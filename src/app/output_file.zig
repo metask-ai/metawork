@@ -32,6 +32,311 @@ pub const Request = struct {
     test_after_chunk: if (builtin.is_test) ?Hook else void = if (builtin.is_test) null else {},
 };
 
+pub const OpenProof = struct {
+    root_inode: std.Io.File.INode,
+    file: std.Io.File.Stat,
+};
+
+const OfficeKind = enum {
+    word,
+    excel,
+    powerpoint,
+
+    fn fromPath(path: []const u8) ?OfficeKind {
+        const extension = std.fs.path.extension(path);
+        if (std.ascii.eqlIgnoreCase(extension, ".docx")) return .word;
+        if (std.ascii.eqlIgnoreCase(extension, ".xlsx")) return .excel;
+        if (std.ascii.eqlIgnoreCase(extension, ".pptx")) return .powerpoint;
+        return null;
+    }
+
+    fn contentType(self: OfficeKind) []const u8 {
+        return switch (self) {
+            .word => "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+            .excel => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+            .powerpoint => "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+        };
+    }
+};
+
+pub fn officeCandidate(path: []const u8) bool {
+    return OfficeKind.fromPath(path) != null;
+}
+
+pub fn htmlCandidate(path: []const u8) bool {
+    const extension = std.fs.path.extension(path);
+    return std.ascii.eqlIgnoreCase(extension, ".html") or std.ascii.eqlIgnoreCase(extension, ".htm");
+}
+
+pub fn inspectOpen(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool)) !OpenProof {
+    if (std.Thread.getCurrentId() == request.main_thread_id) return error.MainThreadFileEffect;
+    if (cancelled.load(.acquire)) return error.Cancelled;
+    try validatePath(request.relative_path);
+    if (!std.fs.path.isAbsolute(request.workspace_root)) return error.InvalidWorkspaceRoot;
+    const office = OfficeKind.fromPath(request.relative_path);
+    if (office == null and !htmlCandidate(request.relative_path)) return error.RestrictedOutput;
+    var root = try openRoot(io, request.workspace_root);
+    defer root.close(io);
+    var file = try openScopedFile(io, root, request.relative_path);
+    defer file.close(io);
+    if (builtin.os.tag == .windows) file.flags.nonblocking = true;
+    const stat = try file.stat(io);
+    if (stat.kind != .file) return error.NotRegularOutput;
+    if (stat.size > max_file_bytes) return error.OutputTooLarge;
+    const proof: OpenProof = .{ .root_inode = (try root.stat(io)).inode, .file = stat };
+    if (office) |kind| try inspectOfficeParts(io, file, kind, stat.size, cancelled);
+    try revalidateOpenName(io, request, proof);
+    return proof;
+}
+
+pub fn revalidateOpenName(io: std.Io, request: Request, proof: OpenProof) !void {
+    var root = try openRoot(io, request.workspace_root);
+    defer root.close(io);
+    if ((try root.stat(io)).inode != proof.root_inode) return error.OutputChanged;
+    var file = try openScopedFile(io, root, request.relative_path);
+    defer file.close(io);
+    if (!stable(proof.file, try file.stat(io))) return error.OutputChanged;
+}
+
+fn inspectOfficeParts(io: std.Io, file: std.Io.File, kind: OfficeKind, size: u64, cancelled: *const std.atomic.Value(bool)) !void {
+    const allocator = std.heap.c_allocator;
+    var io_buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &io_buffer);
+    const signature = reader.interface.take(4) catch return error.RestrictedOutput;
+    if (!std.mem.eql(u8, signature, &std.zip.local_file_header_sig)) return error.RestrictedOutput;
+    try reader.seekTo(0);
+    const directory = std.zip.Iterator.init(&reader) catch return error.RestrictedOutput;
+    if (directory.cd_record_count == 0 or directory.cd_record_count > 4096 or directory.cd_zip_offset > size)
+        return error.RestrictedOutput;
+
+    const relationships = try readOfficeMetadata(allocator, &reader, directory, "_rels/.rels", cancelled);
+    defer allocator.free(relationships);
+    const main_part = try officeMainPart(relationships);
+    const manifest = try readOfficeMetadata(allocator, &reader, directory, "[Content_Types].xml", cancelled);
+    defer allocator.free(manifest);
+    if (!std.mem.eql(u8, try officeContentType(manifest, main_part), kind.contentType())) return error.RestrictedOutput;
+    const main = try findOfficeEntry(&reader, directory, main_part, cancelled);
+    _ = try officeEntryData(&reader, main, main_part, directory.cd_zip_offset);
+}
+
+fn findOfficeEntry(reader: *std.Io.File.Reader, directory: std.zip.Iterator, name: []const u8, cancelled: *const std.atomic.Value(bool)) !std.zip.Iterator.Entry {
+    var iterator = directory;
+    var found: ?std.zip.Iterator.Entry = null;
+    var storage: [max_path_bytes]u8 = undefined;
+    while (iterator.next() catch return error.RestrictedOutput) |entry| {
+        if (cancelled.load(.acquire)) return error.Cancelled;
+        if (entry.filename_len != name.len) continue;
+        try reader.seekTo(entry.header_zip_offset + @sizeOf(std.zip.CentralDirectoryFileHeader));
+        const candidate = storage[0..name.len];
+        try reader.interface.readSliceAll(candidate);
+        if (!std.ascii.eqlIgnoreCase(candidate, name)) continue;
+        if (found != null) return error.RestrictedOutput;
+        found = entry;
+    }
+    return found orelse error.RestrictedOutput;
+}
+
+fn readOfficeMetadata(allocator: std.mem.Allocator, reader: *std.Io.File.Reader, directory: std.zip.Iterator, name: []const u8, cancelled: *const std.atomic.Value(bool)) ![]u8 {
+    const entry = try findOfficeEntry(reader, directory, name, cancelled);
+    const max_metadata_bytes = 16 * 1024 * 1024;
+    if (entry.flags.encrypted or entry.uncompressed_size > max_metadata_bytes or entry.compressed_size > max_metadata_bytes)
+        return error.RestrictedOutput;
+    try reader.seekTo(try officeEntryData(reader, entry, name, directory.cd_zip_offset));
+    const bytes = readOfficeXml(allocator, &reader.interface, entry) catch return error.RestrictedOutput;
+    errdefer allocator.free(bytes);
+    if (bytes.len != entry.uncompressed_size or std.hash.Crc32.hash(bytes) != entry.crc32 or !std.unicode.utf8ValidateSlice(bytes))
+        return error.RestrictedOutput;
+    return bytes;
+}
+
+fn readOfficeXml(allocator: std.mem.Allocator, reader: *std.Io.Reader, entry: std.zip.Iterator.Entry) ![]u8 {
+    const compressed = try allocator.alloc(u8, @intCast(entry.compressed_size));
+    errdefer allocator.free(compressed);
+    try reader.readSliceAll(compressed);
+    if (entry.compression_method == .store) return compressed;
+    if (entry.compression_method != .deflate) return error.RestrictedOutput;
+    var source: std.Io.Reader = .fixed(compressed);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var decoder: std.compress.flate.Decompress = .init(&source, .raw, &window);
+    const decoded = try decoder.reader.allocRemaining(allocator, .limited64(entry.uncompressed_size + 1));
+    allocator.free(compressed);
+    return decoded;
+}
+
+test "Office inspection reads bounded deflate XML parts" {
+    const compressed = "\xb3\x09\xa9\x2c\x48\x2d\xd6\xb7\x03\x00";
+    var input: std.Io.Reader = .fixed(compressed);
+    var entry = std.mem.zeroes(std.zip.Iterator.Entry);
+    entry.compression_method = .deflate;
+    entry.compressed_size = compressed.len;
+    entry.uncompressed_size = "<Types/>".len;
+    const decoded = try readOfficeXml(std.testing.allocator, &input, entry);
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqualStrings("<Types/>", decoded);
+}
+
+fn officeEntryData(reader: *std.Io.File.Reader, entry: std.zip.Iterator.Entry, name: []const u8, limit: u64) !u64 {
+    if (entry.file_offset > limit or limit - entry.file_offset < @sizeOf(std.zip.LocalFileHeader)) return error.RestrictedOutput;
+    try reader.seekTo(entry.file_offset);
+    const header = try reader.interface.takeStruct(std.zip.LocalFileHeader, .little);
+    if (!std.mem.eql(u8, &header.signature, &std.zip.local_file_header_sig) or header.filename_len != name.len or
+        @as(u16, @bitCast(header.flags)) != @as(u16, @bitCast(entry.flags)) or header.compression_method != entry.compression_method)
+        return error.RestrictedOutput;
+    var local_name: [max_path_bytes]u8 = undefined;
+    try reader.interface.readSliceAll(local_name[0..name.len]);
+    if (!std.ascii.eqlIgnoreCase(local_name[0..name.len], name)) return error.RestrictedOutput;
+    const offset = entry.file_offset + @sizeOf(std.zip.LocalFileHeader) + header.filename_len + header.extra_len;
+    if (offset > limit or entry.compressed_size > limit - offset) return error.RestrictedOutput;
+    return offset;
+}
+
+// OPC package metadata consists of a container with empty child elements.
+const OfficeMetadata = struct {
+    remaining: []const u8,
+    root: []const u8,
+
+    const whitespace = " \t\r\n";
+    const Tag = struct {
+        name: []const u8,
+        attributes: []const u8,
+        empty: bool,
+
+        fn attribute(tag: Tag, wanted: []const u8) !?[]const u8 {
+            var input = tag.attributes;
+            var found: ?[]const u8 = null;
+            while (input.len != 0) {
+                const end = std.mem.indexOfAny(u8, input, whitespace ++ "=") orelse return error.RestrictedOutput;
+                const name = input[0..end];
+                input = std.mem.trimStart(u8, input[end..], whitespace);
+                if (name.len == 0 or input.len == 0 or input[0] != '=') return error.RestrictedOutput;
+                input = std.mem.trimStart(u8, input[1..], whitespace);
+                if (input.len < 2 or (input[0] != '"' and input[0] != '\'')) return error.RestrictedOutput;
+                const close = std.mem.indexOfScalar(u8, input[1..], input[0]) orelse return error.RestrictedOutput;
+                if (std.mem.eql(u8, name, wanted)) {
+                    if (found != null) return error.RestrictedOutput;
+                    found = input[1..][0..close];
+                }
+                input = input[close + 2 ..];
+                if (input.len != 0 and std.mem.indexOfScalar(u8, whitespace, input[0]) == null) return error.RestrictedOutput;
+                input = std.mem.trimStart(u8, input, whitespace);
+            }
+            return found;
+        }
+
+        fn localName(tag: Tag) []const u8 {
+            const colon = std.mem.lastIndexOfScalar(u8, tag.name, ':') orelse return tag.name;
+            return tag.name[colon + 1 ..];
+        }
+    };
+
+    fn init(bytes: []const u8, name: []const u8, namespace: []const u8) !OfficeMetadata {
+        var metadata: OfficeMetadata = .{
+            .remaining = if (std.mem.startsWith(u8, bytes, "ï»¿")) bytes[3..] else bytes,
+            .root = "",
+        };
+        const root = try metadata.readTag();
+        if (root.empty or !std.mem.eql(u8, root.localName(), name)) return error.RestrictedOutput;
+        var storage: [max_path_bytes]u8 = undefined;
+        const xmlns = if (std.mem.indexOfScalar(u8, root.name, ':')) |colon|
+            std.fmt.bufPrint(&storage, "xmlns:{s}", .{root.name[0..colon]}) catch return error.RestrictedOutput
+        else
+            "xmlns";
+        if (!std.mem.eql(u8, (try root.attribute(xmlns)) orelse "", namespace)) return error.RestrictedOutput;
+        metadata.root = root.name;
+        return metadata;
+    }
+
+    fn skipMisc(metadata: *OfficeMetadata) !void {
+        while (true) {
+            metadata.remaining = std.mem.trimStart(u8, metadata.remaining, whitespace);
+            const terminator: []const u8 = if (std.mem.startsWith(u8, metadata.remaining, "<!--"))
+                "-->"
+            else if (std.mem.startsWith(u8, metadata.remaining, "<?"))
+                "?>"
+            else
+                return;
+            const end = std.mem.indexOf(u8, metadata.remaining, terminator) orelse return error.RestrictedOutput;
+            metadata.remaining = metadata.remaining[end + terminator.len ..];
+        }
+    }
+
+    fn readTag(metadata: *OfficeMetadata) !Tag {
+        try metadata.skipMisc();
+        if (metadata.remaining.len == 0 or metadata.remaining[0] != '<') return error.RestrictedOutput;
+        const end = std.mem.indexOfScalar(u8, metadata.remaining, '>') orelse return error.RestrictedOutput;
+        const body = std.mem.trimEnd(u8, metadata.remaining[1..end], whitespace);
+        metadata.remaining = metadata.remaining[end + 1 ..];
+        if (body.len == 0 or std.mem.indexOfAny(u8, body, "<!") != null) return error.RestrictedOutput;
+        const empty = body[body.len - 1] == '/' and body[0] != '/';
+        const inner = if (empty) body[0 .. body.len - 1] else body;
+        const name_end = std.mem.indexOfAny(u8, inner, whitespace) orelse inner.len;
+        if (name_end == 0) return error.RestrictedOutput;
+        return .{ .name = inner[0..name_end], .attributes = std.mem.trim(u8, inner[name_end..], whitespace), .empty = empty };
+    }
+
+    fn next(metadata: *OfficeMetadata) !?Tag {
+        const entry = try metadata.readTag();
+        if (entry.name[0] == '/') {
+            if (!std.mem.eql(u8, entry.name[1..], metadata.root) or entry.attributes.len != 0) return error.RestrictedOutput;
+            try metadata.skipMisc();
+            if (metadata.remaining.len != 0) return error.RestrictedOutput;
+            return null;
+        }
+        if (!entry.empty) {
+            const closing = try metadata.readTag();
+            if (closing.name[0] != '/' or closing.attributes.len != 0 or !std.mem.eql(u8, closing.name[1..], entry.name))
+                return error.RestrictedOutput;
+        }
+        return entry;
+    }
+
+    fn matches(metadata: OfficeMetadata, entry: Tag, name: []const u8) bool {
+        const colon = std.mem.lastIndexOfScalar(u8, metadata.root, ':') orelse return std.mem.eql(u8, entry.name, name);
+        const prefix = metadata.root[0 .. colon + 1];
+        return std.mem.startsWith(u8, entry.name, prefix) and std.mem.eql(u8, entry.name[prefix.len..], name);
+    }
+};
+
+fn officeMainPart(bytes: []const u8) ![]const u8 {
+    var metadata = try OfficeMetadata.init(bytes, "Relationships", "http://schemas.openxmlformats.org/package/2006/relationships");
+    var part: ?[]const u8 = null;
+    while (try metadata.next()) |entry| {
+        if (!metadata.matches(entry, "Relationship")) continue;
+        const kind = (try entry.attribute("Type")) orelse return error.RestrictedOutput;
+        if (!std.mem.eql(u8, kind, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument") and
+            !std.mem.eql(u8, kind, "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument")) continue;
+        const mode = (try entry.attribute("TargetMode")) orelse "Internal";
+        const target = (try entry.attribute("Target")) orelse return error.RestrictedOutput;
+        if (part != null or !std.mem.eql(u8, mode, "Internal")) return error.RestrictedOutput;
+        const name = if (std.mem.startsWith(u8, target, "/")) target[1..] else target;
+        validatePath(name) catch return error.RestrictedOutput;
+        if (std.mem.indexOfAny(u8, name, "#&") != null) return error.RestrictedOutput;
+        part = name;
+    }
+    return part orelse error.RestrictedOutput;
+}
+
+fn officeContentType(bytes: []const u8, part: []const u8) ![]const u8 {
+    var metadata = try OfficeMetadata.init(bytes, "Types", "http://schemas.openxmlformats.org/package/2006/content-types");
+    var matching_override: ?[]const u8 = null;
+    var matching_default: ?[]const u8 = null;
+    while (try metadata.next()) |entry| {
+        if (metadata.matches(entry, "Override")) {
+            const name = (try entry.attribute("PartName")) orelse return error.RestrictedOutput;
+            if (name.len == 0 or name[0] != '/' or !std.ascii.eqlIgnoreCase(name[1..], part)) continue;
+            if (matching_override != null) return error.RestrictedOutput;
+            matching_override = (try entry.attribute("ContentType")) orelse return error.RestrictedOutput;
+        } else if (metadata.matches(entry, "Default")) {
+            const extension = (try entry.attribute("Extension")) orelse return error.RestrictedOutput;
+            const actual = std.fs.path.extension(part);
+            if (actual.len == 0 or !std.ascii.eqlIgnoreCase(extension, actual[1..])) continue;
+            if (matching_default != null) return error.RestrictedOutput;
+            matching_default = (try entry.attribute("ContentType")) orelse return error.RestrictedOutput;
+        }
+    }
+    return matching_override orelse matching_default orelse error.RestrictedOutput;
+}
+
 pub fn validatePath(path: []const u8) error{InvalidOutputPath}!void {
     if (path.len == 0 or path.len > max_path_bytes or !std.unicode.utf8ValidateSlice(path))
         return error.InvalidOutputPath;

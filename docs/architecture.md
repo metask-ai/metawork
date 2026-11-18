@@ -13,7 +13,7 @@
 | Bridge      | Zig                    | Renderer 协议、authority 与 ProductDelivery 边界                        |
 | Product     | Zig                    | 产品事实、行为、事务、持久化和恢复的逻辑边界                            |
 | Agent       | Zig + Metask AgentCore | MetaWork-owned 执行边界及其对 canonical AgentCore bundle 的唯一消费路径 |
-| Storage     | Zig + SQLite           | MetaWork-owned、无业务语义的 SQL contract 与 backend 边界               |
+| Foundation  | Zig + SQLite           | 基础服务层：能原样搬到另一个应用的服务，不依赖任何业务 owner            |
 | Native SDK  | Native SDK             | Application 消费的外部桌面能力依赖                                      |
 
 正式主路径不采用 Tauri + Rust，不建立第二套 Renderer，不以 PTY、xterm、终端字节流或 Provider SSE 作为 Agent UI 协议，不复制 AgentCore ABI 或实现源码，也不建立 Native SDK Adapter、通用 Desktop Interface、可替换框架 facade 或平行系统能力协议。
@@ -31,8 +31,7 @@ flowchart TB
     BRIDGE["Bridge<br/>command / authority / ProductDelivery"]
     PRODUCT["Product<br/>Account + Product Control"]
     AGENT["Agent<br/>Runtime / Session / Conversation"]
-    STORAGE["Storage<br/>standalone SQL boundary"]
-    FOUNDATION["Foundation<br/>product-neutral mechanism"]
+    FOUNDATION["Foundation<br/>basic services"]
     AGENTCORE["Metask AgentCore<br/>external execution dependency"]
     NATIVE_RUNTIME["Native SDK Runtime API<br/>external desktop dependency"]
     NATIVE_COMPAT["Native SDK compatibility<br/>Application-owned seams"]
@@ -40,7 +39,7 @@ flowchart TB
     APPLICATION -. "compose" .-> BRIDGE
     APPLICATION -. "compose" .-> PRODUCT
     APPLICATION -. "compose / lifecycle" .-> AGENT
-    APPLICATION -->|"shared mechanism"| FOUNDATION
+    APPLICATION -. "compose / inject" .-> FOUNDATION
     BRIDGE <-->|"Renderer Bridge"| RENDERER
     BRIDGE <-->|"typed command / projection"| PRODUCT
     PRODUCT -->|"public execution surface"| AGENT
@@ -57,8 +56,7 @@ flowchart TB
 3. Product 包含 Account 与 Product Control 两个 named owner，不代表统一 module；Product Control 直接消费 Agent 公共执行能力；
 4. Agent 是独立于 Product 的 MetaWork-owned 执行边界，也是 AgentCore SDK/ABI 的唯一正式消费者；
 5. Native SDK compatibility 是 Application-owned 的受限消费路径，不是新的顶层 owner、平台层或 SDK 替代品；
-6. Storage 是独立基础边界；接入 Product 必须显式定义 schema owner、backend composition 和 shutdown，不因源码存在而自动取得业务职责；
-7. Foundation 只拥有无产品语义的执行机制，与 Application、Product、Agent、Storage 平级；它不得反向导入任何 owner。其纯合同是不持有状态或句柄、不建立连接、不发起外部 effect 的类型与纯函数，包括结果事实与协议编解码，可被任何 owner 精确导入；引擎只由 Application 组合。endpoint、client 身份、响应解释与错误映射等业务政策留在调用方 owner。成员逐个按准入收取，不因目录位置取得身份。
+6. Foundation 是 MetaWork 的基础服务层，成员的判定标准是能原样搬到另一个应用。架构上它与 Application、Product、Agent、Renderer 平级，指职责和所有权：Foundation 自己决定服务的接口和实现，Application 只负责组合；依赖上它在最底层，只依赖 std、其他 Foundation 成员和基础服务所需的第三方库，不依赖任何业务 owner。有状态服务由 Application 创建唯一实例、管理生命周期并注入使用方。成员分为合同与引擎：合同是不持有状态或句柄、不建立连接、不发起外部 effect 的类型与纯函数，包括结果事实与协议编解码，可被任何 owner 精确导入；引擎只由 Application 组合。endpoint、client 身份、响应解释与错误映射等业务政策留在调用方 owner。成员逐个按准入收取，不因目录位置取得身份。
 
 文档中的 Application 对应代码中的组合类型 `App`；“Product”只指产品逻辑边界；“Agent”只指 MetaWork 对 AgentCore 的产品化集成边界；“Host”在 wire 或依赖合同中泛指 Renderer 之外的可信侧，不能据此建立新的 owner。
 
@@ -156,6 +154,7 @@ Windows System WebView 的顶部与两上角缩放由 Native SDK 原生宿主拥
 | ------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `app_single_instance`           | 二级       | 应用实例仲裁与 second-launch activation transport                                                                                                    | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown                                                                   |
 | `external_link_handoff`         | 一级       | Application 在 Native 主线程把下述受领域约束的 intent 经公开 `PlatformServices.openExternalUrl` 交给系统 handler；不放宽 WebView navigation policy   | SDK Runtime API 提供独立于 WebView navigation policy、可逐次接收同等严格目标且覆盖已登记消费者的 external-open 能力，并通过 macOS/Windows 验收 |
+| `output_browser_handoff`        | 二级       | Application 在 Windows、macOS 原生主线程将已验证的 HTML 成果原路径交给系统默认浏览器 | SDK 提供按网页 handler 交接本地文件且通过两平台验收 |
 | `macos_icon_composer_package`   | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API                                                                                       | SDK 原生产生等价资源与 metadata 并通过分发验收                                                                                                 |
 | `office_resource_publish.macos` | 二级       | Application 在自有 Office 资源目录内，通过 `renameatx_np(RENAME_EXCL)` 排他发布本次 stage；仅接受受限兄弟目录名                                      | SDK 提供同卷、排他且原子的目录发布原语并通过竞争与占位对象保留验收                                                                             |
 | `mcp_process.windows`           | 二级       | Application 为 MCP 创建不继承的 kill-on-close Job，将 std.process 挂起创建的 child 纳管后恢复执行；不创建第二套 spawn 或管道实现，不接收任意进程目标 | canonical SDK 提供等价进程树归属、执行前纳管及关闭能力并通过平台验收                                                                           |
@@ -165,7 +164,9 @@ Windows System WebView 的顶部与两上角缩放由 Native SDK 原生宿主拥
 
 `mcp_quarantine.macos` 独立补齐 MCP 同步隔离所需的排他移动能力，不扩大 Office seam。Product MCP 定义 typed 请求、唯一文件名与完成目录名，并拥有 pending intent、exact bytes 核验、移动顺序和持久化屏障；Application 只将这些请求绑定到已打开的 MCP 目录，通过 `renameatx_np(RENAME_EXCL)` 执行一次原子移动。能力缺失或移动失败必须明确失败，目标存在时保留源与目标；移动成功后的同步失败仍由 Product 报告 outcome unknown。该能力不接受用户路径，不反向导入 Application，不修改既有持久化格式。seam 只借用调用期间的目录 handle，保留调用前取消检查，不保存资源、启动线程或新增 shutdown 工作；只允许公开 OS symbol `renameatx_np`，不使用 SDK 私有实现或普通 rename、硬链接、复制 fallback。验证须覆盖文件及目录目标占位、链接、并发唯一赢家、各移动前后中断与同步失败恢复；SDK 等价正式能力验收后删除该 seam、allowlist 和专用平台验证。
 
-`external_link_handoff` 只允许五种 intent：Renderer 显式点击的有界 `http`、`https` 或 `mailto` 链接，经 Bridge 校验 connection/window、协议、绝对地址、无 userinfo 与控制字符；Account 登录只使用其 OAuth owner 构造的授权 URL，充值只使用 Account 固定目标；MCP 授权只使用当前 server、operation 与 consent 绑定的 AuthorizationAttempt 所生成的 HTTPS URL，打开前仍须满足既有时效、取消与授权检查。Update 只使用当前 release、用户显式点击且版本绑定的官方目标包地址，或固定官网地址；预检完成后仍由 Product owner 重新校验，连接撤销与 shutdown 禁止迟到交接。项目目录交接仅消费 Product Control 验证的 Manual Workspace canonical root，由 Application 在主线程转义为 file URL 后经同一公开原语同步执行；不得开放 Renderer 任意路径、文件或协议，具体请求与校验以[Renderer Bridge 合同](renderer-bridge-contract.md)为准。网络 URL 保持原字节，不经 Renderer 转交 Host OAuth 材料，不进入 Snapshot、日志或持久化；OAuth 参数的 ownership 与清零仍归各领域 owner。成功只表示 handler 接收，不表示页面加载或 OAuth 完成；失败沿既有闭合结果和 attempt 清理路径返回，不重试、不重放，也不先尝试 Runtime 再 fallback 到低层原语。WebView 外部导航始终保持拒绝。
+`external_link_handoff` 只消费下述受领域约束的 intent。Renderer 显式点击的有界 `http`、`https` 或 `mailto` 链接，经 Bridge 校验 connection/window、协议、绝对地址、无 userinfo 与控制字符；Account 登录只使用其 OAuth owner 构造的授权 URL，充值只使用 Account 固定目标；MCP 授权只使用当前 server、operation 与 consent 绑定的 AuthorizationAttempt 所生成的 HTTPS URL，打开前仍须满足既有时效、取消与授权检查。Update 只使用当前 release、用户显式点击且版本绑定的官方目标包地址，或固定官网地址；预检完成后仍由 Product owner 重新校验，连接撤销与 shutdown 禁止迟到交接。项目目录交接仅消费 Product Control 验证的 Manual Workspace canonical root，由 Application 在主线程转义为 file URL 后经同一公开原语同步执行；不得开放 Renderer 任意路径、文件或协议，具体请求与校验以[Renderer Bridge 合同](renderer-bridge-contract.md)为准。Office 成果只在通过[Product 架构](product-architecture.md#43-workbench-historystore)校验后，以同一原语交给系统默认应用。网络 URL 保持原字节，不经 Renderer 转交 Host OAuth 材料，不进入 Snapshot、日志或持久化；OAuth 参数的 ownership 与清零仍归各领域 owner。成功只表示 handler 接收，不表示页面加载或 OAuth 完成；失败沿既有闭合结果和 attempt 清理路径返回，不重试、不重放，也不先尝试 Runtime 再 fallback 到低层原语。WebView 外部导航始终保持拒绝。
+
+`output_browser_handoff` 补齐 SDK 按文件类型选默认应用与按网页协议选浏览器之间的差异。Application 仅在用户显式打开 HTML 成果、Product 与 Bridge 复核当前授权、Application 复核原路径身份后调用。该调用只传入以 `.html` 或 `.htm` 结尾的有界、转义 `file:` URL。Windows 从系统 HTTPS 关联解析默认浏览器，并以单个文件 URL 参数启动；macOS 解析同一默认关联，再指定该应用打开文件 URL。默认应用关联由系统管理，WebView 沿用已有导航策略。seam 在当次调用内释放资源。找不到支持的浏览器或交接失败时显式返回失败，保留源码及定位入口。以实际默认浏览器显示原件验证，SDK 提供等价能力后原位替换并删除 seam、allowlist 与专用验证。
 
 `app_single_instance` 必须同时满足：
 
@@ -180,14 +181,14 @@ Windows System WebView 的顶部与两上角缩放由 Native SDK 原生宿主拥
 
 Compatibility 的 module root 与依赖方向由[工程结构与所有权](project-structure.md)映射，machine allowlist 和 architecture guard 强制实现边界，平台证据与未闭合验收由[验证规范](validation.md)维护。未在本节登记的低层调用不构成兼容能力。
 
-### 3.6 Storage
+### 3.6 Foundation Storage
 
-Storage 是 MetaWork-owned、无业务语义的基础设施边界，拥有 backend-neutral SQL value、statement、query/mutation outcome、limit 和 migration mechanism；concrete backend 独占 engine connection、transaction、engine profile 与错误映射。Product owner 始终独占自己的 schema、migration 内容、health、恢复、并发和所需 durability policy，Storage 不因承载数据取得业务 policy。
+Storage 是 Foundation 的 SQL 存储服务族。SQL 合同拥有 backend-neutral SQL value、statement、query/mutation outcome、limit 和 migration mechanism；SQLite backend 是引擎，独占 engine connection、transaction、engine profile 与错误映射。Product owner 始终独占自己的 schema、migration 内容、health、恢复、并发和所需 durability policy，Storage 不因承载数据取得业务 policy。
 
-Product Control 的无状态 history schema 窄模块依赖 Storage SQL contract，与 backend 消费同一个合同模块；该依赖不授予开库、查询或运行时 policy。具体数据库仍未接入生产 Application/Product Runtime，后续由 Application 组合并向 Product 注入借用 capability。直接 SQLite backend、conformance 和未来 backend 原位替换由[Storage 架构](storage-architecture.md)定义；生产接入仍须显式完成 owner composition，不能通过共享数据库或通用 repository 绕过 Product 边界。
+Product Control 的无状态 history schema 窄模块只依赖 SQL 合同，与 backend 消费同一个合同模块；该依赖不授予开库、查询或运行时 policy。Application 创建唯一的 history 数据库实例并拥有其文件生命周期，再向 Product 注入借用 capability，接线见 [Product 架构](product-architecture.md#43-workbench-historystore)。直接 SQLite backend、conformance 和未来 backend 原位替换由 [Storage 架构](storage-architecture.md) 定义；新的使用方同样须显式完成 owner composition，不能通过共享数据库或通用 repository 绕过 Product 边界。
 
 ```text
-Product Control history schema -> Storage SQL contract <- Storage backend -> SQLite
+Product Control history schema -> Foundation SQL contract <- Foundation SQLite backend -> SQLite
 ```
 
 ### 3.7 持久化权威与故障语义
@@ -198,7 +199,7 @@ Product Control history schema -> Storage SQL contract <- Storage backend -> SQL
 
 ### 3.8 Foundation HTTP 执行
 
-MetaWork 自有的出站 HTTP 由 Foundation 拥有执行机制、Application 组合；业务 owner 保留 endpoint、响应解释、重试与 shutdown 顺序，AgentCore 内部网络仍由其自身拥有。执行层对请求、解析和连接实行有界 admission，容量不足明确失败；多地址连接不得依赖共享异步额度；除下述复用连接上的一次重试外，单次调用不得重放 HTTP。已占用流的 MCP continuation 使用预留容量并继承原始 deadline，不能延长原流的预算。
+MetaWork 自有的出站 HTTP 由 Foundation 的 HTTP 服务执行，Application 创建唯一引擎实例并注入；业务 owner 保留 endpoint、响应解释、重试与 shutdown 顺序，AgentCore 内部网络仍由其自身拥有。HTTP 引擎对请求、解析和连接实行有界 admission，容量不足明确失败；多地址连接不得依赖共享异步额度；除下述复用连接上的一次重试外，单次调用不得重放 HTTP。已占用流的 MCP continuation 使用预留容量并继承原始 deadline，不能延长原流的预算。
 
 每个调用方显式给出整次调用的 deadline，或在由自身取消约束整次调用时给出 DNS、TCP 与 TLS 的连接预算。多地址连接最多两路并行，后一地址至少在前一次尝试开始 250 ms 后才启动；只有其后仍有地址的尝试才按剩余预算分摊设上限（不少于 2 秒），最后或唯一地址使用全部剩余预算。未尝试的地址不构成失败；对外报告的失败按 TLS、连接、DNS 的顺序取最具体者，诊断只记录各类尝试的计数。
 

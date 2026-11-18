@@ -1164,7 +1164,7 @@ pub const Dispatcher = struct {
         const operation = request.operationId.value;
         try self.requireOutputConnection(invocation, generation, operation);
         if (operation <= self.output_high_water or request.taskId.value == 0 or request.runId.value == 0) return error.InvalidBridgeId;
-        const id = try handlers.parseOutputId(request.outputId.value);
+        const target = try request.target();
         self.output_high_water = operation;
         const control = try self.requireProductControl();
         const vacant = for (&self.output_in_flight) |*slot| {
@@ -1178,7 +1178,11 @@ pub const Dispatcher = struct {
         self.next_output_completion_id += 1;
         vacant.* = .{ .completion_id = completion, .generation = generation, .operation_id = operation, .window_id = invocation.source.window_id, .responder = responder, .request_len = invocation.request.id.len, .request_id = undefined };
         @memcpy(vacant.*.?.request_id[0..invocation.request.id.len], invocation.request.id);
-        self.adoptOutputAdmission(completion, control.beginOutputCheck(completion, request.taskId.value, request.runId.value, id, request.action.value));
+        const admission = switch (target) {
+            .output => |output_id| control.beginOutputCheck(completion, request.taskId.value, request.runId.value, output_id, request.action.value),
+            .change => |change_id| control.beginOutputRegistration(completion, request.taskId.value, request.runId.value, change_id),
+        };
+        self.adoptOutputAdmission(completion, admission);
     }
 
     fn adoptOutputAdmission(self: *Dispatcher, id: u64, admission: product_control.Runtime.OutputCheckAdmission) void {

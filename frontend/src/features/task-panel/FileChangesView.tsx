@@ -1,8 +1,9 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import type {
   FileChangeDiffResult,
   FileChangeView,
+  OutputActionState,
   RunFileChanges,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -178,6 +179,59 @@ function groupedKind(changes: FileChangeView[]): FileChangeView["kind"] {
   return "modified";
 }
 
+type RegisterOutput = (
+  changeId: string,
+  signal: AbortSignal,
+) => Promise<OutputActionState>;
+
+function RegisterOutputButton({
+  changeId,
+  register,
+}: {
+  changeId: string;
+  register: RegisterOutput;
+}) {
+  const { t } = useI18n();
+  const active = useRef<AbortController | null>(null);
+  const [working, setWorking] = useState(false);
+  const [result, setResult] = useState<OutputActionState | null>(null);
+  useEffect(() => () => active.current?.abort(), []);
+
+  async function addOutput() {
+    if (active.current || result === "registered") return;
+    const controller = new AbortController();
+    active.current = controller;
+    setWorking(true);
+    setResult(null);
+    try {
+      const state = await register(changeId, controller.signal);
+      if (!controller.signal.aborted) setResult(state);
+    } catch {
+      if (!controller.signal.aborted) setResult("failed");
+    } finally {
+      active.current = null;
+      if (!controller.signal.aborted) setWorking(false);
+    }
+  }
+
+  return (
+    <div className="task-panel-change-state">
+      {result !== "registered" && (
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          disabled={working}
+          onClick={() => void addOutput()}
+        >
+          {t("outputs.register")}
+        </Button>
+      )}
+      {result && <span role="status">{t(`outputs.state.${result}`)}</span>}
+    </div>
+  );
+}
+
 function RecordedFileSection({
   group,
   index,
@@ -185,6 +239,7 @@ function RecordedFileSection({
   expanded,
   onExpandedChange,
   onLoad,
+  onRegister,
 }: {
   group: FileChangeGroup;
   index: number;
@@ -192,8 +247,10 @@ function RecordedFileSection({
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
   onLoad: (change: FileChangeView) => void;
+  onRegister?: RegisterOutput;
 }) {
   const { t } = useI18n();
+  const latestChange = group.changes.at(-1);
   const records = group.changes.map((change) => ({
     change,
     state: diffs[change.id] ?? ({ phase: "idle", diff: null } as const),
@@ -371,6 +428,13 @@ function RecordedFileSection({
             </div>
           </div>
         )}
+        {latestChange?.outputRegistrationAdmitted && onRegister && (
+          <RegisterOutputButton
+            key={latestChange.id}
+            changeId={latestChange.id}
+            register={onRegister}
+          />
+        )}
       </div>
     </section>
   );
@@ -387,6 +451,7 @@ export function FileChangesView({
   onFocusHandled,
   onScrollTopChange,
   onLoad,
+  onRegister,
 }: {
   observation: RunFileChanges["observation"];
   changes: FileChangeView[];
@@ -398,6 +463,7 @@ export function FileChangesView({
   onFocusHandled: (requestId: number) => void;
   onScrollTopChange: (scrollTop: number) => void;
   onLoad: (change: FileChangeView) => void;
+  onRegister?: RegisterOutput;
 }) {
   const { t } = useI18n();
   const groups = useMemo(() => groupFileChanges(changes), [changes]);
@@ -458,6 +524,7 @@ export function FileChangesView({
               onFileExpandedChange(group.displayPath, expanded)
             }
             onLoad={onLoad}
+            onRegister={onRegister}
           />
         ))}
       </div>

@@ -1,7 +1,7 @@
 const std = @import("std");
 const schema = @import("product_control_history_schema");
 const sql = @import("metawork_storage_sql");
-const storage = @import("storage");
+const sqlite = @import("metawork_storage_sqlite");
 const fixture_support = @import("history_schema_fixture");
 const history = struct {
     pub const wire = fixture_support.wire;
@@ -62,6 +62,7 @@ const added_columns = [_]struct { column: []const u8, version: usize }{
     .{ .column = "conversation_position", .version = 10 },
     .{ .column = "superseded_by_run_id", .version = 10 },
     .{ .column = "compact_boundary", .version = 10 },
+    .{ .column = "updated_output_ids_json", .version = 11 },
 };
 
 /// Writes today's rows into a store migrated only through `version`, which is
@@ -131,18 +132,18 @@ test "model error migration upgrades published v1 records to null and rejects th
     const path = try temporaryPath(a, temporary.dir);
     const state = try history.fixture(a);
     {
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..1]);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..1]);
         defer database.destroy() catch unreachable;
         try insertAtVersion(a, database.capability(), state, 1);
     }
     {
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
         try expectSame(a, database.capability(), state);
         const loaded = try history.load(a, database.capability());
         try std.testing.expect(loaded.tasks[0].runs[0].model_error == null);
     }
-    try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..1]));
+    try std.testing.expectError(error.VersionUnknown, sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..1]));
 }
 
 test "run cause domain upgrade accepts an approval mode change stop in an existing store" {
@@ -155,12 +156,12 @@ test "run cause domain upgrade accepts an approval mode change stop in an existi
     const state = try history.fixture(a);
     {
         // A store written before the Product cause existed rejects it.
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..7]);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..7]);
         defer database.destroy() catch unreachable;
         try insertAtVersion(a, database.capability(), state, 1);
         try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET cause='approval_mode_change'" } }}));
     }
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
     defer database.destroy() catch unreachable;
     try expectSame(a, database.capability(), state);
     try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET cause='approval_mode_change'" } }}));
@@ -182,11 +183,11 @@ test "a store written before the attachment media identity keeps its plain chips
     }
     {
         // Written at the version before the identity existed.
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..8]);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..8]);
         defer database.destroy() catch unreachable;
         try insertAtVersion(a, database.capability(), state, 8);
     }
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
     defer database.destroy() catch unreachable;
     // The upgrade adds no column and invents no identity: those attachments
     // still have none, which is what keeps their history chips plain.
@@ -204,11 +205,11 @@ test "Project removal survives SQL restart without changing Workspace or Task au
     const state = try history.fixture(a);
     state.workspaces[0].project_removed = true;
     {
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(a, database.capability(), state);
     }
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
     defer database.destroy() catch unreachable;
     try expectSame(a, database.capability(), state);
     for ([_][]const u8{
@@ -231,11 +232,11 @@ test "model error history survives restart and credential sanitization with exac
     const state = try history.fixture(a);
     state.tasks[0].runs[0].model_error = modelErrorFixture();
     {
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(a, database.capability(), state);
     }
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
     defer database.destroy() catch unreachable;
     try expectSame(a, database.capability(), state);
     var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
@@ -271,7 +272,7 @@ test "history schema preserves optional source-qualified Task model intent" {
         .{ .source_id = "metask", .model_id = "next-model", .revision = 7 },
         .{ .source_id = "custom-provider-00000000000000000000000000000001", .model_id = "模型-世", .revision = std.math.maxInt(u64) },
     }) |intent| {
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
         defer database.destroy() catch unreachable;
         state.tasks[0].model_intent = intent;
         _ = try save(allocator, database.capability(), state);
@@ -293,7 +294,7 @@ test "history SQL preserves manual and cancelled review summaries without review
         var temporary = std.testing.tmpDir(.{});
         defer temporary.cleanup();
         const path = try temporaryPath(allocator, temporary.dir);
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
         try expectSame(allocator, database.capability(), state);
@@ -327,7 +328,7 @@ test "history input JSON preserves reading anchors beyond surviving output" {
         .order = null,
         .state = "unadopted",
     }});
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     _ = try save(allocator, database.capability(), state);
     try expectSame(allocator, database.capability(), state);
@@ -409,7 +410,7 @@ test "history schema preserves null empty and nonterminal history variants" {
             },
             else => unreachable,
         }
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
         try expectSame(allocator, database.capability(), state);
@@ -425,15 +426,15 @@ test "history schema reopens the same identity and rejects changed or older migr
     const path = try temporaryPath(allocator, temporary.dir);
     const state = try history.fixture(allocator);
     {
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
     }
     const changed = [_]sql.Migration{.{ .version = 1, .name = schema.migrations[0].name, .sql = schema.migrations[0].sql ++ "\n" }};
-    try std.testing.expectError(error.MigrationMismatch, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &changed));
-    try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &.{}));
+    try std.testing.expectError(error.MigrationMismatch, sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &changed));
+    try std.testing.expectError(error.VersionUnknown, sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &.{}));
     {
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
         try expectSame(allocator, database.capability(), state);
     }
@@ -459,7 +460,7 @@ test "history schema preserves permission review delegation and reviewer audit" 
     task.ui_history[0].state = "allowed_once";
     task.ui_history[0].answered_by = "reviewer";
     task.ui_history[0].review_reason = "Bounded *** operation.";
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     _ = try save(allocator, database.capability(), state);
     try expectSame(allocator, database.capability(), state);
@@ -497,7 +498,7 @@ test "history schema rejects structural counterexamples and rolls back the prece
     second_run.file_change_observation = null;
     state.tasks[0].runs = try allocator.dupe(history.wire.RunWire, &.{ state.tasks[0].runs[0], second_run });
     state.tasks[0].next_run_generation = 16;
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     _ = try save(allocator, database.capability(), state);
     // Workspace and Task array order intentionally differs from identity order.
@@ -557,7 +558,7 @@ test "history loader refuses invalid domain data instead of silently producing e
         defer arena.deinit();
         const allocator = arena.allocator();
         const state = try history.fixture(allocator);
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
         defer database.destroy() catch unreachable;
         try std.testing.expectError(error.EmptyHistory, history.load(allocator, database.capability()));
         _ = try save(allocator, database.capability(), state);
@@ -611,7 +612,7 @@ test "merged history payloads retain Product validation after removing child con
         defer arena.deinit();
         const allocator = arena.allocator();
         var state = try history.fixture(allocator);
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
         const task = &state.tasks[0];
@@ -684,7 +685,7 @@ test "merged history payloads retain Product validation after removing child con
 }
 
 test "history unsigned values retain byte ordering and exact boundary equality" {
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     const numbers = [_]u64{ 0, std.math.maxInt(i64), @as(u64, std.math.maxInt(i64)) + 1, std.math.maxInt(u64) };
     var encoded: [4][8]u8 = undefined;
@@ -738,7 +739,7 @@ test "history schema preserves approval revisions and the approval checkpoint un
     const state = try history.fixture(allocator);
     state.tasks[0].approval_revision = std.math.maxInt(u64);
     state.tasks[0].checkpoint.?.anchor.terminal = .{ .kind = "approval", .id = std.math.maxInt(u64) };
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     _ = try save(allocator, database.capability(), state);
     try expectSame(allocator, database.capability(), state);
@@ -810,7 +811,7 @@ test "history populated round fits one real mutation and survives full field rec
     defer arena.deinit();
     const allocator = arena.allocator();
     const state = try populated(allocator, 32, 32, 8);
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     const batch = try save(allocator, database.capability(), state);
     try std.testing.expect(batch.mutations.items.len <= sql.Limits.exec_statements);
@@ -856,7 +857,7 @@ test "merged history arrays preserve maximum counts escaped bytes order and unsi
     };
     // Escaping can multiply JSON byte size. This checks one Task's bounded
     // arrays plus the entire failure list, not a full live Runtime snapshot.
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     const batch = try save(allocator, database.capability(), state);
     try std.testing.expect(sql.validMutations(batch.mutations.items));
@@ -884,7 +885,7 @@ test "history updates child decisions and compacts atomically with checkpoint fa
             .params = &.{.{ .text = try std.json.Stringify.valueAlloc(allocator, expected.failures, .{}) }},
         }, .expected_changes = .{ .exactly = 1 } },
     };
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     _ = try save(allocator, database.capability(), original);
     try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&(updates ++ [_]sql.Mutation{.{ .statement = .{
@@ -902,7 +903,7 @@ test "merged recovery failures survive without a surviving Task" {
     var state = try history.fixture(allocator);
     state.tasks = &.{};
     state.workspaces = &.{};
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     _ = try save(allocator, database.capability(), state);
     try expectSame(allocator, database.capability(), state);
@@ -917,7 +918,7 @@ test "one complete maximum-count Run fits the bounded SQL transaction" {
     try std.testing.expect(sql.validMutations(batch.mutations.items));
     try std.testing.expect(batch.mutations.items.len <= sql.Limits.exec_statements);
     try std.testing.expect(parameterBytes(batch) <= sql.Limits.exec_parameter_bytes);
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(batch.mutations.items));
     try expectSame(allocator, database.capability(), state);
@@ -928,7 +929,7 @@ test "bounded history loader reads a legal table larger than a query result budg
     defer arena.deinit();
     const allocator = arena.allocator();
     const state = try populated(allocator, 32, 1, 1);
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     _ = try save(allocator, database.capability(), state);
     const bytes = try allocator.alloc(u8, history.limits.max_tool_field_bytes);
@@ -956,13 +957,13 @@ test "history schema upgrades populated data and old readers reject the newer ve
     const path = try temporaryPath(allocator, temporary.dir);
     const state = try history.fixture(allocator);
     {
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
     }
     const migrations = schema.migrations[0..schema.migrations.len].* ++ [_]sql.Migration{upgrade};
     {
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
         defer database.destroy() catch unreachable;
         try std.testing.expectEqual(upgrade.version, database.schemaVersion());
         var count: Count = .{};
@@ -970,7 +971,7 @@ test "history schema upgrades populated data and old readers reject the newer ve
         try std.testing.expectEqual(@as(?i64, 1), count.value);
         try expectSame(allocator, database.capability(), state);
     }
-    try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations));
+    try std.testing.expectError(error.VersionUnknown, sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations));
 }
 
 test "history schema rolls back every pending migration including schema and backfill" {
@@ -982,7 +983,7 @@ test "history schema rolls back every pending migration including schema and bac
     const path = try temporaryPath(allocator, temporary.dir);
     const state = try history.fixture(allocator);
     {
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
     }
@@ -991,8 +992,8 @@ test "history schema rolls back every pending migration including schema and bac
         .name = "test_only_failure",
         .sql = "CREATE TABLE test_marker(id INTEGER); UPDATE tasks SET title=X'6368616e676564'; UPDATE runs SET generation=NULL;",
     } };
-    try std.testing.expectError(error.MigrationFailed, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations));
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    try std.testing.expectError(error.MigrationFailed, sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations));
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
     defer database.destroy() catch unreachable;
     try std.testing.expectEqual(@as(u32, schema.migrations.len), database.schemaVersion());
     try expectSame(allocator, database.capability(), state);
@@ -1008,7 +1009,7 @@ test "history schema round-trips every persisted field through the original code
     const original = try history.fixture(allocator);
     const encoded = try allocator.alloc(u8, history.wire.max_store_bytes);
     const original_bytes = try history.wire.encode(encoded, original, history.limits);
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     const batch = try history.batchFor(allocator, original);
     try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(batch.mutations.items));
@@ -1021,7 +1022,7 @@ test "history schema round-trips every persisted field through the original code
 test "history schema accepts one complete relational set atomically" {
     // This fixture isolates DDL relationships. Product-valid aggregates are
     // separately checked against the original codec in the round-trip tests.
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     var mutations: [6]sql.Mutation = undefined;
     var statements = std.mem.splitScalar(u8, @embedFile("history_schema_minimal.sql"), ';');
@@ -1061,9 +1062,10 @@ test "history schema accepts one complete relational set atomically" {
 
 test "history schema creates every business table without bootstrapping business state" {
     // A single module identity is required at the capability boundary.
-    comptime if (sql.Database != storage.sql.Database or sql.Migration != storage.sql.Migration)
+    comptime if (sql.Database != @typeInfo(@TypeOf(sqlite.Database.capability)).@"fn".return_type.? or
+        []const sql.Migration != @typeInfo(@TypeOf(sqlite.Database.create)).@"fn".params[3].type.?)
         @compileError("Storage and Product must share one SQL contract module");
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     try std.testing.expectEqual(schema.migrations.len, database.schemaVersion());
     for ([_][]const u8{
@@ -1084,7 +1086,7 @@ test "history schema creates every business table without bootstrapping business
 }
 
 test "history schema preserves unsigned identity and NUL bytes through the public capability" {
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     const high_id = sql.Value{ .blob = &.{ 0x80, 0, 0, 0, 0, 0, 0, 1 } };
     const one = sql.Value{ .blob = &.{ 0, 0, 0, 0, 0, 0, 0, 1 } };
@@ -1126,7 +1128,7 @@ test "history schema deferred parent rebuild preserves every child and value" {
     const path = try temporaryPath(allocator, temporary.dir);
     const state = try history.fixture(allocator);
     {
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
     }
@@ -1155,7 +1157,7 @@ test "history schema deferred parent rebuild preserves every child and value" {
             try script.appendSlice(allocator, line);
     }
     const migrations = schema.migrations[0..schema.migrations.len].* ++ [_]sql.Migration{.{ .version = schema.migrations.len + 1, .name = "rebuild_parent", .sql = script.items }};
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
     defer database.destroy() catch unreachable;
     for (tables) |table| {
         var count: Count = .{};
@@ -1179,7 +1181,7 @@ test "history schema named nullable checks and unique indexes evolve through Sto
     state.tasks[0].runs[0].assistant = "";
     state.tasks[0].runs[0].commentary_ends = &.{};
     {
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
     }
@@ -1191,7 +1193,7 @@ test "history schema named nullable checks and unique indexes evolve through Sto
         \\CREATE UNIQUE INDEX workspaces_canonical_root_unique ON workspaces(canonical_root);
         },
     };
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
     defer database.destroy() catch unreachable;
     try expectSame(allocator, database.capability(), state);
     try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET assistant_output_kind='unknown',assistant_output_start=X'0000000000000000'" } }}));
@@ -1279,7 +1281,7 @@ test "history schema accepts every owner relational enum in a valid Product aggr
             } else if (comptime std.mem.eql(u8, binding[1], "status")) {
                 run.file_changes.?[0].status = value;
             } else @compileError("New enum binding needs a valid aggregate fixture");
-            const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+            const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
             defer database.destroy() catch unreachable;
             _ = try save(allocator, database.capability(), state);
             try expectSame(allocator, database.capability(), state);
@@ -1353,7 +1355,7 @@ test "history typed JSON accepts owner enums without losing their Product semant
             } else if (comptime std.mem.eql(u8, binding[0], "permission_namespace")) {
                 task.ui_history[0].permission.?.tool_namespace = value;
             } else @compileError("New JSON enum requires a valid fixture");
-            const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+            const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
             defer database.destroy() catch unreachable;
             _ = try save(a, database.capability(), state);
             try expectSame(a, database.capability(), state);
@@ -1405,7 +1407,7 @@ test "history SQL round trips the full failed input reason domain and rejects ot
         input.failure_reason = reason;
         input.blocking_task_id = if (reason == .session_close_failed) task.id else null;
     }
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     _ = try save(allocator, database.capability(), state);
     try expectSame(allocator, database.capability(), state);
@@ -1440,7 +1442,7 @@ test "history SQL upgrade keeps valid failed input reasons and removes old runti
     const path = try temporaryPath(allocator, temporary.dir);
     const previous_migrations = schema.migrations[0..6];
     {
-        const previous = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations);
+        const previous = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations);
         defer previous.destroy() catch unreachable;
         try insertAtVersion(allocator, previous.capability(), state, previous_migrations.len);
         try std.testing.expectEqual(sql.MutationOutcome.committed, previous.capability().mutate(&.{.{
@@ -1448,10 +1450,10 @@ test "history SQL upgrade keeps valid failed input reasons and removes old runti
             .expected_changes = .{ .exactly = 1 },
         }}));
     }
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
     defer database.destroy() catch unreachable;
     try expectSame(allocator, database.capability(), state);
-    try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations));
+    try std.testing.expectError(error.VersionUnknown, sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations));
 }
 
 test "history file reference JSON preserves Host image provenance and defaults old records to false" {
@@ -1465,7 +1467,7 @@ test "history file reference JSON preserves Host image provenance and defaults o
     try std.testing.expect(!reference.isGeneratedVideo());
     for ([_]bool{ false, true }) |generated| {
         reference.generated_image = generated;
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
         try expectSame(allocator, database.capability(), state);
@@ -1481,7 +1483,8 @@ test "production SQL history preserves Outputs metadata without file contents" {
     const state = try history.fixture(arena.allocator());
     var outputs = [_]history.wire.OutputWire{.{ .id = "01" ** 16, .locator = "report.docx", .size_bytes = 42, .sha256 = "ab" ** 32, .redacted = false }};
     state.tasks[0].runs[0].outputs = &outputs;
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    state.tasks[0].runs[0].updated_output_ids = &.{("01" ** 16).*};
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     _ = try save(arena.allocator(), database.capability(), state);
     try expectSame(arena.allocator(), database.capability(), state);
@@ -1516,7 +1519,7 @@ test "history schema upgrades legacy video references and fences out the previou
     legacy.presentation_anchor = .{ .after_output_count = 0, .presentation_order = 1 };
     const update = "UPDATE run_tools SET file_refs_json=?1 WHERE file_refs_json IS NOT NULL";
     {
-        const previous = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations);
+        const previous = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations);
         defer previous.destroy() catch unreachable;
         try insertAtVersion(allocator, previous.capability(), state, previous_migrations.len);
         const json = try std.json.Stringify.valueAlloc(allocator, &.{legacy}, .{ .emit_null_optional_fields = false });
@@ -1529,16 +1532,16 @@ test "history schema upgrades legacy video references and fences out the previou
     reference.generated_video = true;
     reference.presentation_state = "anchored";
     reference.presentation_anchor = legacy.presentation_anchor;
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
     defer database.destroy() catch unreachable;
     try expectSame(allocator, database.capability(), state);
-    try std.testing.expectError(error.VersionUnknown, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations));
+    try std.testing.expectError(error.VersionUnknown, sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, previous_migrations));
     const loaded = try history.load(allocator, database.capability());
     const restored = loaded.tasks[0].runs[0].tools[0].file_refs.?[0];
     try std.testing.expect(restored.isGeneratedVideo());
     try std.testing.expectEqual(@as(u64, 1), restored.presentation_anchor.?.presentation_order);
 
-    const rewritten = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const rewritten = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer rewritten.destroy() catch unreachable;
     _ = try save(allocator, rewritten.capability(), loaded);
     try expectSame(allocator, rewritten.capability(), state);
@@ -1570,7 +1573,7 @@ test "largest legal Tool value exceeds the old SQL cap and round-trips" {
     const batch = try history.batchFor(allocator, state);
     try std.testing.expect(parameterBytes(batch) > 8 * 1024 * 1024);
     try std.testing.expect(parameterBytes(batch) <= sql.Limits.exec_parameter_bytes);
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(batch.mutations.items));
     try expectSame(allocator, database.capability(), state);
@@ -1588,7 +1591,7 @@ test "SQL history preserves opaque and read-only legacy bytes exactly" {
     const known = try std.json.Stringify.valueAlloc(allocator, state.tasks[0], .{});
     const readonly = try std.fmt.allocPrint(allocator, "{{\"future_field\":true,{s}", .{known[1..]});
     const preserved: history.wire.PreservedFrames = .{ .retained = &.{.{ .kind = .task, .id = 98, .order = 99, .payload = payload }}, .read_only_tasks = &.{.{ .task_id = state.tasks[0].id, .recent_order = state.tasks[0].recent_order, .payload = readonly }} };
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     const batch = try schema.codec.batchForPreserving(allocator, state, preserved, history.limits);
     try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(batch.mutations.items));
@@ -1602,7 +1605,7 @@ test "SQL history preserves opaque and read-only legacy bytes exactly" {
 test "retained rows without a root are untrusted rather than empty history" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO retained_records(kind,id,occurrence,recent_order,payload) VALUES('task',X'0000000000000001',0,X'0000000000000001',X'ff')" } }}));
     try std.testing.expectError(error.MissingState, history.load(arena.allocator(), database.capability()));
@@ -1611,7 +1614,7 @@ test "retained rows without a root are untrusted rather than empty history" {
 test "a failed page cannot publish a partial history aggregate" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     const state = try history.fixture(arena.allocator());
     _ = try save(arena.allocator(), database.capability(), state);
@@ -1646,7 +1649,7 @@ test "repository commits only changed rows and keeps witness atomic" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
     defer repository.deinit();
@@ -1708,7 +1711,7 @@ test "history preserves descending Run tool and file arrays without inferring or
             second.artifact = null;
             run.file_changes = try a.dupe(history.wire.FileChangeWire, &.{ run.file_changes.?[0], second });
         }
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(a, database.capability(), state);
         try expectSame(a, database.capability(), state);
@@ -1728,7 +1731,7 @@ test "repository skips body-only position writes and vacates all swapped batches
         tool.progress = body;
         tool.content = body;
     }
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
     defer repository.deinit();
@@ -1781,7 +1784,7 @@ test "history loader rejects committed temporary positions and gaps" {
         defer arena.deinit();
         const a = arena.allocator();
         const state = try history.fixture(a);
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
         defer database.destroy() catch unreachable;
         _ = try save(a, database.capability(), state);
         try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = invalid } }}));
@@ -1809,7 +1812,7 @@ test "history first keyset page rejects invalid keys instead of hiding them behi
             task.completion_seen_run_id = 0;
         }
         {
-            const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+            const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
             defer database.destroy() catch unreachable;
             _ = try save(a, database.capability(), state);
         }
@@ -1819,7 +1822,7 @@ test "history first keyset page rejects invalid keys instead of hiding them behi
         else
             "ALTER TABLE runs DROP CONSTRAINT runs_ordinal_domain;UPDATE runs SET ordinal=-1;";
         const migrations = schema.migrations[0..schema.migrations.len].* ++ [_]sql.Migration{.{ .version = schema.migrations.len + 1, .name = "broken_first_key", .sql = corrupt }};
-        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
         defer database.destroy() catch unreachable;
         if (history.load(a, database.capability())) |_| return error.InvalidFirstKeyHidden else |_| {}
     }
@@ -1868,7 +1871,7 @@ test "repository Task deletion and insertion do not renumber unrelated identitie
     other.next_run_generation = 0;
     state.tasks = try a.dupe(history.wire.TaskWire, &.{ state.tasks[0], other });
     state.next_task_recent_order = 43;
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
     defer repository.deinit();
@@ -1906,7 +1909,7 @@ test "repository deletes Task descendants and backfills a previously failed chan
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
     defer repository.deinit();
@@ -1936,7 +1939,7 @@ test "repository preserves witness atomicity beyond 128 retained-record statemen
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
     defer repository.deinit();
@@ -1973,7 +1976,7 @@ test "repository preserves multiple opaque frame occurrences with the same ident
         .{ .kind = .task, .id = 100, .order = 101, .payload = "{\"future\":2}" },
         .{ .kind = .task, .id = 100, .order = 101, .payload = "{\"future\":2}" },
     };
-    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
     var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
     defer repository.deinit();

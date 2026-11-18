@@ -2960,46 +2960,76 @@ function decodeDeliveredOutputs(
   value: unknown,
   path: string,
 ): RunView["outputs"] {
-  if (!Array.isArray(value) || value.length > 8)
-    fail(path, "expected bounded delivered outputs");
+  if (!Array.isArray(value)) fail(path, "expected delivered outputs");
   const ids = new Set<string>();
+  let deliveries = 0;
   return value.map((raw, index) => {
     const itemPath = `${path}[${index}]`;
-    const item = object(raw, itemPath, [
-      "id",
-      "displayPath",
-      "sizeBytes",
-      "redacted",
-    ]);
-    const id = stringValue(item.id, `${itemPath}.id`);
-    if (!/^[0-9a-f]{32}$/.test(id) || /^0+$/.test(id) || ids.has(id))
-      fail(itemPath, "invalid or repeated output identity");
-    ids.add(id);
-    const displayPath = stringValue(
-      item.displayPath,
-      `${itemPath}.displayPath`,
+    const updated = Object.hasOwn(record(raw, itemPath), "updated");
+    const item = object(
+      raw,
+      itemPath,
+      updated ? [...outputFields, "updated"] : outputFields,
     );
-    const redacted = booleanValue(item.redacted, `${itemPath}.redacted`);
+    if (updated && item.updated !== true)
+      fail(itemPath, "invalid output update flag");
+    if (!updated && ++deliveries > 8) fail(path, "too many delivered outputs");
+    const output = decodeOutputFields(item, itemPath);
+    if (ids.has(output.id))
+      fail(itemPath, "invalid or repeated output identity");
+    ids.add(output.id);
+    return updated ? { ...output, updated: true as const } : output;
+  });
+}
+const outputFields = ["id", "displayPath", "sizeBytes", "redacted"] as const;
+function decodeOutputFields(item: Record<string, unknown>, itemPath: string) {
+  const id = stringValue(item.id, `${itemPath}.id`);
+  if (!/^[0-9a-f]{32}$/.test(id) || /^0+$/.test(id))
+    fail(itemPath, "invalid output identity");
+  const displayPath = stringValue(item.displayPath, `${itemPath}.displayPath`);
+  const redacted = booleanValue(item.redacted, `${itemPath}.redacted`);
+  if (
+    redacted
+      ? displayPath !== ""
+      : displayPath.length === 0 ||
+        new TextEncoder().encode(displayPath).length > 512 ||
+        /[\u0000-\u001f\u007f\\:<>"|?*]/.test(displayPath) ||
+        displayPath
+          .split("/")
+          .some(
+            (part) =>
+              !part || part === "." || part === ".." || /[. ]$/.test(part),
+          )
+  )
+    fail(itemPath, "invalid output display path");
+  return {
+    id,
+    displayPath,
+    sizeBytes: u64WireInteger(item.sizeBytes, `${itemPath}.sizeBytes`),
+    redacted,
+  };
+}
+function decodeConversationOutputs(
+  value: unknown,
+  path: string,
+  manifest: RunManifest[],
+) {
+  const runIds = new Set(manifest.map((run) => run.id));
+  const ids = new Set<string>();
+  const paths = new Set<string>();
+  return arrayValue(value, path, (raw, itemPath) => {
+    const item = object(raw, itemPath, [...outputFields, "runId"]);
+    const output = decodeOutputFields(item, itemPath);
+    const runId = positiveWireId(item.runId, `${itemPath}.runId`);
     if (
-      redacted
-        ? displayPath !== ""
-        : displayPath.length === 0 ||
-          new TextEncoder().encode(displayPath).length > 512 ||
-          /[\u0000-\u001f\u007f\\:<>"|?*]/.test(displayPath) ||
-          displayPath
-            .split("/")
-            .some(
-              (part) =>
-                !part || part === "." || part === ".." || /[. ]$/.test(part),
-            )
+      !runIds.has(runId) ||
+      ids.has(output.id) ||
+      (!output.redacted && paths.has(output.displayPath))
     )
-      fail(itemPath, "invalid output display path");
-    return {
-      id,
-      displayPath,
-      sizeBytes: u64WireInteger(item.sizeBytes, `${itemPath}.sizeBytes`),
-      redacted,
-    };
+      fail(itemPath, "unbound or repeated conversation output");
+    ids.add(output.id);
+    if (!output.redacted) paths.add(output.displayPath);
+    return { ...output, runId };
   });
 }
 function decodeRunFileChanges(
@@ -3018,6 +3048,9 @@ function decodeRunFileChanges(
     `${path}.changes`,
     (value, itemPath) => {
       const change = object(value, itemPath, [
+        ...(Object.hasOwn(record(value, itemPath), "outputRegistrationAdmitted")
+          ? ["outputRegistrationAdmitted"]
+          : []),
         "id",
         "order",
         "kind",
@@ -3042,7 +3075,18 @@ function decodeRunFileChanges(
           : stringValue(change.fromDisplayPath, `${itemPath}.fromDisplayPath`);
       if ((kind === "moved") !== (fromDisplayPath !== null))
         fail(itemPath, "moved changes alone require a source path");
+      if (
+        Object.hasOwn(change, "outputRegistrationAdmitted") &&
+        (change.outputRegistrationAdmitted !== true ||
+          change.redacted !== false ||
+          change.status !== "applied" ||
+          (kind !== "created" && kind !== "modified"))
+      )
+        fail(itemPath, "invalid output registration eligibility");
       return {
+        ...(change.outputRegistrationAdmitted === true
+          ? { outputRegistrationAdmitted: true as const }
+          : {}),
         id: stringValue(change.id, `${itemPath}.id`),
         order: positiveWireId(change.order, `${itemPath}.order`),
         kind,
@@ -3676,6 +3720,15 @@ function decodeTask(
   manifest: RunManifest[],
 ): TaskView {
   const item = object(value, path, [
+    ...(Object.hasOwn(record(value, path), "conversationOutputs")
+      ? ["conversationOutputs"]
+      : []),
+    ...(Object.hasOwn(record(value, path), "officeOutputsOpen")
+      ? ["officeOutputsOpen"]
+      : []),
+    ...(Object.hasOwn(record(value, path), "browserOutputsOpen")
+      ? ["browserOutputsOpen"]
+      : []),
     ...(Object.hasOwn(record(value, path), "sessionCloseRetryAvailable")
       ? ["sessionCloseRetryAvailable"]
       : []),
@@ -3721,6 +3774,16 @@ function decodeTask(
     "pendingUi",
     "uiHistory",
   ]);
+  if (
+    Object.hasOwn(item, "officeOutputsOpen") &&
+    item.officeOutputsOpen !== true
+  )
+    fail(path, "invalid Office output availability");
+  if (
+    Object.hasOwn(item, "browserOutputsOpen") &&
+    item.browserOutputsOpen !== true
+  )
+    fail(path, "invalid browser output availability");
   const bindingItem = object(item.binding, `${path}.binding`, [
     "epoch",
     "availability",
@@ -4324,6 +4387,21 @@ function decodeTask(
     currentRunPhase,
     context,
     runs,
+    ...(item.officeOutputsOpen === true
+      ? { officeOutputsOpen: true as const }
+      : {}),
+    ...(item.browserOutputsOpen === true
+      ? { browserOutputsOpen: true as const }
+      : {}),
+    ...(item.conversationOutputs === undefined
+      ? {}
+      : {
+          conversationOutputs: decodeConversationOutputs(
+            item.conversationOutputs,
+            `${path}.conversationOutputs`,
+            manifest,
+          ),
+        }),
     compacts,
     pendingUi,
     uiHistory,

@@ -620,14 +620,15 @@ pub fn build(b: *std.Build) void {
     b.step("test-app-history", "Verify Application SQLite history lifecycle").dependOn(&b.addRunArtifact(app_history_tests).step);
     const storage_tests = b.addTest(.{
         .name = "metawork-storage",
-        .root_module = test_modules.storage,
+        .root_module = test_modules.metawork_storage_sqlite,
     });
     const storage_crash_fixture_module = b.createModule(.{
         .root_source_file = b.path("tests/support/storage_crash_fixture.zig"),
-        .target = test_modules.storage.resolved_target,
-        .optimize = test_modules.storage.optimize,
+        .target = test_modules.metawork_storage_sqlite.resolved_target,
+        .optimize = test_modules.metawork_storage_sqlite.optimize,
     });
-    storage_crash_fixture_module.addImport("storage", test_modules.storage);
+    storage_crash_fixture_module.addImport("metawork_storage_sqlite", test_modules.metawork_storage_sqlite);
+    storage_crash_fixture_module.addImport("metawork_storage_sql", test_modules.metawork_storage_sql);
     storage_crash_fixture_module.link_libc = bundle.link_libc;
     const storage_crash_fixture = b.addExecutable(.{
         .name = "metawork-storage-crash-fixture",
@@ -639,7 +640,7 @@ pub fn build(b: *std.Build) void {
     );
     const storage_tests_run = b.addRunArtifact(storage_tests);
     storage_tests_run.step.dependOn(&install_storage_crash_fixture.step);
-    const storage_crash_fixture_name = if (test_modules.storage.resolved_target.?.result.os.tag == .windows) "metawork-storage-crash-fixture.exe" else "metawork-storage-crash-fixture";
+    const storage_crash_fixture_name = if (test_modules.metawork_storage_sqlite.resolved_target.?.result.os.tag == .windows) "metawork-storage-crash-fixture.exe" else "metawork-storage-crash-fixture";
     storage_tests_run.setEnvironmentVariable(
         "METAWORK_STORAGE_CRASH_FIXTURE",
         b.getInstallPath(.bin, storage_crash_fixture_name),
@@ -747,33 +748,35 @@ pub fn build(b: *std.Build) void {
     // Isolated, opt-in Stage A probes. Not part of the app or the default test graph.
     const sqlite_a_module = b.createModule(.{
         .root_source_file = b.path("tests/probes/sqlite_history_a_memory.zig"),
-        .target = test_modules.storage.resolved_target,
-        .optimize = test_modules.storage.optimize,
+        .target = test_modules.metawork_storage_sqlite.resolved_target,
+        .optimize = test_modules.metawork_storage_sqlite.optimize,
         .link_libc = true,
     });
     sqlite_a_module.addImport("product_task_persistence", test_modules.product_task_persistence);
     sqlite_a_module.addImport("product_task_runtime", test_modules.product_task_runtime);
     sqlite_a_module.addImport("product_task_state", test_modules.product_task_state);
-    sqlite_a_module.addImport("storage", test_modules.storage);
+    sqlite_a_module.addImport("metawork_storage_sqlite", test_modules.metawork_storage_sqlite);
+    sqlite_a_module.addImport("metawork_storage_sql", test_modules.metawork_storage_sql);
     const sqlite_a_memory = b.addTest(.{ .name = "sqlite-history-a-memory", .root_module = sqlite_a_module, .filters = &.{"stage A"} });
     const sqlite_a_sql_module = b.createModule(.{
         .root_source_file = b.path("tests/probes/sqlite_history_a_backend.zig"),
-        .target = test_modules.storage.resolved_target,
-        .optimize = test_modules.storage.optimize,
+        .target = test_modules.metawork_storage_sqlite.resolved_target,
+        .optimize = test_modules.metawork_storage_sqlite.optimize,
         .link_libc = true,
     });
-    sqlite_a_sql_module.addImport("storage", test_modules.storage);
+    sqlite_a_sql_module.addImport("metawork_storage_sqlite", test_modules.metawork_storage_sqlite);
+    sqlite_a_sql_module.addImport("metawork_storage_sql", test_modules.metawork_storage_sql);
     const sqlite_a_backend = b.addTest(.{ .name = "sqlite-history-a-backend", .root_module = sqlite_a_sql_module, .filters = &.{"stage A"} });
     const sqlite_a_step = b.step("build-sqlite-history-a-probes", "Build isolated SQLite stage A memory and existing-backend measurements");
     sqlite_a_step.dependOn(&b.addInstallArtifact(sqlite_a_memory, .{}).step);
     sqlite_a_step.dependOn(&b.addInstallArtifact(sqlite_a_backend, .{}).step);
     const sqlite_a_primitives_module = b.createModule(.{
         .root_source_file = b.path("tests/probes/sqlite_history_a_primitives.zig"),
-        .target = test_modules.storage.resolved_target,
-        .optimize = test_modules.storage.optimize,
+        .target = test_modules.metawork_storage_sqlite.resolved_target,
+        .optimize = test_modules.metawork_storage_sqlite.optimize,
         .link_libc = true,
     });
-    sqlite_a_primitives_module.addImport("storage", test_modules.storage);
+    sqlite_a_primitives_module.addImport("metawork_storage_sqlite", test_modules.metawork_storage_sqlite);
     sqlite_a_primitives_module.addIncludePath(b.dependency("sqlite", .{}).path("."));
     sqlite_a_primitives_module.addCSourceFile(.{ .file = b.path("tests/probes/sqlite_history_a_primitives.c"), .flags = &.{"-std=c11"} });
     const sqlite_a_primitives = b.addTest(.{ .name = "sqlite-history-a-primitives", .root_module = sqlite_a_primitives_module, .filters = &.{"stage A"} });
@@ -783,30 +786,30 @@ pub fn build(b: *std.Build) void {
         sqlite_a_size_options.addOption(bool, "engine", engine);
         const sqlite_a_size_module = b.createModule(.{
             .root_source_file = b.path("tests/probes/sqlite_history_a_size.zig"),
-            .target = test_modules.storage.resolved_target,
-            .optimize = test_modules.storage.optimize,
+            .target = test_modules.metawork_storage_sqlite.resolved_target,
+            .optimize = test_modules.metawork_storage_sqlite.optimize,
             .link_libc = true,
         });
         sqlite_a_size_module.addOptions("stage_a_size_options", sqlite_a_size_options);
-        if (engine) sqlite_a_size_module.addImport("storage", test_modules.storage);
+        if (engine) sqlite_a_size_module.addImport("metawork_storage_sqlite", test_modules.metawork_storage_sqlite);
         const sqlite_a_size = b.addExecutable(.{ .name = if (engine) "sqlite-history-a-size-engine" else "sqlite-history-a-size-base", .root_module = sqlite_a_size_module });
         sqlite_a_step.dependOn(&b.addInstallArtifact(sqlite_a_size, .{}).step);
     }
     const history_schema_fixture_module = b.createModule(.{
         .root_source_file = b.path("tests/support/history_schema.zig"),
-        .target = test_modules.storage.resolved_target,
-        .optimize = test_modules.storage.optimize,
+        .target = test_modules.metawork_storage_sqlite.resolved_target,
+        .optimize = test_modules.metawork_storage_sqlite.optimize,
     });
-    history_schema_fixture_module.addImport("metawork_storage_sql", test_modules.storage_sql);
+    history_schema_fixture_module.addImport("metawork_storage_sql", test_modules.metawork_storage_sql);
     history_schema_fixture_module.addImport("product_task_persistence", test_modules.product_task_persistence);
     const history_schema_tests_module = b.createModule(.{
         .root_source_file = b.path("tests/product/history_schema_test.zig"),
-        .target = test_modules.storage.resolved_target,
-        .optimize = test_modules.storage.optimize,
+        .target = test_modules.metawork_storage_sqlite.resolved_target,
+        .optimize = test_modules.metawork_storage_sqlite.optimize,
     });
     history_schema_tests_module.addImport("product_control_history_schema", test_modules.product_control_history_schema);
-    history_schema_tests_module.addImport("metawork_storage_sql", test_modules.storage_sql);
-    history_schema_tests_module.addImport("storage", test_modules.storage);
+    history_schema_tests_module.addImport("metawork_storage_sql", test_modules.metawork_storage_sql);
+    history_schema_tests_module.addImport("metawork_storage_sqlite", test_modules.metawork_storage_sqlite);
     history_schema_tests_module.addImport("history_schema_fixture", history_schema_fixture_module);
     const history_schema_tests = b.addTest(.{
         .name = "metawork-product-history-schema",
@@ -915,8 +918,8 @@ fn addLifecycleTests(
 
 const WiredModules = struct {
     product_update: *std.Build.Module,
-    storage: *std.Build.Module,
-    storage_sql: *std.Build.Module,
+    metawork_storage_sqlite: *std.Build.Module,
+    metawork_storage_sql: *std.Build.Module,
     product_control_history_schema: *std.Build.Module,
     metawork_oauth_mechanics: *std.Build.Module,
     metawork_oauth_loopback: *std.Build.Module,
@@ -1466,14 +1469,24 @@ fn wireAgentCore(
     });
     if (target.result.os.tag == .macos)
         app_single_instance_compat.linkFramework("CoreFoundation", .{});
+    const output_browser_handoff = b.createModule(.{
+        .root_source_file = b.path("src/native_sdk_compat/output_browser_handoff.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    if (target.result.os.tag == .macos) {
+        output_browser_handoff.linkFramework("CoreFoundation", .{});
+        output_browser_handoff.linkFramework("CoreServices", .{});
+    }
     const office_resource_publish_compat = b.createModule(.{
         .root_source_file = b.path("src/native_sdk_compat/office_resource_publish.zig"),
         .target = target,
         .optimize = root_module.optimize,
         .link_libc = bundle.link_libc,
     });
-    const storage_sql = b.createModule(.{
-        .root_source_file = b.path("src/storage/sql.zig"),
+    const metawork_storage_sql = b.createModule(.{
+        .root_source_file = b.path("src/foundation/storage/sql.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -1482,16 +1495,16 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_control_history_schema.addImport("metawork_storage_sql", storage_sql);
-    const storage = b.createModule(.{
-        .root_source_file = b.path("src/storage.zig"),
+    product_control_history_schema.addImport("metawork_storage_sql", metawork_storage_sql);
+    const metawork_storage_sqlite = b.createModule(.{
+        .root_source_file = b.path("src/foundation/storage/sqlite.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    storage.addImport("metawork_storage_sql", storage_sql);
+    metawork_storage_sqlite.addImport("metawork_storage_sql", metawork_storage_sql);
     const sqlite = b.dependency("sqlite", .{});
-    storage.addIncludePath(sqlite.path("."));
-    storage.addCSourceFile(.{
+    metawork_storage_sqlite.addIncludePath(sqlite.path("."));
+    metawork_storage_sqlite.addCSourceFile(.{
         .file = sqlite.path("sqlite3.c"),
         .flags = &.{
             "-DSQLITE_THREADSAFE=2",
@@ -1502,7 +1515,7 @@ fn wireAgentCore(
             "-DSQLITE_DEFAULT_MEMSTATUS=0",
         },
     });
-    storage.link_libc = true;
+    metawork_storage_sqlite.link_libc = true;
     product_identity.addImport(
         "app_manifest_zon",
         existingImport(runner, "app_manifest_zon"),
@@ -2766,7 +2779,8 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     product_control.addImport("product_control_history_schema", product_control_history_schema);
-    app.addImport("storage", storage);
+    app.addImport("metawork_storage_sqlite", metawork_storage_sqlite);
+    app.addImport("metawork_storage_sql", metawork_storage_sql);
     app.addImport("runner", runner);
     app.addImport("build_options", existingImport(runner, "build_options"));
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
@@ -2815,6 +2829,7 @@ fn wireAgentCore(
     app.addImport("metask_client", metask_client);
     app.addImport("metawork_product_identity", product_identity);
     app.addImport("metawork_office_resource_publish_compat", office_resource_publish_compat);
+    app.addImport("metawork_output_browser_handoff", output_browser_handoff);
     app.addImport(
         "metawork_app_single_instance_compat",
         app_single_instance_compat,
@@ -2828,8 +2843,8 @@ fn wireAgentCore(
     root_module.link_libc = bundle.link_libc;
     return .{
         .product_update = product_update,
-        .storage = storage,
-        .storage_sql = storage_sql,
+        .metawork_storage_sqlite = metawork_storage_sqlite,
+        .metawork_storage_sql = metawork_storage_sql,
         .product_control_history_schema = product_control_history_schema,
         .metawork_oauth_mechanics = metawork_oauth_mechanics,
         .metawork_oauth_loopback = metawork_oauth_loopback,

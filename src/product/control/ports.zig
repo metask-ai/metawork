@@ -166,6 +166,7 @@ pub const VideoRunPreparation = struct {
 pub const FileDeliveryPreparation = struct {
     context: *anyopaque,
     prepare_fn: *const fn (*anyopaque, workspace.TaskAuthority) ?product_task.OwnedFileDelivery,
+    validate_path_fn: ?*const fn ([]const u8) error{InvalidOutputPath}!void = null,
 
     pub fn prepare(self: FileDeliveryPreparation, authority: workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
         return self.prepare_fn(self.context, authority);
@@ -422,6 +423,25 @@ pub const NativeDialog = struct {
 pub const OutputFileReveal = struct {
     context: *anyopaque,
     reveal_fn: *const fn (*anyopaque, []const u8, []const u8) anyerror!void,
+};
+
+pub const OutputFileOpen = struct {
+    context: *anyopaque,
+    office: bool,
+    browser: bool,
+    prepare_fn: *const fn (*anyopaque, []const u8, []const u8) anyerror!OwnedOutputOpen,
+};
+
+pub const OwnedOutputOpen = struct {
+    context: *anyopaque,
+    inspect_fn: *const fn (*anyopaque, *const std.atomic.Value(bool)) anyerror!void,
+    open_fn: *const fn (*anyopaque) anyerror!void,
+    release_fn: *const fn (*anyopaque) void,
+
+    pub fn deinit(self: *OwnedOutputOpen) void {
+        self.release_fn(self.context);
+        self.* = undefined;
+    }
 };
 
 /// Callback-scoped source identity. The Application copies this and the picker

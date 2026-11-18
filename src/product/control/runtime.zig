@@ -1377,6 +1377,7 @@ pub const Runtime = struct {
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     output_checks: output_check.Lane = .{},
     output_file_reveal: ?control_ports.OutputFileReveal = null,
+    output_file_open: ?control_ports.OutputFileOpen = null,
     output_file_save: ?control_ports.OutputFileSave = null,
     pending_output_saves: [output_check.max_in_flight]?struct { id: u64, target: OutputFileTarget } = @splat(null),
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
@@ -1785,6 +1786,7 @@ pub const Runtime = struct {
 
     pub fn beginOutputCheck(self: *Runtime, completion_id: u64, task_id: u64, run_id: u64, output_id: [16]u8, kind: OutputCheckKind) OutputCheckAdmission {
         if (self.shutting_down or self.output_checks.stopping) return .{ .immediate = .failed };
+        if (kind == .register) return .{ .immediate = .restricted };
         var target = self.copyOutputFileTarget(self.allocator, task_id, run_id, output_id) catch |err|
             return .{ .immediate = outputCheckAuthorityState(err) };
         var target_owned = true;
@@ -1806,23 +1808,110 @@ pub const Runtime = struct {
             };
             return .{ .immediate = .busy };
         }
+        const result = self.queueOutputInspection(completion_id, kind, target);
+        if (result == .queued) target_owned = false;
+        return result;
+    }
+
+    fn outputRegistrationAuthority(self: *const Runtime, task_id: u64, run_id: u64, change_id: []const u8) OutputFileAuthorityError!task_runtime.OutputRegistrationReference {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.projection_security_epoch == 0) return error.StaleSecurityEpoch;
+        const reference = self.task_runtime.outputRegistrationReference(task_id, run_id, change_id) orelse return error.RestrictedOutput;
+        const preparation = self.file_delivery_preparation orelse return error.RestrictedOutput;
+        const validate_path = preparation.validate_path_fn orelse return error.RestrictedOutput;
+        validate_path(reference.locator) catch return error.RestrictedOutput;
+        if (!self.workspace.filePreviewAuthorized(reference.workspace_id, reference.workspace_epoch, reference.workspace_root) or
+            self.containsKnownCredential(reference.locator) or self.containsKnownCredential(reference.workspace_root))
+            return error.RestrictedOutput;
+        return reference;
+    }
+
+    pub fn beginOutputRegistration(self: *Runtime, completion_id: u64, task_id: u64, run_id: u64, change_id: []const u8) OutputCheckAdmission {
+        if (self.requiredHistoryBlocked()) return .{ .immediate = .busy };
+        const reference = self.outputRegistrationAuthority(task_id, run_id, change_id) catch |err|
+            return .{ .immediate = outputCheckAuthorityState(err) };
+        const root_end = reference.workspace_root.len;
+        const locator_end = root_end + reference.locator.len;
+        const storage = self.allocator.alloc(u8, locator_end + change_id.len) catch return .{ .immediate = .failed };
+        @memcpy(storage[0..root_end], reference.workspace_root);
+        @memcpy(storage[root_end..locator_end], reference.locator);
+        @memcpy(storage[locator_end..], change_id);
+        var target: OutputFileTarget = .{
+            .allocator = self.allocator,
+            .storage = storage,
+            .task_id = task_id,
+            .run_id = run_id,
+            .output_id = @splat(0),
+            .change_id = storage[locator_end..],
+            .workspace_id = reference.workspace_id,
+            .workspace_epoch = reference.workspace_epoch,
+            .security_epoch = self.projection_security_epoch,
+            .workspace_root = storage[0..root_end],
+            .relative_path = storage[root_end..locator_end],
+            .size_bytes = 0,
+            .sha256 = @splat(0),
+        };
+        const result = self.queueOutputInspection(completion_id, .register, target);
+        if (result != .queued) target.deinit();
+        return result;
+    }
+
+    fn revalidateOutputInspection(self: *const Runtime, target: *const OutputFileTarget) OutputFileAuthorityError!void {
+        const change_id = target.change_id orelse return self.revalidateOutputFileTarget(target);
+        if (target.security_epoch != self.projection_security_epoch) return error.StaleSecurityEpoch;
+        const current = try self.outputRegistrationAuthority(target.task_id, target.run_id, change_id);
+        if (current.workspace_id != target.workspace_id or current.workspace_epoch != target.workspace_epoch or
+            !std.mem.eql(u8, current.workspace_root, target.workspace_root) or
+            !std.mem.eql(u8, current.locator, target.relative_path))
+            return error.RestrictedOutput;
+    }
+
+    fn queueOutputInspection(self: *Runtime, completion_id: u64, kind: OutputCheckKind, target: OutputFileTarget) OutputCheckAdmission {
         var work: output_check.Work = inspect: {
+            if (kind == .open) {
+                const open = self.output_file_open orelse return .{ .immediate = .unavailable };
+                const owned = open.prepare_fn(open.context, target.workspace_root, target.relative_path) catch |err|
+                    return .{ .immediate = output_check.openFailure(err) };
+                break :inspect .{ .open = owned };
+            }
             const preparation = self.file_delivery_preparation orelse return .{ .immediate = .unavailable };
             const workspace = self.workspace.recoveryBinding(target.workspace_id) orelse unreachable;
             break :inspect .{ .inspect = preparation.prepare(workspace) orelse return .{ .immediate = .unavailable } };
         };
         var work_owned = true;
         defer if (work_owned) work.deinit();
-        // A Native picker may pump messages; no pre-dialog authority survives it.
-        self.revalidateOutputFileTarget(&target) catch |err| return .{ .immediate = outputCheckAuthorityState(err) };
+        self.revalidateOutputInspection(&target) catch |err| return .{ .immediate = outputCheckAuthorityState(err) };
         self.output_checks.begin(self.io, self.allocator, .{
             .context = self.change_notifier.context,
             .wake_fn = self.change_notifier.wake,
         }, completion_id, kind, target, work) catch |err|
             return .{ .immediate = if (err == error.Capacity) .busy else .failed };
-        target_owned = false;
         work_owned = false;
         return .queued;
+    }
+
+    fn registerInspectedOutput(self: *Runtime, target: *const OutputFileTarget) OutputCheckState {
+        if (self.requiredHistoryBlocked()) return .busy;
+        self.revalidateOutputInspection(target) catch |err| return outputCheckAuthorityState(err);
+        var id: [16]u8 = undefined;
+        std.Io.randomSecure(self.io, &id) catch return .failed;
+        const receipt = lifecycle.FileDeliveryReceipt.init(id, target.relative_path, target.size_bytes, target.sha256) catch return .restricted;
+        const added = self.task_runtime.addUserOutput(target.task_id, target.run_id, &receipt, self.taskEventEffects()) catch |err|
+            return if (err == error.ToolCapacity) .busy else .failed;
+        if (!added and self.task_persistence_health == .ready) return .registered;
+        self.commitTaskStateIfConfigured(.required) catch |err| {
+            if (added and err != error.TaskPersistenceOutcomeUnknown) {
+                self.task_runtime.discardUserOutput(target.task_id, target.run_id, id);
+            }
+            self.bumpRevision();
+            _ = self.change_notifier.notify();
+            return if (err == error.TaskBusy) .busy else .failed;
+        };
+        if (added) {
+            self.bumpRevision();
+            _ = self.change_notifier.notify();
+        }
+        return .registered;
     }
 
     pub fn requestOutputSave(self: *Runtime, id: u64, parent: u64, completion: *const OutputSavePort.Completion) !u64 {
@@ -1897,7 +1986,12 @@ pub const Runtime = struct {
             self.output_checks.decide(publication, state);
         }
         while (self.output_checks.take(self.io)) |taken| {
-            var state = if (taken.committed or taken.state == .cleanup_failed) taken.state else if (!sink.request_active_fn(sink.context, taken.completion_id)) OutputCheckState.cancelled else if (self.revalidateOutputFileTarget(taken.target)) |_| taken.state else |err| outputCheckAuthorityState(err);
+            var state = if (taken.committed or taken.state == .cleanup_failed) taken.state else if (!sink.request_active_fn(sink.context, taken.completion_id)) OutputCheckState.cancelled else if (self.revalidateOutputInspection(taken.target)) |_| taken.state else |err| outputCheckAuthorityState(err);
+            if (state == .ready and taken.kind == .register) state = self.registerInspectedOutput(taken.target);
+            if (state == .ready and taken.kind == .open) {
+                const open = taken.job.work.open;
+                state = if (open.open_fn(open.context)) |_| .opened else |err| output_check.openFailure(err);
+            }
             if (state == .ready and taken.kind == .reveal) {
                 state = if (self.output_file_reveal) |reveal| result: {
                     reveal.reveal_fn(reveal.context, taken.target.workspace_root, taken.target.relative_path) catch |err| break :result switch (err) {
@@ -1923,6 +2017,10 @@ pub const Runtime = struct {
 
     pub fn setOutputFileReveal(self: *Runtime, reveal: control_ports.OutputFileReveal) void {
         self.output_file_reveal = reveal;
+    }
+
+    pub fn setOutputFileOpen(self: *Runtime, open: control_ports.OutputFileOpen) void {
+        self.output_file_open = open;
     }
 
     pub fn shutdownOutputChecks(self: *Runtime) void {
@@ -7636,6 +7734,9 @@ pub const Runtime = struct {
             .context = self,
             .authority_fn = taskProjectionAuthority,
             .text = text.task(),
+            .output_path_validator = if (self.file_delivery_preparation) |preparation| preparation.validate_path_fn else null,
+            .office_outputs_open = if (self.output_file_open) |open| open.office else false,
+            .browser_outputs_open = if (self.output_file_open) |open| open.browser else false,
             .catalog = .{
                 .context = text,
                 .write_fn = writeTaskCatalogProjection,
@@ -22970,6 +23071,51 @@ test "Output check worker distinguishes current bytes from changed or unavailabl
         try std.testing.expectEqual(i + 1, harness.releases);
     }
     try std.testing.expectEqual(cases.len, harness.inspections.load(.acquire));
+    harness.outcome = .{ .verified = .{ .size_bytes = 43, .sha256 = @splat(4) } };
+    try std.testing.expect(control.beginOutputCheck(cases.len + 1, 3, 7, @splat(3), .check_current) == .queued);
+    try harness.drainAll(&control);
+    try std.testing.expectEqual(OutputCheckState.ready, harness.results[cases.len].?.state);
+}
+
+test "Output registration waits for terminal receipt drain, deduplicates, and persists the inspected bytes" {
+    const Validator = struct {
+        fn validate(path: []const u8) error{InvalidOutputPath}!void {
+            if (!std.mem.eql(u8, path, "results/年度报告.docx")) return error.InvalidOutputPath;
+        }
+    };
+    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId(), .outcome = .{ .verified = .{ .size_bytes = 51, .sha256 = @splat(9) } } };
+    var storage: [256 * 1024]u8 = undefined;
+    var history = TestTaskPersistence{ .storage = &storage };
+    var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
+    defer control.deinit();
+    control.setFileDeliveryPreparation(.{ .context = &harness, .prepare_fn = OutputCheckHarness.prepare, .validate_path_fn = Validator.validate });
+
+    var event = try testEnvelope(3, 7, "{\"file_changes\":{\"id\":\"tool-1\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"results/年度报告.docx\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-1\",\"agent_depth\":0,\"before_bytes\":42,\"after_bytes\":51,\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}");
+    defer event.deinit();
+    try control.applyEvent(&event);
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
+    const change_id = run.file_changes[0].?.id;
+    try std.testing.expectEqual(OutputCheckState.restricted, control.beginOutputRegistration(1, 3, 7, change_id).immediate);
+    try std.testing.expect(commitTerminal(run, .completed, .completed, null, .reusable, "", false));
+    try std.testing.expectEqual(OutputCheckState.restricted, control.beginOutputRegistration(2, 3, 7, change_id).immediate);
+    control.markTerminalRunsBeforeEventDrain();
+    finalizeTestTerminalDrain(&control);
+    try std.testing.expectEqual(OutputCheckState.restricted, control.beginOutputRegistration(3, 3, 7, "other-change").immediate);
+    for ([_]u64{ 4, 5 }, 0..) |id, index| {
+        try std.testing.expect(control.beginOutputRegistration(id, 3, 7, change_id) == .queued);
+        try harness.drainAll(&control);
+        try std.testing.expectEqual(OutputCheckState.registered, harness.results[index].?.state);
+    }
+    try std.testing.expect(run.outputs[0] != null and run.outputs[1] == null);
+    const id = run.outputs[0].?.id;
+    var restored = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, testLimits(), .{
+        .task_persistence = history.capability(storage[0..history.len]),
+    });
+    defer restored.deinit();
+    const output = restored.task_runtime.outputFileReference(3, 7, id).?;
+    try std.testing.expectEqualStrings("results/年度报告.docx", output.locator);
+    try std.testing.expectEqual(@as(u64, 51), output.size_bytes);
+    try std.testing.expectEqual(@as([32]u8, @splat(9)), output.sha256);
 }
 
 test "Output check cancellation bounds active and queued work without retaining effects" {
@@ -23060,14 +23206,14 @@ test "Output reveal requires both verified bytes and an active requester immedia
     harness.outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(4) } };
     try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .reveal) == .queued);
     try harness.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.changed, harness.results[1].?.state);
-    try std.testing.expectEqual(@as(usize, 1), harness.reveals);
+    try std.testing.expectEqual(OutputCheckState.revealed, harness.results[1].?.state);
+    try std.testing.expectEqual(@as(usize, 2), harness.reveals);
     harness.outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(2) } };
     harness.requester_active = false;
     try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3), .reveal) == .queued);
     try harness.drainAll(&control);
     try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[2].?.state);
-    try std.testing.expectEqual(@as(usize, 1), harness.reveals);
+    try std.testing.expectEqual(@as(usize, 2), harness.reveals);
 }
 
 const OutputSaveHarness = struct {

@@ -756,6 +756,7 @@ fn writeRun(batch: *Batch, v: wire.RunWire, task_id: u64, position: usize) !void
         .outcome = ot(v.outcome),
         .cause = ot(v.cause),
         .outputs_json = try batch.json(v.outputs),
+        .updated_output_ids_json = try batch.json(v.updated_output_ids),
         .input_json = try batch.json(v.input),
         .submission_json = try batch.ojson(v.submission),
         .commentary_ends_json = try batch.json(v.commentary_ends),
@@ -813,6 +814,7 @@ fn readRun(row: Record) !wire.RunWire {
     v.tools = &.{};
     v.file_changes = if (v.file_change_observation == null) null else &.{};
     v.outputs = try row.json([]wire.OutputWire, "outputs_json");
+    v.updated_output_ids = try row.json([]const [32]u8, "updated_output_ids_json");
     return v;
 }
 
@@ -926,7 +928,7 @@ comptime {
     if (std.meta.fields(wire.TaskWire).len != 27) @compileError("Review every history SQL field mapping after TaskWire changes");
     if (std.meta.fields(wire.ModelIntentWire).len != 3) @compileError("Review every history SQL field mapping after ModelIntentWire changes");
     // model_error is a nullable typed JSON value read and written with its Run.
-    if (std.meta.fields(wire.RunWire).len != 35) @compileError("Review every history SQL field mapping after RunWire changes");
+    if (std.meta.fields(wire.RunWire).len != 36) @compileError("Review every history SQL field mapping after RunWire changes");
     // batch.json/row.json preserve the full typed input, including its reading anchor.
     if (std.meta.fields(wire.AdditionalInputWire).len != 11) @compileError("Review history input JSON mapping after AdditionalInputWire changes");
     if (std.meta.fields(wire.ToolWire).len != 14) @compileError("Review every history SQL field mapping after ToolWire changes");

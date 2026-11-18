@@ -9,6 +9,7 @@ type RunTarget = { taskId: string; runId: string };
 
 export type TaskPanelTarget =
   | { kind: "empty" }
+  | { kind: "outputs"; taskId: string }
   | {
       kind: "workspace";
       taskId: string;
@@ -43,7 +44,14 @@ export type TaskPanelWorkspaceTab = {
   displayPath: string;
 };
 export type TaskPanelTab =
-  TaskPanelPreviewTab | TaskPanelReviewTab | TaskPanelWorkspaceTab;
+  | TaskPanelPreviewTab
+  | TaskPanelReviewTab
+  | TaskPanelWorkspaceTab
+  | { kind: "outputs"; taskId: string; tabId: string };
+
+export function createTaskPanelOutputsTab(taskId: string): TaskPanelTab {
+  return { kind: "outputs", taskId, tabId: tabId(["outputs", taskId]) };
+}
 
 export function createTaskPanelWorkspaceTab(
   taskId: string,
@@ -109,6 +117,7 @@ export function createTaskPanelReviewTab(
 }
 
 export function taskPanelTabTarget(tab: TaskPanelTab): TaskPanelTarget {
+  if (tab.kind === "outputs") return { kind: "outputs", taskId: tab.taskId };
   if (tab.kind === "workspace")
     return {
       kind: "workspace",
@@ -140,6 +149,8 @@ function resolveTaskPanelTab(
   manifest?: readonly RunManifest[],
 ): TaskPanelTab | null {
   if (!task || tab.taskId !== task.id) return null;
+  if (tab.kind === "outputs")
+    return task.conversationOutputs?.length ? tab : null;
   if (tab.kind === "workspace")
     return task.workspaceId === tab.workspaceId ? tab : null;
   const run = task.runs.find((candidate) => candidate.id === tab.runId);
@@ -157,6 +168,8 @@ function resolveTaskPanelTab(
 }
 
 function sameTaskPanelTab(left: TaskPanelTab, right: TaskPanelTab): boolean {
+  if (left.kind === "outputs" || right.kind === "outputs")
+    return left.tabId === right.tabId;
   if (left.kind === "workspace" || right.kind === "workspace")
     return (
       left.kind === "workspace" &&
@@ -288,6 +301,7 @@ export function targetToTaskPanelTab(
   task: TaskView | null,
 ): TaskPanelTab | null {
   if (!task || task.id !== target.taskId) return null;
+  if (target.kind === "outputs") return createTaskPanelOutputsTab(task.id);
   if (target.kind === "workspace")
     return target.workspaceId === task.workspaceId
       ? createTaskPanelWorkspaceTab(

@@ -304,7 +304,9 @@ pub fn executeRun(context: *anyopaque) void {
             );
         }
     }
+    observeOutputs(run, .before);
     var terminal = agent_run.execute();
+    if (terminal.coreWasInvoked()) observeOutputs(run, .after);
     run.agent_handoff.store(.finishing, .release);
     _ = commitAgentTerminal(job.projector, run, &terminal);
     const checkpoint_eligible = terminal.coreWasInvoked() and
@@ -322,6 +324,47 @@ pub fn executeRun(context: *anyopaque) void {
     job.notifier.notify();
     generateAutomaticTitle(job);
     job.notifier.notify();
+}
+
+fn observeOutputs(run: *state.RunRecord, phase: enum { before, after }) void {
+    const delivery = run.file_delivery orelse return;
+    const execution = run.execution orelse return;
+    const cancelled: std.atomic.Value(bool) = .init(false);
+    for (execution.tracked_outputs) |*output| {
+        if (run.pending_termination.load(.acquire) != .none) return;
+        if (phase == .after and output.before == null) continue;
+        const observation = delivery.input.inspect_fn(delivery.input.context, output.locator, &cancelled);
+        if (observation != .verified) continue;
+        if (phase == .before) {
+            output.before = observation.verified.sha256;
+        } else {
+            output.changed = !std.mem.eql(u8, &output.before.?, &observation.verified.sha256);
+        }
+    }
+}
+
+test "Run output observation compares against bytes at execution start" {
+    const Source = struct {
+        byte: u8,
+        fn inspect(context: *anyopaque, _: []const u8, _: *const std.atomic.Value(bool)) agent.FileDeliveryInspection {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return .{ .verified = .{ .size_bytes = 4, .sha256 = @splat(self.byte) } };
+        }
+        fn release(_: *anyopaque) void {}
+    };
+    var source: Source = .{ .byte = 2 };
+    var artifacts = [_]state.TrackedOutput{.{ .id = ("01" ** 16).*, .locator = @constCast("report.docx") }};
+    var execution: state.RunExecution = .{ .tracked_outputs = &artifacts };
+    var run: state.RunRecord = undefined;
+    run.execution = &execution;
+    run.pending_termination = .init(.none);
+    run.file_delivery = .{ .input = .{ .context = &source, .inspect_fn = Source.inspect }, .release_fn = Source.release };
+    observeOutputs(&run, .before);
+    observeOutputs(&run, .after);
+    try std.testing.expect(!artifacts[0].changed);
+    source.byte = 3;
+    observeOutputs(&run, .after);
+    try std.testing.expect(artifacts[0].changed);
 }
 
 pub fn cancelRun(context: *anyopaque) void {
