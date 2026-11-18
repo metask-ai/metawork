@@ -205,10 +205,85 @@ const not_forwarded = [_]NotForwarded{
         .name = "export_checkpoint",
         .why = "its sink is a byte callback, same as the restore source above",
     },
+
+    // The ten below are the execution half's side, and they are here because
+    // `forwardable` now spans both halves. Each one's result puts a handle
+    // *into* a table over there, which `adapters.resultAdapter` leaves to the
+    // path that carries a reservation into the result encoding --
+    // `adapters.named_handles` classifies every one of them. The caller's
+    // half can send the call and read the answer; nothing yet writes the
+    // answer.
+    .{
+        .owner = .runtime,
+        .name = "create_session_route",
+        .why = "`adapters.owedResults` owes `port.SessionRoute`: the Session has to be put " ++
+            "into the execution half's table, which needs the reservation path",
+    },
+    .{
+        .owner = .runtime,
+        .name = "query_skill_catalog",
+        .why = "`adapters.owedResults` owes `catalog.Acquisition`, whose lease is put into " ++
+            "a table; `named_handles` classifies it irreversible",
+    },
+    .{
+        .owner = .runtime,
+        .name = "borrow_skill_restore_inputs",
+        .why = "`adapters.owedResults` owes `port.SkillRestoreBorrow`, which names a lease " ++
+            "the execution half holds",
+    },
+    .{
+        .owner = .runtime,
+        .name = "clone_skill_restore_inputs",
+        .why = "`adapters.owedResults` owes a new `*SkillRestoreInputs`, which is a handle " ++
+            "put into a table",
+    },
+    .{
+        .owner = .runtime,
+        .name = "narrow_skill_restore_inputs",
+        .why = "the same, and narrowing allocates another handle on that side",
+    },
+    .{
+        .owner = .runtime,
+        .name = "create_mcp_admission_selection",
+        .why = "both directions are MCP's: the activation argument and the selection result",
+    },
+    .{
+        .owner = .runtime,
+        .name = "prepare_mcp_restore_selection",
+        .why = "the same, and it takes two MCP handles",
+    },
+    .{
+        .owner = .session,
+        .name = "capture_restore_inputs",
+        .why = "`adapters.owedResults` owes `port.SessionRestoreInputs`, which names two " ++
+            "captured capabilities",
+    },
+    .{
+        .owner = .session,
+        .name = "begin_run_outcome",
+        .why = "`adapters.owedResults` owes `port.BeginRunOutcome`: a begun Run is an entry " ++
+            "in the execution half's `runs` table, taken before the call that begins it",
+    },
 };
 
+/// Whether this build answers one method **end to end**.
+///
+/// All four directions, not the two this half owns. The first version asked
+/// only `outbound.sendable and inbound.readable`, and that let me report "46
+/// methods forward end to end" when what I had measured was 46 the caller's
+/// half can send and read -- the execution half's own two registries were
+/// untouched, so a method in that 46 could still meet `NotDispatchable` at
+/// the far end. A count that can say something the build does not do is worse
+/// than no count, so the predicate now spans both halves and the number it
+/// produces cannot mean anything else.
+///
+/// It also means `not_forwarded` is the honest list: a method whose exec-side
+/// adapter is missing is named there with its reason, rather than looking
+/// forwardable from here.
 fn forwardable(comptime owner: method.Owner, comptime name: []const u8) bool {
-    return outbound.sendable(owner, name) and inbound.readable(owner, name);
+    return outbound.sendable(owner, name) and
+        inbound.readable(owner, name) and
+        dispatch.dispatchable(owner, name);
 }
 
 fn listedNotForwarded(comptime owner: method.Owner, comptime name: []const u8) bool {
@@ -246,9 +321,16 @@ comptime {
 }
 
 fn notForwarded(comptime owner: method.Owner, comptime name: []const u8) noreturn {
+    // The comptime check above guarantees that an unforwardable method is
+    // listed, so reaching the `else` means this was called for a method that
+    // *is* forwardable -- a caller bypassing `forward`.
     const entry = comptime for (not_forwarded) |listed| {
         if (listed.owner == owner and std.mem.eql(u8, listed.name, name)) break listed;
-    } else @compileError(name ++ " is forwardable; call `forward` instead");
+    } else @compileError(
+        name ++ " is answered end to end by this build, so it has no `not_forwarded` entry; " ++
+            "`forward`/`forwardAnswering` reach this only through `body`, which checks " ++
+            "`forwardable` first",
+    );
     @panic("agent link: " ++ @tagName(owner) ++ "." ++ name ++
         " is not forwarded by this build -- " ++ entry.why);
 }
@@ -1291,4 +1373,40 @@ test "an answer outside the method's own set lands on the restricting side" {
         error.SessionClosing,
         answered(.session, "request_compact_cancellation", gone, error.SessionClosing),
     );
+}
+
+test "how much of the surface this build answers end to end, counted across both halves" {
+    @setEvalBranchQuota(10_000_000);
+    comptime var end_to_end: usize = 0;
+    comptime var caller_gap: usize = 0;
+    comptime var exec_gap: usize = 0;
+    inline for (comptime method.entries) |entry| {
+        if (entry.transport == .stream) continue;
+        switch (entry.owner) {
+            inline else => |owner| {
+                const sends = comptime outbound.sendable(owner, entry.name);
+                const reads = comptime inbound.readable(owner, entry.name);
+                const dispatches = comptime dispatch.dispatchable(owner, entry.name);
+                if (comptime sends and reads and dispatches) end_to_end += 1;
+                if (comptime !(sends and reads)) caller_gap += 1;
+                if (comptime !dispatches) exec_gap += 1;
+            },
+        }
+    }
+
+    // The number that matters, and the one I reported wrongly before: 37 of
+    // the 50 callable methods are end_to_end by both halves. "46" was the
+    // caller's half counted on its own, which is a different thing and not a
+    // claim about what works.
+    try testing.expectEqual(@as(usize, 37), end_to_end);
+    try testing.expectEqual(not_forwarded.len, 50 - end_to_end);
+
+    // And the execution half is the binding constraint: every method the
+    // caller's half cannot send or read is also one the execution half
+    // cannot dispatch, so its own worklist is the longer one. Asserted
+    // rather than observed, because if that stops being true the two lists
+    // have diverged and the shorter one would start looking like the answer.
+    try testing.expectEqual(exec_gap, 50 - end_to_end);
+    try testing.expect(caller_gap <= exec_gap);
+    try testing.expectEqual(@as(usize, 37), comptime dispatch.dispatchableCount());
 }
