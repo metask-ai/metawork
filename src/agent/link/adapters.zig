@@ -30,6 +30,7 @@ const wire_types = @import("wire_types.zig");
 const port = contract.port;
 const surface = contract.surface;
 const control = contract.control;
+const call_frame = @import("call_frame.zig");
 const run_tools = @import("run_tools.zig");
 const shapes = @import("shapes.zig");
 const catalog = @import("agent_catalog");
@@ -145,6 +146,9 @@ pub const Bindings = struct {
     /// The one Runtime. A `runtime` method names no receiver because there is
     /// nothing to choose between, so this is where its calls land.
     runtime: port.RuntimePort,
+    /// Where checkpoint blob bytes go and come from. The link holds no store;
+    /// `call_frame.BlobStore` says why this half carries the bytes at all.
+    store: call_frame.BlobStore,
     /// Sessions this half holds for the other half to name, each with the
     /// tool capabilities of its current prepared Run. Those are not
     /// call-scoped, and `run_tools.zig` says why they live here.
@@ -431,6 +435,12 @@ const dispositions = [_]struct { name: []const u8, disposition: Disposition }{
     .{ .name = @typeName(*const mcp_catalog.RestoreSelection), .disposition = .mcp_step },
 };
 
+/// The disposition recorded for a type, by type rather than by its printed
+/// name, so a caller does not have to spell it.
+pub fn dispositionOfType(comptime T: type) ?Disposition {
+    return dispositionOf(@typeName(T));
+}
+
 fn dispositionOf(comptime name: []const u8) ?Disposition {
     comptime {
         for (dispositions) |entry| {
@@ -573,6 +583,7 @@ test "a stale handle resolves to a refusal, never to the slot's next occupant" {
     const bindings: Bindings = .{
         .allocator = testing.allocator,
         .runtime = port.RuntimePort.quiet,
+        .store = call_frame.BlobStore.empty,
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -687,6 +698,7 @@ fn testBindings() Bindings {
     return .{
         .allocator = testing.allocator,
         .runtime = port.RuntimePort.quiet,
+        .store = call_frame.BlobStore.empty,
         .sessions = undefined,
         .runs = undefined,
         .leases = undefined,
@@ -712,6 +724,7 @@ test "an options mirror is read back with its handle resolved and its absence ke
     const bindings: Bindings = .{
         .allocator = testing.allocator,
         .runtime = port.RuntimePort.quiet,
+        .store = call_frame.BlobStore.empty,
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -1185,6 +1198,7 @@ test "a capacity refusal can name the table it came from" {
     const bindings: Bindings = .{
         .allocator = testing.allocator,
         .runtime = port.RuntimePort.quiet,
+        .store = call_frame.BlobStore.empty,
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -1328,6 +1342,7 @@ const Tables = struct {
         return .{
             .allocator = testing.allocator,
             .runtime = port.RuntimePort.quiet,
+            .store = call_frame.BlobStore.empty,
             .sessions = &self.sessions,
             .runs = &self.runs,
             .leases = &self.leases,

@@ -32,7 +32,9 @@ const error_code = @import("error_code.zig");
 const handle_table = @import("handle_table.zig");
 const method = @import("method.zig");
 const payload = @import("payload.zig");
+const call_frame = @import("call_frame.zig");
 const run_tools = @import("run_tools.zig");
+const shapes = @import("shapes.zig");
 const wire_types = @import("wire_types.zig");
 
 const checkpoint = @import("agent_checkpoint");
@@ -139,6 +141,57 @@ pub fn invoke(
     return error.UnknownMethod;
 }
 
+/// Whether any of a method's parameters is a capability this half builds
+/// rather than a value it decodes. Derived from the dispositions, so a
+/// parameter that gains one is a method that needs a prong.
+pub fn buildsCapability(comptime owner: method.Owner, comptime name: []const u8) bool {
+    comptime {
+        const Fn = @typeInfo(@FieldType(owner.VTable(), name)).pointer.child;
+        for (@typeInfo(Fn).@"fn".params, 0..) |param, position| {
+            if (position == 0) continue;
+            if (adapters.dispositionOfType(param.type.?) != null) return true;
+        }
+        return false;
+    }
+}
+
+/// The methods with a prong written for them below.
+const capability_prongs = [_][]const u8{"export_checkpoint"};
+
+fn hasProng(comptime name: []const u8) bool {
+    comptime {
+        for (capability_prongs) |listed| {
+            if (std.mem.eql(u8, listed, name)) return true;
+        }
+        return false;
+    }
+}
+
+// A method that builds a capability must have a prong, and a prong must be
+// for a method that builds one. Checked both ways so neither side can drift
+// -- a method whose parameter gains a disposition is named here by the
+// compiler rather than failing at its first request.
+comptime {
+    @setEvalBranchQuota(1_000_000);
+    for (method.entries) |entry| {
+        if (entry.transport == .stream) continue;
+        const builds = switch (entry.owner) {
+            inline else => |owner| buildsCapability(owner, entry.name),
+        };
+        if (!builds and hasProng(entry.name)) @compileError(
+            "src/agent/link/dispatch.zig has a capability prong for " ++ entry.name ++
+                ", whose parameters no longer include one; remove it",
+        );
+    }
+    for (capability_prongs) |name| {
+        var found = false;
+        for (method.entries) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) found = true;
+        }
+        if (!found) @compileError("the prong for " ++ name ++ " names no registered method");
+    }
+}
+
 fn invokeOne(
     comptime entry: method.Entry,
     arena: std.mem.Allocator,
@@ -146,6 +199,7 @@ fn invokeOne(
     request: Request,
 ) InvokeError![]u8 {
     if (comptime entry.transport == .stream) return error.NotACall;
+    if (comptime hasProng(entry.name)) return exportCheckpoint(arena, bindings, request);
     if (comptime !dispatchable(entry.owner, entry.name)) return error.NotDispatchable;
 
     const VTable = comptime entry.owner.VTable();
@@ -185,6 +239,69 @@ fn invokeOne(
 
     if (comptime Returned == void) return successResponse(arena, void, {});
     const encoded = try (comptime adapters.resultAdapter(Returned).?).apply(bindings, value);
+    return successResponse(arena, @TypeOf(encoded), encoded);
+}
+
+/// `export_checkpoint`, whose sink this half opens from the store.
+///
+/// Written out rather than folded into the generic loop, because what it does
+/// is not decoding: it opens a blob, wraps it so the sink handed over belongs
+/// to this call, retires that wrapper when the call returns and gives the
+/// store's sink back -- in that order, on defers, so a refusal anywhere in
+/// between leaves neither behind.
+fn exportCheckpoint(
+    arena: std.mem.Allocator,
+    bindings: adapters.Bindings,
+    request: Request,
+) InvokeError![]u8 {
+    const entry = comptime try method.find(method.codeOf(.session, "export_checkpoint"));
+    const Fn = comptime @typeInfo(
+        @FieldType(port.SessionPort.VTable, "export_checkpoint"),
+    ).pointer.child;
+    const Arguments = comptime wire_types.Request(Fn);
+
+    const wired = try payload.decodeExact(Arguments, arena, request.arguments);
+    const receiver = (try resolveReceiver(bindings, request)) orelse return error.UnknownHandle;
+    const session = receiver.session.port;
+
+    // The wire carries the destination where the method takes a sink.
+    const destination = wired[1];
+    const inner = bindings.store.open_sink_fn(bindings.store.context, destination) orelse {
+        // The export path's own vocabulary says this, so it is an outcome
+        // rather than a transport error: nothing was written, the Session is
+        // untouched and reusable, and `io_failed` at the export stage is what
+        // "the blob could not be opened" is. Reporting it as a link failure
+        // would make the caller treat a Session it can still use as suspect.
+        const refused: shapes.CheckpointOutcome = .{ .failure = .{
+            .stage = .checkpoint_export,
+            .reason = .io_failed,
+            .disposition = .reusable,
+        } };
+        return successResponse(arena, @TypeOf(refused), refused);
+    };
+    defer bindings.store.close_sink_fn(bindings.store.context, inner);
+
+    var backing = call_frame.ExportSink.Backing.init(.{
+        .inner = inner,
+        .destination = destination,
+    });
+    // Retired before the store's sink is given back, so the wrapper can never
+    // outlive what it writes through.
+    defer backing.retire();
+
+    var outcome = session.vtable.export_checkpoint(
+        session.context,
+        wired[0],
+        call_frame.ExportSink.sink(&backing),
+        wired[2],
+        wired[3],
+        wired[4],
+    ) catch |err| return failureResponse(arena, err);
+    defer outcome.deinit();
+
+    const encoded = try (comptime adapters.resultAdapter(contract.CheckpointOutcome).?)
+        .apply(bindings, outcome);
+    _ = entry;
     return successResponse(arena, @TypeOf(encoded), encoded);
 }
 
@@ -296,6 +413,7 @@ test "a receiver is resolved through its table, and a stale id is refused" {
     const bindings: adapters.Bindings = .{
         .allocator = testing.allocator,
         .runtime = port.RuntimePort.quiet,
+        .store = call_frame.BlobStore.empty,
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -398,6 +516,7 @@ const Harness = struct {
         return .{
             .allocator = testing.allocator,
             .runtime = port.RuntimePort.quiet,
+            .store = call_frame.BlobStore.empty,
             .sessions = &self.sessions,
             .runs = &self.runs,
             .leases = &self.leases,
@@ -523,9 +642,11 @@ test "each refusal leaves nothing behind" {
     }
 
     // A method this build cannot answer end to end. A statement about the
-    // build, and it still leaves nothing behind.
+    // build, and it still leaves nothing behind. `prepare_run_with_tools`
+    // takes capabilities with no prong yet, and the prong check runs before
+    // the generic path, so this is the refusal it gets.
     {
-        const entry = try method.find(method.codeOf(.session, "export_checkpoint"));
+        const entry = try method.find(method.codeOf(.session, "prepare_run_with_tools"));
         const header = envelope.requestHeaderBytes(entry.owner);
         const bytes = try arena.alloc(u8, header);
         envelope.encodeRequestHeader(bytes, entry, id);
@@ -557,6 +678,170 @@ test "each refusal leaves nothing behind" {
         try testing.expectEqual(baseline, harness.live());
     }
 
+    _ = harness.sessions.take(id);
+}
+
+/// A store that records what was written and can refuse to open.
+const Blobs = struct {
+    buffer: [64]u8 = undefined,
+    written: usize = 0,
+    opened: usize = 0,
+    closed: usize = 0,
+
+    fn store(self: *Blobs) call_frame.BlobStore {
+        var value = call_frame.BlobStore.empty;
+        value.context = self;
+        value.open_sink_fn = openSink;
+        value.close_sink_fn = closeSink;
+        return value;
+    }
+
+    fn openSink(context: ?*anyopaque, _: shapes.CheckpointDestination) ?checkpoint.Sink {
+        const self: *Blobs = @ptrCast(@alignCast(context.?));
+        self.opened += 1;
+        return .{ .context = self, .write_fn = write };
+    }
+
+    fn closeSink(context: ?*anyopaque, _: checkpoint.Sink) void {
+        const self: *Blobs = @ptrCast(@alignCast(context.?));
+        self.closed += 1;
+    }
+
+    fn write(context: ?*anyopaque, bytes: []const u8) checkpoint.SinkWriteResult {
+        const self: *Blobs = @ptrCast(@alignCast(context.?));
+        if (self.written + bytes.len > self.buffer.len) return .io_failed;
+        @memcpy(self.buffer[self.written..][0..bytes.len], bytes);
+        self.written += bytes.len;
+        return .ok;
+    }
+};
+
+/// A Session that writes through the sink it was handed and then refuses.
+const Exporter = struct {
+    bytes: []const u8,
+
+    fn exportCheckpointImpl(
+        context: ?*anyopaque,
+        _: contract.CheckpointLimits,
+        sink: checkpoint.Sink,
+        _: u64,
+        _: u64,
+        _: []const u8,
+    ) contract.surface.Error!checkpoint.Outcome {
+        const self: *Exporter = @ptrCast(@alignCast(context.?));
+        _ = sink.write_fn(sink.context, self.bytes);
+        // The failure arm, so the test needs no twenty-field description to
+        // build. The success arm's encoding is the generic mirror, which is
+        // instantiated at comptime by the outcome adapter.
+        return .{ .failure = .{
+            .stage = .checkpoint_export,
+            .reason = .core_error,
+            .disposition = .reusable,
+        } };
+    }
+
+    fn port(self: *Exporter, vtable: *port_namespace.SessionPort.VTable) port_namespace.SessionPort {
+        vtable.export_checkpoint = exportCheckpointImpl;
+        return .{ .context = self, .vtable = vtable };
+    }
+};
+
+fn exportRequest(arena: std.mem.Allocator, receiver: handle_table.Id) ![]u8 {
+    const entry = try method.find(method.codeOf(.session, "export_checkpoint"));
+    const Fn = @typeInfo(@FieldType(port.SessionPort.VTable, "export_checkpoint")).pointer.child;
+    const Arguments = wire_types.Request(Fn);
+    const arguments: Arguments = .{
+        .{
+            .hard_bytes = 32,
+            .max_section_bytes = 32,
+            .max_string_bytes = 32,
+            .max_messages = 4,
+            .max_blocks_per_message = 4,
+            .chunk_bytes = 16,
+        },
+        .{ .task_id = 3, .generation = 5, .hard_bytes = 32 },
+        7,
+        8,
+        "model",
+    };
+    const header = envelope.requestHeaderBytes(entry.owner);
+    const body = payload.encodedSize(Arguments, arguments);
+    const out = try arena.alloc(u8, header + body);
+    envelope.encodeRequestHeader(out[0..header], entry, receiver);
+    _ = payload.encode(Arguments, arguments, out[header..]);
+    return out;
+}
+
+test "an export writes its bytes into the store and answers in its own vocabulary" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var blobs: Blobs = .{};
+    var exporter: Exporter = .{ .bytes = "checkpoint-bytes" };
+    var vtable: port.SessionPort.VTable = undefined;
+    var held = run_tools.HeldSession.init(exporter.port(&vtable));
+    const id = try harness.sessions.insert(&held);
+
+    var bindings = harness.bindings();
+    bindings.store = blobs.store();
+
+    const response = try invoke(arena, bindings, try classify(try exportRequest(arena, id)));
+
+    // The bytes went through this call's sink into the store, and the store's
+    // own sink was given back once the call returned.
+    try testing.expectEqual(@as(usize, 1), blobs.opened);
+    try testing.expectEqual(@as(usize, 1), blobs.closed);
+    try testing.expectEqualStrings("checkpoint-bytes", blobs.buffer[0..blobs.written]);
+
+    // The answer is the method's outcome, not a transport failure.
+    switch (try envelope.decodeResponse(response)) {
+        .failure => return error.ExpectedValue,
+        .value => |bytes| {
+            const decoded = try payload.decodeExact(shapes.CheckpointOutcome, arena, bytes);
+            try testing.expectEqual(checkpoint.FailureReason.core_error, decoded.failure.reason);
+            try testing.expectEqual(
+                checkpoint.OperationDisposition.reusable,
+                decoded.failure.disposition,
+            );
+        },
+    }
+    _ = harness.sessions.take(id);
+}
+
+test "a store that cannot open the blob is an export failure, not a link failure" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var exporter: Exporter = .{ .bytes = "unreached" };
+    var vtable: port.SessionPort.VTable = undefined;
+    var held = run_tools.HeldSession.init(exporter.port(&vtable));
+    const id = try harness.sessions.insert(&held);
+
+    // `empty` refuses to open. The Session is untouched and still usable, so
+    // the answer says `reusable` -- reporting a link failure would make the
+    // caller treat a Session it can still use as suspect.
+    const response = try invoke(
+        arena,
+        harness.bindings(),
+        try classify(try exportRequest(arena, id)),
+    );
+    switch (try envelope.decodeResponse(response)) {
+        .failure => return error.ExpectedValue,
+        .value => |bytes| {
+            const decoded = try payload.decodeExact(shapes.CheckpointOutcome, arena, bytes);
+            try testing.expectEqual(checkpoint.FailureReason.io_failed, decoded.failure.reason);
+            try testing.expectEqual(
+                checkpoint.OperationDisposition.reusable,
+                decoded.failure.disposition,
+            );
+        },
+    }
     _ = harness.sessions.take(id);
 }
 
