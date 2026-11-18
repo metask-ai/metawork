@@ -1629,11 +1629,13 @@ test "an answer outside the method's own set lands on the restricting side" {
 
 test "how much of the surface this build answers end to end, counted across both halves" {
     @setEvalBranchQuota(10_000_000);
+    comptime var callable: usize = 0;
     comptime var end_to_end: usize = 0;
     comptime var caller_gap: usize = 0;
     comptime var exec_gap: usize = 0;
     inline for (comptime method.entries) |entry| {
         if (entry.transport == .stream) continue;
+        callable += 1;
         switch (entry.owner) {
             inline else => |owner| {
                 const sends = comptime outbound.sendable(owner, entry.name);
@@ -1646,19 +1648,23 @@ test "how much of the surface this build answers end to end, counted across both
         }
     }
 
-    // The number that matters, and the one I reported wrongly before: 37 of
-    // the 50 callable methods are end_to_end by both halves. "46" was the
+    // The number that matters, and the one I reported wrongly twice: how many
+    // of the callable methods are end_to_end by *both* halves. "46" was the
     // caller's half counted on its own, which is a different thing and not a
-    // claim about what works.
+    // claim about what works; and the sentence that used to stand here said
+    // 37 while the assertion below said 38, because a prong fix moved the
+    // measurement and not the prose. So the count stays in the assertions and
+    // the prose stops repeating it.
+    try testing.expectEqual(@as(usize, 50), callable);
     try testing.expectEqual(@as(usize, 38), end_to_end);
-    try testing.expectEqual(not_forwarded.len, 50 - end_to_end);
+    try testing.expectEqual(not_forwarded.len, callable - end_to_end);
 
     // And the execution half is the binding constraint: every method the
     // caller's half cannot send or read is also one the execution half
     // cannot dispatch, so its own worklist is the longer one. Asserted
     // rather than observed, because if that stops being true the two lists
     // have diverged and the shorter one would start looking like the answer.
-    try testing.expectEqual(exec_gap, 50 - end_to_end);
+    try testing.expectEqual(exec_gap, callable - end_to_end);
     try testing.expect(caller_gap <= exec_gap);
     try testing.expectEqual(@as(usize, 38), comptime dispatch.dispatchableCount());
 }

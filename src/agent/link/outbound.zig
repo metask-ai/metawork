@@ -391,10 +391,9 @@ test "the argument direction is counted on its own" {
         try testing.expect(entry.name.len > 0);
         try testing.expect(entry.position > 0);
     }
-    // Three, and each is the same question rather than three: a parameter
-    // that is a byte callback has no wire form derivable from the callback,
-    // because what the far side needs to know is in the closure and not in
-    // the type.
+    // Both are the same question rather than two: a parameter that is a byte
+    // callback has no wire form derivable from the callback, because what the
+    // far side needs to know is in the closure and not in the type.
     //
     //   * `restore_session_route`'s source needs a *descriptor* -- which
     //     generation, which digest, how many bytes -- and those are facts
@@ -409,15 +408,19 @@ test "the argument direction is counted on its own" {
     //     MCP step with the rest of it.
     try testing.expectEqual(@as(usize, 2), owed.len);
 
-    // What that leaves: 47 of the 50 callable methods can put every argument
+    // What that leaves: the callable methods that can put every argument
     // they are given on the wire. Counted rather than claimed, same as the
-    // execution half's `dispatchableCount`.
+    // execution half's `dispatchableCount` -- and the two owed arguments sit
+    // on two methods, so this is the callable count less those two.
+    var callable: usize = 0;
     var count: usize = 0;
     inline for (comptime method.entries) |entry| {
         if (entry.transport == .stream) continue;
+        callable += 1;
         if (comptime sendable(entry.owner, entry.name)) count += 1;
     }
-    try testing.expectEqual(@as(usize, 48), count);
+    try testing.expectEqual(@as(usize, 50), callable);
+    try testing.expectEqual(callable - owed.len, count);
 }
 
 fn testClient(count: usize) !*client.Client {

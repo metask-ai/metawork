@@ -1131,7 +1131,7 @@ test "how much of the surface this build answers is counted, not claimed" {
     try testing.expectEqual(@as(usize, 50), callable);
     try testing.expectEqual(@as(usize, 38), answered);
 
-    // One of the 38 is answered by a prong rather than by the generic chain,
+    // One of those is answered by a prong rather than by the generic chain,
     // and `dispatchable` says so: `export_checkpoint`'s capability is built
     // here, so asking `argumentsRebuildable` about it would report "no"
     // about a method this half does answer.
