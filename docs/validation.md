@@ -433,7 +433,7 @@ Windows x86_64 的已授权正式请求取得可完整解码的 JPEG。临时探
 - busy、constraint、cancel、resource、corrupt 和 outcome-unknown 分类；故障注入不能替代能稳定触发的真实引擎失败；
 - blocking no-spin concurrency、排队 caller、callback 重入拒绝、并发 shutdown 与 interrupt 收敛，以及 destroy 前 caller quiescence；
 - child-process crash 后 reopen/hot-WAL recovery；
-- architecture guard 证明 Product schema 只消费唯一 SQL contract，具体 Storage backend 不进入 Application/Product 运行图。
+- architecture guard 证明 SQLite C 只出现在 Foundation storage 族的 SQLite backend，SQL 合同不触及 SQLite，SQLite backend 只由 Application 组合，Product 只经 history schema 消费 SQL 合同。
 
 专用入口分别运行默认 Debug、`-Doptimize=ReleaseSafe` 与 `-Doptimize=ReleaseFast`。正式 Native graph 和 `test-storage` 必须复用同一 Storage runner 与 crash fixture；fixture 缺失必须失败，不得静默跳过。共享 owner 或 module graph 变化仍须运行正式 Native graph，专用入口不替代仓库级依赖验证。
 
