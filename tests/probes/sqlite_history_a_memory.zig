@@ -5,8 +5,8 @@ const builtin = @import("builtin");
 const history = @import("product_task_persistence");
 const task_runtime = @import("product_task_runtime");
 const state = @import("product_task_state");
-const storage = @import("storage");
-const sql = storage.sql;
+const sqlite = @import("metawork_storage_sqlite");
+const sql = @import("metawork_storage_sql");
 
 const Config = struct { tasks: usize = 20, runs: usize = 16, body_bytes: usize = 4096, tools: usize = 0, escaped: bool = false, budget_bytes: usize = 1536 * 1024, samples: usize = 5, approvals: usize = 8, compacts: usize = 16 };
 const usage: history.UsageWire = .{ .input_tokens = 1, .output_tokens = 1, .cache_read_input_tokens = 0, .cache_creation_input_tokens = 0 };
@@ -201,7 +201,7 @@ test "stage A actual history memory" {
     const frozen = try counter.allocator().alloc(u8, 7 * 1024 * 1024);
     defer counter.allocator().free(frozen);
     @memset(frozen, 'f');
-    const db = try storage.sqlite.Database.create(std.testing.io, counter.allocator(), .memory, &.{.{ .version = 1, .name = "peak_sample", .sql = "CREATE TABLE sample(b BLOB)" }});
+    const db = try sqlite.Database.create(std.testing.io, counter.allocator(), .memory, &.{.{ .version = 1, .name = "peak_sample", .sql = "CREATE TABLE sample(b BLOB)" }});
     defer db.destroy() catch unreachable;
     try std.testing.expectEqual(sql.MutationOutcome.committed, db.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO sample VALUES(?)", .params = &.{.{ .blob = frozen }} } }}));
     const overlap_memory = memory();

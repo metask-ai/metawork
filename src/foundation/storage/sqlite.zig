@@ -1977,3 +1977,7 @@ test "maintenance shares the query reentry gate" {
     try std.testing.expectEqual(sql.QueryOutcome.rejected, observation.outcome);
     try std.testing.expectEqual(sql.QueryOutcome.ok, observation.db.maintain(.confirm));
 }
+
+test {
+    _ = conformance;
+}
