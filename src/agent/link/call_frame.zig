@@ -24,6 +24,7 @@ const std = @import("std");
 const handle_table = @import("handle_table.zig");
 const shapes = @import("shapes.zig");
 const checkpoint = @import("agent_checkpoint");
+const checkpoint_restore = @import("agent_checkpoint_restore");
 
 /// A capability's backing object, valid for exactly one call.
 ///
@@ -198,46 +199,15 @@ test "capacity is refused before the call that cannot be undone, not after" {
     try testing.expect(table.releaseReservation(held));
 }
 
-/// A checkpoint destination the execution half writes to, as a capability
-/// built over one call's frame.
-///
-/// The sink is the first of the four and it is the shape the rest follow:
-/// nothing about the destination crosses except the descriptor, the bytes
-/// never leave this half, and the writer lives in a frame the dispatcher
-/// retires.
-pub const CheckpointWriter = struct {
-    destination: envelope_destination,
-    written: u64 = 0,
-
-    const envelope_destination = @import("shapes.zig").CheckpointDestination;
-    pub const Backing = Frame(CheckpointWriter);
-
-    /// `ok` while the write is admitted, and the contract's own refusal
-    /// otherwise. A retained frame lands on `contract_failed`, because a
-    /// write after the call is exactly a contract failure and the vocabulary
-    /// already says so.
-    pub fn sink(backing: *Backing) checkpoint.Sink {
-        return .{ .context = backing.context(), .write_fn = write };
-    }
-
-    fn write(context: ?*anyopaque, bytes: []const u8) checkpoint.SinkWriteResult {
-        const backing = Backing.fromContext(context) orelse return .contract_failed;
-        const writer = backing.borrow() orelse return .contract_failed;
-        if (bytes.len == 0) return .contract_failed;
-        const hard = writer.destination.hard_bytes;
-        if (writer.written > hard - @min(hard, bytes.len)) return .contract_failed;
-        writer.written += bytes.len;
-        return .ok;
-    }
-};
-
 const testing = std.testing;
 
 test "a frame answers while its call is running and refuses afterwards" {
-    var backing = CheckpointWriter.Backing.init(.{
+    var sink_state: Recorder = .{ .buffer = &sink_scratch };
+    var backing = ExportSink.Backing.init(.{
+        .inner = sink_state.sink(),
         .destination = .{ .task_id = 7, .generation = 3, .hard_bytes = 64 },
     });
-    const sink = CheckpointWriter.sink(&backing);
+    const sink = ExportSink.sink(&backing);
 
     try testing.expectEqual(checkpoint.SinkWriteResult.ok, sink.write_fn(sink.context, "hello"));
     try testing.expectEqual(@as(u64, 5), backing.borrow().?.written);
@@ -257,7 +227,9 @@ test "a frame answers while its call is running and refuses afterwards" {
 }
 
 test "a retired frame is not merely zeroed, because zero can look valid" {
-    var backing = CheckpointWriter.Backing.init(.{
+    var sink_state: Recorder = .{ .buffer = &sink_scratch };
+    var backing = ExportSink.Backing.init(.{
+        .inner = sink_state.sink(),
         .destination = .{ .task_id = 1, .generation = 1, .hard_bytes = 8 },
     });
     try testing.expect(backing.live());
@@ -270,20 +242,20 @@ test "a retired frame is not merely zeroed, because zero can look valid" {
 
     // Only the exact live word admits a borrow, so a reused allocation has to
     // reproduce it to be mistaken for a live frame.
-    backing.marker = CheckpointWriter.Backing.live_marker;
+    backing.marker = ExportSink.Backing.live_marker;
     try testing.expect(backing.borrow() != null);
 }
 
 test "a frame is retired on the failing path too, which is the path that matters" {
     const Work = struct {
-        fn succeed(_: void, frame: *CheckpointWriter.Backing) anyerror!u64 {
-            const sink = CheckpointWriter.sink(frame);
+        fn succeed(_: void, frame: *ExportSink.Backing) anyerror!u64 {
+            const sink = ExportSink.sink(frame);
             if (sink.write_fn(sink.context, "ok") != .ok) return error.Unexpected;
             return frame.borrow().?.written;
         }
 
-        fn fail(_: void, frame: *CheckpointWriter.Backing) anyerror!u64 {
-            const sink = CheckpointWriter.sink(frame);
+        fn fail(_: void, frame: *ExportSink.Backing) anyerror!u64 {
+            const sink = ExportSink.sink(frame);
             _ = sink.write_fn(sink.context, "partial");
             // An early return, which is what a dispatcher does on a bad
             // argument or an unknown handle.
@@ -291,19 +263,20 @@ test "a frame is retired on the failing path too, which is the path that matters
         }
     };
 
-    const destination: @import("shapes.zig").CheckpointDestination =
+    var sink_state: Recorder = .{ .buffer = &sink_scratch };
+    const destination: shapes.CheckpointDestination =
         .{ .task_id = 4, .generation = 2, .hard_bytes = 64 };
 
-    var good = CheckpointWriter.Backing.init(.{ .destination = destination });
-    const written = try overFrame(CheckpointWriter, anyerror!u64, &good, {}, Work.succeed);
+    var good = ExportSink.Backing.init(.{ .inner = sink_state.sink(), .destination = destination });
+    const written = try overFrame(ExportSink, anyerror!u64, &good, {}, Work.succeed);
     try testing.expectEqual(@as(u64, 2), written);
     try testing.expect(!good.live());
 
-    var bad = CheckpointWriter.Backing.init(.{ .destination = destination });
-    const sink = CheckpointWriter.sink(&bad);
+    var bad = ExportSink.Backing.init(.{ .inner = sink_state.sink(), .destination = destination });
+    const sink = ExportSink.sink(&bad);
     try testing.expectError(
         error.Unexpected,
-        overFrame(CheckpointWriter, anyerror!u64, &bad, {}, Work.fail),
+        overFrame(ExportSink, anyerror!u64, &bad, {}, Work.fail),
     );
     // The point: the call left through an error and the frame is still
     // retired, so the capability the far side may have kept is dead either
@@ -315,22 +288,183 @@ test "a frame is retired on the failing path too, which is the path that matters
     );
 }
 
-test "the sink keeps the bound the descriptor carried" {
-    var backing = CheckpointWriter.Backing.init(.{
-        .destination = .{ .task_id = 2, .generation = 9, .hard_bytes = 4 },
+// ---------------------------------------------------------------------------
+// Checkpoint blob bytes
+// ---------------------------------------------------------------------------
+
+/// How this half carries checkpoint blob bytes.
+///
+/// `architecture.md` section 5 settles which half: the blob and the record
+/// pointing at it are separate carriers, the record's commit authority is
+/// Product's, and the execution half performing an export does not thereby
+/// gain persistence authority. So the bytes are this half's to write and
+/// read, the record stays the caller's to commit, and what crosses is the
+/// descriptor and the outcome.
+///
+/// Supplied by the composition root, because the link holds no store. It
+/// hands out the shapes the port already speaks -- a `checkpoint.Sink` and a
+/// `checkpoint_restore.Source` -- so nothing here reshapes bytes, and takes
+/// them back when the call that used one has returned.
+pub const BlobStore = struct {
+    context: ?*anyopaque,
+    /// A sink for the blob this destination names, or `null` when one cannot
+    /// be opened. The export path has an answer for that already.
+    open_sink_fn: *const fn (?*anyopaque, shapes.CheckpointDestination) ?checkpoint.Sink,
+    /// A source for the blob this descriptor names, or `null` when it is not
+    /// there -- which the restore path also already answers.
+    open_source_fn: *const fn (?*anyopaque, shapes.CheckpointSourceDescriptor) ?Source,
+    close_sink_fn: *const fn (?*anyopaque, checkpoint.Sink) void,
+    close_source_fn: *const fn (?*anyopaque, Source) void,
+
+    pub const Source = checkpoint_restore.Source;
+
+    /// A store with nothing in it, for a composition that has no blobs yet
+    /// and for tests that drive other things. Opening always refuses, which
+    /// is the fail-closed answer rather than a store that silently accepts
+    /// bytes nobody will find again.
+    pub const empty: BlobStore = .{
+        .context = null,
+        .open_sink_fn = struct {
+            fn call(_: ?*anyopaque, _: shapes.CheckpointDestination) ?checkpoint.Sink {
+                return null;
+            }
+        }.call,
+        .open_source_fn = struct {
+            fn call(_: ?*anyopaque, _: shapes.CheckpointSourceDescriptor) ?Source {
+                return null;
+            }
+        }.call,
+        .close_sink_fn = struct {
+            fn call(_: ?*anyopaque, _: checkpoint.Sink) void {}
+        }.call,
+        .close_source_fn = struct {
+            fn call(_: ?*anyopaque, _: Source) void {}
+        }.call,
+    };
+};
+
+/// The sink a method is called with, over the store's own sink.
+///
+/// The indirection is not ceremony. The store's sink belongs to the
+/// composition root; the one handed to the method belongs to this call, and
+/// wrapping it is what makes "nothing kept it past the call" a property this
+/// side can check: the frame is retired when the call returns, so a sink the
+/// callee stored answers `contract_failed` instead of writing into a blob
+/// this half has already closed.
+pub const ExportSink = struct {
+    /// Where the bytes really go.
+    inner: checkpoint.Sink,
+    destination: shapes.CheckpointDestination,
+    written: u64 = 0,
+
+    pub const Backing = Frame(ExportSink);
+
+    pub fn sink(backing: *Backing) checkpoint.Sink {
+        return .{ .context = backing.context(), .write_fn = write };
+    }
+
+    fn write(context: ?*anyopaque, bytes: []const u8) checkpoint.SinkWriteResult {
+        const backing = Backing.fromContext(context) orelse return .contract_failed;
+        const self = backing.borrow() orelse return .contract_failed;
+        if (bytes.len == 0) return .contract_failed;
+        // The bound crossed as a number and is enforced where the bytes are.
+        const hard = self.destination.hard_bytes;
+        if (self.written > hard - @min(hard, bytes.len)) return .contract_failed;
+        const result = self.inner.write_fn(self.inner.context, bytes);
+        if (result != .ok) return result;
+        self.written += bytes.len;
+        return .ok;
+    }
+};
+
+/// The source a restore is called with, over the store's own source. Same
+/// reason as `ExportSink`.
+pub const RestoreSource = struct {
+    inner: BlobStore.Source,
+    read: u64 = 0,
+
+    pub const Backing = Frame(RestoreSource);
+
+    pub fn source(backing: *Backing) BlobStore.Source {
+        return .{ .context = backing.context(), .read_fn = readBytes };
+    }
+
+    fn readBytes(
+        context: ?*anyopaque,
+        destination: []u8,
+    ) checkpoint_restore.SourceReadResult {
+        const backing = Backing.fromContext(context) orelse return .contract_failed;
+        const self = backing.borrow() orelse return .contract_failed;
+        const result = self.inner.read_fn(self.inner.context, destination);
+        switch (result) {
+            .bytes => |count| self.read += count,
+            else => {},
+        }
+        return result;
+    }
+};
+
+test "an export sink writes through to the store and stops at the bound" {
+    var recorded: [64]u8 = undefined;
+    var sink_state: Recorder = .{ .buffer = &recorded };
+    var backing = ExportSink.Backing.init(.{
+        .inner = sink_state.sink(),
+        .destination = .{ .task_id = 1, .generation = 2, .hard_bytes = 8 },
     });
-    const sink = CheckpointWriter.sink(&backing);
-    try testing.expectEqual(checkpoint.SinkWriteResult.ok, sink.write_fn(sink.context, "abcd"));
-    // One byte past `hard_bytes` is a contract failure, not a truncation: the
-    // bound crossed as a number and is enforced where the bytes are.
+    const handed = ExportSink.sink(&backing);
+
+    try testing.expectEqual(checkpoint.SinkWriteResult.ok, handed.write_fn(handed.context, "abcd"));
+    try testing.expectEqual(@as(usize, 4), sink_state.written);
+    // One byte past the bound is a contract failure, and it never reaches the
+    // store: the bound is enforced before the write-through.
     try testing.expectEqual(
         checkpoint.SinkWriteResult.contract_failed,
-        sink.write_fn(sink.context, "e"),
+        handed.write_fn(handed.context, "efghi"),
     );
-    // An empty write is a contract failure too, as it is in process.
-    try testing.expectEqual(
-        checkpoint.SinkWriteResult.contract_failed,
-        sink.write_fn(sink.context, ""),
-    );
+    try testing.expectEqual(@as(usize, 4), sink_state.written);
+
+    // The call returns. A sink the callee kept writes nowhere.
     backing.retire();
+    try testing.expectEqual(
+        checkpoint.SinkWriteResult.contract_failed,
+        handed.write_fn(handed.context, "x"),
+    );
+    try testing.expectEqual(@as(usize, 4), sink_state.written);
 }
+
+test "a store refusal is an answer the export path already has" {
+    // `empty` refuses to open, which is the fail-closed answer: a store that
+    // accepted bytes nobody could find again would report a successful export
+    // of a blob that is not there.
+    const store = BlobStore.empty;
+    try testing.expect(store.open_sink_fn(store.context, .{
+        .task_id = 1,
+        .generation = 1,
+        .hard_bytes = 16,
+    }) == null);
+    try testing.expect(store.open_source_fn(store.context, .{
+        .task_id = 1,
+        .generation = 1,
+        .digest = @splat(0),
+        .byte_size = 16,
+    }) == null);
+}
+
+const Recorder = struct {
+    buffer: []u8,
+    written: usize = 0,
+
+    fn sink(self: *Recorder) checkpoint.Sink {
+        return .{ .context = self, .write_fn = write };
+    }
+
+    fn write(context: ?*anyopaque, bytes: []const u8) checkpoint.SinkWriteResult {
+        const self: *Recorder = @ptrCast(@alignCast(context.?));
+        if (self.written + bytes.len > self.buffer.len) return .io_failed;
+        @memcpy(self.buffer[self.written..][0..bytes.len], bytes);
+        self.written += bytes.len;
+        return .ok;
+    }
+};
+
+var sink_scratch: [256]u8 = undefined;

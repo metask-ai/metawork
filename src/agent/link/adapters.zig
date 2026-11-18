@@ -818,15 +818,126 @@ pub fn resultAdapter(comptime T: type) ?ResultAdapter(T) {
         }
     }.apply };
 
-    // Mirrors the execution half can state without owning anything new: each
-    // is a plain-data reading of a value it already has.
+    // Mirrors that reshape rather than copy: each has its own `from`, and
+    // what it does -- numbering an error, dropping a diagnostic the caller
+    // must not read -- is not a field-by-field copy.
     if (T == surface.CloseOutcome) return .{ .apply = struct {
         fn apply(_: Bindings, value: T) ResultError!shapes.CloseOutcome {
             return shapes.CloseOutcome.from(value);
         }
     }.apply };
+    if (T == surface.BeginRunFailure) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResultError!shapes.BeginRunFailure {
+            return shapes.BeginRunFailure.from(value);
+        }
+    }.apply };
+    if (T == control.TerminalResult) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResultError!shapes.TerminalResult {
+            return shapes.TerminalResult.from(&value);
+        }
+    }.apply };
+    if (T == control.CompactTerminalResult) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResultError!shapes.CompactTerminalResult {
+            return shapes.CompactTerminalResult.from(&value);
+        }
+    }.apply };
+    if (T == surface.PendingUiRequest) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResultError!shapes.PendingUiRequest {
+            return shapes.PendingUiRequest.from(&value);
+        }
+    }.apply };
+    if (T == catalog.Projection) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResultError!shapes.CatalogProjection {
+            return shapes.CatalogProjection.from(value);
+        }
+    }.apply };
+
+    // Mirrors whose fields all correspond, copied by the generic reader
+    // rather than by hand.
+    if (T == checkpoint.Description) return resultMirror(T, shapes.CheckpointDescription);
+    // `catalog.Acquisition` is not here: its lease has to be *put into* a
+    // table, and `named_handles` classifies its method as irreversible, so it
+    // waits for the path that carries a reservation into the result encoding.
+
+    // A union, so the two sides are stated rather than looped over: the
+    // success carries a description that is itself a mirror, and the failure
+    // is already plain data.
+    if (T == checkpoint.Outcome) return .{ .apply = struct {
+        fn apply(bindings: Bindings, value: T) ResultError!shapes.CheckpointOutcome {
+            return switch (value) {
+                .success => |success| .{ .success = .{
+                    .checkpoint = success.checkpoint,
+                    .description = try (comptime resultAdapter(checkpoint.Description).?)
+                        .apply(bindings, success.description),
+                } },
+                .failure => |failure| .{ .failure = failure },
+            };
+        }
+    }.apply };
 
     return null;
+}
+
+/// A port value copied into the mirror that carries it, field by field.
+///
+/// The inverse of `mirrorAdapter`, and generic for the same reason: a
+/// hand-written copy is a second place for a shape to drift, and
+/// `shapes.mirrors` only checks that a mirror field still names something.
+/// Only for mirrors whose fields all correspond -- the ones `shapes.zig`
+/// records with an empty reshaped list. A mirror that renames or recomputes
+/// a field has its own `from`, because what it does is not a copy.
+/// Whether a mirror field borrows what the original owns: the same bytes,
+/// read-only. Ownership does not cross -- the original frees them after the
+/// response is encoded -- so the mirror naming them `const` is the honest
+/// shape rather than a different encoding.
+fn borrowsFrom(comptime Mirrored: type, comptime Origin: type) bool {
+    const mirrored = @typeInfo(Mirrored);
+    const origin = @typeInfo(Origin);
+    // An optional of each is the same question one level down.
+    if (mirrored == .optional and origin == .optional)
+        return borrowsFrom(mirrored.optional.child, origin.optional.child);
+    if (mirrored != .pointer or origin != .pointer) return false;
+    if (mirrored.pointer.size != .slice or origin.pointer.size != .slice) return false;
+    return mirrored.pointer.child == origin.pointer.child and
+        mirrored.pointer.is_const and !origin.pointer.is_const;
+}
+
+fn resultMirror(comptime T: type, comptime Mirror: type) ResultAdapter(T) {
+    if (wire_types.Wire(T) != Mirror) @compileError(
+        "the mirror for " ++ @typeName(T) ++ " is not its wire form",
+    );
+    return .{
+        .apply = struct {
+            fn apply(bindings: Bindings, value: T) ResultError!Mirror {
+                var out: Mirror = undefined;
+                inline for (@typeInfo(Mirror).@"struct".fields) |field| {
+                    if (!@hasField(T, field.name)) @compileError(
+                        @typeName(Mirror) ++ "." ++ field.name ++ " does not name a field of " ++
+                            @typeName(T) ++ ", so this is a reshaping rather than a copy and " ++
+                            "belongs in that mirror's own `from`",
+                    );
+                    const Origin = @FieldType(T, field.name);
+                    if (Origin == field.type or comptime borrowsFrom(field.type, Origin)) {
+                        @field(out, field.name) = @field(value, field.name);
+                        continue;
+                    }
+                    const nested = comptime resultAdapter(Origin) orelse @compileError(
+                        @typeName(T) ++ "." ++ field.name ++ " is carried as " ++
+                            @typeName(field.type) ++ " and nothing turns " ++
+                            @typeName(Origin) ++ " into it",
+                    );
+                    if (field.type != wire_types.Wire(Origin)) @compileError(
+                        @typeName(Mirror) ++ "." ++ field.name ++ " is " ++
+                            @typeName(field.type) ++ " but " ++ @typeName(Origin) ++
+                            " crosses as " ++ @typeName(wire_types.Wire(Origin)) ++
+                            "; one field cannot have two encodings",
+                    );
+                    @field(out, field.name) = try nested.apply(bindings, @field(value, field.name));
+                }
+                return out;
+            }
+        }.apply,
+    };
 }
 
 /// One return type still owed, with the same discipline as the argument side:
@@ -873,7 +984,7 @@ test "the return direction is counted on its own, because it is not the mirror i
     // Most returns are plain data and need nothing, which is the same reason
     // most arguments needed nothing.
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 15), owed.len);
+    try testing.expectEqual(@as(usize, 11), owed.len);
 
     for (owed) |entry| {
         try testing.expect(entry.name.len > 0);
@@ -1642,4 +1753,38 @@ test "naming a handle is detected through the shapes that carry one" {
     try testing.expect(!namesHandle(u64));
     try testing.expect(!namesHandle(void));
     try testing.expect(!namesHandle(shapes.CloseOutcome));
+}
+
+test "a reshaping mirror numbers its error, and a copying one borrows the bytes" {
+    const bindings = testBindings();
+
+    // Reshaping: the error becomes the number the registry assigns it, which
+    // is the whole reason this one is not a copy.
+    const failure = try (resultAdapter(surface.BeginRunFailure).?).apply(bindings, .{
+        .err = error.SessionPoisoned,
+        .session_disposition = .poisoned,
+    });
+    try testing.expectEqual(
+        @import("error_code.zig").encode(error.SessionPoisoned),
+        failure.error_code,
+    );
+    try testing.expectEqual(control.SessionDisposition.poisoned, failure.session_disposition);
+
+    // Copying: a mirror field may borrow what the original owns, because
+    // ownership does not cross -- the original frees the bytes after the
+    // response is encoded. Only that direction, and only the same bytes.
+    try testing.expect(borrowsFrom([]const u8, []u8));
+    try testing.expect(borrowsFrom(?[]const u8, ?[]u8));
+    try testing.expect(!borrowsFrom([]u8, []const u8));
+    try testing.expect(!borrowsFrom([]const u16, []u8));
+    try testing.expect(!borrowsFrom([]const u8, []const u8));
+    try testing.expect(!borrowsFrom(u64, u64));
+
+    // The checkpoint description's copier is instantiated by the outcome
+    // adapter above it, so every one of its fields has found a rule at
+    // comptime. That is not the same as having been run, and it is recorded
+    // here as the weaker fact it is: the description's own round trip waits
+    // for a dispatcher test that produces a real one.
+    try testing.expect(resultAdapter(checkpoint.Description) != null);
+    try testing.expect(resultAdapter(checkpoint.Outcome) != null);
 }

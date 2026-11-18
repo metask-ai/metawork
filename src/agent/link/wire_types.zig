@@ -92,6 +92,9 @@ pub fn Wire(comptime T: type) type {
         if (T == catalog.Query) return shapes.CatalogQuery;
         if (T == catalog.Projection) return shapes.CatalogProjection;
         if (T == checkpoint.Outcome) return shapes.CheckpointOutcome;
+        // Not reached through a method's signature -- an outcome carries it --
+        // but stated here so the mirror has one wire form rather than two.
+        if (T == checkpoint.Description) return shapes.CheckpointDescription;
         if (T == port.SessionRoute) return shapes.SessionRoute;
         if (T == port.SessionRestoreRoute) return shapes.SessionRestoreRoute;
         if (T == port.BeginRunOutcome) return shapes.BeginRunOutcome;

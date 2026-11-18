@@ -567,5 +567,5 @@ test "how much of the surface this build answers is counted, not claimed" {
     // number kept here: arguments still owed, results still owed.
     try testing.expect(answered < callable);
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 34), answered);
+    try testing.expectEqual(@as(usize, 37), answered);
 }
