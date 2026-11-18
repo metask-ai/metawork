@@ -122,7 +122,9 @@ const control_vtable: port.RunControl.VTable = .{
         }
     }.call,
     .input_observation = struct {
-        fn call(context: ?*anyopaque, run_id: u64, generation: u64) session_control.InputObservation {
+        // In process the observation is always made; the optional exists for
+        // the half that may not be there.
+        fn call(context: ?*anyopaque, run_id: u64, generation: u64) ?session_control.InputObservation {
             return blockOf(context).session.controlledInputObservation(run_id, generation);
         }
     }.call,
@@ -416,7 +418,9 @@ const runtime_vtable: port.RuntimePort.VTable = .{
         }
     }.call,
     .borrow_skill_restore_inputs = struct {
-        fn call(context: ?*anyopaque, inputs: *const port.SkillRestoreInputs) port.SkillRestoreBorrow {
+        // In process the inputs are right here; the optional is for the half
+        // that may not be.
+        fn call(context: ?*anyopaque, inputs: *const port.SkillRestoreInputs) ?port.SkillRestoreBorrow {
             _ = context;
             const owned: *const root.SkillRestoreInputs = @ptrCast(inputs);
             const borrowed = owned.borrow();

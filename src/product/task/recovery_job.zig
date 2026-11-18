@@ -308,6 +308,27 @@ pub const ModelIntentAuthority = struct {
     catalog_generation: u64,
 };
 
+/// The skills a restore will reopen with: the borrow, nothing to borrow, or
+/// a half that could not be asked.
+///
+/// Named so the refusal can be driven on its own. This path has a failure
+/// channel and an answer that already means it, so it refuses rather than
+/// restoring silently: a Session reopened without the skills the Task had is
+/// a different Session, not a recovered one. "It could have passed null" is
+/// not the same as "null is an acceptable answer".
+pub const RestoreSkillBorrow = union(enum) {
+    borrowed: ?agent.SkillRestoreBorrow,
+    unavailable,
+};
+
+pub fn borrowRestoreSkills(capabilities: ?RestoreCapabilities) RestoreSkillBorrow {
+    const value = capabilities orelse return .{ .borrowed = null };
+    const inputs = value.skill orelse return .{ .borrowed = null };
+    const borrow = value.original.agent.borrowSkillRestoreInputs(inputs) orelse
+        return .unavailable;
+    return .{ .borrowed = borrow };
+}
+
 pub const RestoreCapabilities = struct {
     original: agent.SessionRestoreInputs,
     skill: ?*agent.SkillRestoreInputs,
@@ -497,6 +518,13 @@ pub const Job = struct {
         var image_capabilities: [models_contract.max_model_image_capabilities]agent.ModelImageCapability = undefined;
         std.debug.assert(execution.target.image_capabilities.len <= image_capabilities.len);
         for (execution.target.image_capabilities, 0..) |entry, index| image_capabilities[index] = .{ .model = entry.model, .supported = entry.supported };
+        // Borrowed once, before the options are built, so that a borrow that
+        // cannot be made refuses the recovery instead of opening a Session
+        // with no skills.
+        const borrowed_skill = switch (borrowRestoreSkills(capabilities)) {
+            .borrowed => |value| value,
+            .unavailable => return .{ .failure = .runtime_unavailable },
+        };
         const options: agent.SessionOpenOptions = .{
             .model_binding = .{
                 .image_capabilities = image_capabilities[0..execution.target.image_capabilities.len],
@@ -520,8 +548,8 @@ pub const Job = struct {
             },
             .canonical_user_home = self.attempt.workspace.canonical_user_home,
             .workspace_epoch = self.attempt.workspace.epoch_token,
-            .skill_catalog = if (capabilities) |value| if (value.skill) |inputs| value.original.agent.borrowSkillRestoreInputs(inputs).catalog else null else null,
-            .skill_policy = if (capabilities) |value| if (value.skill) |inputs| value.original.agent.borrowSkillRestoreInputs(inputs).policy else null else null,
+            .skill_catalog = if (borrowed_skill) |borrow| borrow.catalog else null,
+            .skill_policy = if (borrowed_skill) |borrow| borrow.policy else null,
             .mcp_selection = if (capabilities) |value| value.mcp else null,
             .operation_id_floor = .{
                 .last_run_id = self.attempt.run_id_floor,
@@ -639,5 +667,47 @@ test "restore Runtime serialization failures remain retryable job outcomes" {
     try std.testing.expectEqual(
         Failure.session_capacity,
         mapRestoreError(error.SessionCapacity),
+    );
+}
+
+test "a restore whose skills cannot be borrowed refuses instead of reopening without them" {
+    var storage: [8]u8 align(8) = @splat(0);
+    const inputs: *agent.SkillRestoreInputs = @ptrCast(&storage);
+    const capabilities: RestoreCapabilities = .{
+        .original = .{
+            .agent = agent.RuntimePort.testUnreachableBorrow(),
+            .skill = inputs,
+            .mcp = null,
+            .permission_mode = .default,
+            .shell_policy = .unrestricted,
+            .permission_interaction = .interactive,
+        },
+        .skill = inputs,
+        .mcp = null,
+        .mcp_catalog_generation = null,
+    };
+
+    // `run` turns this into `.{ .failure = .runtime_unavailable }`, which is
+    // the answer the recovery path already had for an unreachable Runtime.
+    try std.testing.expectEqual(
+        RestoreSkillBorrow.unavailable,
+        borrowRestoreSkills(capabilities),
+    );
+    try std.testing.expectEqual(
+        Failure.runtime_unavailable,
+        mapRestoreError(error.RuntimeShuttingDown),
+    );
+
+    // A Task with no skill inputs is a different fact and keeps its answer:
+    // nothing to borrow is not a borrow that failed.
+    var without = capabilities;
+    without.skill = null;
+    try std.testing.expectEqual(
+        @as(?agent.SkillRestoreBorrow, null),
+        borrowRestoreSkills(without).borrowed,
+    );
+    try std.testing.expectEqual(
+        @as(?agent.SkillRestoreBorrow, null),
+        borrowRestoreSkills(null).borrowed,
     );
 }

@@ -774,7 +774,10 @@ fn inputReady(task: *const task_state.Task) bool {
         run.agent_handoff.load(.acquire) != .running) return false;
     var lease = run.execution.?.run_control.tryAcquireLease() orelse return false;
     defer lease.deinit();
-    return lease.inputObservation().ready;
+    // The view offers an input box only to a Run that says it is ready, so an
+    // observation that could not be made offers none.
+    const observation = lease.inputObservation() orelse return false;
+    return observation.ready;
 }
 
 fn writeInputId(writer: *std.Io.Writer, id: ?u64) Error!void {
@@ -1836,4 +1839,50 @@ test "Product view owned Tool preparation copies facts and releases every alloca
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.capture, .{});
+}
+
+test "a Run whose input readiness cannot be observed offers no input box" {
+    // The same one-line choice as `inputAction` and `submitInputImpl` make in
+    // the Task runtime: no observation is not readiness. Driven here because
+    // this caller needs nothing but a Task.
+    var execution: task_state.RunExecution = .{};
+    execution.run_control = agent.RunControl.testUnreachable(4, 1);
+    var runs = [_]?task_state.RunRecord{.{
+        .id = 4,
+        .generation = 1,
+        .execution = &execution,
+        .execution_generation = 1,
+        .execution_protocol = .anthropic_messages,
+        .execution_model = @constCast("model"),
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
+        .input = .{ .text = .{ .value = @constCast("input") } },
+        .commentary_ends = @constCast(&[_]u64{}),
+        .tools = @constCast(&[_]?task_state.ToolView{}),
+        .terminal_diagnostic = @constCast(""),
+        .agent_handoff = .init(.running),
+    }};
+    var compacts: [0]?task_state.CompactRecord = .{};
+    var ui_history: [0]?task_state.UiRecord = .{};
+    var task = task_state.Task{
+        .durable = .{
+            .id = 1,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .anthropic_messages,
+            .execution_model = @constCast("model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 1,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &runs,
+            .compacts = &compacts,
+            .ui_history = &ui_history,
+        },
+        .runtime = .{},
+    };
+    task.runtime.active_operation = .{ .run = 4 };
+
+    try std.testing.expect(!inputReady(&task));
 }

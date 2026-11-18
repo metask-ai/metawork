@@ -158,9 +158,21 @@ pub const OwnedBinding = struct {
 
     fn copy(allocator: std.mem.Allocator, input: BindingInput) !OwnedBinding {
         if (input.source.len == 0 or input.source.len > 256 or
-            input.model.len == 0 or input.model.len > 256 or !std.unicode.utf8ValidateSlice(input.model) or
-            input.credential.len == 0 or input.credential.len > 4096 or
-            std.mem.indexOfAny(u8, input.credential, "\r\n\x00") != null) return error.InvalidBinding;
+            input.model.len == 0 or input.model.len > 256 or !std.unicode.utf8ValidateSlice(input.model))
+            return error.InvalidBinding;
+        // A reader is the authoritative source of the credential: `execute`
+        // reads it live and never looks at these bytes when one is present. So
+        // the bytes are optional exactly when a reader is, which is what lets a
+        // caller that must not hold the secret -- one on the far side of a
+        // process boundary -- bind without putting it on the wire. Supplied
+        // bytes are validated exactly as before, and a binding with neither is
+        // refused here rather than at request time.
+        if (input.credential_reader == null and input.credential.len == 0)
+            return error.InvalidBinding;
+        if (input.credential.len > 4096 or
+            (input.credential.len != 0 and
+                std.mem.indexOfAny(u8, input.credential, "\r\n\x00") != null))
+            return error.InvalidBinding;
         for (input.model) |byte| if (std.ascii.isControl(byte)) return error.InvalidBinding;
         const endpoint = try allocator.dupe(u8, input.endpoint);
         errdefer allocator.free(endpoint);
@@ -275,7 +287,13 @@ pub fn perform(allocator: std.mem.Allocator, network: http.Transport, binding: *
         const len = reader.read_fn(reader.context, &current) orelse return .{ .failed = .unavailable };
         if (len == 0 or len > current.len or std.mem.indexOfAny(u8, current[0..len], "\r\n\x00") != null) return .{ .failed = .unavailable };
         break :live current[0..len];
-    } else binding.credential;
+    } else if (binding.credential.len != 0)
+        binding.credential
+    else
+        // Neither source cannot arrive through `init`, which refuses it.
+        // Failing closed keeps that true for a binding built any other way,
+        // rather than sending an empty bearer.
+        return .{ .failed = .unavailable };
     const bearer = std.fmt.allocPrint(allocator, "Bearer {s}", .{credential}) catch return .{ .failed = .capacity };
     defer {
         std.crypto.secureZero(u8, bearer);

@@ -304,6 +304,9 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-checkpoint", .root_module = test_modules.agent_checkpoint },
         .{ .name = "metawork-agent-session", .root_module = test_modules.agent_session },
         .{ .name = "metawork-agent-contract", .root_module = test_modules.agent_contract },
+        .{ .name = "metawork-agent-link", .root_module = test_modules.agent_link },
+        .{ .name = "metawork-app-execution-mode", .root_module = test_modules.app_execution_mode },
+        .{ .name = "metawork-app-execution-host", .root_module = test_modules.app_execution_host },
         .{ .name = "metawork-agent-file-delivery", .root_module = test_modules.agent_file_delivery },
         .{ .name = "metawork-product-attachment", .root_module = test_modules.product_attachment },
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
@@ -367,6 +370,8 @@ pub fn build(b: *std.Build) void {
             schedule_tests.dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.agent_contract)
             b.step("test-agent-contract", "Run the Agent contract declarations and codec tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.agent_link)
+            b.step("test-agent-link", "Run the execution link frame, registry and channel tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_runtime)
             b.step("test-product-skill-runtime", "Run Product Skill runtime tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_policy)
@@ -694,6 +699,51 @@ pub fn build(b: *std.Build) void {
     );
     fault_capture_step.dependOn(&fault_unit_tests_run.step);
     fault_capture_step.dependOn(&fault_capture_tests_run.step);
+    // The process seam needs a second process, so it is verified the only way
+    // it can be: a fixture that runs the real execution-half entry over real
+    // inherited pipes, with the parent doing the real handshake. A missing
+    // fixture must fail the run, never skip it.
+    const execution_link_fixture_module = b.createModule(.{
+        .root_source_file = b.path("tests/support/execution_link_fixture.zig"),
+        .target = test_modules.app_execution_mode.resolved_target,
+        .optimize = test_modules.app_execution_mode.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    execution_link_fixture_module.addImport("app_execution_mode", test_modules.app_execution_mode);
+    execution_link_fixture_module.addImport("metawork_agent_link", test_modules.agent_link);
+    const execution_link_fixture = b.addExecutable(.{
+        .name = "metawork-execution-link-fixture",
+        .root_module = execution_link_fixture_module,
+    });
+    const install_execution_link_fixture = b.addInstallArtifact(execution_link_fixture, .{});
+    const execution_link_module = b.createModule(.{
+        .root_source_file = b.path("tests/integration/execution_link_test.zig"),
+        .target = test_modules.app_execution_host.resolved_target,
+        .optimize = test_modules.app_execution_host.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    execution_link_module.addImport("app_execution_host", test_modules.app_execution_host);
+    execution_link_module.addImport("app_execution_mode", test_modules.app_execution_mode);
+    execution_link_module.addImport("metawork_agent_link", test_modules.agent_link);
+    const execution_link_tests_run = b.addRunArtifact(b.addTest(.{
+        .name = "metawork-execution-link",
+        .root_module = execution_link_module,
+    }));
+    execution_link_tests_run.step.dependOn(&install_execution_link_fixture.step);
+    execution_link_tests_run.setEnvironmentVariable("METAWORK_EXECUTION_LINK_FIXTURE", b.getInstallPath(
+        .bin,
+        if (test_modules.app_execution_mode.resolved_target.?.result.os.tag == .windows)
+            "metawork-execution-link-fixture.exe"
+        else
+            "metawork-execution-link-fixture",
+    ));
+    execution_link_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_VERSION", "fixture-0");
+    execution_link_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_DIGEST", "1");
+    artifacts.tests.step.dependOn(&execution_link_tests_run.step);
+    b.step(
+        "test-execution-link",
+        "Run the execution process fork, identity exchange and stop tests",
+    ).dependOn(&execution_link_tests_run.step);
     // Isolated, opt-in Stage A probes. Not part of the app or the default test graph.
     const sqlite_a_module = b.createModule(.{
         .root_source_file = b.path("tests/probes/sqlite_history_a_memory.zig"),
@@ -904,6 +954,9 @@ const WiredModules = struct {
     product_permission_review: *std.Build.Module,
     agent_session: *std.Build.Module,
     agent_contract: *std.Build.Module,
+    agent_link: *std.Build.Module,
+    app_execution_host: *std.Build.Module,
+    app_execution_mode: *std.Build.Module,
     agent_file_delivery: *std.Build.Module,
     agent_catalog: *std.Build.Module,
     agent_checkpoint: *std.Build.Module,
@@ -1624,6 +1677,34 @@ fn wireAgentCore(
     agent_contract.addImport("agent_mcp_connector", agent_mcp_connector);
     agent_contract.addImport("agent_mcp_stdio", agent_mcp_stdio);
     agent_contract.addImport("agent_mcp_http", agent_mcp_http);
+    // The execution link. It frames bytes and numbers the port's methods and
+    // errors; it imports the contract module only, so a binary that links it
+    // still links no AgentCore archive.
+    const agent_link = b.createModule(.{
+        .root_source_file = b.path("src/agent/link.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    agent_link.addImport("agent_contract", agent_contract);
+    agent_link.addImport("agent_mcp_catalog", agent_mcp_catalog);
+    agent_link.addImport("agent_catalog", agent_catalog);
+    agent_link.addImport("agent_checkpoint", agent_checkpoint);
+    agent_link.addImport("agent_checkpoint_restore", agent_checkpoint_restore);
+    // The two halves of the process seam. They live in their own modules so a
+    // test fixture can stand in for the execution half without the Renderer
+    // bundle the application executable carries.
+    const app_execution_mode = b.createModule(.{
+        .root_source_file = b.path("src/app/execution_mode.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    app_execution_mode.addImport("metawork_agent_link", agent_link);
+    const app_execution_host = b.createModule(.{
+        .root_source_file = b.path("src/app/execution_host.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    app_execution_host.addImport("metawork_agent_link", agent_link);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
@@ -2693,6 +2774,10 @@ fn wireAgentCore(
     // instead of repeating it as a literal.
     app.addImport("app_manifest_zon", existingImport(runner, "app_manifest_zon"));
     app.addImport("metawork_agent", agent);
+    app.addImport("metawork_agent_link", agent_link);
+    app.addImport("app_execution_host", app_execution_host);
+    app.addImport("app_execution_mode", app_execution_mode);
+    app.addImport("event_pump", event_pump);
     app.addImport("metawork_product_update", product_update);
     app.addImport("app_output_file", output_file);
     app.addImport("metawork_product_workspace", product_workspace);
@@ -2782,6 +2867,9 @@ fn wireAgentCore(
         .product_permission_review = product_permission_review,
         .agent_session = session,
         .agent_contract = agent_contract,
+        .agent_link = agent_link,
+        .app_execution_host = app_execution_host,
+        .app_execution_mode = app_execution_mode,
         .agent_file_delivery = agent_file_delivery,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,
