@@ -1,8 +1,11 @@
-//! Product-neutral OAuth trust-boundary mechanics.
+//! Product-neutral OAuth trust-boundary mechanics, a Foundation contract:
+//! types and pure functions only. PKCE generation borrows the caller's `Io`
+//! for entropy and nothing here holds a handle or starts an effect.
 //!
 //! Callers own endpoint paths, issuer policy, field limits, response copy and
-//! domain error mapping. This leaf only owns PKCE generation, bounded secret
-//! lifetime, strict callback query parsing and constant-time state comparison.
+//! domain error mapping. This contract only owns PKCE generation, bounded
+//! secret lifetime, strict callback query parsing and constant-time state
+//! comparison.
 const std = @import("std");
 
 pub const pkce_seed_bytes: usize = 32;

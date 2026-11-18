@@ -58,7 +58,7 @@ flowchart TB
 4. Agent 是独立于 Product 的 MetaWork-owned 执行边界，也是 AgentCore SDK/ABI 的唯一正式消费者；
 5. Native SDK compatibility 是 Application-owned 的受限消费路径，不是新的顶层 owner、平台层或 SDK 替代品；
 6. Storage 是独立基础边界；接入 Product 必须显式定义 schema owner、backend composition 和 shutdown，不因源码存在而自动取得业务职责；
-7. Foundation 只拥有无产品语义的执行机制，与 Application、Product、Agent、Storage 平级；它不得反向导入任何 owner，其纯合同可被任何 owner 精确导入，引擎只由 Application 组合。成员逐个按准入收取，不因目录位置取得身份。
+7. Foundation 只拥有无产品语义的执行机制，与 Application、Product、Agent、Storage 平级；它不得反向导入任何 owner。其纯合同是不持有状态或句柄、不建立连接、不发起外部 effect 的类型与纯函数，包括结果事实与协议编解码，可被任何 owner 精确导入；引擎只由 Application 组合。endpoint、client 身份、响应解释与错误映射等业务政策留在调用方 owner。成员逐个按准入收取，不因目录位置取得身份。
 
 文档中的 Application 对应代码中的组合类型 `App`；“Product”只指产品逻辑边界；“Agent”只指 MetaWork 对 AgentCore 的产品化集成边界；“Host”在 wire 或依赖合同中泛指 Renderer 之外的可信侧，不能据此建立新的 owner。
 

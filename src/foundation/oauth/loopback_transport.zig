@@ -5,9 +5,9 @@ const select_start = @import("metawork_select_start");
 const request_head_bytes: usize = 16 * 1024;
 const response_bytes: usize = 4096;
 
-/// Application-owned OAuth loopback server. Listener and connection handles,
-/// cancellation/deadline races and HTTP byte mechanics never cross into the
-/// Account policy sink.
+/// OAuth loopback server engine, composed by Application. Listener and
+/// connection handles, cancellation/deadline races and HTTP byte mechanics
+/// never cross into the caller's policy sink.
 pub const Server = struct {
     io: std.Io,
     listener: std.Io.net.Server,
@@ -281,8 +281,8 @@ pub const Server = struct {
     }
 };
 
-/// Stable Application storage exposed to Account only through its endpoint
-/// vtable. Exactly one Account login may own the adapter at a time.
+/// Stable storage exposed to a caller only through its endpoint vtable.
+/// Exactly one authorization attempt may own the adapter at a time.
 pub const Adapter = struct {
     io: std.Io,
     server: ?Server = null,
@@ -410,7 +410,7 @@ const TestPolicy = struct {
     }
 };
 
-test "Application loopback pump composes with a caller-owned callback policy" {
+test "loopback pump composes with a caller-owned callback policy" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
     defer threaded.deinit();
     var server = try Server.init(threaded.io());
@@ -445,7 +445,7 @@ test "Application loopback pump composes with a caller-owned callback policy" {
     try std.testing.expect(callback_policy.completed);
 }
 
-test "Account loopback adapters bind distinct OS-assigned ports" {
+test "loopback adapters bind distinct OS-assigned ports" {
     var first = Adapter.init(std.testing.io);
     defer first.deinit();
     const first_endpoint = first.endpoint();
@@ -463,7 +463,7 @@ test "Account loopback adapters bind distinct OS-assigned ports" {
     try std.testing.expect(first_port != second_port);
 }
 
-test "cancel closes the Application listener and wakes blocked accept" {
+test "cancel closes the listener and wakes blocked accept" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
     defer threaded.deinit();
     const Probe = struct {
@@ -497,7 +497,7 @@ test "cancel closes the Application listener and wakes blocked accept" {
     try std.testing.expectEqual(error.Cancelled, context.failure.?);
 }
 
-test "deadline closes the Application listener" {
+test "deadline closes the listener" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
     defer threaded.deinit();
     var server = try Server.init(threaded.io());

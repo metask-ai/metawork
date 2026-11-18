@@ -205,6 +205,114 @@ function foundationImportViolations(file, source) {
   return violations;
 }
 
+/**
+ * Foundation members by role. A contract is types and pure functions: it holds
+ * no state or handle, opens no connection and starts no external effect (PKCE
+ * generation only borrows the caller's Io for entropy). An engine does at
+ * least one of those. Together they must name every Foundation build module.
+ */
+const foundationContracts = [
+  "metawork_http_contract",
+  "metawork_oauth_loopback",
+  "metawork_oauth_mechanics",
+];
+const foundationEngines = [
+  "metawork_http_memory",
+  "metawork_http_transport",
+  "metawork_oauth_loopback_transport",
+  "metawork_select_start",
+];
+
+/** The directory a Foundation file belongs to: its family, or the top level. */
+function foundationUnit(file) {
+  const rest = file.slice(foundationRoot.length);
+  const slash = rest.indexOf("/");
+  return slash === -1
+    ? foundationRoot
+    : `${foundationRoot}${rest.slice(0, slash + 1)}`;
+}
+
+/**
+ * Relative imports stay inside the importer's family directory, and a
+ * top-level member reaches only top-level files. Families and top-level
+ * members reach each other through named build modules.
+ */
+function foundationRelativeImportViolations(file, source) {
+  const unit = foundationUnit(file);
+  const violations = [];
+  for (const [, name] of source.matchAll(/@import\("([^"]+)"\)/g)) {
+    if (!name.endsWith(".zig")) continue;
+    const resolved = resolveImportPath(file, name);
+    if (
+      !resolved.startsWith(foundationRoot) ||
+      foundationUnit(resolved) !== unit
+    )
+      violations.push(name);
+  }
+  return violations;
+}
+
+/** No src/foundation.zig and no file named after a family directory. */
+function foundationRootFileViolations(files) {
+  const families = new Set(
+    files.map(foundationUnit).filter((unit) => unit !== foundationRoot),
+  );
+  return files.filter(
+    (file) =>
+      file === "src/foundation.zig" ||
+      families.has(`${file.slice(0, -".zig".length)}/`),
+  );
+}
+
+/**
+ * A Foundation file publishes only its own declarations: it never exposes an
+ * imported module, never re-exports a declaration of another named module and
+ * never uses usingnamespace. Re-exporting a member's own private file is its
+ * own declaration.
+ */
+function foundationForwardingViolations(source) {
+  const violations = [];
+  if (/\busingnamespace\b/.test(source)) violations.push("usingnamespace");
+  for (const [line] of source.matchAll(
+    /pub (?:const|var) \w+\s*=\s*@import\([^)]*\)/g,
+  ))
+    violations.push(line);
+  const moduleAliases = [
+    ...source.matchAll(/const (\w+)\s*=\s*@import\("([^"]+)"\)/g),
+  ]
+    .filter(
+      ([, , name]) =>
+        !name.endsWith(".zig") && !["std", "builtin"].includes(name),
+    )
+    .map(([, alias]) => alias);
+  for (const alias of moduleAliases)
+    for (const [line] of source.matchAll(
+      new RegExp(`pub (?:const|var) \\w+\\s*=\\s*${alias}\\b[^;]*;`, "g"),
+    ))
+      violations.push(line);
+  return violations;
+}
+
+/**
+ * Only Application composes an engine: every build edge to an engine starts
+ * at a module rooted in src/app.zig or src/app/, or at another Foundation
+ * engine. A contract therefore never depends on an engine.
+ */
+function foundationEngineImportViolations(buildSource, engines) {
+  const sources = moduleRootSources(buildSource);
+  return moduleImportEdges(buildSource)
+    .filter((edge) => engines.includes(edge.target))
+    .filter((edge) => {
+      const owner = sources.get(edge.owner) ?? "";
+      return !(
+        owner === "src/app.zig" ||
+        owner.startsWith("src/app/") ||
+        engines.includes(edge.owner)
+      );
+    })
+    .map((edge) => `${edge.owner} -> ${edge.target}`);
+}
+
 test("permission reviewer is an isolated Completion consumer without approval authority", () => {
   const build = read("build.zig");
   const source = read("src/product/permission/review.zig");
@@ -1025,15 +1133,11 @@ test("Foundation members import no Application, Product, Agent or Bridge module"
     .filter(([, path]) => path.startsWith(foundationRoot))
     .map(([name]) => name)
     .sort();
-  assert.deepEqual(members, [
-    "metawork_http_contract",
-    "metawork_http_memory",
-    "metawork_http_transport",
-    "metawork_oauth_loopback",
-    "metawork_oauth_loopback_transport",
-    "metawork_oauth_mechanics",
-    "metawork_select_start",
-  ]);
+  assert.deepEqual(
+    members,
+    [...foundationContracts, ...foundationEngines].sort(),
+    "every Foundation member is classified as a contract or an engine",
+  );
   for (const edge of moduleImportEdges(build)) {
     if (!members.includes(edge.owner)) continue;
     const target = sources.get(edge.target) ?? "";
@@ -1059,21 +1163,149 @@ test("Foundation members import no Application, Product, Agent or Bridge module"
   for (const file of files)
     assert.deepEqual(foundationImportViolations(file, read(file)), []);
 
-  // This member must also carry no platform framework: std and Foundation only.
+  // Members carry no platform framework: std and Foundation only.
   for (const file of files)
     for (const [, name] of read(file).matchAll(/@import\("([^"]+)"\)/g))
       assert.ok(
         name.endsWith(".zig") ||
-          [
-            "std",
-            "builtin",
-            "metawork_http_memory",
-            "metawork_http_contract",
-            "metawork_oauth_loopback",
-            "metawork_select_start",
-          ].includes(name),
+          ["std", "builtin"].includes(name) ||
+          members.includes(name),
         `${file} imports unexpected module ${name}`,
       );
+});
+
+test("Foundation families keep relative imports home and publish no root or forwarding file", () => {
+  const files = zigFiles(foundationRoot);
+  assert.equal(existsSync(new URL("src/foundation.zig", root)), false);
+  assert.deepEqual(foundationRootFileViolations(files), []);
+  for (const file of files) {
+    const source = read(file);
+    assert.deepEqual(foundationRelativeImportViolations(file, source), []);
+    assert.deepEqual(foundationForwardingViolations(source), [], file);
+  }
+  assert.deepEqual(
+    foundationEngineImportViolations(read("build.zig"), foundationEngines),
+    [],
+  );
+});
+
+test("the Foundation family rules reject synthetic violations", () => {
+  for (const [file, source] of [
+    [
+      "src/foundation/oauth/mechanics.zig",
+      'const c = @import("../http/contract.zig");',
+    ],
+    [
+      "src/foundation/oauth/mechanics.zig",
+      'const s = @import("../select_start.zig");',
+    ],
+    [
+      "src/foundation/select_start.zig",
+      'const m = @import("oauth/mechanics.zig");',
+    ],
+    [
+      "src/foundation/http/transport.zig",
+      'const a = @import("../../app/mcp_oauth.zig");',
+    ],
+  ])
+    assert.equal(
+      foundationRelativeImportViolations(file, source).length,
+      1,
+      `the rule must reject ${source} in ${file}`,
+    );
+  assert.deepEqual(
+    foundationRelativeImportViolations(
+      "src/foundation/http/transport.zig",
+      'const p = @import("idle_probe.zig");\nconst t = @import("transport_test.zig");',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    foundationRelativeImportViolations(
+      "src/foundation/select_start.zig",
+      'const t = @import("select_start_test.zig");',
+    ),
+    [],
+  );
+
+  assert.deepEqual(
+    foundationRootFileViolations([
+      "src/foundation/http/contract.zig",
+      "src/foundation/http.zig",
+    ]),
+    ["src/foundation/http.zig"],
+  );
+  assert.deepEqual(
+    foundationRootFileViolations([
+      "src/foundation.zig",
+      "src/foundation/select_start.zig",
+    ]),
+    ["src/foundation.zig"],
+  );
+  assert.deepEqual(
+    foundationRootFileViolations([
+      "src/foundation/select_start.zig",
+      "src/foundation/http/contract.zig",
+      "src/foundation/oauth/mechanics.zig",
+    ]),
+    [],
+  );
+
+  for (const source of [
+    'pub const transport = @import("metawork_http_transport");',
+    'const contract = @import("metawork_http_contract");\npub const Error = contract.Error;',
+    'pub usingnamespace @import("idle_probe.zig");',
+  ])
+    assert.equal(
+      foundationForwardingViolations(source).length,
+      1,
+      `the rule must reject ${source}`,
+    );
+  assert.deepEqual(
+    foundationForwardingViolations(
+      'const probe = @import("idle_probe.zig");\npub const ProbeOutcome = probe.Outcome;\nconst contract = @import("metawork_http_contract");\npub fn failure() contract.Failure {}',
+    ),
+    [],
+  );
+
+  const modules = [
+    ["app", "src/app.zig"],
+    ["mcp_oauth", "src/app/mcp_oauth.zig"],
+    ["account_loopback", "src/product/account/loopback.zig"],
+    ["metawork_oauth_mechanics", "src/foundation/oauth/mechanics.zig"],
+    [
+      "metawork_oauth_loopback_transport",
+      "src/foundation/oauth/loopback_transport.zig",
+    ],
+    ["metawork_select_start", "src/foundation/select_start.zig"],
+  ]
+    .map(
+      ([name, path]) =>
+        `const ${name} = b.createModule(.{ .root_source_file = b.path("${path}") });`,
+    )
+    .join("\n");
+  const legal = [
+    'app.addImport("metawork_oauth_loopback_transport", metawork_oauth_loopback_transport);',
+    'mcp_oauth.addImport("metawork_oauth_loopback_transport", metawork_oauth_loopback_transport);',
+    'metawork_oauth_loopback_transport.addImport("metawork_select_start", metawork_select_start);',
+    'account_loopback.addImport("metawork_oauth_mechanics", metawork_oauth_mechanics);',
+  ].join("\n");
+  assert.deepEqual(
+    foundationEngineImportViolations(`${modules}\n${legal}`, foundationEngines),
+    [],
+  );
+  for (const edge of [
+    'account_loopback.addImport("metawork_oauth_loopback_transport", metawork_oauth_loopback_transport);',
+    'metawork_oauth_mechanics.addImport("metawork_select_start", metawork_select_start);',
+  ])
+    assert.equal(
+      foundationEngineImportViolations(
+        `${modules}\n${legal}\n${edge}`,
+        foundationEngines,
+      ).length,
+      1,
+      `the rule must reject ${edge}`,
+    );
 });
 
 test("the Foundation import rule rejects owner modules and escaping relative imports", () => {
