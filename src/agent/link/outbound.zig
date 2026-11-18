@@ -11,8 +11,10 @@
 //! What this direction *cannot* do is compose a capability. A parameter that
 //! is a function pointer into this process means nothing over there, and the
 //! answer is never "send the pointer": either the far side builds its own
-//! against a descriptor (`checkpoint.Sink` becomes a destination) or the call
-//! is a reverse call and the pointer stays here. Both are decisions recorded
+//! from what it already has -- `checkpoint.Sink` sends nothing at all, because
+//! every fact a destination needs is on the Session the call was made on or in
+//! the call's own limits -- or the call is a reverse call and the pointer
+//! stays here. Both are decisions recorded
 //! elsewhere -- `adapters.Disposition` on the execution side,
 //! `reverse.zig` for the calls that come back -- so a parameter with neither
 //! is owed, and `owedArguments` is the list.

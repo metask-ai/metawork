@@ -278,8 +278,14 @@ fn exportCheckpoint(
     // opening a blob under Task 0, and it is filled in by the route creation
     // that puts a Session in this table -- which `not_forwarded` records as
     // still owed, so today this path refuses and says why.
+    // Not an export failure and not `CheckpointIncompatible`, which would say
+    // something about the checkpoint: the checkpoint is fine and this build
+    // cannot name the Task. `NotDispatchable` is what "this build cannot
+    // answer this" already means, and the gap itself is recorded where it
+    // belongs -- `create_session_route` is the route creation that would fill
+    // the identity in, and it is in `not_forwarded`.
     const identity = receiver.session.identity;
-    if (!identity.valid()) return failureResponse(arena, error.CheckpointIncompatible);
+    if (!identity.valid()) return error.NotDispatchable;
     const destination: call_frame.BlobDestination = .{
         .task_id = identity.task_id,
         .hard_bytes = wired[0].hard_bytes,

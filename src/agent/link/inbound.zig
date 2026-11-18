@@ -85,17 +85,41 @@ pub fn boxesNeeded(comptime Wired: type) usize {
 pub const Reservations = struct {
     taken: []const *client.Box,
     used: usize = 0,
+    /// The id each claimed box is to hold, written into it only once the
+    /// whole conversion has succeeded.
+    wanted: []handle_table.Id = &.{},
 
-    /// The next box, for a handle the answer actually carried.
+    /// The next box, for a handle the answer actually carried, with the id it
+    /// is to name.
+    ///
+    /// The id is recorded rather than written, and that is the whole point.
+    /// A conversion that filled a box and then failed -- `catalog.Acquisition`
+    /// fills the lease and then allocates the projection, which can fail --
+    /// left an object live on the far side with nothing on this side able to
+    /// name it or release it, which is exactly what the boxes exist to stop,
+    /// one line later than the header describes. Ordering the work inside
+    /// every adapter would fix the ones we looked at and leave the rule to be
+    /// remembered by the next one; deferring the fill to `invoke` means no
+    /// adapter *can* fill a box, so none can abandon a filled one.
     ///
     /// Asserts rather than returning an error: running out means
     /// `boxesNeeded` under-counted the shape, which is a build-time fact
     /// about types rather than anything the peer can cause.
-    pub fn next(self: *Reservations) *client.Box {
+    pub fn claim(self: *Reservations, id: handle_table.Id) *client.Box {
         std.debug.assert(self.used < self.taken.len);
+        std.debug.assert(self.used < self.wanted.len);
         const box = self.taken[self.used];
+        self.wanted[self.used] = id;
         self.used += 1;
         return box;
+    }
+
+    /// Writes the recorded ids in. Called once, after the conversion has
+    /// succeeded, so every box either names something or was never claimed.
+    pub fn settle(self: *Reservations, half: *client.Client) void {
+        for (self.taken[0..self.used], self.wanted[0..self.used]) |box, id| {
+            half.boxes.fill(box, id);
+        }
     }
 };
 
@@ -289,8 +313,7 @@ pub fn adapter(comptime T: type) ?Adapter(T) {
                         // through: `adapters.BegunRun` is that entry, and a
                         // second id for the same thing would be a second
                         // lifetime to keep in step with it.
-                        const box = taken.next();
-                        half.boxes.fill(box, route.run);
+                        const box = taken.claim(route.run);
                         const control_handle: port.RunControl = .{
                             .context = box,
                             .vtable = half.vtables.run_control,
@@ -357,9 +380,7 @@ fn handleAdapter(comptime T: type) ?Adapter(T) {
         .boxed => .{ .apply = struct {
             fn apply(_: *client.Client, taken: *Reservations, id: handle_table.Id) Error!T {
                 if (!id.valid()) return error.Unreadable;
-                const box = taken.next();
-                box.link.boxes.fill(box, id);
-                return @ptrCast(box);
+                return @ptrCast(taken.claim(id));
             }
         }.apply },
         // A port value has a context to carry the box in. Which port value
@@ -373,9 +394,7 @@ fn handleAdapter(comptime T: type) ?Adapter(T) {
                 id: handle_table.Id,
             ) Error!port.SessionPort {
                 if (!id.valid()) return error.Unreadable;
-                const box = taken.next();
-                half.boxes.fill(box, id);
-                return .{ .context = box, .vtable = half.vtables.session };
+                return .{ .context = taken.claim(id), .vtable = half.vtables.session };
             }
         }.apply } else null,
     };
@@ -453,8 +472,19 @@ pub fn invoke(
     return switch (answer) {
         .failed => |err| .{ .failed = err },
         .returned => |wired| blk: {
-            var taken: Reservations = .{ .taken = reserved[0..opened] };
-            break :blk .{ .returned = try read.apply(half, &taken, wired) };
+            var wanted: [needed]handle_table.Id = undefined;
+            var taken: Reservations = .{
+                .taken = reserved[0..opened],
+                .wanted = wanted[0..],
+            };
+            // The conversion claims boxes but fills none, so a failure here
+            // leaves every box unfilled and the defer above gives all of them
+            // back. Settling after it has succeeded is what makes "a filled
+            // box is a box Product owns" true without each adapter having to
+            // order its own work.
+            const value = try read.apply(half, &taken, wired);
+            taken.settle(half);
+            break :blk .{ .returned = value };
         },
     };
 }
@@ -524,10 +554,15 @@ test "a handle arrives into a box that was already taken" {
     defer releaseTestClient(half);
 
     const box = try half.boxes.reserve();
-    var taken: Reservations = .{ .taken = &.{box} };
+    var wanted: [1]handle_table.Id = undefined;
+    var taken: Reservations = .{ .taken = &.{box}, .wanted = &wanted };
 
     const session = try (comptime adapter(port.SessionPort).?)
         .apply(half, &taken, .{ .slot = 6, .generation = 2 });
+    // The conversion claimed the box; `invoke` is what writes the id in once
+    // nothing further can fail, so a test driving one adapter does that step
+    // too rather than reading a box the real sequence has not filled yet.
+    taken.settle(half);
 
     // Named, and the name is this half's own record rather than the id in a
     // pointer-shaped integer.
@@ -672,10 +707,12 @@ test "a Run's two halves come from one box, because one entry holds both" {
     defer releaseTestClient(half);
 
     const box = try half.boxes.reserve();
-    var taken: Reservations = .{ .taken = &.{box} };
+    var wanted: [1]handle_table.Id = undefined;
+    var taken: Reservations = .{ .taken = &.{box}, .wanted = &wanted };
     const outcome = try (comptime adapter(port.BeginRunOutcome).?).apply(half, &taken, .{
         .run = .{ .run_id = 11, .generation = 2, .run = .{ .slot = 5, .generation = 1 } },
     });
+    taken.settle(half);
 
     // One box spent, and the Run and its control both name it: a second id
     // for `adapters.BegunRun` would be a second lifetime to keep in step.
@@ -695,7 +732,8 @@ test "an absent capability spends no name" {
 
     const first = try half.boxes.reserve();
     const second = try half.boxes.reserve();
-    var taken: Reservations = .{ .taken = &.{ first, second } };
+    var wanted: [2]handle_table.Id = undefined;
+    var taken: Reservations = .{ .taken = &.{ first, second }, .wanted = &wanted };
 
     const inputs = try (comptime adapter(port.SessionRestoreInputs).?).apply(half, &taken, .{
         .skill = .{ .slot = 2, .generation = 1 },
@@ -737,4 +775,47 @@ fn testClient(count: usize) !*client.Client {
 fn releaseTestClient(self: *client.Client) void {
     self.deinit();
     testing.allocator.destroy(self);
+}
+
+test "a conversion that fails after claiming a box leaves no box named" {
+    const half = try testClient(2);
+    defer releaseTestClient(half);
+
+    const box = try half.boxes.reserve();
+    var wanted: [1]handle_table.Id = undefined;
+    var taken: Reservations = .{ .taken = &.{box}, .wanted = &wanted };
+
+    // `catalog.Acquisition` claims the lease's box and then allocates the
+    // projection, which can fail. Before the fill was deferred, the box was
+    // already filled by then: the lease stayed live on the far side with
+    // nothing on this side able to name it or release it, which is the exact
+    // failure the boxes exist to prevent.
+    const saved = half.allocator;
+    half.allocator = std.testing.failing_allocator;
+    try testing.expectError(
+        error.OutOfMemory,
+        (comptime adapter(catalog.Acquisition).?).apply(half, &taken, .{
+            .lease = .{ .slot = 3, .generation = 1 },
+            .projection = .{
+                .revision = "rev",
+                .health = .healthy,
+                .skills = &.{},
+                .issues = &.{},
+            },
+        }),
+    );
+    half.allocator = saved;
+
+    // The box was claimed, so `used` moved -- and it holds no id. That is
+    // what `invoke`'s defer tests to decide whether to give a box back, so an
+    // unnamed box is a box that goes back rather than a name kept for an
+    // object this half never received.
+    try testing.expectEqual(@as(usize, 1), taken.used);
+    try testing.expect(!box.id.valid());
+
+    // And it does go back: the slot is a reservation until then, which is
+    // why the count is one here and zero after.
+    try testing.expectEqual(@as(usize, 1), half.boxes.liveCount());
+    half.boxes.releaseReservation(box);
+    try testing.expectEqual(@as(usize, 0), half.boxes.liveCount());
 }
