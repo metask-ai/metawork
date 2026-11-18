@@ -28,6 +28,7 @@ const std = @import("std");
 const contract = @import("agent_contract");
 const adapters = @import("adapters.zig");
 const envelope = @import("envelope.zig");
+const error_code = @import("error_code.zig");
 const handle_table = @import("handle_table.zig");
 const method = @import("method.zig");
 const payload = @import("payload.zig");
@@ -169,6 +170,183 @@ pub const Receiver = union(enum) {
     run: *adapters.BegunRun,
 };
 
+// ---------------------------------------------------------------------------
+// Answering a request
+// ---------------------------------------------------------------------------
+
+pub const InvokeError = error{
+    /// A method number this build does not register. `classify` refuses these
+    /// first; this exists because `invoke` is reachable on its own.
+    UnknownMethod,
+    /// A stream method is not a call. The exec half pushes event frames and
+    /// the caller's pump answers from what arrived, so a request for one is a
+    /// protocol violation rather than something to perform.
+    NotACall,
+    /// This build cannot yet rebuild one of the method's arguments or encode
+    /// its result. Not a refusal of the request -- a statement about this
+    /// build, enumerated by `adapters.owedParameters` and
+    /// `adapters.owedResults` rather than discovered here.
+    NotDispatchable,
+} || DecodeError || adapters.ResolveError || adapters.ResultError ||
+    std.mem.Allocator.Error;
+
+/// Whether this build can answer a method end to end.
+pub fn dispatchable(comptime owner: method.Owner, comptime name: []const u8) bool {
+    comptime {
+        if (!adapters.argumentsRebuildable(owner, name)) return false;
+        const Fn = @typeInfo(@FieldType(owner.VTable(), name)).pointer.child;
+        const Returned = wire_types.Payload(@typeInfo(Fn).@"fn".return_type.?);
+        if (Returned == void) return true;
+        return adapters.resultAdapter(Returned) != null;
+    }
+}
+
+/// Answers one request: decode the arguments, call the method on the object
+/// the request named, encode what it returned.
+///
+/// Everything is allocated in `arena`, including the response, so the caller
+/// resets it once the bytes are written. Nothing allocated for one request
+/// outlives it -- which is the same rule the per-call frames keep, for the
+/// same reason.
+///
+/// The method's own failure is not this function's failure. A `surface.Error`
+/// comes back as a response carrying that error's registered number, because
+/// it is an answer; the errors above are about the request or this build.
+pub fn invoke(
+    arena: std.mem.Allocator,
+    bindings: adapters.Bindings,
+    request: Request,
+) InvokeError![]u8 {
+    inline for (method.entries) |entry| {
+        if (entry.code == request.entry.code) return invokeOne(entry, arena, bindings, request);
+    }
+    return error.UnknownMethod;
+}
+
+fn invokeOne(
+    comptime entry: method.Entry,
+    arena: std.mem.Allocator,
+    bindings: adapters.Bindings,
+    request: Request,
+) InvokeError![]u8 {
+    if (comptime entry.transport == .stream) return error.NotACall;
+    if (comptime !dispatchable(entry.owner, entry.name)) return error.NotDispatchable;
+
+    const VTable = comptime entry.owner.VTable();
+    const Fn = comptime @typeInfo(@FieldType(VTable, entry.name)).pointer.child;
+    const Arguments = comptime wire_types.Request(Fn);
+    const Returned = comptime wire_types.Payload(@typeInfo(Fn).@"fn".return_type.?);
+
+    // Decoded before anything is resolved, because a malformed payload must
+    // not be answered by a call: the cheapest refusals come first and leave
+    // nothing behind.
+    const wired = try payload.decodeExact(Arguments, arena, request.arguments);
+
+    const receiver = try resolveReceiver(bindings, request);
+    const context = contextOf(entry.owner, bindings, receiver);
+    const vtable = vtableOf(entry.owner, bindings, receiver);
+
+    var arguments: std.meta.ArgsTuple(Fn) = undefined;
+    arguments[0] = context;
+    comptime var carried: usize = 0;
+    inline for (@typeInfo(Fn).@"fn".params[1..], 1..) |param, position| {
+        const Parameter = param.type.?;
+        const adapter = comptime adapters.parameterAdapter(Parameter).?;
+        if (comptime wire_types.Wire(Parameter) == void) {
+            // Nothing was sent for it: the execution half supplies it, as it
+            // does the allocator.
+            arguments[position] = try adapter.apply(bindings, {});
+        } else {
+            arguments[position] = try adapter.apply(bindings, wired[carried]);
+            comptime carried += 1;
+        }
+    }
+
+    const returned = @call(.auto, @field(vtable, entry.name), arguments);
+    const value = if (comptime isErrorUnion(Fn)) returned catch |err| {
+        return failureResponse(arena, err);
+    } else returned;
+
+    if (comptime Returned == void) return successResponse(arena, void, {});
+    const encoded = try (comptime adapters.resultAdapter(Returned).?).apply(bindings, value);
+    return successResponse(arena, @TypeOf(encoded), encoded);
+}
+
+fn isErrorUnion(comptime Fn: type) bool {
+    return @typeInfo(@typeInfo(Fn).@"fn".return_type.?) == .error_union;
+}
+
+fn contextOf(
+    comptime owner: method.Owner,
+    bindings: adapters.Bindings,
+    receiver: ?Receiver,
+) ?*anyopaque {
+    return switch (owner) {
+        .runtime => bindings.runtime.context,
+        .session => receiver.?.session.context,
+        .run => receiver.?.run.context,
+        // The control block, which is what a Run's control handle names.
+        .run_control => receiver.?.run.control_handle.context,
+    };
+}
+
+fn vtableOf(
+    comptime owner: method.Owner,
+    bindings: adapters.Bindings,
+    receiver: ?Receiver,
+) *const owner.VTable() {
+    return switch (owner) {
+        .runtime => bindings.runtime.vtable,
+        .session => receiver.?.session.vtable,
+        .run => receiver.?.run.run_vtable,
+        .run_control => receiver.?.run.control_handle.vtable.?,
+    };
+}
+
+fn successResponse(
+    arena: std.mem.Allocator,
+    comptime T: type,
+    value: T,
+) std.mem.Allocator.Error![]u8 {
+    const body = if (T == void) 0 else payload.encodedSize(T, value);
+    const out = try arena.alloc(u8, envelope.header_bytes + body);
+    envelope.encodeResponseHeader(out[0..envelope.header_bytes], envelope.ok);
+    if (T != void) {
+        const written = payload.encode(T, value, out[envelope.header_bytes..]);
+        std.debug.assert(written == body);
+    }
+    return out;
+}
+
+fn failureResponse(
+    arena: std.mem.Allocator,
+    err: error_code.LinkError,
+) std.mem.Allocator.Error![]u8 {
+    // A failure carries no payload, which `envelope.decodeResponse` enforces
+    // from the other side as well.
+    const out = try arena.alloc(u8, envelope.header_bytes);
+    envelope.encodeResponseHeader(out[0..envelope.header_bytes], error_code.encode(err));
+    return out;
+}
+
+/// How much of the surface this build answers end to end, counted rather than
+/// claimed. It reaches `method.entries.len` minus the stream methods when
+/// both worklists are empty.
+pub fn dispatchableCount() usize {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
+        var count: usize = 0;
+        for (method.entries) |entry| {
+            if (entry.transport == .stream) continue;
+            const ok = switch (entry.owner) {
+                inline else => |owner| dispatchable(owner, entry.name),
+            };
+            if (ok) count += 1;
+        }
+        return count;
+    }
+}
+
 const testing = std.testing;
 
 test "a frame answers while its call is running and refuses afterwards" {
@@ -262,6 +440,7 @@ test "a receiver is resolved through its table, and a stale id is refused" {
     defer selections.deinit();
     const bindings: adapters.Bindings = .{
         .allocator = testing.allocator,
+        .runtime = port.RuntimePort.quiet,
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -463,4 +642,234 @@ test "a frame is retired on the failing path too, which is the path that matters
         checkpoint.SinkWriteResult.contract_failed,
         sink.write_fn(sink.context, "after"),
     );
+}
+
+/// A Session whose one driven method records what it was given. The rest of
+/// the vtable is left undefined on purpose: a test that called one of those
+/// would crash rather than quietly pass, which is the behaviour wanted from a
+/// fixture that is deliberately partial.
+const FakeSession = struct {
+    model: []const u8 = "",
+    fail: bool = false,
+
+    fn setModel(context: ?*anyopaque, model: []const u8) contract.surface.Error!void {
+        const self: *FakeSession = @ptrCast(@alignCast(context.?));
+        if (self.fail) return error.SessionPoisoned;
+        self.model = model;
+    }
+
+    fn port(self: *FakeSession, vtable: *port_namespace.SessionPort.VTable) port_namespace.SessionPort {
+        vtable.set_model = setModel;
+        return .{ .context = self, .vtable = vtable };
+    }
+};
+
+const port_namespace = port;
+
+const Harness = struct {
+    sessions: handle_table.Table(port.SessionPort),
+    runs: handle_table.Table(adapters.BegunRun),
+    leases: handle_table.Table(@import("agent_catalog").Lease),
+    skill_restore: handle_table.Table(port.SkillRestoreInputs),
+    session_restore: handle_table.Table(port.SessionRestoreInputs),
+    selections: handle_table.Table(@import("agent_mcp_catalog").Selection),
+
+    fn init() !Harness {
+        return .{
+            .sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 2),
+            .runs = try handle_table.Table(adapters.BegunRun).init(testing.allocator, 2),
+            .leases = try handle_table.Table(@import("agent_catalog").Lease)
+                .init(testing.allocator, 2),
+            .skill_restore = try handle_table.Table(port.SkillRestoreInputs)
+                .init(testing.allocator, 2),
+            .session_restore = try handle_table.Table(port.SessionRestoreInputs)
+                .init(testing.allocator, 2),
+            .selections = try handle_table.Table(@import("agent_mcp_catalog").Selection)
+                .init(testing.allocator, 2),
+        };
+    }
+
+    fn deinit(self: *Harness) void {
+        self.sessions.deinit();
+        self.runs.deinit();
+        self.leases.deinit();
+        self.skill_restore.deinit();
+        self.session_restore.deinit();
+        self.selections.deinit();
+    }
+
+    fn bindings(self: *Harness) adapters.Bindings {
+        return .{
+            .allocator = testing.allocator,
+            .runtime = port.RuntimePort.quiet,
+            .sessions = &self.sessions,
+            .runs = &self.runs,
+            .leases = &self.leases,
+            .skill_restore = &self.skill_restore,
+            .session_restore = &self.session_restore,
+            .selections = &self.selections,
+        };
+    }
+
+    fn live(self: *Harness) usize {
+        var total: usize = 0;
+        for (adapters.liveCounts(self.bindings())) |entry| total += entry.live;
+        return total;
+    }
+};
+
+/// One `set_model` request, built the way the caller's stub will build it.
+fn setModelRequest(
+    arena: std.mem.Allocator,
+    receiver: handle_table.Id,
+    model: []const u8,
+    truncate: bool,
+) ![]u8 {
+    const entry = try method.find(method.codeOf(.session, "set_model"));
+    const Fn = @typeInfo(@FieldType(port.SessionPort.VTable, "set_model")).pointer.child;
+    const Arguments = wire_types.Request(Fn);
+    const arguments: Arguments = .{model};
+
+    const header = envelope.requestHeaderBytes(entry.owner);
+    const body = payload.encodedSize(Arguments, arguments);
+    const out = try arena.alloc(u8, header + body);
+    envelope.encodeRequestHeader(out[0..header], entry, receiver);
+    _ = payload.encode(Arguments, arguments, out[header..]);
+    return if (truncate) out[0 .. out.len - 1] else out;
+}
+
+test "a request is answered by the object it named" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var fake: FakeSession = .{};
+    var vtable: port.SessionPort.VTable = undefined;
+    var held = fake.port(&vtable);
+    const id = try harness.sessions.insert(&held);
+
+    const bytes = try setModelRequest(arena, id, "a-model", false);
+    const response = try invoke(arena, harness.bindings(), try classify(bytes));
+
+    // Success, and a method returning `Error!void` carries no payload.
+    switch (try envelope.decodeResponse(response)) {
+        .value => |value| try testing.expectEqual(@as(usize, 0), value.len),
+        .failure => return error.ExpectedValue,
+    }
+    try testing.expectEqualStrings("a-model", fake.model);
+
+    _ = harness.sessions.take(id);
+}
+
+test "the method's own failure is an answer, not the dispatcher's failure" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var fake: FakeSession = .{ .fail = true };
+    var vtable: port.SessionPort.VTable = undefined;
+    var held = fake.port(&vtable);
+    const id = try harness.sessions.insert(&held);
+
+    const bytes = try setModelRequest(arena, id, "a-model", false);
+    const response = try invoke(arena, harness.bindings(), try classify(bytes));
+    switch (try envelope.decodeResponse(response)) {
+        .value => return error.ExpectedFailure,
+        .failure => |err| try testing.expectEqual(
+            @as(anyerror, error.SessionPoisoned),
+            err,
+        ),
+    }
+    // The table is untouched: a refused call releases nothing.
+    try testing.expectEqual(@as(usize, 1), harness.live());
+    _ = harness.sessions.take(id);
+}
+
+test "each refusal leaves nothing behind" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var fake: FakeSession = .{};
+    var vtable: port.SessionPort.VTable = undefined;
+    var held = fake.port(&vtable);
+    const id = try harness.sessions.insert(&held);
+    const baseline = harness.live();
+
+    // A payload that stops short. Refused before anything is resolved, which
+    // is the order: the cheapest refusals first.
+    {
+        const bytes = try setModelRequest(arena, id, "a-model", true);
+        try testing.expectError(
+            error.Truncated,
+            invoke(arena, harness.bindings(), try classify(bytes)),
+        );
+        try testing.expectEqual(baseline, harness.live());
+        try testing.expectEqualStrings("", fake.model);
+    }
+
+    // A receiver that no longer exists. The call is not attempted.
+    {
+        const stale = handle_table.Id{ .slot = id.slot, .generation = id.generation + 4 };
+        const bytes = try setModelRequest(arena, stale, "a-model", false);
+        try testing.expectError(
+            error.UnknownHandle,
+            invoke(arena, harness.bindings(), try classify(bytes)),
+        );
+        try testing.expectEqual(baseline, harness.live());
+        try testing.expectEqualStrings("", fake.model);
+    }
+
+    // A method this build cannot answer end to end. A statement about the
+    // build, and it still leaves nothing behind.
+    {
+        const entry = try method.find(method.codeOf(.session, "export_checkpoint"));
+        const header = envelope.requestHeaderBytes(entry.owner);
+        const bytes = try arena.alloc(u8, header);
+        envelope.encodeRequestHeader(bytes, entry, id);
+        try testing.expectError(
+            error.NotDispatchable,
+            invoke(arena, harness.bindings(), try classify(bytes)),
+        );
+        try testing.expectEqual(baseline, harness.live());
+    }
+
+    // A stream method is not a call at all.
+    {
+        const entry = try method.find(method.codeOf(.runtime, "take_event"));
+        const header = envelope.requestHeaderBytes(entry.owner);
+        const bytes = try arena.alloc(u8, header);
+        envelope.encodeRequestHeader(bytes, entry, .none);
+        try testing.expectError(
+            error.NotACall,
+            invoke(arena, harness.bindings(), try classify(bytes)),
+        );
+        try testing.expectEqual(baseline, harness.live());
+    }
+
+    // And a number this build does not register never becomes a request.
+    {
+        var unknown: [envelope.header_bytes]u8 = undefined;
+        std.mem.writeInt(u16, &unknown, 0x7abc, .little);
+        try testing.expectError(error.UnknownMethod, classify(&unknown));
+        try testing.expectEqual(baseline, harness.live());
+    }
+
+    _ = harness.sessions.take(id);
+}
+
+test "how much of the surface this build answers is counted, not claimed" {
+    const answered = comptime dispatchableCount();
+    const callable = comptime adapters.callableCount();
+    // Not all of it yet, and the gap is the two worklists rather than a
+    // number kept here: arguments still owed, results still owed.
+    try testing.expect(answered < callable);
+    try testing.expectEqual(@as(usize, 50), callable);
+    try testing.expectEqual(@as(usize, 34), answered);
 }

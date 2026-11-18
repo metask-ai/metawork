@@ -72,8 +72,10 @@ const checkpoint = @import("agent_checkpoint");
 pub const BegunRun = struct {
     /// The Session the port named, as this half named it.
     context: ?*anyopaque,
-    /// The one method `RunPort.VTable` has.
-    execute: *const fn (?*anyopaque, u64, u64) control.TerminalResult,
+    /// The Run's vtable, kept as a vtable rather than as its one function
+    /// pointer so that every owner is reached by the same `@field(vtable,
+    /// name)` and the dispatcher needs no case for this one.
+    run_vtable: *const port.RunPort.VTable,
     run_id: u64,
     generation: u64,
     /// The control handle every retain and release goes through.
@@ -90,7 +92,7 @@ pub const BegunRun = struct {
     pub fn fromPort(value: port.RunPort) BegunRun {
         return .{
             .context = value.context,
-            .execute = value.vtable.execute,
+            .run_vtable = value.vtable,
             .run_id = value.run_id,
             .generation = value.generation,
             .control_handle = value.base_lease.control,
@@ -139,6 +141,9 @@ pub const Bindings = struct {
     /// encoded before the call returns, so nothing allocated here outlives
     /// the dispatch.
     allocator: std.mem.Allocator,
+    /// The one Runtime. A `runtime` method names no receiver because there is
+    /// nothing to choose between, so this is where its calls land.
+    runtime: port.RuntimePort,
     /// Sessions this half holds for the other half to name.
     sessions: *handle_table.Table(port.SessionPort),
     /// Runs, which also answer their control handle: in process both are the
@@ -537,6 +542,7 @@ test "a stale handle resolves to a refusal, never to the slot's next occupant" {
     var second: port.SessionPort = .{ .context = null, .vtable = undefined };
     const bindings: Bindings = .{
         .allocator = testing.allocator,
+        .runtime = port.RuntimePort.quiet,
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -645,6 +651,7 @@ test "a type absent from the chain is owed, not assumed trivial" {
 fn testBindings() Bindings {
     return .{
         .allocator = testing.allocator,
+        .runtime = port.RuntimePort.quiet,
         .sessions = undefined,
         .runs = undefined,
         .leases = undefined,
@@ -669,6 +676,7 @@ test "an options mirror is read back with its handle resolved and its absence ke
     defer selections.deinit();
     const bindings: Bindings = .{
         .allocator = testing.allocator,
+        .runtime = port.RuntimePort.quiet,
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -1020,6 +1028,7 @@ test "a capacity refusal can name the table it came from" {
     defer selections.deinit();
     const bindings: Bindings = .{
         .allocator = testing.allocator,
+        .runtime = port.RuntimePort.quiet,
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -1162,6 +1171,7 @@ const Tables = struct {
     fn bindings(self: *Tables) Bindings {
         return .{
             .allocator = testing.allocator,
+            .runtime = port.RuntimePort.quiet,
             .sessions = &self.sessions,
             .runs = &self.runs,
             .leases = &self.leases,
