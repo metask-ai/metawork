@@ -198,18 +198,23 @@ try {
         }
         if (-not $visible) { throw 'The default Office application did not display the private fixture' }
         $savedOriginal = $false
-        foreach ($progId in @('KWPS.Application', 'WPS.Application', 'Word.Application')) {
-            try { $office = [Runtime.InteropServices.Marshal]::GetActiveObject($progId) } catch { continue }
-            foreach ($document in $office.Documents) {
-                if (-not [string]::Equals($document.FullName, $source, [StringComparison]::OrdinalIgnoreCase)) { continue }
-                $document.Content.InsertAfter(' Saved by MetaWork Office acceptance.')
-                $document.Save()
-                $savedOriginal = (Get-FixtureHash $source) -ne $originalHash
-                $document.Close()
-                break
+        $saveDeadline = [DateTime]::UtcNow.AddSeconds(8)
+        do {
+            foreach ($progId in @('KWPS.Application', 'WPS.Application', 'Word.Application')) {
+                try { $office = [Runtime.InteropServices.Marshal]::GetActiveObject($progId) } catch { continue }
+                foreach ($document in $office.Documents) {
+                    if (-not [string]::Equals($document.FullName, $source, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                    $document.Content.InsertAfter(' Saved by MetaWork Office acceptance.')
+                    $document.Save()
+                    $savedOriginal = (Get-FixtureHash $source) -ne $originalHash
+                    $document.Close()
+                    if (-not $savedOriginal) { throw 'Saving did not change the original fixture' }
+                    break
+                }
+                if ($savedOriginal) { break }
             }
-            if ($savedOriginal) { break }
-        }
+            if (-not $savedOriginal) { Start-Sleep -Milliseconds 250 }
+        } while (-not $savedOriginal -and [DateTime]::UtcNow -lt $saveDeadline)
         $success = $true
         @{ mode=$Mode; openedOriginal=$visible; savedOriginal=$savedOriginal } | ConvertTo-Json -Compress
         return

@@ -541,9 +541,9 @@ export async function runOutputDeliveryVertical({
         trigger: () => expectOpen(word, "opened"),
       });
       assert.equal(evidence.office.openedOriginal, true);
+      assert.equal(evidence.office.savedOriginal, true);
       delete evidence.officeStage;
-      if (evidence.office.savedOriginal)
-        assert.notDeepEqual(await readFile(original), wordPackage);
+      assert.notDeepEqual(await readFile(original), wordPackage);
     }
     const screenshot = await webview.send("Page.captureScreenshot", {
       format: "png",
