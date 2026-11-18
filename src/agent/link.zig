@@ -34,6 +34,7 @@ pub const wire_types = @import("link/wire_types.zig");
 pub const envelope = @import("link/envelope.zig");
 pub const reverse = @import("link/reverse.zig");
 pub const channel = @import("link/channel.zig");
+pub const unreachability = @import("link/unreachability.zig");
 
 pub const revision = handshake.revision;
 pub const Role = handshake.Role;
@@ -174,6 +175,7 @@ test {
     _ = envelope;
     _ = reverse;
     _ = channel;
+    _ = unreachability;
 }
 
 test "the two halves of one build accept each other" {

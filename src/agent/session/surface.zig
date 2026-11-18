@@ -93,6 +93,11 @@ pub const CloseOutcome = union(enum) {
         err: Error,
         session_disposition: SessionDisposition,
     },
+
+    /// A close that could not reach the Session is a failure, never a close:
+    /// `closed` would tell the caller its Session is gone when it may still
+    /// be running.
+    pub const link_unreachable: std.meta.Tag(@This()) = .failure;
 };
 
 pub const WorkspaceTrust = union(enum) {

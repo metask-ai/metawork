@@ -71,6 +71,10 @@ pub const SessionRestoreRoute = struct {
 pub const BeginRunOutcome = union(enum) {
     run: RunPort,
     failure: surface.BeginRunFailure,
+
+    /// A Run that could not be begun because the link is gone is a failure.
+    /// Handing back a `run` would give the caller a Run nothing is executing.
+    pub const link_unreachable: std.meta.Tag(@This()) = .failure;
 };
 
 /// A Run handed to its executor. `execute` blocks until the Run reaches a
@@ -382,7 +386,16 @@ pub const RuntimePort = struct {
     context: ?*anyopaque,
     vtable: *const VTable,
 
-    pub const RestoreAdmission = enum { available, capacity_reached, mcp_busy, unavailable };
+    pub const RestoreAdmission = enum {
+        available,
+        capacity_reached,
+        mcp_busy,
+        unavailable,
+
+        /// Admitting a restore we cannot reach would hand the caller a
+        /// Session that is not there, so the existing refusal is the answer.
+        pub const link_unreachable: @This() = .unavailable;
+    };
 
     pub const VTable = struct {
         create_session_route: *const fn (?*anyopaque, surface.SessionOpenOptions) Allocating!SessionRoute,

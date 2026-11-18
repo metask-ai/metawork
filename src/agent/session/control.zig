@@ -162,6 +162,12 @@ pub const InputSubmission = union(enum) {
     rejected: InputRejection,
     /// A dependency contract failure cannot be reported as a refusal.
     unknown,
+
+    /// The answer when the dependency cannot be reached at all. Named here
+    /// rather than left to the caller so that the port guard in
+    /// `src/agent/link/unreachability.zig` checks a property instead of a
+    /// spelling, and so a forwarding stub has one place to read it from.
+    pub const link_unreachable: std.meta.Tag(@This()) = .unknown;
 };
 
 /// Correlation facts only. No text is retained or scheduled by this ledger.
@@ -377,6 +383,10 @@ pub const EventReadyNotification = enum {
     scheduled,
     already_pending,
     unavailable,
+
+    /// There is no consumer to schedule when the link is gone, so the answer
+    /// the vocabulary already has is the right one.
+    pub const link_unreachable: @This() = .unavailable;
 };
 
 pub const EventReadyNotifier = struct {
