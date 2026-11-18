@@ -166,7 +166,7 @@ pub fn resolveReceiver(
 
 pub const Receiver = union(enum) {
     session: port.SessionPort,
-    run: *port.RunPort,
+    run: *adapters.BegunRun,
 };
 
 const testing = std.testing;
@@ -250,7 +250,7 @@ test "a request is classified by the registry, and an unregistered one is refuse
 test "a receiver is resolved through its table, and a stale id is refused" {
     var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
     defer sessions.deinit();
-    var runs = try handle_table.Table(port.RunPort).init(testing.allocator, 1);
+    var runs = try handle_table.Table(adapters.BegunRun).init(testing.allocator, 1);
     defer runs.deinit();
     var leases = try handle_table.Table(@import("agent_catalog").Lease).init(testing.allocator, 1);
     defer leases.deinit();

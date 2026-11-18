@@ -29,10 +29,107 @@ const wire_types = @import("wire_types.zig");
 
 const port = contract.port;
 const surface = contract.surface;
+const control = contract.control;
 const shapes = @import("shapes.zig");
 const catalog = @import("agent_catalog");
 const mcp_catalog = @import("agent_mcp_catalog");
 const checkpoint = @import("agent_checkpoint");
+
+/// What the execution half keeps for one begun Run.
+///
+/// Deliberately not a `port.RunPort`. Of that type's six fields, the context
+/// and the vtable *are* this half -- it does not need a port pointing at its
+/// own implementation -- the Run's identity travels as ordinary arguments on
+/// the calls that need it, and `executed` is the caller's bookkeeping about
+/// the caller's own value: its stub holds that flag and asserts on it, and no
+/// part of it crosses. If anything ever has to ask the other half whether a
+/// Run was executed, that is a local invariant turned into a distributed one.
+///
+/// Holding the whole port would have been worse than redundant.
+/// `RunPort.deinit` releases the base lease, and the caller's own `deinit`
+/// already forwards a release of its own; running both decrements one
+/// reference twice, and `SessionControlBlock.lifetime` is a real count that
+/// asserts against exactly that.
+///
+/// So what is held is the one thing that is not bookkeeping: the references
+/// that keep the Session alive while the Run runs, and a tally of how many
+/// are outstanding.
+///
+/// ## Why the tally is not avoidable
+///
+/// In process the Run's base lease is just another reference -- the control
+/// block counts, it does not distinguish. Across the link the same holds: a
+/// release request decrements some reference, and since they are fungible,
+/// decrementing "some" is decrementing "the base one".
+///
+/// What that costs is the ability to tell, from a release request alone,
+/// whether the caller has finished with the Run. So closure cannot simply
+/// release the base lease: it would be releasing a reference some earlier
+/// request may already have taken. The tally answers it exactly -- one for
+/// the Run itself, one more for each retain granted, one fewer for each
+/// release performed -- and closure releases what is left. Guessing instead
+/// is a double release or a Session that never closes, and both are silent.
+pub const BegunRun = struct {
+    /// The Session the port named, as this half named it.
+    context: ?*anyopaque,
+    /// The one method `RunPort.VTable` has.
+    execute: *const fn (?*anyopaque, u64, u64) control.TerminalResult,
+    run_id: u64,
+    generation: u64,
+    /// The control handle every retain and release goes through.
+    control_handle: port.RunControl,
+    /// References this half holds on the Session for this Run. Starts at one:
+    /// the Run's own. Atomic because the requests that move it need not
+    /// arrive on one thread, and a lost increment here is a Session released
+    /// while a call is still inside it.
+    outstanding: std.atomic.Value(u32) = .init(1),
+
+    /// Takes the port apart. `port_impl.runPort` takes the Run's base lease
+    /// with it, so the value handed in must not be used afterwards -- which
+    /// is why this consumes it rather than borrowing.
+    pub fn fromPort(value: port.RunPort) BegunRun {
+        return .{
+            .context = value.context,
+            .execute = value.vtable.execute,
+            .run_id = value.run_id,
+            .generation = value.generation,
+            .control_handle = value.base_lease.control,
+        };
+    }
+
+    /// A retain the caller asked for. The tally moves only when the retain
+    /// actually happened, so a refused one cannot leave a reference behind.
+    pub fn retain(self: *BegunRun) bool {
+        if (!self.control_handle.vtable.?.try_retain(self.control_handle.context)) return false;
+        _ = self.outstanding.fetchAdd(1, .acq_rel);
+        return true;
+    }
+
+    /// A release the caller asked for.
+    pub fn release(self: *BegunRun) void {
+        const previous = self.outstanding.fetchSub(1, .acq_rel);
+        std.debug.assert(previous > 0);
+        self.control_handle.vtable.?.release(self.control_handle.context);
+    }
+
+    /// Everything the caller never released, because it can no longer ask.
+    /// Called once, by closure draining this Run's entry.
+    pub fn releaseOutstanding(self: *BegunRun) u32 {
+        const remaining = self.outstanding.swap(0, .acq_rel);
+        var index: u32 = 0;
+        while (index < remaining) : (index += 1) {
+            self.control_handle.vtable.?.release(self.control_handle.context);
+        }
+        return remaining;
+    }
+
+    /// Whether a request names this Run. The identity travels as arguments,
+    /// so it is checked here rather than trusted: a request naming another
+    /// Run must not be executed as this one.
+    pub fn names(self: *const BegunRun, run_id: u64, generation: u64) bool {
+        return self.run_id == run_id and self.generation == generation;
+    }
+};
 
 /// The execution half's own state, which is what makes an argument whole
 /// again. A wire value plus these is a port value; a wire value alone is not.
@@ -46,7 +143,7 @@ pub const Bindings = struct {
     sessions: *handle_table.Table(port.SessionPort),
     /// Runs, which also answer their control handle: in process both are the
     /// Session's control block, so `envelope.Receiver.run` names one entry.
-    runs: *handle_table.Table(port.RunPort),
+    runs: *handle_table.Table(BegunRun),
     /// Skill catalog leases.
     leases: *handle_table.Table(catalog.Lease),
     /// Captured skill capabilities. A separate table from the leases because
@@ -425,7 +522,7 @@ test "an allocator is supplied locally rather than carried" {
 test "a stale handle resolves to a refusal, never to the slot's next occupant" {
     var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
     defer sessions.deinit();
-    var runs = try handle_table.Table(port.RunPort).init(testing.allocator, 1);
+    var runs = try handle_table.Table(BegunRun).init(testing.allocator, 1);
     defer runs.deinit();
     var leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 1);
     defer leases.deinit();
@@ -560,7 +657,7 @@ fn testBindings() Bindings {
 test "an options mirror is read back with its handle resolved and its absence kept" {
     var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
     defer sessions.deinit();
-    var runs = try handle_table.Table(port.RunPort).init(testing.allocator, 1);
+    var runs = try handle_table.Table(BegunRun).init(testing.allocator, 1);
     defer runs.deinit();
     var leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 2);
     defer leases.deinit();
@@ -805,7 +902,7 @@ pub const Reclaim = struct {
 
 pub const reclamation = [_]Reclaim{
     .{ .field = "sessions", .release_method = "release_closed_session", .bound_to = .session },
-    .{ .field = "runs", .release_method = "", .bound_to = .run },
+    .{ .field = "runs", .release_method = "release", .bound_to = .run },
     .{ .field = "leases", .release_method = "release_skill_catalog", .bound_to = .caller_hold },
     .{
         .field = "skill_restore",
@@ -911,7 +1008,7 @@ test "every handle table says what reclaims its entries, and only in two ways" {
 test "a capacity refusal can name the table it came from" {
     var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
     defer sessions.deinit();
-    var runs = try handle_table.Table(port.RunPort).init(testing.allocator, 2);
+    var runs = try handle_table.Table(BegunRun).init(testing.allocator, 2);
     defer runs.deinit();
     var leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 3);
     defer leases.deinit();
@@ -1019,7 +1116,7 @@ const ReleaseLog = struct {
     fn release(self: *ReleaseLog, comptime T: type, value: *T) void {
         _ = value;
         if (T == port.SessionPort) self.sessions += 1;
-        if (T == port.RunPort) self.runs += 1;
+        if (T == BegunRun) self.runs += 1;
         if (T == catalog.Lease) self.leases += 1;
         if (T == port.SkillRestoreInputs) self.skill_restore += 1;
         if (T == port.SessionRestoreInputs) self.session_restore += 1;
@@ -1034,7 +1131,7 @@ const ReleaseLog = struct {
 
 const Tables = struct {
     sessions: handle_table.Table(port.SessionPort),
-    runs: handle_table.Table(port.RunPort),
+    runs: handle_table.Table(BegunRun),
     leases: handle_table.Table(catalog.Lease),
     skill_restore: handle_table.Table(port.SkillRestoreInputs),
     session_restore: handle_table.Table(port.SessionRestoreInputs),
@@ -1043,7 +1140,7 @@ const Tables = struct {
     fn init() !Tables {
         return .{
             .sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 4),
-            .runs = try handle_table.Table(port.RunPort).init(testing.allocator, 4),
+            .runs = try handle_table.Table(BegunRun).init(testing.allocator, 4),
             .leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 4),
             .skill_restore = try handle_table.Table(port.SkillRestoreInputs)
                 .init(testing.allocator, 4),
@@ -1092,7 +1189,7 @@ const Tables = struct {
 
 const Storage = struct {
     session: port.SessionPort = .{ .context = null, .vtable = undefined },
-    run: port.RunPort = undefined,
+    run: BegunRun = undefined,
     lease: [8]u8 align(8) = @splat(0),
     skill: [8]u8 align(8) = @splat(0),
     session_inputs: port.SessionRestoreInputs = undefined,
@@ -1154,4 +1251,137 @@ test "the link ending leaves no table holding anything" {
     // first pass.
     var second: ReleaseLog = .{};
     try testing.expectEqual(@as(usize, 0), drainEverything(tables.bindings(), &second));
+}
+
+/// A control handle that counts, so the accounting can be asserted rather
+/// than reasoned about.
+const CountingControl = struct {
+    retains: u32 = 0,
+    releases: u32 = 0,
+    refuse: bool = false,
+
+    fn tryRetain(context: ?*anyopaque) bool {
+        const self: *CountingControl = @ptrCast(@alignCast(context.?));
+        if (self.refuse) return false;
+        self.retains += 1;
+        return true;
+    }
+
+    fn release(context: ?*anyopaque) void {
+        const self: *CountingControl = @ptrCast(@alignCast(context.?));
+        self.releases += 1;
+    }
+
+    fn submitInput(
+        _: ?*anyopaque,
+        _: u64,
+        _: u64,
+        _: u64,
+        _: []const u8,
+    ) control.InputSubmission {
+        return @unionInit(
+            control.InputSubmission,
+            @tagName(control.InputSubmission.link_unreachable),
+            {},
+        );
+    }
+
+    fn inputObservation(_: ?*anyopaque, _: u64, _: u64) ?control.InputObservation {
+        return null;
+    }
+
+    fn requestTermination(
+        _: ?*anyopaque,
+        _: u64,
+        _: u64,
+        _: control.TerminationSignal,
+    ) control.TerminationRequestResult {
+        return control.TerminationRequestResult.link_unreachable;
+    }
+
+    const vtable: port.RunControl.VTable = .{
+        .try_retain = tryRetain,
+        .release = release,
+        .submit_input = submitInput,
+        .input_observation = inputObservation,
+        .request_termination = requestTermination,
+    };
+
+    fn executed(_: ?*anyopaque, _: u64, _: u64) control.TerminalResult {
+        unreachable;
+    }
+
+    fn begunRun(self: *CountingControl) BegunRun {
+        // Built the way `fromPort` builds it, through a port value, so the
+        // test exercises the taking-apart rather than hand-filling the parts.
+        const handle: port.RunControl = .{
+            .context = self,
+            .vtable = &vtable,
+            .run_id = 11,
+            .generation = 4,
+        };
+        return BegunRun.fromPort(.{
+            .context = self,
+            .vtable = &run_vtable,
+            .run_id = 11,
+            .generation = 4,
+            .base_lease = .{ .control = handle },
+        });
+    }
+
+    const run_vtable: port.RunPort.VTable = .{ .execute = executed };
+};
+
+test "every reference this half holds for a Run is released exactly once" {
+    var counting: CountingControl = .{};
+    var run = counting.begunRun();
+
+    // The Run's own reference is held without a retain crossing: it exists
+    // because the Run does.
+    try testing.expectEqual(@as(u32, 1), run.outstanding.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), counting.retains);
+
+    // Two retains the caller asked for, one release it asked for.
+    try testing.expect(run.retain());
+    try testing.expect(run.retain());
+    try testing.expectEqual(@as(u32, 3), run.outstanding.load(.acquire));
+    run.release();
+    try testing.expectEqual(@as(u32, 2), run.outstanding.load(.acquire));
+
+    // The link ends. What is left is released, and the totals balance: three
+    // references held (one for the Run, two retained), three released.
+    try testing.expectEqual(@as(u32, 2), run.releaseOutstanding());
+    try testing.expectEqual(@as(u32, 2), counting.retains);
+    try testing.expectEqual(@as(u32, 3), counting.releases);
+    try testing.expectEqual(counting.retains + 1, counting.releases);
+
+    // Draining twice releases nothing twice, which is the failure a guess
+    // would produce here.
+    try testing.expectEqual(@as(u32, 0), run.releaseOutstanding());
+    try testing.expectEqual(@as(u32, 3), counting.releases);
+}
+
+test "a refused retain leaves no reference behind" {
+    var counting: CountingControl = .{ .refuse = true };
+    var run = counting.begunRun();
+
+    try testing.expect(!run.retain());
+    // The tally did not move, so closure will not release a reference the
+    // Session never gave out.
+    try testing.expectEqual(@as(u32, 1), run.outstanding.load(.acquire));
+    try testing.expectEqual(@as(u32, 1), run.releaseOutstanding());
+    try testing.expectEqual(@as(u32, 1), counting.releases);
+}
+
+test "a request naming another Run is not executed as this one" {
+    var counting: CountingControl = .{};
+    var run = counting.begunRun();
+    defer _ = run.releaseOutstanding();
+
+    // The identity travels as ordinary arguments, so it is checked against
+    // the entry rather than trusted. `execute` here would panic if reached,
+    // which is the point: a mismatch must not get that far.
+    try testing.expect(run.names(11, 4));
+    try testing.expect(!run.names(11, 5));
+    try testing.expect(!run.names(12, 4));
 }
