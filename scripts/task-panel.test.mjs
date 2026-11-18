@@ -5514,7 +5514,7 @@ test("Markdown preview renders documents, switches to source, and preserves mode
   assert.ok(screen.getByRole("heading", { name: "Updated" }));
 });
 
-test("HTML renders in a sandbox and retains its inert highlighted source", async () => {
+test("HTML and scripts appear only as inert source in the task panel", async () => {
   for (const path of ["notes.txt", "script.js", "page.html", "page.HTM"]) {
     const content =
       '<h1>Page</h1><script>window.zero.invoke("attack")</script><img src="https://example.com/track.png">';
@@ -5529,16 +5529,7 @@ test("HTML renders in a sandbox and retains its inert highlighted source", async
       },
     };
     render(filePreviewElement(state));
-    if (/\.html?$/i.test(path)) {
-      const frame = document.querySelector("iframe");
-      assert.equal(frame?.getAttribute("sandbox"), "");
-      assert.match(frame?.getAttribute("srcdoc"), /<h1>Page<\/h1>/);
-      assert.doesNotMatch(frame?.getAttribute("srcdoc"), /<script|https:/);
-      assert.equal(document.querySelector("h1, script, img"), null);
-      fireEvent.click(screen.getByRole("tab", { name: "Source" }));
-    } else {
-      assert.equal(screen.queryByRole("tablist"), null);
-    }
+    assert.equal(screen.queryByRole("tablist"), null);
     if (path === "notes.txt") {
       await act(async () => Promise.resolve());
       assert.equal(document.querySelector(".token"), null);

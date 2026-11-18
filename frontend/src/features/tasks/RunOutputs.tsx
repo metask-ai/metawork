@@ -31,6 +31,7 @@ export function RunOutputs({
   onPrepareEdit,
   onPreview,
   officeOpen = false,
+  browserOpen = false,
   layout = "outputs",
 }: {
   outputs: readonly (DeliveredOutputView & { runId?: string })[];
@@ -41,6 +42,7 @@ export function RunOutputs({
   onPrepareEdit?: OutputEditHandler;
   onPreview?: OutputPreview;
   officeOpen?: boolean;
+  browserOpen?: boolean;
   layout?: "outputs" | "file-actions" | "conversation";
 }) {
   const { t } = useI18n();
@@ -59,6 +61,7 @@ export function RunOutputs({
           onPrepareEdit={onPrepareEdit}
           onPreview={onPreview}
           officeOpen={officeOpen}
+          browserOpen={browserOpen}
           actionsOnly={actionsOnly}
         />
       ))}
@@ -81,6 +84,7 @@ function OutputRow({
   onPrepareEdit,
   onPreview,
   officeOpen,
+  browserOpen,
   actionsOnly,
 }: {
   output: DeliveredOutputView;
@@ -91,9 +95,11 @@ function OutputRow({
   onPrepareEdit?: OutputEditHandler;
   onPreview?: OutputPreview;
   officeOpen: boolean;
+  browserOpen: boolean;
   actionsOnly: boolean;
 }) {
   const { locale, t } = useI18n();
+  const html = /\.html?$/i.test(output.displayPath);
   const nameId = useId();
   const [pending, setPending] = useState<RowAction | null>(null);
   const [cancelling, setCancelling] = useState(false);
@@ -216,8 +222,9 @@ function OutputRow({
         {onAction && taskId && runId && (
           <div className="run-output-actions">
             {!actionsOnly &&
-              officeOpen &&
-              /\.(?:docx|xlsx|pptx)$/i.test(output.displayPath) && (
+              ((officeOpen &&
+                /\.(?:docx|xlsx|pptx)$/i.test(output.displayPath)) ||
+                (browserOpen && html)) && (
                 <Button
                   type="button"
                   variant="secondary"
@@ -226,25 +233,23 @@ function OutputRow({
                   disabled={disabled || pending !== null || output.redacted}
                   onClick={() => void perform("open")}
                 >
-                  {t("outputs.open")}
+                  {t(html ? "outputs.open_browser" : "outputs.open")}
                 </Button>
               )}
-            {!actionsOnly &&
-              onPreview &&
-              /\.html?$/i.test(output.displayPath) && (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  aria-describedby={nameId}
-                  disabled={disabled || pending !== null || output.redacted}
-                  onClick={(event) =>
-                    void perform("preview", event.currentTarget)
-                  }
-                >
-                  {t("outputs.open_preview")}
-                </Button>
-              )}
+            {!actionsOnly && onPreview && html && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-describedby={nameId}
+                disabled={disabled || pending !== null || output.redacted}
+                onClick={(event) =>
+                  void perform("preview", event.currentTarget)
+                }
+              >
+                {t("outputs.view_source")}
+              </Button>
+            )}
             {!actionsOnly && (
               <Button
                 variant="ghost"

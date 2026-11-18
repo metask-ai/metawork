@@ -1,6 +1,8 @@
 import { fixtureModelSelection } from "./test-support/fixture-model-selection.mjs";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { crc32, deflateRawSync } from "node:zlib";
@@ -16,7 +18,14 @@ function officeWordFixture() {
     "[Content_Types].xml": `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="${documentType}"/></Types>`,
     "_rels/.rels":
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
-    "word/document.xml": `<w:document xmlns:w="${wordNamespace}"><w:body><w:p><w:r><w:t>MetaWork original fixture</w:t></w:r></w:p></w:body></w:document>`,
+    "word/document.xml": `<w:document xmlns:w="${wordNamespace}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>
+      <w:p><w:r><w:t>MetaWork original fixture</w:t></w:r></w:p>
+      <w:p><w:hyperlink r:id="rId1"><w:r><w:t>Example hyperlink</w:t></w:r></w:hyperlink></w:p>
+      <w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>
+      <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+    </w:body></w:document>`,
+    "word/_rels/document.xml.rels":
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid" TargetMode="External"/></Relationships>',
   };
   const local = [];
   const central = [];
@@ -54,6 +63,71 @@ function officeWordFixture() {
   return Buffer.concat([...local, ...central, end]);
 }
 
+// The opened local page reports its URL after loading a sibling stylesheet
+// and handling a click. The listener serves no Workspace files.
+async function prepareBrowserFixture(workspaceRoot, relative, poll) {
+  const token = randomUUID();
+  let observation;
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, "http://127.0.0.1");
+    if (url.pathname === "/" + token) {
+      observation = Object.fromEntries(url.searchParams);
+      observation.userAgent = request.headers["user-agent"];
+    }
+    response.writeHead(204).end();
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const stylesheet = token + ".css";
+  try {
+    await writeFile(
+      path.join(workspaceRoot, path.dirname(relative), stylesheet),
+      "h1 { color: rgb(1, 41, 81); }",
+    );
+  } catch (error) {
+    server.close();
+    throw error;
+  }
+  const endpoint = "http://127.0.0.1:" + server.address().port + "/" + token;
+  const content = `<!doctype html><title>MetaWork browser file</title><link rel="stylesheet" href="${stylesheet}">
+<h1>Static report from outputs</h1><button>Initial</button>
+<script>
+window.addEventListener("load", () => {
+  const button = document.querySelector("button");
+  button.addEventListener("click", () => { button.textContent = "Clicked"; });
+  button.click();
+  const params = new URLSearchParams({
+    href: location.href,
+    color: getComputedStyle(document.querySelector("h1")).color,
+    text: button.textContent,
+  });
+  new Image().src = ${JSON.stringify(endpoint)} + "?" + params;
+});
+</script>`;
+  return {
+    content,
+    observed: () => observation,
+    async verify() {
+      const result = await poll(
+        () => observation,
+        20_000,
+        "Browser rendering the Workspace original",
+      );
+      assert.equal(
+        fileURLToPath(result.href),
+        path.join(workspaceRoot, relative),
+      );
+      assert.equal(result.color, "rgb(1, 41, 81)");
+      assert.equal(result.text, "Clicked");
+      assert.match(result.userAgent, /\b(?:Chrome|Edg|Firefox|Safari)\//);
+      return result;
+    },
+    close: () => server.close(),
+  };
+}
+
 // Real App/Core/Renderer; only Provider replies are scripted. Drive the normal
 // Composer so a second snapshot reader cannot starve the window's one current
 // snapshot. Read verification snapshots only after the UI has settled.
@@ -87,6 +161,7 @@ export async function runOutputDeliveryVertical({
   };
   const labels = (key) => [enUS[key], zhCN[key]];
   let webview;
+  let browser;
   async function audit() {
     await webview.evaluate(`(() => {
       window.__outputInputs = []; window.__outputActions = [];
@@ -434,12 +509,12 @@ export async function runOutputDeliveryVertical({
     evidence.updatedExistingOutputId = output.id;
     await writeFile(source, bytes);
 
-    const html = "results/static.html";
+    const html = "results/hero 中文.html";
+    browser = await prepareBrowserFixture(workspaceRoot, html, poll);
     const page = await run("Create a static report", "OUTPUT_HTML_CREATED", [
       toolSse("html-write", "html-write", "Write", {
         file_path: path.join(workspaceRoot, html),
-        content:
-          "<!doctype html><h1>Static report from outputs</h1><table><tr><td>42</td></tr></table>",
+        content: browser.content,
       }),
       textSse("html-created", "OUTPUT_HTML_CREATED"),
     ]);
@@ -474,50 +549,84 @@ export async function runOutputDeliveryVertical({
     );
     assert.equal(htmlOutput.runId, page.id);
     await clickLabel(labels("outputs.view"));
-    await clickLabel(
-      labels("outputs.open_preview"),
-      `#task-panel-tabpanel [data-output-id="${htmlOutput.id}"] button`,
-    );
+    const htmlButtons = `#task-panel-tabpanel [data-output-id="${htmlOutput.id}"] button`;
+    await clickLabel(labels("outputs.view_source"), htmlButtons);
     await poll(
       () =>
         webview.evaluate(
-          `document.querySelector('iframe[sandbox=""]')?.getAttribute('srcdoc')?.includes('Static report from outputs')`,
+          `document.querySelector('.task-panel-code-source code')?.textContent === ${JSON.stringify(browser.content)} &&
+            !document.querySelector('#task-panel-tabpanel iframe, #task-panel-tabpanel h1, #task-panel-tabpanel script')`,
         ),
       15_000,
-      "HTML appears in the isolated preview frame",
+      "HTML appears as inert source",
     );
-    const preview = await webview.send("DOMSnapshot.captureSnapshot", {
-      computedStyles: [],
-    });
-    assert.ok(preview.strings.includes("about:srcdoc"));
-    assert.ok(preview.strings.includes("Static report from outputs"));
+    assert.equal(browser.observed(), undefined);
+    if (nativeOutputProbe) {
+      await clickLabel(labels("outputs.view"));
+      await clickLabel(labels("outputs.open_browser"), htmlButtons);
+      evidence.htmlBrowser = await browser.verify();
+      assert.equal(
+        await readFile(path.join(workspaceRoot, html), "utf8"),
+        browser.content,
+      );
+    }
     evidence.registeredHtmlOutput = htmlOutput.id;
     if (nativeOutputProbe) {
       evidence.officeStage = "registering";
-      const wordPath = `results/MetaWork Office original ${taskId}-${process.pid}.docx`;
-      const wrongPath = `results/MetaWork Office mismatch ${taskId}-${process.pid}.xlsx`;
+      const originalName = `results/MetaWork Office original ${taskId}-${process.pid}`;
+      const wordPath = originalName + ".docx";
       const original = path.join(workspaceRoot, wordPath);
       const wordPackage = officeWordFixture();
-      await writeFile(original, wordPackage);
-      await writeFile(path.join(workspaceRoot, wrongPath), wordPackage);
+      const cases = [
+        { relative: wordPath, bytes: wordPackage },
+        {
+          relative: originalName + "-sheet.XLSX",
+          bytes: await readFile(
+            new URL(
+              "../tests/fixtures/office/checked-summary.xlsx",
+              import.meta.url,
+            ),
+          ),
+        },
+        {
+          relative: originalName + "-slides.pptx",
+          bytes: await readFile(
+            new URL(
+              "../tests/fixtures/office/metaskoffice-20261030/bar-multi-labels-metaskoffice-roundtrip.pptx",
+              import.meta.url,
+            ),
+          ),
+        },
+        { relative: originalName + "-mismatch.xlsx", bytes: wordPackage },
+        {
+          relative: originalName + "-invalid.docx",
+          bytes: "Not an Office document",
+        },
+      ];
+      for (const fixture of cases) {
+        await writeFile(
+          path.join(workspaceRoot, fixture.relative),
+          fixture.bytes,
+        );
+      }
       const officeRun = await run(
-        "Deliver the Office document",
+        "Deliver the Office documents",
         "OUTPUT_OFFICE_READY",
         [
-          toolSse("office-deliver", "office-deliver", "DeliverFile", {
-            path: wordPath,
-          }),
-          toolSse("office-mismatch", "office-mismatch", "DeliverFile", {
-            path: wrongPath,
-          }),
+          ...cases.map(({ relative }, index) =>
+            toolSse(
+              `${index}-office-deliver`,
+              `${index}-office-deliver`,
+              "DeliverFile",
+              { path: relative },
+            ),
+          ),
           textSse("office-ready", "OUTPUT_OFFICE_READY"),
         ],
       );
-      const word = officeRun.outputs.find(
-        (record) => record.displayPath === wordPath,
-      );
-      const mismatch = officeRun.outputs.find(
-        (record) => record.displayPath === wrongPath,
+      const [word, sheet, slides, mismatch, invalid] = cases.map(
+        ({ relative }) =>
+          officeRun.outputs.find((record) => record.displayPath === relative),
       );
       evidence.officeStage = "rejecting_mismatch";
       const officeRow = (record) => `[data-output-id="${record.id}"]`;
@@ -534,6 +643,7 @@ export async function runOutputDeliveryVertical({
         );
       };
       await expectOpen(mismatch, "restricted");
+      await expectOpen(invalid, "restricted");
       evidence.officeStage = "opening_original";
       evidence.office = await nativeOutputProbe({
         mode: "office",
@@ -542,8 +652,52 @@ export async function runOutputDeliveryVertical({
       });
       assert.equal(evidence.office.openedOriginal, true);
       assert.equal(evidence.office.savedOriginal, true);
+      const savedBytes = await readFile(original);
+      assert.notDeepEqual(savedBytes, wordPackage);
+      evidence.officeStage = "opening_workbook_and_slides";
+      for (const record of [sheet, slides]) {
+        const source = path.join(workspaceRoot, record.displayPath);
+        const result = await nativeOutputProbe({
+          mode: "office-view",
+          source,
+          trigger: () => expectOpen(record, "opened"),
+        });
+        assert.equal(result.openedOriginal, true);
+      }
+      evidence.office.openedWorkbookAndSlides = true;
+      evidence.officeStage = "working_from_saved_original";
+      await clickLabel(labels("outputs.edit"), `${officeRow(word)} button`);
+      await poll(
+        () =>
+          webview.evaluate(
+            `document.querySelector('.composer-shell textarea')?.value.includes(${JSON.stringify(wordPath)})`,
+          ),
+        10_000,
+        "The Office edit draft references the Workspace original",
+      );
+      await run(" Verify the saved document.", "OUTPUT_OFFICE_SAVED_BYTES", [
+        toolSse("office-saved", "office-saved", "DeliverFile", {
+          path: wordPath,
+        }),
+        (payload) => {
+          const blocks = payload.messages.at(-1).content;
+          const result = blocks.find(
+            (block) => block.tool_use_id === "office-saved",
+          );
+          assert.equal(result?.is_error ?? false, false);
+          const content =
+            typeof result.content === "string"
+              ? result.content
+              : result.content.map((block) => block.text ?? "").join("");
+          assert.equal(
+            JSON.parse(content).sha256,
+            createHash("sha256").update(savedBytes).digest("hex"),
+          );
+          return textSse("office-saved-verified", "OUTPUT_OFFICE_SAVED_BYTES");
+        },
+      ]);
+      evidence.office.nextTurnReadSavedOriginal = true;
       delete evidence.officeStage;
-      assert.notDeepEqual(await readFile(original), wordPackage);
     }
     const screenshot = await webview.send("Page.captureScreenshot", {
       format: "png",
@@ -605,7 +759,79 @@ export async function runOutputDeliveryVertical({
     );
     throw error;
   } finally {
+    browser?.close();
     webview?.close();
+  }
+}
+
+// macOS automation exercises the real Bridge/Host and observes the default
+// browser; the Windows vertical also drives the Renderer buttons directly.
+export async function runOutputBrowserHostProbe({
+  created,
+  workspaceRoot,
+  invoke,
+  snapshot,
+  poll,
+  provider,
+  toolSse,
+  textSse,
+}) {
+  await invoke("metawork.tasks.rename", {
+    taskId: created.taskId,
+    title: "HTML browser fixture",
+  });
+  const relative = "results/hero 中文.HTM";
+  await mkdir(path.join(workspaceRoot, "results"), { recursive: true });
+  const browser = await prepareBrowserFixture(workspaceRoot, relative, poll);
+  try {
+    await writeFile(path.join(workspaceRoot, relative), browser.content, {
+      flag: "wx",
+    });
+    provider.enqueue(
+      toolSse("html-delivery", "html-delivery", "DeliverFile", {
+        path: relative,
+      }),
+      textSse("html-delivered", "HTML_DELIVERED"),
+    );
+    const started = await invoke("metawork.tasks.run", {
+      taskId: created.taskId,
+      expectedBindingEpoch: created.bindingEpoch,
+      input: { kind: "text", text: "Deliver the HTML fixture." },
+    });
+    assert.equal(started.accepted, true);
+    const published = await poll(
+      async () => {
+        if (provider.error) throw provider.error;
+        const task = (await snapshot()).tasks.find(
+          (t) => t.id === created.taskId,
+        );
+        const run = task?.runs.find((r) => r.id === started.runId);
+        return run?.terminal ? { task, run } : null;
+      },
+      60_000,
+      "HTML delivery",
+    );
+    assert.equal(published.task.browserOutputsOpen, true);
+    assert.equal(published.task.officeOutputsOpen, undefined);
+    assert.equal(published.run.terminal.outcome, "completed");
+    assert.equal(published.run.outputs[0].displayPath, relative);
+    const opened = await invoke("metawork.outputs.action", {
+      generation: "1",
+      operationId: "1",
+      taskId: created.taskId,
+      runId: started.runId,
+      outputId: published.run.outputs[0].id,
+      action: "open",
+    });
+    assert.equal(opened?.state, "opened");
+    const result = await browser.verify();
+    assert.equal(
+      await readFile(path.join(workspaceRoot, relative), "utf8"),
+      browser.content,
+    );
+    return result;
+  } finally {
+    browser.close();
   }
 }
 

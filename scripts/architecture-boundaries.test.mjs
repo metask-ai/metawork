@@ -3117,6 +3117,30 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     "src/native_sdk_compat/app_single_instance/windows.zig";
   const instanceMacosPath =
     "src/native_sdk_compat/app_single_instance/macos.zig";
+  const browserHandoff = "src/native_sdk_compat/output_browser_handoff.zig";
+  assert.deepEqual(
+    externSymbols(read(browserHandoff), [
+      "shlwapi",
+      "shell32",
+      "CoreFoundation",
+      "CoreServices",
+    ]),
+    [
+      "AssocQueryStringW",
+      "CFArrayCreate",
+      "CFRelease",
+      "CFURLCreateWithBytes",
+      "LSCopyDefaultApplicationURLForURL",
+      "LSOpenFromURLSpec",
+      "ShellExecuteW",
+    ],
+  );
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('@import("metawork_output_browser_handoff")'),
+    ),
+    ["src/app/platform.zig"],
+  );
   const officePublish = "src/native_sdk_compat/office_resource_publish.zig";
   const mcpProcess = "src/native_sdk_compat/mcp_process.zig";
   const mcpQuarantine = "src/native_sdk_compat/mcp_quarantine.zig";

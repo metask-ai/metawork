@@ -427,6 +427,8 @@ pub const OutputFileReveal = struct {
 
 pub const OutputFileOpen = struct {
     context: *anyopaque,
+    office: bool,
+    browser: bool,
     prepare_fn: *const fn (*anyopaque, []const u8, []const u8) anyerror!OwnedOutputOpen,
 };
 

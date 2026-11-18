@@ -1265,6 +1265,7 @@ export const modelInputBlockers = [
 export type TaskView = {
   conversationOutputs?: (DeliveredOutputView & { runId: string })[];
   officeOutputsOpen?: true;
+  browserOutputsOpen?: true;
   modelInputBlocker?: (typeof modelInputBlockers)[number];
   sessionCloseRetryAvailable?: true;
   signal: (typeof taskNavigationSignals)[number] | null;

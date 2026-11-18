@@ -5432,6 +5432,7 @@ export default function App() {
                   layout="conversation"
                   outputs={panelTask.conversationOutputs}
                   officeOpen={panelTask.officeOutputsOpen}
+                  browserOpen={panelTask.browserOutputsOpen}
                   taskId={panelTask.id}
                   disabled={bridgeUnavailable}
                   onPreview={

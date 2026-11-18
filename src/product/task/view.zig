@@ -221,6 +221,7 @@ pub const Input = struct {
     text: TextProjection,
     output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void = null,
     office_outputs_open: bool = false,
+    browser_outputs_open: bool = false,
     catalog: CatalogProjection,
     pending_ui: PendingUiProjection,
     /// A consumer page is an explicit slice of this Task's stable Run order.
@@ -546,6 +547,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     try writeConversationContext(writer, task.conversation_observation);
     try writeConversationOutputs(writer, input.text, task);
     if (input.office_outputs_open) writer.writeAll(",\"officeOutputsOpen\":true") catch return error.SnapshotTooLarge;
+    if (input.browser_outputs_open) writer.writeAll(",\"browserOutputsOpen\":true") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
     var run_count: usize = 0;
     for (task.durable.runs, 0..) |*entry, run_index| {

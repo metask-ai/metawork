@@ -7735,7 +7735,8 @@ pub const Runtime = struct {
             .authority_fn = taskProjectionAuthority,
             .text = text.task(),
             .output_path_validator = if (self.file_delivery_preparation) |preparation| preparation.validate_path_fn else null,
-            .office_outputs_open = self.output_file_open != null,
+            .office_outputs_open = if (self.output_file_open) |open| open.office else false,
+            .browser_outputs_open = if (self.output_file_open) |open| open.browser else false,
             .catalog = .{
                 .context = text,
                 .write_fn = writeTaskCatalogProjection,

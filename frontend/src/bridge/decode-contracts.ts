@@ -3726,6 +3726,9 @@ function decodeTask(
     ...(Object.hasOwn(record(value, path), "officeOutputsOpen")
       ? ["officeOutputsOpen"]
       : []),
+    ...(Object.hasOwn(record(value, path), "browserOutputsOpen")
+      ? ["browserOutputsOpen"]
+      : []),
     ...(Object.hasOwn(record(value, path), "sessionCloseRetryAvailable")
       ? ["sessionCloseRetryAvailable"]
       : []),
@@ -3776,6 +3779,11 @@ function decodeTask(
     item.officeOutputsOpen !== true
   )
     fail(path, "invalid Office output availability");
+  if (
+    Object.hasOwn(item, "browserOutputsOpen") &&
+    item.browserOutputsOpen !== true
+  )
+    fail(path, "invalid browser output availability");
   const bindingItem = object(item.binding, `${path}.binding`, [
     "epoch",
     "availability",
@@ -4381,6 +4389,9 @@ function decodeTask(
     runs,
     ...(item.officeOutputsOpen === true
       ? { officeOutputsOpen: true as const }
+      : {}),
+    ...(item.browserOutputsOpen === true
+      ? { browserOutputsOpen: true as const }
       : {}),
     ...(item.conversationOutputs === undefined
       ? {}

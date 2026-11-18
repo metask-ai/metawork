@@ -52,6 +52,7 @@ import { runScheduledTasksVertical } from "./scheduled-tasks-vertical.mjs";
 import { runNotificationPresentationVertical } from "./notification-presentation-vertical.mjs";
 import {
   runOutputDeliveryVertical,
+  runOutputBrowserHostProbe,
   runOfficeDeliveryHostProbe,
 } from "./output-delivery-vertical.mjs";
 
@@ -958,7 +959,6 @@ desktopVertical: try {
     break desktopVertical;
   }
   if (outputOnly) {
-    assert.equal(process.platform, "win32");
     const outputNativeMode = process.env.METAWORK_OUTPUT_NATIVE;
     const catalog = await poll(
       async () => {
@@ -972,6 +972,38 @@ desktopVertical: try {
       commandTimeoutMs,
       "Output Workspace catalog",
     );
+    if (process.platform === "darwin") {
+      const created = await invokeBridge("metawork.tasks.create", {
+        workspace: { kind: "manual", workspaceId, expectedWorkspaceEpoch },
+        modelSelection: fixtureModelSelection(await snapshot()),
+        expectedSkillCatalogRevision: catalog.revision,
+        expectedSkillSelectionRevision: catalog.selectionRevision,
+        approvalMode: "full_access",
+      });
+      assert.equal(created.accepted, true);
+      const result = await runOutputBrowserHostProbe({
+        created,
+        workspaceRoot: canonicalWorkspace,
+        invoke: (command, payload) =>
+          command === "metawork.tasks.run"
+            ? invokePreparedRun(payload)
+            : invokeBridge(command, payload),
+        snapshot,
+        poll,
+        provider,
+        toolSse,
+        textSse,
+      });
+      await writeFile(
+        join(root, ".zig-cache/output-macos-browser.json"),
+        JSON.stringify(result, null, 2) + "\n",
+      );
+      await stopApplication("HTML browser verification complete");
+      process.stdout.write(
+        "macOS HTML browser handoff passed: original file, relative styles and click handler.\n",
+      );
+      break desktopVertical;
+    }
     await runOutputDeliveryVertical({
       workspaceRoot: canonicalWorkspace,
       workspaceId,
@@ -1050,7 +1082,10 @@ desktopVertical: try {
                 });
               });
               void finished.catch(readyReject);
-              const timer = setTimeout(() => child.kill(), 40_000);
+              const timer = setTimeout(
+                () => child.kill(),
+                mode.startsWith("office") ? 65_000 : 40_000,
+              );
               try {
                 await ready;
                 await Promise.all([trigger(), finished]);
@@ -1083,7 +1118,7 @@ desktopVertical: try {
     });
     await stopApplication("Output desktop verification complete");
     process.stdout.write(
-      `Output Windows desktop vertical passed: real Core delivery, registration, updates, HTML preview, edit draft and cold history${outputNativeMode === "1" ? ", native Save As and Explorer selection" : ""}.\n`,
+      `Output Windows desktop vertical passed: real Core delivery, registration, updates, HTML source, edit draft and cold history${outputNativeMode === "1" ? ", native Save As and Explorer selection" : ""}.\n`,
     );
     break desktopVertical;
   }

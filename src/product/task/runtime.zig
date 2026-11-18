@@ -1238,6 +1238,7 @@ pub const ProjectionEffects = struct {
     text: task_view.TextProjection,
     output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void = null,
     office_outputs_open: bool = false,
+    browser_outputs_open: bool = false,
     catalog: task_view.CatalogProjection,
     max_pending_ui_json_bytes: usize,
 
@@ -6803,6 +6804,7 @@ pub const Runtime = struct {
                 .text = effects.text,
                 .output_path_validator = if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
                 .office_outputs_open = effects.office_outputs_open and external.workspace_identity_exact and !external.shutting_down,
+                .browser_outputs_open = effects.browser_outputs_open and external.workspace_identity_exact and !external.shutting_down,
                 .catalog = effects.catalog,
                 .pending_ui = .{
                     .context = &pending_ui_context,
@@ -7027,6 +7029,7 @@ pub const Runtime = struct {
             .text = effects.text,
             .output_path_validator = if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
             .office_outputs_open = effects.office_outputs_open and external.workspace_identity_exact and !external.shutting_down,
+            .browser_outputs_open = effects.browser_outputs_open and external.workspace_identity_exact and !external.shutting_down,
             .catalog = effects.catalog,
             .pending_ui = .{ .context = &pending_ui_context, .write_fn = writePendingUiProjection },
             .run_start = start,

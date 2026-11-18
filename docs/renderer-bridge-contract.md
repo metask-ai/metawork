@@ -126,7 +126,7 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 
 结果精确为 `{ generation, operationId, state }`，身份与请求一致。state 为 `ready | revealed | saved | registered | opened | save_failed | target_changed | cleanup_failed | busy | missing | restricted | changed | too_large | cancelled | timed_out | stale_security | unavailable | failed`。`check` 读取当前字节并与交付身份对比。`check_current` 验证当前工作区文件可访问且读取期间稳定。两者只在当前授权成立时返回 `ready`。`reveal` 通过当前文件验证后把定位请求交给系统，`revealed` 只表示系统接收了请求。`saved` 只证明选定目标已原子发布。save_failed、target_changed 与 cleanup_failed 分别说明保存失败、目标身份已变化及临时文件清理未完成，只出现在保存请求。后续每次操作都重新校验。
 
-平台准入且当前 Workspace 授权有效时，Task 投影追加 `officeOutputsOpen: true`。`open` 成功返回 `opened`，表示系统接受打开当前 Office 原文件的请求。
+有效 Workspace 下，Office 和浏览器打开能力分别由 Task 投影的 `officeOutputsOpen: true` 和 `browserOutputsOpen: true` 表示，未开放时省略相应字段。`open` 由 Host 根据已验证的成果类型选择交接目标，成功返回 `opened` 只表示系统接收打开原文件的请求。
 
 Bridge 与 Product 分别有界限制在途请求；文件读取在独立 worker，不能占普通 File Preview worker。Product 发布校验结果或执行 Application 定位 effect 前，Bridge 必须再次证明该请求的 connection/window 仍有效且未取消。Renderer 换 Task、成果身份失效、断连或组件卸载时丢弃旧响应并取消在途请求，不持久化检查状态。`metawork.outputs.cancel` 精确输入 `{ generation, operationId }`，同步结果精确为 `{ generation, operationId, cancelled }`；boolean 只表示该连接下仍存在的请求已接受取消，不证明 worker 已物理退出；保存发布决定一旦提交，取消返回 false，不能再把实际保存结果改写为 cancelled。原异步请求只在 worker 静止后完成并释放 owned effect；关闭应用须 join 后逐一结算 responder。文件工作期限覆盖排队、复制和等待发布决定；系统保存对话框的用户选择时间不计算为文件工作。save 的 Renderer transport 不使用普通短 command timeout 催促用户选位置。超时或 transport 失败不自动重放系统动作。
 

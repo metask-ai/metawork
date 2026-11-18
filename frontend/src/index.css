@@ -9145,21 +9145,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   overflow-wrap: anywhere;
 }
 
-.task-panel-preview-html {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  background: var(--ui-surface-canvas);
-}
-
-.task-panel-preview-html iframe {
-  display: block;
-  width: 100%;
-  min-height: 0;
-  border: 0;
-  background: white;
-}
-
 .task-panel-preview-document .ai-markdown ul {
   list-style: disc;
 }
