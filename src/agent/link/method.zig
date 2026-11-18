@@ -152,6 +152,8 @@ pub const entries = [_]Entry{
     .{ .owner = .session, .name = "permission_stop_request", .code = 0x0219, .transport = .call, .caller = .unattributed }, // read of exec-side state
     .{ .owner = .session, .name = "copy_pending_ui_request", .code = 0x021A, .transport = .call, .caller = .main_loop }, // the UI holds the bytes, but liveness is exec's fact
     .{ .owner = .session, .name = "export_checkpoint", .code = 0x021B, .transport = .call, .caller = .worker }, // the sink stays exec-side; only the request and the outcome cross
+    .{ .owner = .session, .name = "conversation_bounds", .code = 0x021C, .transport = .call, .caller = .unattributed }, // two counts out
+    .{ .owner = .session, .name = "rewind_to_user_message", .code = 0x021D, .transport = .call, .caller = .unattributed }, // a position in, a typed outcome back
     .{ .owner = .run, .name = "execute", .code = 0x0301, .transport = .call, .caller = .worker }, // blocks until the Run terminal; a slow response is not a dead link
     .{ .owner = .run_control, .name = "try_retain", .code = 0x0401, .transport = .call, .caller = .unattributed }, // exec-side lease acquisition
     .{ .owner = .run_control, .name = "release", .code = 0x0402, .transport = .call, .caller = .unattributed }, // pairs with the retain above
@@ -285,7 +287,7 @@ test "the registry covers each vtable exactly" {
         }
         try std.testing.expectEqual(fields.len, owned);
     }
-    try std.testing.expectEqual(@as(usize, 52), entries.len);
+    try std.testing.expectEqual(@as(usize, 54), entries.len);
 }
 
 test "the control list is exactly the operations that must overtake bytes" {

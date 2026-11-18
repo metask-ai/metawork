@@ -102,6 +102,7 @@ pub const entries = [_]Entry{
     .{ .name = "CheckpointUnsupported", .code = 69 },
     .{ .name = "CheckpointIncompatible", .code = 70 },
     .{ .name = "LogicalSessionConflict", .code = 71 },
+    .{ .name = "RewindFailed", .code = 72 },
 };
 
 /// The error set every link call can produce: the contract set plus the

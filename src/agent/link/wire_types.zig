@@ -1,7 +1,7 @@
 //! What each port type becomes on the wire, and the request and response
 //! payloads that follow from it.
 //!
-//! The 52 forwarding stubs' *payloads* are derived rather than written: a
+//! The 54 forwarding stubs' *payloads* are derived rather than written: a
 //! method's request is its parameters after the context pointer, each mapped
 //! through `Wire`, and its response is its return type with the error union
 //! stripped and mapped the same way. So a parameter that changes type changes

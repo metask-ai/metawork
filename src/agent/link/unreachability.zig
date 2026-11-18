@@ -405,8 +405,8 @@ test "the surface divides into expressible, exempt and pending, with nothing lef
     try testing.expectEqual(pending.len, tally.owed);
     // The numbers themselves, so a method moving between buckets is visible
     // in the suite and not only in a build that happened to succeed.
-    try testing.expectEqual(@as(usize, 52), tally.total);
-    try testing.expectEqual(@as(usize, 42), tally.expressible);
+    try testing.expectEqual(@as(usize, 54), tally.total);
+    try testing.expectEqual(@as(usize, 44), tally.expressible);
     try testing.expectEqual(@as(usize, 9), tally.exempt);
     try testing.expectEqual(@as(usize, 1), tally.owed);
 }

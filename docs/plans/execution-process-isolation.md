@@ -36,7 +36,7 @@
 
 第三条是方向性的,同样趁便宜定下来:**正向调用的处理器可以嵌套一次反向调用并等待;反向调用的处理器不得发起正向调用并等待。** 前者正是安装工具的形状,而它安全的前提恰好是第一条规则(UI 用一个永不阻塞在正向调用上的线程应答);后者会把链闭合——exec 等 UI 答反向、UI 等 exec 答正向,而两侧容量耗尽的拒绝码都会说「对端欠应答」,没有一处会说出这是个环。做法不是约定而是**不给手段**:反向处理器的 context 必须是链路能看进去的类型,且不得(经任意层级的字段)触及 `Caller`;**类型擦除的 context 一律拒绝**,因为那正是这类规则平时被绕过的方式。两个例外是 `std.Io` 与 `std.mem.Allocator`——它们也是擦除的,但触及链路需要链路自己的类型,这两者产生不了,而把它们算进去会使任何持有 `io` 的 context 都被拒。现在没有任何反向处理器,所以这条是零成本的;等 UI 侧有了处理器再补,就得去审每个处理器调了什么。
 
-实现上这条做成了**转发与调用方类别无关**:52 个转发都是「按 correlation 开一个槽、发出、再认领」,应答落进槽里而不是交给某个正 park 的线程,所以放弃等待(`abandon`)是合法动作而读取方从不需要有人在等。由此两件事成立:`execute` 的终态能到一个已经不等的驱动手里;而**线程归属变成调用点的性质而不是转发的性质**——同一个方法确实可能被两种线程调用,所以那 30 个未归属不再卡住转发的实现,`caller` 那张表管的是「调用点允不允许在那条线程上等」。
+实现上这条做成了**转发与调用方类别无关**:每一个转发都是「按 correlation 开一个槽、发出、再认领」,应答落进槽里而不是交给某个正 park 的线程,所以放弃等待(`abandon`)是合法动作而读取方从不需要有人在等。由此两件事成立:`execute` 的终态能到一个已经不等的驱动手里;而**线程归属变成调用点的性质而不是转发的性质**——同一个方法确实可能被两种线程调用,所以那 30 个未归属不再卡住转发的实现,`caller` 那张表管的是「调用点允不允许在那条线程上等」。
 
 一个要明说的代价:**放弃等待不释放容量。** 槽位要留到对端应答为止,因为 correlation 必须一直被占着,否则一个迟到的应答会被匹配到下一个占用该槽的调用上——容量是有界且可恢复的,而投错调用的应答是一个长得像正确答案的错答案。
 
@@ -44,7 +44,7 @@
 
 前置重构已经落地（PR #211），一期不必再做：`src/agent/contract.zig` 是 archive-free 的契约模块根，`src/agent/session/surface.zig` 是纯数据声明，`src/agent/session/port.zig` 是 vtable 端口、`port_impl.zig` 是唯一的进程内实现。`src/product/` 整目录已无 `metawork_agent` 导入，Product 经 `metawork_agent_contract` 与 port 面访问 Agent。
 
-但 port 面**不是**边界的全部调用面，本文先前那句「换掉 `port_impl.zig` 这一组 vtable 就是边界的全部调用面」是错的，实施第 3 步时核出来的。除 port 的 52 个方法之外，Product 还在进程内**直接调用 Agent 自有 opaque 句柄上的方法**，这些调用一条都不经过 `port.zig`：
+但 port 面**不是**边界的全部调用面，本文先前那句「换掉 `port_impl.zig` 这一组 vtable 就是边界的全部调用面」是错的，实施第 3 步时核出来的。除 port 注册表里的那些方法之外，Product 还在进程内**直接调用 Agent 自有 opaque 句柄上的方法**，这些调用一条都不经过 `port.zig`：
 
 | 句柄 | Product 直接调用的方法 | 调用点 |
 | --- | --- | --- |
@@ -283,7 +283,7 @@ staged 导出的接纳路径必须具体，这是一期最容易做成「看起�
 | --- | --- |
 | 1 | 模式分叉与进程生命周期：exec 模式在建窗口前分出，UI 能启动、关闭、回收 exec；握手字段齐备且不符即拒绝。此步不搬 Runtime，Agent 仍在 UI 侧，用于单独验证分叉与握手 |
 | 2 | transport：帧、分片、typed 错误映射、调用相关 id、出站有界队列与 writer 线程、control 预留额度。以既有 port 方法集逐一对照，不得出现无映射的方法或错误 |
-| 3 | Runtime 与活对象搬迁（不含 MCP）：欠 wire shape 的载荷逐项落形状、exec 侧句柄表(只需这一侧:唯一一个方向相反的 `catalog.Query.source_lifetime` 已确定不过界——它的合同要求 nonblocking 的引用计数,而跨进程调用必然阻塞,所以改为调用方在过界前 retain、lease 释放时 release,执行侧收到的是保证而不是回调钩子)、UI 侧转发 vtable 填满 `RuntimePort`/`SessionPort`/`RunPort`/`RunControl` 的 52 个方法、exec 侧 dispatcher，以及生图/生视频/交付根/checkpoint sink 落位。**完成判据是注册表由编译器判定闭合，不是「某个件数做完」**：`crossings.zig` 的 `owed()` 归零、每条记录与编译器一致、每个 mirror 都经 `requireStructural` 接受，`method.zig` 的 52 个转发全部填满。手数出来的 16 是**下界而不是总数**——读 port 枚举不出边界已经两次了（句柄方法 59→68；`CallbackRejection` 的 `?anyerror`，而且它的注释还写着「只含固定枚举和计数」），剩下的项里再挖出新的属于正常，不是计划出错。报告按「闭合了没有」报，不按「做了几项」报 |
+| 3 | Runtime 与活对象搬迁（不含 MCP）：欠 wire shape 的载荷逐项落形状、exec 侧句柄表(只需这一侧:唯一一个方向相反的 `catalog.Query.source_lifetime` 已确定不过界——它的合同要求 nonblocking 的引用计数,而跨进程调用必然阻塞,所以改为调用方在过界前 retain、lease 释放时 release,执行侧收到的是保证而不是回调钩子)、UI 侧转发 vtable 填满 `RuntimePort`/`SessionPort`/`RunPort`/`RunControl` 在 `method.zig` 里注册的每一个方法、exec 侧 dispatcher，以及生图/生视频/交付根/checkpoint sink 落位。**完成判据是注册表由编译器判定闭合，不是「某个件数做完」**：`crossings.zig` 的 `owed()` 归零、每条记录与编译器一致、每个 mirror 都经 `requireStructural` 接受，`method.zig` 注册的每一个转发都已填满。手数出来的 16 是**下界而不是总数**——读 port 枚举不出边界已经两次了（句柄方法 59→68；`CallbackRejection` 的 `?anyerror`，而且它的注释还写着「只含固定枚举和计数」），剩下的项里再挖出新的属于正常，不是计划出错。报告按「闭合了没有」报，不按「做了几项」报 |
 | 4 | MCP 搬迁：UI 只送配置 generation 与 server 声明，exec 侧自建 `McpRuntimeInput` 与 transport owner，进程 spawn、Windows Job 归属、HTTP 栈与 OAuth 都在 exec 侧组合。完成条件含 4.6 的 Job 归属两个方向，以及第 7 节那条真杀 UI 之后 exec 与 MCP 子进程都还活着的验收 |
 | 5 | 关联身份：Session 创建与恢复协议带上 Product 指定身份；exec 侧持有至 Session 结束；二期字段位留出 |
 | 6 | disconnect 下行收口：按 4.6 的五步顺序实现，parked 解除先于终止；exec 孤儿自我收口；`EventDrainStatus` 分辨「已排空」与「链路已断」 |
