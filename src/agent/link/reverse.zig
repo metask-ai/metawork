@@ -1,14 +1,27 @@
 //! Calls that run from the execution half into the caller.
 //!
-//! There is exactly one, and it is registered here rather than left as a shape
-//! each future case grows for itself. While there is one, the rules are cheap;
-//! with five they would be five local decisions, each with a reason that
-//! sounded fine at the time.
+//! They are registered here rather than left as a shape each case grows for
+//! itself. The rules below were written while there was one, which is why
+//! they are uniform; the second one arrived afterwards and had to satisfy
+//! them unchanged, which is the only test a rule like this gets.
 //!
-//! The one is the MCP installation tool: it hands an install request to the
-//! caller and reads the answer, because it has to tell the model whether the
-//! request was accepted. Everything else either composes locally or was ruled
-//! out from crossing.
+//! Two, and each is here because the effect belongs to the caller:
+//!
+//! - The MCP installation tool hands an install request to the caller and
+//!   reads the answer, because it has to tell the model whether the request
+//!   was accepted.
+//! - File delivery inspection asks the caller to check a finished file's
+//!   bytes. `deliver_file.zig` states why in its own first line: file effects
+//!   and Product commit are separate owners, and a model-provided path never
+//!   constitutes a receipt. The receipt's whole value is that the half which
+//!   did not run the model looked at the bytes. An execution-side inspection
+//!   would be the half that may be crashing vouching for itself, which turns
+//!   a guarantee into its opposite while the code still compiles.
+//!
+//! Everything else either composes locally or was ruled out from crossing.
+//! Image and video generation in particular are execution-side by
+//! `architecture.md` section 5: a binding crosses, not a capability, so they
+//! are not reverse calls and must not become them.
 //!
 //! Two rules, and the second is the one that looked free in process.
 //!
@@ -36,7 +49,38 @@
 //! The answer vocabulary needs nothing new: the tool's result already has
 //! `unavailable`, which is the fail-closed answer when the caller is not
 //! there, and `busy`, which is "try later". That is the same split as the
-//! pending table's two exhaustion failures.
+//! pending table's two exhaustion failures. The inspection's vocabulary has
+//! `failed: .unavailable` for the same reason.
+//!
+//! ## What the second one added
+//!
+//! Both rules held for it unchanged, and one of them was already paid: in
+//! process `session.zig` releases the Session lock *before* calling the
+//! inspection and re-takes it after, so delivery never held a lock across the
+//! callback even before the split. The guard still travels, because the
+//! caller must admit the request against its own record of a Run that may
+//! have moved on while the request was in flight.
+//!
+//! Two things it did add.
+//!
+//! **The first rule is narrower here than it is in general.** `output_file`
+//! refuses a file effect on the main thread -- `MainThreadFileEffect`, which
+//! the Host maps to `restricted` -- so the thread that answers this call must
+//! not be the main thread either. Rule one says "a thread that never blocks
+//! on a forward call"; for this call it is also "not the main thread", and
+//! those two together are a real constraint on where the answering loop
+//! lives, not a free choice.
+//!
+//! **A cancel flag cannot cross, and does not need to.** In process the
+//! execution half hands the inspector a pointer to a stack-local atomic and
+//! registers it, so a cancelling thread can cut a long read short. A pointer
+//! into the other half's stack is exactly what this link exists to stop. It
+//! is not needed for correctness: `session.zig` re-reads its own flag and its
+//! termination signal *after* the inspection returns and answers `cancelled`
+//! from there, so a Run cancelled during an inspection still ends as
+//! cancelled. What is lost is only the early abort -- a cancellation during a
+//! large file's read waits for that read to finish. That is a cost, and it is
+//! written here rather than left for someone to find in a profile.
 
 const std = @import("std");
 const contract = @import("agent_contract");
@@ -48,6 +92,8 @@ const pending = @import("pending.zig");
 pub const Call = enum {
     /// Hand an install request to the caller and read whether it was admitted.
     mcp_installation,
+    /// Ask the caller to check a finished file's bytes and say what it found.
+    file_delivery_inspection,
 };
 
 /// What crosses from the execution half to the caller for one reverse call.
@@ -69,15 +115,37 @@ pub const McpInstallationRequest = struct {
 
 pub const McpInstallationResponse = contract.McpInstallationResult;
 
+/// What crosses for one file delivery inspection.
+///
+/// The path is the model's, and it is not trusted by either half: the
+/// execution half validates its shape with `deliver_file.validatePath` before
+/// sending, and the caller resolves it beneath the root *it* holds. The root
+/// does not travel at all -- the caller composed the capability against its
+/// own copy, exactly as it does in process -- so there is no asserted root
+/// here for anyone to have to revalidate.
+pub const FileDeliveryInspectionRequest = struct {
+    task_id: u64,
+    /// The Run the file is being delivered for, and its generation. The
+    /// caller admits the request against its own record of that Run.
+    run_id: u64,
+    generation: u64,
+    /// Workspace-relative, forward slashes, already shape-validated.
+    path: []const u8,
+};
+
+pub const FileDeliveryInspectionResponse = contract.FileDeliveryInspection;
+
 pub fn Request(comptime call: Call) type {
     return switch (call) {
         .mcp_installation => McpInstallationRequest,
+        .file_delivery_inspection => FileDeliveryInspectionRequest,
     };
 }
 
 pub fn Response(comptime call: Call) type {
     return switch (call) {
         .mcp_installation => McpInstallationResponse,
+        .file_delivery_inspection => FileDeliveryInspectionResponse,
     };
 }
 
@@ -201,15 +269,19 @@ pub fn Handler(comptime call: Call, comptime Context: type) type {
 pub fn unreachableAnswer(comptime call: Call) Response(call) {
     return switch (call) {
         .mcp_installation => .unavailable,
+        // The inspection vocabulary already has it, and it is the fail-closed
+        // side: nothing was checked, so nothing is verified.
+        .file_delivery_inspection => .{ .failed = .unavailable },
     };
 }
 
 const testing = std.testing;
 
-test "there is one reverse call, and adding another is a decision not a drift" {
-    // The count is asserted so a second reverse call cannot appear without
-    // this file changing, which is where the two rules live.
-    try testing.expectEqual(@as(usize, 1), std.enums.values(Call).len);
+test "a reverse call cannot appear without this file changing" {
+    // The count is asserted so one cannot be added without passing through
+    // the rules above. The second one did: it failed this assertion first,
+    // which is what the assertion is for.
+    try testing.expectEqual(@as(usize, 2), std.enums.values(Call).len);
 }
 
 test "every reverse call can answer that the caller is unreachable" {
@@ -223,6 +295,10 @@ test "every reverse call can answer that the caller is unreachable" {
                 contract.McpInstallationResult.unavailable,
                 answer,
             ),
+            .file_delivery_inspection => try testing.expectEqual(
+                contract.FileDeliveryFailure.unavailable,
+                answer.failed,
+            ),
         }
     }
 }
@@ -231,6 +307,23 @@ test "every reverse call carries the guard that replaces the held lock" {
     inline for (comptime std.enums.values(Call)) |call| {
         try testing.expect(requestCarriesGuard(call));
     }
+}
+
+test "a cancel flag does not cross, and the answer's shape says what replaces it" {
+    // The in-process capability takes a pointer to the execution half's own
+    // stack-local atomic. Nothing shaped like that is in the request, and the
+    // reason it is safe to leave out is that the execution half re-checks its
+    // own cancellation after the answer arrives.
+    try testing.expect(!@hasField(FileDeliveryInspectionRequest, "cancelled"));
+    try testing.expect(!@hasField(FileDeliveryInspectionRequest, "cancellation"));
+    inline for (@typeInfo(FileDeliveryInspectionRequest).@"struct".fields) |field| {
+        try testing.expect(field.type != *const std.atomic.Value(bool));
+        try testing.expect(field.type != *std.atomic.Value(bool));
+    }
+    // And the root does not cross either: the caller composed the capability
+    // against its own copy, so an asserted root would have no reader.
+    try testing.expect(!@hasField(FileDeliveryInspectionRequest, "root"));
+    try testing.expect(!@hasField(FileDeliveryInspectionRequest, "workspace_root"));
 }
 
 test "the request carries the bytes but not their ownership" {

@@ -235,8 +235,10 @@ pub const crossings = [_]Crossing{
     composed(
         contract.FileDeliveryInput,
         .{ .substituted = .untyped_pointer },
-        "delivery root; the execution half holds the capability",
-        &.{shapes.FileDeliveryRoot},
+        "enablement only; the inspection is the caller's and crosses back as a " ++
+            "reverse call, so neither the capability nor the root it resolves " ++
+            "against has a reader on the execution side",
+        &.{shapes.FileDeliveryEnabled},
     ),
 
     // An embedded error set, which the error registry already numbers.

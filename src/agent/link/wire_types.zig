@@ -72,8 +72,8 @@ pub fn Wire(comptime T: type) type {
         if (T == checkpoint.Sink) return shapes.CheckpointDestination;
         if (T == contract.McpInstallationInput) return shapes.McpInstallationTarget;
         if (T == ?contract.McpInstallationInput) return ?shapes.McpInstallationTarget;
-        if (T == contract.FileDeliveryInput) return shapes.FileDeliveryRoot;
-        if (T == ?contract.FileDeliveryInput) return ?shapes.FileDeliveryRoot;
+        if (T == contract.FileDeliveryInput) return shapes.FileDeliveryEnabled;
+        if (T == ?contract.FileDeliveryInput) return ?shapes.FileDeliveryEnabled;
         if (T == contract.VideoGenerationRunInput) return shapes.VideoGenerationBinding;
         if (T == ?contract.VideoGenerationRunInput) return ?shapes.VideoGenerationBinding;
 

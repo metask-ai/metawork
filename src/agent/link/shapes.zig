@@ -345,22 +345,23 @@ pub const CheckpointDestination = struct {
     hard_bytes: u64,
 };
 
-/// The delivery root a Run may hand files into. The inspection callback is
-/// composed in the execution half against this root.
+/// That a Run may deliver files, and nothing else.
 ///
-/// The root is not trusted on arrival. In process the component that states it
-/// is the one that confirmed it, so "canonical" is a fact; across the link it
-/// is a string the peer asserted, and section 6 is explicit that a trusted
-/// Workspace comes only from a Host's own native selection and that the Host
-/// revalidates paths and resource scope. So the execution half revalidates it
-/// under the same constraint the write path already applies -- resolution
-/// beneath the root rather than trust in the name.
+/// An earlier version of this carried the delivery root, because this file
+/// said the inspection callback was composed in the execution half against
+/// it. That was wrong, and wrong in the direction that matters.
+/// `deliver_file.zig` opens by saying that file effects and Product commit
+/// are separate owners and that a model-provided path never constitutes a
+/// receipt; `src/app.zig` composes the capability with the Host's own copy of
+/// the root and refuses the effect on the main thread. The inspection is the
+/// caller's, so it stays the caller's: it is registered in `reverse.zig` as a
+/// reverse call rather than rebuilt over here.
 ///
-/// This is the second property that is free in process and has to be stated
-/// after the split, alongside the reviewer's redaction order.
-pub const FileDeliveryRoot = struct {
-    asserted_root: []const u8,
-};
+/// With the inspection answered by the half that already holds the root, the
+/// root has no reader on this side -- and an asserted root that nobody reads
+/// is worse than none, because it looks like a fact that was checked. So the
+/// whole content is the optional's presence: enabled, or absent.
+pub const FileDeliveryEnabled = struct {};
 
 /// `catalog.Query` without its borrowed source lifetime.
 ///
@@ -648,7 +649,7 @@ comptime {
     payload.requireStructural(CheckpointOutcome);
     payload.requireStructural(PendingUiRequest);
     payload.requireStructural(CheckpointDestination);
-    payload.requireStructural(FileDeliveryRoot);
+    payload.requireStructural(FileDeliveryEnabled);
     payload.requireStructural(CatalogProjection);
     payload.requireStructural(CatalogQuery);
     payload.requireStructural(ImageGenerationBinding);

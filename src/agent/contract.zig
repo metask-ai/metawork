@@ -91,6 +91,7 @@ pub const Error = surface.Error;
 pub const ExternalInterruption = control.ExternalInterruption;
 pub const FileDeliveryInput = delivery.Input;
 pub const FileDeliveryInspection = delivery.Inspection;
+pub const FileDeliveryFailure = delivery.Failure;
 pub const FileDeliveryReceipt = delivery.Receipt;
 pub const ImageGenerationCredentialReader = image_generation.CredentialReader;
 pub const ImageGenerationOutput = image_generation.Output;
