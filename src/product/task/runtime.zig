@@ -8377,7 +8377,17 @@ pub const Runtime = struct {
                             std.debug.assert(task.durable.binding_epoch == job.attempt.binding_epoch);
                             std.debug.assert(task.durable.execution_generation == job.attempt.source_execution_generation);
                             const previous_epoch = task.durable.binding_epoch;
-                            const next_epoch = previous_epoch + @as(u64, if (advances_binding) 1 else 0);
+                            // The same function the open and the `.not_started`
+                            // arm use. `unreachable` is sound here and nowhere
+                            // else: the assert above pins this epoch to the
+                            // attempt's, and the attempt could not have been
+                            // opened at `maxInt` with an advancing binding --
+                            // `openSession` refuses that before a Session
+                            // exists.
+                            const next_epoch = checkpoint_record.installedBindingEpoch(
+                                previous_epoch,
+                                advances_binding,
+                            ) catch unreachable;
                             if (job.rebind) |*rebind| {
                                 if (job.outcome.candidate.checkpoint) |value| {
                                     var record = value;
