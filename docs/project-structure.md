@@ -26,17 +26,15 @@
 | `src/product/{attachment,mcp,schedule,skill,task,update,workspace}.zig` 及同名目录 | Product Control 持有的 aggregate           | Attachment 只拥有 transient staged raw bytes、预算与线性消费；其余 aggregate 各自发布窄 public module，均不形成新的顶层 owner                                                                                                                                                                                                        |
 | `src/agent.zig`、`src/agent/`                                               | Agent                                      | AgentCore integration、Runtime、Session、Completion 与 callback/event boundary                                                                                                                                                                                                                                                       |
 | `src/bridge.zig`、`src/bridge/`                                             | Bridge                                     | Renderer command authority、wire decode 与 ProductDelivery transport                                                                                                                                                                                                                                                                 |
-| `src/storage.zig`、`src/storage/`                                           | Storage                                    | backend-independent SQL contract、backend 与 conformance                                                                                                                                                                                                                                                                             |
-| `src/foundation/`                                                           | Foundation                                 | 无产品语义的执行机制。每个成员是独立可 import 的模块根，不发布 `src/foundation.zig`、barrel 或统一 facade；纯合同成员任何 owner 都可消费，引擎成员只有 Application 可消费                                                                                                                                                             |
+| `src/foundation/`                                                           | Foundation                                 | 基础服务层，按服务族分子目录（`http/`、`oauth/`、`storage/`），不属于任何族的成员位于顶层。每个成员是独立可 import 的模块根，不发布 `src/foundation.zig`、族根文件、barrel 或统一 facade；纯合同成员任何 owner 都可消费，引擎成员只有 Application 可消费                                                                                     |
 | `src/automation.zig`、`src/automation/`                                     | Automation capability                      | compile-time authority selection，不形成产品 owner                                                                                                                                                                                                                                                                                   |
-| `src/oauth/`                                                                | OAuth shared leaf                          | 只提供 PKCE、secret lifetime、严格 callback 解析与 loopback byte-pump 合同；不拥有 callback path、issuer/resource 接受、limit policy、响应文案或领域错误映射                                                                                                                                                                         |
 | `src/image/`                                                                | Encoded image shared leaf                  | 只解析有界容器、编码尺寸、动画及主图/容器结束事实；不解码像素或执行平台 effect，格式准入、尺寸及尾部政策由 Agent/Product 各自拥有                                                                                                                                                                                                    |
 | `src/native_sdk_compat/`                                                    | Application                                | 已登记 Native SDK 缺口的窄 compatibility seam，不形成通用平台层                                                                                                                                                                                                                                                                      |
 | `src/product_identity.zig`                                                  | `app.zon`-derived shared leaf              | 把 build-time artifact identity 投影给 Application 及 Models/Account/MCP credential boundary，不形成领域 owner                                                                                                                                                                                                                       |
 
 `src/product/models.zig` 是 Product Control 构造并持有 Models aggregate 的 runtime root，只发布 `Runtime`、启动错误等 aggregate API；Product Control 可按需要同时精确导入该 root、`src/product/models/contract.zig` 的纯模型合同和 `src/product/models/ports.zig` 的窄 effect port。Application adapter消费 Models contract/port与 Metask provider transport leaf，Task与 Schedule只消费 contract，三条路线不经 root转发。`src/product/account/contract.zig`只发布 Account identity/authorization合同；Account root及内部 module不得导入任何 Models module。`src/product/agent_protocol_adapter.zig`只拥有 Product到 Agent的穷举协议映射，不能承载模型执行配置、推断或通用转换。它们都不是新的顶层产品 owner。`src/product/`只是 Account、Product Control及其 aggregate的目录归属，不发布统一 Product facade。
 
-`src/foundation/` 的成员按两条准入收取：该目录下任何文件都不得导入 Application、Product、Agent 或 Bridge 的模块，由 architecture guard 强制；且该成员能够原样搬到另一个完全不同的应用。成员之间不形成 owner 层级，也不互相转发；新增成员逐个按同一准入判断，不因目录位置自动取得身份。
+`src/foundation/` 的成员按两条准入收取：它是基础服务，能够原样搬到另一个完全不同的应用；它只依赖 std、其他 Foundation 成员和该服务所需的第三方库，不依赖任何业务 owner。第三方库逐个登记允许出现的文件，SQLite C 只允许出现在 `storage/` 族的 SQLite backend 中；两条依赖规则由 architecture guard 强制。成员之间不形成 owner 层级，也不互相转发；族目录内的文件只相对导入本族文件，顶层成员只相对导入顶层文件，族之间以及族与顶层成员之间只经 build 具名模块依赖。新增成员逐个按同一准入判断，不因目录位置自动取得身份。
 
 每个 `*.zig` module root 只显式发布消费者需要的类型、函数或窄 namespace。内部文件不得通过无边界 `usingnamespace`、barrel 或 forwarding facade 重新暴露；build graph 中为隔离测试或依赖形成的 leaf module 不因此取得新的 owner 身份。
 
@@ -80,26 +78,26 @@ application -> account, models capabilities, product control, agent, bridge, aut
 application -> native_sdk_compat
 application -> product identity
 application -> foundation engines
-application, product control, agent, bridge -> foundation contracts
-application, account -> OAuth shared mechanics and loopback contract
+application, account, product control, agent, bridge -> foundation contracts
+foundation -> std, foundation members, registered third-party libraries
 bridge -> product control, account contract, Native SDK transport contract
 product control -> agent through product agent protocol adapter, account contract, models root/contract/ports
-account -> account contract, OAuth mechanics/loopback contract
+account -> account contract
 task, schedule -> models contract
 models, account credential boundary -> product identity through Application adapters
 agent -> Metask AgentCore bundle SDK
 automation -> bridge policy, account contract, Native SDK policy types
-storage backend -> SQLite amalgamation
-product control history schema, storage backend -> one Storage SQL contract module
+foundation storage backend -> SQLite amalgamation
+product control history schema, foundation storage backend -> one Foundation SQL contract module
 ```
 
 Application 只做 composition、capability 注入、资源生命周期和跨 owner 调用顺序，不读取领域内部状态形成 policy。`app/`、`product/`、`agent/` 与 `bridge/` 的下层 owner 都不得反向导入 Application 实现。
 
-Foundation 与 Application、Product、Agent、Storage 平级，只拥有无产品语义的执行机制。它的纯合同成员任何 owner 都可以精确导入，但合同只承载已经发生的事实，不授予发起 effect 的能力；引擎成员只有 Application 可以导入并组合。Foundation 不得反向导入任何 owner。
+Foundation 是 MetaWork 的基础服务层。架构上它与 Application、Product、Agent、Renderer 平级，指职责和所有权：Foundation 自己决定服务的接口和实现，Application 只负责组合；依赖上它在最底层，不依赖任何业务 owner。有状态服务由 Application 创建唯一实例、管理生命周期并注入使用方。它的纯合同成员任何 owner 都可以精确导入：合同是不持有状态或句柄、不建立连接、不发起外部 effect 的类型与纯函数，包括已经发生的结果事实与协议编解码；需要熵的合同函数（如 PKCE 生成）只借用调用方传入的 `Io`。合同编码出的请求字节仍交给调用方的 transport port，由 Application 组合的引擎执行，合同本身不授予发起 effect 的能力。引擎成员只有 Application 可以导入并组合，或被其他 Foundation 引擎依赖；合同成员不依赖引擎。
 
-Product Control 可以消费 Agent、Account 与 Models 的纯合同，并可构造 Models aggregate，但不得导入 AgentCore SDK、Account Runtime、Bridge 或 Renderer。Models contract/registry/runtime/provider 不得反向导入 Account 或消费方；Account root/contract/state/runtime不得导入 Models root/contract/runtime/ports/provider。Application可以同时组合两者并把一次 Account authorization lease交给 Metask catalog worker，但不得因此建立领域反向边。Task与 Schedule不得通过 Account取得模型执行类型，也不得导入 Models runtime/root/ports。Bridge可以消费 Product Control public surface、Models command/view、Account脱敏合同与 Native SDK transport contract，但不得持有 Account Runtime、AgentCore handle、`PlatformServices`、OS handle或具体平台实现。Agent不得导入 Product Control、Models、Bridge、Application或 Renderer。`product_identity.zig`只消费 `app.zon` manifest与 build-time artifact option；Application的 Models/Account/MCP credential adapter可以读取其派生 identity，但它不得反向依赖领域模块。Storage contract不依赖 Product、Application、Native SDK或 SQLite C类型；只有 concrete backend可以依赖 SQLite。
+Product Control 可以消费 Agent、Account 与 Models 的纯合同，并可构造 Models aggregate，但不得导入 AgentCore SDK、Account Runtime、Bridge 或 Renderer。Models contract/registry/runtime/provider 不得反向导入 Account 或消费方；Account root/contract/state/runtime不得导入 Models root/contract/runtime/ports/provider。Application可以同时组合两者并把一次 Account authorization lease交给 Metask catalog worker，但不得因此建立领域反向边。Task与 Schedule不得通过 Account取得模型执行类型，也不得导入 Models runtime/root/ports。Bridge可以消费 Product Control public surface、Models command/view、Account脱敏合同与 Native SDK transport contract，但不得持有 Account Runtime、AgentCore handle、`PlatformServices`、OS handle或具体平台实现。Agent不得导入 Product Control、Models、Bridge、Application或 Renderer。`product_identity.zig`只消费 `app.zon` manifest与 build-time artifact option；Application的 Models/Account/MCP credential adapter可以读取其派生 identity，但它不得反向依赖领域模块。Foundation SQL 合同不依赖 SQLite C 类型，只有 SQLite backend 可以依赖 SQLite；Product 只经 history schema 消费 SQL 合同。
 
-OAuth shared leaf 不发布统一 OAuth flow 或业务 policy。Account 与 Application MCP OAuth 可以消费其 mechanics/loopback contract，但必须各自拥有 callback path、redirect/issuer/resource 接受规则、大小和 invalid-request budget、用户响应与错误映射；MCP 不得导入 Account 私有 OAuth 或 loopback policy。
+Foundation 的 OAuth 族不发布统一 OAuth flow 或业务 policy，其 loopback 引擎只由 Application 组合。RFC 6749 授权请求、token 请求体、token 响应与 error 响应的协议层编解码属于 OAuth 合同。Account 与 Application MCP OAuth 可以消费 OAuth 合同，但必须各自拥有 endpoint、client 身份、scope、必需字段、callback path、redirect/issuer/resource 接受规则、大小上限和 invalid-request budget、时间单位、用户响应与错误映射；MCP 不得导入 Account 私有 OAuth 或 loopback policy。
 
 `src/native_sdk_compat/` 中每项 seam 必须由 Application 显式组装，只暴露对应缺口所需的窄 capability。它不得成为 Native SDK adapter、Desktop Interface、通用 facade 或下层 owner 的反向依赖入口；SDK 提供等价正式能力并完成验收后，应删除对应 seam、allowlist 和专用验证。
 

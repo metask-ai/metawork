@@ -2665,7 +2665,10 @@ pub const Runtime = struct {
                 if (!has_slot) return .wait;
                 var lease = run.execution.?.run_control.tryAcquireLease() orelse return .wait;
                 defer lease.deinit();
-                if (!lease.inputObservation().ready) return .wait;
+                // No answer is not readiness, which is the same choice the
+                // lease acquisition one line up already makes.
+                const observation = lease.inputObservation() orelse return .wait;
+                if (!observation.ready) return .wait;
                 return .{ .submit = .{ .index = index, .run_id = id } };
             },
         }
@@ -3128,7 +3131,9 @@ pub const Runtime = struct {
         if (run.agent_handoff.load(.acquire) != .running) return error.RunNotReady;
         var lease = run.execution.?.run_control.tryAcquireLease() orelse return error.RunNotReady;
         defer lease.deinit();
-        if (!lease.inputObservation().ready) return error.RunNotReady;
+        // As above: a Run whose readiness cannot be observed is not ready.
+        const observation = lease.inputObservation() orelse return error.RunNotReady;
+        if (!observation.ready) return error.RunNotReady;
         if (!std.unicode.utf8ValidateSlice(text) or std.mem.trim(u8, text, " \t\r\n").len == 0) return error.MissingInstruction;
         if (text.len > effects.limits.max_user_message_bytes) return error.ProjectionCapacity;
         if (run.next_input_id == std.math.maxInt(u64)) return error.ProjectionCapacity;
@@ -3882,10 +3887,7 @@ pub const Runtime = struct {
             task.durable.recent_order = self.takeRecentOrder();
             return true;
         }
-        const stopping = switch (dispatch) {
-            .pending, .requested, .already_requested => true,
-            .already_finishing, .already_terminal, .stale_run, .session_closing => false,
-        };
+        const stopping = dispatchStops(dispatch, .pending_stops);
         if (!stopping) return continuation_cancelled;
         task.runtime.permission_review.invalidate();
         if (record) |value| switch (pushUiRecord(task, value)) {
@@ -4376,7 +4378,7 @@ pub const Runtime = struct {
             const dispatch = requestRunTermination(run_record, .session_close);
             if (effects.executor.cancel(run_record)) {
                 run_record.terminal_observed = true;
-            } else if (dispatch == .stale_run) {
+            } else if (task_policy.dispatchedControlStale(dispatch)) {
                 std.debug.panic(
                     "active Task Run {d} published a stale RunControl",
                     .{run_record.id},
@@ -7101,8 +7103,22 @@ pub const Runtime = struct {
 
     fn sameRestoreFilters(capabilities: *const RestoreCapabilities, current: RestoreFilters) bool {
         if (capabilities.mcp_catalog_generation != current.mcp_catalog_generation) return false;
-        const before_ids = if (capabilities.skill) |value| capabilities.original.agent.borrowSkillRestoreInputs(value).policy.granted_skill_ids else &.{};
-        const after_ids = if (current.skill) |value| capabilities.original.agent.borrowSkillRestoreInputs(value).policy.granted_skill_ids else &.{};
+        // A borrow that cannot be made is not an empty filter. Two empty id
+        // lists have equal length and compare equal element by element, so a
+        // default here would reach `return true` -- the filters did not
+        // change, restore the Session as it was -- for a Session whose skills
+        // nobody could look at. Every other doubtful path in this function and
+        // in `modelRestoreCapabilitiesExact` answers false, so these do too.
+        const before_ids: []const []const u8 = if (capabilities.skill) |value| borrowed: {
+            const borrow = capabilities.original.agent.borrowSkillRestoreInputs(value) orelse
+                return false;
+            break :borrowed borrow.policy.granted_skill_ids;
+        } else &.{};
+        const after_ids: []const []const u8 = if (current.skill) |value| borrowed: {
+            const borrow = capabilities.original.agent.borrowSkillRestoreInputs(value) orelse
+                return false;
+            break :borrowed borrow.policy.granted_skill_ids;
+        } else &.{};
         if (before_ids.len != after_ids.len) return false;
         for (before_ids, after_ids) |before, after| if (!std.mem.eql(u8, before, after)) return false;
         const before_tools = if (capabilities.mcp) |value| value.selectedTools() else &.{};
@@ -7743,15 +7759,7 @@ pub const Runtime = struct {
             defer access.deinit();
             if (access.permissionStopRequest() != active_run_id) continue;
             const dispatch = requestPermissionTermination(run);
-            const stopping = switch (dispatch) {
-                .requested, .already_requested => true,
-                .pending,
-                .already_finishing,
-                .already_terminal,
-                .stale_run,
-                .session_closing,
-                => false,
-            };
+            const stopping = dispatchStops(dispatch, .pending_waits);
             if (!stopping) continue;
             task.runtime.cancel_requested = true;
             changed = true;
@@ -8371,7 +8379,22 @@ pub const Runtime = struct {
                         pinned = task.runtime.restore_catalog;
                         task.runtime.restore_catalog = null;
                         if (pinned) |*snapshot| for (snapshot.skills) |*skill| {
-                            const granted = if (rebind.capabilities) |capabilities| if (capabilities.skill) |inputs| capabilities.original.agent.borrowSkillRestoreInputs(inputs).policy.granted_skill_ids else &.{} else &.{};
+                            // The one site that keeps the empty default,
+                            // because here empty already restricts: a skill
+                            // is enabled only if the grant list names it, so
+                            // an empty list enables nothing. Unlike the
+                            // comparison above, an empty list cannot be
+                            // mistaken for an unchanged one.
+                            const granted: []const []const u8 = if (rebind.capabilities) |capabilities|
+                                if (capabilities.skill) |inputs|
+                                    if (capabilities.original.agent.borrowSkillRestoreInputs(inputs)) |borrow|
+                                        borrow.policy.granted_skill_ids
+                                    else
+                                        &.{}
+                                else
+                                    &.{}
+                            else
+                                &.{};
                             skill.enabled = skill.enabled and for (granted) |id| {
                                 if (std.mem.eql(u8, id, skill.skill_id)) break true;
                             } else false;
@@ -10482,6 +10505,36 @@ fn acknowledgeLatestCompletion(task: *task_state.Task) void {
         task.durable.completion_seen_run_id = latest.id;
 }
 
+/// How a caller reads a request that has not reached the Session yet.
+///
+/// The two callers differ on this one value and agree on every other: a user
+/// cancel of a Run still being handed over is a stop in progress, while the
+/// permission path acts only on a Run already running.
+const PendingReading = enum { pending_stops, pending_waits };
+
+/// Whether a termination dispatch means the Run is now winding down.
+///
+/// Named once rather than switched twice, so that the group meaning "the
+/// request did not take" has a single definition. `dependency_contract`
+/// belongs in it: a request that never arrived cannot have started a stop,
+/// and claiming otherwise would show the Task as stopping over a Run nobody
+/// asked anything of.
+fn dispatchStops(
+    dispatch: task_state.RunTerminationDispatch,
+    pending: PendingReading,
+) bool {
+    return switch (dispatch) {
+        .pending => pending == .pending_stops,
+        .requested, .already_requested => true,
+        .already_finishing,
+        .already_terminal,
+        .stale_run,
+        .session_closing,
+        .dependency_contract,
+        => false,
+    };
+}
+
 fn requestRunTermination(
     run: *task_state.RunRecord,
     pending: task_state.PendingInterruption,
@@ -10507,6 +10560,7 @@ fn requestRunTermination(
         .already_terminal => .already_terminal,
         .stale_run => .stale_run,
         .session_closing => .session_closing,
+        .dependency_contract => .dependency_contract,
     };
 }
 
@@ -10528,6 +10582,7 @@ fn requestPermissionTermination(
         .already_terminal => .already_terminal,
         .stale_run => .stale_run,
         .session_closing => .session_closing,
+        .dependency_contract => .dependency_contract,
     };
 }
 
@@ -10934,7 +10989,13 @@ fn inputBlocksAutomaticAllow(run: *const task_state.RunRecord) bool {
     if (run.agent_handoff.load(.acquire) != .running) return true;
     var lease = run.execution.?.run_control.tryAcquireLease() orelse return true;
     defer lease.deinit();
-    return lease.inputObservation().blocksAutomaticAllow();
+    // The one caller whose restricting answer is `true`, and this function
+    // already answers that way twice: a Run that is not running, and a lease
+    // that cannot be acquired, both block automatic approval. An unreachable
+    // link is the third of the same kind, and the only one that could not
+    // happen while both halves shared an address space.
+    const observation = lease.inputObservation() orelse return true;
+    return observation.blocksAutomaticAllow();
 }
 
 fn hasWaitingInputs(task: *const task_state.Task) bool {
@@ -13393,4 +13454,104 @@ test "a composition with no window system announces nothing and costs nothing" {
     publishTerminalTestRun(&runs[0].?, .completed);
     runtime.notifyRunAttention(.{}, &context, noScheduledOwner);
     try std.testing.expectEqual(@as(u64, 1), task.notification_marks.?.terminal_run_id);
+}
+
+// ---------------------------------------------------------------------------
+// The branches an unreachable half exists for
+// ---------------------------------------------------------------------------
+//
+// Every one of these answers was written for a half that is not there, so
+// every one of them is unreachable in process unless a test supplies a control
+// handle that cannot answer. Without that the whole group is dead code and a
+// green suite says nothing about it, which is the same shape as a comptime
+// guard whose tests are never collected.
+
+fn unreachableHalfRun(execution: *task_state.RunExecution) task_state.RunRecord {
+    execution.run_control = agent.RunControl.testUnreachable(9, 1);
+    return .{
+        .id = 9,
+        .generation = 1,
+        .execution = execution,
+        .execution_generation = 1,
+        .execution_protocol = .anthropic_messages,
+        .execution_model = @constCast("model"),
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
+        .input = .{ .text = .{ .value = @constCast("input") } },
+        .commentary_ends = @constCast(&[_]u64{}),
+        .tools = @constCast(&[_]?task_state.ToolView{}),
+        .terminal_diagnostic = @constCast(""),
+        .agent_handoff = .init(.running),
+    };
+}
+
+test "an observation that could not be made blocks automatic approval" {
+    var execution: task_state.RunExecution = .{};
+    var run = unreachableHalfRun(&execution);
+
+    // The reason the return type changed. This function already answers true
+    // for a Run that is not running and true for a lease it cannot acquire;
+    // an unreachable half is the third of the same kind, and the only one
+    // that could not arise while both halves shared an address space.
+    try std.testing.expect(inputBlocksAutomaticAllow(&run));
+}
+
+test "a termination request that never arrived starts no stop and panics nowhere" {
+    var execution: task_state.RunExecution = .{};
+    var run = unreachableHalfRun(&execution);
+
+    try std.testing.expectEqual(
+        task_state.RunTerminationDispatch.dependency_contract,
+        requestRunTermination(&run, .user_cancel),
+    );
+    try std.testing.expectEqual(
+        task_state.RunTerminationDispatch.dependency_contract,
+        requestPermissionTermination(&run),
+    );
+
+    // Both callers put it with the answers that mean the request did not
+    // take, which is the whole content of the classification.
+    try std.testing.expect(!dispatchStops(.dependency_contract, .pending_stops));
+    try std.testing.expect(!dispatchStops(.dependency_contract, .pending_waits));
+    try std.testing.expect(dispatchStops(.pending, .pending_stops));
+    try std.testing.expect(!dispatchStops(.pending, .pending_waits));
+
+    // And neither panic path fires on it. That is the only thing those two
+    // sites have to guarantee, and a comparison cannot be made to guarantee
+    // it by the compiler.
+    try std.testing.expect(!task_policy.publishedControlStale(.dependency_contract));
+    try std.testing.expect(!task_policy.dispatchedControlStale(.dependency_contract));
+    try std.testing.expect(task_policy.publishedControlStale(.stale_run));
+    try std.testing.expect(task_policy.dispatchedControlStale(.stale_run));
+}
+
+test "restore filters that could not be borrowed are not unchanged filters" {
+    // `modelRestoreCapabilitiesExact` ends in `return sameRestoreFilters(...)`,
+    // so this is the answer it hands Control: not exact, do not restore as if
+    // nothing moved.
+    var storage: [8]u8 align(8) = @splat(0);
+    const inputs: *agent.SkillRestoreInputs = @ptrCast(&storage);
+    var capabilities: RestoreCapabilities = .{
+        .original = .{
+            .agent = agent.RuntimePort.testUnreachableBorrow(),
+            .skill = inputs,
+            .mcp = null,
+            .permission_mode = .default,
+            .shell_policy = .unrestricted,
+            .permission_interaction = .interactive,
+        },
+        .skill = inputs,
+        .mcp = null,
+        .mcp_catalog_generation = null,
+    };
+    const current: Runtime.RestoreFilters = .{
+        .skill = inputs,
+        .mcp = null,
+        .mcp_catalog_generation = null,
+    };
+
+    // The failure a default would have produced: two empty id lists have
+    // equal length and compare equal element by element, so it would have
+    // reached `return true`.
+    try std.testing.expect(!Runtime.sameRestoreFilters(&capabilities, current));
 }

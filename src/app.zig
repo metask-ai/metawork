@@ -21,7 +21,7 @@ const models_automation_vault = @import("app/models_automation_vault.zig");
 const models_platform_binding = @import("app/models_platform_binding.zig");
 const metask_http_transport = @import("app/metask_http_transport.zig");
 const completion_http_transport = @import("app/completion_http_transport.zig");
-const oauth_loopback_transport = @import("oauth_loopback_transport");
+const oauth_loopback_transport = @import("metawork_oauth_loopback_transport");
 const agent_event_coordinator = @import("app/agent_event_coordinator.zig");
 const app_automation = @import("app/automation.zig");
 const frontend = @import("app/frontend.zig");
@@ -35,6 +35,10 @@ const app_platform = @import("app/platform.zig");
 const attachment_images = @import("app/attachment_images.zig");
 const app_single_instance = @import("app/single_instance_coordinator.zig");
 const fault = @import("app_fault");
+const execution_host = @import("app_execution_host");
+const execution_mode = @import("app_execution_mode");
+const agent_link = @import("metawork_agent_link");
+const event_pump = @import("event_pump");
 const app_stores = @import("app/stores.zig");
 const app_window = @import("app/window.zig");
 const product_update = @import("metawork_product_update");
@@ -662,7 +666,45 @@ fn createAgentRuntime(
     });
 }
 
+/// The execution half's build identity. It is the same four facts the fault
+/// record carries, for the same reason: the composition root owns them, and a
+/// peer that disagrees on any of them is not this build.
+const link_identity: agent_link.Identity = .{
+    .version = product_identity.version,
+    .core_manifest_sha256 = fault.digestFromHex(agent.core_manifest_sha256),
+    .core_abi_revision = agent.core_abi_revision,
+};
+
+/// Message-size policy for the link. The numbers belong to the owners of the
+/// limits they come from, so they are named here rather than inside the link.
+const link_message_limits: agent_link.MessageLimits = .{
+    .event = (event_pump.Limits{ .session_slots = 1 }).max_event_bytes,
+    .request = max_link_request_bytes,
+    .response = max_link_response_bytes,
+    .ui_request = pending_ui_json_capacity,
+    .ui_response = max_link_ui_response_bytes,
+};
+
+/// A Run input is the largest thing the UI sends. The ABI's prompt bound is
+/// the ceiling; the Product's own attachment and message caps are smaller, and
+/// they still apply before anything reaches here.
+const max_link_request_bytes: usize = 16 * 1024 * 1024;
+/// A skill catalog projection is the largest thing the execution half returns
+/// outside the event stream.
+const max_link_response_bytes: usize = 8 * 1024 * 1024;
+const max_link_ui_response_bytes: usize = 64 * 1024;
+
 pub fn run(init: std.process.Init) !void {
+    // The execution half runs instead of the application. It must fork before
+    // the Native SDK runner is entered, because a process that reaches the
+    // runner has a window, and this one must never have one.
+    if (execution_host.requested(init.minimal.args, init.gpa)) {
+        const exit = execution_mode.run(init.io, std.heap.c_allocator, .{
+            .identity = link_identity,
+            .message_limits = link_message_limits,
+        });
+        std.process.exit(@intFromEnum(exit));
+    }
     var http_engine: @import("metawork_http_transport").Engine = undefined;
     http_engine.init(std.heap.c_allocator, init.io);
     defer http_engine.deinit();

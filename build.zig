@@ -259,8 +259,8 @@ pub fn build(b: *std.Build) void {
         name: []const u8,
         root_module: *std.Build.Module,
     }{
-        .{ .name = "metawork-oauth-mechanics", .root_module = test_modules.oauth_mechanics },
-        .{ .name = "metawork-oauth-loopback", .root_module = test_modules.oauth_loopback },
+        .{ .name = "metawork-oauth-mechanics", .root_module = test_modules.metawork_oauth_mechanics },
+        .{ .name = "metawork-oauth-loopback", .root_module = test_modules.metawork_oauth_loopback },
         .{ .name = "metawork-product-models-contract", .root_module = test_modules.models_contract },
         .{ .name = "metawork-product-agent-protocol-adapter", .root_module = test_modules.product_agent_protocol_adapter },
         .{ .name = "metawork-account-contract", .root_module = test_modules.account_contract },
@@ -274,8 +274,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-models", .root_module = test_modules.models },
         .{ .name = "metawork-account-ports", .root_module = test_modules.account_ports },
         .{ .name = "metawork-account-loopback", .root_module = test_modules.account_loopback },
-        .{ .name = "metawork-oauth-loopback-transport", .root_module = test_modules.oauth_loopback_transport },
-        .{ .name = "metawork-select-start", .root_module = existingImport(test_modules.oauth_loopback_transport, "app_select_start") },
+        .{ .name = "metawork-oauth-loopback-transport", .root_module = test_modules.metawork_oauth_loopback_transport },
+        .{ .name = "metawork-select-start", .root_module = existingImport(test_modules.metawork_oauth_loopback_transport, "metawork_select_start") },
         .{ .name = "metawork-http-memory", .root_module = existingImport(test_modules.app, "metawork_http_memory") },
         .{ .name = "metawork-http-transport", .root_module = existingImport(test_modules.app, "metawork_http_transport") },
         .{ .name = "metawork-account-login-attempt", .root_module = test_modules.account_login_attempt },
@@ -304,6 +304,9 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-checkpoint", .root_module = test_modules.agent_checkpoint },
         .{ .name = "metawork-agent-session", .root_module = test_modules.agent_session },
         .{ .name = "metawork-agent-contract", .root_module = test_modules.agent_contract },
+        .{ .name = "metawork-agent-link", .root_module = test_modules.agent_link },
+        .{ .name = "metawork-app-execution-mode", .root_module = test_modules.app_execution_mode },
+        .{ .name = "metawork-app-execution-host", .root_module = test_modules.app_execution_host },
         .{ .name = "metawork-agent-file-delivery", .root_module = test_modules.agent_file_delivery },
         .{ .name = "metawork-product-attachment", .root_module = test_modules.product_attachment },
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
@@ -367,6 +370,8 @@ pub fn build(b: *std.Build) void {
             schedule_tests.dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.agent_contract)
             b.step("test-agent-contract", "Run the Agent contract declarations and codec tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.agent_link)
+            b.step("test-agent-link", "Run the execution link frame, registry and channel tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_runtime)
             b.step("test-product-skill-runtime", "Run Product Skill runtime tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_policy)
@@ -381,9 +386,9 @@ pub fn build(b: *std.Build) void {
             product_control_step.dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.image_output)
             b.step("test-image-output", "Run Workspace image output tests").dependOn(&b.addRunArtifact(tests).step);
-        if (spec.root_module == test_modules.oauth_loopback_transport)
+        if (spec.root_module == test_modules.metawork_oauth_loopback_transport)
             b.step("test-oauth-loopback-transport", "Run real OAuth callback concurrency and cancellation tests").dependOn(&b.addRunArtifact(tests).step);
-        if (spec.root_module == existingImport(test_modules.oauth_loopback_transport, "app_select_start"))
+        if (spec.root_module == existingImport(test_modules.metawork_oauth_loopback_transport, "metawork_select_start"))
             b.step("test-select-start", "Run partial Select registration cleanup tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == existingImport(test_modules.app, "metawork_http_transport"))
             b.step("test-http-transport", "Run shared HTTP execution and resource tests").dependOn(&b.addRunArtifact(tests).step);
@@ -615,14 +620,15 @@ pub fn build(b: *std.Build) void {
     b.step("test-app-history", "Verify Application SQLite history lifecycle").dependOn(&b.addRunArtifact(app_history_tests).step);
     const storage_tests = b.addTest(.{
         .name = "metawork-storage",
-        .root_module = test_modules.storage,
+        .root_module = test_modules.metawork_storage_sqlite,
     });
     const storage_crash_fixture_module = b.createModule(.{
         .root_source_file = b.path("tests/support/storage_crash_fixture.zig"),
-        .target = test_modules.storage.resolved_target,
-        .optimize = test_modules.storage.optimize,
+        .target = test_modules.metawork_storage_sqlite.resolved_target,
+        .optimize = test_modules.metawork_storage_sqlite.optimize,
     });
-    storage_crash_fixture_module.addImport("storage", test_modules.storage);
+    storage_crash_fixture_module.addImport("metawork_storage_sqlite", test_modules.metawork_storage_sqlite);
+    storage_crash_fixture_module.addImport("metawork_storage_sql", test_modules.metawork_storage_sql);
     storage_crash_fixture_module.link_libc = bundle.link_libc;
     const storage_crash_fixture = b.addExecutable(.{
         .name = "metawork-storage-crash-fixture",
@@ -634,7 +640,7 @@ pub fn build(b: *std.Build) void {
     );
     const storage_tests_run = b.addRunArtifact(storage_tests);
     storage_tests_run.step.dependOn(&install_storage_crash_fixture.step);
-    const storage_crash_fixture_name = if (test_modules.storage.resolved_target.?.result.os.tag == .windows) "metawork-storage-crash-fixture.exe" else "metawork-storage-crash-fixture";
+    const storage_crash_fixture_name = if (test_modules.metawork_storage_sqlite.resolved_target.?.result.os.tag == .windows) "metawork-storage-crash-fixture.exe" else "metawork-storage-crash-fixture";
     storage_tests_run.setEnvironmentVariable(
         "METAWORK_STORAGE_CRASH_FIXTURE",
         b.getInstallPath(.bin, storage_crash_fixture_name),
@@ -694,36 +700,83 @@ pub fn build(b: *std.Build) void {
     );
     fault_capture_step.dependOn(&fault_unit_tests_run.step);
     fault_capture_step.dependOn(&fault_capture_tests_run.step);
+    // The process seam needs a second process, so it is verified the only way
+    // it can be: a fixture that runs the real execution-half entry over real
+    // inherited pipes, with the parent doing the real handshake. A missing
+    // fixture must fail the run, never skip it.
+    const execution_link_fixture_module = b.createModule(.{
+        .root_source_file = b.path("tests/support/execution_link_fixture.zig"),
+        .target = test_modules.app_execution_mode.resolved_target,
+        .optimize = test_modules.app_execution_mode.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    execution_link_fixture_module.addImport("app_execution_mode", test_modules.app_execution_mode);
+    execution_link_fixture_module.addImport("metawork_agent_link", test_modules.agent_link);
+    const execution_link_fixture = b.addExecutable(.{
+        .name = "metawork-execution-link-fixture",
+        .root_module = execution_link_fixture_module,
+    });
+    const install_execution_link_fixture = b.addInstallArtifact(execution_link_fixture, .{});
+    const execution_link_module = b.createModule(.{
+        .root_source_file = b.path("tests/integration/execution_link_test.zig"),
+        .target = test_modules.app_execution_host.resolved_target,
+        .optimize = test_modules.app_execution_host.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    execution_link_module.addImport("app_execution_host", test_modules.app_execution_host);
+    execution_link_module.addImport("app_execution_mode", test_modules.app_execution_mode);
+    execution_link_module.addImport("metawork_agent_link", test_modules.agent_link);
+    const execution_link_tests_run = b.addRunArtifact(b.addTest(.{
+        .name = "metawork-execution-link",
+        .root_module = execution_link_module,
+    }));
+    execution_link_tests_run.step.dependOn(&install_execution_link_fixture.step);
+    execution_link_tests_run.setEnvironmentVariable("METAWORK_EXECUTION_LINK_FIXTURE", b.getInstallPath(
+        .bin,
+        if (test_modules.app_execution_mode.resolved_target.?.result.os.tag == .windows)
+            "metawork-execution-link-fixture.exe"
+        else
+            "metawork-execution-link-fixture",
+    ));
+    execution_link_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_VERSION", "fixture-0");
+    execution_link_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_DIGEST", "1");
+    artifacts.tests.step.dependOn(&execution_link_tests_run.step);
+    b.step(
+        "test-execution-link",
+        "Run the execution process fork, identity exchange and stop tests",
+    ).dependOn(&execution_link_tests_run.step);
     // Isolated, opt-in Stage A probes. Not part of the app or the default test graph.
     const sqlite_a_module = b.createModule(.{
         .root_source_file = b.path("tests/probes/sqlite_history_a_memory.zig"),
-        .target = test_modules.storage.resolved_target,
-        .optimize = test_modules.storage.optimize,
+        .target = test_modules.metawork_storage_sqlite.resolved_target,
+        .optimize = test_modules.metawork_storage_sqlite.optimize,
         .link_libc = true,
     });
     sqlite_a_module.addImport("product_task_persistence", test_modules.product_task_persistence);
     sqlite_a_module.addImport("product_task_runtime", test_modules.product_task_runtime);
     sqlite_a_module.addImport("product_task_state", test_modules.product_task_state);
-    sqlite_a_module.addImport("storage", test_modules.storage);
+    sqlite_a_module.addImport("metawork_storage_sqlite", test_modules.metawork_storage_sqlite);
+    sqlite_a_module.addImport("metawork_storage_sql", test_modules.metawork_storage_sql);
     const sqlite_a_memory = b.addTest(.{ .name = "sqlite-history-a-memory", .root_module = sqlite_a_module, .filters = &.{"stage A"} });
     const sqlite_a_sql_module = b.createModule(.{
         .root_source_file = b.path("tests/probes/sqlite_history_a_backend.zig"),
-        .target = test_modules.storage.resolved_target,
-        .optimize = test_modules.storage.optimize,
+        .target = test_modules.metawork_storage_sqlite.resolved_target,
+        .optimize = test_modules.metawork_storage_sqlite.optimize,
         .link_libc = true,
     });
-    sqlite_a_sql_module.addImport("storage", test_modules.storage);
+    sqlite_a_sql_module.addImport("metawork_storage_sqlite", test_modules.metawork_storage_sqlite);
+    sqlite_a_sql_module.addImport("metawork_storage_sql", test_modules.metawork_storage_sql);
     const sqlite_a_backend = b.addTest(.{ .name = "sqlite-history-a-backend", .root_module = sqlite_a_sql_module, .filters = &.{"stage A"} });
     const sqlite_a_step = b.step("build-sqlite-history-a-probes", "Build isolated SQLite stage A memory and existing-backend measurements");
     sqlite_a_step.dependOn(&b.addInstallArtifact(sqlite_a_memory, .{}).step);
     sqlite_a_step.dependOn(&b.addInstallArtifact(sqlite_a_backend, .{}).step);
     const sqlite_a_primitives_module = b.createModule(.{
         .root_source_file = b.path("tests/probes/sqlite_history_a_primitives.zig"),
-        .target = test_modules.storage.resolved_target,
-        .optimize = test_modules.storage.optimize,
+        .target = test_modules.metawork_storage_sqlite.resolved_target,
+        .optimize = test_modules.metawork_storage_sqlite.optimize,
         .link_libc = true,
     });
-    sqlite_a_primitives_module.addImport("storage", test_modules.storage);
+    sqlite_a_primitives_module.addImport("metawork_storage_sqlite", test_modules.metawork_storage_sqlite);
     sqlite_a_primitives_module.addIncludePath(b.dependency("sqlite", .{}).path("."));
     sqlite_a_primitives_module.addCSourceFile(.{ .file = b.path("tests/probes/sqlite_history_a_primitives.c"), .flags = &.{"-std=c11"} });
     const sqlite_a_primitives = b.addTest(.{ .name = "sqlite-history-a-primitives", .root_module = sqlite_a_primitives_module, .filters = &.{"stage A"} });
@@ -733,30 +786,30 @@ pub fn build(b: *std.Build) void {
         sqlite_a_size_options.addOption(bool, "engine", engine);
         const sqlite_a_size_module = b.createModule(.{
             .root_source_file = b.path("tests/probes/sqlite_history_a_size.zig"),
-            .target = test_modules.storage.resolved_target,
-            .optimize = test_modules.storage.optimize,
+            .target = test_modules.metawork_storage_sqlite.resolved_target,
+            .optimize = test_modules.metawork_storage_sqlite.optimize,
             .link_libc = true,
         });
         sqlite_a_size_module.addOptions("stage_a_size_options", sqlite_a_size_options);
-        if (engine) sqlite_a_size_module.addImport("storage", test_modules.storage);
+        if (engine) sqlite_a_size_module.addImport("metawork_storage_sqlite", test_modules.metawork_storage_sqlite);
         const sqlite_a_size = b.addExecutable(.{ .name = if (engine) "sqlite-history-a-size-engine" else "sqlite-history-a-size-base", .root_module = sqlite_a_size_module });
         sqlite_a_step.dependOn(&b.addInstallArtifact(sqlite_a_size, .{}).step);
     }
     const history_schema_fixture_module = b.createModule(.{
         .root_source_file = b.path("tests/support/history_schema.zig"),
-        .target = test_modules.storage.resolved_target,
-        .optimize = test_modules.storage.optimize,
+        .target = test_modules.metawork_storage_sqlite.resolved_target,
+        .optimize = test_modules.metawork_storage_sqlite.optimize,
     });
-    history_schema_fixture_module.addImport("metawork_storage_sql", test_modules.storage_sql);
+    history_schema_fixture_module.addImport("metawork_storage_sql", test_modules.metawork_storage_sql);
     history_schema_fixture_module.addImport("product_task_persistence", test_modules.product_task_persistence);
     const history_schema_tests_module = b.createModule(.{
         .root_source_file = b.path("tests/product/history_schema_test.zig"),
-        .target = test_modules.storage.resolved_target,
-        .optimize = test_modules.storage.optimize,
+        .target = test_modules.metawork_storage_sqlite.resolved_target,
+        .optimize = test_modules.metawork_storage_sqlite.optimize,
     });
     history_schema_tests_module.addImport("product_control_history_schema", test_modules.product_control_history_schema);
-    history_schema_tests_module.addImport("metawork_storage_sql", test_modules.storage_sql);
-    history_schema_tests_module.addImport("storage", test_modules.storage);
+    history_schema_tests_module.addImport("metawork_storage_sql", test_modules.metawork_storage_sql);
+    history_schema_tests_module.addImport("metawork_storage_sqlite", test_modules.metawork_storage_sqlite);
     history_schema_tests_module.addImport("history_schema_fixture", history_schema_fixture_module);
     const history_schema_tests = b.addTest(.{
         .name = "metawork-product-history-schema",
@@ -787,7 +840,7 @@ fn addRendererWireGenerator(b: *std.Build) void {
     module.addImport("snapshot_contract", snapshot);
     module.addImport("task_view_contract", task_view);
     const update = b.createModule(.{ .root_source_file = b.path("src/product/update.zig"), .target = b.graph.host });
-    update.addImport("metawork_http_contract", b.createModule(.{ .root_source_file = b.path("src/foundation/http_contract.zig"), .target = b.graph.host }));
+    update.addImport("metawork_http_contract", b.createModule(.{ .root_source_file = b.path("src/foundation/http/contract.zig"), .target = b.graph.host }));
     module.addImport("product_update", update);
     const generator = b.addExecutable(.{ .name = "metawork-renderer-wire-generator", .root_module = module });
     b.step("generate-renderer-wire", "Generate Renderer structures from actual Host wire types").dependOn(&b.addRunArtifact(generator).step);
@@ -865,11 +918,11 @@ fn addLifecycleTests(
 
 const WiredModules = struct {
     product_update: *std.Build.Module,
-    storage: *std.Build.Module,
-    storage_sql: *std.Build.Module,
+    metawork_storage_sqlite: *std.Build.Module,
+    metawork_storage_sql: *std.Build.Module,
     product_control_history_schema: *std.Build.Module,
-    oauth_mechanics: *std.Build.Module,
-    oauth_loopback: *std.Build.Module,
+    metawork_oauth_mechanics: *std.Build.Module,
+    metawork_oauth_loopback: *std.Build.Module,
     models_contract: *std.Build.Module,
     product_agent_protocol_adapter: *std.Build.Module,
     account: *std.Build.Module,
@@ -884,7 +937,7 @@ const WiredModules = struct {
     account_summary: *std.Build.Module,
     account_credential_store: *std.Build.Module,
     account_loopback: *std.Build.Module,
-    oauth_loopback_transport: *std.Build.Module,
+    metawork_oauth_loopback_transport: *std.Build.Module,
     account_login_attempt: *std.Build.Module,
     account_network_attempt: *std.Build.Module,
     account_oauth: *std.Build.Module,
@@ -904,6 +957,9 @@ const WiredModules = struct {
     product_permission_review: *std.Build.Module,
     agent_session: *std.Build.Module,
     agent_contract: *std.Build.Module,
+    agent_link: *std.Build.Module,
+    app_execution_host: *std.Build.Module,
+    app_execution_mode: *std.Build.Module,
     agent_file_delivery: *std.Build.Module,
     agent_catalog: *std.Build.Module,
     agent_checkpoint: *std.Build.Module,
@@ -1429,8 +1485,8 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
         .link_libc = bundle.link_libc,
     });
-    const storage_sql = b.createModule(.{
-        .root_source_file = b.path("src/storage/sql.zig"),
+    const metawork_storage_sql = b.createModule(.{
+        .root_source_file = b.path("src/foundation/storage/sql.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -1439,16 +1495,16 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_control_history_schema.addImport("metawork_storage_sql", storage_sql);
-    const storage = b.createModule(.{
-        .root_source_file = b.path("src/storage.zig"),
+    product_control_history_schema.addImport("metawork_storage_sql", metawork_storage_sql);
+    const metawork_storage_sqlite = b.createModule(.{
+        .root_source_file = b.path("src/foundation/storage/sqlite.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    storage.addImport("metawork_storage_sql", storage_sql);
+    metawork_storage_sqlite.addImport("metawork_storage_sql", metawork_storage_sql);
     const sqlite = b.dependency("sqlite", .{});
-    storage.addIncludePath(sqlite.path("."));
-    storage.addCSourceFile(.{
+    metawork_storage_sqlite.addIncludePath(sqlite.path("."));
+    metawork_storage_sqlite.addCSourceFile(.{
         .file = sqlite.path("sqlite3.c"),
         .flags = &.{
             "-DSQLITE_THREADSAFE=2",
@@ -1459,7 +1515,7 @@ fn wireAgentCore(
             "-DSQLITE_DEFAULT_MEMSTATUS=0",
         },
     });
-    storage.link_libc = true;
+    metawork_storage_sqlite.link_libc = true;
     product_identity.addImport(
         "app_manifest_zon",
         existingImport(runner, "app_manifest_zon"),
@@ -1634,6 +1690,34 @@ fn wireAgentCore(
     agent_contract.addImport("agent_mcp_connector", agent_mcp_connector);
     agent_contract.addImport("agent_mcp_stdio", agent_mcp_stdio);
     agent_contract.addImport("agent_mcp_http", agent_mcp_http);
+    // The execution link. It frames bytes and numbers the port's methods and
+    // errors; it imports the contract module only, so a binary that links it
+    // still links no AgentCore archive.
+    const agent_link = b.createModule(.{
+        .root_source_file = b.path("src/agent/link.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    agent_link.addImport("agent_contract", agent_contract);
+    agent_link.addImport("agent_mcp_catalog", agent_mcp_catalog);
+    agent_link.addImport("agent_catalog", agent_catalog);
+    agent_link.addImport("agent_checkpoint", agent_checkpoint);
+    agent_link.addImport("agent_checkpoint_restore", agent_checkpoint_restore);
+    // The two halves of the process seam. They live in their own modules so a
+    // test fixture can stand in for the execution half without the Renderer
+    // bundle the application executable carries.
+    const app_execution_mode = b.createModule(.{
+        .root_source_file = b.path("src/app/execution_mode.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    app_execution_mode.addImport("metawork_agent_link", agent_link);
+    const app_execution_host = b.createModule(.{
+        .root_source_file = b.path("src/app/execution_host.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    app_execution_host.addImport("metawork_agent_link", agent_link);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
@@ -1720,13 +1804,13 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     account_state.addImport("metawork_account_contract", account_contract);
-    const oauth_mechanics = b.createModule(.{
-        .root_source_file = b.path("src/oauth/mechanics.zig"),
+    const metawork_oauth_mechanics = b.createModule(.{
+        .root_source_file = b.path("src/foundation/oauth/mechanics.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    const oauth_loopback = b.createModule(.{
-        .root_source_file = b.path("src/oauth/loopback.zig"),
+    const metawork_oauth_loopback = b.createModule(.{
+        .root_source_file = b.path("src/foundation/oauth/loopback.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -1736,21 +1820,21 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     account_oauth.addImport("metawork_account_contract", account_contract);
-    account_oauth.addImport("oauth_mechanics", oauth_mechanics);
+    account_oauth.addImport("metawork_oauth_mechanics", metawork_oauth_mechanics);
     const account_loopback = b.createModule(.{
         .root_source_file = b.path("src/product/account/loopback.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     account_loopback.addImport("account_oauth", account_oauth);
-    account_loopback.addImport("oauth_loopback", oauth_loopback);
-    const oauth_loopback_transport = b.createModule(.{
-        .root_source_file = b.path("src/app/oauth_loopback_transport.zig"),
+    account_loopback.addImport("metawork_oauth_loopback", metawork_oauth_loopback);
+    const metawork_oauth_loopback_transport = b.createModule(.{
+        .root_source_file = b.path("src/foundation/oauth/loopback_transport.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    const app_select_start = b.createModule(.{
-        .root_source_file = b.path("src/app/select_start.zig"),
+    const metawork_select_start = b.createModule(.{
+        .root_source_file = b.path("src/foundation/select_start.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -1763,17 +1847,17 @@ fn wireAgentCore(
         .link_libc = bundle.link_libc,
     });
     const metawork_http_memory = b.createModule(.{
-        .root_source_file = b.path("src/foundation/http_memory.zig"),
+        .root_source_file = b.path("src/foundation/http/memory.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     const metawork_http_contract = b.createModule(.{
-        .root_source_file = b.path("src/foundation/http_contract.zig"),
+        .root_source_file = b.path("src/foundation/http/contract.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     const metawork_http_transport = b.createModule(.{
-        .root_source_file = b.path("src/foundation/http_transport.zig"),
+        .root_source_file = b.path("src/foundation/http/transport.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -1782,8 +1866,8 @@ fn wireAgentCore(
     // Update publishes the engine's typed failure facts; the engine itself
     // stays Application-only.
     product_update.addImport("metawork_http_contract", metawork_http_contract);
-    oauth_loopback_transport.addImport("app_select_start", app_select_start);
-    oauth_loopback_transport.addImport("oauth_loopback", oauth_loopback);
+    metawork_oauth_loopback_transport.addImport("metawork_select_start", metawork_select_start);
+    metawork_oauth_loopback_transport.addImport("metawork_oauth_loopback", metawork_oauth_loopback);
     const metask_transport = b.createModule(.{
         .root_source_file = b.path("src/product/metask_transport.zig"),
         .target = target,
@@ -1804,6 +1888,7 @@ fn wireAgentCore(
     metask_client.addImport("metawork_account_contract", account_contract);
     metask_client.addImport("account_state", account_state);
     metask_client.addImport("account_oauth", account_oauth);
+    metask_client.addImport("metawork_oauth_mechanics", metawork_oauth_mechanics);
     metask_client.addImport("account_summary", account_summary);
     const account_login_attempt = b.createModule(.{
         .root_source_file = b.path("src/product/account/login_attempt.zig"),
@@ -2498,7 +2583,7 @@ fn wireAgentCore(
     video_output.addImport("app_output_file", output_file);
     product_control_ports.addImport("metawork_product_workspace", product_workspace);
     image_output.addImport("metawork_agent", agent);
-    image_output.addImport("app_select_start", app_select_start);
+    image_output.addImport("metawork_select_start", metawork_select_start);
     image_output.addImport("metawork_product_workspace", product_workspace);
     const product_control_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/control/runtime.zig"),
@@ -2639,7 +2724,7 @@ fn wireAgentCore(
     });
     mcp_platform.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     mcp_platform.addImport("metawork_agent", agent);
-    mcp_platform.addImport("app_select_start", app_select_start);
+    mcp_platform.addImport("metawork_select_start", metawork_select_start);
     mcp_platform.addImport("metawork_http_transport", metawork_http_transport);
     const mcp_process_compat = b.createModule(.{
         .root_source_file = b.path("src/native_sdk_compat/mcp_process.zig"),
@@ -2664,10 +2749,10 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    mcp_oauth.addImport("oauth_mechanics", oauth_mechanics);
+    mcp_oauth.addImport("metawork_oauth_mechanics", metawork_oauth_mechanics);
     mcp_oauth.addImport("metawork_http_transport", metawork_http_transport);
-    mcp_oauth.addImport("oauth_loopback", oauth_loopback);
-    mcp_oauth.addImport("oauth_loopback_transport", oauth_loopback_transport);
+    mcp_oauth.addImport("metawork_oauth_loopback", metawork_oauth_loopback);
+    mcp_oauth.addImport("metawork_oauth_loopback_transport", metawork_oauth_loopback_transport);
     mcp_platform.addImport("metawork_mcp_oauth", mcp_oauth);
 
     const models_coordinator = b.createModule(.{
@@ -2694,7 +2779,8 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     product_control.addImport("product_control_history_schema", product_control_history_schema);
-    app.addImport("storage", storage);
+    app.addImport("metawork_storage_sqlite", metawork_storage_sqlite);
+    app.addImport("metawork_storage_sql", metawork_storage_sql);
     app.addImport("runner", runner);
     app.addImport("build_options", existingImport(runner, "build_options"));
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
@@ -2702,6 +2788,10 @@ fn wireAgentCore(
     // instead of repeating it as a literal.
     app.addImport("app_manifest_zon", existingImport(runner, "app_manifest_zon"));
     app.addImport("metawork_agent", agent);
+    app.addImport("metawork_agent_link", agent_link);
+    app.addImport("app_execution_host", app_execution_host);
+    app.addImport("app_execution_mode", app_execution_mode);
+    app.addImport("event_pump", event_pump);
     app.addImport("metawork_product_update", product_update);
     app.addImport("app_output_file", output_file);
     app.addImport("metawork_product_workspace", product_workspace);
@@ -2729,8 +2819,8 @@ fn wireAgentCore(
     app.addImport("metawork_account", account);
     app.addImport("account_oauth", account_oauth);
     app.addImport("account_loopback", account_loopback);
-    app.addImport("oauth_loopback_transport", oauth_loopback_transport);
-    app.addImport("app_select_start", app_select_start);
+    app.addImport("metawork_oauth_loopback_transport", metawork_oauth_loopback_transport);
+    app.addImport("metawork_select_start", metawork_select_start);
     app.addImport("app_fault", app_fault);
     app.addImport("metawork_http_memory", metawork_http_memory);
     app.addImport("metawork_http_transport", metawork_http_transport);
@@ -2753,11 +2843,11 @@ fn wireAgentCore(
     root_module.link_libc = bundle.link_libc;
     return .{
         .product_update = product_update,
-        .storage = storage,
-        .storage_sql = storage_sql,
+        .metawork_storage_sqlite = metawork_storage_sqlite,
+        .metawork_storage_sql = metawork_storage_sql,
         .product_control_history_schema = product_control_history_schema,
-        .oauth_mechanics = oauth_mechanics,
-        .oauth_loopback = oauth_loopback,
+        .metawork_oauth_mechanics = metawork_oauth_mechanics,
+        .metawork_oauth_loopback = metawork_oauth_loopback,
         .models_contract = models_contract,
         .product_agent_protocol_adapter = product_agent_protocol_adapter,
         .account = account,
@@ -2772,7 +2862,7 @@ fn wireAgentCore(
         .account_summary = account_summary,
         .account_credential_store = account_credential_store,
         .account_loopback = account_loopback,
-        .oauth_loopback_transport = oauth_loopback_transport,
+        .metawork_oauth_loopback_transport = metawork_oauth_loopback_transport,
         .account_login_attempt = account_login_attempt,
         .account_network_attempt = account_network_attempt,
         .account_oauth = account_oauth,
@@ -2792,6 +2882,9 @@ fn wireAgentCore(
         .product_permission_review = product_permission_review,
         .agent_session = session,
         .agent_contract = agent_contract,
+        .agent_link = agent_link,
+        .app_execution_host = app_execution_host,
+        .app_execution_mode = app_execution_mode,
         .agent_file_delivery = agent_file_delivery,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,

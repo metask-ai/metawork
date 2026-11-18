@@ -71,6 +71,10 @@ pub const SessionRestoreRoute = struct {
 pub const BeginRunOutcome = union(enum) {
     run: RunPort,
     failure: surface.BeginRunFailure,
+
+    /// A Run that could not be begun because the link is gone is a failure.
+    /// Handing back a `run` would give the caller a Run nothing is executing.
+    pub const link_unreachable: std.meta.Tag(@This()) = .failure;
 };
 
 /// A Run handed to its executor. `execute` blocks until the Run reaches a
@@ -122,7 +126,7 @@ pub const RunControl = struct {
         try_retain: *const fn (?*anyopaque) bool,
         release: *const fn (?*anyopaque) void,
         submit_input: *const fn (?*anyopaque, u64, u64, u64, []const u8) session_control.InputSubmission,
-        input_observation: *const fn (?*anyopaque, u64, u64) session_control.InputObservation,
+        input_observation: *const fn (?*anyopaque, u64, u64) ?session_control.InputObservation,
         request_termination: *const fn (?*anyopaque, u64, u64, session_control.TerminationSignal) session_control.TerminationRequestResult,
     };
 
@@ -131,6 +135,61 @@ pub const RunControl = struct {
         if (!vtable.try_retain(self.context)) return null;
         return .{ .control = self };
     }
+
+    /// A control handle whose far side cannot be reached, so that the branch
+    /// each caller writes for that case actually runs.
+    ///
+    /// Its answers are the declared ones rather than hand-picked: the
+    /// termination result is `TerminationRequestResult.link_unreachable` and
+    /// the submission is `InputSubmission`'s, so this fixture and the port
+    /// guard in `src/agent/link/unreachability.zig` cannot drift apart.
+    pub fn testUnreachable(run_id: u64, generation: u64) RunControl {
+        std.debug.assert(@import("builtin").is_test);
+        return .{
+            .context = null,
+            .vtable = &unreachable_vtable,
+            .run_id = run_id,
+            .generation = generation,
+        };
+    }
+
+    const unreachable_vtable: VTable = .{
+        // Retaining succeeds. A caller that could not take the lease stops one
+        // line earlier and never reaches the answers below, and those answers
+        // are the point of this fixture.
+        .try_retain = struct {
+            fn call(_: ?*anyopaque) bool {
+                return true;
+            }
+        }.call,
+        .release = struct {
+            fn call(_: ?*anyopaque) void {}
+        }.call,
+        .submit_input = struct {
+            fn call(_: ?*anyopaque, _: u64, _: u64, _: u64, _: []const u8) session_control.InputSubmission {
+                return @unionInit(
+                    session_control.InputSubmission,
+                    @tagName(session_control.InputSubmission.link_unreachable),
+                    {},
+                );
+            }
+        }.call,
+        .input_observation = struct {
+            fn call(_: ?*anyopaque, _: u64, _: u64) ?session_control.InputObservation {
+                return null;
+            }
+        }.call,
+        .request_termination = struct {
+            fn call(
+                _: ?*anyopaque,
+                _: u64,
+                _: u64,
+                _: session_control.TerminationSignal,
+            ) session_control.TerminationRequestResult {
+                return session_control.TerminationRequestResult.link_unreachable;
+            }
+        }.call,
+    };
 };
 
 /// A retained Agent control reference. This is a linear value: callers must
@@ -150,7 +209,17 @@ pub const RunControlLease = struct {
         );
     }
 
-    pub fn inputObservation(self: *const RunControlLease) session_control.InputObservation {
+    /// `null` when no observation could be made at all, because the far side
+    /// is unreachable.
+    ///
+    /// Deliberately not an empty observation. Its fields point opposite ways:
+    /// a caller reading `ready` treats a zeroed value as not ready, which
+    /// restricts, while a caller reading `blocksAutomaticAllow` reads the same
+    /// zeroed value as nothing blocking, which releases automatic approval. No
+    /// default value is safe for both, and no added field makes one safe, so
+    /// the absence is handed to the caller and each one says which side it
+    /// chose.
+    pub fn inputObservation(self: *const RunControlLease) ?session_control.InputObservation {
         std.debug.assert(!self.released);
         return self.control.vtable.?.input_observation(
             self.control.context,
@@ -403,7 +472,16 @@ pub const RuntimePort = struct {
     context: ?*anyopaque,
     vtable: *const VTable,
 
-    pub const RestoreAdmission = enum { available, capacity_reached, mcp_busy, unavailable };
+    pub const RestoreAdmission = enum {
+        available,
+        capacity_reached,
+        mcp_busy,
+        unavailable,
+
+        /// Admitting a restore we cannot reach would hand the caller a
+        /// Session that is not there, so the existing refusal is the answer.
+        pub const link_unreachable: @This() = .unavailable;
+    };
 
     pub const VTable = struct {
         create_session_route: *const fn (?*anyopaque, surface.SessionOpenOptions) Allocating!SessionRoute,
@@ -433,7 +511,7 @@ pub const RuntimePort = struct {
         /// the caller owns.
         narrow_skill_restore_inputs: *const fn (?*anyopaque, *SkillRestoreInputs, surface.SkillPolicyInput) Allocating!*SkillRestoreInputs,
         clone_skill_restore_inputs: *const fn (?*anyopaque, *SkillRestoreInputs) Allocating!*SkillRestoreInputs,
-        borrow_skill_restore_inputs: *const fn (?*anyopaque, *const SkillRestoreInputs) SkillRestoreBorrow,
+        borrow_skill_restore_inputs: *const fn (?*anyopaque, *const SkillRestoreInputs) ?SkillRestoreBorrow,
         release_skill_restore_inputs: *const fn (?*anyopaque, *SkillRestoreInputs) Error!void,
         /// Releases what `SessionPort.captureRestoreInputs` handed out. The
         /// value is consumed; the caller must not release its parts itself.
@@ -446,6 +524,23 @@ pub const RuntimePort = struct {
     /// a Control test that drives only projection, a Host that has not
     /// attached one yet -- bind this.
     pub const quiet: RuntimePort = .{ .context = null, .vtable = &quiet_vtable };
+
+    /// `quiet`, except that the skill-restore borrow cannot be made, so that
+    /// each caller's answer to an unreachable half actually runs.
+    pub fn testUnreachableBorrow() RuntimePort {
+        std.debug.assert(@import("builtin").is_test);
+        return .{ .context = null, .vtable = &unreachable_borrow_vtable };
+    }
+
+    const unreachable_borrow_vtable: VTable = vtable: {
+        var copy = quiet_vtable;
+        copy.borrow_skill_restore_inputs = struct {
+            fn call(_: ?*anyopaque, _: *const SkillRestoreInputs) ?SkillRestoreBorrow {
+                return null;
+            }
+        }.call;
+        break :vtable copy;
+    };
 
     const quiet_vtable: VTable = .{
         .create_session_route = struct {
@@ -533,7 +628,7 @@ pub const RuntimePort = struct {
             }
         }.call,
         .borrow_skill_restore_inputs = struct {
-            fn call(_: ?*anyopaque, _: *const SkillRestoreInputs) SkillRestoreBorrow {
+            fn call(_: ?*anyopaque, _: *const SkillRestoreInputs) ?SkillRestoreBorrow {
                 @panic("Agent call on a Runtime port that has no Agent");
             }
         }.call,
@@ -631,7 +726,15 @@ pub const RuntimePort = struct {
         return self.vtable.clone_skill_restore_inputs(self.context, inputs);
     }
 
-    pub fn borrowSkillRestoreInputs(self: RuntimePort, inputs: *const SkillRestoreInputs) SkillRestoreBorrow {
+    /// `null` when the borrow could not be made, because the half holding
+    /// the inputs is unreachable.
+    ///
+    /// It is not an empty borrow. An empty grant list is a meaningful value
+    /// here -- it denies every skill -- and in the one place that compares two
+    /// of them it would read as "the filters did not change", which restores a
+    /// Session as though its skills were intact. So the absence is the
+    /// caller's to answer.
+    pub fn borrowSkillRestoreInputs(self: RuntimePort, inputs: *const SkillRestoreInputs) ?SkillRestoreBorrow {
         return self.vtable.borrow_skill_restore_inputs(self.context, inputs);
     }
 

@@ -292,7 +292,13 @@ pub fn executeRun(context: *anyopaque) void {
             var lease = lease_value;
             const result = lease.requestTermination(policy.pendingTerminationSignal(run));
             lease.deinit();
-            if (result == .stale_run) std.debug.panic(
+            // The predicate is named in `policy.zig` because a comparison is
+            // not a switch: adding a value to the result points the compiler
+            // at every exhaustive switch and at neither of the two sites that
+            // panic. An undelivered request answers false there -- it says
+            // nothing about the RunControl just published, and the Run reaches
+            // its own terminal with that same failure a moment later.
+            if (policy.publishedControlStale(result)) std.debug.panic(
                 "newly published RunControl for Run {d} was already stale",
                 .{run.id},
             );

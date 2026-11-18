@@ -504,7 +504,18 @@ const ReviewerTransport = struct {
             defer self.exited.store(true, .release);
             while (!self.released.load(.acquire)) {
                 if (cancellation.isRequested() and !self.hold_cancel_cleanup) return error.Cancelled;
-                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch return error.Cancelled;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {
+                    // A cancelled sleep is not a release. While holding, this
+                    // worker must keep occupying reviewer capacity until the
+                    // test lets it go, so `released` is the only way out of
+                    // this loop: the cancellation the hold exists to outlive
+                    // used to end the call here instead of at the check above,
+                    // and then the worker was reaped, its capacity freed, and
+                    // the assertion about capacity failed somewhere else with
+                    // no hint of why.
+                    if (!self.hold_cancel_cleanup) return error.Cancelled;
+                    std.Thread.yield() catch {};
+                };
             }
             if (cancellation.isRequested()) return error.Cancelled;
         }
@@ -903,11 +914,15 @@ test "Control permission reviewer capacity includes cancelled workers until they
         if (first.runtime.permission_review.phase == .needs_user) break;
         std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake) catch return error.TestUnexpectedResult;
     }
+    // The precondition everything below rests on, so it is checked first: a
+    // reviewer that exited has been reaped, which frees the capacity this test
+    // is about. Asserted last, a lost hold showed up as a phase of `.reviewing`
+    // and said nothing about the reason.
+    try std.testing.expect(!transport.exited.load(.acquire));
     try std.testing.expectEqual(.needs_user, first.runtime.permission_review.phase);
     try std.testing.expectEqual(.needs_user, control.testTask(ids[8]).?.runtime.permission_review.phase);
     try std.testing.expectEqual(.capacity, control.testTask(ids[8]).?.runtime.permission_review.cause);
     try std.testing.expect(transport.calls.load(.acquire) <= 8);
-    try std.testing.expect(!transport.exited.load(.acquire));
 }
 
 fn reviewSuggestion(decision: enum { allow_once, needs_user, deny }, reason: []const u8) product_task.PermissionReviewOutcome {
@@ -6148,7 +6163,11 @@ test "Skill input is accepted once while fresh preparation waits and failed fres
     var restore_inputs = try access.captureRestoreInputs();
     access.deinit();
     defer restore_inputs.release() catch unreachable;
-    try std.testing.expectEqual(@as(usize, 0), restore_inputs.agent.borrowSkillRestoreInputs(restore_inputs.skill.?).policy.granted_skill_ids.len);
+    // In process the borrow is always made, so a null here is a test
+    // failure rather than a case to handle.
+    const borrowed = restore_inputs.agent.borrowSkillRestoreInputs(restore_inputs.skill.?) orelse
+        return error.BorrowUnavailable;
+    try std.testing.expectEqual(@as(usize, 0), borrowed.policy.granted_skill_ids.len);
     const withdrawn_refreshes = fake_core.catalog_refreshes;
     try std.testing.expectEqual(@as(usize, 1), withdrawn_refreshes);
     const ordinary = try workbench.sendInput("text-without-skills", task_id, .{ .text = "Continue without Skill grants" });

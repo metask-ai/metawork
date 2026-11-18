@@ -205,6 +205,170 @@ function foundationImportViolations(file, source) {
   return violations;
 }
 
+/**
+ * Foundation members by role. A contract is types and pure functions: it holds
+ * no state or handle, opens no connection and starts no external effect (PKCE
+ * generation only borrows the caller's Io for entropy). An engine does at
+ * least one of those. Together they must name every Foundation build module.
+ */
+const foundationContracts = [
+  "metawork_http_contract",
+  "metawork_oauth_loopback",
+  "metawork_oauth_mechanics",
+  "metawork_storage_sql",
+];
+const foundationEngines = [
+  "metawork_http_memory",
+  "metawork_http_transport",
+  "metawork_oauth_loopback_transport",
+  "metawork_select_start",
+  "metawork_storage_sqlite",
+];
+
+/**
+ * A Foundation member names std, builtin and other Foundation members only.
+ * Relative file imports are held by the family rules below.
+ */
+function foundationNamedImportViolations(source, members) {
+  return [...source.matchAll(/@import\("([^"]+)"\)/g)]
+    .map(([, name]) => name)
+    .filter(
+      (name) =>
+        !name.endsWith(".zig") &&
+        !["std", "builtin"].includes(name) &&
+        !members.includes(name),
+    );
+}
+
+/**
+ * Third-party C a Foundation service needs, registered by the only files
+ * allowed to reach it. SQLite belongs to the storage family's backend; no
+ * contract is ever listed here.
+ */
+const foundationCFiles = [
+  "src/foundation/storage/sqlite.zig",
+  "src/foundation/storage/sqlite/connection.zig",
+  "src/foundation/storage/sqlite/migrations.zig",
+];
+
+function foundationCViolations(file, source) {
+  return /@cImport|@cInclude|\bsqlite3/.test(source) &&
+    !foundationCFiles.includes(file)
+    ? [file]
+    : [];
+}
+
+/**
+ * Outside Foundation, SQLite is reached only through the storage family: no
+ * SQLite C, no facade module, no relative path into the family, and the
+ * backend module only from Application, which composes it.
+ */
+function storageBypassViolations(file, source) {
+  const violations = [];
+  if (/@cInclude\("sqlite3\.h"\)|\bsqlite3_/.test(source))
+    violations.push("sqlite3");
+  if (/@import\("metawork[_-]storage"\)/.test(source))
+    violations.push("metawork_storage");
+  if (/@import\("[^"]*foundation\/storage\/[^"]*"\)/.test(source))
+    violations.push("relative storage file");
+  if (
+    /@import\("metawork_storage_sqlite"\)/.test(source) &&
+    !(file === "src/app.zig" || file.startsWith("src/app/"))
+  )
+    violations.push("metawork_storage_sqlite");
+  return violations;
+}
+
+/** The directory a Foundation file belongs to: its family, or the top level. */
+function foundationUnit(file) {
+  const rest = file.slice(foundationRoot.length);
+  const slash = rest.indexOf("/");
+  return slash === -1
+    ? foundationRoot
+    : `${foundationRoot}${rest.slice(0, slash + 1)}`;
+}
+
+/**
+ * Relative imports stay inside the importer's family directory, and a
+ * top-level member reaches only top-level files. Families and top-level
+ * members reach each other through named build modules.
+ */
+function foundationRelativeImportViolations(file, source) {
+  const unit = foundationUnit(file);
+  const violations = [];
+  for (const [, name] of source.matchAll(/@import\("([^"]+)"\)/g)) {
+    if (!name.endsWith(".zig")) continue;
+    const resolved = resolveImportPath(file, name);
+    if (
+      !resolved.startsWith(foundationRoot) ||
+      foundationUnit(resolved) !== unit
+    )
+      violations.push(name);
+  }
+  return violations;
+}
+
+/** No src/foundation.zig and no file named after a family directory. */
+function foundationRootFileViolations(files) {
+  const families = new Set(
+    files.map(foundationUnit).filter((unit) => unit !== foundationRoot),
+  );
+  return files.filter(
+    (file) =>
+      file === "src/foundation.zig" ||
+      families.has(`${file.slice(0, -".zig".length)}/`),
+  );
+}
+
+/**
+ * A Foundation file publishes only its own declarations: it never exposes an
+ * imported module, never re-exports a declaration of another named module and
+ * never uses usingnamespace. Re-exporting a member's own private file is its
+ * own declaration.
+ */
+function foundationForwardingViolations(source) {
+  const violations = [];
+  if (/\busingnamespace\b/.test(source)) violations.push("usingnamespace");
+  for (const [line] of source.matchAll(
+    /pub (?:const|var) \w+\s*=\s*@import\([^)]*\)/g,
+  ))
+    violations.push(line);
+  const moduleAliases = [
+    ...source.matchAll(/const (\w+)\s*=\s*@import\("([^"]+)"\)/g),
+  ]
+    .filter(
+      ([, , name]) =>
+        !name.endsWith(".zig") && !["std", "builtin"].includes(name),
+    )
+    .map(([, alias]) => alias);
+  for (const alias of moduleAliases)
+    for (const [line] of source.matchAll(
+      new RegExp(`pub (?:const|var) \\w+\\s*=\\s*${alias}\\b[^;]*;`, "g"),
+    ))
+      violations.push(line);
+  return violations;
+}
+
+/**
+ * Only Application composes an engine: every build edge to an engine starts
+ * at a module rooted in src/app.zig or src/app/, or at another Foundation
+ * engine. A contract therefore never depends on an engine.
+ */
+function foundationEngineImportViolations(buildSource, engines) {
+  const sources = moduleRootSources(buildSource);
+  return moduleImportEdges(buildSource)
+    .filter((edge) => engines.includes(edge.target))
+    .filter((edge) => {
+      const owner = sources.get(edge.owner) ?? "";
+      return !(
+        owner === "src/app.zig" ||
+        owner.startsWith("src/app/") ||
+        engines.includes(edge.owner)
+      );
+    })
+    .map((edge) => `${edge.owner} -> ${edge.target}`);
+}
+
 test("permission reviewer is an isolated Completion consumer without approval authority", () => {
   const build = read("build.zig");
   const source = read("src/product/permission/review.zig");
@@ -750,7 +914,6 @@ test("named module roots exist and lower owners cannot import composition", () =
     "src/agent.zig",
     "src/product/control.zig",
     "src/bridge.zig",
-    "src/storage.zig",
   ]) {
     assert.equal(existsSync(new URL(path, root)), true, `${path} must exist`);
   }
@@ -758,6 +921,8 @@ test("named module roots exist and lower owners cannot import composition", () =
   assert.equal(existsSync(new URL("src/agentcore/", root)), false);
   assert.equal(existsSync(new URL("src/account.zig", root)), false);
   assert.equal(existsSync(new URL("src/account/", root)), false);
+  assert.equal(existsSync(new URL("src/storage.zig", root)), false);
+  assert.equal(existsSync(new URL("src/storage/", root)), false);
   assert.equal(existsSync(new URL("src/product/execution/", root)), false);
   assert.equal(
     existsSync(new URL("src/product/control/runtime.zig", root)),
@@ -1018,18 +1183,18 @@ test("named module roots exist and lower owners cannot import composition", () =
   }
 });
 
-test("Foundation members import no Application, Product, Agent or Bridge module", () => {
+test("Foundation members depend only on std, Foundation members and registered third-party C", () => {
   const build = read("build.zig");
   const sources = moduleRootSources(build);
   const members = [...sources]
     .filter(([, path]) => path.startsWith(foundationRoot))
     .map(([name]) => name)
     .sort();
-  assert.deepEqual(members, [
-    "metawork_http_contract",
-    "metawork_http_memory",
-    "metawork_http_transport",
-  ]);
+  assert.deepEqual(
+    members,
+    [...foundationContracts, ...foundationEngines].sort(),
+    "every Foundation member is classified as a contract or an engine",
+  );
   for (const edge of moduleImportEdges(build)) {
     if (!members.includes(edge.owner)) continue;
     const target = sources.get(edge.target) ?? "";
@@ -1055,23 +1220,161 @@ test("Foundation members import no Application, Product, Agent or Bridge module"
   for (const file of files)
     assert.deepEqual(foundationImportViolations(file, read(file)), []);
 
-  // This member must also carry no platform framework: std and Foundation only.
+  // Named imports: std, builtin and Foundation members. No business owner, no
+  // Native SDK and no platform framework.
   for (const file of files)
-    for (const [, name] of read(file).matchAll(/@import\("([^"]+)"\)/g))
-      assert.ok(
-        name.endsWith(".zig") ||
-          [
-            "std",
-            "builtin",
-            "metawork_http_memory",
-            "metawork_http_contract",
-          ].includes(name),
-        `${file} imports unexpected module ${name}`,
-      );
+    assert.deepEqual(
+      foundationNamedImportViolations(read(file), members),
+      [],
+      `${file} imports an unexpected module`,
+    );
+
+  // Third-party C stays in the files registered for it, so no contract and no
+  // other service reaches SQLite.
+  assert.deepEqual(
+    files
+      .filter((file) => /@cImport|@cInclude|\bsqlite3/.test(read(file)))
+      .sort(),
+    [...foundationCFiles].sort(),
+  );
+});
+
+test("Foundation families keep relative imports home and publish no root or forwarding file", () => {
+  const files = zigFiles(foundationRoot);
+  assert.equal(existsSync(new URL("src/foundation.zig", root)), false);
+  assert.deepEqual(foundationRootFileViolations(files), []);
+  for (const file of files) {
+    const source = read(file);
+    assert.deepEqual(foundationRelativeImportViolations(file, source), []);
+    assert.deepEqual(foundationForwardingViolations(source), [], file);
+  }
+  assert.deepEqual(
+    foundationEngineImportViolations(read("build.zig"), foundationEngines),
+    [],
+  );
+});
+
+test("the Foundation family rules reject synthetic violations", () => {
+  for (const [file, source] of [
+    [
+      "src/foundation/oauth/mechanics.zig",
+      'const c = @import("../http/contract.zig");',
+    ],
+    [
+      "src/foundation/oauth/mechanics.zig",
+      'const s = @import("../select_start.zig");',
+    ],
+    [
+      "src/foundation/select_start.zig",
+      'const m = @import("oauth/mechanics.zig");',
+    ],
+    [
+      "src/foundation/http/transport.zig",
+      'const a = @import("../../app/mcp_oauth.zig");',
+    ],
+  ])
+    assert.equal(
+      foundationRelativeImportViolations(file, source).length,
+      1,
+      `the rule must reject ${source} in ${file}`,
+    );
+  assert.deepEqual(
+    foundationRelativeImportViolations(
+      "src/foundation/http/transport.zig",
+      'const p = @import("idle_probe.zig");\nconst t = @import("transport_test.zig");',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    foundationRelativeImportViolations(
+      "src/foundation/select_start.zig",
+      'const t = @import("select_start_test.zig");',
+    ),
+    [],
+  );
+
+  assert.deepEqual(
+    foundationRootFileViolations([
+      "src/foundation/http/contract.zig",
+      "src/foundation/http.zig",
+    ]),
+    ["src/foundation/http.zig"],
+  );
+  assert.deepEqual(
+    foundationRootFileViolations([
+      "src/foundation.zig",
+      "src/foundation/select_start.zig",
+    ]),
+    ["src/foundation.zig"],
+  );
+  assert.deepEqual(
+    foundationRootFileViolations([
+      "src/foundation/select_start.zig",
+      "src/foundation/http/contract.zig",
+      "src/foundation/oauth/mechanics.zig",
+    ]),
+    [],
+  );
+
+  for (const source of [
+    'pub const transport = @import("metawork_http_transport");',
+    'const contract = @import("metawork_http_contract");\npub const Error = contract.Error;',
+    'pub usingnamespace @import("idle_probe.zig");',
+  ])
+    assert.equal(
+      foundationForwardingViolations(source).length,
+      1,
+      `the rule must reject ${source}`,
+    );
+  assert.deepEqual(
+    foundationForwardingViolations(
+      'const probe = @import("idle_probe.zig");\npub const ProbeOutcome = probe.Outcome;\nconst contract = @import("metawork_http_contract");\npub fn failure() contract.Failure {}',
+    ),
+    [],
+  );
+
+  const modules = [
+    ["app", "src/app.zig"],
+    ["mcp_oauth", "src/app/mcp_oauth.zig"],
+    ["account_loopback", "src/product/account/loopback.zig"],
+    ["metawork_oauth_mechanics", "src/foundation/oauth/mechanics.zig"],
+    [
+      "metawork_oauth_loopback_transport",
+      "src/foundation/oauth/loopback_transport.zig",
+    ],
+    ["metawork_select_start", "src/foundation/select_start.zig"],
+  ]
+    .map(
+      ([name, path]) =>
+        `const ${name} = b.createModule(.{ .root_source_file = b.path("${path}") });`,
+    )
+    .join("\n");
+  const legal = [
+    'app.addImport("metawork_oauth_loopback_transport", metawork_oauth_loopback_transport);',
+    'mcp_oauth.addImport("metawork_oauth_loopback_transport", metawork_oauth_loopback_transport);',
+    'metawork_oauth_loopback_transport.addImport("metawork_select_start", metawork_select_start);',
+    'account_loopback.addImport("metawork_oauth_mechanics", metawork_oauth_mechanics);',
+  ].join("\n");
+  assert.deepEqual(
+    foundationEngineImportViolations(`${modules}\n${legal}`, foundationEngines),
+    [],
+  );
+  for (const edge of [
+    'account_loopback.addImport("metawork_oauth_loopback_transport", metawork_oauth_loopback_transport);',
+    'metawork_oauth_mechanics.addImport("metawork_select_start", metawork_select_start);',
+  ])
+    assert.equal(
+      foundationEngineImportViolations(
+        `${modules}\n${legal}\n${edge}`,
+        foundationEngines,
+      ).length,
+      1,
+      `the rule must reject ${edge}`,
+    );
 });
 
 test("the Foundation import rule rejects owner modules and escaping relative imports", () => {
-  const member = "src/foundation/http_transport.zig";
+  const member = "src/foundation/http/transport.zig";
   for (const source of [
     'const a = @import("metawork_product_control");',
     'const a = @import("metawork_product_update");',
@@ -1079,8 +1382,8 @@ test("the Foundation import rule rejects owner modules and escaping relative imp
     'const a = @import("metawork_bridge");',
     'const a = @import("metawork_app");',
     'const a = @import("metask_agentcore");',
-    'const a = @import("../product/update.zig");',
-    'const a = @import("../app/mcp_oauth.zig");',
+    'const a = @import("../../product/update.zig");',
+    'const a = @import("../../app/mcp_oauth.zig");',
   ])
     assert.equal(
       foundationImportViolations(member, source).length,
@@ -1090,10 +1393,198 @@ test("the Foundation import rule rejects owner modules and escaping relative imp
   assert.deepEqual(
     foundationImportViolations(
       member,
-      'const std = @import("std");\nconst memory = @import("metawork_http_contract");\nconst probe = @import("http_idle_probe.zig");',
+      'const std = @import("std");\nconst memory = @import("metawork_http_contract");\nconst probe = @import("idle_probe.zig");',
     ),
     [],
   );
+
+  const storage = "src/foundation/storage/sqlite.zig";
+  for (const source of [
+    'const a = @import("metawork_product_control");',
+    'const a = @import("../../app/history_store.zig");',
+    'const a = @import("../../product/control/persistence/schema.zig");',
+  ])
+    assert.equal(
+      foundationImportViolations(storage, source).length,
+      1,
+      `the rule must reject ${source} in ${storage}`,
+    );
+  const members = [...foundationContracts, ...foundationEngines];
+  for (const name of [
+    "metawork_product_control",
+    "metawork_app",
+    "metawork_automation",
+    "metawork_product_identity",
+    "image_container",
+    "native_sdk",
+    "metask_agentcore",
+  ])
+    assert.equal(
+      foundationNamedImportViolations(`const a = @import("${name}");`, members)
+        .length,
+      1,
+      `the named import rule must reject ${name}`,
+    );
+  const legal =
+    'const std = @import("std");\nconst builtin = @import("builtin");\nconst sql = @import("metawork_storage_sql");\nconst backend = @import("sqlite/connection.zig");';
+  assert.deepEqual(foundationImportViolations(storage, legal), []);
+  assert.deepEqual(foundationNamedImportViolations(legal, members), []);
+});
+
+test("the Foundation storage family keeps SQLite in its backend and its backend in Application", () => {
+  const build = read("build.zig");
+  const packageManifest = read("build.zig.zon");
+  const appManifest = read("app.zon");
+
+  for (const file of zigFiles("src/").filter(
+    (file) => !file.startsWith(foundationRoot),
+  ))
+    assert.deepEqual(storageBypassViolations(file, read(file)), [], file);
+  // The backend reaches the contract through its one named module.
+  for (const file of zigFiles("src/foundation/storage/"))
+    assert.doesNotMatch(
+      read(file),
+      /@import\("(?:storage\/|\.\.\/)?sql\.zig"\)/,
+    );
+
+  const sources = moduleRootSources(build);
+  assert.deepEqual(
+    [...sources]
+      .filter(([, path]) => path === "src/foundation/storage/sql.zig")
+      .map(([name]) => name),
+    ["metawork_storage_sql"],
+  );
+  const contractEdges = [
+    ...build.matchAll(
+      /\b([A-Za-z_]\w*)\.addImport\("metawork_storage_sql",\s*([^)]*)\)/g,
+    ),
+  ];
+  assert.ok(contractEdges.length > 0);
+  for (const [, owner, target] of contractEdges)
+    assert.match(
+      target.trim(),
+      /^(?:test_modules\.)?metawork_storage_sql$/,
+      `${owner} must receive the one SQL contract module`,
+    );
+
+  assert.match(build, /const sqlite = b\.dependency\("sqlite", \.\{\}\);/);
+  assert.match(
+    build,
+    /metawork_storage_sqlite\.addIncludePath\(sqlite\.path\("\."\)\);/,
+  );
+  assert.match(build, /metawork_storage_sqlite\.addCSourceFile\(/);
+  // Only the backend compiles SQLite; the opt-in primitives probe measures the
+  // engine directly and never joins the app or the default test graph.
+  for (const [, owner] of build.matchAll(
+    /\b([A-Za-z_]\w*)\.add(?:IncludePath|CSourceFile)\((?:(?!\);)[\s\S]){0,120}sqlite/g,
+  ))
+    assert.ok(
+      ["metawork_storage_sqlite", "sqlite_a_primitives_module"].includes(owner),
+      `${owner} must not compile SQLite`,
+    );
+  assert.doesNotMatch(build, /\.addImport\(\s*"metawork[_-]storage"/);
+  assert.match(build, /"test-storage"/);
+  assert.match(
+    packageManifest,
+    /\.sqlite = \.\{[\s\S]*?\.url = "https:\/\/www\.sqlite\.org\/\d{4}\/sqlite-amalgamation-\d+\.zip",[\s\S]*?\.hash = "[^"]+",[\s\S]*?\}/,
+  );
+  assert.doesNotMatch(packageManifest, /latest/i);
+  assert.doesNotMatch(appManifest, /"sqlite"/);
+});
+
+test("the Foundation storage rules reject synthetic violations", () => {
+  const cImport = 'const c = @cImport({\n    @cInclude("sqlite3.h");\n});';
+  for (const [file, source] of [
+    ["src/foundation/http/transport.zig", cImport],
+    ["src/foundation/storage/conformance.zig", cImport],
+    ["src/foundation/storage/sql.zig", cImport],
+    ["src/foundation/storage/sql.zig", "statement: ?*c.sqlite3_stmt,"],
+  ])
+    assert.deepEqual(
+      foundationCViolations(file, source),
+      [file],
+      `the rule must reject ${source} in ${file}`,
+    );
+  assert.deepEqual(
+    foundationCViolations(
+      "src/foundation/storage/sqlite/connection.zig",
+      cImport,
+    ),
+    [],
+  );
+
+  for (const [file, source] of [
+    [
+      "src/product/control/persistence/schema.zig",
+      'const sqlite = @import("metawork_storage_sqlite");',
+    ],
+    ["src/product/task/persistence.zig", cImport],
+    ["src/agent/session.zig", "_ = c.sqlite3_open_v2;"],
+    [
+      "src/app/history_store.zig",
+      'const sqlite = @import("../foundation/storage/sqlite.zig");',
+    ],
+    [
+      "src/app/history_store.zig",
+      'const storage = @import("metawork_storage");',
+    ],
+  ])
+    assert.equal(
+      storageBypassViolations(file, source).length,
+      1,
+      `the rule must reject ${source} in ${file}`,
+    );
+  assert.deepEqual(
+    storageBypassViolations(
+      "src/app/history_store.zig",
+      'const sql = @import("metawork_storage_sql");\nconst sqlite = @import("metawork_storage_sqlite");',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    storageBypassViolations(
+      "src/product/control/persistence/schema.zig",
+      'pub const sql = @import("metawork_storage_sql");',
+    ),
+    [],
+  );
+
+  const modules = [
+    ["app", "src/app.zig"],
+    [
+      "product_control_history_schema",
+      "src/product/control/persistence/schema.zig",
+    ],
+    ["metawork_storage_sql", "src/foundation/storage/sql.zig"],
+    ["metawork_storage_sqlite", "src/foundation/storage/sqlite.zig"],
+  ]
+    .map(
+      ([name, path]) =>
+        `const ${name} = b.createModule(.{ .root_source_file = b.path("${path}") });`,
+    )
+    .join("\n");
+  const legal = [
+    'app.addImport("metawork_storage_sqlite", metawork_storage_sqlite);',
+    'app.addImport("metawork_storage_sql", metawork_storage_sql);',
+    'metawork_storage_sqlite.addImport("metawork_storage_sql", metawork_storage_sql);',
+    'product_control_history_schema.addImport("metawork_storage_sql", metawork_storage_sql);',
+  ].join("\n");
+  assert.deepEqual(
+    foundationEngineImportViolations(`${modules}\n${legal}`, foundationEngines),
+    [],
+  );
+  for (const edge of [
+    'product_control_history_schema.addImport("metawork_storage_sqlite", metawork_storage_sqlite);',
+    'metawork_storage_sql.addImport("metawork_storage_sqlite", metawork_storage_sqlite);',
+  ])
+    assert.equal(
+      foundationEngineImportViolations(
+        `${modules}\n${legal}\n${edge}`,
+        foundationEngines,
+      ).length,
+      1,
+      `the rule must reject ${edge}`,
+    );
 });
 
 test("Product Control is the only composition owner identity", () => {
@@ -2565,7 +3056,7 @@ test("Product Account owns Metask protocol without a concrete HTTP client", () =
     .map(read)
     .join("\n");
   const adapter = read("src/app/metask_http_transport.zig");
-  const http = read("src/foundation/http_transport.zig");
+  const http = read("src/foundation/http/transport.zig");
   const app = read("src/app.zig");
 
   assert.doesNotMatch(accountSource, /std\.http\.Client|StdHttpTransport/);
@@ -2629,11 +3120,11 @@ test("OAuth mechanics are neutral while callers own policy and Application owns 
     .map(read)
     .join("\n");
   const policy = read("src/product/account/loopback.zig");
-  const transport = read("src/app/oauth_loopback_transport.zig");
+  const transport = read("src/foundation/oauth/loopback_transport.zig");
   const loginAttempt = read("src/product/account/login_attempt.zig");
   const mcpOauth = read("src/app/mcp_oauth.zig");
-  const oauthMechanics = read("src/oauth/mechanics.zig");
-  const oauthLoopback = read("src/oauth/loopback.zig");
+  const oauthMechanics = read("src/foundation/oauth/mechanics.zig");
+  const oauthLoopback = read("src/foundation/oauth/loopback.zig");
   const build = read("build.zig");
 
   assert.doesNotMatch(
@@ -2665,48 +3156,17 @@ test("OAuth mechanics are neutral while callers own policy and Application owns 
     build,
     /mcp_oauth\.addImport\("account_(?:oauth|loopback)"/,
   );
-  assert.match(build, /mcp_oauth\.addImport\("oauth_mechanics"/);
-  assert.match(build, /mcp_oauth\.addImport\("oauth_loopback"/);
+  assert.match(build, /mcp_oauth\.addImport\("metawork_oauth_mechanics"/);
+  assert.match(build, /mcp_oauth\.addImport\("metawork_oauth_loopback"/);
 });
 
-test("Product history schema consumes only the unique Storage SQL contract", () => {
-  const storageFiles = ["src/storage.zig", ...zigFiles("src/storage/")];
-  const storageContract = read("src/storage/sql.zig");
+test("Product history schema consumes only the Foundation SQL contract", () => {
   const build = read("build.zig");
-  const packageManifest = read("build.zig.zon");
-  const appManifest = read("app.zon");
-  const nonStorageFiles = zigFiles("src/").filter(
-    (file) => file !== "src/storage.zig" && !file.startsWith("src/storage/"),
-  );
-
-  assertNoImports(storageFiles, [
-    "metawork_app",
-    "metawork_account",
-    "metawork_agent",
-    "metawork_product_control",
-    "metawork_bridge",
-    "metask_agentcore",
-    "native_sdk",
-  ]);
-  assert.doesNotMatch(storageContract, /@cImport|sqlite3|storage\/sqlite\.zig/);
-  assert.deepEqual(
-    storageFiles.filter((file) => /@cImport|sqlite3/.test(read(file))),
-    [
-      "src/storage/sqlite/connection.zig",
-      "src/storage/sqlite/migrations.zig",
-      "src/storage/sqlite.zig",
-    ],
-  );
-  for (const file of nonStorageFiles) {
-    assert.doesNotMatch(
-      read(file),
-      /@import\("(?:metawork[_-]storage|storage\/sqlite\.zig)"\)|@cInclude\("sqlite3\.h"\)|\bsqlite3_/,
-      `${file} bypasses the Storage SQL contract`,
-    );
-  }
   const schemaFile = "src/product/control/persistence/schema.zig";
+
+  // Product reaches SQL only through the history schema, and never the backend.
   assert.deepEqual(
-    nonStorageFiles.filter((file) =>
+    zigFiles("src/product/").filter((file) =>
       /@import\("metawork_storage_sql"\)/.test(read(file)),
     ),
     [schemaFile],
@@ -2714,7 +3174,7 @@ test("Product history schema consumes only the unique Storage SQL contract", () 
   assertNoImports(
     [schemaFile],
     [
-      "storage",
+      "metawork_storage_sqlite",
       "metawork_storage",
       "metawork_app",
       "metawork_agent",
@@ -2731,50 +3191,18 @@ test("Product history schema consumes only the unique Storage SQL contract", () 
     read(schemaFile),
     /@embedFile\("migrations\/0001_task_history\.sql"\)/,
   );
-  const contractTargets = [
-    ...build.matchAll(
-      /\b([A-Za-z_]\w*)\.addImport\("([^"]+)",\s*(?:test_modules\.)?storage_sql\)/g,
-    ),
-  ];
+
+  const sources = moduleRootSources(build);
   assert.deepEqual(
-    contractTargets.map((match) => [match[1], match[2]]).sort(),
-    [
-      ["history_schema_fixture_module", "metawork_storage_sql"],
-      ["history_schema_tests_module", "metawork_storage_sql"],
-      ["product_control_history_schema", "metawork_storage_sql"],
-      ["storage", "metawork_storage_sql"],
-    ],
+    moduleImportEdges(build)
+      .filter(
+        (edge) =>
+          edge.target === "metawork_storage_sql" &&
+          (sources.get(edge.owner) ?? "").startsWith("src/product/"),
+      )
+      .map((edge) => edge.owner),
+    ["product_control_history_schema"],
   );
-  const contractReceivers = [
-    ...build.matchAll(
-      /\b([A-Za-z_]\w*)\.addImport\("metawork_storage_sql",\s*([^)]*)\)/g,
-    ),
-  ];
-  assert.deepEqual(contractReceivers.map((match) => match[1]).sort(), [
-    "history_schema_fixture_module",
-    "history_schema_tests_module",
-    "product_control_history_schema",
-    "storage",
-  ]);
-  assert.ok(
-    contractReceivers.every((match) =>
-      /^(?:test_modules\.)?storage_sql$/.test(match[2].trim()),
-    ),
-  );
-  assert.equal(
-    (
-      build.match(
-        /\.root_source_file = b\.path\("src\/storage\/sql\.zig"\)/g,
-      ) ?? []
-    ).length,
-    1,
-  );
-  for (const file of storageFiles) {
-    assert.doesNotMatch(
-      read(file),
-      /@import\("(?:storage\/|\.\.\/)?sql\.zig"\)/,
-    );
-  }
   assert.deepEqual(
     [
       ...build.matchAll(
@@ -2788,22 +3216,6 @@ test("Product history schema consumes only the unique Storage SQL contract", () 
     build,
     /artifacts\.tests\.step\.dependOn\(&history_schema_tests_run\.step\)/,
   );
-
-  assert.match(build, /const sqlite = b\.dependency\("sqlite", \.\{\}\);/);
-  assert.match(build, /storage\.addIncludePath\(sqlite\.path\("\."\)\);/);
-  assert.match(build, /storage\.addCSourceFile\(/);
-  assert.doesNotMatch(
-    build,
-    /(?:app|account|agent|workbench|bridge)\.add(?:IncludePath|CSourceFile)\([\s\S]{0,120}sqlite/,
-  );
-  assert.doesNotMatch(build, /\.addImport\(\s*"metawork[_-]storage"/);
-  assert.match(build, /"test-storage"/);
-  assert.match(
-    packageManifest,
-    /\.sqlite = \.\{[\s\S]*?\.url = "https:\/\/www\.sqlite\.org\/\d{4}\/sqlite-amalgamation-\d+\.zip",[\s\S]*?\.hash = "[^"]+",[\s\S]*?\}/,
-  );
-  assert.doesNotMatch(packageManifest, /latest/i);
-  assert.doesNotMatch(appManifest, /"sqlite"/);
 });
 
 test("AgentCore SDK access is restricted to Agent modules and the test fixture", () => {
@@ -3040,8 +3452,18 @@ test("all active test roots are connected without test-count assertions", () => 
   );
   const sessionRoot = read("src/agent/session.zig");
   const completionRoot = read("src/agent/completion.zig");
+  const linkRoot = read("src/agent/link.zig");
   for (const path of inlineAgentTests) {
     if (build.includes(`"${path}"`)) continue;
+    if (path.startsWith("src/agent/link/")) {
+      const relative = path.slice("src/agent/link/".length, -4);
+      assert.match(
+        linkRoot,
+        new RegExp(`@import\\("link/${relative}\\.zig"\\)`),
+        `${path} is not aggregated by link.zig`,
+      );
+      continue;
+    }
     if (path.startsWith("src/agent/completion/")) {
       const relative = path.slice("src/agent/completion/".length, -4);
       assert.match(

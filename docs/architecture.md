@@ -13,7 +13,7 @@
 | Bridge      | Zig                    | Renderer 协议、authority 与 ProductDelivery 边界                        |
 | Product     | Zig                    | 产品事实、行为、事务、持久化和恢复的逻辑边界                            |
 | Agent       | Zig + Metask AgentCore | MetaWork-owned 执行边界及其对 canonical AgentCore bundle 的唯一消费路径 |
-| Storage     | Zig + SQLite           | MetaWork-owned、无业务语义的 SQL contract 与 backend 边界               |
+| Foundation  | Zig + SQLite           | 基础服务层：能原样搬到另一个应用的服务，不依赖任何业务 owner            |
 | Native SDK  | Native SDK             | Application 消费的外部桌面能力依赖                                      |
 
 正式主路径不采用 Tauri + Rust，不建立第二套 Renderer，不以 PTY、xterm、终端字节流或 Provider SSE 作为 Agent UI 协议，不复制 AgentCore ABI 或实现源码，也不建立 Native SDK Adapter、通用 Desktop Interface、可替换框架 facade 或平行系统能力协议。
@@ -31,8 +31,7 @@ flowchart TB
     BRIDGE["Bridge<br/>command / authority / ProductDelivery"]
     PRODUCT["Product<br/>Account + Product Control"]
     AGENT["Agent<br/>Runtime / Session / Conversation"]
-    STORAGE["Storage<br/>standalone SQL boundary"]
-    FOUNDATION["Foundation<br/>product-neutral mechanism"]
+    FOUNDATION["Foundation<br/>basic services"]
     AGENTCORE["Metask AgentCore<br/>external execution dependency"]
     NATIVE_RUNTIME["Native SDK Runtime API<br/>external desktop dependency"]
     NATIVE_COMPAT["Native SDK compatibility<br/>Application-owned seams"]
@@ -40,7 +39,7 @@ flowchart TB
     APPLICATION -. "compose" .-> BRIDGE
     APPLICATION -. "compose" .-> PRODUCT
     APPLICATION -. "compose / lifecycle" .-> AGENT
-    APPLICATION -->|"shared mechanism"| FOUNDATION
+    APPLICATION -. "compose / inject" .-> FOUNDATION
     BRIDGE <-->|"Renderer Bridge"| RENDERER
     BRIDGE <-->|"typed command / projection"| PRODUCT
     PRODUCT -->|"public execution surface"| AGENT
@@ -57,8 +56,7 @@ flowchart TB
 3. Product 包含 Account 与 Product Control 两个 named owner，不代表统一 module；Product Control 直接消费 Agent 公共执行能力；
 4. Agent 是独立于 Product 的 MetaWork-owned 执行边界，也是 AgentCore SDK/ABI 的唯一正式消费者；
 5. Native SDK compatibility 是 Application-owned 的受限消费路径，不是新的顶层 owner、平台层或 SDK 替代品；
-6. Storage 是独立基础边界；接入 Product 必须显式定义 schema owner、backend composition 和 shutdown，不因源码存在而自动取得业务职责；
-7. Foundation 只拥有无产品语义的执行机制，与 Application、Product、Agent、Storage 平级；它不得反向导入任何 owner，其纯合同可被任何 owner 精确导入，引擎只由 Application 组合。成员逐个按准入收取，不因目录位置取得身份。
+6. Foundation 是 MetaWork 的基础服务层，成员的判定标准是能原样搬到另一个应用。架构上它与 Application、Product、Agent、Renderer 平级，指职责和所有权：Foundation 自己决定服务的接口和实现，Application 只负责组合；依赖上它在最底层，只依赖 std、其他 Foundation 成员和基础服务所需的第三方库，不依赖任何业务 owner。有状态服务由 Application 创建唯一实例、管理生命周期并注入使用方。成员分为合同与引擎：合同是不持有状态或句柄、不建立连接、不发起外部 effect 的类型与纯函数，包括结果事实与协议编解码，可被任何 owner 精确导入；引擎只由 Application 组合。endpoint、client 身份、响应解释与错误映射等业务政策留在调用方 owner。成员逐个按准入收取，不因目录位置取得身份。
 
 文档中的 Application 对应代码中的组合类型 `App`；“Product”只指产品逻辑边界；“Agent”只指 MetaWork 对 AgentCore 的产品化集成边界；“Host”在 wire 或依赖合同中泛指 Renderer 之外的可信侧，不能据此建立新的 owner。
 
@@ -183,14 +181,14 @@ Windows System WebView 的顶部与两上角缩放由 Native SDK 原生宿主拥
 
 Compatibility 的 module root 与依赖方向由[工程结构与所有权](project-structure.md)映射，machine allowlist 和 architecture guard 强制实现边界，平台证据与未闭合验收由[验证规范](validation.md)维护。未在本节登记的低层调用不构成兼容能力。
 
-### 3.6 Storage
+### 3.6 Foundation Storage
 
-Storage 是 MetaWork-owned、无业务语义的基础设施边界，拥有 backend-neutral SQL value、statement、query/mutation outcome、limit 和 migration mechanism；concrete backend 独占 engine connection、transaction、engine profile 与错误映射。Product owner 始终独占自己的 schema、migration 内容、health、恢复、并发和所需 durability policy，Storage 不因承载数据取得业务 policy。
+Storage 是 Foundation 的 SQL 存储服务族。SQL 合同拥有 backend-neutral SQL value、statement、query/mutation outcome、limit 和 migration mechanism；SQLite backend 是引擎，独占 engine connection、transaction、engine profile 与错误映射。Product owner 始终独占自己的 schema、migration 内容、health、恢复、并发和所需 durability policy，Storage 不因承载数据取得业务 policy。
 
-Product Control 的无状态 history schema 窄模块依赖 Storage SQL contract，与 backend 消费同一个合同模块；该依赖不授予开库、查询或运行时 policy。具体数据库仍未接入生产 Application/Product Runtime，后续由 Application 组合并向 Product 注入借用 capability。直接 SQLite backend、conformance 和未来 backend 原位替换由[Storage 架构](storage-architecture.md)定义；生产接入仍须显式完成 owner composition，不能通过共享数据库或通用 repository 绕过 Product 边界。
+Product Control 的无状态 history schema 窄模块只依赖 SQL 合同，与 backend 消费同一个合同模块；该依赖不授予开库、查询或运行时 policy。Application 创建唯一的 history 数据库实例并拥有其文件生命周期，再向 Product 注入借用 capability，接线见 [Product 架构](product-architecture.md#43-workbench-historystore)。直接 SQLite backend、conformance 和未来 backend 原位替换由 [Storage 架构](storage-architecture.md) 定义；新的使用方同样须显式完成 owner composition，不能通过共享数据库或通用 repository 绕过 Product 边界。
 
 ```text
-Product Control history schema -> Storage SQL contract <- Storage backend -> SQLite
+Product Control history schema -> Foundation SQL contract <- Foundation SQLite backend -> SQLite
 ```
 
 ### 3.7 持久化权威与故障语义
@@ -201,7 +199,7 @@ Product Control history schema -> Storage SQL contract <- Storage backend -> SQL
 
 ### 3.8 Foundation HTTP 执行
 
-MetaWork 自有的出站 HTTP 由 Foundation 拥有执行机制、Application 组合；业务 owner 保留 endpoint、响应解释、重试与 shutdown 顺序，AgentCore 内部网络仍由其自身拥有。执行层对请求、解析和连接实行有界 admission，容量不足明确失败；多地址连接不得依赖共享异步额度；除下述复用连接上的一次重试外，单次调用不得重放 HTTP。已占用流的 MCP continuation 使用预留容量并继承原始 deadline，不能延长原流的预算。
+MetaWork 自有的出站 HTTP 由 Foundation 的 HTTP 服务执行，Application 创建唯一引擎实例并注入；业务 owner 保留 endpoint、响应解释、重试与 shutdown 顺序，AgentCore 内部网络仍由其自身拥有。HTTP 引擎对请求、解析和连接实行有界 admission，容量不足明确失败；多地址连接不得依赖共享异步额度；除下述复用连接上的一次重试外，单次调用不得重放 HTTP。已占用流的 MCP continuation 使用预留容量并继承原始 deadline，不能延长原流的预算。
 
 每个调用方显式给出整次调用的 deadline，或在由自身取消约束整次调用时给出 DNS、TCP 与 TLS 的连接预算。多地址连接最多两路并行，后一地址至少在前一次尝试开始 250 ms 后才启动；只有其后仍有地址的尝试才按剩余预算分摊设上限（不少于 2 秒），最后或唯一地址使用全部剩余预算。未尝试的地址不构成失败；对外报告的失败按 TLS、连接、DNS 的顺序取最具体者，诊断只记录各类尝试的计数。
 
@@ -231,6 +229,15 @@ Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通�
 | 每 active Session Worker  | Session 级隔离               | 只有单 Worker 证据不足时才评估 |
 
 统一 Zig 和线程池不提供进程隔离；当前 AgentCore fatal 可以带走 Host 与全部进程内 Session。独立 fault-domain 证据支持单 AgentCore Worker 方向，但 spike IPC 不是产品协议，也不证明 Worker 已实现。正式 Worker 必须独立定义 versioned transport、capacity/backpressure、ownership、correlation、credential、disconnect、Run cause 与 shutdown；不得把当前 checkpoint recovery 误报为 in-flight Run 或 Worker crash recovery。证据状态见[验证规范](validation.md)。
+拆分后故障有两个方向，上表的隔离列只陈述 AgentCore 一侧。exec 侧 fatal 是该列要隔离的那一个；UI 侧 fatal 则留下一个仍在执行的 exec，而这是目前唯一有实测证据的形状。已选择的收口是保住对话而不保住 Run：exec 发现 UI 不可达后停止接纳新 Run、解除全部未决 UI 请求、终止在飞 Run、导出 checkpoint，再干净退出；该顺序不可重排；Task 仍然中断，但不丢上次 checkpoint 之后的增量。该收口只有在导出结果能被 Product owner 在下次启动按既有 admission 接纳时才成立——checkpoint 的 blob 与指向它的记录分属不同载体，记录的提交权属于 Product owner，exec 承担导出不使它取得持久化 authority，无人接纳的导出字节按 §3.7 只是待分类证据。保住 Run 的重新挂接，即 exec 不退、等待 UI 重启接管，是后续方向；它要求两样当前不存在的东西：exec 持有 UI 给出的 per-session/run 关联身份，以及 UI 启动时先向 exec 查活体清单再决定重新绑定，而不是按持久化中非终态即 interrupted 判定。今天 Product 的 Task 身份与 Agent Session 的 route 身份互相独立，route id 只在进程内分配且不持久化；唯一持久化的相关身份是 checkpoint 记录里由 AgentCore 指定的 logical session id，它只随 checkpoint 存在、不标识 Run，还会把 Task 身份反向绑到 AgentCore 指定的值上，因此不能充当该关联身份。两样要求都落在 Session 创建协议上，所以一期必须预留该关联身份字段，否则后续方向要重开协议。
+
+未决的 UI 请求在拆分后不再与 UI 同生共死。单进程里对 UI 的 by-contract 无限等待随进程一同结束，因此无害；拆分后 UI 退出而 exec 存活时，同一个等待会永久占住一个 Core 回调线程连同其 Run。所以 UI 不可达时所有 parked 请求必须按 ABI 既有的 UI 不可用返回路径解除，该路径已经存在，不得为此给人类 decision wait 设置 deadline。解除必须先于终止在飞 Run：park 着的 Core 回调线程不解除，它持有的 Run 就到不了终态，上述导出也就无法进行，这正是该收口顺序不可重排的原因。
+
+跨界持有的引用计数属于同一类事实，方向相反而已。执行侧为一个 lease 持有的 pin 由调用方在请求过界之前取得、在该 lease 释放时放回；pin 的 retain/release 本身不过界，因为其合同要求「nonblocking 的引用计数」，而跨进程调用必然阻塞，且会让执行侧等在一个可能不可达的 UI 上。由此有两条与未决请求镜像的要求：执行侧不可达时，调用方必须释放它为那些 lease 所持的全部 pin，否则引用计数永不归零、被钉住的来源永久泄漏；调用方不可达时，执行侧必须把手中的 pin 视为已失效并终止对应 lease，不得穿过它继续读取被钉住的文件。重新挂接方向下则必须把这些请求重新投给新 UI，不得静默丢弃。
+
+进程级致命故障自身必须留下独立于 Product 持久化的事实，因为它发生时正常提交路径已经不再运行。该事实由故障所在进程在自己的故障处理路径上写出：一条预先分配的定长记录，带构建与 AgentCore artifact 身份、出事线程、故障地址及其所属模块区间和调用栈；一个标明进程内哪些 Run 正在执行的 breadcrumb 环，由持有 Run 的 worker 经 Application 定义的窄 capability 发布，使处理路径只复制内存而不读取 Product state；以及一对落在单实例租约上的启动/退出标记，使“上次退出不干净”成为事实而不是推断，并用 pid 与进程启动时间把记录配对回该次运行。处理路径只能使用异步信号安全的手段，不分配内存、不取锁、不走正常 I/O 与格式化，否则在真正的致命故障里写不出来；完整记录必须在走栈之前落盘，因为走栈本身在一个已经证明状态错误的进程里可能再次故障。记录只负责离线归因，即把故障地址归到 AgentCore 还是 MetaWork 自己的代码并保留当时在执行的 Run；它不解释产品语义，不代替 Product 对 Run 终态的判定，也不自带上报通道，面向用户的呈现属于产品级反馈机制。拆分后两半各自安装并写出自己的记录，记录标明由哪一半写出，因为被隔离的那一侧留下的记录正是要读的那一份。
+
+模块归属上，为 Run 本身和 compaction 持有 Metask 凭据的执行侧同时拥有 Run 结束时的自动标题模型调用、自动审批的复核模型调用，以及图像、视频生成的出站 HTTP。这几项都已经持有执行所需凭据，移到 UI 侧只会让同一份凭据多出一个持有者——留在 UI 侧的那一项会使 UI 进程仅为一个用途而持有一份 Metask 凭据，并为它新增一个独立的续期点。复核还另有一条理由：它运行期间有一个 Core 回调线程处于未决等待，放在 UI 侧会使 UI 的存活成为 Run 继续推进的前提，而那正是本节要解除的耦合；自动审批的意义也正是不需要人，所以这些请求必须在 UI 根本不存在时也能被回答。复核的输入含工具参数与用户历史，脱敏必须在过界之前、由持有该数据的 Product 一侧完成；执行侧跑模型而 Product 提交复核结果，permission 仍是 §6 所定的 Product 与 Agent 协作的安全事实。进程级致命故障的事实来源是上述记录，不是 Run 行上新增的终止原因值；Run 行只需与记录中的 Task 与 Run 标识可关联。
 
 ## 6. 安全边界
 

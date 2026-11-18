@@ -381,6 +381,11 @@ pub const RunTerminationDispatch = enum {
     already_terminal,
     stale_run,
     session_closing,
+    /// The request never reached the Session, so nothing is known about what
+    /// it would have done. Mapped one-to-one from
+    /// `TerminationRequestResult.dependency_contract`; every reader groups it
+    /// with the answers that mean the request did not take.
+    dependency_contract,
 };
 
 pub const PendingInterruption = enum(u8) {

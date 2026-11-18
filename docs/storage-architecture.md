@@ -2,9 +2,9 @@
 
 > 状态：Storage SQL contract、直接 SQLite backend 与 conformance 的 source of truth；正式历史接线与业务合同见 [Product 架构](product-architecture.md#43-workbench-historystore)
 
-本文定义 MetaWork 自有的 SQLite 基础存储能力。Storage 只提供无业务语义的 SQL、事务、迁移和数据库生命周期机制；基础能力完成不等于批准迁移或接入任何现有 Product 数据。
+本文定义 Foundation 的 Storage 服务族：SQL 合同与直接 SQLite backend。它是能原样搬到另一个应用的基础服务，只提供无业务语义的 SQL、事务、迁移和数据库生命周期；依赖上不依赖任何业务 owner，数据库实例由 Application 创建、管理生命周期并以借用 capability 注入使用方。基础能力本身不批准迁移或接入任何 Product 数据，每个使用方都须显式完成 owner composition。
 
-Storage 的顶层边界见[高层架构](architecture.md)，源码 owner 见[工程结构与所有权](project-structure.md)，验证责任见[验证规范](validation.md)。
+Foundation 的定位与依赖规则见[高层架构](architecture.md)，源码 owner 见[工程结构与所有权](project-structure.md)，验证责任见[验证规范](validation.md)。
 
 ## 1. 决策与范围
 
@@ -29,34 +29,33 @@ single direct SQLite connection
 6. 文件数据库使用 `WAL + synchronous=FULL`；在没有性能证据时优先承诺已返回 commit 的断电持久性。
 7. migration identity 由 Storage-owned metadata table 保存，不使用 `PRAGMA user_version` 作为身份或兼容路径。
 
-当前范围严格限制在 `Storage`、SQLite build profile、对应测试与本真源。它不包括 Application composition、正式数据库路径、Product schema、旧数据迁移、双写、运行时 fallback 或现有 store 的删除。
+本文范围限于 SQL 合同、SQLite backend、SQLite build profile 与对应验证。Application composition、正式数据库路径、Product schema 与数据迁移由使用方的合同定义，当前产品历史见 [Product 架构](product-architecture.md#43-workbench-historystore)。
 
 ## 2. Owner 与依赖方向
 
-Storage 拥有：
+Storage 族拥有：
 
 - backend-neutral value、statement、mutation、row、migration、limits 和 outcomes；
 - 参数绑定、只读 query、原子 mutation batch、行数期望和 migration identity；
 - SQLite connection、authorizer、engine profile、limits、interrupt、shutdown 和错误分类；
 - backend conformance、SQLite 集成、故障和 crash-recovery 验证。
 
-Storage 不拥有业务表、Product health/retry/recovery policy、应用数据目录、production identity 或顶层启动顺序。`src/storage/sql.zig` 不得导入 Product、Application、Bridge、Renderer、Native SDK 或 SQLite C 类型；SQLite C 值只存在于 concrete backend 内。
+Storage 族不拥有业务表、Product health/retry/recovery policy、应用数据目录、production identity 或顶层启动顺序。SQL 合同 `metawork_storage_sql` 是 Foundation 合同，任何 owner 都可以精确导入，不得依赖 SQLite C 类型；SQLite backend `metawork_storage_sqlite` 是 Foundation 引擎，只由 Application 组合，SQLite C 值只存在于 backend 内。两者都遵守 Foundation 的依赖规则，不依赖任何业务 owner。
 
 Product owner 定义 schema、migration 内容、恢复和业务并发不变量，当前产品历史由 Product 架构定义。未来 backend adapter 必须完整满足本合同；不得以兼容层、双写或静默 fallback 弱化合同。
 
-模块 owner 固定为：
+文件归属固定为：
 
 ```text
-src/storage.zig                         # Storage module root
-src/storage/sql.zig                     # backend-neutral public contract
-src/storage/conformance.zig             # shared backend contract tests
-src/storage/sqlite.zig                  # public concrete owner and lifecycle orchestration
-src/storage/sqlite/connection.zig       # SQLite C API, profile, limits, authorizers, bind/row/error
-src/storage/sqlite/migrations.zig       # migration metadata, checksum and atomic application
-tests/support/storage_crash_fixture.zig # child-process WAL recovery fixture
+src/foundation/storage/sql.zig                # metawork_storage_sql: backend-neutral public contract
+src/foundation/storage/sqlite.zig             # metawork_storage_sqlite: concrete owner and lifecycle orchestration
+src/foundation/storage/sqlite/connection.zig  # SQLite C API, profile, limits, authorizers, bind/row/error
+src/foundation/storage/sqlite/migrations.zig  # migration metadata, checksum and atomic application
+src/foundation/storage/conformance.zig        # shared backend contract tests, private to the SQLite backend test root
+tests/support/storage_crash_fixture.zig       # child-process WAL recovery fixture
 ```
 
-不继续按 helper 数量拆文件；只有出现新的 owner、生命周期或独立可测试不变量时才增加模块。
+不继续按 helper 数量拆文件；只有出现新的 owner、生命周期或独立可测试不变量时才增加模块。conformance 目前只由 SQLite backend 相对导入并登记测试；出现第二个 backend 时，它必须提成具名的测试支持模块，因为同一个文件不能同时属于两个模块。
 
 ## 3. Backend-neutral SQL contract
 
@@ -246,5 +245,3 @@ owner 在 `destroy` 前必须停止并 join 全部其他使用者，包括 gate 
 ## 8. 验证 Gate
 
 本合同的验证责任、标准入口、平台矩阵与未闭合证据统一由[验证规范的 Storage 基础层验证](validation.md#storage-基础层验证)定义。测试必须观察本合同中的权限隔离、持久化身份、事务结果与连接健康、借用生命周期和恢复不变量；测试数量或单次全绿不能替代这些证据。
-
-当前基础层仍不创建 production `app.db`，不改变任何 Product store、Account persistence、Application startup/shutdown 或 Product mutation path。

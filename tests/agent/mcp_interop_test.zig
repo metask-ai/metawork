@@ -3995,7 +3995,10 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
         defer restored_access.deinit();
         var ceiling = try restored_access.captureRestoreInputs();
         defer ceiling.release() catch unreachable;
-        try std.testing.expectEqual(@as(usize, 1), ceiling.agent.borrowSkillRestoreInputs(ceiling.skill.?).policy.granted_skill_ids.len);
+        // In process the borrow is always made; a null is a test failure.
+        const borrowed = ceiling.agent.borrowSkillRestoreInputs(ceiling.skill.?) orelse
+            return error.BorrowUnavailable;
+        try std.testing.expectEqual(@as(usize, 1), borrowed.policy.granted_skill_ids.len);
     }
     try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Continue on the new connection." }, .allow_session));
     try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Deny this echo tool." }, .allow_session));
@@ -4015,7 +4018,9 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     if (manual) try std.testing.expect(task.runtime.last_restore_report.?.restored_permission_rules >= 2);
     try std.testing.expectEqual(agent.ShellPolicy.unrestricted, restored_inputs.shell_policy);
     try std.testing.expectEqual(agent.PermissionInteraction.interactive, restored_inputs.permission_interaction);
-    const ids = restored_inputs.agent.borrowSkillRestoreInputs(restored_inputs.skill.?).policy.granted_skill_ids;
+    const restored_borrow = restored_inputs.agent.borrowSkillRestoreInputs(restored_inputs.skill.?) orelse
+        return error.BorrowUnavailable;
+    const ids = restored_borrow.policy.granted_skill_ids;
     try std.testing.expectEqual(@as(usize, 2), ids.len);
     try std.testing.expect(for (ids) |id| {
         if (std.mem.eql(u8, id, retained.skill_id)) break true;
