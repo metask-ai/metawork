@@ -248,6 +248,19 @@ pub const RunControlLease = struct {
     }
 };
 
+/// What cancelling a compact can refuse with.
+///
+/// The two Session-side members are the implementation's own. The third is
+/// the link's, and it is here rather than reused from `surface.Error` because
+/// this method's set is deliberately narrow: `src/product/task/runtime.zig`
+/// switches on it exhaustively, which is the whole value of a narrow set, and
+/// a method that can be called across a process boundary has to be able to
+/// say that the boundary is gone. Neither existing member means it --
+/// `NoSuchCompact` would claim the compact was already over, `SessionClosing`
+/// that the Session is winding down -- and the exhaustive switch is what
+/// makes the caller say which side it chooses instead of inheriting one.
+pub const CompactCancellation = error{ NoSuchCompact, SessionClosing, DependencyUnreachable };
+
 pub const SessionPort = struct {
     context: ?*anyopaque,
     vtable: *const VTable,
@@ -282,7 +295,7 @@ pub const SessionPort = struct {
         prepare_compact: *const fn (?*anyopaque) Allocating!u64,
         cancel_prepared_compact: *const fn (?*anyopaque, u64) Error!void,
         execute_prepared_compact: *const fn (?*anyopaque, u64) Error!session_control.CompactTerminalResult,
-        request_compact_cancellation: *const fn (?*anyopaque, u64, session_control.ExternalInterruption) error{ NoSuchCompact, SessionClosing }!void,
+        request_compact_cancellation: *const fn (?*anyopaque, u64, session_control.ExternalInterruption) CompactCancellation!void,
         respond_permission: *const fn (?*anyopaque, u64, u64, sdk.protocol.PermissionChoice) Allocating!void,
         fail_ui_request_identity_contract: *const fn (?*anyopaque, u64) Error!void,
         pending_ui_observation: *const fn (?*anyopaque) ?PendingUiObservation,
@@ -420,7 +433,7 @@ pub const SessionPort = struct {
         self: SessionPort,
         operation_id: u64,
         interruption: session_control.ExternalInterruption,
-    ) error{ NoSuchCompact, SessionClosing }!void {
+    ) CompactCancellation!void {
         return self.vtable.request_compact_cancellation(self.context, operation_id, interruption);
     }
 

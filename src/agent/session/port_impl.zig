@@ -258,7 +258,7 @@ const session_vtable: port.SessionPort.VTable = .{
         }
     }.call,
     .request_compact_cancellation = struct {
-        fn call(context: ?*anyopaque, operation_id: u64, interruption: session_control.ExternalInterruption) error{ NoSuchCompact, SessionClosing }!void {
+        fn call(context: ?*anyopaque, operation_id: u64, interruption: session_control.ExternalInterruption) port.CompactCancellation!void {
             return sessionOf(context).requestCompactCancellation(operation_id, interruption);
         }
     }.call,

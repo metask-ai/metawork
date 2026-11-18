@@ -401,6 +401,11 @@ pub fn Outcome(comptime owner: method.Owner, comptime name: []const u8) type {
     };
 }
 
+/// Whether one method's result can be read back from here.
+pub fn readable(comptime owner: method.Owner, comptime name: []const u8) bool {
+    return adapter(@FieldType(Outcome(owner, name), "returned")) != null;
+}
+
 pub const InvokeError = client.CallError || Error;
 
 /// Sends one call and reads its answer back into the port's own types.

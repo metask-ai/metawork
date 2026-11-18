@@ -10820,6 +10820,13 @@ fn cancelCompactRecord(
     ) catch |err| switch (err) {
         error.NoSuchCompact => return .already_terminal,
         error.SessionClosing => return .session_closing,
+        // The cancellation did not happen and nothing here can find out
+        // whether it ever will, so this lands where an unreachable Session
+        // already lands: the caller stops asking about this compact. The
+        // other choice, `.already_terminal`, would tell Product the compact
+        // is over -- a claim about the Session's state that nobody
+        // established.
+        error.DependencyUnreachable => return .session_closing,
     };
     task.durable.recent_order = self.takeRecentOrder();
     return if (prior == null) .requested else .already_requested;
