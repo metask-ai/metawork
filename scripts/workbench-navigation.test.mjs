@@ -20,6 +20,8 @@ import {
   prepareRetryDraft,
   pruneTaskDrafts,
   readNewTaskDraft,
+  readNewTaskDraftRecord,
+  writeNewTaskDraftRecord,
   readTaskDraft,
   writeNewTaskDraft,
   writeTaskDraft,
@@ -652,4 +654,55 @@ test("search query byte bound preserves Unicode codepoints", () => {
   assert.ok(Buffer.byteLength(query) <= 256);
   assert.equal(Buffer.from(query).toString("utf8"), query);
   assert.equal(boundedSearchQuery("x".repeat(300)).length, 256);
+});
+
+test("project draft records retain an explicit directory with empty content and ignore retired storage", () => {
+  const values = new Map();
+  globalThis.window = {
+    sessionStorage: {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => values.set(key, value),
+      removeItem: (key) => values.delete(key),
+    },
+  };
+  try {
+    values.set(
+      "metawork.new-task-draft.v1.1",
+      JSON.stringify({ kind: "text", text: "Old directory slot" }),
+    );
+    assert.equal(readNewTaskDraft("1").text, "");
+    writeNewTaskDraftRecord("1", {
+      directory: { kind: "explicit", workspaceId: "9" },
+      content: { kind: "text", text: "" },
+    });
+    assert.deepEqual(readNewTaskDraftRecord("1").directory, {
+      kind: "explicit",
+      workspaceId: "9",
+    });
+    writeNewTaskDraft("1", {
+      kind: "text",
+      text: "Keep project 1 in directory 9",
+    });
+    assert.equal(readNewTaskDraft("1").text, "Keep project 1 in directory 9");
+    clearNewTaskDraft("1");
+    assert.deepEqual(readNewTaskDraftRecord("1"), {
+      directory: { kind: "explicit", workspaceId: "9" },
+      content: { kind: "text", text: "" },
+    });
+    assert.equal(
+      newTaskDraftMoveDecision(
+        { kind: "text", text: "" },
+        { kind: "text", text: "" },
+        true,
+        true,
+      ),
+      "preserve_both",
+    );
+    const persisted = JSON.parse(
+      values.get("metawork.new-task-project-draft.v1.1"),
+    );
+    assert.equal(Object.hasOwn(persisted, "projectId"), false);
+  } finally {
+    delete globalThis.window;
+  }
 });

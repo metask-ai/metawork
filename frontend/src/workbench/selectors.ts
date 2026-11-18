@@ -51,7 +51,7 @@ function permissionReviewInProgress(task: TaskNavigation): boolean {
 export function orderedProjects(workspaces: readonly WorkspaceView[]) {
   return workspaces
     .filter(
-      (workspace) => workspace.kind === "manual" && !workspace.projectRemoved,
+      (workspace) => workspace.kind === "manual" && workspace.projectEntry,
     )
     .sort((left, right) => {
       const leftOrder = BigInt(left.recentOrder);

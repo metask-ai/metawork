@@ -118,7 +118,6 @@ const terminal_diagnostic_capacity = 512;
 // conversations, not CPU. Sized so approval-blocked runs cannot easily
 // exhaust the pool.
 const host_worker_count = 16;
-const product_snapshot_capacity = bridge_api.snapshot_max_bytes;
 
 const FrozenFileDelivery = struct {
     io: std.Io,
@@ -308,7 +307,6 @@ const App = struct {
                 .max_pending_ui_json_bytes = pending_ui_json_capacity,
                 .max_pending_ui_requests = host_worker_count,
                 .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
-                .max_snapshot_bytes = product_snapshot_capacity,
             },
             configuration,
         );

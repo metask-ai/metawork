@@ -819,6 +819,7 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
           accepted: true,
           taskId: "11",
           bindingEpoch: "13",
+          projectId: null,
           mcpAuthority: { kind: "ready", selection: "none" },
           reason: null,
         };
@@ -880,11 +881,13 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
       null,
       null,
       "manual",
+      null,
     ),
     {
       accepted: true,
       taskId: "11",
       bindingEpoch: "13",
+      projectId: null,
       mcpAuthority: { kind: "ready", selection: "none" },
       reason: null,
     },
@@ -949,6 +952,7 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
     {
       command: "metawork.tasks.create",
       payload: {
+        projectId: null,
         workspace: {
           kind: "manual",
           workspaceId: "7",

@@ -414,7 +414,7 @@ fn validatePreserved(allocator: std.mem.Allocator, state: wire.StateWire, preser
         if (v.id == 0 or (v.kind == .task and v.id >= state.next_task_id) or (v.kind == .workspace and v.id >= state.next_workspace_id)) return error.Invalid;
     }
     for (preserved.read_only_tasks) |v| {
-        const original = try std.json.parseFromSliceLeaky(wire.TaskWire, allocator, v.payload, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+        const original = try std.json.parseFromSliceLeaky(struct { id: u64, recent_order: u64, workspace_id: u64 }, allocator, v.payload, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
         if (original.id != v.task_id or original.recent_order != v.recent_order) return error.Invalid;
         var found = false;
         for (state.tasks) |task| {
@@ -635,7 +635,7 @@ fn writeWorkspace(batch: *Batch, v: wire.WorkspaceWire) !void {
         .canonical_root = b(v.canonical_root),
         .display_name = b(v.display_name),
         .visible = boolean(v.visible),
-        .project_removed = boolean(v.project_removed),
+        .project_entry = boolean(v.project_entry),
         .recent_order = try batch.u(v.recent_order),
     });
 }
@@ -648,7 +648,7 @@ fn readWorkspace(row: Record) !wire.WorkspaceWire {
     v.canonical_root = try row.b("canonical_root");
     v.display_name = try row.b("display_name");
     v.visible = try row.boolean("visible");
-    v.project_removed = try row.boolean("project_removed");
+    v.project_entry = try row.boolean("project_entry");
     v.recent_order = try row.u("recent_order");
     return v;
 }
@@ -661,6 +661,7 @@ fn writeTask(batch: *Batch, v: wire.TaskWire) !void {
         .id = try batch.u(v.id),
         .recent_order = try batch.u(v.recent_order),
         .completion_seen_run_id = try batch.ou(v.completion_seen_run_id),
+        .project_id = try batch.ou(v.project_id),
         .workspace_id = try batch.u(v.workspace_id),
         .workspace_epoch = try batch.u(v.workspace_epoch),
         .workspace_root = b(v.workspace_root),
@@ -703,6 +704,7 @@ fn readTask(row: Record) !wire.TaskWire {
     v.id = try row.u("id");
     v.recent_order = try row.u("recent_order");
     v.completion_seen_run_id = try row.ou("completion_seen_run_id");
+    v.project_id = try row.ou("project_id");
     v.workspace_id = try row.u("workspace_id");
     v.workspace_epoch = try row.u("workspace_epoch");
     v.workspace_root = try row.b("workspace_root");
@@ -925,7 +927,7 @@ comptime {
     if (std.meta.fields(wire.StateWire).len != 9) @compileError("Review every history SQL field mapping after StateWire changes");
     if (std.meta.fields(wire.TaskFailureWire).len != 3) @compileError("Review every history SQL field mapping after TaskFailureWire changes");
     if (std.meta.fields(wire.WorkspaceWire).len != 8) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
-    if (std.meta.fields(wire.TaskWire).len != 27) @compileError("Review every history SQL field mapping after TaskWire changes");
+    if (std.meta.fields(wire.TaskWire).len != 28) @compileError("Review every history SQL field mapping after TaskWire changes");
     if (std.meta.fields(wire.ModelIntentWire).len != 3) @compileError("Review every history SQL field mapping after ModelIntentWire changes");
     // model_error is a nullable typed JSON value read and written with its Run.
     if (std.meta.fields(wire.RunWire).len != 36) @compileError("Review every history SQL field mapping after RunWire changes");

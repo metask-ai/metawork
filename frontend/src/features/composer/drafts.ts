@@ -12,8 +12,7 @@ import {
 // Drafts are local Composer state, never part of the Host projection.
 const legacyTaskPrefix = "metawork.task-draft.";
 const taskPrefix = "metawork.task-draft.v1.";
-const legacyNewTaskPrefix = "metawork.new-task-draft.";
-const newTaskPrefix = "metawork.new-task-draft.v1.";
+const newTaskPrefix = "metawork.new-task-project-draft.v1.";
 export const unscopedNewTaskDraftId = "unscoped";
 export { maxComposerCharacters };
 // Keep oversized text drafts editable across reloads, including JSON escaping.
@@ -35,17 +34,21 @@ export function remainingAttachmentFiles(
 
 export function newTaskDraftStorageId(
   active: boolean,
-  workspaceId: string | null,
+  projectId: string | null,
 ) {
-  return active ? workspaceId || unscopedNewTaskDraftId : null;
+  return active ? projectId || unscopedNewTaskDraftId : null;
 }
 
 export function newTaskDraftMoveDecision(
   source: ComposerDraft,
   target: ComposerDraft,
+  sourceHasDirectory = false,
+  targetHasDirectory = false,
 ) {
-  if (!draftHasContent(source)) return "preserve_target" as const;
-  if (draftHasContent(target)) return "preserve_both" as const;
+  if (!draftHasContent(source) && !sourceHasDirectory)
+    return "preserve_target" as const;
+  if (draftHasContent(target) || targetHasDirectory)
+    return "preserve_both" as const;
   return "move" as const;
 }
 
@@ -331,41 +334,96 @@ export function clearTaskDraft(taskId: string): void {
   writeTaskDraft(taskId, emptyComposerDraft());
 }
 
-export function readNewTaskDraft(workspaceId: string): ComposerDraft {
+export type NewTaskDirectory =
+  | { kind: "project_default" }
+  | { kind: "explicit"; workspaceId: string | null };
+export type NewTaskDraftRecord = {
+  directory: NewTaskDirectory;
+  content: ComposerDraft;
+};
+export function readNewTaskDraftRecord(projectKey: string): NewTaskDraftRecord {
+  const empty = (): NewTaskDraftRecord => ({
+    directory: { kind: "project_default" },
+    content: emptyComposerDraft(),
+  });
   try {
-    const target = composerSessionStorage();
-    if (!target) return emptyComposerDraft();
-    const tagged = target.getItem(`${newTaskPrefix}${workspaceId}`);
-    return tagged !== null
-      ? decodeTaggedDraft(tagged)
-      : decodeLegacyTextDraft(
-          target.getItem(`${legacyNewTaskPrefix}${workspaceId}`),
-        );
+    const encoded = composerSessionStorage()?.getItem(
+      `${newTaskPrefix}${projectKey}`,
+    );
+    if (!encoded || utf8ByteLength(encoded) > maxPersistedDraftBytes)
+      return empty();
+    const value: unknown = JSON.parse(encoded);
+    if (
+      !value ||
+      typeof value !== "object" ||
+      !exactKeys(value as Record<string, unknown>, ["directory", "content"])
+    )
+      return empty();
+    const record = value as Record<string, unknown>;
+    const directory = record.directory as Record<string, unknown> | null;
+    if (!directory || typeof directory !== "object") return empty();
+    if (directory.kind === "project_default") {
+      if (!exactKeys(directory, ["kind"])) return empty();
+    } else if (directory.kind === "explicit") {
+      if (!exactKeys(directory, ["kind", "workspaceId"])) return empty();
+      const id = directory.workspaceId;
+      if (
+        id !== null &&
+        (typeof id !== "string" ||
+          !/^[1-9][0-9]{0,19}$/.test(id) ||
+          BigInt(id) > 18446744073709551615n)
+      )
+        return empty();
+    } else return empty();
+    return {
+      directory: directory as NewTaskDirectory,
+      content: decodeTaggedDraft(JSON.stringify(record.content)),
+    };
   } catch {
-    return emptyComposerDraft();
+    return empty();
   }
 }
-
-export function writeNewTaskDraft(
-  workspaceId: string,
-  value: ComposerDraft,
+export function writeNewTaskDraftRecord(
+  projectKey: string,
+  value: NewTaskDraftRecord,
 ): void {
   try {
     const target = composerSessionStorage();
     if (!target) return;
-    writeDraftValue(
-      target,
-      `${newTaskPrefix}${workspaceId}`,
-      `${legacyNewTaskPrefix}${workspaceId}`,
-      value,
-    );
+    const key = `${newTaskPrefix}${projectKey}`;
+    if (
+      !draftHasContent(value.content) &&
+      value.directory.kind === "project_default"
+    ) {
+      target.removeItem(key);
+      return;
+    }
+    const content = encodeDraft(value.content);
+    if (content === null) return;
+    const encoded = JSON.stringify({
+      directory: value.directory,
+      content: JSON.parse(content),
+    });
+    if (utf8ByteLength(encoded) <= maxPersistedDraftBytes)
+      target.setItem(key, encoded);
   } catch {
-    // Draft persistence is helpful, but never a prerequisite for composing.
+    /* Local draft storage must not prevent composing. */
   }
 }
-
-export function clearNewTaskDraft(workspaceId: string): void {
-  writeNewTaskDraft(workspaceId, emptyComposerDraft());
+export function readNewTaskDraft(projectKey: string): ComposerDraft {
+  return readNewTaskDraftRecord(projectKey).content;
+}
+export function writeNewTaskDraft(
+  projectKey: string,
+  value: ComposerDraft,
+): void {
+  writeNewTaskDraftRecord(projectKey, {
+    directory: readNewTaskDraftRecord(projectKey).directory,
+    content: value,
+  });
+}
+export function clearNewTaskDraft(projectKey: string): void {
+  writeNewTaskDraft(projectKey, emptyComposerDraft());
 }
 
 export function pruneTaskDrafts(validTaskIds: ReadonlySet<string>): void {

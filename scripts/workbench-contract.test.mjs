@@ -17,6 +17,7 @@ import {
   decodeHostSignalEvent,
   decodePingResponse,
   decodeTaskCreateResult,
+  decodeTaskProjectResult,
   decodeTaskCompactResult,
   decodeTaskRestoreResult,
   decodeTaskRunResult,
@@ -118,17 +119,17 @@ test("Task index and detail require their Host action blockers", () => {
 
 test("project entry removal is a strict fact independent of Task directory and Workspace authorization", () => {
   const value = clone(fixture);
-  value.workspaces[0].projectRemoved = true;
+  value.workspaces[0].projectEntry = false;
   const decoded = decodeWorkbenchSnapshot(value);
-  assert.equal(decoded.workspaces[0].projectRemoved, true);
+  assert.equal(decoded.workspaces[0].projectEntry, false);
   assert.equal(
     decoded.workspaces[0].authorization,
     fixture.workspaces[0].authorization,
   );
   assert.equal(decoded.tasks[0].workspaceId, fixture.tasks[0].workspaceId);
   for (const invalid of [undefined, null, "true", 1]) {
-    value.workspaces[0].projectRemoved = invalid;
-    assert.throws(() => decodeWorkbenchSnapshot(value), /projectRemoved/);
+    value.workspaces[0].projectEntry = invalid;
+    assert.throws(() => decodeWorkbenchSnapshot(value), /projectEntry/);
   }
 });
 
@@ -401,12 +402,18 @@ test("Skill discovery is scoped root evidence, separate from shared Task catalog
       recentOrder: "1",
     },
     { kind: "manual", authorization: "removing", recentOrder: "1" },
-    { kind: "automatic", authorization: "available", recentOrder: "0" },
+    {
+      kind: "automatic",
+      authorization: "available",
+      recentOrder: "0",
+      projectEntry: false,
+    },
   ]) {
     const next = clone(candidate);
     Object.assign(next.workspaces[0], workspaceState, {
       skillSourceDiscovery: null,
     });
+    if (workspaceState.kind === "automatic") next.tasks[0].projectId = null;
     // These Workspace facts are valid; only publishing discovery is forbidden.
     assert.deepEqual(decodeWorkbenchSnapshot(next), next);
     next.workspaces[0].skillSourceDiscovery =
@@ -1490,6 +1497,8 @@ test("Task model selection availability is a strict Host-owned projection", () =
 test("Automatic Workspace current catalog uses the Host authority without project controls", () => {
   const automatic = clone(fixture);
   automatic.workspaces[0].kind = "automatic";
+  automatic.workspaces[0].projectEntry = false;
+  automatic.tasks[0].projectId = null;
   automatic.workspaces[0].recentOrder = "0";
   automatic.workspaces[0].skillCatalog.availability = "unavailable";
   assert.deepEqual(decodeWorkbenchSnapshot(automatic), automatic);
@@ -1506,6 +1515,7 @@ test("automatic Workspace projection is one-to-one and capability-gated", () => 
     ...clone(fixture.workspaces[0]),
     id: "9",
     kind: "automatic",
+    projectEntry: false,
     displayName: "Automatic workspace",
     canonicalRoot: "/data/workspaces/0000000000000009",
     recentOrder: "0",
@@ -2181,6 +2191,7 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
       accepted: true,
       taskId: "3",
       bindingEpoch: "7",
+      projectId: null,
       mcpAuthority: { kind: "ready", selection: "none" },
       reason: null,
     }),
@@ -2188,6 +2199,7 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
       accepted: true,
       taskId: "3",
       bindingEpoch: "7",
+      projectId: null,
       mcpAuthority: { kind: "ready", selection: "none" },
       reason: null,
     },
@@ -2198,6 +2210,7 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
         accepted: true,
         taskId: "3",
         bindingEpoch: "7",
+        projectId: null,
         mcpAuthority: { kind: "unavailable", selection: "none" },
         reason: null,
       }),
@@ -2209,6 +2222,7 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
         accepted: false,
         taskId: null,
         bindingEpoch: null,
+        projectId: null,
         mcpAuthority: { kind: "unavailable", selection: null },
         reason: "catalog_loading",
       }),
@@ -4335,4 +4349,52 @@ test("calendar day sets decode strictly and preserve all selected dates", () => 
   }
   snapshot.scheduledTasks[0].recurrence.frequency = "daily";
   assert.throws(() => decodeWorkbenchSnapshot(snapshot));
+});
+
+test("Task projects allow retained identities outside the Snapshot and validate projected kinds", () => {
+  const retained = clone(fixture);
+  retained.tasks[0].projectId = "18446744073709551615";
+  assert.equal(
+    decodeWorkbenchSnapshot(retained).tasks[0].projectId,
+    "18446744073709551615",
+  );
+  const automatic = clone(fixture);
+  automatic.workspaces[0].kind = "automatic";
+  automatic.workspaces[0].recentOrder = "0";
+  automatic.workspaces[0].projectEntry = false;
+  assert.throws(() => decodeWorkbenchSnapshot(automatic), /Manual Workspace/);
+  delete retained.tasks[0].projectId;
+  assert.throws(() => decodeWorkbenchSnapshot(retained), /projectId/);
+});
+
+test("Task project results validate identity, nullable target and exact business rejection", () => {
+  const applied = { applied: true, taskId: "3", projectId: "9", reason: null };
+  assert.deepEqual(decodeTaskProjectResult(applied, "3"), applied);
+  assert.deepEqual(
+    decodeTaskProjectResult({ ...applied, projectId: null }, "3"),
+    { ...applied, projectId: null },
+  );
+  assert.throws(
+    () => decodeTaskProjectResult(applied, "4"),
+    /identity mismatch/,
+  );
+  assert.throws(
+    () => decodeTaskProjectResult({ ...applied, projectId: "0" }, "3"),
+    /positive/,
+  );
+  assert.throws(
+    () =>
+      decodeTaskProjectResult(
+        { ...applied, applied: false, reason: "project_unavailable" },
+        "3",
+      ),
+    /expected null/,
+  );
+  const rejected = {
+    applied: false,
+    taskId: "3",
+    projectId: null,
+    reason: "project_unavailable",
+  };
+  assert.deepEqual(decodeTaskProjectResult(rejected, "3"), rejected);
 });

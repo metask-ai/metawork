@@ -1,4 +1,34 @@
 export const enUS = {
+  "task.project_change_body":
+    "Changing the project keeps this chat’s working directory.",
+  "task.project_change_not_confirmed":
+    "The project change is not confirmed. Refresh to check its current assignment.",
+  "task.project": "Project",
+  "task.no_project": "No project",
+  "task.project_removed": "Project removed",
+  "task.add_project": "Add project",
+  "task.add_project_failed":
+    "Could not add the project. Choose its folder again.",
+  "task.move_to_project": "Move to project",
+  "task.change_project": "Change project",
+  "task.project_change_failed":
+    "Could not change the project. Refresh and try again.",
+  "task.draft_preserved":
+    "Your original draft was kept. You are viewing the destination project’s draft.",
+  "settings.working_directories": "Working directories",
+  "workspace.directory_capacity":
+    "The working directory limit is reached. Revoke an unused directory in Settings → Working directories.",
+  "workspace.directory_management_body":
+    "Manage authorized local working directories. Choosing a directory registers access; Add project creates its sidebar entry.",
+  "workspace.choose_directory": "Choose working directory",
+  "workspace.revoke_directory": "Revoke directory access",
+  "workspace.no_directories": "No working directories registered.",
+  "workspace.directory_action_failed":
+    "Could not complete the directory action. Refresh and try again.",
+  "workspace.revoke_directory_body":
+    "Revoke access to “{title}” and close tasks actually working in it. Associated chats: {count}. History and local files are kept.",
+  "workspace.revoke_project_body":
+    "The “{title}” project entry will also be removed. Chats working in other directories: {count}. They remain in Recent; archived chats stay in the archive. Adding the project again restores its group.",
   "model_setup.preference_not_saved":
     "Your model preference could not be saved. Confirmed task choices are unchanged.",
   "mutation.reason.schedule_persistence_unavailable":
@@ -348,7 +378,7 @@ export const enUS = {
   "workspace.selection_failed":
     "The workspace could not be opened. Choose it again.",
   "workspace.selection_capacity":
-    "The workspace limit has been reached. Remove a project from the sidebar to add another folder.",
+    "The project limit has been reached. Remove a project entry to add another.",
   "workspace.grant_confirmed": "Workspace selected.",
   "workspace.access_required":
     "This workspace is unavailable. Select the folder again.",
@@ -704,7 +734,7 @@ export const enUS = {
     "Choose a folder with SKILL.md at its root or in one wrapper folder.",
   "skills.choose_again": "Choose again",
   "skills.import_error.invalid_scope":
-    "Choose an available personal or project scope.",
+    "Choose an available personal or working directory scope.",
   "skills.import_error.invalid_preview":
     "This confirmation has expired or is no longer valid. Choose the source again.",
   "skills.import_error.source_unavailable":
@@ -740,9 +770,9 @@ export const enUS = {
   "skills.import_error.catalog_loading":
     "Skills are still being checked or verified. Wait, then confirm again.",
   "skills.import_error.workspace_changed":
-    "Project authorization has changed. Choose the project and confirm again.",
+    "Working directory authorization has changed. Choose the directory and confirm again.",
   "skills.import_error.workspace_unavailable":
-    "The project is unavailable. Restore folder authorization and try again.",
+    "The working directory is unavailable. Restore folder authorization and try again.",
   "skills.import_error.capacity_reached":
     "There is not enough processing capacity right now. Try again later.",
   "skills.import_error.shutting_down":
@@ -1753,6 +1783,8 @@ export const enUS = {
     "The selected execution setup is not available right now.",
   "mutation.reason.workspace_changed":
     "This workspace changed. Review its latest state and try again.",
+  "mutation.reason.project_unavailable":
+    "This project is no longer available. Choose another project.",
   "mutation.reason.workspace_unavailable":
     "This workspace is no longer available.",
   "mutation.reason.workspace_removing":

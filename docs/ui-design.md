@@ -88,8 +88,8 @@ Account
 ├── Custom Provider registry
 └── Default execution selection
 
-Workspace
-└── Task
+Project（可空归属；Manual Workspace 提供默认目录）
+└── Task（独立绑定实际 Workspace）
     ├── Bound execution generation / model
     ├── User instructions
     ├── Agent responses and work activity
@@ -114,7 +114,8 @@ Workspace
 
 | English source       | 简体中文        | 使用说明                              |
 | -------------------- | --------------- | ------------------------------------- |
-| Workspace            | 工作区          | 本地目录和任务归属范围                |
+| Workspace            | 工作区          | 实际工作目录与授权身份                |
+| Project              | 项目            | 会话组织归属，关联默认目录            |
 | Task                 | 任务            | 用户可持续补充的工作上下文            |
 | New task             | 新建任务        | 不使用 New session                    |
 | Skills               | 技能            | MetaWork 用户 Skill 目录与健康        |
@@ -234,12 +235,12 @@ Workspace
 
 - New task、全局能力入口、可操作的项目目录行与 Task 行共用 36 px 最小行高、相同内容宽度、8 px 圆角的中性状态样式；内容垂直居中，导航、项目和任务行的高亮左右边缘对齐，任务区出现滚动条也不缩窄高亮区域。浅色主题的左栏采用浅灰底，悬停与当前项统一使用稍深的中性灰色和主要文字色；标题栏左侧与账户区域延续左栏底色，账户入口沿用相同的中性高亮，深色主题采用对应中性色；不使用紫色底或侧边紫色标记。项目目录行与 Task 行在操作菜单展开时沿用当前项底色，菜单关闭后恢复悬停或默认状态；实际 Task 与全局能力的当前项继续由导航状态决定。
 - 品牌到能力导航留白 12 px，能力导航到任务区域留白 24 px，项目分组间距 8 px；“项目”“最近”标题左边缘与文件夹图标对齐。组内保持 1 px 行间距、14 px 左右留白，项目区到“最近”保留 24 px 间距；
-- 左栏保留全局 Task 列表，并按 [Task 列表、项目与排序](#56-task-列表项目与排序) 额外展示用户选择目录的项目导航；不提供全局 Workspace 切换器或目录添加动作。只消费同一 canonical snapshot 中的 Workspace、项目入口状态与所属 Task；项目入口状态不改变全局 Task 列表，Host 撤销授权并移出 Snapshot 的 Workspace 不生成可点击的死入口；
+- 左栏保留全局 Task 列表，并按 [Task 列表、项目与排序](#56-task-列表项目与排序) 额外展示按归属组织的项目导航，并提供显式“添加项目”；不提供全局 Workspace 切换器。只消费同一 canonical snapshot 中的 Workspace、项目入口状态与所属 Task；项目入口状态不改变全局 Task 列表，Host 撤销授权并移出 Snapshot 的 Workspace 不生成可点击的死入口；
 - Task 被选择后使用自身绑定的 Workspace 路径，不提交额外的全局 Workspace 导航动作；不同路径下的后台 Task 都必须持续可见；
-- New task 默认选择 Automatic Workspace，未手动选择目录时，工具带按钮显示“选择工作目录”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；用户确认目录后即完成授权并只更新草稿上下文，不得追加 trust 确认、自动创建 Task 或发送已有内容。选定 Manual Workspace 后，按钮显示项目名，悬停可查看完整目录。创建后可在右上角的任务信息查看已选目录。
-- New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
+- 无项目草稿默认选择 Automatic Workspace，项目草稿默认采用项目关联目录，已有明确目录选择优先。Automatic intent 的工具带按钮显示“选择工作目录”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；用户确认目录后即完成授权并只更新草稿上下文，不得追加 trust 确认、自动创建 Task 或发送已有内容。选定 Manual Workspace 后，按钮显示目录名，悬停可查看完整目录。创建后可在右上角的任务信息查看已选目录。
+- New task 草稿按可空项目身份隔离，目录作为本槽位属性保存默认、明确 Manual 或 Automatic 选择。改目录保留文字与附件；改项目仅在目标没有内容或明确目录选择时迁移，目标已有任一项则保留两份并打开目标，通过轻量提示说明原草稿已保留。项目默认目录在目标槽位解析，已有 Task 草稿仍按 Task identity 保存；
 - Workspace projection 的 `kind` 是 Host 事实；一个 Manual Workspace 可以承载多个 Task，Automatic Workspace 精确归属一个 Task；
-- Composer 的工作目录控件只选择、添加或重新授权 New task 路径；设置页不提供 Workspace 生命周期管理。设置作为覆盖整个 主界面内容区的长期 surface 打开，保留窗口壳层和底层内容的挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；
+- Composer 的工作目录控件选择、登记或重新授权 New task 路径，与项目选择器分开。目录候选不按项目入口过滤；设置提供已登记 Manual 工作目录的重新授权与撤销。设置作为覆盖整个 主界面内容区的长期 surface 打开，保留窗口壳层和底层内容的挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；
 - 历史 Manual 目录经 Host 恢复检查仍可用时可直接点选，不显示“需要访问权限”或要求重复目录选择器；真实失效目录才显示“目录不可用”并提供重新选择。再次打开历史 Task 只保证可浏览记录，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
 - MetaWork 重启后，左栏直接使用 Product 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
 - `taskHistoryPersistenceHealth = degraded` 本身不显示常驻提示；`retainedTaskHistoryCount > 0` 时，左栏 Task 列表以一行静态说明告知有多少已保存 Task 无法在当前版本打开且已原样保留，不提供动作、不阻塞任何操作。`history_read_only` Task 正常出现在列表中，Composer 以 placeholder 说明只能查看，菜单中的重命名、归档与删除不可用。`read_failed / corrupt / write_failed / outcome_unknown` 显示非阻塞保存提示，但不得禁用 Composer、Task 操作、Workspace 选择、权限响应或取消。Host 发布 recovery available 时，提示内提供“使用新的存储继续”，并在就地确认中明确当前文件会保留为恢复副本；Renderer 只提交当前 snapshot revision，不选择路径或操作文件。取消不改变状态，失败保留提示，成功等待 Host snapshot 收口；
@@ -375,14 +376,14 @@ Tasks
 
 ### 5.6 Task 列表、项目与排序
 
-全局 Task 列表以“最近 / Recent”为标题，保留所有可见任务，每个 Task 在该列表中只出现一次；其上方展示“项目”区域，canonical snapshot 中项目入口未被移除的 Manual Workspace 使用自己的 identity、目录名称和所属 Task 形成一个项目。Automatic Workspace 不生成项目，包括用户调整了默认目录上级位置的情形。两处任务入口共享选择、状态、完成提醒和任务操作，不复制 Task 状态或因项目展示改变绑定。
+全局 Task 列表以“最近 / Recent”为标题，保留所有可见任务，每个 Task 在该列表中只出现一次；其上方展示“项目”区域，canonical snapshot 中 `projectEntry` 为真的 Manual Workspace 使用自己的 identity 和目录名称提供项目入口，Task 以独立 `projectId` 分组。Automatic Workspace 不生成项目，包括用户调整了默认目录上级位置的情形。两处任务入口共享选择、状态、完成提醒和任务操作，不复制 Task 状态或因项目展示改变绑定。
 
 全局列表与每个项目内部共用同一排序：依次按需要处理、正在运行、排队、其他未归档的优先级排列，同一优先级内按 Task `recentOrder` 倒序；状态优先级不生成标题、分隔或独立栏目。项目之间按 Workspace `recentOrder` 倒序：
 
 ```text
 Projects
   [Directory name]
-    [Task in this directory] [status icon]
+    [Task assigned to this project] [status icon]
 Recent
   [Task name]  [status icon]
   [Task name]  [status icon]
@@ -390,7 +391,7 @@ Recent
 ```
 
 - 列表不按状态拆分栏目，不显示 `Needs your attention / Running / Queued / Archived` 等状态标题；
-- 只有存在仍被投影且项目入口未被移除的 Manual Workspace 时显示“项目”；目录标题使用文件夹图标与单行名称，文件夹图标和名称分别与上方能力导航的图标、文字对齐；完整安全路径放在 hover title 中，redacted 时不显示路径。项目内任务名称与文件夹名称左对齐，空项目提示沿用同一文字起点；任务行的点击区域、悬停与选中底色占满项目列表可用宽度，不随文字缩进。不在每个任务行重复目录说明；同名目录保留 canonical identity，可通过标题的路径区分；
+- “项目”区始终提供添加项目入口，即使尚无项目。 添加失败在入口下方提示。项目额度满时提示移除项目入口，工作目录额度满时提供打开“工作目录”设置的按钮。仅有入口的 Manual Workspace 生成分组；目录标题使用文件夹图标与单行名称，文件夹图标和名称分别与上方能力导航的图标、文字对齐；完整安全路径放在 hover title 中，redacted 时不显示路径。项目内任务名称与文件夹名称左对齐，空项目提示沿用同一文字起点；任务行的点击区域、悬停与选中底色占满项目列表可用宽度，不随文字缩进。不在每个任务行重复目录说明；同名目录保留 canonical identity，可通过标题的路径区分；
 - 项目任务默认展开。点击目录标题或用 Enter / Space 激活标题可独立展开或收起该项目，标题通过 `aria-expanded` 提供可访问状态。按 Manual Workspace identity 将收起的项目保存在本机界面偏好中，重启后恢复。收起仅隐藏该项目的任务列表及空态提示，不改变当前 Task、工作面或全局“最近”列表。空项目展开时显示无任务说明；全局与项目列表固定隐藏归档任务，不提供归档显示开关；项目只有隐藏的归档任务时说明归档已隐藏，不误称项目没有任务；全局任务计数只计算唯一 Task，不因项目入口重复计数；
 - 当前排序优先级只决定行的位置，不在视觉上形成分组；排序规则后续变化不得重新引入状态栏目；
 - 任务标题使用扣除右侧状态与操作区后的可用宽度，超出时在可见区域末端淡出。悬停或键盘聚焦任务行片刻后，溢出标题在同一区域内横向滚动一次，离开后恢复末端淡出。开启减少动效时保留静态淡出；
@@ -405,7 +406,9 @@ Recent
 
 项目菜单按“打开项目目录”“移除项目”排列；打开使用文件夹打开图标与普通菜单样式，点击后直接请求系统文件管理器进入项目目录，不弹确认或切换工作面。目录不可用、脱敏、连接尚不可用或打开请求未完成时禁用打开项，移除入口保持自身语义；失败在所属项目旁按项目状态变化、目录不可用、系统文件管理器未能打开或请求未完成分别显示可读提示，不泄露路径或原始错误；提示带可访问的关闭按钮，关闭只隐藏提示并把焦点还给发起打开的入口，不移除项目或改动目录。用户可显式重试，重试成功撤下提示，再次失败重新显示。任务信息中的工作目录打开入口沿用同一规则。
 
-项目标题在横向“…”前提供“新建会话”快捷按钮，使用与全局新建任务相同的线性图标；点击后进入绑定该 Manual Workspace 的 New task 输入界面并聚焦 Composer，复用已有目录选择、草稿隔离和起始偏好规则，首次发送前不创建 Task、不执行 Run 或弹目录选择器。目录授权不可用或连接不可用时禁用新建入口。项目标题通过右键菜单或行右侧的横向“…”按钮提供同一份项目菜单；两个快捷按钮在鼠标悬停项目行或任一操作按钮获得键盘焦点时显示，与 Task 的三点入口对齐并沿用其尺寸、颜色和透明背景规则，不显示常驻下拉按钮。点击“…”以按钮定位菜单，不切换当前任务或改变草稿；Enter/Space 可操作，聚焦项目标题或三点按钮后也可用 Shift+F10 或菜单键打开。关闭菜单或取消确认后焦点返回本次打开菜单的入口。确认框默认聚焦取消，标题仅询问是否移除指定项目；提示只说明任务及其历史记录保留、执行不受影响和项目可重新添加，不引用左栏位置或“最近”等导航名称。确认后请求 Host 移除项目入口，等待期间禁用重复提交，并按刷新后的 canonical Snapshot 更新分组；拒绝或失败保留入口并在确认框提供可重试提示，超时只刷新事实而不自动重发。保留当前 Task、工作面、草稿和全部执行状态，不调用 Workspace 授权撤销或任务停止命令，不建立任务关闭重试流程。空项目和目录不可用的项目仍可移除入口。入口状态不参与目录身份或授权判定；用户通过 Host 原生目录选择器重新添加同一目录后恢复分组，已有有效授权保持原样，取消或授权失败不添加。选择完成前切换工作面不得切换当前任务或迁移过期草稿；项目列表仍以 Host 的最新事实为准。
+项目标题在横向“…”前提供“新建会话”快捷按钮，使用与全局新建任务相同的线性图标；点击后打开该项目的 New task 草稿并聚焦 Composer，默认采用关联目录，仍可另选目录或 Automatic，复用草稿隔离和起始偏好规则，首次发送前不创建 Task、不执行 Run 或弹目录选择器。连接不可用时禁用新建入口；默认目录不可用时仍允许编辑草稿和改选其他目录。项目标题通过右键菜单或行右侧的横向“…”按钮提供同一份项目菜单；两个快捷按钮在鼠标悬停项目行或任一操作按钮获得键盘焦点时显示，与 Task 的三点入口对齐并沿用其尺寸、颜色和透明背景规则，不显示常驻下拉按钮。点击“…”以按钮定位菜单，不切换当前任务或改变草稿；Enter/Space 可操作，聚焦项目标题或三点按钮后也可用 Shift+F10 或菜单键打开。关闭菜单或取消确认后焦点返回本次打开菜单的入口。确认框默认聚焦取消，标题仅询问是否移除指定项目；提示只说明任务及其历史记录保留、执行不受影响和项目可重新添加，不引用左栏位置或“最近”等导航名称。确认后请求 Host 移除项目入口，等待期间禁用重复提交，并按刷新后的 canonical Snapshot 更新分组；拒绝或失败保留入口并在确认框提供可重试提示，超时只刷新事实而不自动重发。保留当前 Task、工作面、草稿和全部执行状态，不调用 Workspace 授权撤销或任务停止命令，不建立任务关闭重试流程。空项目和目录不可用的项目仍可移除入口。入口状态不参与目录身份或授权判定；用户通过显式“添加项目”的 Host 原生 picker 重新添加同根项目才恢复分组；普通工作目录选择保持已有入口状态。已有有效授权保持原样，取消或授权失败不添加。选择完成前切换工作面不得切换当前任务或迁移过期草稿；项目列表仍以 Host 的最新事实为准。
+
+Task 菜单在归档之后提供“移入项目”或“更改项目”，打开 Foundation Dialog 并复用紧凑选择菜单，包含“无项目”。选择后提交整理，提示工作目录保持不变；关闭后焦点返回同一 Task 的稳定列表行。日常 Task 可内部拖入项目标题或“最近”标题，后者清除归属；外部伪造拖放和文件拖放不执行整理。菜单与拖放采用同一操作，连续选择不因前一个回执未到而锁定；分组只取 canonical Snapshot，超时先刷新事实，不自动重发。只读历史与关闭、删除中的 Task 禁用整理。
 
 ### 5.7 创建、命名、归档与删除
 
@@ -742,10 +745,10 @@ New task 页面以 Composer 为绝对主视觉。其上方只显示直接的行�
 Composer 布局与输入规则：
 
 - 输入容器使用白色 `panel` 语义面、细中性边框和极轻阴影。新建任务与已有会话共享此表面。聚焦时仅将中性边框轻微加深，并以短过渡切换。减少动效时省去过渡，内部控件保留独立、清楚的键盘焦点。输入正文使用 15 px、400 字重与 1.6 行高。工具栏采用常规字重、透明默认底色和中性悬停，所属模型、审批与 Workspace 菜单使用浅中性选中底色及明确的选择标记。可发送按钮保留品牌紫，禁用时使用中性底色和灰色图标。危险、授权与错误状态使用各自语义色；
-- 底部工具带左侧放添加菜单与审批，模型选择与唯一的发送或停止主动作组成右侧操作组；中央可用宽度不足时，右侧组整体换到下一行并保持靠右，模型名称可以省略，但发送/停止维持完整点击区。换行由输入框实际可用宽度决定，不只依赖整个窗口的宽度。textarea 与底部工具带共同组成一个完整圆角容器，不得拆成相互竞争的表单块。New task 的 Workspace 选择器放在容器内的工具带左侧，紧跟审批。
+- 底部工具带左侧放添加菜单与审批，模型选择与唯一的发送或停止主动作组成右侧操作组；中央可用宽度不足时，右侧组整体换到下一行并保持靠右，模型名称可以省略，但发送/停止维持完整点击区。换行由输入框实际可用宽度决定，不只依赖整个窗口的宽度。textarea 与底部工具带共同组成一个完整圆角容器，不得拆成相互竞争的表单块。New task 的项目与工作目录选择器分别放在容器内工具带左侧，紧跟审批；窄窗可换行。
 - New task 没有有效模型选择时，在输入框下方显示一份模型准备提示，区分首次配置、授权、目录加载与失效重选。已有候选时直接打开模型列表；所有创建提交明确模型目标，创建失败保留草稿。偏好记忆失败独立反馈，不把已成功 Task 显示成创建失败。
-- Composer 的模型和工作目录菜单使用基础选择菜单的紧凑布局。
-- New task 工具带内的 Workspace 菜单按左栏项目顺序列出已添加的目录，每项显示文件夹图标和项目名，不可用的目录保留状态提示。菜单底部依次提供原生目录选择入口和带文件夹叉号图标的“不使用工作目录”。
+- Composer 的模型、项目和工作目录菜单使用基础选择菜单的紧凑布局。
+- New task 工具带内的 Workspace 菜单按已有最近顺序列出全部已登记 Manual 目录，每项显示文件夹图标和目录名，不可用的目录保留状态提示。菜单底部依次提供原生目录选择入口和带文件夹叉号图标的“不使用工作目录”。
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Automatic intent 不是 Workspace 缺失；`automaticWorkspaces` 可用时普通 Text 可以直接发送。只有所选 Manual Workspace 缺失或授权失效时发送才保持禁用，并在工作目录控件处提供明确恢复动作；Workspace 选择和发送是两个独立动作。
 
@@ -834,7 +837,7 @@ Host 明确拒绝接收后，当前连接在独立额度内暂存可复制的草
 
 ### 8.3 New task 首次发送
 
-首次发送区分创建真实 Task、Task 接收消息和实际执行。Renderer 对同一 New task 只发起一次 create；创建期间继续编辑和发送，有界保留明确提交，取得 identity 后依点击顺序交付，不等待上条响应，也不等待 Skill/restore/readiness。准备和推进属于 Task，Renderer 不管理底层执行逻辑。
+首次发送同时提交可空项目归属和实际目录选择，区分创建真实 Task、Task 接收消息和实际执行。来源槽位首次创建未结算时锁定其项目与目录选择器，事件处理也检查锁定；其他项目槽位仍可使用，返回来源消费原创建，明确失败或未知结算后解除锁定。Renderer 对同一 New task 只发起一次 create；创建期间继续编辑和发送，有界保留明确提交，取得 identity 后依点击顺序交付，不等待上条响应，也不等待 Skill/restore/readiness。准备和推进属于 Task，Renderer 不管理底层执行逻辑。
 
 创建失败或未知逐条显示失败/未确认且不自动重建；切页不改变原提交目标。创建期间停止取消此前尚未交付的提交；创建结果迟到时保留真实 Task，不再交付被取消项。之后的新发送是新意图。连接 generation 失效不跨重连补发。
 
@@ -921,7 +924,7 @@ Renderer 只显示 Host capability projection 声明的模式，不独立审核�
 
 - Run 的 input/output/cache read/cache creation 统计不进入对话、任务信息或右栏，也不保留空 disclosure、隐藏组件或兼容入口；Host/Bridge 的统计、持久化和数据合同不变。不合并为 Task 用量，也不推算总运行耗时；
 - Composer 仅在当前 attached Conversation 有 Host pressure 观测时显示对应 warning/critical 的可读提醒；只有用户打开后才展示最近观测说明和 current/auto-compact/blocking token 数。没有 pressure 时整块隐藏，即使存在 lastAutoCompact 历史也不创建入口；不展示压缩前后 token、dropped/kept、伪百分比、连续实时用量、raw source Run identity 或跨 attachment 历史。Host 清除 pressure 后提醒与已展开详情同步卸载，不由 Renderer 计时或历史推断恢复；
-- Task 标题附近的“任务信息”使用独立 info 图标，仅在用户打开后展示已绑定的 Manual Workspace 名称、实际执行模型、固定 permission profile（受 capability gate 控制）与创建时 MCP 三态。工作目录行仅在目录名称可公开时显示，并提供打开目录的图标按钮。按钮复用项目菜单的打开资格与失败反馈，长名称可以换行。模型取当前 Run 的冻结 execution；没有当前 Run 时取最近一轮 Run，并标明“最近一轮模型”；没有 Run 时不展示执行模型，不用 Composer 选择或 global default 伪造执行事实。MCP 不是实时连接状态，不暗示可热附加。不增加通用设置页或第二个概览；
+- Task 标题附近的“任务信息”使用独立 info 图标，仅在用户打开后分别展示项目归属、已绑定的 Manual 工作目录名称、实际执行模型、固定 permission profile（受 capability gate 控制）与创建时 MCP 三态。工作目录行仅在目录名称可公开时显示，并提供打开目录的图标按钮。按钮复用项目菜单的打开资格与失败反馈，长名称可以换行。模型取当前 Run 的冻结 execution；没有当前 Run 时取最近一轮 Run，并标明“最近一轮模型”；没有 Run 时不展示执行模型，不用 Composer 选择或 global default 伪造执行事实。MCP 不是实时连接状态，不暗示可热附加。不增加通用设置页或第二个概览；
 - pendingUi 派生“需要处理”定位入口，不存已读或自动展开记忆；只有原始主区审批提供操作按钮。用户点击定位时，overlay 先关闭再滚动/聚焦原请求；停靠面板保持。新请求自身不触发滚动、焦点移动或面板开合，全宽覆盖时定位入口仍可达。
 
 右栏显隐不属于内容目标。内容是当前 Task 内的对象标签会话：可以同时保留多个精确文件预览，File Changes Review 最多保留一个；未打开对象时呈现通用空态。文件预览从对话内联引用或工作区文件树进入，工作过程不重复文件入口；记录审查保留所属 Run 的入口；文件树只按用户展开读取当前目录，不递归扫描、不自动读取正文。Review 是按文件首次出现顺序纵向展开的连续差异文档，同一 `displayPath` 的稳定顺序记录汇入一个文件区块；Review 不建立记录列表、单条详情页、返回层级或旧概览兼容开关。
@@ -1072,15 +1075,19 @@ Models
     ├── Model list（test / edit / remove）
     └── Add model dialog（vendor preset / custom service）
 
+Working directories
+├── Choose / Reauthorize directory
+└── Revoke authorization
+
 Archived tasks
 ├── Search by task name
-└── View history / Restore / Delete
+└── View history / Change project / Restore / Delete
 
 ```
 
 设置是覆盖整个 主界面内容区的正式全局 surface，不用狭窄 popover 承载目录选择、错误恢复和危险退出。它保留窗口壳层，底层内容继续挂载但不可操作；进入后不重复显示或操作 Task 左栏，也不改变离开前的 Task、草稿、滚动和焦点状态。窗口标题栏保持一致，页面内 `返回主界面` 是返回入口；左下角用户菜单只负责打开该 surface 和少量直接动作。
 
-“已归档任务”作为设置末尾的平级分区，即使为空仍可访问。列表消费 Host task index 的归档记录，按名称搜索、按 recentOrder 倒序，显示名称、现有安全项目/目录说明和恢复/删除；不显示推断的归档时间、不提供 Workspace 管理或新的全文索引。加载、失败、无归档和搜索无结果分别呈现；historyReadOnly 只允许阅读。恢复/删除中按 Task 禁用动作，失败就地显示和显式重试，不能因目录当前不可执行就丢弃已发布历史。已投影的归档 Task 可在 owning Workspace 不参与活动导航时显式打开只读历史；不因此恢复 Workspace 授权或开放执行。
+“已归档任务”作为设置末尾的平级分区，即使为空仍可访问。列表消费 Host task index 的归档记录，按名称搜索、按 recentOrder 倒序，显示名称、独立的项目归属、实际目录说明和更改项目/恢复/删除；不显示推断的归档时间、不提供 Workspace 管理或新的全文索引。加载、失败、无归档和搜索无结果分别呈现；historyReadOnly 只允许阅读。项目候选共用当前项目入口，入口移除时显示“项目已移除”。恢复/删除中按 Task 禁用动作，失败就地显示和显式重试，不能因目录当前不可执行就丢弃已发布历史。已投影的归档 Task 可在 owning Workspace 不参与活动导航时显式打开只读历史；不因此恢复 Workspace 授权或开放执行。
 
 点击归档历史显式离开设置，复用现有 Task 工作面；返回归档列表保留搜索、滚动和合理焦点。列表恢复留在设置，工作面恢复留在原 Task；恢复不新建 Task、不自动发送、不复活旧完成提醒，继续执行仍受 Host gate。已有搜索命中归档任务应标明归档且不自动恢复。普通设置开关仍保持原工作面与草稿；只有显式查看归档历史才导航 Task。
 
@@ -1092,7 +1099,7 @@ Archived tasks
 
 `Models / 模型` 只管理用户自行添加的模型与对应服务配置，不再提供平级 `Providers` 导航。模型服务管理分组只有在 management、API Key 写入系统 credential storage、模型测试和已开放 protocol admission 共同可用时才显示；该组隐藏不影响配置恢复入口。不能显示不可完成的空壳或“能力不可用”配置表单。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
 
-Workspace 列表、打开、迁移、清理和重新授权不属于 Settings surface。New task 路径控件负责选择、添加和重新授权 Manual Workspace；Automatic Workspace 只随 owning Task 导航。Renderer 只在当前 draft 内保存 Manual Workspace identity，不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
+“工作目录”分区列出已登记的 Manual Workspace，可选择新目录、通过原生 picker 重新授权、撤销目录授权。选择目录只登记授权，建立项目入口须使用侧栏“添加项目”。撤销确认默认聚焦取消，说明实际使用目录的 Task 将被收口；有项目入口时说明入口一并移除，以及在其他目录工作的 N 条日常会话仍保留在“最近”，重新添加项目恢复分组。归档记录保留。只在 Host 收口成功并从 Snapshot 移除目录后更新列表，失败保留事实并提示重试；等待期间禁止重复提交。目录额度满时说明原因并指向此分区。Automatic Workspace 仍随 owning Task 管理；本页不提供磁盘迁移或清理。Renderer 的目录选择保存在项目草稿内，不维护 `activeWorkspaceId` 或全局活动 Workspace 镜像。
 
 `General / 常规` 中提供一行“Automatic Workspace 位置”，它只设置未来随机子目录的直接上级目录，不关闭随机目录、不改名、不迁移也不删除既有 Workspace。主值始终显示 Host 发布的 effective canonical path；system default 只在路径旁显示为“默认”状态标签，不能用“系统默认位置”等抽象文案替代真实路径。辅助文案明确“仅影响新建任务”；动作为“选择文件夹”与仅在非默认或需要显式恢复时出现的“恢复默认”。Choose 只打开 Host 原生 picker，并在 Host 拥有 canonical path 时以当前路径作为初始目录；没有可信路径时不猜测目录。取消后保持页面和焦点；命令完成前禁用该行动作，成功后等待 canonical Snapshot 刷新，不乐观替换路径。
 
@@ -1301,10 +1308,10 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 
 - 清晰的行动标题，不使用空泛欢迎语或人格化 Assistant 宣传；
 - 作为首屏主视觉的 Composer；
-- 当前模型与 Workspace；
+- 当前模型、项目归属与实际工作目录选择；
 - 当真实能力边界影响本次执行时，显示准确、可操作的 authority 限制提示；不得显示泛化的“信任此工作区”。
 
-没有 Workspace 时可以先输入临时草稿，但发送动作明确引导选择 Workspace；用户在原生目录 picker 中确认即完成 Manual Workspace 授权，不追加“Use this folder”或 trust 弹窗。模型尚未准备时同时遵守 §14.1 的模型提示，不把 Workspace 问题解释为登录问题。
+Automatic intent 可直接发送并由 Host 创建独立目录，明确选定的 Manual 目录不可用时保留草稿并引导改选或重新授权；用户在原生目录 picker 中确认即完成 Manual Workspace 授权，不追加“Use this folder”或 trust 弹窗。模型尚未准备时同时遵守 §14.1 的模型提示，不把 Workspace 问题解释为登录问题。
 
 ### 17.3 错误原则
 
@@ -1391,7 +1398,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - Workspace 是独立 projection：空 Workspace、最近使用、重新授权、移除和跨 Workspace Task signal；
 - Automatic Workspace 位置行覆盖 system default/custom、仅影响新 Task 的说明、Choose 取消和焦点恢复、Reset/Retry 的 Host capability gate，以及全部 typed health；旧 Task 不显示已迁移，Renderer 不提交或乐观镜像物理路径；
 - 原生目录 picker 确认后直接完成 Manual Workspace 注册，不出现第二次 trust / `Use this folder` 请求，Renderer 不提交 `trusted` boolean；
-- New task Composer 始终显示当前模型和 Workspace，上下文缺失时提供明确下一步而非静默 disabled；
+- New task Composer 始终分别显示当前模型、项目和工作目录，上下文缺失时提供明确下一步而非静默 disabled；
 - New task 首次发送覆盖本地 admission 不满足、`create_rejected`、`create_failed`、Task 已创建后的 `run_rejected` / `run_failed`、Run accepted 与 command timeout；每种结果都保持正确页面和草稿 scope，不伪造指令、Running 或失败定论；
 - 模型管理中的添加、编辑、测试与删除结果与 Composer 的可用模型候选一致；模型切换 pending/error 在任务输入区呈现；
 - 模型设置页只管理用户添加的模型，厂商预设只准备表单；没有默认 API、默认模型或独立 Provider 配置步骤，任务模型在输入区选择，不自动改绑已有 Task；

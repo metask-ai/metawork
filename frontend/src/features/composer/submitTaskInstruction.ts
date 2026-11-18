@@ -50,6 +50,15 @@ export class TaskSubmissionSession {
     this.taskId = options.taskId;
   }
 
+  get targetTaskId(): string | null {
+    return this.taskId;
+  }
+  get creationUnknown(): boolean {
+    return (
+      this.taskId === null && this.creation !== null && this.pending.size === 0
+    );
+  }
+
   /** Call after create_rejected; capacity rejection may leave creation in flight. */
   get canReleaseAfterCreationRejection(): boolean {
     return (

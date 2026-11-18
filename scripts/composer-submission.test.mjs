@@ -291,18 +291,24 @@ async function renderSubmissionApp(
       );
     },
     created: async (createdTask = task, index = 0) =>
-      act(async () =>
+      act(async () => {
+        createdTask.projectId = createRequests[index]?.[5] ?? null;
+        if (createRequests[index]?.[0].kind === "manual")
+          createdTask.workspaceId = createRequests[index][0].workspaceId;
         createResolvers[index]({
           accepted: true,
           taskId: createdTask.id,
+          projectId: createdTask.projectId,
           bindingEpoch: createdTask.binding.epoch,
-        }),
-      ),
+          mcpAuthority: { kind: "ready", selection: "none" },
+        });
+      }),
     rejectCreation: async (reason, blockingTaskId, index = 0) =>
       act(async () =>
         createResolvers[index]({
           accepted: false,
           taskId: null,
+          projectId: null,
           bindingEpoch: null,
           mcpAuthority: null,
           reason,
@@ -807,6 +813,7 @@ for (const catalogFirst of [true, false]) {
       null,
       null,
       "auto_review",
+      null,
     ]);
     await fixture.created(fixture.task, 1);
     await waitFor(() => assert.equal(fixture.inputs.length, 1));
@@ -912,6 +919,7 @@ test("App creation retry captures another source and the newly selected Workspac
     null,
     null,
     "auto_review",
+    null,
   ]);
   await fixture.created(fixture.task, 1);
   await waitFor(() => assert.equal(fixture.inputs.length, 1));
@@ -925,8 +933,7 @@ test("App unknown creation retains identity and never implicitly creates another
   await user.type(fixture.textarea, "Unknown first instruction{Enter}");
   await waitFor(() => assert.equal(fixture.creations(), 1));
   await fixture.loseCreationReply();
-  assert.equal(screen.queryByRole("combobox", { name: "Model" }), null);
-  assert.ok(document.querySelector(".composer-model-readonly"));
+  assert.ok(screen.getByRole("combobox", { name: "Model" }));
   await user.type(fixture.textarea, "Later explicit instruction{Enter}");
   await waitFor(() =>
     assert.ok(screen.getByText("Later explicit instruction")),
@@ -939,6 +946,14 @@ test("App unknown creation retains identity and never implicitly creates another
 test("App old creation rejection cannot unlock a newer pending creation", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const user = userEvent.setup({ document });
+  const secondProject = {
+    ...structuredClone(fixture.snapshot.workspaces[0]),
+    id: "2",
+    displayName: "Second project",
+    canonicalRoot: "/second-project",
+  };
+  fixture.snapshot.workspaces.push(secondProject);
+  await fixture.publish();
   const original = fixture.snapshot.models.providers[0].models[0];
   await user.click(screen.getByRole("combobox", { name: "Model" }));
   await user.click(
@@ -947,7 +962,10 @@ test("App old creation rejection cannot unlock a newer pending creation", async 
   await user.type(fixture.textarea, "Old pending creation{Enter}");
   await waitFor(() => assert.equal(fixture.creations(), 1));
   await user.click(
-    screen.getByRole("button", { name: "New task", exact: true }),
+    screen.getByRole("button", {
+      name: "New conversation in “Second project”",
+      exact: true,
+    }),
   );
   await screen.findByRole("combobox", { name: "Model" });
   await user.type(fixture.textarea, "New pending creation{Enter}");
@@ -958,8 +976,14 @@ test("App old creation rejection cannot unlock a newer pending creation", async 
   assert.equal(fixture.textarea.value, "Draft after new creation");
   assert.equal(document.activeElement, fixture.textarea);
   assert.equal(fixture.creations(), 2);
-  await fixture.created(fixture.task, 1);
-  fixture.snapshot.tasks = [fixture.task];
+  const created = {
+    ...structuredClone(fixture.task),
+    id: "9",
+    workspaceId: "2",
+    projectId: "2",
+  };
+  await fixture.created(created, 1);
+  fixture.snapshot.tasks = [created];
   await fixture.publish();
   await waitFor(() => assert.equal(fixture.inputs.length, 1));
   assert.equal(fixture.inputs[0][2].text, "New pending creation");
@@ -1608,7 +1632,7 @@ test("App explains Workspace selection failures below the Composer and preserves
     BridgeClient.prototype,
     "chooseWorkspace",
     async () => {
-      throw new Error("WorkspaceCapacity");
+      throw new Error("WorkspaceDirectoryCapacity");
     },
   );
   const selector = screen.getByRole("combobox", {
@@ -1623,7 +1647,7 @@ test("App explains Workspace selection failures below the Composer and preserves
   await user.type(fixture.textarea, "Keep my draft");
   await chooseFolder();
   const capacity = await screen.findByText(
-    /The workspace limit has been reached/,
+    /The working directory limit is reached/,
     { selector: ".composer-workspace-notice > p" },
   );
   assert.ok(capacity.closest(".composer-workspace-notice"));
@@ -2236,8 +2260,7 @@ test("changing the inherited working directory before sending creates the Task i
 
 for (const [scenario, workspace] of [
   ["an Automatic directory", { kind: "automatic" }],
-  ["a removed project", { projectRemoved: true }],
-  ["a project requiring access", { authorization: "reauthorization_required" }],
+  ["a removed project", { projectEntry: false }],
 ])
   test(`New task uses the default for a Task with ${scenario}`, async (ctx) => {
     const fixture = await renderSubmissionApp(ctx, { workspace });
@@ -2254,15 +2277,24 @@ for (const [scenario, workspace] of [
 test("late Workspace creation cannot attach old messages or selection to a newly opened draft", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const user = userEvent.setup({ document });
+  fixture.snapshot.workspaces.push({
+    ...structuredClone(fixture.snapshot.workspaces[0]),
+    id: "2",
+    displayName: "Separate project",
+    canonicalRoot: "/separate-project",
+  });
+  await fixture.publish();
   await selectManualSubmissionWorkspace(user);
   fireEvent.change(fixture.textarea, {
     target: { value: "old pending creation" },
   });
   fireEvent.keyDown(fixture.textarea, { key: "Enter" });
   fireEvent.click(
-    screen.getByRole("button", { name: "New task", exact: true }),
+    screen.getByRole("button", {
+      name: "New conversation in “Separate project”",
+      exact: true,
+    }),
   );
-  await selectManualSubmissionWorkspace(user);
   fireEvent.change(fixture.textarea, { target: { value: "new unsent draft" } });
 
   await fixture.created();
@@ -2278,7 +2310,12 @@ test("late Workspace creation cannot attach old messages or selection to a newly
 
   fireEvent.keyDown(fixture.textarea, { key: "Enter" });
   assert.equal(fixture.creations(), 2);
-  const secondTask = { ...structuredClone(fixture.task), id: "4" };
+  const secondTask = {
+    ...structuredClone(fixture.task),
+    id: "4",
+    workspaceId: "2",
+    projectId: "2",
+  };
   await fixture.created(secondTask, 1);
   await fixture.settle();
   assert.deepEqual(fixture.targets, [
@@ -2842,4 +2879,165 @@ test("creation rejection after security refresh releases its session for an expl
   await waitFor(() => assert.equal(fixture.inputs.length, 1));
   assert.equal(fixture.inputs[0][2].text, "explicit retry with new model");
   await fixture.settle();
+});
+
+test("project draft keeps its content and membership when choosing an entry-free directory", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const user = userEvent.setup({ document });
+  const project = fixture.snapshot.workspaces[0];
+  const directory = {
+    ...structuredClone(project),
+    id: "2",
+    displayName: "Directory C",
+    canonicalRoot: "/directory-c",
+    projectEntry: false,
+  };
+  fixture.snapshot.workspaces.push(directory);
+  await fixture.publish();
+  await user.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  await user.type(fixture.textarea, "Work for P in C");
+  await user.click(
+    screen.getByRole("combobox", { name: "Choose working directory" }),
+  );
+  await user.click(
+    await screen.findByRole("option", { name: "Directory C", exact: true }),
+  );
+  assert.equal(fixture.textarea.value, "Work for P in C");
+  assert.ok(
+    screen
+      .getByRole("combobox", { name: "Project" })
+      .textContent.includes(project.displayName),
+  );
+  assert.equal(document.querySelector('[data-workspace-id="2"]'), null);
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  assert.equal(fixture.createRequests[0][0].workspaceId, "2");
+  assert.equal(fixture.createRequests[0][5], project.id);
+  assert.equal(
+    screen.getByRole("combobox", { name: "Project" }).disabled,
+    true,
+  );
+  assert.equal(
+    screen.getByRole("combobox", { name: "Choose working directory" }).disabled,
+    true,
+  );
+  await fixture.rejectCreation("execution_unavailable");
+});
+
+test("returning to a project draft consumes the original pending creation", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const user = userEvent.setup({ document });
+  const project = fixture.snapshot.workspaces[0];
+  await user.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  await user.type(fixture.textarea, "First project input{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  await user.click(
+    screen.getAllByRole("button", { name: /Submission task/ })[0],
+  );
+  await user.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  assert.equal(
+    screen.getByRole("combobox", { name: "Project" }).disabled,
+    true,
+  );
+  await user.type(fixture.textarea, "After returning{Enter}");
+  assert.equal(fixture.creations(), 1);
+  const created = {
+    ...structuredClone(fixture.task),
+    id: "9",
+    title: "Created project task",
+    projectId: project.id,
+  };
+  fixture.snapshot.tasks.push(created);
+  await fixture.created(created);
+  await fixture.publish();
+  await waitFor(() => assert.equal(fixture.inputs.length, 2));
+  assert.deepEqual(
+    fixture.inputs.map((input) => input[0]),
+    ["9", "9"],
+  );
+  await fixture.settle();
+});
+
+test("a created Task deleted while away cannot keep its project draft locked", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const user = userEvent.setup({ document });
+  await user.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  await user.type(fixture.textarea, "Original creation{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  await user.click(
+    screen.getAllByRole("button", { name: /Submission task/ })[0],
+  );
+  const created = {
+    ...structuredClone(fixture.task),
+    id: "9",
+    title: "Created while away",
+  };
+  fixture.snapshot.tasks.push(created);
+  await fixture.created(created);
+  await fixture.publish();
+  fixture.snapshot.tasks = fixture.snapshot.tasks.filter(
+    (task) => task.id !== "9",
+  );
+  await fixture.publish();
+  await user.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  assert.equal(
+    screen.getByRole("combobox", { name: "Project" }).disabled,
+    false,
+  );
+  fireEvent.change(fixture.textarea, {
+    target: { value: "New creation after deletion" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  await fixture.rejectCreation("execution_unavailable", undefined, 1);
+  await fixture.settle();
+});
+
+test("project switching preserves both drafts when the destination has an explicit empty directory choice", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const user = userEvent.setup({ document });
+  fixture.snapshot.workspaces.push({
+    ...structuredClone(fixture.snapshot.workspaces[0]),
+    id: "2",
+    displayName: "Project Q",
+    canonicalRoot: "/project-q",
+  });
+  await fixture.publish();
+  const { writeNewTaskDraftRecord } = await vite.ssrLoadModule(
+    "/src/features/composer/drafts.ts",
+  );
+  writeNewTaskDraftRecord("2", {
+    directory: { kind: "explicit", workspaceId: null },
+    content: { kind: "text", text: "" },
+  });
+  await user.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  await user.type(fixture.textarea, "Keep the P draft");
+  await user.click(screen.getByRole("combobox", { name: "Project" }));
+  await user.click(
+    await screen.findByRole("option", { name: "Project Q", exact: true }),
+  );
+  assert.equal(fixture.textarea.value, "");
+  await screen.findByText(
+    "Your original draft was kept. You are viewing the destination project’s draft.",
+  );
+  await user.click(screen.getByRole("combobox", { name: "Project" }));
+  await user.click(
+    await screen.findByRole("option", {
+      name: fixture.snapshot.workspaces[0].displayName,
+      exact: true,
+    }),
+  );
+  assert.equal(fixture.textarea.value, "Keep the P draft");
 });

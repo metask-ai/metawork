@@ -26,6 +26,7 @@ export async function runApprovalModeVertical({
   const modelSnapshot = await snapshot();
   const create = async (workspace, title) => {
     const result = await invoke("metawork.tasks.create", {
+      projectId: null,
       workspace,
 
       modelSelection: fixtureModelSelection(modelSnapshot),

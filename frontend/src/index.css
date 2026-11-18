@@ -6375,6 +6375,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-micro);
 }
 
+.task-project[data-drop-target="true"],
+.task-list-heading[data-drop-target="true"] {
+  outline: 2px solid var(--ui-focus-ring);
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+
 .task-projects {
   margin-bottom: 14px;
 }

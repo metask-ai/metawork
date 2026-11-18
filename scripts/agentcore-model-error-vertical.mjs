@@ -38,6 +38,7 @@ export async function runModelErrorVertical({
     (item) => item.id === chosen.workspaceId,
   );
   const created = await invoke("metawork.tasks.create", {
+    projectId: null,
     workspace: {
       kind: "manual",
       workspaceId: workspace.id,
@@ -138,6 +139,7 @@ export async function runModelErrorVertical({
   // Run keeps its frozen execution. Its owned copy protects shared projections.
   accepted(
     await invoke("metawork.tasks.create", {
+      projectId: null,
       workspace: {
         kind: "manual",
         workspaceId: workspace.id,
@@ -419,6 +421,7 @@ export async function runModelErrorVertical({
     (item) => item.id === chosen.workspaceId,
   );
   const paymentCreated = await invoke("metawork.tasks.create", {
+    projectId: null,
     workspace: {
       kind: "manual",
       workspaceId: paymentWorkspace.id,

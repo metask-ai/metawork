@@ -154,6 +154,7 @@ export async function runApprovalReadabilityVertical({
   await webview.send("Emulation.setFocusEmulationEnabled", { enabled: true });
   const modelSnapshot = await snapshot();
   const created = await invoke("metawork.tasks.create", {
+    projectId: null,
     workspace: {
       kind: "manual",
       workspaceId,

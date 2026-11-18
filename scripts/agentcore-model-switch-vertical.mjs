@@ -170,6 +170,7 @@ export async function runModelSwitchVertical({
     );
     const modelSnapshot = await snapshot();
     const created = await invoke("metawork.tasks.create", {
+      projectId: null,
       workspace: {
         kind: "manual",
         workspaceId: workspace.id,

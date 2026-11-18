@@ -244,6 +244,7 @@ try {
     workspaceReady.current.tasks.map((item) => item.id),
   );
   const createTaskResponse = await invokeBridge("metawork.tasks.create", {
+    projectId: null,
     workspace: {
       kind: "manual",
       workspaceId,
