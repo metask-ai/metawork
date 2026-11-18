@@ -435,7 +435,7 @@ pub const RuntimePort = struct {
         /// the caller owns.
         narrow_skill_restore_inputs: *const fn (?*anyopaque, *SkillRestoreInputs, surface.SkillPolicyInput) Allocating!*SkillRestoreInputs,
         clone_skill_restore_inputs: *const fn (?*anyopaque, *SkillRestoreInputs) Allocating!*SkillRestoreInputs,
-        borrow_skill_restore_inputs: *const fn (?*anyopaque, *const SkillRestoreInputs) SkillRestoreBorrow,
+        borrow_skill_restore_inputs: *const fn (?*anyopaque, *const SkillRestoreInputs) ?SkillRestoreBorrow,
         release_skill_restore_inputs: *const fn (?*anyopaque, *SkillRestoreInputs) Error!void,
         /// Releases what `SessionPort.captureRestoreInputs` handed out. The
         /// value is consumed; the caller must not release its parts itself.
@@ -535,7 +535,7 @@ pub const RuntimePort = struct {
             }
         }.call,
         .borrow_skill_restore_inputs = struct {
-            fn call(_: ?*anyopaque, _: *const SkillRestoreInputs) SkillRestoreBorrow {
+            fn call(_: ?*anyopaque, _: *const SkillRestoreInputs) ?SkillRestoreBorrow {
                 @panic("Agent call on a Runtime port that has no Agent");
             }
         }.call,
@@ -633,7 +633,15 @@ pub const RuntimePort = struct {
         return self.vtable.clone_skill_restore_inputs(self.context, inputs);
     }
 
-    pub fn borrowSkillRestoreInputs(self: RuntimePort, inputs: *const SkillRestoreInputs) SkillRestoreBorrow {
+    /// `null` when the borrow could not be made, because the half holding
+    /// the inputs is unreachable.
+    ///
+    /// It is not an empty borrow. An empty grant list is a meaningful value
+    /// here -- it denies every skill -- and in the one place that compares two
+    /// of them it would read as "the filters did not change", which restores a
+    /// Session as though its skills were intact. So the absence is the
+    /// caller's to answer.
+    pub fn borrowSkillRestoreInputs(self: RuntimePort, inputs: *const SkillRestoreInputs) ?SkillRestoreBorrow {
         return self.vtable.borrow_skill_restore_inputs(self.context, inputs);
     }
 

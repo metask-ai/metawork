@@ -6147,7 +6147,11 @@ test "Skill input is accepted once while fresh preparation waits and failed fres
     var restore_inputs = try access.captureRestoreInputs();
     access.deinit();
     defer restore_inputs.release() catch unreachable;
-    try std.testing.expectEqual(@as(usize, 0), restore_inputs.agent.borrowSkillRestoreInputs(restore_inputs.skill.?).policy.granted_skill_ids.len);
+    // In process the borrow is always made, so a null here is a test
+    // failure rather than a case to handle.
+    const borrowed = restore_inputs.agent.borrowSkillRestoreInputs(restore_inputs.skill.?) orelse
+        return error.BorrowUnavailable;
+    try std.testing.expectEqual(@as(usize, 0), borrowed.policy.granted_skill_ids.len);
     const withdrawn_refreshes = fake_core.catalog_refreshes;
     try std.testing.expectEqual(@as(usize, 1), withdrawn_refreshes);
     const ordinary = try workbench.sendInput("text-without-skills", task_id, .{ .text = "Continue without Skill grants" });

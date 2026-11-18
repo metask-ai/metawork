@@ -408,7 +408,9 @@ const runtime_vtable: port.RuntimePort.VTable = .{
         }
     }.call,
     .borrow_skill_restore_inputs = struct {
-        fn call(context: ?*anyopaque, inputs: *const port.SkillRestoreInputs) port.SkillRestoreBorrow {
+        // In process the inputs are right here; the optional is for the half
+        // that may not be.
+        fn call(context: ?*anyopaque, inputs: *const port.SkillRestoreInputs) ?port.SkillRestoreBorrow {
             _ = context;
             const owned: *const root.SkillRestoreInputs = @ptrCast(inputs);
             const borrowed = owned.borrow();

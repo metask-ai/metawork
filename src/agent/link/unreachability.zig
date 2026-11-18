@@ -255,15 +255,6 @@ pub const pending = [_]Pending{
     },
     .{
         .owner = .runtime,
-        .name = "borrow_skill_restore_inputs",
-        .lands = "A plain struct of a handle id and a policy. Its six call sites divide " ++
-            "three ways and one of them, the restore-filter comparison, would read two " ++
-            "empty id lists as equal and conclude the filters did not change, which " ++
-            "restores a Session as if its skills were intact.",
-        .step = "this change",
-    },
-    .{
-        .owner = .runtime,
         .name = "pending_event_count",
         .lands = "Zero reads as fully drained by both consumers of EventDrainStatus -- " ++
             "settleTerminalOutputAfterEventDrain and " ++
@@ -424,18 +415,18 @@ test "the surface divides into expressible, exempt and pending, with nothing lef
     // The numbers themselves, so a method moving between buckets is visible
     // in the suite and not only in a build that happened to succeed.
     try testing.expectEqual(@as(usize, 52), tally.total);
-    try testing.expectEqual(@as(usize, 40), tally.expressible);
+    try testing.expectEqual(@as(usize, 41), tally.expressible);
     try testing.expectEqual(@as(usize, 9), tally.exempt);
-    try testing.expectEqual(@as(usize, 3), tally.owed);
+    try testing.expectEqual(@as(usize, 2), tally.owed);
 }
 
 test "the pending list is the rule's output, named one by one" {
     // Written out rather than counted: this is the list the change works
-    // from. `input_observation` has left it: its answer is now an optional,
-    // which is what put the choice at each of its four call sites.
+    // from. `input_observation` and `borrow_skill_restore_inputs` have left
+    // it: both answers are now optionals, which is what put the choice at
+    // each of their call sites.
     const expected = [_][]const u8{
         "request_termination",
-        "borrow_skill_restore_inputs",
         "pending_event_count",
     };
     try testing.expectEqual(expected.len, pending.len);
@@ -445,7 +436,7 @@ test "the pending list is the rule's output, named one by one" {
     for (pending) |entry| {
         if (std.mem.eql(u8, entry.step, "this change")) this_step += 1;
     }
-    try testing.expectEqual(@as(usize, 2), this_step);
+    try testing.expectEqual(@as(usize, 1), this_step);
 }
 
 test "each way of expressing it is recognised, and nothing else is" {
@@ -489,6 +480,10 @@ test "each way of expressing it is recognised, and nothing else is" {
     );
     try testing.expect(expressibility(contract.control.TerminationRequestResult) == null);
     try testing.expect(expressibility(port.SkillRestoreBorrow) == null);
+    try testing.expectEqual(
+        Expressibility.optional,
+        expressibility(ReturnType(.runtime, "borrow_skill_restore_inputs")).?,
+    );
 }
 
 test "an enum that merely has a plausible variant does not qualify" {

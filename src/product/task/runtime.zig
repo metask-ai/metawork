@@ -6811,8 +6811,22 @@ pub const Runtime = struct {
 
     fn sameRestoreFilters(capabilities: *const RestoreCapabilities, current: RestoreFilters) bool {
         if (capabilities.mcp_catalog_generation != current.mcp_catalog_generation) return false;
-        const before_ids = if (capabilities.skill) |value| capabilities.original.agent.borrowSkillRestoreInputs(value).policy.granted_skill_ids else &.{};
-        const after_ids = if (current.skill) |value| capabilities.original.agent.borrowSkillRestoreInputs(value).policy.granted_skill_ids else &.{};
+        // A borrow that cannot be made is not an empty filter. Two empty id
+        // lists have equal length and compare equal element by element, so a
+        // default here would reach `return true` -- the filters did not
+        // change, restore the Session as it was -- for a Session whose skills
+        // nobody could look at. Every other doubtful path in this function and
+        // in `modelRestoreCapabilitiesExact` answers false, so these do too.
+        const before_ids: []const []const u8 = if (capabilities.skill) |value| borrowed: {
+            const borrow = capabilities.original.agent.borrowSkillRestoreInputs(value) orelse
+                return false;
+            break :borrowed borrow.policy.granted_skill_ids;
+        } else &.{};
+        const after_ids: []const []const u8 = if (current.skill) |value| borrowed: {
+            const borrow = capabilities.original.agent.borrowSkillRestoreInputs(value) orelse
+                return false;
+            break :borrowed borrow.policy.granted_skill_ids;
+        } else &.{};
         if (before_ids.len != after_ids.len) return false;
         for (before_ids, after_ids) |before, after| if (!std.mem.eql(u8, before, after)) return false;
         const before_tools = if (capabilities.mcp) |value| value.selectedTools() else &.{};
@@ -8078,7 +8092,22 @@ pub const Runtime = struct {
                         pinned = task.runtime.restore_catalog;
                         task.runtime.restore_catalog = null;
                         if (pinned) |*snapshot| for (snapshot.skills) |*skill| {
-                            const granted = if (rebind.capabilities) |capabilities| if (capabilities.skill) |inputs| capabilities.original.agent.borrowSkillRestoreInputs(inputs).policy.granted_skill_ids else &.{} else &.{};
+                            // The one site that keeps the empty default,
+                            // because here empty already restricts: a skill
+                            // is enabled only if the grant list names it, so
+                            // an empty list enables nothing. Unlike the
+                            // comparison above, an empty list cannot be
+                            // mistaken for an unchanged one.
+                            const granted: []const []const u8 = if (rebind.capabilities) |capabilities|
+                                if (capabilities.skill) |inputs|
+                                    if (capabilities.original.agent.borrowSkillRestoreInputs(inputs)) |borrow|
+                                        borrow.policy.granted_skill_ids
+                                    else
+                                        &.{}
+                                else
+                                    &.{}
+                            else
+                                &.{};
                             skill.enabled = skill.enabled and for (granted) |id| {
                                 if (std.mem.eql(u8, id, skill.skill_id)) break true;
                             } else false;

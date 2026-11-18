@@ -497,6 +497,19 @@ pub const Job = struct {
         var image_capabilities: [models_contract.max_model_image_capabilities]agent.ModelImageCapability = undefined;
         std.debug.assert(execution.target.image_capabilities.len <= image_capabilities.len);
         for (execution.target.image_capabilities, 0..) |entry, index| image_capabilities[index] = .{ .model = entry.model, .supported = entry.supported };
+        // Borrowed once, before the options are built, so that a borrow that
+        // cannot be made refuses the recovery instead of opening a Session
+        // with no skills. This path has a failure channel and an answer that
+        // already means it: restoring silently without the skills the Task had
+        // is a different Session, not a recovered one.
+        const borrowed_skill: ?agent.SkillRestoreBorrow = if (capabilities) |value|
+            if (value.skill) |inputs|
+                value.original.agent.borrowSkillRestoreInputs(inputs) orelse
+                    return .{ .failure = .runtime_unavailable }
+            else
+                null
+        else
+            null;
         const options: agent.SessionOpenOptions = .{
             .model_binding = .{
                 .image_capabilities = image_capabilities[0..execution.target.image_capabilities.len],
@@ -520,8 +533,8 @@ pub const Job = struct {
             },
             .canonical_user_home = self.attempt.workspace.canonical_user_home,
             .workspace_epoch = self.attempt.workspace.epoch_token,
-            .skill_catalog = if (capabilities) |value| if (value.skill) |inputs| value.original.agent.borrowSkillRestoreInputs(inputs).catalog else null else null,
-            .skill_policy = if (capabilities) |value| if (value.skill) |inputs| value.original.agent.borrowSkillRestoreInputs(inputs).policy else null else null,
+            .skill_catalog = if (borrowed_skill) |borrow| borrow.catalog else null,
+            .skill_policy = if (borrowed_skill) |borrow| borrow.policy else null,
             .mcp_selection = if (capabilities) |value| value.mcp else null,
             .operation_id_floor = .{
                 .last_run_id = self.attempt.run_id_floor,
