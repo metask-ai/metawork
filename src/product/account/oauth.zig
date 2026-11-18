@@ -1,7 +1,7 @@
 //! Product Account OAuth policy and value types.
 const std = @import("std");
 const contract = @import("metawork_account_contract");
-const mechanics = @import("oauth_mechanics");
+const mechanics = @import("metawork_oauth_mechanics");
 
 pub const authority = "https://www.metask-ai.com";
 pub const authorize_url = authority ++ "/oauth/authorize";

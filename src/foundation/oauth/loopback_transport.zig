@@ -1,6 +1,6 @@
 const std = @import("std");
-const loopback = @import("oauth_loopback");
-const select_start = @import("app_select_start");
+const loopback = @import("metawork_oauth_loopback");
+const select_start = @import("metawork_select_start");
 
 const request_head_bytes: usize = 16 * 1024;
 const response_bytes: usize = 4096;

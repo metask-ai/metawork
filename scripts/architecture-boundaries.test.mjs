@@ -1029,6 +1029,10 @@ test("Foundation members import no Application, Product, Agent or Bridge module"
     "metawork_http_contract",
     "metawork_http_memory",
     "metawork_http_transport",
+    "metawork_oauth_loopback",
+    "metawork_oauth_loopback_transport",
+    "metawork_oauth_mechanics",
+    "metawork_select_start",
   ]);
   for (const edge of moduleImportEdges(build)) {
     if (!members.includes(edge.owner)) continue;
@@ -1065,13 +1069,15 @@ test("Foundation members import no Application, Product, Agent or Bridge module"
             "builtin",
             "metawork_http_memory",
             "metawork_http_contract",
+            "metawork_oauth_loopback",
+            "metawork_select_start",
           ].includes(name),
         `${file} imports unexpected module ${name}`,
       );
 });
 
 test("the Foundation import rule rejects owner modules and escaping relative imports", () => {
-  const member = "src/foundation/http_transport.zig";
+  const member = "src/foundation/http/transport.zig";
   for (const source of [
     'const a = @import("metawork_product_control");',
     'const a = @import("metawork_product_update");',
@@ -1079,8 +1085,8 @@ test("the Foundation import rule rejects owner modules and escaping relative imp
     'const a = @import("metawork_bridge");',
     'const a = @import("metawork_app");',
     'const a = @import("metask_agentcore");',
-    'const a = @import("../product/update.zig");',
-    'const a = @import("../app/mcp_oauth.zig");',
+    'const a = @import("../../product/update.zig");',
+    'const a = @import("../../app/mcp_oauth.zig");',
   ])
     assert.equal(
       foundationImportViolations(member, source).length,
@@ -1090,7 +1096,7 @@ test("the Foundation import rule rejects owner modules and escaping relative imp
   assert.deepEqual(
     foundationImportViolations(
       member,
-      'const std = @import("std");\nconst memory = @import("metawork_http_contract");\nconst probe = @import("http_idle_probe.zig");',
+      'const std = @import("std");\nconst memory = @import("metawork_http_contract");\nconst probe = @import("idle_probe.zig");',
     ),
     [],
   );
@@ -2565,7 +2571,7 @@ test("Product Account owns Metask protocol without a concrete HTTP client", () =
     .map(read)
     .join("\n");
   const adapter = read("src/app/metask_http_transport.zig");
-  const http = read("src/foundation/http_transport.zig");
+  const http = read("src/foundation/http/transport.zig");
   const app = read("src/app.zig");
 
   assert.doesNotMatch(accountSource, /std\.http\.Client|StdHttpTransport/);
@@ -2629,11 +2635,11 @@ test("OAuth mechanics are neutral while callers own policy and Application owns 
     .map(read)
     .join("\n");
   const policy = read("src/product/account/loopback.zig");
-  const transport = read("src/app/oauth_loopback_transport.zig");
+  const transport = read("src/foundation/oauth/loopback_transport.zig");
   const loginAttempt = read("src/product/account/login_attempt.zig");
   const mcpOauth = read("src/app/mcp_oauth.zig");
-  const oauthMechanics = read("src/oauth/mechanics.zig");
-  const oauthLoopback = read("src/oauth/loopback.zig");
+  const oauthMechanics = read("src/foundation/oauth/mechanics.zig");
+  const oauthLoopback = read("src/foundation/oauth/loopback.zig");
   const build = read("build.zig");
 
   assert.doesNotMatch(
@@ -2665,8 +2671,8 @@ test("OAuth mechanics are neutral while callers own policy and Application owns 
     build,
     /mcp_oauth\.addImport\("account_(?:oauth|loopback)"/,
   );
-  assert.match(build, /mcp_oauth\.addImport\("oauth_mechanics"/);
-  assert.match(build, /mcp_oauth\.addImport\("oauth_loopback"/);
+  assert.match(build, /mcp_oauth\.addImport\("metawork_oauth_mechanics"/);
+  assert.match(build, /mcp_oauth\.addImport\("metawork_oauth_loopback"/);
 });
 
 test("Product history schema consumes only the unique Storage SQL contract", () => {

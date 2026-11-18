@@ -4,9 +4,9 @@
 
 const std = @import("std");
 const http_execution = @import("metawork_http_transport");
-const oauth_mechanics = @import("oauth_mechanics");
-const oauth_loopback = @import("oauth_loopback");
-const oauth_loopback_transport = @import("oauth_loopback_transport");
+const oauth_mechanics = @import("metawork_oauth_mechanics");
+const oauth_loopback = @import("metawork_oauth_loopback");
+const oauth_loopback_transport = @import("metawork_oauth_loopback_transport");
 
 const callback_path = "/auth/callback";
 
