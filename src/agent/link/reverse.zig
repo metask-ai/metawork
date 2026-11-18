@@ -428,7 +428,15 @@ pub fn perform(
     _ = payload.encode(Request(call), request, framed[header_bytes..]);
 
     const correlation = caller.pending.open() catch return busyAnswer(call);
-    switch (try caller.outbound.trySubmit(.ui_request, correlation, framed)) {
+    // An allocation failure inside the submit is also "nothing was sent", and
+    // it used to be the one way out of here that kept the slot: the `.busy`
+    // and `.closed` arms below give it back, and `try` walked past them. A
+    // caller that hit it repeatedly would exhaust the table on requests it
+    // never made -- which is what those two arms exist to prevent.
+    switch (caller.outbound.trySubmit(.ui_request, correlation, framed) catch |err| {
+        caller.pending.discardUnsent(correlation);
+        return err;
+    }) {
         .queued => {},
         // Nothing was sent, so nothing is owed: the slot goes back now
         // rather than being held for an answer that cannot come. Abandoning
@@ -744,4 +752,40 @@ test "a closed link is unreachable, not busy" {
         .request_json = "{}",
     });
     try testing.expectEqual(contract.McpInstallationResult.unavailable, install);
+}
+
+test "a submit that cannot allocate gives the slot back here too" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var harness = try Harness.init(4, .{});
+    defer harness.deinit();
+    var link = harness.caller();
+
+    // Only the queue's own allocator fails: it is the one the submit
+    // duplicates the frame with, and swapping it keeps this from depending on
+    // how many allocations starting a channel happens to make.
+    harness.outbound.allocator = std.testing.failing_allocator;
+    try testing.expectError(
+        error.OutOfMemory,
+        perform(.file_delivery_inspection, &link, arena, sample),
+    );
+    harness.outbound.allocator = testing.allocator;
+
+    // The two arms beside it already answered this: nothing was sent, so
+    // nothing is owed. `try` was the one way out that kept the slot.
+    try testing.expectEqual(@as(usize, 0), harness.pending_table.liveCount());
+    try testing.expectEqual(@as(usize, 0), harness.pending_table.unsettledCount());
+
+    var index: usize = 0;
+    while (index < 16) : (index += 1) {
+        harness.outbound.allocator = std.testing.failing_allocator;
+        try testing.expectError(
+            error.OutOfMemory,
+            perform(.file_delivery_inspection, &link, arena, sample),
+        );
+        harness.outbound.allocator = testing.allocator;
+    }
+    try testing.expectEqual(@as(usize, 0), harness.pending_table.liveCount());
 }

@@ -184,7 +184,13 @@ pub fn call(
     _ = payload.encode(@TypeOf(arguments), arguments, framed[header..]);
 
     const correlation = client.pending.open() catch return error.Busy;
-    switch (try client.outbound.trySubmit(kind, correlation, framed)) {
+    // An allocation failure inside the submit is also "nothing was sent", and
+    // it was the one way out of here that kept the slot: the `.busy` and
+    // `.closed` arms below give it back, and `try` walked past them.
+    switch (client.outbound.trySubmit(kind, correlation, framed) catch |err| {
+        client.pending.discardUnsent(correlation);
+        return err;
+    }) {
         .queued => {},
         // Nothing was sent, so nothing is owed: the slot goes back now rather
         // than being held for an answer that cannot come.
@@ -357,4 +363,69 @@ test "a released handle used again is refused, not read" {
     // use-after-free.
     try testing.expectEqual(client, Client.linkFrom(session.context));
     try testing.expectError(error.UnknownBox, Client.receiverFrom(session.context));
+}
+
+test "a submit that cannot allocate gives the slot back" {
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "link", .{ .truncate = true });
+    defer file.close(io);
+
+    var queue: channel.Outbound = undefined;
+    try queue.start(io, testing.allocator, file, .{});
+    defer queue.stop();
+    var slots: pending.Table = undefined;
+    try slots.init(io, testing.allocator, 4);
+    defer slots.deinit();
+    const half = try testing.allocator.create(Client);
+    defer testing.allocator.destroy(half);
+    try half.init(testing.allocator, &queue, &slots, .{
+        .session = undefined,
+        .run = undefined,
+        .run_control = undefined,
+        .runtime = undefined,
+    }, 2);
+    defer half.deinit();
+
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    // Only the queue's own allocator fails, which is the one the submit
+    // duplicates the frame with. Swapping it rather than counting a failure
+    // index keeps the test from depending on how many allocations starting a
+    // channel happens to make.
+    queue.allocator = std.testing.failing_allocator;
+    try testing.expectError(error.OutOfMemory, call(
+        .session,
+        "set_model",
+        half,
+        arena_state.allocator(),
+        .{ .slot = 1, .generation = 1 },
+        .{"a-model"},
+    ));
+    queue.allocator = testing.allocator;
+
+    // The slot was opened before the submit. `.busy` and `.closed` both give
+    // it back; this path walked past them through `try` and kept it live for
+    // an answer that was never asked for.
+    try testing.expectEqual(@as(usize, 0), slots.liveCount());
+    try testing.expectEqual(@as(usize, 0), slots.unsettledCount());
+
+    // Repeating it cannot exhaust a four-slot table, which is what counting
+    // is for.
+    var index: usize = 0;
+    while (index < 16) : (index += 1) {
+        queue.allocator = std.testing.failing_allocator;
+        try testing.expectError(error.OutOfMemory, call(
+            .session,
+            "set_model",
+            half,
+            arena_state.allocator(),
+            .{ .slot = 1, .generation = 1 },
+            .{"a-model"},
+        ));
+        queue.allocator = testing.allocator;
+    }
+    try testing.expectEqual(@as(usize, 0), slots.liveCount());
 }
