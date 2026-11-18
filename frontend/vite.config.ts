@@ -1,5 +1,6 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import rootPackage from "../package.json" with { type: "json" };
@@ -19,6 +20,17 @@ export default defineConfig(({ command }) => ({
   plugins: [
     react(),
     tailwindcss(),
+    {
+      name: "metawork-license",
+      apply: "build",
+      async generateBundle() {
+        this.emitFile({
+          type: "asset",
+          fileName: "licenses/METAWORK.txt",
+          source: await readFile(new URL("../LICENSE", import.meta.url)),
+        });
+      },
+    },
     {
       name: "metawork-csp",
       transformIndexHtml: {

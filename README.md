@@ -114,3 +114,7 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle node scripts/run-agentcore-restor
 - [macOS 分发](docs/macos-distribution.md)：本地签名、Developer ID、DMG 与公证
 - [Windows 分发](docs/windows-distribution.md)：Inno Setup、Authenticode 与安装验证
 - [Agent 工作约束](AGENTS.md)：仓库内执行规则和不可绕过的 Gate
+
+## 许可证
+
+MetaWork 自有代码采用 [MIT 许可证](LICENSE)。第三方代码及资源适用各自的许可条款。
