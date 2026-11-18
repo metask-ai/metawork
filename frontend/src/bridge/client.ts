@@ -1019,6 +1019,30 @@ export class BridgeClient {
       operationId,
     );
   }
+  /**
+   * Replaces one earlier message and reruns the conversation from it. The
+   * text is Product's own record of that input as the user edited it: Core
+   * stores a user message wrapped in the Host context block, so the message
+   * at a conversation position is not what MetaWork sent, and the Renderer
+   * never reads it back.
+   */
+  async editInput(
+    operationId: string,
+    taskId: string,
+    runId: string,
+    input: TaskRunInput,
+  ) {
+    return decodeSendInputResult(
+      await this.invoke(commands.editInput, {
+        operationId,
+        taskId,
+        runId,
+        input,
+      }),
+      taskId,
+      operationId,
+    );
+  }
   async retryInput(
     taskId: string,
     originalOperationId: string,

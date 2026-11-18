@@ -129,6 +129,9 @@ pub const TaskMutation = union(enum) {
     approval_mode: struct { profile_changes: bool },
     /// A manual compaction the user asked for.
     manual_compact,
+    /// An edited earlier message: the Conversation rewinds to that message's
+    /// position and the edited text reruns in its place.
+    rewind,
 };
 
 pub const MutationImpact = struct {
@@ -167,6 +170,17 @@ pub fn mutationImpact(mutation: TaskMutation) MutationImpact {
             .core_quiescence = .required,
             .queued_input = .held,
             .model_access = .required,
+        },
+        // Queued messages were written to follow a continuation this rewind
+        // removes, and a rewind performed after them would drop their turns
+        // too. Hand the text back for an explicit resend instead. The rewind
+        // itself calls no model; the Run that follows it is admitted through
+        // the ordinary input path, which requires the credential of its own.
+        .rewind => MutationImpact{
+            .execution_config = .unchanged,
+            .core_quiescence = .required,
+            .queued_input = .{ .resendable = .edit_and_rerun },
+            .model_access = .none,
         },
     };
 }
@@ -207,8 +221,9 @@ pub fn pendingTerminationSignal(
     return .{
         .interrupted = switch (run.pending_termination.load(.acquire)) {
             .none => unreachable,
-            // Core has no approval-change interruption; it sees a cancellation.
-            .user_cancel, .approval_mode_change => .user_cancel,
+            // Core has no Product stop reason of its own; every one of these
+            // reaches it as a cancellation.
+            .user_cancel, .approval_mode_change, .edit_and_rerun => .user_cancel,
             .timeout => .timeout,
             .session_close => .session_close,
             .app_shutdown => .app_shutdown,
@@ -220,9 +235,10 @@ pub fn pendingExternalInterruption(
     compact: *const task_state.CompactRecord,
 ) agent.ExternalInterruption {
     return switch (compact.pending_interruption.load(.acquire)) {
-        // An approval change never interrupts a Compact: neither mutation is
-        // admitted while the other is running.
-        .none, .approval_mode_change => unreachable,
+        // Neither an approval change nor an edit interrupts a Compact: an
+        // edited message waits behind it, and neither mutation is admitted
+        // while the other is running.
+        .none, .approval_mode_change, .edit_and_rerun => unreachable,
         .user_cancel => .user_cancel,
         .timeout => .timeout,
         .session_close => .session_close,
@@ -269,6 +285,7 @@ pub fn productCancelCause(
     if (cause != .user_cancel) return cause;
     return switch (run.pending_termination.load(.acquire)) {
         .approval_mode_change => .approval_mode_change,
+        .edit_and_rerun => .edit_and_rerun,
         else => cause,
     };
 }
@@ -694,13 +711,19 @@ pub fn checkpointFailureAttempt(
     };
 }
 
+/// The latest terminal Run the user is told about: the Task row's state, the
+/// unread completion badge, the acknowledgement that clears it and a Run
+/// notification all read this one answer. A Run a rewind replaced is not among
+/// them -- the edited message took its turn's place, so the outcome of that
+/// turn is not the Task's latest news either.
 pub fn latestTerminalRun(
-    runs: []?task_state.RunRecord,
+    task: *const task_state.Task,
 ) ?*const task_state.RunRecord {
     var latest: ?*const task_state.RunRecord = null;
-    for (runs) |*entry| {
+    for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
         if (task_state.productTerminalFacts(run) == null) continue;
+        if (!runProjected(task, run)) continue;
         if (latest == null or run.id > latest.?.id) latest = run;
     }
     return latest;
@@ -709,7 +732,7 @@ pub fn latestTerminalRun(
 pub fn unreadCompletionRunId(task: *const task_state.Task) ?u64 {
     // A read-only Task cannot record acknowledgement, so it never reminds.
     if (task.durable.archived or task.read_only_history != null) return null;
-    const run = latestTerminalRun(task.durable.runs) orelse return null;
+    const run = latestTerminalRun(task) orelse return null;
     const terminal = task_state.productTerminalFacts(run) orelse unreachable;
     if (terminal.outcome != .completed or
         task.durable.completion_seen_run_id == run.id)
@@ -746,7 +769,7 @@ pub fn navigationSignal(task: *const task_state.Task) ?NavigationSignal {
         .none, .run => {},
     }
     if (task.deletion == .failed) return .failed;
-    const run = latestTerminalRun(task.durable.runs) orelse return null;
+    const run = latestTerminalRun(task) orelse return null;
     return switch (task_state.productTerminalFacts(run).?.outcome) {
         .failed, .dependency_contract_failure => .failed,
         .interrupted => .interrupted,
@@ -829,11 +852,74 @@ pub fn hasPendingConversationCoverage(task: *const task_state.Task) bool {
     return false;
 }
 
+/// Whether a rewind has taken this Run's turn out of the Conversation.
+///
+/// A rewind is only as durable as the Run that performed it. Core keeps no
+/// record of one, and the rewind reaches disk only when a committed
+/// checkpoint covers that Run; until then a restart restores a Conversation
+/// that predates it. So a supersession attributed to a Run that never made it
+/// into the Conversation is not in force, and the turn it named is back.
+pub fn runSuperseded(task: *const task_state.Task, run: *const task_state.RunRecord) bool {
+    const by = run.superseded_by_run_id orelse return false;
+    const performer = task_state.findRunConst(task.durable.runs, by) orelse return true;
+    return performer.coverage != .excluded;
+}
+
+/// Whether the Renderer sees this Run at all. An edited message stands in the
+/// place of the turn a rewind replaced, so a superseded Run is projected
+/// nowhere: not in the snapshot, not in a history page, and not in the Run
+/// manifest -- which is also what closes a file-change panel still pointed at
+/// it. The record stays in Product history and in the store, which is what
+/// restore and the file-change record read. Stated here so every projection
+/// asks the same question.
+pub fn runProjected(task: *const task_state.Task, run: *const task_state.RunRecord) bool {
+    return !runSuperseded(task, run);
+}
+
+pub const EditUnavailable = enum {
+    /// No position was ever recorded for this Run: history written before
+    /// #114, or a submission that could not read the Conversation. Product
+    /// will not derive one from its own records.
+    no_position,
+    /// The position was summarized away. Nothing can name that turn again.
+    compacted,
+    /// A rewind already took this turn out of the Conversation.
+    superseded,
+};
+
+pub const EditablePosition = union(enum) {
+    position: u64,
+    unavailable: EditUnavailable,
+};
+
+/// The Conversation position an edit-and-rerun would name for this Run, or
+/// why there is none. Both the acceptance path and the projection that offers
+/// the edit entry read this, so the answer is the same in the window the user
+/// sees and in the call they make from it. Task lifecycle is each caller's
+/// own gate: this one answers only for the position.
+pub fn editablePosition(
+    task: *const task_state.Task,
+    run: *const task_state.RunRecord,
+) EditablePosition {
+    if (runSuperseded(task, run)) return .{ .unavailable = .superseded };
+    const position = run.conversation_position orelse return .{ .unavailable = .no_position };
+    if (position <= task.durable.compact_boundary) return .{ .unavailable = .compacted };
+    return .{ .position = position };
+}
+
+/// The newest Run whose turn is still in the Conversation. It is also the
+/// `last_run_id` a checkpoint export expects Core to report, and skipping
+/// superseded Runs cannot break that: a rewind leaves Core's `last_run_id`
+/// alone, and the Run that performed one is always newer than the Runs it
+/// superseded, so it is the maximum either way. Should that Run itself leave
+/// the Conversation, its supersessions lapse with it and the Runs it named
+/// are the frontier again.
 pub fn lastConversationRunId(task: *const task_state.Task) ?u64 {
     var latest: u64 = 0;
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
         if (run.coverage == .excluded or
+            runSuperseded(task, run) or
             !run.event_stream_finalized or
             task_state.productTerminalFacts(run) == null)
             continue;
@@ -1326,6 +1412,93 @@ test "checkpoint matches covered frontier and permits only excluded Product tail
     task.durable.runs[1].?.coverage = .excluded;
     task.durable.runs[0].?.coverage = .excluded;
     try std.testing.expect(!checkpointMatchesCurrentHistory(&task, record));
+}
+
+test "a rewind leaves its turns in history and out of the Conversation" {
+    var runs = [_]?task_state.RunRecord{
+        terminalRun(1, .covered),
+        terminalRun(3, .covered),
+        terminalRun(5, .pending),
+    };
+    runs[0].?.conversation_position = 1;
+    runs[1].?.conversation_position = 3;
+    runs[2].?.conversation_position = 3;
+    var compacts: [0]?task_state.CompactRecord = .{};
+    var ui_history: [0]?task_state.UiRecord = .{};
+    var task = task_state.Task{
+        .durable = .{
+            .id = 3,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .anthropic_messages,
+            .execution_model = @constCast("model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 2,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &runs,
+            .compacts = &compacts,
+            .ui_history = &ui_history,
+        },
+        .runtime = .{},
+    };
+
+    // Run 5 replaced run 3: it took that turn's position, and the turn stays
+    // in history while leaving the Conversation.
+    task.durable.runs[1].?.superseded_by_run_id = 5;
+    try std.testing.expect(runSuperseded(&task, &task.durable.runs[1].?));
+    try std.testing.expect(!runSuperseded(&task, &task.durable.runs[0].?));
+    try std.testing.expect(!runProjected(&task, &task.durable.runs[1].?));
+    try std.testing.expect(runProjected(&task, &task.durable.runs[0].?));
+    try std.testing.expectEqual(@as(u64, 5), runHistoryHighWater(&task));
+    // The replacement is the frontier, which is also what Core reports as its
+    // `last_run_id`: a rewind leaves that alone, and the Run that performed
+    // one is always newer than the Runs it superseded.
+    try std.testing.expectEqual(@as(?u64, 5), lastConversationRunId(&task));
+
+    // A rewind is only as durable as the Run that performed it: while that
+    // Run is out of the Conversation, a restart restores a checkpoint that
+    // predates the rewind, so the turn it named is back.
+    task.durable.runs[2].?.coverage = .excluded;
+    try std.testing.expect(!runSuperseded(&task, &task.durable.runs[1].?));
+    try std.testing.expect(runProjected(&task, &task.durable.runs[1].?));
+    try std.testing.expectEqual(@as(?u64, 3), lastConversationRunId(&task));
+    task.durable.runs[2].?.coverage = .covered;
+
+    // The declaration the executor acts on: queued messages were written to
+    // follow a continuation this rewind removes, so their text comes back for
+    // an explicit resend instead of running after it.
+    const impact = mutationImpact(.rewind);
+    try std.testing.expectEqual(task_state.SendInputReason.edit_and_rerun, impact.queued_input.resendable);
+    try std.testing.expectEqual(.required, impact.core_quiescence);
+    try std.testing.expectEqual(.unchanged, impact.execution_config);
+    try std.testing.expectEqual(.none, impact.model_access);
+
+    // What the edit entry asks, in the window and at the call.
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        editablePosition(&task, &task.durable.runs[0].?).position,
+    );
+    try std.testing.expectEqual(
+        EditUnavailable.superseded,
+        editablePosition(&task, &task.durable.runs[1].?).unavailable,
+    );
+    // A compaction summarized that turn away: nothing can name it again.
+    task.durable.compact_boundary = 2;
+    try std.testing.expectEqual(
+        EditUnavailable.compacted,
+        editablePosition(&task, &task.durable.runs[0].?).unavailable,
+    );
+    task.durable.compact_boundary = 0;
+    // History written before positions were recorded. Product will not derive
+    // one from its own Run list, because ABI numbering counts replies, tool
+    // results and runtime text that have no records here.
+    task.durable.runs[0].?.conversation_position = null;
+    try std.testing.expectEqual(
+        EditUnavailable.no_position,
+        editablePosition(&task, &task.durable.runs[0].?).unavailable,
+    );
 }
 
 test "approval checkpoint survives a later Task model change but keeps revision and frontier exact" {

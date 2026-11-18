@@ -190,6 +190,16 @@ const session_vtable: port.SessionPort.VTable = .{
             return sessionOf(context).updatePermissionMode(expected, target);
         }
     }.call,
+    .conversation_bounds = struct {
+        fn call(context: ?*anyopaque) surface.Error!surface.ConversationBounds {
+            return sessionOf(context).conversationBounds();
+        }
+    }.call,
+    .rewind_to_user_message = struct {
+        fn call(context: ?*anyopaque, position: u64) surface.Error!surface.RewindOutcome {
+            return sessionOf(context).rewindToUserMessage(position);
+        }
+    }.call,
     .update_credential = struct {
         fn call(context: ?*anyopaque, credential: []const u8) surface.Error!void {
             return sessionOf(context).updateCredential(credential);

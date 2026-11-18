@@ -952,6 +952,11 @@ export const enUS = {
   "input.waiting": "Waiting",
   "input.cancelled": "Stopped",
   "input.unexecuted": "Not executed",
+  "input.edit": "Edit",
+  "input.edit_notice":
+    "The conversation rewinds to this message; files and other changes already made stay as they are.",
+  "input.edit_confirm": "Rerun from here",
+  "input.edit_cancel": "Cancel",
   "input.retry_original": "Resend original message",
   "input.discard_retry": "Discard saved input",
   "input.submitted": "Message sent.",
@@ -966,6 +971,14 @@ export const enUS = {
     "The approval mode change stopped this run. The message was kept so you can resend it.",
   "mutation.reason.combined_input_too_large":
     "The combined messages exceed the input limit. Send them separately.",
+  "mutation.reason.edit_and_rerun":
+    "Editing an earlier message took this one out of the conversation. It was kept so you can resend it.",
+  "mutation.reason.rewind_compacted":
+    "That part of the conversation was summarized away and can no longer be replaced. The message was kept so you can send it as a new one.",
+  "mutation.reason.rewind_position_rejected":
+    "MetaWork could not place that message in the conversation, so nothing was changed. Please report this.",
+  "mutation.reason.rewind_failed":
+    "The conversation could not be rewound. Nothing was changed.",
   "mutation.reason.checkpoint_failed":
     "Run cleanup failed; messages were not continued.",
   "mutation.reason.schedule_failed":
@@ -1687,6 +1700,7 @@ export const enUS = {
   "outcome.dependency_contract_failure": "Task runtime failed",
   "cause.user_cancel": "Stopped by you",
   "cause.approval_mode_change": "Stopped to change the approval mode",
+  "cause.edit_and_rerun": "Stopped to rerun from an edited message",
   "cause.timeout": "Timed out",
   "cause.session_close": "Session released",
   "cause.app_shutdown": "MetaWork closed",

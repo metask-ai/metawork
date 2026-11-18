@@ -677,6 +677,7 @@ fn writeTask(batch: *Batch, v: wire.TaskWire) !void {
         .model = b(v.binding.model),
         .model_intent_json = try batch.ojson(v.model_intent),
         .next_run_generation = try batch.u(v.next_run_generation),
+        .compact_boundary = try batch.u(v.compact_boundary),
         .checkpoint_anchor = t(v.checkpoint_anchor),
         .checkpoint_attempt = t(v.checkpoint_attempt),
         .active_operation_kind = ot(if (v.active_operation) |op| op.kind else null),
@@ -718,6 +719,7 @@ fn readTask(row: Record) !wire.TaskWire {
     v.binding.model = try row.b("model");
     v.model_intent = try row.ojson(wire.ModelIntentWire, "model_intent_json");
     v.next_run_generation = try row.u("next_run_generation");
+    v.compact_boundary = try row.u("compact_boundary");
     v.checkpoint_anchor = try row.t("checkpoint_anchor");
     v.checkpoint_attempt = try row.t("checkpoint_attempt");
     v.active_operation = if (try row.ot("active_operation_kind")) |kind| .{ .kind = kind, .id = try row.u("active_operation_id") } else null;
@@ -735,6 +737,8 @@ fn writeRun(batch: *Batch, v: wire.RunWire, task_id: u64, position: usize) !void
         .ordinal = try ordinal(position),
         .id = try batch.u(v.id),
         .coverage = t(v.coverage),
+        .conversation_position = try batch.ou(v.conversation_position),
+        .superseded_by_run_id = try batch.ou(v.superseded_by_run_id),
         .generation = try batch.u(v.generation),
         .execution_generation = try batch.u(v.execution_generation),
         .execution_protocol = t(v.execution_protocol),
@@ -773,6 +777,8 @@ fn readRun(row: Record) !wire.RunWire {
     var v: wire.RunWire = undefined;
     v.id = try row.u("id");
     v.coverage = try row.t("coverage");
+    v.conversation_position = try row.ou("conversation_position");
+    v.superseded_by_run_id = try row.ou("superseded_by_run_id");
     v.generation = try row.u("generation");
     v.execution_generation = try row.u("execution_generation");
     v.execution_protocol = try row.t("execution_protocol");
@@ -917,10 +923,10 @@ comptime {
     if (std.meta.fields(wire.StateWire).len != 9) @compileError("Review every history SQL field mapping after StateWire changes");
     if (std.meta.fields(wire.TaskFailureWire).len != 3) @compileError("Review every history SQL field mapping after TaskFailureWire changes");
     if (std.meta.fields(wire.WorkspaceWire).len != 8) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
-    if (std.meta.fields(wire.TaskWire).len != 26) @compileError("Review every history SQL field mapping after TaskWire changes");
+    if (std.meta.fields(wire.TaskWire).len != 27) @compileError("Review every history SQL field mapping after TaskWire changes");
     if (std.meta.fields(wire.ModelIntentWire).len != 3) @compileError("Review every history SQL field mapping after ModelIntentWire changes");
     // model_error is a nullable typed JSON value read and written with its Run.
-    if (std.meta.fields(wire.RunWire).len != 33) @compileError("Review every history SQL field mapping after RunWire changes");
+    if (std.meta.fields(wire.RunWire).len != 35) @compileError("Review every history SQL field mapping after RunWire changes");
     // batch.json/row.json preserve the full typed input, including its reading anchor.
     if (std.meta.fields(wire.AdditionalInputWire).len != 11) @compileError("Review history input JSON mapping after AdditionalInputWire changes");
     if (std.meta.fields(wire.ToolWire).len != 14) @compileError("Review every history SQL field mapping after ToolWire changes");

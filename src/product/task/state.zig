@@ -122,6 +122,7 @@ pub const ActiveOperation = task_attachment.ActiveOperation;
 pub const RunCause = enum {
     user_cancel,
     approval_mode_change,
+    edit_and_rerun,
     timeout,
     session_close,
     app_shutdown,
@@ -391,6 +392,11 @@ pub const PendingInterruption = enum(u8) {
     /// A Run stopped because an approval change crossed the Core profile
     /// boundary. Core still observes a user cancellation.
     approval_mode_change,
+    /// A Run stopped because the user edited an earlier message, which has to
+    /// rewind the Conversation and can only do so once the Task is idle. The
+    /// user did not press Stop, and history says which of the two happened.
+    /// Core still observes a user cancellation.
+    edit_and_rerun,
 };
 
 /// Owned safe observation, separate from the decision about the Run outcome.
@@ -582,6 +588,11 @@ pub const InputSubmission = struct {
     retry_payload: ?OwnedRunInput = null,
     retried_as: ?Submission = null,
     force_new_run: bool = false,
+    /// An edited earlier message: the Conversation rewinds to this position
+    /// before this submission starts its Run, so the rerun takes the place of
+    /// the turn being replaced. Set only by edit-and-rerun, which is why such
+    /// a submission never joins a Run already in flight.
+    rewind_to_position: ?u64 = null,
     state: enum { waiting, failed, cancelled, interrupted } = .waiting,
     /// Only the stable reason of a failed submission is written to history.
     reason: ?SendInputReason = null,
@@ -664,6 +675,20 @@ pub const SendInputReason = enum {
     admission_failed,
     continuation_cancelled,
     approval_mode_change,
+    /// Queued messages were written for a continuation an edit-and-rerun then
+    /// took out of the Conversation. The text is handed back for an explicit
+    /// resend rather than running after a rewind it did not expect.
+    edit_and_rerun,
+    /// The edited message named a Conversation position that had been
+    /// summarized away before its Run could start. Nothing can bring that
+    /// turn back, so the text comes back to the user instead.
+    rewind_compacted,
+    /// The rewind was refused for a reason that can only mean Product named
+    /// the wrong position. Distinct from `rewind_compacted` on purpose: this
+    /// one is a defect to report, not a limit to explain.
+    rewind_position_rejected,
+    /// The rewind itself failed at the Core boundary.
+    rewind_failed,
     combined_input_too_large,
     checkpoint_failed,
     schedule_failed,
@@ -1010,6 +1035,20 @@ pub const RunRecord = struct {
     finished_at_unix_ms: ?u64 = null,
     id: u64,
     coverage: ConversationCoverage = .pending,
+    /// The 1-based position Core's Conversation gave this Run's input, read
+    /// from `describe` at the moment the input was submitted and never
+    /// recomputed. It is the only way back to this turn: ABI numbering counts
+    /// replies, tool results and runtime text, which Product history has no
+    /// records for, so no arithmetic over `runs` can reproduce it. Null for
+    /// history written before #114 and for a Run whose submission could not
+    /// read it.
+    conversation_position: ?u64 = null,
+    /// The Run whose rewind dropped this Run's turn from the Conversation.
+    /// The turn stays in Product history, and the files and other effects it
+    /// produced stay too; only the Conversation lost it. Read through
+    /// `task_policy.runSuperseded`, which also knows when a supersession is
+    /// not in force.
+    superseded_by_run_id: ?u64 = null,
     generation: u64,
     execution_generation: u64,
     execution_protocol: Protocol,
@@ -1275,6 +1314,13 @@ pub const DurableTaskRecord = struct {
     archived: bool = false,
     runs: []?RunRecord,
     compacts: []?CompactRecord,
+    /// The highest `compact_boundary` this Task has observed, read with the
+    /// message count whenever an input is submitted. Positions at or below it
+    /// were summarized away and can no longer be named, so it is what hides
+    /// the edit entry. It only ever rises, and because it is observed at
+    /// submission it lags a compaction until the next input: the check the
+    /// rewind itself makes is the authoritative one.
+    compact_boundary: u64 = 0,
     next_run_generation: u64 = 0,
     ui_history: []?UiRecord,
     ui_history_count: usize = 0,
@@ -1498,6 +1544,7 @@ pub fn finalizedFileChangeObservation(run: *const RunRecord) FileChangeObservati
         .resource_limit => terminal.phase == .stopped,
         .user_cancel,
         .approval_mode_change,
+        .edit_and_rerun,
         .timeout,
         .session_close,
         .app_shutdown,
@@ -1661,6 +1708,12 @@ pub fn findRun(entries: []?RunRecord, run_id: u64) ?*RunRecord {
     return null;
 }
 
+pub fn findRunConst(entries: []const ?RunRecord, run_id: u64) ?*const RunRecord {
+    if (run_id == 0) return null;
+    for (entries) |*entry| if (entry.*) |*run| if (run.id == run_id) return run;
+    return null;
+}
+
 pub fn findCompact(entries: []?CompactRecord, operation_id: u64) ?*CompactRecord {
     for (entries) |*entry| {
         const compact = &(entry.* orelse continue);
@@ -1691,6 +1744,25 @@ pub fn markTerminalRunsBeforeEventDrain(task: *Task) bool {
     return changed;
 }
 
+/// Takes a Run out of the Conversation.
+///
+/// A Run that performed a rewind cannot leave the Conversation quietly while
+/// its Session is still attached: Core has already dropped those turns, and
+/// the history that is about to say they are back no longer describes the
+/// live Conversation. Poisoning the attachment closes that Session, and the
+/// next operation restores the committed checkpoint, which predates the
+/// rewind. A Session that is already closing needs none of this: the restore
+/// is what it will do anyway.
+pub fn excludeRunFromConversation(task: *Task, run: *RunRecord) void {
+    run.coverage = .excluded;
+    for (task.durable.runs) |*entry| {
+        const other = &(entry.* orelse continue);
+        if (other.superseded_by_run_id != run.id) continue;
+        if (task.runtime.attached()) |attached| attached.health = .session_poisoned;
+        return;
+    }
+}
+
 pub fn finalizeMarkedTerminalRunsAfterEventDrain(
     task: *Task,
     finished_at_ms: ?u64,
@@ -1717,7 +1789,7 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
         }
         freezeRunElapsedMs(run, finished_at_ms);
         if (terminalPayload(run).?.exclude_on_product_terminal and run.coverage == .pending)
-            run.coverage = .excluded;
+            excludeRunFromConversation(task, run);
         run.noteProjectionChange();
         run.event_stream_finalized = true;
         if (run.finished_at_unix_ms == null)

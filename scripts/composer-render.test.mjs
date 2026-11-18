@@ -239,6 +239,7 @@ function renderCompletedSurface(
       {
         id: "9",
         conversationCoverage,
+        editAdmitted: false,
         phase: pendingUi ? "waiting_ui" : "completed",
         execution: {
           generation: "1",

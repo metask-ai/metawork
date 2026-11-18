@@ -98,6 +98,7 @@ export const commands = {
   run: "metawork.tasks.run",
   sendInput: "metawork.tasks.sendInput",
   retryInput: "metawork.tasks.retryInput",
+  editInput: "metawork.tasks.editInput",
   discardInputRetry: "metawork.tasks.discardInputRetry",
   stop: "metawork.tasks.stop",
   setApprovalMode: "metawork.tasks.setApprovalMode",

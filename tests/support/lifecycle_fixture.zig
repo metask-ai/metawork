@@ -310,6 +310,12 @@ pub const FakePromptProfile = struct {
     }
 };
 
+pub const ConversationRole = enum { user, assistant };
+
+/// Enough for every lifecycle test's Conversation; a Run that would exceed it
+/// records nothing rather than wrapping, which a rewind test would notice.
+pub const max_conversation_messages = 64;
+
 pub const FakeSession = struct {
     input_accepted: u32 = 0,
     input_adopted: u32 = 0,
@@ -342,6 +348,15 @@ pub const FakeSession = struct {
     /// Observe the immutable credential supplied at the ABI boundary without
     /// retaining its bytes. Only synthetic test credentials are used here.
     credential_digest: [32]u8 = @splat(0),
+    /// The Conversation `describe` reports and `rewind_to_user_message`
+    /// positions name, measured against the real Core: 1-based over the full
+    /// history, a plain turn taking a user message then an assistant reply,
+    /// and `compact_boundary` rising without `message_count` ever falling for
+    /// a compaction. A turn is recorded atomically when the Run is admitted,
+    /// because MetaWork reads these numbers only while the Session is idle.
+    conversation: [max_conversation_messages]ConversationRole = @splat(.user),
+    message_count: usize = 0,
+    compact_boundary: usize = 0,
 
     pub fn lock(self: *FakeSession) void {
         self.mutex.lockUncancelable(std.testing.io);
@@ -357,6 +372,14 @@ pub const FakeSession = struct {
 
     pub fn broadcast(self: *FakeSession) void {
         self.condition.broadcast(std.testing.io);
+    }
+
+    /// Records one admitted turn. The caller holds the Session lock.
+    fn recordTurnLocked(self: *FakeSession) void {
+        if (self.message_count + 2 > max_conversation_messages) return;
+        self.conversation[self.message_count] = .user;
+        self.conversation[self.message_count + 1] = .assistant;
+        self.message_count += 2;
     }
 };
 
@@ -420,6 +443,7 @@ pub const FakeCore = struct {
     abort_calls: usize = 0,
     compact_calls: usize = 0,
     compact_abort_calls: usize = 0,
+    rewind_calls: usize = 0,
     last_abort_reason: ?u32 = null,
     buffer_releases: usize = 0,
     credential_seen: bool = false,
@@ -473,6 +497,7 @@ pub const FakeCore = struct {
     abort_gate: ?*CallbackSignal = null,
     forced_compact_status: ?u32 = null,
     forced_compact_abort_status: ?u32 = null,
+    forced_rewind_status: ?u32 = null,
     forced_compact_outcome: ?u32 = null,
     malformed_compact_result: bool = false,
     forced_session_destroy_status: ?u32 = null,
@@ -726,6 +751,12 @@ pub const FakeCore = struct {
     pub fn forceNextCompactAbortStatus(self: *FakeCore, status: u32) void {
         self.lock();
         self.forced_compact_abort_status = status;
+        self.unlock();
+    }
+
+    pub fn forceNextRewindStatus(self: *FakeCore, status: u32) void {
+        self.lock();
+        self.forced_rewind_status = status;
         self.unlock();
     }
 
@@ -1782,7 +1813,7 @@ pub fn sessionDescribe(
         (if (session.restore_degraded)
             std.fmt.bufPrint(
                 &session.description_buffer,
-                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"{s}\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"image_input\":{{\"supported\":false,\"source\":\"unknown\"}},\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"{s}\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"image_input\":{{\"supported\":false,\"source\":\"unknown\"}},\"conversation\":{{\"message_count\":{d},\"compact_boundary\":{d}}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
                 .{
                     described_session_id,
                     if (session.restored) "restored" else "fresh",
@@ -1793,13 +1824,15 @@ pub fn sessionDescribe(
                     permissionModeName(session.permission_mode_code),
                     session.policy_generation,
                     model_json,
+                    session.message_count,
+                    session.compact_boundary,
                     profile_json,
                 },
             )
         else
             std.fmt.bufPrint(
                 &session.description_buffer,
-                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"{s}\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"image_input\":{{\"supported\":false,\"source\":\"unknown\"}},\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"{s}\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"image_input\":{{\"supported\":false,\"source\":\"unknown\"}},\"conversation\":{{\"message_count\":{d},\"compact_boundary\":{d}}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
                 .{
                     described_session_id,
                     if (session.restored) "restored" else "fresh",
@@ -1810,6 +1843,8 @@ pub fn sessionDescribe(
                     permissionModeName(session.permission_mode_code),
                     session.policy_generation,
                     model_json,
+                    session.message_count,
+                    session.compact_boundary,
                     profile_json,
                 },
             )) catch {
@@ -2025,6 +2060,13 @@ pub fn sessionCompact(
     result.after_context_tokens = 40;
     result.input_tokens = 5;
     result.output_tokens = 2;
+    if (result.outcome_code == wire.COMPACT_COMPACTED) {
+        // The real policy summarizes the oldest turn and leaves the rest
+        // where they were: the boundary rises, the count does not move.
+        session.lock();
+        defer session.unlock();
+        session.compact_boundary = @min(session.message_count, session.compact_boundary + 2);
+    }
     return wire.STATUS_OK;
 }
 
@@ -2183,6 +2225,7 @@ pub fn sessionRunInput(
     }
     session.running = true;
     session.run_id = run_id;
+    session.recordTurnLocked();
     session.input_accepted = 0;
     session.input_adopted = 0;
     const plan = session.plan;
@@ -2903,8 +2946,58 @@ pub fn sessionUpdatePermissionMode(handle: ?*wire.SessionHandle, code: u32, out_
     return wire.STATUS_OK;
 }
 
-fn sessionRewindToUserMessage(_: ?*wire.SessionHandle, _: u64, _: ?*wire.OwnedBytesV1) callconv(.c) u32 {
-    @panic("MetaWork does not call AgentCore rewind");
+/// The measured semantics: 1-based over the full history including the
+/// compacted prefix, idle-only, and each refusal leaves the Conversation
+/// exactly as it was. NOT_USER_MESSAGE is decided before
+/// MESSAGE_POSITION_COMPACTED, which is what the real Core does -- a position
+/// under the boundary reports COMPACTED only when it is a user message.
+fn sessionRewindToUserMessage(
+    handle: ?*wire.SessionHandle,
+    position: u64,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    const session: *FakeSession = @ptrCast(@alignCast(handle orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }));
+    fake_core.lock();
+    fake_core.rewind_calls += 1;
+    const forced_status = fake_core.forced_rewind_status;
+    fake_core.forced_rewind_status = null;
+    fake_core.unlock();
+    if (forced_status) |status| {
+        diagnostic(out_error);
+        return status;
+    }
+    session.lock();
+    defer session.unlock();
+    if (!session.in_use or session.destroyed) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_STATE;
+    }
+    if (session.running or session.compacting) {
+        diagnostic(out_error);
+        return wire.STATUS_BUSY;
+    }
+    if (position == 0) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    if (position > session.message_count) {
+        diagnostic(out_error);
+        return wire.STATUS_MESSAGE_POSITION_OUT_OF_RANGE;
+    }
+    if (session.conversation[@intCast(position - 1)] != .user) {
+        diagnostic(out_error);
+        return wire.STATUS_NOT_USER_MESSAGE;
+    }
+    if (position <= session.compact_boundary) {
+        diagnostic(out_error);
+        return wire.STATUS_MESSAGE_POSITION_COMPACTED;
+    }
+    session.message_count = @intCast(position - 1);
+    return wire.STATUS_OK;
 }
 
 const fake_session_control_api = wire.SessionControlApiV1{
