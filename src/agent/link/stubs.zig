@@ -48,6 +48,7 @@ const handle_table = @import("handle_table.zig");
 const inbound = @import("inbound.zig");
 const method = @import("method.zig");
 const outbound = @import("outbound.zig");
+const payload = @import("payload.zig");
 const unreachability = @import("unreachability.zig");
 const wire_types = @import("wire_types.zig");
 
@@ -1076,6 +1077,8 @@ const Recorder = struct {
     model: [64]u8 = undefined,
     model_len: usize = 0,
     calls: usize = 0,
+    stopped_run: ?u64 = null,
+    stopped_with: ?session_control.TerminationSignal = null,
 
     fn setModel(context: ?*anyopaque, model: []const u8) surface.Error!void {
         const self: *Recorder = @ptrCast(@alignCast(context.?));
@@ -1089,8 +1092,20 @@ const Recorder = struct {
         return self.model[0..self.model_len];
     }
 
+    fn requestTermination(
+        context: ?*anyopaque,
+        run_id: u64,
+        signal: session_control.TerminationSignal,
+    ) surface.Error!void {
+        const self: *Recorder = @ptrCast(@alignCast(context.?));
+        self.stopped_run = run_id;
+        self.stopped_with = signal;
+        self.calls += 1;
+    }
+
     fn sessionPortFor(self: *Recorder, vtable: *port.SessionPort.VTable) port.SessionPort {
         vtable.set_model = setModel;
+        vtable.request_termination = requestTermination;
         return .{ .context = self, .vtable = vtable };
     }
 };
@@ -1102,6 +1117,10 @@ const Peer = struct {
     slots: *pending.Table,
     sessions: *handle_table.Table(run_tools.HeldSession),
     answered: usize = 0,
+    /// The frame kind the request arrived on. Recorded rather than assumed:
+    /// the transport column is only a design claim until something reads
+    /// which kind actually carried the call.
+    arrived_on: ?frame.Kind = null,
 
     const limits: channel.MessageLimits = .{
         .event = 1 << 20,
@@ -1132,17 +1151,22 @@ const Peer = struct {
         var header_bytes: [frame.header_bytes]u8 = undefined;
         reader.interface.readSliceAll(&header_bytes) catch return false;
         const header = frame.decode(&header_bytes) catch return false;
-        if (header.kind != .request or !header.final) return false;
+        // Either kind can carry a call: `control` is the one that may
+        // overtake fragments, and a dispatcher that only read `request`
+        // frames would leave every Stop unanswered on a link that was
+        // working.
+        if (header.kind != .request and header.kind != .control) return false;
+        if (!header.final) return false;
 
-        const payload = testing.allocator.alloc(u8, header.payload_len) catch return false;
-        defer testing.allocator.free(payload);
-        reader.interface.readSliceAll(payload) catch return false;
+        const request_bytes = testing.allocator.alloc(u8, header.payload_len) catch return false;
+        defer testing.allocator.free(request_bytes);
+        reader.interface.readSliceAll(request_bytes) catch return false;
 
         var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
 
-        const request = dispatch.classify(payload) catch return false;
+        const request = dispatch.classify(request_bytes) catch return false;
         const response = dispatch.invoke(arena, self.bindings(), request) catch return false;
 
         // Owned by the table's allocator, because `claim` frees it there.
@@ -1150,6 +1174,7 @@ const Peer = struct {
         @memcpy(owned, response);
         self.slots.deposit(header.correlation, owned);
         self.answered += 1;
+        self.arrived_on = header.kind;
         return true;
     }
 
@@ -1214,7 +1239,75 @@ test "a call through the port Product already uses reaches a real Session" {
     // still the box, because `set_model` names no new handle.
     try testing.expectEqual(@as(usize, 0), slots.liveCount());
     try testing.expectEqual(@as(usize, 1), half.boxes.liveCount());
+    try testing.expectEqual(frame.Kind.request, peer.arrived_on.?);
     _ = sessions.take(id);
+}
+
+test "a Stop travels on the transport it is registered with" {
+    // The transport column exists so a Stop can overtake queued fragments.
+    // Until this test, every call went out as a `request` whatever the
+    // registry said -- so what is under test is not that the Session was
+    // reached but *which frame kind* reached it.
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "link", .{ .read = true, .truncate = true });
+    defer file.close(io);
+
+    var queue: channel.Outbound = undefined;
+    try queue.start(io, testing.allocator, file, .{});
+    defer queue.stop();
+    var slots: pending.Table = undefined;
+    try slots.init(io, testing.allocator, 4);
+    defer slots.deinit();
+    const half = try testing.allocator.create(client.Client);
+    defer testing.allocator.destroy(half);
+    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    defer half.deinit();
+
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2);
+    defer sessions.deinit();
+    var recorder: Recorder = .{};
+    var session_vtable: port.SessionPort.VTable = undefined;
+    var held = run_tools.HeldSession.init(recorder.sessionPortFor(&session_vtable));
+    const id = try sessions.insert(&held);
+
+    const box = try half.boxes.open(id);
+    const session: port.SessionPort = .{ .context = box, .vtable = half.vtables.session };
+
+    var peer: Peer = .{ .io = io, .dir = tmp.dir, .slots = &slots, .sessions = &sessions };
+    var thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+
+    try session.requestTermination(7, .{ .interrupted = .user_cancel });
+    thread.join();
+
+    try testing.expectEqual(frame.Kind.control, peer.arrived_on.?);
+    try testing.expectEqual(@as(u64, 7), recorder.stopped_run.?);
+    try testing.expectEqual(
+        session_control.ExternalInterruption.user_cancel,
+        recorder.stopped_with.?.interrupted,
+    );
+    try testing.expectEqual(@as(usize, 0), slots.liveCount());
+    _ = sessions.take(id);
+}
+
+test "every control-transport request fits the one frame it is allowed" {
+    // The comptime block in `wire_types.zig` already failed the build if not.
+    // This records that the set is not empty, because a check over an empty
+    // set passes for the wrong reason.
+    comptime var controls: usize = 0;
+    inline for (method.entries) |entry| {
+        if (entry.transport != .control) continue;
+        controls += 1;
+        switch (entry.owner) {
+            inline else => |tag| {
+                const Fn = @typeInfo(@FieldType(tag.VTable(), entry.name)).pointer.child;
+                const bound = comptime payload.maxEncodedSize(wire_types.Request(Fn)).?;
+                try testing.expect(bound <= frame.max_fragment_payload_bytes);
+            },
+        }
+    }
+    try testing.expectEqual(@as(usize, 4), controls);
 }
 
 test "a method the far side refuses comes back as that method's own error" {

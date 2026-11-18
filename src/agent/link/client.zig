@@ -162,6 +162,17 @@ pub fn call(
     arguments: Arguments(owner, name),
 ) CallError!Answer(owner, name) {
     const entry = comptime method.find(method.codeOf(owner, name)) catch unreachable;
+    // The frame kind comes from the registration, not from this function. A
+    // `control` entry is on that transport because its call must overtake
+    // queued fragments -- `request_run_termination` and the three other Stop
+    // methods are registered that way, and sending them as `request` put
+    // them behind whatever fragment was mid-flight. The registry said one
+    // thing and the send did another, which is the same fault as a count
+    // that describes work the build does not do.
+    const kind = comptime entry.transport.kind() orelse @compileError(
+        @tagName(owner) ++ "." ++ name ++ " is not a call: a `stream` method is answered " ++
+            "from the caller's own pump, so there is no request to send",
+    );
     const header = comptime envelope.requestHeaderBytes(owner);
 
     const framed = try client.allocator.alloc(
@@ -173,7 +184,7 @@ pub fn call(
     _ = payload.encode(@TypeOf(arguments), arguments, framed[header..]);
 
     const correlation = client.pending.open() catch return error.Busy;
-    switch (try client.outbound.trySubmit(.request, correlation, framed)) {
+    switch (try client.outbound.trySubmit(kind, correlation, framed)) {
         .queued => {},
         // Nothing was sent, so nothing is owed: the slot goes back now rather
         // than being held for an answer that cannot come.

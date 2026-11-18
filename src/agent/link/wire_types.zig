@@ -33,6 +33,7 @@ const payload = @import("payload.zig");
 const shapes = @import("shapes.zig");
 const handle_table = @import("handle_table.zig");
 const method = @import("method.zig");
+const frame = @import("frame.zig");
 
 const surface = contract.surface;
 const control = contract.control;
@@ -193,6 +194,27 @@ comptime {
                 payload.requireStructural(Request(Fn));
                 const Out = Response(Fn);
                 if (Out != void) payload.requireStructural(Out);
+
+                // A `control` frame is never fragmented, so a method
+                // registered on that transport has to fit in one. The check
+                // is on the type, not on a value: a parameter that gained a
+                // slice would otherwise keep building and fail at the first
+                // Stop large enough to split -- and a Stop is the one call
+                // that must not fail, which is why it is on this transport
+                // in the first place.
+                if (entry.transport == .control) {
+                    const bound = payload.maxEncodedSize(Request(Fn)) orelse @compileError(
+                        @tagName(entry.owner) ++ "." ++ entry.name ++ " is registered as " ++
+                            "`control` but its request has no size bound, so it could need " ++
+                            "more than one frame; a control frame is never fragmented. " ++
+                            "Either its parameters lose the slice or its transport is not " ++
+                            "`control`",
+                    );
+                    if (bound > frame.max_fragment_payload_bytes) @compileError(
+                        @tagName(entry.owner) ++ "." ++ entry.name ++ " is registered as " ++
+                            "`control` but its request can exceed one fragment",
+                    );
+                }
             },
         }
     }
