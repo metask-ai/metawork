@@ -3103,13 +3103,24 @@ test "MCP OAuth HTTP races complete cancel and expire without async capacity" {
         var cancellation: *Cancellation = undefined;
         var mode: enum { complete, cancel, deadline } = .complete;
         var exited: std.atomic.Value(bool) = .init(false);
+        var entered: std.Io.Event = .unset;
 
         fn lookup(_: ?*anyopaque, _: std.Io.net.HostName, resolved: *std.Io.Queue(std.Io.net.HostName.LookupResult), _: std.Io.net.HostName.LookupOptions) std.Io.net.HostName.LookupError!void {
             defer resolved.close(io);
             defer exited.store(true, .release);
+            entered.set(io);
             if (mode == .cancel) cancellation.cancel();
             if (mode != .complete) try std.Io.sleep(io, .fromSeconds(60), .awake);
             return error.UnknownHostName;
+        }
+
+        /// The call's deadline is waited for as a `.deadline` sleep. In
+        /// `.deadline` mode it arrives once the lookup is in flight; the other
+        /// modes give it a backstop the clock never reaches, so each mode's
+        /// result is decided by the lookup alone, not by thread start-up.
+        fn sleep(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+            if (mode == .deadline and timeout == .deadline) return entered.wait(io);
+            return io.vtable.sleep(userdata, timeout);
         }
     };
     inline for (std.enums.values(@TypeOf(Dns.mode))) |mode| {
@@ -3118,15 +3129,17 @@ test "MCP OAuth HTTP races complete cancel and expire without async capacity" {
         Dns.io = threaded.io();
         Dns.mode = mode;
         Dns.exited.store(false, .release);
+        Dns.entered = .unset;
         var vtable = Dns.io.vtable.*;
         vtable.netLookup = Dns.lookup;
+        vtable.sleep = Dns.sleep;
         const io: std.Io = .{ .userdata = Dns.io.userdata, .vtable = &vtable };
         var cancellation: Cancellation = .{ .io = io };
         Dns.cancellation = &cancellation;
         var engine: http_execution.Engine = undefined;
         engine.init(std.testing.allocator, io);
         defer engine.deinit();
-        var transport: StdHttpTransport = .{ .http_engine = &engine, .isolation = .public, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromMilliseconds(100), .clock = .boot }) };
+        var transport: StdHttpTransport = .{ .http_engine = &engine, .isolation = .public, .cancellation = &cancellation, .deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(30), .clock = .boot }) };
         var body: [32]u8 = undefined;
         var headers: [32]u8 = undefined;
         const result = transport.transport().fetch(.{ .method = .post, .url = "https://oauth.invalid/token", .body = "fixture" }, &body, &headers);
