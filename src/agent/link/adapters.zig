@@ -950,3 +950,208 @@ test "a capacity refusal can name the table it came from" {
     try testing.expectError(error.HandleCapacity, sessions.insert(&second));
     _ = sessions.take(id);
 }
+
+/// What ends a set of entries. The same values `Reclaim.bound_to` names, so
+/// asking "what does this ending drain" is a lookup in that table rather than
+/// a list someone kept beside it.
+pub const Bound = @FieldType(Reclaim, "bound_to");
+
+/// Drains every table whose entries are bound to `bound`, handing each object
+/// to `releaser.release(T, pointer)`.
+///
+/// Driven by `reclamation` rather than by a written-out list of tables. That
+/// is the difference between `bound_to` being a fact and being a note: a
+/// table added to `Bindings` has to appear in that inventory already, so it
+/// is drained here without anyone remembering to add it -- and if its ending
+/// were wrong, the test below would show entries surviving an ending that
+/// should have taken them.
+///
+/// No allocation: `drain` fills whatever buffer it is given and says how
+/// much, so this loops until a pass comes back empty.
+pub fn drainBound(bindings: Bindings, bound: Bound, releaser: anytype) usize {
+    var drained: usize = 0;
+    inline for (reclamation) |entry| {
+        if (entry.bound_to == bound) {
+            const table = @field(bindings, entry.field);
+            const Held = @TypeOf(table.*).Held;
+            var buffer: [16]*Held = undefined;
+            while (true) {
+                const taken = table.drain(&buffer);
+                if (taken.len == 0) break;
+                for (taken) |value| {
+                    releaser.release(Held, value);
+                    drained += 1;
+                }
+            }
+        }
+    }
+    return drained;
+}
+
+/// The link ended, so every entry ends with it: an object the other half can
+/// no longer name is not waiting for anything.
+pub fn drainEverything(bindings: Bindings, releaser: anytype) usize {
+    var drained: usize = 0;
+    inline for (comptime std.enums.values(Bound)) |bound| {
+        drained += drainBound(bindings, bound, releaser);
+    }
+    return drained;
+}
+
+/// Counts what each ending is responsible for, so "something really empties
+/// this table" is a number rather than a claim.
+pub fn tablesBoundTo(comptime bound: Bound) usize {
+    var count: usize = 0;
+    inline for (reclamation) |entry| {
+        if (entry.bound_to == bound) count += 1;
+    }
+    return count;
+}
+
+const ReleaseLog = struct {
+    sessions: usize = 0,
+    runs: usize = 0,
+    leases: usize = 0,
+    skill_restore: usize = 0,
+    session_restore: usize = 0,
+    selections: usize = 0,
+
+    fn release(self: *ReleaseLog, comptime T: type, value: *T) void {
+        _ = value;
+        if (T == port.SessionPort) self.sessions += 1;
+        if (T == port.RunPort) self.runs += 1;
+        if (T == catalog.Lease) self.leases += 1;
+        if (T == port.SkillRestoreInputs) self.skill_restore += 1;
+        if (T == port.SessionRestoreInputs) self.session_restore += 1;
+        if (T == mcp_catalog.Selection) self.selections += 1;
+    }
+
+    fn total(self: ReleaseLog) usize {
+        return self.sessions + self.runs + self.leases +
+            self.skill_restore + self.session_restore + self.selections;
+    }
+};
+
+const Tables = struct {
+    sessions: handle_table.Table(port.SessionPort),
+    runs: handle_table.Table(port.RunPort),
+    leases: handle_table.Table(catalog.Lease),
+    skill_restore: handle_table.Table(port.SkillRestoreInputs),
+    session_restore: handle_table.Table(port.SessionRestoreInputs),
+    selections: handle_table.Table(mcp_catalog.Selection),
+
+    fn init() !Tables {
+        return .{
+            .sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 4),
+            .runs = try handle_table.Table(port.RunPort).init(testing.allocator, 4),
+            .leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 4),
+            .skill_restore = try handle_table.Table(port.SkillRestoreInputs)
+                .init(testing.allocator, 4),
+            .session_restore = try handle_table.Table(port.SessionRestoreInputs)
+                .init(testing.allocator, 4),
+            .selections = try handle_table.Table(mcp_catalog.Selection).init(testing.allocator, 4),
+        };
+    }
+
+    fn deinit(self: *Tables) void {
+        self.sessions.deinit();
+        self.runs.deinit();
+        self.leases.deinit();
+        self.skill_restore.deinit();
+        self.session_restore.deinit();
+        self.selections.deinit();
+    }
+
+    fn bindings(self: *Tables) Bindings {
+        return .{
+            .allocator = testing.allocator,
+            .sessions = &self.sessions,
+            .runs = &self.runs,
+            .leases = &self.leases,
+            .skill_restore = &self.skill_restore,
+            .session_restore = &self.session_restore,
+            .selections = &self.selections,
+        };
+    }
+
+    /// One entry in every table, so a drain that misses one is visible.
+    fn fill(self: *Tables, storage: *Storage) !void {
+        _ = try self.sessions.insert(&storage.session);
+        _ = try self.runs.insert(&storage.run);
+        _ = try self.leases.insert(@ptrCast(&storage.lease));
+        _ = try self.skill_restore.insert(@ptrCast(&storage.skill));
+        _ = try self.session_restore.insert(&storage.session_inputs);
+        _ = try self.selections.insert(@ptrCast(&storage.selection));
+    }
+
+    fn live(self: *const Tables) usize {
+        return self.sessions.live + self.runs.live + self.leases.live +
+            self.skill_restore.live + self.session_restore.live + self.selections.live;
+    }
+};
+
+const Storage = struct {
+    session: port.SessionPort = .{ .context = null, .vtable = undefined },
+    run: port.RunPort = undefined,
+    lease: [8]u8 align(8) = @splat(0),
+    skill: [8]u8 align(8) = @splat(0),
+    session_inputs: port.SessionRestoreInputs = undefined,
+    selection: [8]u8 align(8) = @splat(0),
+};
+
+test "an ending drains exactly the tables bound to it, and the link drains all" {
+    var tables = try Tables.init();
+    defer tables.deinit();
+    var storage: Storage = .{};
+    try tables.fill(&storage);
+    try testing.expectEqual(@as(usize, 6), tables.live());
+
+    var log: ReleaseLog = .{};
+    // A Session closing takes the Session and the MCP selection it bound, and
+    // nothing else: the caller still holds the three it holds.
+    try testing.expectEqual(@as(usize, 2), tablesBoundTo(.session));
+    try testing.expectEqual(@as(usize, 2), drainBound(tables.bindings(), .session, &log));
+    try testing.expectEqual(@as(usize, 1), log.sessions);
+    try testing.expectEqual(@as(usize, 1), log.selections);
+    try testing.expectEqual(@as(usize, 0), log.leases);
+    try testing.expectEqual(@as(usize, 4), tables.live());
+
+    // A Run reaching its terminal takes its own entry and no one else's.
+    try testing.expectEqual(@as(usize, 1), drainBound(tables.bindings(), .run, &log));
+    try testing.expectEqual(@as(usize, 1), log.runs);
+    try testing.expectEqual(@as(usize, 3), tables.live());
+
+    // And the three the caller holds are exactly what is left, which is why
+    // they are the ones a capacity refusal names first.
+    try testing.expectEqual(@as(usize, 3), tablesBoundTo(.caller_hold));
+    try testing.expectEqual(@as(usize, 3), drainBound(tables.bindings(), .caller_hold, &log));
+    try testing.expectEqual(@as(usize, 0), tables.live());
+    try testing.expectEqual(@as(usize, 6), log.total());
+}
+
+test "the link ending leaves no table holding anything" {
+    // The property the inventory exists for: closure is driven by
+    // `reclamation`, so this covers a table added later without anyone
+    // editing this test. A table whose ending never arrives would show up
+    // here as an entry that survived.
+    var tables = try Tables.init();
+    defer tables.deinit();
+    var storage: Storage = .{};
+    try tables.fill(&storage);
+
+    var log: ReleaseLog = .{};
+    try testing.expectEqual(@as(usize, 6), drainEverything(tables.bindings(), &log));
+    try testing.expectEqual(@as(usize, 0), tables.live());
+    try testing.expectEqual(@as(usize, 6), log.total());
+
+    // Every ending together covers the whole inventory, so no entry is bound
+    // to something that never happens.
+    var covered: usize = 0;
+    inline for (comptime std.enums.values(Bound)) |bound| covered += tablesBoundTo(bound);
+    try testing.expectEqual(reclamation.len, covered);
+
+    // Draining twice releases nothing twice: every id was retired by the
+    // first pass.
+    var second: ReleaseLog = .{};
+    try testing.expectEqual(@as(usize, 0), drainEverything(tables.bindings(), &second));
+}
