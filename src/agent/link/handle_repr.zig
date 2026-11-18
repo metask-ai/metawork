@@ -151,119 +151,217 @@ fn classify(comptime T: type, comptime named: []const u8) void {
     }
 }
 
-/// The slots the caller's half names its boxed handles by.
+/// The boxes the caller's half names far objects by.
+///
+/// Both representations end up here, and after building the inbound chain
+/// that is the honest shape: each one needs *a real pointer to a record of
+/// ours that names the far object*, and they differ only in who carries that
+/// pointer. A `boxed` handle's pointer **is** the box, because the pointer is
+/// the whole value. An `in_context` handle's port value **holds** the box in
+/// its own `context`, because it has somewhere to put it. One record, one
+/// validity check, one release path; the distinction `Representation` draws
+/// is about carriage, not about two kinds of storage.
 ///
 /// One bounded allocation rather than one per handle: the pointer handed out
 /// is the address of a slot, so it is a real pointer into live memory and a
 /// read of it reads what was written. A pointer this table did not issue
 /// fails the arithmetic -- out of range, or not on a slot boundary -- so a
-/// wrong one is refused instead of being read as whatever lies there.
+/// wrong one is refused instead of being read as whatever lies there. That is
+/// also why a released handle used again is a refusal rather than a
+/// use-after-free, which one allocation per handle could not give.
 ///
 /// A slot keeps no generation of its own. The id it holds has one, so a stale
 /// box holds a stale id and the execution half's own table refuses it: the
 /// refusal belongs where the object lives. What has to be prevented here is
 /// only a freed slot coming back under a different handle, and `releaseThrough`
 /// is what prevents that.
-pub const Boxes = struct {
-    pub const Slot = struct {
-        id: handle_table.Id = .none,
-        live: bool = false,
-    };
+/// Generic in the link type, so the box's way back cannot hold anything else.
+/// `?*anyopaque` would do the same job and would be the shape this file exists
+/// to argue against: a pointer whose type nobody checks, cast back on trust.
+/// One type parameter buys the check instead.
+pub fn Boxes(comptime Link: type) type {
+    return struct {
+        const Self = @This();
 
-    allocator: std.mem.Allocator,
-    slots: []Slot,
+        pub const Slot = struct {
+            /// The link this box names something on. A stub reached through
+            /// an `in_context` port value has only the context pointer to
+            /// start from, so the way back to its own half is in the box.
+            ///
+            /// Every slot in one table carries the same link, so this is set
+            /// once at `init` rather than per `open`: a free slot with a
+            /// valid link is a slot whose only unanswered question is what it
+            /// names, which is the question `live` answers.
+            link: *Link,
+            id: handle_table.Id = .none,
+            live: bool = false,
+        };
 
-    pub const Error = error{
-        /// Every slot is in use. A bound, not a growth, for the same reason
-        /// the execution half's table has one.
-        BoxCapacity,
-        /// A pointer this table did not issue, or one whose slot is free.
-        UnknownBox,
-    };
+        allocator: std.mem.Allocator,
+        slots: []Slot,
 
-    pub fn init(allocator: std.mem.Allocator, count: usize) std.mem.Allocator.Error!Boxes {
-        std.debug.assert(count > 0);
-        const slots = try allocator.alloc(Slot, count);
-        @memset(slots, .{});
-        return .{ .allocator = allocator, .slots = slots };
-    }
+        pub const Error = error{
+            /// Every slot is in use. A bound, not a growth, for the same
+            /// reason the execution half's table has one.
+            BoxCapacity,
+            /// A pointer this table did not issue, or one whose slot is free.
+            UnknownBox,
+        };
 
-    pub fn deinit(self: *Boxes) void {
-        self.allocator.free(self.slots);
-        self.* = undefined;
-    }
+        pub fn init(
+            allocator: std.mem.Allocator,
+            count: usize,
+            link: *Link,
+        ) std.mem.Allocator.Error!Self {
+            std.debug.assert(count > 0);
+            const slots = try allocator.alloc(Slot, count);
+            @memset(slots, .{ .link = link });
+            return .{ .allocator = allocator, .slots = slots };
+        }
 
-    /// Names an id, returning the slot the caller will carry as the handle.
-    pub fn open(self: *Boxes, id: handle_table.Id) Error!*Slot {
-        std.debug.assert(id.valid());
-        for (self.slots) |*slot| {
-            if (slot.live) continue;
-            slot.* = .{ .id = id, .live = true };
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.slots);
+            self.* = undefined;
+        }
+
+        /// Names an id, returning the box the caller will carry.
+        pub fn open(self: *Self, id: handle_table.Id) Error!*Slot {
+            std.debug.assert(id.valid());
+            const slot = try self.freeSlot();
+            slot.id = id;
             return slot;
         }
-        return error.BoxCapacity;
-    }
 
-    /// The id a handle names, without giving up the handle.
-    pub fn borrow(self: *Boxes, handle: *const anyopaque) Error!handle_table.Id {
-        const slot = try self.slotOf(handle);
-        return slot.id;
-    }
-
-    pub fn liveCount(self: *const Boxes) usize {
-        var count: usize = 0;
-        for (self.slots) |slot| {
-            if (slot.live) count += 1;
+        /// Takes a box before the call that will name it.
+        ///
+        /// The mirror of `handle_table.reserve`, for the same reason and in
+        /// the other direction. A method whose result names a handle has
+        /// already done something irreversible on the far side by the time
+        /// the answer arrives: if this half then had no box left, the object
+        /// would be live over there with nothing here able to name or release
+        /// it. Spending the capacity first turns that into a refusal before
+        /// the call, which is a refusal that costs nothing.
+        pub fn reserve(self: *Self) Error!*Slot {
+            return self.freeSlot();
         }
-        return count;
-    }
 
-    pub fn capacity(self: *const Boxes) usize {
-        return self.slots.len;
-    }
+        /// Names the id the answer brought, on a box already taken.
+        pub fn fill(self: *Self, slot: *Slot, id: handle_table.Id) void {
+            std.debug.assert(id.valid());
+            std.debug.assert(slot.live and !slot.id.valid());
+            std.debug.assert(self.holds(slot));
+            slot.id = id;
+        }
 
-    fn slotOf(self: *Boxes, handle: *const anyopaque) Error!*Slot {
-        const base = @intFromPtr(self.slots.ptr);
-        const address = @intFromPtr(handle);
-        if (address < base) return error.UnknownBox;
-        const offset = address - base;
-        if (offset % @sizeOf(Slot) != 0) return error.UnknownBox;
-        const index = offset / @sizeOf(Slot);
-        if (index >= self.slots.len) return error.UnknownBox;
-        const slot = &self.slots[index];
-        if (!slot.live) return error.UnknownBox;
-        return slot;
-    }
-};
+        /// Gives back a box whose call did not produce a handle.
+        pub fn releaseReservation(self: *Self, slot: *Slot) void {
+            std.debug.assert(slot.live and !slot.id.valid());
+            std.debug.assert(self.holds(slot));
+            slot.live = false;
+        }
 
-/// Releases a handle through the call that releases it.
-///
-/// Both bad states are out of reach by position: the slot is cleared after
-/// the call returns without error, so "released but the box is still there"
-/// cannot happen (the clear follows the success) and "the box is gone but
-/// nothing was released" cannot either (an early return never reaches the
-/// clear). A failed release leaves the name working, which it must -- the
-/// object is still over there and the caller may ask again.
-///
-/// Deliberately not "give the slot up first and put it back on failure".
-/// That was the first version, and it opens a window: while the call is in
-/// flight the slot is free, so another thread's `open` can take it, and the
-/// restore would then write this handle's id over that one -- two handles
-/// naming one slot. Clearing after success has no window at all.
-pub fn releaseThrough(
-    boxes: *Boxes,
-    handle: *const anyopaque,
-    comptime Result: type,
-    context: anytype,
-    comptime body: fn (@TypeOf(context), handle_table.Id) Result,
-) (Boxes.Error || @typeInfo(Result).error_union.error_set)!void {
-    const slot = try boxes.slotOf(handle);
-    const id = slot.id;
-    _ = try body(context, id);
-    slot.* = .{};
+        /// The id a handle names, without giving up the handle.
+        ///
+        /// A box that is reserved but not yet filled names nothing, so it is
+        /// refused rather than answered with `Id.none`: a zero id is invalid
+        /// by construction and handing one out would push the refusal to
+        /// whoever read it next.
+        pub fn borrow(self: *Self, handle: *const anyopaque) Error!handle_table.Id {
+            const slot = try self.slotOf(handle);
+            if (!slot.id.valid()) return error.UnknownBox;
+            return slot.id;
+        }
+
+        fn freeSlot(self: *Self) Error!*Slot {
+            for (self.slots) |*slot| {
+                if (slot.live) continue;
+                slot.* = .{ .link = slot.link, .id = .none, .live = true };
+                return slot;
+            }
+            return error.BoxCapacity;
+        }
+
+        fn holds(self: *const Self, slot: *const Slot) bool {
+            const base = @intFromPtr(self.slots.ptr);
+            const address = @intFromPtr(slot);
+            return address >= base and
+                (address - base) % @sizeOf(Slot) == 0 and
+                (address - base) / @sizeOf(Slot) < self.slots.len;
+        }
+
+        /// The link a handle belongs to, which is how a stub entered through
+        /// an `in_context` port value finds its own half.
+        pub fn linkOf(self: *Self, handle: *const anyopaque) Error!*Link {
+            const slot = try self.slotOf(handle);
+            return slot.link;
+        }
+
+        pub fn liveCount(self: *const Self) usize {
+            var count: usize = 0;
+            for (self.slots) |slot| {
+                if (slot.live) count += 1;
+            }
+            return count;
+        }
+
+        pub fn capacity(self: *const Self) usize {
+            return self.slots.len;
+        }
+
+        fn slotOf(self: *Self, handle: *const anyopaque) Error!*Slot {
+            const base = @intFromPtr(self.slots.ptr);
+            const address = @intFromPtr(handle);
+            if (address < base) return error.UnknownBox;
+            const offset = address - base;
+            if (offset % @sizeOf(Slot) != 0) return error.UnknownBox;
+            const index = offset / @sizeOf(Slot);
+            if (index >= self.slots.len) return error.UnknownBox;
+            const slot = &self.slots[index];
+            if (!slot.live) return error.UnknownBox;
+            return slot;
+        }
+
+        /// Releases a handle through the call that releases it.
+        ///
+        /// Both bad states are out of reach by position: the slot is cleared
+        /// after the call returns without error, so "released but the box is
+        /// still there" cannot happen (the clear follows the success) and
+        /// "the box is gone but nothing was released" cannot either (an early
+        /// return never reaches the clear). A failed release leaves the name
+        /// working, which it must -- the object is still over there and the
+        /// caller may ask again.
+        ///
+        /// Deliberately not "give the slot up first and put it back on
+        /// failure". That was the first version, and it opens a window: while
+        /// the call is in flight the slot is free, so another thread's `open`
+        /// can take it, and the restore would then write this handle's id
+        /// over that one -- two handles naming one slot. Clearing after
+        /// success has no window at all.
+        pub fn releaseThrough(
+            self: *Self,
+            handle: *const anyopaque,
+            comptime Result: type,
+            context: anytype,
+            comptime body: fn (@TypeOf(context), handle_table.Id) Result,
+        ) (Error || @typeInfo(Result).error_union.error_set)!void {
+            const slot = try self.slotOf(handle);
+            // A reserved box names nothing yet, so there is nothing to
+            // release through: `releaseReservation` is that case's own call.
+            if (!slot.id.valid()) return error.UnknownBox;
+            const id = slot.id;
+            _ = try body(context, id);
+            slot.id = .none;
+            slot.live = false;
+        }
+    };
 }
 
 const testing = std.testing;
+
+/// A stand-in for the caller's half. The table only ever carries the pointer
+/// back out, so what it points at does not matter -- that it is typed does.
+const TestLink = struct { tag: u32 = 0 };
+const TestBoxes = Boxes(TestLink);
 
 test "which representation a type gets is read off the type" {
     // A port value carries its own context, so the id rides there.
@@ -305,7 +403,8 @@ test "which representation a type gets is read off the type" {
 }
 
 test "a box is a real pointer into live memory, and a forged one is refused" {
-    var boxes = try Boxes.init(testing.allocator, 2);
+    var link: TestLink = .{ .tag = 9 };
+    var boxes = try TestBoxes.init(testing.allocator, 2, &link);
     defer boxes.deinit();
 
     const first = try boxes.open(.{ .slot = 3, .generation = 1 });
@@ -321,19 +420,24 @@ test "a box is a real pointer into live memory, and a forged one is refused" {
 
     // A pointer this table never issued fails the arithmetic rather than
     // being read as whatever lies at that address.
-    var elsewhere: Boxes.Slot = .{ .id = .{ .slot = 7, .generation = 7 }, .live = true };
+    var elsewhere: TestBoxes.Slot = .{
+        .link = &link,
+        .id = .{ .slot = 7, .generation = 7 },
+        .live = true,
+    };
     try testing.expectError(error.UnknownBox, boxes.borrow(&elsewhere));
     const misaligned: *const anyopaque = @ptrFromInt(@intFromPtr(first) + 1);
     try testing.expectError(error.UnknownBox, boxes.borrow(misaligned));
 }
 
 test "a release clears the box only after it succeeded, with no window" {
-    var boxes = try Boxes.init(testing.allocator, 1);
+    var link: TestLink = .{};
+    var boxes = try TestBoxes.init(testing.allocator, 1, &link);
     defer boxes.deinit();
     const handle = try boxes.open(.{ .slot = 5, .generation = 2 });
 
     const Watcher = struct {
-        boxes: *Boxes,
+        boxes: *TestBoxes,
         seen: ?handle_table.Id = null,
         live_during_call: usize = 0,
 
@@ -352,7 +456,7 @@ test "a release clears the box only after it succeeded, with no window" {
     var watcher: Watcher = .{ .boxes = &boxes };
     try testing.expectError(
         error.Unexpected,
-        releaseThrough(&boxes, handle, anyerror!void, &watcher, Work.refuses),
+        boxes.releaseThrough(handle, anyerror!void, &watcher, Work.refuses),
     );
     // The call saw the id, and the object is still over there, so the name
     // has to keep working.
@@ -366,7 +470,7 @@ test "a release clears the box only after it succeeded, with no window" {
     try testing.expectEqual(@as(usize, 1), watcher.live_during_call);
 
     watcher.seen = null;
-    try releaseThrough(&boxes, handle, anyerror!void, &watcher, Work.accepts);
+    try boxes.releaseThrough(handle, anyerror!void, &watcher, Work.accepts);
     // Released, so the box is gone: there is no state where one happened
     // without the other.
     try testing.expectEqual(@as(u32, 5), watcher.seen.?.slot);
@@ -382,13 +486,83 @@ test "a box keeps no generation, because the id it holds has one" {
     // The stale-handle refusal belongs where the object lives: a box holding
     // a retired id resolves to nothing in the execution half's own table, and
     // duplicating the check here would be a second place for it to drift.
-    try testing.expectEqual(@as(usize, @sizeOf(handle_table.Id) + 1), blk: {
-        break :blk @sizeOf(Boxes.Slot) - (@sizeOf(Boxes.Slot) - @sizeOf(handle_table.Id) - 1);
-    });
-    try testing.expect(!@hasField(Boxes.Slot, "generation"));
+    try testing.expect(!@hasField(TestBoxes.Slot, "generation"));
+
+    var link: TestLink = .{ .tag = 4 };
     const id: handle_table.Id = .{ .slot = 2, .generation = 11 };
-    var boxes = try Boxes.init(testing.allocator, 1);
+    var boxes = try TestBoxes.init(testing.allocator, 1, &link);
     defer boxes.deinit();
     const handle = try boxes.open(id);
     try testing.expectEqual(id.bits(), (try boxes.borrow(handle)).bits());
+
+    // And the way back out is the link that was put in, as itself rather than
+    // as a pointer something else could have written.
+    try testing.expectEqual(&link, try boxes.linkOf(handle));
+    try testing.expectEqual(@as(u32, 4), (try boxes.linkOf(handle)).tag);
+}
+
+test "both representations are carried by one box, differing only in who holds it" {
+    // The point of unifying them: an `in_context` handle's port value holds
+    // the box, a `boxed` handle's pointer is the box, and the record and its
+    // validity check are the same one. So a stale port value is refused by
+    // the same arithmetic that refuses a stale lease pointer, rather than
+    // being a freed allocation nobody can check.
+    var link: TestLink = .{};
+    var boxes = try TestBoxes.init(testing.allocator, 2, &link);
+    defer boxes.deinit();
+
+    const boxed = try boxes.open(.{ .slot = 1, .generation = 1 });
+    const in_context = try boxes.open(.{ .slot = 2, .generation = 1 });
+
+    // Carried as the handle itself.
+    const lease: *@import("agent_catalog").Lease = @ptrCast(boxed);
+    try testing.expectEqual(@as(u32, 1), (try boxes.borrow(lease)).slot);
+
+    // Carried in a port value's own context.
+    const session: port.SessionPort = .{ .context = in_context, .vtable = undefined };
+    try testing.expectEqual(@as(u32, 2), (try boxes.borrow(session.context.?)).slot);
+
+    // One release path, so a released handle of either shape is a refusal.
+    const Releasing = struct {
+        fn ok(_: void, _: handle_table.Id) anyerror!void {}
+    };
+    try boxes.releaseThrough(lease, anyerror!void, {}, Releasing.ok);
+    try testing.expectError(error.UnknownBox, boxes.borrow(lease));
+    try testing.expectEqual(@as(u32, 2), (try boxes.borrow(session.context.?)).slot);
+}
+
+test "a box is taken before the call that names it, not after" {
+    // The mirror of the reservation on the execution half. The failure this
+    // removes: a method whose result names a handle succeeds over there, the
+    // answer arrives, and this half has no box left -- so the object is live
+    // with nothing here able to name or release it. Taking the box first
+    // makes that a refusal before anything irreversible happened.
+    var link: TestLink = .{};
+    var boxes = try TestBoxes.init(testing.allocator, 1, &link);
+    defer boxes.deinit();
+
+    const reserved = try boxes.reserve();
+    // Spent, so a second caller is refused now rather than after its call.
+    try testing.expectError(error.BoxCapacity, boxes.reserve());
+    try testing.expectError(error.BoxCapacity, boxes.open(.{ .slot = 1, .generation = 1 }));
+
+    // It names nothing yet, and says so instead of answering with a zero id
+    // that whoever read it would have to refuse.
+    try testing.expectError(error.UnknownBox, boxes.borrow(reserved));
+    const Releasing = struct {
+        fn ok(_: void, _: handle_table.Id) anyerror!void {}
+    };
+    try testing.expectError(
+        error.UnknownBox,
+        boxes.releaseThrough(reserved, anyerror!void, {}, Releasing.ok),
+    );
+
+    boxes.fill(reserved, .{ .slot = 6, .generation = 2 });
+    try testing.expectEqual(@as(u32, 6), (try boxes.borrow(reserved)).slot);
+
+    // And a call that produced no handle gives the box back.
+    try boxes.releaseThrough(reserved, anyerror!void, {}, Releasing.ok);
+    const again = try boxes.reserve();
+    boxes.releaseReservation(again);
+    try testing.expectEqual(@as(usize, 0), boxes.liveCount());
 }

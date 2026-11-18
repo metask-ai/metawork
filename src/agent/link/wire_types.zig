@@ -60,7 +60,8 @@ pub fn Wire(comptime T: type) type {
         if (T == ?*catalog.Lease or T == *catalog.Lease) return handle_table.Id;
         if (T == ?*const mcp_catalog.Selection or T == *const mcp_catalog.Selection)
             return handle_table.Id;
-        if (T == *const mcp_catalog.RestoreSelection) return handle_table.Id;
+        if (T == *const mcp_catalog.RestoreSelection or T == *mcp_catalog.RestoreSelection)
+            return handle_table.Id;
         if (T == *const mcp_catalog.Activation) return handle_table.Id;
         if (T == *mcp_catalog.Selection) return handle_table.Id;
         if (T == *port.SkillRestoreInputs or T == *const port.SkillRestoreInputs)

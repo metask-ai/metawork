@@ -4,8 +4,8 @@
 //! This is the fourth direction. The execution half rebuilds arguments it was
 //! sent (`adapters.parameterAdapter`) and encodes what the method returned
 //! (`adapters.resultAdapter`); this side encodes the arguments it is called
-//! with and reads the answer back. The four are not symmetric, which is why
-//! each is counted on its own.
+//! with and reads the answer back (`inbound.zig`). The four are not
+//! symmetric, which is why each is counted on its own.
 //!
 //! ## Who owns what comes back
 //!
@@ -38,12 +38,30 @@ const handle_table = @import("handle_table.zig");
 const method = @import("method.zig");
 const payload = @import("payload.zig");
 const pending = @import("pending.zig");
-const shapes = @import("shapes.zig");
 const wire_types = @import("wire_types.zig");
 
 const port = contract.port;
-const surface = contract.surface;
-const control = contract.control;
+
+/// The boxes this half names far objects by, typed to this half.
+pub const Boxes = handle_repr.Boxes(Client);
+
+/// One box: the whole of both handle representations. A `boxed` handle's
+/// pointer is this record's address; an `in_context` handle's port value
+/// carries that address in its own `context`.
+pub const Box = Boxes.Slot;
+
+/// The vtables this half installs in the port values it hands out.
+///
+/// Held as data rather than reached by import, because the stubs are what
+/// fill them and the stubs are what reads the answers back: a direct import
+/// either way round would be a cycle. Passing them in also means a test can
+/// bind a vtable of its own without the stub module in the way.
+pub const Vtables = struct {
+    session: *const port.SessionPort.VTable,
+    run: *const port.RunPort.VTable,
+    run_control: *const port.RunControl.VTable,
+    runtime: *const port.RuntimePort.VTable,
+};
 
 /// The caller's half of one link.
 pub const Client = struct {
@@ -51,22 +69,59 @@ pub const Client = struct {
     allocator: std.mem.Allocator,
     outbound: *channel.Outbound,
     pending: *pending.Table,
-    /// The slots this half names boxed handles by.
-    boxes: *handle_repr.Boxes,
-};
+    boxes: Boxes,
+    vtables: Vtables,
 
-/// What a port value's `context` points at on this side: the link, and the id
-/// the execution half named the object by.
-///
-/// This is the whole of the `in_context` representation. The pointer is a real
-/// pointer to this record, so every check on it means what it says, and the
-/// contract did not have to grow a field.
-pub const Binding = struct {
-    client: *Client,
-    id: handle_table.Id,
+    /// Two-phase, because the boxes carry the way back to the link they
+    /// belong to and that is this value's own address.
+    pub fn init(
+        self: *Client,
+        allocator: std.mem.Allocator,
+        outbound: *channel.Outbound,
+        slots: *pending.Table,
+        vtables: Vtables,
+        box_count: usize,
+    ) std.mem.Allocator.Error!void {
+        self.* = .{
+            .allocator = allocator,
+            .outbound = outbound,
+            .pending = slots,
+            .boxes = undefined,
+            .vtables = vtables,
+        };
+        self.boxes = try Boxes.init(allocator, box_count, self);
+    }
 
-    pub fn of(context: ?*anyopaque) *Binding {
-        return @ptrCast(@alignCast(context.?));
+    pub fn deinit(self: *Client) void {
+        self.boxes.deinit();
+    }
+
+    /// The link a port value belongs to, from the context it carries.
+    ///
+    /// The cast is on trust, and it is worth being exact about what that does
+    /// and does not mean. A stub reached through an `in_context` port value
+    /// receives nothing but the context pointer: there is no second field to
+    /// anchor on, so a pointer this half never issued cannot be detected
+    /// here. That is not a gap the link introduces -- in process the same
+    /// context is an implementation pointer and a wrong one is already
+    /// undefined behaviour, so Product handing back a value it was not given
+    /// is the same bug with the same consequence either way.
+    ///
+    /// What the box *does* buy is the case that is not a Product bug: a
+    /// handle released and then used again. The box is still a box, so the
+    /// read is a read of live memory, and its id has been cleared -- so the
+    /// next step refuses it. One allocation per handle would have made that a
+    /// use-after-free instead.
+    pub fn linkFrom(context: ?*anyopaque) *Client {
+        const box: *Box = @ptrCast(@alignCast(context.?));
+        return box.link;
+    }
+
+    /// The id a port value's context names, checked against this half's own
+    /// table rather than read straight out of the box.
+    pub fn receiverFrom(context: ?*anyopaque) Boxes.Error!handle_table.Id {
+        const box: *Box = @ptrCast(@alignCast(context.?));
+        return box.link.boxes.borrow(box);
     }
 };
 
@@ -89,10 +144,20 @@ pub const CallError = Failure || std.mem.Allocator.Error;
 /// The three failures stay apart for the same reason they do on the reverse
 /// path: "nobody is there" and "not right now" are different facts, and a
 /// diagnostic that merged them would name the wrong cause.
+///
+/// The answer is decoded against a copy of the response bytes taken into
+/// `arena`, not against the transport's own buffer. `payload.decode` borrows
+/// `[]const u8` from the bytes it reads and allocates every other slice in
+/// the allocator it is given, so decoding in place would hand back a value
+/// pointing into a buffer this function frees on the way out -- a value that
+/// reads correctly for as long as nothing else has used that memory, which is
+/// the failure mode this whole change exists to remove. One copy per call
+/// buys a lifetime that is simply the arena's.
 pub fn call(
     comptime owner: method.Owner,
     comptime name: []const u8,
     client: *Client,
+    arena: std.mem.Allocator,
     receiver: handle_table.Id,
     arguments: Arguments(owner, name),
 ) CallError!Answer(owner, name) {
@@ -126,7 +191,8 @@ pub fn call(
         .link_closed => return error.Unreachable,
         .response => |bytes| {
             defer client.pending.allocator.free(bytes);
-            const outcome = envelope.decodeResponse(bytes) catch return error.Unreadable;
+            const held = try arena.dupe(u8, bytes);
+            const outcome = envelope.decodeResponse(held) catch return error.Unreadable;
             return switch (outcome) {
                 .failure => |err| .{ .failed = err },
                 .value => |value| blk: {
@@ -135,7 +201,7 @@ pub fn call(
                         if (value.len != 0) return error.Unreadable;
                         break :blk .{ .returned = {} };
                     }
-                    const decoded = payload.decodeExact(Wired, client.allocator, value) catch
+                    const decoded = payload.decodeExact(Wired, arena, value) catch
                         return error.Unreadable;
                     break :blk .{ .returned = decoded };
                 },
@@ -222,19 +288,62 @@ test "a gone link has an answer in the contract's own set" {
     );
 }
 
-test "a binding is a real pointer to this side's own record" {
-    var client: Client = undefined;
-    var binding: Binding = .{ .client = &client, .id = .{ .slot = 4, .generation = 1 } };
-    const port_value: port.SessionPort = .{ .context = &binding, .vtable = undefined };
-
-    // The whole of the `in_context` representation: the context is ours, so
-    // the id rides there and the pointer is a pointer.
-    try testing.expectEqual(
-        @as(u32, 4),
-        Binding.of(port_value.context).id.slot,
+/// A client with no channel: enough to own boxes and be found through one.
+fn boxedClient(count: usize) !*Client {
+    const self = try testing.allocator.create(Client);
+    try self.init(
+        testing.allocator,
+        undefined,
+        undefined,
+        .{
+            .session = undefined,
+            .run = undefined,
+            .run_control = undefined,
+            .runtime = undefined,
+        },
+        count,
     );
+    return self;
+}
+
+fn releaseClient(self: *Client) void {
+    self.deinit();
+    testing.allocator.destroy(self);
+}
+
+test "a port value's context is a box, and the box is the way back to the link" {
+    const client = try boxedClient(2);
+    defer releaseClient(client);
+
+    const box = try client.boxes.open(.{ .slot = 4, .generation = 1 });
+    const session: port.SessionPort = .{ .context = box, .vtable = client.vtables.session };
+
+    // The pointer is a real pointer to a record of ours, so every check on it
+    // means what it says -- and the id rides there rather than in the
+    // contract, which did not have to grow a field.
+    try testing.expectEqual(client, Client.linkFrom(session.context));
+    try testing.expectEqual(@as(u32, 4), (try Client.receiverFrom(session.context)).slot);
     try testing.expectEqual(
         handle_repr.Representation.in_context,
         handle_repr.representationOf(port.SessionPort).?,
     );
+}
+
+test "a released handle used again is refused, not read" {
+    const client = try boxedClient(1);
+    defer releaseClient(client);
+
+    const box = try client.boxes.open(.{ .slot = 7, .generation = 3 });
+    const session: port.SessionPort = .{ .context = box, .vtable = client.vtables.session };
+
+    const Releasing = struct {
+        fn ok(_: void, _: handle_table.Id) anyerror!void {}
+    };
+    try client.boxes.releaseThrough(box, anyerror!void, {}, Releasing.ok);
+
+    // This is what the box buys over one allocation per handle: the read is
+    // still a read of live memory, so the refusal is a refusal rather than a
+    // use-after-free.
+    try testing.expectEqual(client, Client.linkFrom(session.context));
+    try testing.expectError(error.UnknownBox, Client.receiverFrom(session.context));
 }
