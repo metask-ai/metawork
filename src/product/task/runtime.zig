@@ -8301,12 +8301,17 @@ pub const Runtime = struct {
                         .pending, .outcome_unknown => break,
                         .not_started => if (allowed) adoption: {
                             const previous_epoch = task.durable.binding_epoch;
-                            if (advances_binding and previous_epoch == std.math.maxInt(u64)) {
+                            // The same function the Session was opened
+                            // through, so the epoch it carries and the epoch
+                            // installed here cannot be two different numbers.
+                            const next_epoch = checkpoint_record.installedBindingEpoch(
+                                previous_epoch,
+                                advances_binding,
+                            ) catch {
                                 task.runtime.last_restore_failure = .binding_epoch_exhausted;
                                 install_candidate = false;
                                 break :adoption;
-                            }
-                            const next_epoch = previous_epoch + @as(u64, if (advances_binding) 1 else 0);
+                            };
                             const previous_checkpoint = task.durable.checkpoint;
                             const previous_model = task.durable.execution_model;
                             const previous_protocol = task.durable.execution_protocol;
