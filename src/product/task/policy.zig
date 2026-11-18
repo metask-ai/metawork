@@ -208,22 +208,41 @@ pub const CompactTerminalDecision = struct {
 /// moment it was published, which is the one thing either panic path treats as
 /// a defect of ours.
 ///
-/// Named rather than compared in place, because a comparison is not a switch:
-/// adding a value to `TerminationRequestResult` makes the compiler point at
-/// every exhaustive switch and at neither of those two sites. An undelivered
-/// request in particular must answer false here -- the other half dying is not
-/// a stale control, and crashing over it is the behaviour process isolation
-/// exists to remove.
+/// Both panic sites compare rather than switch, because each sits in the
+/// middle of a long function where an exhaustive switch would read badly. That
+/// is why the question is asked here instead: a predicate that does one thing
+/// can afford the switch, so a value added to the result is named by the
+/// compiler once, in the one place that decides. An undelivered request
+/// answers false -- the other half dying is not a stale control, and crashing
+/// over it is the behaviour process isolation exists to remove.
 pub fn publishedControlStale(result: agent.TerminationRequestResult) bool {
-    return result == .stale_run;
+    return switch (result) {
+        .stale_run => true,
+        .requested,
+        .already_requested,
+        .already_terminal,
+        .session_closing,
+        .dependency_contract,
+        => false,
+    };
 }
 
 /// The same question asked of a dispatch the caller has already mapped. Two
-/// spellings because the two sites hold different types, one definition each
-/// because a bare `==` in the middle of a long function is where the next
-/// value will be forgotten.
+/// spellings because the two sites hold different types, and each exhaustive
+/// for the same reason: concentrating the risk in one predicate is only worth
+/// anything if that predicate is the one the compiler checks.
 pub fn dispatchedControlStale(dispatch: task_state.RunTerminationDispatch) bool {
-    return dispatch == .stale_run;
+    return switch (dispatch) {
+        .stale_run => true,
+        .pending,
+        .requested,
+        .already_requested,
+        .already_finishing,
+        .already_terminal,
+        .session_closing,
+        .dependency_contract,
+        => false,
+    };
 }
 
 pub fn pendingInterruption(

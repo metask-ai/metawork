@@ -36,9 +36,12 @@
 //!   to `error_code.zig`, not here.
 //! - A comparison is not a switch. `if (result == .stale_run)` keeps
 //!   compiling when a variant is added, so a new answer can land nowhere.
-//!   There is exactly one such site in the surface this change touches
-//!   (`src/product/task/execution.zig:293`), and it is covered by a comment
-//!   there because nothing else can cover it.
+//!   Two sites in the surface this change touches compare that way, both of
+//!   them panics, and neither is left to a comment: they ask
+//!   `policy.publishedControlStale` and `policy.dispatchedControlStale`,
+//!   which are exhaustive switches. A predicate that does one thing can
+//!   afford the switch where the long function around the call site cannot,
+//!   so the risk is not merely gathered in one place but checked there.
 //!
 //! ## The three exemption categories, and why each is load-bearing
 //!
