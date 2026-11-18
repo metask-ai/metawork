@@ -367,15 +367,39 @@ pub const Owed = struct {
 
 /// Why a parameter is still owed, which is never "nobody got to it yet".
 pub const Disposition = enum {
-    /// The execution half performs the effect. The dispatcher builds the
-    /// capability from the descriptor when it invokes the method, and nothing
-    /// may keep its backing object past the call -- a per-call allocation the
-    /// far side still points at is a cross-process use-after-free, the worst
-    /// failure available here. That has to be checked where the dispatcher
-    /// is, not promised here.
-    execution_side_effect,
+    /// The execution half performs the effect *during the call*, so its
+    /// backing lives exactly as long as the call and nothing may keep it
+    /// afterwards: a per-call allocation the far side still points at is a
+    /// cross-process use-after-free, the worst failure available here.
+    /// `dispatch.Frame` is for these, and the no-retention rule is checked
+    /// there rather than promised here.
+    ///
+    /// The two checkpoint effects are the ones: Core writes the blob through
+    /// the sink, and reads it through the source, before the call returns.
+    call_scoped_effect,
+    /// The execution half performs the effect, but the Session keeps the
+    /// capability for its current prepared Run rather than using it during
+    /// the call that handed it over.
+    ///
+    /// An earlier version of this file said no backing may outlive its call,
+    /// full stop. That is false for these four and it was the dangerous kind
+    /// of false: retiring their frame when `prepare_run_with_tools` returned
+    /// would leave the Session holding a capability that answers only its
+    /// failure value, so the tool would be permanently unavailable without
+    /// anything crashing or going red.
+    ///
+    /// `session.zig` stores them (`run_delivery`, `run_mcp_installation`,
+    /// `run_image`, `run_video`), uses them while the Run executes, and
+    /// clears them in `clearRunToolsLocked`. There is at most one set per
+    /// Session, asserted there before each store, so the backing is one set
+    /// on the Session's own entry -- not a table keyed by prepared Run, which
+    /// would make "many at once" representable when it is not.
+    run_scoped_capability,
     /// The caller performs the effect, so it is a reverse call and lives in
-    /// `reverse.zig` under its rules.
+    /// `reverse.zig` under its rules. Being the caller's says nothing about
+    /// how long the execution half must hold the means of asking: the
+    /// delivery inspection is asked during the Run, so its bridge is
+    /// Run-scoped as well.
     reverse_call,
     /// Deferred to the MCP step with the rest of the MCP handle surface.
     mcp_step,
@@ -385,18 +409,21 @@ pub const Disposition = enum {
 /// the chain cannot rebuild must appear here, and a type that gains an adapter
 /// must leave. A list that outlives its reason teaches the wrong rule.
 const dispositions = [_]struct { name: []const u8, disposition: Disposition }{
-    .{ .name = @typeName(checkpoint.Sink), .disposition = .execution_side_effect },
+    .{ .name = @typeName(checkpoint.Sink), .disposition = .call_scoped_effect },
     .{
         .name = @typeName(surface.SessionRestoreOptions),
-        .disposition = .execution_side_effect,
+        .disposition = .call_scoped_effect,
     },
     .{
         .name = @typeName(?surface.ImageGenerationRunInput),
-        .disposition = .execution_side_effect,
+        .disposition = .run_scoped_capability,
     },
     .{ .name = @typeName(?contract.FileDeliveryInput), .disposition = .reverse_call },
     .{ .name = @typeName(?contract.McpInstallationInput), .disposition = .reverse_call },
-    .{ .name = @typeName(?contract.VideoGenerationRunInput), .disposition = .execution_side_effect },
+    .{
+        .name = @typeName(?contract.VideoGenerationRunInput),
+        .disposition = .run_scoped_capability,
+    },
     .{ .name = @typeName(*const mcp_catalog.Activation), .disposition = .mcp_step },
     .{ .name = @typeName(*const mcp_catalog.RestoreSelection), .disposition = .mcp_step },
 };
@@ -616,17 +643,22 @@ test "the worklist is what the step still owes, counted by the compiler" {
     // is not where to put a capability but that nothing keeps its backing
     // object past the call.
     var reverse: usize = 0;
-    var ours: usize = 0;
+    var call_scoped: usize = 0;
+    var run_scoped: usize = 0;
     var mcp: usize = 0;
     for (owed) |entry| switch (entry.disposition) {
         .reverse_call => reverse += 1,
-        .execution_side_effect => ours += 1,
+        .call_scoped_effect => call_scoped += 1,
+        .run_scoped_capability => run_scoped += 1,
         .mcp_step => mcp += 1,
     };
-    // The delivery inspection and the MCP installation are the caller's; the
-    // checkpoint pair and the image and video bindings are this half's.
+    // The delivery inspection and the MCP installation are the caller's. Of
+    // this half's own, the two checkpoint effects are used during their call
+    // and the image and video bindings are kept for the Run -- which is the
+    // distinction a single "execution side effect" was hiding.
     try testing.expectEqual(@as(usize, 2), reverse);
-    try testing.expectEqual(@as(usize, 4), ours);
+    try testing.expectEqual(@as(usize, 2), call_scoped);
+    try testing.expectEqual(@as(usize, 2), run_scoped);
     try testing.expectEqual(@as(usize, 3), mcp);
 }
 
@@ -899,7 +931,17 @@ pub const Reclaim = struct {
     bound_to: enum {
         /// Ends when the Session closes, or when the link does.
         session,
-        /// Ends when the Run reaches its terminal, or when the link does.
+        /// Ends when this Run's life ends by any means, or when the link
+        /// does.
+        ///
+        /// Deliberately not "reaches its terminal", which is what this said
+        /// before and is narrower than the truth. A Run prepared and never
+        /// executed ends too: `session.zig` clears a prepared Run's tools
+        /// from five places -- a begin that refused, a cancel, the Session
+        /// closing, an identity contract failure, and the terminal itself.
+        /// Binding to the terminal would leave the other four holding
+        /// capacity for something that never happened, which is the shape
+        /// this change has already hit twice.
         run,
         /// Held by the caller between two of its own calls. Nothing but its
         /// release or the link bounds it, which is why these are the entries
