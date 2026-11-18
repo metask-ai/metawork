@@ -4805,9 +4805,11 @@ pub const Runtime = struct {
         if (std.mem.allEqual(u8, &output_id, 0)) return null;
         const task = self.findConst(task_id) orelse return null;
         if (task.deletion != .idle) return null;
-        const run = task_state.findRun(task.durable.runs, run_id) orelse return null;
-        for (run.outputs) |entry| {
-            const output = entry orelse continue;
+        const run = task_state.findRunConst(task.durable.runs, run_id) orelse return null;
+        if (!task_policy.runProjected(task, run)) return null;
+        for (&run.outputs) |*entry| {
+            const delivered = &(entry.* orelse continue);
+            const output = task_policy.conversationOutput(task, delivered);
             if (!std.mem.eql(u8, &output.id, &output_id)) continue;
             return .{
                 .workspace_id = task.durable.workspace_id,
@@ -6895,6 +6897,7 @@ pub const Runtime = struct {
             try task_view.writeRun(
                 writer,
                 effects.text,
+                task,
                 run,
                 task_state.runProjectionFacts(run),
                 task_view.resendAdmitted(task, shutting_down),

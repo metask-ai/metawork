@@ -114,7 +114,7 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 
 `output`、`activity`、`tools` 与 `context` 只定义 Renderer 可消费的产品事实和 fail-closed 边界，不规定最终组件、布局、展开策略或更新节奏。当前 Agent 对话的 owner 链、Run exchange 槽位与 active→terminal 呈现收口由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；wire 字段存在、scripted Provider vertical 或静态 DOM 通过都不能替代真实 Provider cadence 与长任务阅读体验的独立验收。后续纯呈现调整仍可在不改变 revision 1 wire 语义的前提下进行。
 
-每个 Run 另精确发布必需的 `outputs` 数组，最多八项；每项精确为 `{ id, displayPath, sizeBytes, redacted }`。id 是非零、32 位小写十六进制的 opaque 成果身份，在 owning Task/Run 内唯一；sizeBytes 是可为零的 canonical decimal `u64` string。displayPath 只包含用于展示及下述普通指令引用的相对文本，必须是容量不超过 512 UTF-8 bytes 的 Workspace 相对路径，不能包含路径逃逸、绝对路径或控制字符；redacted 为 true 时必须为空。Host 还须在投影时防御性检查已知 credential，不能因旧 redacted flag 不一致而泄露路径。协议不运输 locator authority、摘要或组件路径，Renderer 不从 Tool 文本构建成果。`capabilities.typedOutputs` 表示可信交付记录的呈现能力；记录不证明当前文件可用，文件动作须按自己的 Host 授权与内容校验收口。该字段与严格 decoder、scoped/history Run projection 和 fixture 在 revision 1 原位同步替换，不接纳缺失字段的旧 wire。
+每个 Run 另精确发布必需的 `outputs` 数组，最多八项；每项精确为 `{ id, displayPath, sizeBytes, redacted }`。id 是非零、32 位小写十六进制的 opaque Task 成果身份，同一成果可由多个可见 Run 引用，同一 Run 内只发布一次；sizeBytes 是可为零的 canonical decimal `u64` string。displayPath 只包含用于展示及下述普通指令引用的相对文本，必须是容量不超过 512 UTF-8 bytes 的 Workspace 相对路径，不能包含路径逃逸、绝对路径或控制字符；redacted 为 true 时必须为空。Host 还须在投影时防御性检查已知 credential，不能因旧 redacted flag 不一致而泄露路径。协议不运输 locator authority、摘要或组件路径，Renderer 不从 Tool 文本构建成果。`capabilities.typedOutputs` 表示可信交付记录的呈现能力；记录不证明当前文件可用，文件动作须按自己的 Host 授权与内容校验收口。该字段与严格 decoder、scoped/history Run projection 和 fixture 在 revision 1 原位同步替换，不接纳缺失字段的旧 wire。
 
 ## Delivered file actions
 

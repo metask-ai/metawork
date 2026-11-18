@@ -876,6 +876,19 @@ pub fn runProjected(task: *const task_state.Task, run: *const task_state.RunReco
     return !runSuperseded(task, run);
 }
 
+/// Runs retain the evidence for a delivery. The first visible registration
+/// supplies the identity of the file in the conversation.
+pub fn conversationOutput(task: *const task_state.Task, delivered: *const task_state.OutputRecord) *const task_state.OutputRecord {
+    if (delivered.redacted or delivered.locator.len == 0) return delivered;
+    for (task.durable.runs) |*entry| if (entry.*) |*run| {
+        if (!runProjected(task, run)) continue;
+        for (&run.outputs) |*slot| if (slot.*) |*output| {
+            if (!output.redacted and std.mem.eql(u8, output.locator, delivered.locator)) return output;
+        };
+    };
+    return delivered;
+}
+
 pub const EditUnavailable = enum {
     /// No position was ever recorded for this Run: history written before
     /// #114, or a submission that could not read the Conversation. Product
@@ -1499,6 +1512,18 @@ test "a rewind leaves its turns in history and out of the Conversation" {
         EditUnavailable.no_position,
         editablePosition(&task, &task.durable.runs[0].?).unavailable,
     );
+}
+
+test "conversation output identity survives different delivery bytes and follows Run visibility" {
+    var runs = [_]?task_state.RunRecord{ terminalRun(1, .covered), terminalRun(2, .covered) };
+    runs[0].?.outputs[0] = .{ .id = @splat(1), .locator = @constCast("report.xlsx"), .size_bytes = 11, .sha256 = @splat(11) };
+    runs[1].?.outputs[0] = .{ .id = @splat(2), .locator = @constCast("report.xlsx"), .size_bytes = 22, .sha256 = @splat(22) };
+    var task: task_state.Task = undefined;
+    task.durable.runs = &runs;
+
+    try std.testing.expectEqual(@as([16]u8, @splat(1)), conversationOutput(&task, &runs[1].?.outputs[0].?).id);
+    runs[0].?.superseded_by_run_id = 2;
+    try std.testing.expectEqual(@as([16]u8, @splat(2)), conversationOutput(&task, &runs[1].?.outputs[0].?).id);
 }
 
 test "approval checkpoint survives a later Task model change but keeps revision and frontier exact" {
