@@ -217,11 +217,19 @@ pub const exemptions = [_]Exemption{
         .owner = .runtime,
         .name = "has_pending_events",
         .category = .restrictive_default,
-        .consumer = "src/product/control/runtime.zig:7354 shutdown event barrier",
-        .reason = "false is what ends the shutdown barrier loop; true would hang shutdown " ++
-            "forever waiting for an event that cannot arrive. What a gone link takes with " ++
-            "it is not this answer but the drain status, which is pending_event_count's " ++
-            "subject.",
+        .consumer = "src/product/control/runtime.zig shutdownExecutor's barrier and " ++
+            "drainAgentEvents' re-arm",
+        .reason = "The fact this rests on is what the caller does next, and it is the line " ++
+            "after the barrier: shutdownExecutor follows the loop with " ++
+            "excludePendingConversationTailAfterShutdown, which marks a Run's pending " ++
+            "coverage excluded. The shutdown path answers \"nothing pending\" by throwing " ++
+            "the tail away, not by sealing it, so a false that is wrong costs nothing it " ++
+            "was not already giving up. That is the whole difference from " ++
+            "pending_event_count, where the same words make Product commit the tail as " ++
+            "complete -- one sentence, opposite consequences, which is why one of them can " ++
+            "be exempt and the other cannot. The other consumer only declines to re-arm " ++
+            "the notifier, which is harmless. Liveness agrees but is not the reason: true " ++
+            "would hang shutdown on an event that cannot arrive.",
     },
 };
 
@@ -268,14 +276,22 @@ pub const pending = [_]Pending{
     .{
         .owner = .runtime,
         .name = "pending_event_count",
-        .lands = "Zero reads as fully drained at the EventDrainStatus in " ++
-            "src/product/task/runtime.zig, which is what lets Product commit a Run's " ++
-            "final output suffix. A gone link cannot be distinguished from a drained one, " ++
-            "so a truncated conversation would be committed as complete. Unlike the three " ++
-            "above this method does not cross -- the UI-side pump answers it from frames " ++
-            "that already arrived -- but its answer is still a claim about a link that may " ++
-            "be gone.",
-        .step = "disconnect closure (premise eight, docs/plans/execution-process-isolation.md)",
+        .lands = "Zero reads as fully drained by both consumers of EventDrainStatus -- " ++
+            "settleTerminalOutputAfterEventDrain and " ++
+            "finalizeMarkedTerminalRunsAfterEventDrain in src/product/task/runtime.zig " ++
+            "both skip a route whose pending count is non-zero and otherwise go on to " ++
+            "seal the Run's final output. A truncated conversation is therefore committed " ++
+            "as a complete one. That this method does not cross makes it worse rather " ++
+            "than better: a call that crosses can fail, and its failure is visible, while " ++
+            "a count computed from frames already in hand always succeeds and so cannot " ++
+            "be told apart from a real drain by construction. Its fix is not this rule's " ++
+            "usual one either. The pump knows how many frames it holds, so \"I cannot " ++
+            "tell\" is never its honest answer and an optional would add a branch nobody " ++
+            "takes while leaving zero-is-not-end-of-stream exactly where it is. What is " ++
+            "missing is a second proposition -- the stream has ended -- stated by the side " ++
+            "that can know it, with those two call sites gated on that instead of on a " ++
+            "count reaching zero.",
+        .step = "disconnect closure",
     },
 };
 
