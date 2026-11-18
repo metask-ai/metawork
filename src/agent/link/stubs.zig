@@ -206,13 +206,19 @@ const not_forwarded = [_]NotForwarded{
         .why = "its sink is a byte callback, same as the restore source above",
     },
 
-    // The ten below are the execution half's side, and they are here because
-    // `forwardable` now spans both halves. Each one's result puts a handle
-    // *into* a table over there, which `adapters.resultAdapter` leaves to the
-    // path that carries a reservation into the result encoding --
-    // `adapters.named_handles` classifies every one of them. The caller's
+    // The entries below are the execution half's side, and they are here
+    // because `forwardable` spans both halves. Each one's result puts a
+    // handle *into* a table over there, which `adapters.resultAdapter`
+    // leaves to the path that carries a reservation into the result encoding
+    // -- `adapters.named_handles` classifies every one of them. The caller's
     // half can send the call and read the answer; nothing yet writes the
     // answer.
+    //
+    // How many there are is not written here. The previous version said
+    // "the ten below" above nine entries, in the commit that was about a
+    // hand-counted number claiming something the build did not do, which is
+    // the same mistake one line further down. `execSideGaps` counts the list
+    // instead, and a test reads it.
     .{
         .owner = .runtime,
         .name = "create_session_route",
@@ -284,6 +290,28 @@ fn forwardable(comptime owner: method.Owner, comptime name: []const u8) bool {
     return outbound.sendable(owner, name) and
         inbound.readable(owner, name) and
         dispatch.dispatchable(owner, name);
+}
+
+/// How many entries on the list are the execution half's, read off the list.
+///
+/// Counted rather than written in the comment above it. The first version of
+/// that comment said "the ten below" over nine entries, inside the commit
+/// about a hand-counted number claiming something the build did not do.
+fn execSideGaps() usize {
+    comptime {
+        var count: usize = 0;
+        for (not_forwarded) |entry| {
+            const blocked_there = switch (entry.owner) {
+                inline else => |owner| !dispatch.dispatchable(owner, entry.name),
+            };
+            const fine_here = switch (entry.owner) {
+                inline else => |owner| outbound.sendable(owner, entry.name) and
+                    inbound.readable(owner, entry.name),
+            };
+            if (blocked_there and fine_here) count += 1;
+        }
+        return count;
+    }
 }
 
 fn listedNotForwarded(comptime owner: method.Owner, comptime name: []const u8) bool {
@@ -1409,4 +1437,20 @@ test "how much of the surface this build answers end to end, counted across both
     try testing.expectEqual(exec_gap, 50 - end_to_end);
     try testing.expect(caller_gap <= exec_gap);
     try testing.expectEqual(@as(usize, 37), comptime dispatch.dispatchableCount());
+}
+
+test "the list says how many of its entries belong to which half" {
+    @setEvalBranchQuota(10_000_000);
+    // Read off the list rather than written above it. The entry this
+    // replaces said "the ten below" over nine of them, in the commit about a
+    // hand-counted number -- so the number lives here, where it is computed.
+    const exec_only = comptime execSideGaps();
+    try testing.expect(exec_only > 0);
+    try testing.expect(exec_only < not_forwarded.len);
+
+    // The rest are ones this half cannot send or read either, which is the
+    // only other way to be on the list.
+    try testing.expectEqual(@as(usize, 13), not_forwarded.len);
+    try testing.expectEqual(@as(usize, 9), exec_only);
+    try testing.expectEqual(@as(usize, 4), not_forwarded.len - exec_only);
 }
