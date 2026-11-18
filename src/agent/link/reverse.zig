@@ -318,6 +318,27 @@ pub fn Answerer(comptime call: Call, comptime Context: type) type {
     }
 }
 
+fn carriesSlice(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => |info| info.size == .slice,
+        .optional => |info| carriesSlice(info.child),
+        .array => |info| carriesSlice(info.child),
+        .@"struct" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (carriesSlice(field.type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .@"union" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (carriesSlice(field.type)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
 /// The answer when the caller cannot be reached at all. A reverse call must
 /// have one, or the execution half would have to wait for a peer that is gone.
 pub fn unreachableAnswer(comptime call: Call) Response(call) {
@@ -392,13 +413,19 @@ pub fn busyAnswer(comptime call: Call) Response(call) {
 pub fn perform(
     comptime call: Call,
     caller: *Caller,
-    arena: std.mem.Allocator,
+    allocator: std.mem.Allocator,
     request: Request(call),
 ) std.mem.Allocator.Error!Response(call) {
-    const body = try payload.encodeAlloc(Request(call), arena, request);
-    const framed = try arena.alloc(u8, header_bytes + body.len);
+    // One allocation, freed here. Not an arena: a Run can ask several times,
+    // and a bridge that held every request's bytes until the Run ended would
+    // be a leak paced by how much the model delivers.
+    const framed = try allocator.alloc(
+        u8,
+        header_bytes + payload.encodedSize(Request(call), request),
+    );
+    defer allocator.free(framed);
     encodeHeader(framed[0..header_bytes], call);
-    @memcpy(framed[header_bytes..], body);
+    _ = payload.encode(Request(call), request, framed[header_bytes..]);
 
     const correlation = caller.pending.open() catch return busyAnswer(call);
     switch (try caller.outbound.trySubmit(.ui_request, correlation, framed)) {
@@ -422,7 +449,11 @@ pub fn perform(
         .response => |bytes| {
             defer caller.pending.allocator.free(bytes);
             const Wire = wire_types.Wire(Response(call));
-            const decoded = payload.decodeExact(Wire, arena, bytes) catch
+            // Both answers are plain data with no slices, so decoding
+            // allocates nothing; if one ever carries a slice this needs an
+            // arena rather than the allocator the temporaries used.
+            comptime std.debug.assert(!carriesSlice(Wire));
+            const decoded = payload.decodeExact(Wire, allocator, bytes) catch
                 return unreachableAnswer(call);
             return decoded;
         },

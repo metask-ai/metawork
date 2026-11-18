@@ -30,6 +30,8 @@
 const std = @import("std");
 const contract = @import("agent_contract");
 const call_frame = @import("call_frame.zig");
+const channel = @import("channel.zig");
+const pending = @import("pending.zig");
 const reverse = @import("reverse.zig");
 
 const port = contract.port;
@@ -258,3 +260,127 @@ test "a retired bridge answers the capability's own failure, not stale memory" {
 }
 
 var dead_flag = std.atomic.Value(bool).init(false);
+
+// ---------------------------------------------------------------------------
+// What the bridge leaves behind
+// ---------------------------------------------------------------------------
+//
+// The dispatcher's refusals already each have a test asserting the tables are
+// as they were. This is the same discipline on the reverse path, which is
+// where it matters for a different reason: a correlation held for an answer
+// that cannot come is capacity spent on something that never happened, and
+// that shows up only when the table fills.
+
+const Link = struct {
+    io: std.Io,
+    slots: pending.Table = undefined,
+    outbound: channel.Outbound = undefined,
+    tmp: std.testing.TmpDir,
+    file: std.Io.File,
+
+    fn init(limits: channel.Limits) !*Link {
+        const io = testing.io;
+        const self = try testing.allocator.create(Link);
+        self.* = .{ .io = io, .tmp = std.testing.tmpDir(.{}), .file = undefined };
+        self.file = try self.tmp.dir.createFile(io, "link", .{ .truncate = true });
+        try self.slots.init(io, testing.allocator, 4);
+        try self.outbound.start(io, testing.allocator, self.file, limits);
+        return self;
+    }
+
+    fn deinit(self: *Link) void {
+        self.outbound.stop();
+        self.slots.close();
+        self.slots.deinit();
+        self.file.close(self.io);
+        self.tmp.cleanup();
+        testing.allocator.destroy(self);
+    }
+
+    fn caller(self: *Link) reverse.Caller {
+        return .{ .outbound = &self.outbound, .pending = &self.slots };
+    }
+
+    fn quiet(self: *Link) bool {
+        return self.slots.liveCount() == 0 and self.slots.unsettledCount() == 0;
+    }
+};
+
+fn bridgeOver(link: *Link, caller: *reverse.Caller) DeliveryBridge.Backing {
+    caller.* = link.caller();
+    return DeliveryBridge.Backing.init(.{
+        .caller = caller,
+        .allocator = testing.allocator,
+        .task_id = 5,
+        .run_id = 6,
+        .generation = 7,
+    });
+}
+
+test "a caller that cannot take the request leaves the bridge holding nothing" {
+    // A byte budget nothing fits in, so the submit is refused after the slot
+    // was opened -- the shape that would leak one per attempt.
+    var link = try Link.init(.{ .data_bytes = 1 });
+    defer link.deinit();
+    var caller: reverse.Caller = undefined;
+    var backing = bridgeOver(link, &caller);
+    const capability = DeliveryBridge.input(&backing);
+
+    const answer = capability.inspect_fn(capability.context, "out/a.pdf", &dead_flag);
+    try testing.expectEqual(contract.FileDeliveryFailure.capacity, answer.failed);
+    try testing.expect(link.quiet());
+
+    // And repeating it cannot exhaust the four slots.
+    var index: usize = 0;
+    while (index < 16) : (index += 1) {
+        _ = capability.inspect_fn(capability.context, "out/a.pdf", &dead_flag);
+    }
+    try testing.expect(link.quiet());
+    backing.retire();
+}
+
+test "a link that is gone answers unavailable and leaves the bridge holding nothing" {
+    var link = try Link.init(.{});
+    defer link.deinit();
+    link.outbound.stop();
+    var caller: reverse.Caller = undefined;
+    var backing = bridgeOver(link, &caller);
+    const capability = DeliveryBridge.input(&backing);
+
+    // Not `capacity`: "there is nobody" and "try later" stay apart all the
+    // way out to the receipt.
+    const answer = capability.inspect_fn(capability.context, "out/a.pdf", &dead_flag);
+    try testing.expectEqual(contract.FileDeliveryFailure.unavailable, answer.failed);
+    try testing.expect(link.quiet());
+    backing.retire();
+}
+
+test "an answer this build cannot read is not a verification" {
+    var link = try Link.init(.{});
+    defer link.deinit();
+    var caller: reverse.Caller = undefined;
+    var backing = bridgeOver(link, &caller);
+    const capability = DeliveryBridge.input(&backing);
+
+    const Answering = struct {
+        fn run(slots: *pending.Table, ready: *std.atomic.Value(bool)) void {
+            // Wait for the request's slot, then answer it with bytes no
+            // version of this build encodes. Correlations start at one.
+            while (slots.liveCount() == 0) {}
+            const bytes = slots.allocator.alloc(u8, 3) catch return;
+            @memset(bytes, 0xAA);
+            slots.deposit(1, bytes);
+            ready.store(true, .release);
+        }
+    };
+    var ready = std.atomic.Value(bool).init(false);
+    var thread = try std.Thread.spawn(.{}, Answering.run, .{ &link.slots, &ready });
+    defer thread.join();
+
+    const answer = capability.inspect_fn(capability.context, "out/a.pdf", &dead_flag);
+    // A malformed answer is the far side not speaking this protocol, so it is
+    // the fail-closed side rather than a receipt nobody can account for.
+    try testing.expectEqual(contract.FileDeliveryFailure.unavailable, answer.failed);
+    try testing.expect(link.quiet());
+    backing.retire();
+}
