@@ -61,10 +61,20 @@ pub const fake_core_flag = "--fake-core";
 /// of the flush.
 pub const no_drain_flag = "--no-event-drain";
 
+/// Holds every Run until something stops it, with one pool thread.
+///
+/// Both halves of what makes the thread split observable. The Run is held, so
+/// a `.worker` request is genuinely outstanding; and the pool has exactly one
+/// thread, so under a single shared pool that one request would occupy all of
+/// it and the Stop meant to end it could never be answered. With the split,
+/// the blocking request is on a thread of its own and the pool is free.
+pub const hold_runs_flag = "--hold-runs";
+
 const Composer = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     fake_core: bool,
+    hold_runs: bool,
 
     fn factory(self: *Composer) execution_half.RuntimeFactory {
         return .{ .context = self, .create_fn = create, .destroy_fn = destroy };
@@ -82,7 +92,12 @@ const Composer = struct {
         // One event before the terminal, which is what makes the ordering
         // rule observable from the other side: a terminal that arrived first
         // would read as a complete conversation with nothing in it.
-        fake.fake_core.setNextPlan(.event_callback);
+        fake.fake_core.setNextPlan(if (self.hold_runs) .controlled else .event_callback);
+        // A held Run has to *say* it started, or the other half cannot tell
+        // "the request is outstanding" from "the far side is inside it" --
+        // and only the second one is the condition a Stop has to survive.
+        // This makes the fake emit a `run_state` the moment the Run begins.
+        if (self.hold_runs) fake.fake_core.input_enabled = true;
         return agent.Runtime.initWithApi(
             self.io,
             self.allocator,
@@ -117,6 +132,7 @@ pub fn main(init: std.process.Init) !void {
         .io = init.io,
         .allocator = init.gpa,
         .fake_core = requested(init.minimal.args, init.gpa, fake_core_flag),
+        .hold_runs = requested(init.minimal.args, init.gpa, hold_runs_flag),
     };
     const exit = execution_half.run(init.io, init.gpa, .{
         .identity = .{
@@ -147,6 +163,7 @@ pub fn main(init: std.process.Init) !void {
             null,
         .tables = .{ .sessions = 2, .runs = 2 },
         .drain_events = !requested(init.minimal.args, init.gpa, no_drain_flag),
+        .workers = if (requested(init.minimal.args, init.gpa, hold_runs_flag)) 1 else 4,
     });
     if (requested(init.minimal.args, init.gpa, wedge_flag)) {
         // The same wait `Host.stop` uses for its own grace period, for the

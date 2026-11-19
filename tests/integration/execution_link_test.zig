@@ -10,6 +10,7 @@
 const std = @import("std");
 
 const agent = @import("metawork_agent");
+const contract = @import("metawork_agent_contract");
 const execution_host = @import("app_execution_host");
 const execution_link = @import("app_execution_link");
 const execution_link_fixture = @import("execution_link_fixture");
@@ -426,6 +427,142 @@ test "a Run executes in the other process, and its event arrives before its term
     try std.testing.expectEqual(agent_link.client.LinkFault.none, supervisor.fault());
 
     _ = supervisor.stop();
+}
+
+/// Executes a Run on a thread of its own, so the test can drive the link
+/// while that call is outstanding -- which is the whole condition under test.
+const Executing = struct {
+    run: *contract.RunPort,
+    done: std.Io.Event = .unset,
+    signal: ?agent.TerminationSignal = null,
+    reached: bool = false,
+
+    fn main(self: *Executing) void {
+        const terminal = self.run.execute();
+        self.signal = terminal.termination_signal;
+        self.reached = true;
+        self.done.set(io);
+    }
+};
+
+test "a Stop is answered while a Run is still executing in the other process" {
+    // The deadlock the thread split prevents. `execute` blocks until its Run
+    // reaches a terminal, and the Stop that ends it is an ordinary request on
+    // the execution side -- so under one shared pool the Run occupies a
+    // thread and the Stop queues behind the very call it is meant to end.
+    // Product runs sixteen workers and each can be inside `execute`, so four
+    // Runs were enough.
+    //
+    // The fixture runs with a single pool thread and holds every Run, which
+    // makes one Run enough to prove it: with the split the blocking request
+    // is on its own thread and the pool is free, and without it this test
+    // does not return at all.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var workspace = std.testing.tmpDir(.{});
+    defer workspace.cleanup();
+    const root = try workspace.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+
+    var wake: Wake = .{};
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .spawn = .{ .explicit = &.{
+            fixture,
+            execution_link_fixture.runtime_flag,
+            execution_link_fixture.fake_core_flag,
+            execution_link_fixture.hold_runs_flag,
+        } },
+        .wake = wake.notifier(),
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer supervisor.deinit();
+
+    const runtime = supervisor.runtimePort();
+    const route = try runtime.createSessionRoute(.{
+        .task_id = 42,
+        .binding_epoch = 1,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "provider",
+                .protocol = .anthropic_messages,
+                .base_url = "https://example.invalid",
+                .model = "model",
+            },
+            .credential = "secret",
+        },
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{ .canonical_root = root, .trust = .{ .temporary = root } },
+        .canonical_user_home = root,
+        .workspace_epoch = "epoch",
+    });
+    const session = route.session;
+
+    const run_id = try session.prepareRun(.{ .text = "hold" });
+    var begun = switch (session.beginRunOutcome(run_id)) {
+        .run => |value| value,
+        .failure => |value| {
+            std.debug.print("begin across the link: {any}\n", .{value.err});
+            return error.BeginRefused;
+        },
+    };
+
+    var executing: Executing = .{ .run = &begun };
+    var thread = try std.Thread.spawn(.{}, Executing.main, .{&executing});
+
+    // Wait until the Run has *started* over there, not merely until its
+    // request was sent. Without this the Stop usually goes out first and the
+    // test proves nothing: a Stop that arrives before `execute` is answered
+    // by a free thread whatever the design. The held Run announces itself
+    // with a `run_state` event, and that event arriving is the proof that the
+    // far side is inside `execute` with the call outstanding.
+    while (!runtime.hasPendingEvents()) {}
+
+    // The Stop travels on the control transport, which is what lets it
+    // overtake queued fragments -- and it has to be *answered*, which is what
+    // needs a thread that is not the one inside `execute`.
+    try runtime.requestRunTermination(
+        run_id,
+        begun.generation,
+        .{ .interrupted = .user_cancel },
+    );
+
+    // Answered, so the Run ends: the far side's abort releases the held Run
+    // and `execute` returns on its own thread.
+    executing.done.wait(io) catch |err| return err;
+    thread.join();
+    begun.deinit();
+
+    // The terminal carries the interruption, and that is what makes this a
+    // test of the split rather than of a Run that happened to finish before
+    // the Stop arrived: a Run nobody stopped reaches its terminal with no
+    // signal at all. So this assertion says three things at once -- the Run
+    // was still running, the Stop was delivered while it was, and answering
+    // it is what ended the Run.
+    try std.testing.expect(executing.reached);
+    const signal = executing.signal orelse return error.RunWasNotStopped;
+    try std.testing.expectEqual(
+        agent.ExternalInterruption.user_cancel,
+        signal.interrupted,
+    );
+
+    try std.testing.expectEqual(agent_link.client.LinkFault.none, supervisor.fault());
+
+    // The Session is still open and the Run still named, which is the state a
+    // UI that exited mid-Run leaves -- and the child has to *exit* on it
+    // rather than trip an assertion on the way out. Its status is the whole
+    // assertion: a panicking child is how this test passed while proving
+    // nothing, before the status was checked.
+    try std.testing.expectEqual(
+        execution_host.Stopped{ .exited = @intFromEnum(execution_mode.Exit.link_closed) },
+        supervisor.stop(),
+    );
 }
 
 test "a start that refuses leaves no child running and nothing allocated" {

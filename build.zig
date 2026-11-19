@@ -734,6 +734,7 @@ pub fn build(b: *std.Build) void {
     execution_link_module.addImport("app_fault", test_modules.app_fault);
     execution_link_module.addImport("app_execution_link", test_modules.app_execution_link);
     execution_link_module.addImport("metawork_agent", test_modules.agent);
+    execution_link_module.addImport("metawork_agent_contract", test_modules.agent_contract);
     execution_link_module.addImport("execution_link_fixture", execution_link_fixture_module);
     const execution_link_tests_run = b.addRunArtifact(b.addTest(.{
         .name = "metawork-execution-link",

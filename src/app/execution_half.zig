@@ -175,6 +175,37 @@ const Queued = struct {
     payload: []u8,
 };
 
+/// What an entry's end means when the caller is gone.
+///
+/// One method per table kind, chosen by the type the table holds rather than
+/// by a name: a `HeldSession` carries the Run tool capabilities its Session's
+/// Runs were given, and a `BegunRun` carries references this half took on
+/// that Session. Both have to be given up before the objects they point at
+/// are, and both are this half's memory, which `adapters.reclamation` is the
+/// record of.
+///
+/// Everything else in those tables is a pointer the Runtime owns and only
+/// lent out, so dropping the name is the whole of what is owed: the Runtime
+/// is destroyed immediately after this and takes them with it.
+const Releaser = struct {
+    half: *Answering,
+
+    pub fn release(self: Releaser, comptime Held: type, value: *Held) void {
+        if (Held == adapters.BegunRun) {
+            // Every reference the caller never gave back. The count is the
+            // one `BegunRun` keeps, which is why it has to be kept.
+            _ = value.releaseOutstanding();
+            self.half.allocator.destroy(value);
+            return;
+        }
+        if (Held == agent_link.run_tools.HeldSession) {
+            value.retireAll();
+            self.half.allocator.destroy(value);
+            return;
+        }
+    }
+};
+
 /// One blocking request and the thread answering it.
 ///
 /// The slot outlives the thread so the thread can be joined later: a thread
@@ -280,6 +311,15 @@ const Answering = struct {
         // the queue those threads are waiting on would be a use-after-free
         // with a race in front of it.
         Answering.end(self);
+        // Then every entry the caller never released, because it can no
+        // longer ask. `handle_table.Table.deinit` asserts an empty table, so
+        // without this a link that ended with a Session still open -- a UI
+        // that exited mid-Run, which is the case the isolation is *for* --
+        // panicked this half on its way out instead of exiting.
+        //
+        // `adapters.drainEverything` is what decides what that means per
+        // table, and this is its first caller outside a test.
+        _ = adapters.drainEverything(self.bindings(), Releaser{ .half = self });
         self.factory.destroy_fn(self.factory.context, self.runtime);
         self.tables.deinit();
         self.allocator.free(self.workers);
