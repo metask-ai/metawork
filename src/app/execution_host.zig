@@ -200,10 +200,24 @@ pub const Host = struct {
         self.reaped.set(self.io);
     }
 
+    /// Whoever else is reading this link, given the one window in which it
+    /// can be wound down safely.
+    ///
+    /// A reader thread on `from_child` ends when the child's output closes,
+    /// and the child's output closes because its input did. So the window is
+    /// after `to_child` is closed and before `from_child` is: the read is
+    /// about to end on its own, and the handle it is blocked on is still
+    /// open. Closing that handle under a pending read is the race this
+    /// exists to remove.
+    pub const Quiesce = struct {
+        context: ?*anyopaque,
+        settle_fn: *const fn (?*anyopaque) void,
+    };
+
     /// Stops accepting, lets the child see end-of-stream, and waits out the
     /// grace period before killing it. Killing is the bound, not the plan: a
     /// forced exit is what the design reserves for a wedged child.
-    pub fn stop(self: *Host) Stopped {
+    pub fn stop(self: *Host, quiesce: ?Quiesce) Stopped {
         if (self.stopped) return .gone;
         self.stopped = true;
         // Best effort: a child that has already gone makes this fail, and that
@@ -211,6 +225,7 @@ pub const Host = struct {
         _ = self.outbound.trySubmit(.goodbye, 0, &.{}) catch {};
         self.outbound.stop();
         self.to_child.close(self.io);
+        if (quiesce) |settle| settle.settle_fn(settle.context);
 
         const graceful = if (self.reaper == null) false else blk: {
             self.reaped.waitTimeout(self.io, .{ .duration = .{
@@ -232,7 +247,7 @@ pub const Host = struct {
     }
 
     pub fn deinit(self: *Host) void {
-        if (!self.stopped) _ = self.stop();
+        if (!self.stopped) _ = self.stop(null);
         self.allocator.free(self.read_buffer);
         self.* = undefined;
     }

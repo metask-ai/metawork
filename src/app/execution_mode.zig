@@ -6,10 +6,11 @@
 //! far as `runWithOptions` has a WebView, and the execution half must never
 //! have one.
 //!
-//! What it does today is the link and nothing else: state its identity, accept
-//! the peer's, then serve frames until the UI closes the pipe. The Runtime it
-//! will eventually host arrives with the step that moves it; until then this
-//! process answers the handshake, honours `goodbye`, and exits.
+//! What it owns is the transport and nothing else: state its identity, accept
+//! the peer's, then serve frames until the UI closes the pipe. What *answers*
+//! those frames is the caller's -- `execution_half.zig` composes it -- because
+//! answering needs an Agent Runtime and this file must stay importable by a
+//! fixture that has none.
 //!
 //! It composes no Product owner, opens no database, reads no Workspace and
 //! creates no window. Everything it will own arrives explicitly.
@@ -33,11 +34,28 @@ pub const Exit = enum(u8) {
     resource_unavailable = 13,
 };
 
+/// Who answers the frames this file reads.
+///
+/// Two calls rather than one sink, because a sink that answers has to know
+/// the queue it answers on, and that queue only exists once the identity
+/// exchange has succeeded. `end` is called after the read loop returns and
+/// before the queue stops, which is the only point at which "no further
+/// request will arrive" and "a response can still be written" are both true.
+pub const Answering = struct {
+    context: ?*anyopaque,
+    begin_fn: *const fn (?*anyopaque, std.Io, *agent_link.channel.Outbound) ?agent_link.channel.Sink,
+    end_fn: *const fn (?*anyopaque) void,
+};
+
 pub const Options = struct {
     identity: agent_link.Identity,
     message_limits: agent_link.MessageLimits,
     queue_limits: agent_link.QueueLimits = .{},
     read_buffer_bytes: usize = 64 * 1024,
+    /// `null` drops every request and counts what it dropped. That is what a
+    /// caller with no Runtime composed can honestly do, and the identity
+    /// tests are exactly that caller.
+    answering: ?Answering = null,
 };
 
 /// Serves the link until it ends, and returns the exit code to use.
@@ -75,13 +93,20 @@ pub fn run(
     defer outbound.stop();
 
     var discard: Discard = .{};
+    const sink = if (options.answering) |answering|
+        answering.begin_fn(answering.context, io, &outbound) orelse
+            return .resource_unavailable
+    else
+        discard.sink();
+    defer if (options.answering) |answering| answering.end_fn(answering.context);
+
     var inbound: agent_link.channel.Inbound = undefined;
     inbound.init(
         io,
         allocator,
         &reader.interface,
         options.message_limits,
-        discard.sink(),
+        sink,
     ) catch return .resource_unavailable;
     defer inbound.deinit();
 
@@ -92,10 +117,9 @@ pub fn run(
     };
 }
 
-/// Until the Runtime moves here there is nothing to answer a request with.
-/// Dropping a message is not something a later step may inherit, so this
-/// counts what it dropped and the step that moves the Runtime replaces it
-/// rather than extending it.
+/// For a caller that composed nothing to answer with. Dropping a message is
+/// not something a later step may inherit silently, so this counts what it
+/// dropped rather than looking like a working link.
 const Discard = struct {
     delivered: u64 = 0,
 

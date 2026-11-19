@@ -1319,7 +1319,25 @@ const ReleaseLog = struct {
     }
 };
 
-const Tables = struct {
+/// Every table `Bindings` names, owned together.
+///
+/// One definition for the composition and for the tests. A seventh table
+/// added to `Bindings` does not compile until it is here too, and the
+/// `reclamation` guard above already refuses one that does not say how its
+/// entries are reclaimed -- so the set is closed from both ends without a
+/// list anyone maintains by hand.
+///
+/// Every capacity is a bound rather than a growth, for the reason
+/// `handle_table.zig` gives: a table that grows turns a caller that never
+/// releases into memory nobody can account for, and the refusal a bounded
+/// table gives is one the caller can be told about.
+/// A table set over the quiet Runtime and an empty store, for tests that
+/// drive reclamation rather than the Runtime behind it.
+fn quietBindings(tables: *Tables) Bindings {
+    return tables.bindings(testing.allocator, port.RuntimePort.quiet, call_frame.BlobStore.empty);
+}
+
+pub const Tables = struct {
     sessions: handle_table.Table(run_tools.HeldSession),
     runs: handle_table.Table(BegunRun),
     leases: handle_table.Table(catalog.Lease),
@@ -1327,20 +1345,41 @@ const Tables = struct {
     session_restore: handle_table.Table(port.SessionRestoreInputs),
     selections: handle_table.Table(mcp_catalog.Selection),
 
-    fn init() !Tables {
-        return .{
-            .sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 4),
-            .runs = try handle_table.Table(BegunRun).init(testing.allocator, 4),
-            .leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 4),
-            .skill_restore = try handle_table.Table(port.SkillRestoreInputs)
-                .init(testing.allocator, 4),
-            .session_restore = try handle_table.Table(port.SessionRestoreInputs)
-                .init(testing.allocator, 4),
-            .selections = try handle_table.Table(mcp_catalog.Selection).init(testing.allocator, 4),
-        };
+    /// Slot counts. The defaults are the Agent Runtime's own session bound and
+    /// small multiples of it: a Run and a Session are one-to-one while a Run
+    /// is executing, and the rest are per-operation rather than per-Session.
+    pub const Capacity = struct {
+        sessions: usize = 50,
+        runs: usize = 50,
+        leases: usize = 16,
+        skill_restore: usize = 16,
+        session_restore: usize = 16,
+        selections: usize = 16,
+    };
+
+    pub fn init(
+        self: *Tables,
+        allocator: std.mem.Allocator,
+        capacity: Capacity,
+    ) std.mem.Allocator.Error!void {
+        self.sessions = try handle_table.Table(run_tools.HeldSession)
+            .init(allocator, capacity.sessions);
+        errdefer self.sessions.deinit();
+        self.runs = try handle_table.Table(BegunRun).init(allocator, capacity.runs);
+        errdefer self.runs.deinit();
+        self.leases = try handle_table.Table(catalog.Lease).init(allocator, capacity.leases);
+        errdefer self.leases.deinit();
+        self.skill_restore = try handle_table.Table(port.SkillRestoreInputs)
+            .init(allocator, capacity.skill_restore);
+        errdefer self.skill_restore.deinit();
+        self.session_restore = try handle_table.Table(port.SessionRestoreInputs)
+            .init(allocator, capacity.session_restore);
+        errdefer self.session_restore.deinit();
+        self.selections = try handle_table.Table(mcp_catalog.Selection)
+            .init(allocator, capacity.selections);
     }
 
-    fn deinit(self: *Tables) void {
+    pub fn deinit(self: *Tables) void {
         self.sessions.deinit();
         self.runs.deinit();
         self.leases.deinit();
@@ -1349,11 +1388,18 @@ const Tables = struct {
         self.selections.deinit();
     }
 
-    fn bindings(self: *Tables) Bindings {
+    /// The three facts a table set cannot supply itself: who allocates, which
+    /// Runtime the `runtime` methods land on, and where checkpoint bytes go.
+    pub fn bindings(
+        self: *Tables,
+        allocator: std.mem.Allocator,
+        runtime: port.RuntimePort,
+        store: call_frame.BlobStore,
+    ) Bindings {
         return .{
-            .allocator = testing.allocator,
-            .runtime = port.RuntimePort.quiet,
-            .store = call_frame.BlobStore.empty,
+            .allocator = allocator,
+            .runtime = runtime,
+            .store = store,
             .sessions = &self.sessions,
             .runs = &self.runs,
             .leases = &self.leases,
@@ -1389,7 +1435,15 @@ const Storage = struct {
 };
 
 test "an ending drains exactly the tables bound to it, and the link drains all" {
-    var tables = try Tables.init();
+    var tables: Tables = undefined;
+    try tables.init(testing.allocator, .{
+        .sessions = 4,
+        .runs = 4,
+        .leases = 4,
+        .skill_restore = 4,
+        .session_restore = 4,
+        .selections = 4,
+    });
     defer tables.deinit();
     var storage: Storage = .{};
     try tables.fill(&storage);
@@ -1399,21 +1453,21 @@ test "an ending drains exactly the tables bound to it, and the link drains all" 
     // A Session closing takes the Session and the MCP selection it bound, and
     // nothing else: the caller still holds the three it holds.
     try testing.expectEqual(@as(usize, 2), tablesBoundTo(.session));
-    try testing.expectEqual(@as(usize, 2), drainBound(tables.bindings(), .session, &log));
+    try testing.expectEqual(@as(usize, 2), drainBound(quietBindings(&tables), .session, &log));
     try testing.expectEqual(@as(usize, 1), log.sessions);
     try testing.expectEqual(@as(usize, 1), log.selections);
     try testing.expectEqual(@as(usize, 0), log.leases);
     try testing.expectEqual(@as(usize, 4), tables.live());
 
     // A Run reaching its terminal takes its own entry and no one else's.
-    try testing.expectEqual(@as(usize, 1), drainBound(tables.bindings(), .run, &log));
+    try testing.expectEqual(@as(usize, 1), drainBound(quietBindings(&tables), .run, &log));
     try testing.expectEqual(@as(usize, 1), log.runs);
     try testing.expectEqual(@as(usize, 3), tables.live());
 
     // And the three the caller holds are exactly what is left, which is why
     // they are the ones a capacity refusal names first.
     try testing.expectEqual(@as(usize, 3), tablesBoundTo(.caller_hold));
-    try testing.expectEqual(@as(usize, 3), drainBound(tables.bindings(), .caller_hold, &log));
+    try testing.expectEqual(@as(usize, 3), drainBound(quietBindings(&tables), .caller_hold, &log));
     try testing.expectEqual(@as(usize, 0), tables.live());
     try testing.expectEqual(@as(usize, 6), log.total());
 }
@@ -1423,13 +1477,21 @@ test "the link ending leaves no table holding anything" {
     // `reclamation`, so this covers a table added later without anyone
     // editing this test. A table whose ending never arrives would show up
     // here as an entry that survived.
-    var tables = try Tables.init();
+    var tables: Tables = undefined;
+    try tables.init(testing.allocator, .{
+        .sessions = 4,
+        .runs = 4,
+        .leases = 4,
+        .skill_restore = 4,
+        .session_restore = 4,
+        .selections = 4,
+    });
     defer tables.deinit();
     var storage: Storage = .{};
     try tables.fill(&storage);
 
     var log: ReleaseLog = .{};
-    try testing.expectEqual(@as(usize, 6), drainEverything(tables.bindings(), &log));
+    try testing.expectEqual(@as(usize, 6), drainEverything(quietBindings(&tables), &log));
     try testing.expectEqual(@as(usize, 0), tables.live());
     try testing.expectEqual(@as(usize, 6), log.total());
 
@@ -1442,7 +1504,7 @@ test "the link ending leaves no table holding anything" {
     // Draining twice releases nothing twice: every id was retired by the
     // first pass.
     var second: ReleaseLog = .{};
-    try testing.expectEqual(@as(usize, 0), drainEverything(tables.bindings(), &second));
+    try testing.expectEqual(@as(usize, 0), drainEverything(quietBindings(&tables), &second));
 }
 
 /// A control handle that counts, so the accounting can be asserted rather

@@ -307,6 +307,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-link", .root_module = test_modules.agent_link },
         .{ .name = "metawork-app-execution-mode", .root_module = test_modules.app_execution_mode },
         .{ .name = "metawork-app-execution-half", .root_module = test_modules.app_execution_half },
+        .{ .name = "metawork-app-execution-link", .root_module = test_modules.app_execution_link },
         .{ .name = "metawork-app-execution-host", .root_module = test_modules.app_execution_host },
         .{ .name = "metawork-agent-file-delivery", .root_module = test_modules.agent_file_delivery },
         .{ .name = "metawork-product-attachment", .root_module = test_modules.product_attachment },
@@ -713,6 +714,7 @@ pub fn build(b: *std.Build) void {
     });
     execution_link_fixture_module.addImport("app_execution_half", test_modules.app_execution_half);
     execution_link_fixture_module.addImport("metawork_agent_link", test_modules.agent_link);
+    execution_link_fixture_module.addImport("metawork_agent", test_modules.agent);
     const execution_link_fixture = b.addExecutable(.{
         .name = "metawork-execution-link-fixture",
         .root_module = execution_link_fixture_module,
@@ -728,6 +730,9 @@ pub fn build(b: *std.Build) void {
     execution_link_module.addImport("app_execution_mode", test_modules.app_execution_mode);
     execution_link_module.addImport("metawork_agent_link", test_modules.agent_link);
     execution_link_module.addImport("app_fault", test_modules.app_fault);
+    execution_link_module.addImport("app_execution_link", test_modules.app_execution_link);
+    execution_link_module.addImport("metawork_agent", test_modules.agent);
+    execution_link_module.addImport("execution_link_fixture", execution_link_fixture_module);
     const execution_link_tests_run = b.addRunArtifact(b.addTest(.{
         .name = "metawork-execution-link",
         .root_module = execution_link_module,
@@ -970,6 +975,7 @@ const WiredModules = struct {
     agent_link: *std.Build.Module,
     app_execution_host: *std.Build.Module,
     app_execution_half: *std.Build.Module,
+    app_execution_link: *std.Build.Module,
     app_execution_mode: *std.Build.Module,
     agent_file_delivery: *std.Build.Module,
     agent_catalog: *std.Build.Module,
@@ -1870,6 +1876,18 @@ fn wireAgentCore(
     app_execution_half.addImport("metawork_agent_link", agent_link);
     app_execution_half.addImport("app_execution_mode", app_execution_mode);
     app_execution_half.addImport("app_fault", app_fault);
+    app_execution_half.addImport("metawork_agent", agent);
+    // The UI half's side of the same seam: the process, the correlation table
+    // and the port Product is handed.
+    const app_execution_link = b.createModule(.{
+        .root_source_file = b.path("src/app/execution_link.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    app_execution_link.addImport("metawork_agent_link", agent_link);
+    app_execution_link.addImport("app_execution_host", app_execution_host);
+    app_execution_link.addImport("metawork_agent", agent);
     const metawork_http_memory = b.createModule(.{
         .root_source_file = b.path("src/foundation/http/memory.zig"),
         .target = target,
@@ -2816,6 +2834,7 @@ fn wireAgentCore(
     app.addImport("app_execution_host", app_execution_host);
     app.addImport("app_execution_mode", app_execution_mode);
     app.addImport("app_execution_half", app_execution_half);
+    app.addImport("app_execution_link", app_execution_link);
     app.addImport("event_pump", event_pump);
     app.addImport("metawork_product_update", product_update);
     app.addImport("app_output_file", output_file);
@@ -2911,6 +2930,7 @@ fn wireAgentCore(
         .app_execution_host = app_execution_host,
         .app_execution_mode = app_execution_mode,
         .app_execution_half = app_execution_half,
+        .app_execution_link = app_execution_link,
         .agent_file_delivery = agent_file_delivery,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,

@@ -3,8 +3,8 @@
 //! The real execution half is the application executable started with its mode
 //! flag, and that executable carries the Renderer bundle. A test must not need
 //! the bundle to check that the process starts, agrees on identity and stops,
-//! so this fixture runs the same `execution_mode.run` the application forks
-//! into, over the same inherited pipes.
+//! so this fixture composes the same `execution_half.run` the application
+//! forks into, over the same inherited pipes.
 //!
 //! `METAWORK_EXEC_LINK_VERSION` overrides the version this half states, which
 //! is how the test produces the skew that actually happens in the field: a
@@ -12,11 +12,59 @@
 //! a data root to record a process-level fault under; the application resolves
 //! that root from the environment instead, which is a fact about the
 //! installation rather than something this half should go looking for.
+//!
+//! `--with-runtime` composes an Agent Runtime over the AgentCore the
+//! executable links, which is what lets a test drive a real port call across
+//! a real process. It is an argument rather than an environment variable so
+//! one test can ask for it and another can refuse it: the identity tests want
+//! a half that composes nothing, and they must not pay for a Runtime to find
+//! out that the peer is not this build.
+//!
+//! The AgentCore is the real one rather than a stand-in. The lifecycle
+//! fixture's stand-in is written against `std.testing`, which does not compile
+//! into an executable, and the archive is statically linked here anyway -- so
+//! the real one is both available and the more faithful half.
 
 const std = @import("std");
 
+const agent = @import("metawork_agent");
 const execution_half = @import("app_execution_half");
 const agent_link = @import("metawork_agent_link");
+
+pub const runtime_flag = "--with-runtime";
+
+const Composer = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+
+    fn factory(self: *Composer) execution_half.RuntimeFactory {
+        return .{ .context = self, .create_fn = create, .destroy_fn = destroy };
+    }
+
+    fn create(context: ?*anyopaque, notifier: agent.EventReadyNotifier) ?*agent.Runtime {
+        const self: *Composer = @ptrCast(@alignCast(context.?));
+        return agent.Runtime.init(
+            self.io,
+            self.allocator,
+            .{ .max_sessions = 2, .event_ready_notifier = notifier },
+        ) catch null;
+    }
+
+    fn destroy(_: ?*anyopaque, runtime: *agent.Runtime) void {
+        runtime.shutdown() catch {};
+        runtime.deinit();
+    }
+};
+
+fn requested(args: std.process.Args, gpa: std.mem.Allocator, flag: []const u8) bool {
+    var iterator = std.process.Args.Iterator.initAllocator(args, gpa) catch return false;
+    defer iterator.deinit();
+    _ = iterator.next(); // argv[0]
+    while (iterator.next()) |argument| {
+        if (std.mem.eql(u8, argument, flag)) return true;
+    }
+    return false;
+}
 
 pub fn main(init: std.process.Init) !void {
     const version = init.environ_map.get("METAWORK_EXEC_LINK_VERSION") orelse "fixture-0";
@@ -24,6 +72,7 @@ pub fn main(init: std.process.Init) !void {
     var digest: [32]u8 = @splat(0);
     @memset(&digest, digest_text[0]);
 
+    var composer: Composer = .{ .io = init.io, .allocator = init.gpa };
     const exit = execution_half.run(init.io, init.gpa, .{
         .identity = .{
             .version = version,
@@ -47,6 +96,11 @@ pub fn main(init: std.process.Init) !void {
             },
             .data_root = root,
         } else null,
+        .runtime = if (requested(init.minimal.args, init.gpa, runtime_flag))
+            composer.factory()
+        else
+            null,
+        .tables = .{ .sessions = 2, .runs = 2 },
     });
     std.process.exit(@intFromEnum(exit));
 }

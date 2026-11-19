@@ -9,10 +9,25 @@
 
 const std = @import("std");
 
+const agent = @import("metawork_agent");
 const execution_host = @import("app_execution_host");
+const execution_link = @import("app_execution_link");
+const execution_link_fixture = @import("execution_link_fixture");
 const execution_mode = @import("app_execution_mode");
 const agent_link = @import("metawork_agent_link");
 const fault = @import("app_fault");
+
+/// The limits the fixture states. Each side enforces its own, so they need
+/// not agree -- but a response larger than this half's bound is refused as a
+/// protocol violation, so a test that drives real calls uses the same numbers
+/// rather than a smaller guess.
+const fixture_message_limits: agent_link.MessageLimits = .{
+    .event = 1 << 20,
+    .request = 1 << 20,
+    .response = 1 << 20,
+    .ui_request = 1 << 16,
+    .ui_response = 1 << 16,
+};
 
 const io = std.testing.io;
 const allocator = std.testing.allocator;
@@ -58,7 +73,7 @@ test "the execution half starts, agrees on identity and exits on end of stream" 
 
     // Closing our end is the child's exit signal, so a clean stop needs no
     // kill and the child's own status comes back.
-    const stopped = host.stop();
+    const stopped = host.stop(null);
     try std.testing.expectEqual(
         execution_host.Stopped{ .exited = @intFromEnum(execution_mode.Exit.link_closed) },
         stopped,
@@ -100,7 +115,7 @@ test "the execution half installs its own fault record, under its own name" {
     }
     defer host.deinit();
     try std.testing.expectEqual(agent_link.Role.exec, host.peer.role);
-    _ = host.stop();
+    _ = host.stop(null);
 
     // The record file the execution role writes is there, and the one the UI
     // role writes is not: the role picks the file, so one half's later fault
@@ -123,6 +138,56 @@ fn recordPath(storage: []u8, root: []const u8, name: []const u8) ![]const u8 {
     });
 }
 
+test "a port call crosses the process, and the execution half's Runtime answers it" {
+    // The first end-to-end call. Everything between Product's port and an
+    // Agent Runtime in another process is on this path: the spawn, the
+    // identity exchange, the caller's half encoding a request, the frame
+    // queues, the execution half's reader queueing it, a worker dispatching
+    // it against the one Runtime, the response coming back on its
+    // correlation, and the stub handing Product a value. `restore_admission`
+    // is the thinnest method that proves it -- a runtime method, so no
+    // receiver has to exist yet, and an answer only the far side can give.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .spawn = .{ .explicit = &.{ fixture, execution_link_fixture.runtime_flag } },
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer supervisor.deinit();
+
+    const runtime = supervisor.runtimePort();
+    try std.testing.expectEqual(
+        agent.RuntimePort.RestoreAdmission.available,
+        runtime.restoreAdmission(null),
+    );
+    // Asked twice, because a stub that answered from its own side would
+    // answer both the same way whatever the far side held -- and because the
+    // correlation table has to hand back a second slot after the first
+    // settled.
+    try std.testing.expectEqual(
+        agent.RuntimePort.RestoreAdmission.available,
+        runtime.restoreAdmission(null),
+    );
+
+    // Nothing is owed afterwards: both correlations settled, and the link
+    // never concluded anything was wrong with it.
+    try std.testing.expectEqual(@as(usize, 0), supervisor.slots.liveCount());
+    try std.testing.expectEqual(agent_link.client.LinkFault.none, supervisor.fault());
+
+    const stopped = supervisor.stop();
+    try std.testing.expectEqual(
+        execution_host.Stopped{ .exited = @intFromEnum(execution_mode.Exit.link_closed) },
+        stopped,
+    );
+}
+
 test "a peer built from other sources is refused, and does not keep running" {
     const fixture = try fixturePath();
     defer allocator.free(fixture);
@@ -138,7 +203,7 @@ test "a peer built from other sources is refused, and does not keep running" {
         .{ .explicit = &.{fixture} },
     );
     const value = failure orelse {
-        _ = host.stop();
+        _ = host.stop(null);
         host.deinit();
         return error.ExpectedRefusal;
     };
