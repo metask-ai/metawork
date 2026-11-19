@@ -714,16 +714,40 @@ fn runExecute(
 // RunControl
 // -------------------------------------------------------------------------
 
+/// A retain, and this half's own count of what it is holding.
+///
+/// One box names a Run's port and every control lease taken from it, so the
+/// box cannot be given back on the first release. The execution half keeps
+/// the same tally in `adapters.BegunRun`; counting here is what lets the two
+/// reach zero together without either being told the other's answer. The
+/// count moves only when the retain actually happened, which is the same rule
+/// `BegunRun.retain` keeps on the other side.
 fn runControlTryRetain(
     context: ?*anyopaque,
 ) bool {
-    return forwardAnswering(.run_control, "try_retain", false, context, .{});
+    if (!forwardAnswering(.run_control, "try_retain", false, context, .{})) return false;
+    const half = client.Client.linkFrom(context);
+    half.boxes.retained(context.?) catch {
+        // The box went while the call was in flight, which means this half
+        // released the Run under a retain it had asked for. Answering `false`
+        // is the restricting answer and the one the far side's own refusal
+        // would have given.
+        return false;
+    };
+    return true;
 }
 
+/// A release, and the box going back once nothing here names the Run.
 fn runControlRelease(
     context: ?*anyopaque,
 ) void {
-    return forwardAnswering(.run_control, "release", {}, context, .{});
+    forwardAnswering(.run_control, "release", {}, context, .{});
+    const half = client.Client.linkFrom(context);
+    // The last one gives the slot back. A box already gone is not an error to
+    // report -- this method has no way to report one -- and it is the state a
+    // duplicate release leaves, which the far side's table refuses on its own
+    // side too.
+    _ = half.boxes.released(context.?) catch false;
 }
 
 fn runControlSubmitInput(
@@ -983,11 +1007,43 @@ fn runtimeRestoreSessionRoute(
     return forward(.runtime, "restore_session_route", context, .{options});
 }
 
+/// The release that also gives the Session's box back.
+///
+/// Through `handle_repr.releaseThrough`, which is written for exactly this:
+/// the slot is cleared after the call returns without error, so "released but
+/// the box is still there" and "the box is gone but nothing was released" are
+/// both out of reach by position. A refused release leaves the name working,
+/// which it must -- the Session is still over there and the caller may ask
+/// again.
+///
+/// The box is the *argument's*, not the receiver's: this is a `runtime`
+/// method, and what it releases is what it was called with.
 fn runtimeReleaseClosedSession(
     context: ?*anyopaque,
     session: SessionPort,
 ) Error!void {
-    return forward(.runtime, "release_closed_session", context, .{session});
+    const half = @as(*client.Client, @ptrCast(@alignCast(context.?)));
+    const Call = struct {
+        half: *client.Client,
+        session: SessionPort,
+
+        fn send(self: @This(), _: handle_table.Id) Error!void {
+            return forward(.runtime, "release_closed_session", self.half, .{self.session});
+        }
+    };
+    half.boxes.releaseThrough(
+        session.context.?,
+        Error!void,
+        Call{ .half = half, .session = session },
+        Call.send,
+    ) catch |err| switch (err) {
+        // A box this half no longer holds names a Session it already
+        // released. `stoppedBy` reads the same condition as gone, so this
+        // answers what the gone answer is for an `Error!void` method rather
+        // than inventing a second meaning for it.
+        error.UnknownBox, error.BoxCapacity => return error.DependencyUnreachable,
+        else => |rest| return rest,
+    };
 }
 
 fn runtimeRequestRunTermination(
@@ -1218,6 +1274,9 @@ const Peer = struct {
     dir: std.Io.Dir,
     slots: *pending.Table,
     sessions: *handle_table.Table(run_tools.HeldSession),
+    /// Which file in `dir` carries the link. A test that drives two round
+    /// trips needs two, because this harness reads each from the start.
+    name: []const u8 = "link",
     /// The Runtime a `runtime` method lands on. Quiet unless a test needs an
     /// answer, so a test drives exactly what it says it drives.
     runtime: port.RuntimePort = port.RuntimePort.quiet,
@@ -1248,7 +1307,7 @@ const Peer = struct {
     }
 
     fn tryOnce(self: *Peer) bool {
-        const file = self.dir.openFile(self.io, "link", .{}) catch return false;
+        const file = self.dir.openFile(self.io, self.name, .{}) catch return false;
         defer file.close(self.io);
         var buffer: [8192]u8 = undefined;
         var reader = file.readerStreaming(self.io, &buffer);
@@ -1298,16 +1357,19 @@ const Peer = struct {
     }
 };
 
-/// A Runtime that answers `create_session_route` and nothing else.
+/// A Runtime that answers the two route-lifetime methods and nothing else.
 ///
 /// Built over the quiet vtable so every other method keeps the quiet answer:
 /// a stand-in that answered more than the test drives would be a stand-in
-/// whose behaviour nobody states.
+/// whose behaviour nobody states. The quiet answer for most of them is a
+/// panic, which is how a test that drives something it did not mean to say
+/// out loud finds out.
 const FakeRuntime = struct {
     vtable: port.RuntimePort.VTable = undefined,
     session_vtable: port.SessionPort.VTable = undefined,
     recorder: Recorder = .{},
     opened: usize = 0,
+    released: usize = 0,
     opened_for: ?run_tools.SessionIdentity = null,
 
     const route_id: u64 = 77;
@@ -1315,7 +1377,13 @@ const FakeRuntime = struct {
     fn portValue(self: *FakeRuntime) port.RuntimePort {
         self.vtable = port.RuntimePort.quiet.vtable.*;
         self.vtable.create_session_route = createSessionRoute;
+        self.vtable.release_closed_session = releaseClosedSession;
         return .{ .context = self, .vtable = &self.vtable };
+    }
+
+    fn releaseClosedSession(context: ?*anyopaque, _: port.SessionPort) Error!void {
+        const self: *FakeRuntime = @ptrCast(@alignCast(context.?));
+        self.released += 1;
     }
 
     fn createSessionRoute(
@@ -1414,6 +1482,134 @@ test "a Session created on the far side comes back as a port this half can name"
 
     const taken = sessions.take(entry_id) orelse return error.MissingEntry;
     testing.allocator.destroy(taken);
+}
+
+test "a link that has concluded it is unusable carries nothing further" {
+    // Recording the fault was not enough, and the gap was behaviour rather
+    // than bookkeeping: a stub answered "the dependency is unreachable" and
+    // the very next call went out over the same link to the same Session. No
+    // caller may read a gone answer from a link that is still working, so the
+    // fault closes the correlation table and every later call answers without
+    // sending.
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "link", .{ .read = true, .truncate = true });
+    defer file.close(io);
+
+    var queue: channel.Outbound = undefined;
+    try queue.start(io, testing.allocator, file, .{});
+    defer queue.stop();
+    var slots: pending.Table = undefined;
+    try slots.init(io, testing.allocator, 4);
+    defer slots.deinit();
+    const half = try testing.allocator.create(client.Client);
+    defer testing.allocator.destroy(half);
+    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    defer half.deinit();
+
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2);
+    defer sessions.deinit();
+    var recorder: Recorder = .{};
+    var session_vtable: port.SessionPort.VTable = undefined;
+    var held = run_tools.HeldSession.init(recorder.sessionPortFor(&session_vtable));
+    const id = try sessions.insert(&held);
+    const box = try half.boxes.open(id);
+    const session: port.SessionPort = .{ .context = box, .vtable = half.vtables.session };
+
+    half.recordFault(.peer_unsettled);
+    try testing.expectEqual(client.LinkFault.peer_unsettled, half.faulted());
+
+    try testing.expectError(error.DependencyUnreachable, session.setModel("after"));
+    try testing.expectEqual(@as(usize, 0), recorder.calls);
+    try testing.expectEqual(@as(usize, 0), slots.liveCount());
+
+    // Nothing was written, which is the assertion that distinguishes this
+    // from a table that was merely closed: a closed table answers a call that
+    // has already gone out, and a request the peer has is a request it may
+    // act on after the caller has stopped waiting for the answer. The link
+    // file is the whole of what this half sent.
+    queue.stop();
+    const written = try file.stat(io);
+    try testing.expectEqual(@as(u64, 0), written.size);
+
+    // The first fault is the one kept, because it is the one that explains
+    // the rest: a peer that stopped answering fills the table, and every call
+    // after that reports a refused send.
+    half.recordFault(.unreadable);
+    try testing.expectEqual(client.LinkFault.peer_unsettled, half.faulted());
+
+    _ = sessions.take(id);
+}
+
+test "closing a Session gives both halves' names back" {
+    // The other end of the reservation. Until `release_closed_session` was
+    // wired to `reclamation`, a Session created through the link left its
+    // entry behind on one side and its box on the other -- so the fiftieth
+    // Session was the last one this build could name, with nothing failing
+    // until then.
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "link", .{ .read = true, .truncate = true });
+    defer file.close(io);
+
+    var queue: channel.Outbound = undefined;
+    try queue.start(io, testing.allocator, file, .{});
+    defer queue.stop();
+    var slots: pending.Table = undefined;
+    try slots.init(io, testing.allocator, 4);
+    defer slots.deinit();
+    const half = try testing.allocator.create(client.Client);
+    defer testing.allocator.destroy(half);
+    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    defer half.deinit();
+
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2);
+    defer sessions.deinit();
+    var runtime_fake: FakeRuntime = .{};
+    var peer: Peer = .{
+        .io = io,
+        .dir = tmp.dir,
+        .slots = &slots,
+        .sessions = &sessions,
+        .runtime = runtime_fake.portValue(),
+    };
+    var thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+
+    const runtime: port.RuntimePort = .{ .context = half, .vtable = &runtimePort };
+    const route = try runtime.createSessionRoute(test_open_options);
+    thread.join();
+    try testing.expectEqual(@as(usize, 1), sessions.live);
+    try testing.expectEqual(@as(usize, 1), half.boxes.liveCount());
+
+    // The release has to be a second round trip, so a second peer: this
+    // harness answers one request per file read.
+    var second = try tmp.dir.createFile(io, "link2", .{ .read = true, .truncate = true });
+    defer second.close(io);
+    var second_queue: channel.Outbound = undefined;
+    try second_queue.start(io, testing.allocator, second, .{});
+    defer second_queue.stop();
+    half.outbound = &second_queue;
+    var releaser: Peer = .{
+        .io = io,
+        .dir = tmp.dir,
+        .name = "link2",
+        .slots = &slots,
+        .sessions = &sessions,
+        .runtime = runtime_fake.portValue(),
+    };
+    var release_thread = try std.Thread.spawn(.{}, Peer.run, .{&releaser});
+    try runtime.releaseClosedSession(route.session);
+    release_thread.join();
+    try testing.expectEqual(@as(usize, 1), runtime_fake.released);
+
+    // Both names are back, and neither half kept the other's. `Table.deinit`
+    // asserts an empty table, so an entry left here would also take the test
+    // down at the `defer` above.
+    try testing.expectEqual(@as(usize, 0), sessions.live);
+    try testing.expectEqual(@as(usize, 0), half.boxes.liveCount());
+    try testing.expectEqual(@as(usize, 0), slots.liveCount());
 }
 
 test "a create the far side refuses leaves no promised slot behind" {

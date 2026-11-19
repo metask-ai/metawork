@@ -282,6 +282,75 @@ test "a Session the far side's Runtime refuses answers in that method's own word
     _ = supervisor.stop();
 }
 
+test "a start that refuses leaves no child running and nothing allocated" {
+    // `StartFailure` is a return value and not an error, so `errdefer` never
+    // fired for it: two of these paths left the child process running and
+    // four objects allocated while the doc comment above `start` said the
+    // opposite. Invalid message limits is the reachable one of the two -- the
+    // other is a thread that will not spawn -- and it is reached after the
+    // child is already up, which is what makes it the interesting one.
+    //
+    // The leak half of the assertion is the test allocator's: it fails this
+    // test at the end if anything `start` took is still held.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+
+    var wake: Wake = .{};
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        // Zero is not a size any kind may have, which `MessageLimits.valid`
+        // refuses -- and the limits are the composition root's own constants,
+        // so refusing is right: it is a wiring mistake, not a condition.
+        .message_limits = .{
+            .event = 0,
+            .request = 1 << 20,
+            .response = 1 << 20,
+            .ui_request = 1 << 16,
+            .ui_response = 1 << 16,
+        },
+        .spawn = .{ .explicit = &.{fixture} },
+        .wake = wake.notifier(),
+    });
+    try std.testing.expectEqual(execution_host.StartFailure.resource_unavailable, failure.?);
+
+    // No `deinit`: a refused start has nothing to tear down, which is the
+    // claim. Calling it would hide the leak this test exists to catch.
+}
+
+test "a child that will not stop is killed, and the stop returns" {
+    // The kill is the only reason the grace period exists, and it was the one
+    // path that could not reach it: the reader thread was joined *before* the
+    // wait, and that thread ends when the child's output closes -- which
+    // happens when the child exits. So a child that would not exit, which is
+    // exactly what the kill is for, hung the UI thread instead of being
+    // killed. The real shape is a worker inside `run.execute`; the fixture
+    // reproduces the observable part by staying alive after the link ends.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+
+    var wake: Wake = .{};
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .spawn = .{ .explicit = &.{ fixture, execution_link_fixture.wedge_flag } },
+        .wake = wake.notifier(),
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer supervisor.deinit();
+
+    // Returns at all, which is the assertion -- and says the child was
+    // killed rather than having exited on its own. The fixture outlives the
+    // grace period by two orders of magnitude, so a stop that waited for it
+    // would not reach this line within any timeout the suite has.
+    const stopped = supervisor.stop();
+    try std.testing.expectEqual(execution_host.Stopped.killed, stopped);
+}
+
 test "a peer built from other sources is refused, and does not keep running" {
     const fixture = try fixturePath();
     defer allocator.free(fixture);

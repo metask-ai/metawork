@@ -33,6 +33,17 @@ const agent_link = @import("metawork_agent_link");
 
 pub const runtime_flag = "--with-runtime";
 
+/// Stays alive after the link ends, which is the one condition the UI half's
+/// kill exists for: a child that has been told to stop and does not stop. The
+/// real shape of it is a worker inside `run.execute`, which returns only when
+/// its Run reaches a terminal; this reproduces the *observable* part of that
+/// without needing a Run, so the stop path can be driven at all.
+pub const wedge_flag = "--wedge-on-stop";
+
+/// Longer than the UI half's grace period by enough that a stop which waited
+/// for this child would be a hang rather than a slow test.
+const wedge_ms: u64 = 120_000;
+
 const Composer = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -102,6 +113,15 @@ pub fn main(init: std.process.Init) !void {
             null,
         .tables = .{ .sessions = 2, .runs = 2 },
     });
+    if (requested(init.minimal.args, init.gpa, wedge_flag)) {
+        // The same wait `Host.stop` uses for its own grace period, for the
+        // same reason: an event nobody sets is a sleep with no busy loop.
+        var never: std.Io.Event = .unset;
+        never.waitTimeout(init.io, .{ .duration = .{
+            .raw = .fromMilliseconds(wedge_ms),
+            .clock = .awake,
+        } }) catch {};
+    }
     std.process.exit(@intFromEnum(exit));
 }
 

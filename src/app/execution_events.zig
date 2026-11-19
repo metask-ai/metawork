@@ -190,13 +190,24 @@ pub const Pump = struct {
     /// downstream can tell a short conversation from a complete one.
     pub fn push(self: *Pump, event: agent.OwnedCoreEvent) bool {
         const charged = event.ownedBytes();
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.count == self.entries.len) return false;
-        if (self.bytes + charged > self.limits.bytes) return false;
-        self.entries[(self.head + self.count) % self.entries.len] = event;
-        self.count += 1;
-        self.bytes += charged;
+        {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            if (self.count == self.entries.len) return false;
+            if (self.bytes + charged > self.limits.bytes) return false;
+            self.entries[(self.head + self.count) % self.entries.len] = event;
+            self.count += 1;
+            self.bytes += charged;
+        }
+        // Woken here rather than on the `event_ready` frame, because the frame
+        // is not sent for every event that arrives: the execution half flushes
+        // its pump before every response as well as on its drain thread, and a
+        // flush that ran inside a response sent no wake -- so a whole Run's
+        // events could sit here with nobody told. The notifier coalesces a
+        // burst into one wake, which is what makes per-event safe, and the
+        // lock is released first so a consumer woken on this thread cannot
+        // re-enter it.
+        _ = self.wake.notify();
         return true;
     }
 
@@ -285,12 +296,58 @@ fn heldEvent(session_id: u64, run_id: u64, json: []const u8) !agent.OwnedCoreEve
     };
 }
 
+/// Counts wakes, because a wake is the whole of what tells this half's
+/// consumer there is something to drain.
+const CountingWake = struct {
+    count: usize = 0,
+
+    fn notifier(self: *CountingWake) agent.EventReadyNotifier {
+        return .{ .context = self, .notify_fn = notify };
+    }
+
+    fn notify(context: ?*anyopaque) agent.EventReadyNotification {
+        const self: *CountingWake = @ptrCast(@alignCast(context.?));
+        self.count += 1;
+        return .scheduled;
+    }
+};
+
 fn silentWake() agent.EventReadyNotifier {
     return .{ .context = null, .notify_fn = struct {
         fn call(_: ?*anyopaque) agent.EventReadyNotification {
             return .scheduled;
         }
     }.call };
+}
+
+test "every event that arrives wakes the consumer, and a refused one does not" {
+    // The wake is per event rather than per `event_ready` frame, because that
+    // frame is not sent for every event: the execution half flushes its pump
+    // before each response as well as on its drain thread, and a flush inside
+    // a response sent none -- so a whole Run's events could sit here with
+    // nobody told to come and take them.
+    var woken: CountingWake = .{};
+    var pump: Pump = undefined;
+    try pump.init(testing.allocator, testing.io, .{ .count = 2, .bytes = 1 << 20 }, woken.notifier());
+    defer pump.deinit();
+
+    try testing.expect(pump.push(try heldEvent(1, 1, "{\"text_chunk\":\"one\"}")));
+    try testing.expectEqual(@as(usize, 1), woken.count);
+    try testing.expect(pump.push(try heldEvent(1, 1, "{\"text_chunk\":\"two\"}")));
+    try testing.expectEqual(@as(usize, 2), woken.count);
+
+    // A refused event wakes nobody: there is nothing new to drain, and the
+    // caller's answer to a refusal is to end the link rather than to ask the
+    // consumer to try harder.
+    var refused = try heldEvent(1, 1, "{\"text_chunk\":\"third\"}");
+    try testing.expect(!pump.push(refused));
+    refused.deinit();
+    try testing.expectEqual(@as(usize, 2), woken.count);
+
+    var first = pump.take().?;
+    first.deinit();
+    var second = pump.take().?;
+    second.deinit();
 }
 
 test "an event crosses as its bytes and the facts its value cannot carry" {

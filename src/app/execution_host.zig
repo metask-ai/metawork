@@ -203,12 +203,20 @@ pub const Host = struct {
     /// Whoever else is reading this link, given the one window in which it
     /// can be wound down safely.
     ///
-    /// A reader thread on `from_child` ends when the child's output closes,
-    /// and the child's output closes because its input did. So the window is
-    /// after `to_child` is closed and before `from_child` is: the read is
-    /// about to end on its own, and the handle it is blocked on is still
-    /// open. Closing that handle under a pending read is the race this
-    /// exists to remove.
+    /// Whoever else is reading this link, given the one window in which it
+    /// can be wound down safely.
+    ///
+    /// That window is after the child has been reaped and before
+    /// `from_child` is closed, and the ordering is the whole point. A reader
+    /// thread on `from_child` ends when the child's output closes, which
+    /// happens when the child exits -- so joining it *before* the grace wait
+    /// would wait for a child that the kill below exists to deal with. A
+    /// child wedged in a Run is precisely the case the kill is for, and
+    /// joining first made it the one case that hung instead.
+    ///
+    /// After the reap the read has ended or is about to, and the handle it
+    /// was blocked on is still open: closing that handle under a pending read
+    /// is the other race, and doing this between the two removes both.
     pub const Quiesce = struct {
         context: ?*anyopaque,
         settle_fn: *const fn (?*anyopaque) void,
@@ -225,7 +233,6 @@ pub const Host = struct {
         _ = self.outbound.trySubmit(.goodbye, 0, &.{}) catch {};
         self.outbound.stop();
         self.to_child.close(self.io);
-        if (quiesce) |settle| settle.settle_fn(settle.context);
 
         const graceful = if (self.reaper == null) false else blk: {
             self.reaped.waitTimeout(self.io, .{ .duration = .{
@@ -237,6 +244,7 @@ pub const Host = struct {
         if (!graceful) self.child.kill(self.io);
         if (self.reaper) |thread| thread.join();
         self.reaper = null;
+        if (quiesce) |settle| settle.settle_fn(settle.context);
         self.from_child.close(self.io);
         if (!graceful) return .killed;
         const term = self.term orelse return .gone;

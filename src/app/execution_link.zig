@@ -81,6 +81,13 @@ pub const Supervisor = struct {
     /// A returned failure leaves nothing running and nothing allocated, the
     /// way `Host.start` does, because the caller's next move is to try again
     /// or to fall back to the in-process Runtime.
+    ///
+    /// A `StartFailure` is a *return value*, not an error, so `errdefer` does
+    /// not fire for it -- which is how two of these paths left the child
+    /// running and four objects allocated while this comment said otherwise.
+    /// So the unwinding is a plain `defer` guarded by one flag, which covers
+    /// both kinds of exit; an `errdefer` beside it would be a second
+    /// mechanism that fires *as well* on the error paths and frees twice.
     pub fn start(
         self: *Supervisor,
         io: std.Io,
@@ -103,10 +110,17 @@ pub const Supervisor = struct {
             options.queue_limits,
             options.spawn,
         )) |failure| return failure;
-        errdefer _ = self.host.stop(null);
+
+        var composed = false;
+        // `deinit` rather than `stop`: stopping ends the child and closes the
+        // pipes, and the host's read buffer is freed only by `deinit`. The
+        // first version of this unwinding stopped and left that buffer, which
+        // the test allocator caught -- a leak that a refused start would have
+        // repeated on every retry.
+        defer if (!composed) self.host.deinit();
 
         try self.slots.init(io, allocator, options.correlations);
-        errdefer self.slots.deinit();
+        defer if (!composed) self.slots.deinit();
         try self.half.init(
             allocator,
             &self.host.outbound,
@@ -114,9 +128,9 @@ pub const Supervisor = struct {
             agent_link.stubs.vtables,
             options.boxes,
         );
-        errdefer self.half.deinit();
+        defer if (!composed) self.half.deinit();
         try self.pump.init(allocator, io, options.events, options.wake);
-        errdefer self.pump.deinit();
+        defer if (!composed) self.pump.deinit();
         // The four `stream` methods are answered from here. Installed after
         // the half exists, because the buffer holds parsed Core events and the
         // link module parses none.
@@ -133,9 +147,10 @@ pub const Supervisor = struct {
             // invalid set is a wiring mistake rather than a condition.
             error.InvalidLimits => return .resource_unavailable,
         };
-        errdefer self.inbound.deinit();
+        defer if (!composed) self.inbound.deinit();
         self.reader = std.Thread.spawn(.{}, readerMain, .{self}) catch
             return .resource_unavailable;
+        composed = true;
         self.composed = true;
         return null;
     }
@@ -158,8 +173,10 @@ pub const Supervisor = struct {
     ///
     /// The table is closed before the child is told to stop, so a caller
     /// blocked on a correlation is answered rather than waiting out the grace
-    /// period with it. The reader thread is joined inside `Host.stop`, in the
-    /// one window where that is safe: `Quiesce` says why.
+    /// period with it. The reader thread is joined inside `Host.stop`, after
+    /// the child has been reaped -- `Quiesce` says why that is the only safe
+    /// window, and why joining earlier hung on exactly the wedged child the
+    /// kill exists for.
     pub fn stop(self: *Supervisor) Stopped {
         self.slots.close();
         return self.host.stop(.{ .context = self, .settle_fn = joinReader });
@@ -229,10 +246,14 @@ pub const Supervisor = struct {
                     self.half.recordFault(.events_overflowed);
                     return .stop;
                 }
+                // The wake is `push`'s, per event: it is the buffer that knows
+                // something arrived, and the `event_ready` frame is not sent
+                // for every event. `execution_events.zig` says why.
             },
-            // The execution half saying there is something to drain. Product's
-            // own consumer runs on the main loop, so this is a wake rather
-            // than a delivery.
+            // The execution half saying there is something to drain. Kept
+            // because it is the honest signal when the flush that produced
+            // the events is not this half's to see -- and harmless when the
+            // pushes above have already woken: the notifier coalesces.
             .event_ready => _ = self.pump.wake.notify(),
             // A reverse call with nobody composed to answer it. Ending the
             // link is the restrictive answer: the alternative is an execution

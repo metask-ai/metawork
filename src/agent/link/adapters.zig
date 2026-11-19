@@ -109,11 +109,18 @@ pub const BegunRun = struct {
         return true;
     }
 
-    /// A release the caller asked for.
-    pub fn release(self: *BegunRun) void {
+    /// A release the caller asked for, and what is left after it.
+    ///
+    /// The remainder is returned rather than read back by the caller,
+    /// because the caller's next move depends on it: zero means nothing on
+    /// the other half can name this Run again, so the entry holding it is
+    /// free. Reading `outstanding` after the call would be a second
+    /// observation with another release able to land in between.
+    pub fn release(self: *BegunRun) u32 {
         const previous = self.outstanding.fetchSub(1, .acq_rel);
         std.debug.assert(previous > 0);
         self.control_handle.vtable.?.release(self.control_handle.context);
+        return previous - 1;
     }
 
     /// Everything the caller never released, because it can no longer ask.
@@ -1131,24 +1138,68 @@ pub const Reclaim = struct {
         /// a capacity failure will name first.
         caller_hold,
     },
+    /// Whether the entry's memory is this half's to free.
+    ///
+    /// Two different things live in these tables and a release has to tell
+    /// them apart. `sessions` and `runs` hold wrappers this half allocated --
+    /// a `HeldSession` carrying a port and its Run's tools, a `BegunRun`
+    /// carrying a vtable and a reference tally -- so releasing one frees
+    /// memory. The rest hold pointers the Runtime owns and only hands out:
+    /// `release_skill_catalog` gives a lease back to the Runtime, and freeing
+    /// it here would be freeing something this half never allocated.
+    ///
+    /// Declared rather than derived, because "who allocated this" is a fact
+    /// about each table and not something a name can be asked.
+    owns_entry: bool,
 };
 
 pub const reclamation = [_]Reclaim{
-    .{ .field = "sessions", .release_method = "release_closed_session", .bound_to = .session },
-    .{ .field = "runs", .release_method = "release", .bound_to = .run },
-    .{ .field = "leases", .release_method = "release_skill_catalog", .bound_to = .caller_hold },
+    .{
+        .field = "sessions",
+        .release_method = "release_closed_session",
+        .bound_to = .session,
+        .owns_entry = true,
+    },
+    .{
+        .field = "runs",
+        .release_method = "release",
+        .bound_to = .run,
+        .owns_entry = true,
+    },
+    .{
+        .field = "leases",
+        .release_method = "release_skill_catalog",
+        .bound_to = .caller_hold,
+        .owns_entry = false,
+    },
     .{
         .field = "skill_restore",
         .release_method = "release_skill_restore_inputs",
         .bound_to = .caller_hold,
+        .owns_entry = false,
     },
     .{
         .field = "session_restore",
         .release_method = "release_restore_inputs",
         .bound_to = .caller_hold,
+        .owns_entry = false,
     },
-    .{ .field = "selections", .release_method = "", .bound_to = .session },
+    .{ .field = "selections", .release_method = "", .bound_to = .session, .owns_entry = false },
 };
+
+/// Where the entry a release method retires lives, and whether freeing it is
+/// this half's job. `null` for a method that releases nothing.
+///
+/// No `comptime { ... }` body: a `return` inside one breaks at runtime call
+/// sites, and a test names a method as a value.
+pub fn reclaimThrough(comptime release_method: []const u8) ?Reclaim {
+    if (release_method.len == 0) return null;
+    inline for (reclamation) |entry| {
+        if (entry.release_method.len == 0) continue;
+        if (comptime std.mem.eql(u8, entry.release_method, release_method)) return entry;
+    }
+    return null;
+}
 
 fn isHandleTable(comptime T: type) bool {
     const info = @typeInfo(T);
@@ -1644,7 +1695,7 @@ test "every reference this half holds for a Run is released exactly once" {
     try testing.expect(run.retain());
     try testing.expect(run.retain());
     try testing.expectEqual(@as(u32, 3), run.outstanding.load(.acquire));
-    run.release();
+    _ = run.release();
     try testing.expectEqual(@as(u32, 2), run.outstanding.load(.acquire));
 
     // The link ends. What is left is released, and the totals balance: three

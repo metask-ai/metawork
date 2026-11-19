@@ -214,6 +214,12 @@ fn invokeOne(
         return createSessionRoute(arena, bindings, request);
     if (comptime std.mem.eql(u8, entry.name, "begin_run_outcome"))
         return beginRunOutcome(arena, bindings, request);
+    if (comptime std.mem.eql(u8, entry.name, "release_closed_session"))
+        return releaseClosedSession(arena, bindings, request);
+    if (comptime entry.owner == .run_control and std.mem.eql(u8, entry.name, "try_retain"))
+        return tryRetainRun(arena, bindings, request);
+    if (comptime entry.owner == .run_control and std.mem.eql(u8, entry.name, "release"))
+        return releaseRun(arena, bindings, request);
     if (comptime !dispatchable(entry.owner, entry.name)) return error.NotDispatchable;
 
     const VTable = comptime entry.owner.VTable();
@@ -284,6 +290,13 @@ fn createSessionRoute(
         contract.surface.SessionOpenOptions,
     ).?).apply(bindings, wired[0]);
 
+    // The response buffer is taken with the slot, for the same reason. The
+    // first version encoded the answer afterwards, which left one allocation
+    // between a created Session and the caller being told its name: an
+    // `OutOfMemory` there is answered as "nothing happened", and the Session
+    // would sit in the table with nobody able to ask for it -- exactly the
+    // state the reservation exists to make impossible.
+    const out = try reservedResponse(arena, shapes.SessionRoute);
     var kept = false;
     const held = try bindings.allocator.create(run_tools.HeldSession);
     defer if (!kept) bindings.allocator.destroy(held);
@@ -302,7 +315,7 @@ fn createSessionRoute(
     });
     std.debug.assert(bindings.sessions.fill(reservation, held) != null);
     kept = true;
-    return successResponse(arena, shapes.SessionRoute, .{
+    return fillResponse(out, shapes.SessionRoute, .{
         .route_id = route.id,
         .session = reservation.id,
     });
@@ -328,6 +341,7 @@ fn beginRunOutcome(
     const wired = try payload.decodeExact(Arguments, arena, request.arguments);
     const receiver = (try resolveReceiver(bindings, request)) orelse return error.UnknownHandle;
 
+    const out = try reservedResponse(arena, shapes.BeginRunOutcome);
     var kept = false;
     const begun = try bindings.allocator.create(adapters.BegunRun);
     defer if (!kept) bindings.allocator.destroy(begun);
@@ -335,7 +349,7 @@ fn beginRunOutcome(
     defer if (!kept) std.debug.assert(bindings.runs.releaseReservation(reservation));
 
     switch (receiver.session.port.beginRunOutcome(wired[0])) {
-        .failure => |failure| return successResponse(arena, shapes.BeginRunOutcome, .{
+        .failure => |failure| return fillResponse(out, shapes.BeginRunOutcome, .{
             .failure = shapes.BeginRunFailure.from(failure),
         }),
         .run => |value| {
@@ -344,13 +358,145 @@ fn beginRunOutcome(
             begun.* = adapters.BegunRun.fromPort(value);
             std.debug.assert(bindings.runs.fill(reservation, begun) != null);
             kept = true;
-            return successResponse(arena, shapes.BeginRunOutcome, .{ .run = .{
+            return fillResponse(out, shapes.BeginRunOutcome, .{ .run = .{
                 .run_id = begun.run_id,
                 .generation = begun.generation,
                 .run = reservation.id,
             } });
         },
     }
+}
+
+// ---------------------------------------------------------------------------
+// Giving an entry back
+// ---------------------------------------------------------------------------
+//
+// `adapters.reclamation` says, per table, which registered method retires one
+// entry and whether the entry's memory is this half's. Until these three
+// prongs existed nothing read it on a live link: `take` and the drain
+// functions had test callers only, so a Session closed through the link left
+// its entry behind and the fiftieth Run was the last one this half could
+// name. Nothing reached it before, because nothing put anything in the tables.
+//
+// The other three tables wait, and not because they are unreachable in
+// practice: the methods that fill them are in `stubs.not_forwarded`, so a
+// request for one cannot arrive at all -- the caller's half panics before
+// sending. When one of them becomes forwardable, it brings its prong with it.
+
+/// `release_closed_session`, which retires the entry its *argument* names.
+///
+/// The id comes from the wire value rather than from the receiver, because
+/// this is a `runtime` method: the Session being released is what it was
+/// called with. The entry goes only after the Runtime has accepted the
+/// release -- a refused release leaves the name working, which it must, since
+/// the Session is still over here and the caller may ask again.
+fn releaseClosedSession(
+    arena: std.mem.Allocator,
+    bindings: adapters.Bindings,
+    request: Request,
+) InvokeError![]u8 {
+    const Fn = comptime @typeInfo(
+        @FieldType(port.RuntimePort.VTable, "release_closed_session"),
+    ).pointer.child;
+    const Arguments = comptime wire_types.Request(Fn);
+    const wired = try payload.decodeExact(Arguments, arena, request.arguments);
+    const named = wired[0];
+    const held = bindings.sessions.resolve(named) orelse return error.UnknownHandle;
+
+    bindings.runtime.releaseClosedSession(held.port) catch |err|
+        return failureResponse(arena, err);
+
+    // Taken after the release succeeded, and the tools go with it: the
+    // Session is gone, so a set of capabilities built for its Runs is not
+    // something anything can still be holding.
+    if (bindings.sessions.take(named)) |entry| {
+        entry.retireAll();
+        bindings.allocator.destroy(entry);
+    }
+    return successResponse(arena, void, {});
+}
+
+/// `run_control.try_retain`, through the tally that exists for it.
+///
+/// `BegunRun.retain` is what keeps the count of references this half holds on
+/// the Session for this Run, and until this prong existed it had no caller at
+/// all: the generic path reached the control block's own vtable directly, so
+/// the field was initialised to one and never moved. A tally nobody maintains
+/// cannot answer the question it is for -- when the last name for this Run is
+/// gone -- and `releaseOutstanding`, which a closure needs, had nothing to
+/// work from.
+fn tryRetainRun(
+    arena: std.mem.Allocator,
+    bindings: adapters.Bindings,
+    request: Request,
+) InvokeError![]u8 {
+    // Decoded even though it carries nothing, for the reason the generic path
+    // decodes first: bytes after a complete request are a request this build
+    // does not understand, and answering one anyway is how a peer that is not
+    // this build gets served.
+    const Fn = comptime @typeInfo(
+        @FieldType(port.RunControl.VTable, "try_retain"),
+    ).pointer.child;
+    _ = try payload.decodeExact(comptime wire_types.Request(Fn), arena, request.arguments);
+    const receiver = (try resolveReceiver(bindings, request)) orelse return error.UnknownHandle;
+    return successResponse(arena, bool, receiver.run.retain());
+}
+
+/// `run_control.release`, which retires the Run's entry once nothing names it.
+///
+/// Zero is the condition, not "the terminal arrived": a Run prepared and
+/// never executed ends too, and `reclamation` records that its entry is bound
+/// to the Run's life by any means rather than to its terminal.
+fn releaseRun(
+    arena: std.mem.Allocator,
+    bindings: adapters.Bindings,
+    request: Request,
+) InvokeError![]u8 {
+    const Fn = comptime @typeInfo(
+        @FieldType(port.RunControl.VTable, "release"),
+    ).pointer.child;
+    _ = try payload.decodeExact(comptime wire_types.Request(Fn), arena, request.arguments);
+    const receiver = (try resolveReceiver(bindings, request)) orelse return error.UnknownHandle;
+    const begun = receiver.run;
+    if (begun.release() == 0) {
+        if (bindings.runs.take(request.receiver)) |entry| bindings.allocator.destroy(entry);
+    }
+    return successResponse(arena, void, {});
+}
+
+comptime {
+    // The three prongs above are the three entries whose release method this
+    // half performs. Checked against the table rather than listed again, so a
+    // table that changes which method releases it stops matching here.
+    const sessions = adapters.reclaimThrough("release_closed_session").?;
+    if (!std.mem.eql(u8, sessions.field, "sessions") or !sessions.owns_entry)
+        @compileError("release_closed_session no longer retires this half's `sessions` entry");
+    const runs = adapters.reclaimThrough("release").?;
+    if (!std.mem.eql(u8, runs.field, "runs") or !runs.owns_entry)
+        @compileError("release no longer retires this half's `runs` entry");
+}
+
+/// A response buffer taken before the call that will fill it.
+///
+/// Only for a result whose size the type decides, which is what makes taking
+/// it early possible at all: a bounded shape can be sized without the value.
+/// Both reserved prongs return one, and neither allocates after the point
+/// where the thing it is answering about exists.
+fn reservedResponse(
+    arena: std.mem.Allocator,
+    comptime T: type,
+) std.mem.Allocator.Error![]u8 {
+    const bound = comptime payload.maxEncodedSize(T) orelse @compileError(
+        @typeName(T) ++ " carries a slice, so its response cannot be sized before the " ++
+            "call; a result that names a handle has to be bounded",
+    );
+    return arena.alloc(u8, envelope.header_bytes + bound);
+}
+
+fn fillResponse(out: []u8, comptime T: type, value: T) []u8 {
+    envelope.encodeResponseHeader(out[0..envelope.header_bytes], envelope.ok);
+    const written = payload.encode(T, value, out[envelope.header_bytes..]);
+    return out[0 .. envelope.header_bytes + written];
 }
 
 /// `export_checkpoint`, whose sink this half opens from the store.
@@ -671,6 +817,9 @@ const Harness = struct {
     skill_restore: handle_table.Table(port.SkillRestoreInputs),
     session_restore: handle_table.Table(port.SessionRestoreInputs),
     selections: handle_table.Table(@import("agent_mcp_catalog").Selection),
+    /// The Runtime a `runtime` method lands on. Quiet unless a test needs an
+    /// answer, so a test drives exactly what it says it drives.
+    runtime: port.RuntimePort = port.RuntimePort.quiet,
 
     fn init() !Harness {
         return .{
@@ -699,7 +848,7 @@ const Harness = struct {
     fn bindings(self: *Harness) adapters.Bindings {
         return .{
             .allocator = testing.allocator,
-            .runtime = port.RuntimePort.quiet,
+            .runtime = self.runtime,
             .store = call_frame.BlobStore.empty,
             .sessions = &self.sessions,
             .runs = &self.runs,
@@ -1227,6 +1376,130 @@ test "a store that cannot open the blob is an export failure, not a link failure
         },
     }
     _ = harness.sessions.take(id);
+}
+
+/// A Runtime that opens Sessions, for the one prong that creates something.
+const OpeningRuntime = struct {
+    vtable: port.RuntimePort.VTable = undefined,
+    session_vtable: port.SessionPort.VTable = undefined,
+    fake: FakeSession = .{},
+    opened: usize = 0,
+
+    fn portValue(self: *OpeningRuntime) port.RuntimePort {
+        self.vtable = port.RuntimePort.quiet.vtable.*;
+        self.vtable.create_session_route = open;
+        return .{ .context = self, .vtable = &self.vtable };
+    }
+
+    fn open(
+        context: ?*anyopaque,
+        _: contract.surface.SessionOpenOptions,
+    ) contract.surface.Error!port.SessionRoute {
+        const self: *OpeningRuntime = @ptrCast(@alignCast(context.?));
+        self.opened += 1;
+        return .{ .id = 5, .session = self.fake.port(&self.session_vtable) };
+    }
+};
+
+fn createSessionRouteRequest(arena: std.mem.Allocator) ![]u8 {
+    const entry = try method.find(method.codeOf(.runtime, "create_session_route"));
+    const Fn = @typeInfo(
+        @FieldType(port.RuntimePort.VTable, "create_session_route"),
+    ).pointer.child;
+    const Arguments = wire_types.Request(Fn);
+    const arguments: Arguments = .{.{
+        .task_id = 11,
+        .binding_epoch = 3,
+        .model_binding = .{
+            .image_capabilities = &.{},
+            .target = .{
+                .provider_id = "provider",
+                .protocol = .anthropic_messages,
+                .base_url = "https://example.invalid",
+                .model = "model",
+            },
+            .credential = "secret",
+        },
+        .permission_mode = .default,
+        .shell_policy = .unrestricted,
+        .permission_interaction = .interactive,
+        .workspace = .{ .canonical_root = "root", .trust = .explicitly_trusted },
+        .canonical_user_home = "home",
+        .workspace_epoch = "epoch",
+        .skill_catalog = .none,
+        .skill_policy = null,
+        .mcp_selection = .none,
+        .operation_id_floor = .{},
+    }};
+
+    const header = envelope.requestHeaderBytes(entry.owner);
+    const body = payload.encodedSize(Arguments, arguments);
+    const out = try arena.alloc(u8, header + body);
+    envelope.encodeRequestHeader(out[0..header], entry, .none);
+    _ = payload.encode(Arguments, arguments, out[header..]);
+    return out;
+}
+
+test "nothing is allocated between creating a Session and naming it" {
+    // The reservation makes the *slot* safe, and the first version of this
+    // prong left one allocation after it: the response was encoded once the
+    // Session existed, so an `OutOfMemory` there was answered as "nothing
+    // happened" while a Session sat in the table with no name the caller
+    // could reach it by -- exactly the state the reservation exists to make
+    // impossible.
+    //
+    // Driven over every allocation failure point rather than a chosen one,
+    // because which allocation is the last one before the call is what the
+    // fix changed and a fixed index would stop being that one silently. The
+    // invariant at every index: if the Runtime opened a Session, the caller
+    // was told its name.
+    var index: usize = 0;
+    while (index < 32) : (index += 1) {
+        // The failing allocator sits *on top* of the arena, not under it. An
+        // arena asks its backing allocator for a large block and serves small
+        // requests out of it, so a failure point underneath is reached once
+        // and then never again -- which is why the first version of this test
+        // passed with the fix removed.
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        var failing = std.testing.FailingAllocator.init(arena_state.allocator(), .{
+            .fail_index = index,
+        });
+        const arena = failing.allocator();
+
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var runtime: OpeningRuntime = .{};
+        harness.runtime = runtime.portValue();
+
+        const bytes = createSessionRouteRequest(arena) catch continue;
+        const answered = invoke(arena, harness.bindings(), try classify(bytes));
+
+        if (answered) |response| {
+            // Answered: the Session exists and the table holds it, so the
+            // name the caller was given resolves.
+            switch (try envelope.decodeResponse(response)) {
+                .value => {
+                    try testing.expectEqual(@as(usize, 1), runtime.opened);
+                    try testing.expectEqual(@as(usize, 1), harness.sessions.live);
+                    const wired = try payload.decodeExact(shapes.SessionRoute, arena, response[envelope.header_bytes..]);
+                    try testing.expect(harness.sessions.resolve(wired.session) != null);
+                    const taken = harness.sessions.take(wired.session).?;
+                    testing.allocator.destroy(taken);
+                },
+                // A refusal from the Runtime, which this stand-in does not
+                // produce; reaching it would mean the request decoded into
+                // something else.
+                .failure => return error.UnexpectedRefusal,
+            }
+        } else |_| {
+            // Refused: nothing was created and nothing is held. This is the
+            // assertion the fix is about -- a failure after the create would
+            // show up here as an opened Session with an empty table.
+            try testing.expectEqual(@as(usize, 0), runtime.opened);
+            try testing.expectEqual(@as(usize, 0), harness.sessions.live);
+        }
+    }
 }
 
 test "how much of the surface this build answers is counted, not claimed" {

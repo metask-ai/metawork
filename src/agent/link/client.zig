@@ -160,9 +160,21 @@ pub const Client = struct {
         self.boxes.deinit();
     }
 
-    /// Records a fault, keeping the first one. Never `.none`: clearing a
-    /// fault would be a second kind of event, and nothing in a single
-    /// failure model recovers a link in place.
+    /// Records a fault, keeping the first one, and ends the link in the same
+    /// step.
+    ///
+    /// Recording alone was not enough and the gap was behaviour, not
+    /// bookkeeping: a stub that answered "the dependency is unreachable"
+    /// while the link was still carrying calls would hand Product a poisoned
+    /// Session and then let the next call reach that same Session. No caller
+    /// may read a gone answer from a link that is still working, so the
+    /// correlation table closes here -- every waiter is released and every
+    /// later call answers without sending.
+    ///
+    /// Never `.none`: clearing a fault would be a second kind of event, and
+    /// nothing in a single failure model recovers a link in place. Whoever
+    /// owns the process reads `faulted` and ends it; this only stops the link
+    /// from carrying anything further in the meantime.
     pub fn recordFault(self: *Client, reason: LinkFault) void {
         std.debug.assert(reason != .none);
         _ = self.fault.cmpxchgStrong(
@@ -171,6 +183,7 @@ pub const Client = struct {
             .release,
             .acquire,
         );
+        self.pending.close();
     }
 
     /// What this half has concluded about the link, for the supervisor.
@@ -326,6 +339,14 @@ pub fn call(
     receiver: handle_table.Id,
     arguments: Arguments(owner, name),
 ) CallError!Answer(owner, name) {
+    // A link this half has already concluded is unusable carries nothing
+    // further. Checked before anything is encoded, because the point is that
+    // the far side is not asked: a caller that read a gone answer from an
+    // earlier call must not be able to reach the same Session with the next
+    // one, and the peer must not act on a request whose answer this half will
+    // not wait for.
+    if (client.faulted() != .none) return error.Unreachable;
+
     const entry = comptime method.find(method.codeOf(owner, name)) catch unreachable;
     // The frame kind comes from the registration, not from this function. A
     // `control` entry is on that transport because its call must overtake

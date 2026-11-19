@@ -281,6 +281,18 @@ pub fn Boxes(comptime Link: type) type {
             link: *Link,
             id: handle_table.Id = .none,
             live: bool = false,
+            /// How many references this half holds on what the box names.
+            ///
+            /// Only a Run needs it, and it needs it because one box names
+            /// both a `RunPort` and every `RunControl` lease taken from it:
+            /// the execution half keeps the same tally in `adapters.BegunRun`
+            /// and retires its entry when it reaches zero, so a box released
+            /// on the first lease would leave the caller unable to name a Run
+            /// that is still running, and a box never released would spend a
+            /// slot per Run. Each half counts what it is told -- a retain
+            /// that answered true, a release that was sent -- so neither has
+            /// to be told the other's answer.
+            holds: u32 = 0,
         };
 
         allocator: std.mem.Allocator,
@@ -361,7 +373,10 @@ pub fn Boxes(comptime Link: type) type {
         fn freeSlot(self: *Self) Error!*Slot {
             for (self.slots) |*slot| {
                 if (slot.live) continue;
-                slot.* = .{ .link = slot.link, .id = .none, .live = true };
+                // One hold to start with, the way `adapters.BegunRun` starts
+                // its tally at one: the name itself is a reference, and the
+                // call that releases it is the one that gives the slot back.
+                slot.* = .{ .link = slot.link, .id = .none, .live = true, .holds = 1 };
                 return slot;
             }
             return error.BoxCapacity;
@@ -438,6 +453,38 @@ pub fn Boxes(comptime Link: type) type {
             _ = try body(context, id);
             slot.id = .none;
             slot.live = false;
+            slot.holds = 0;
+        }
+
+        /// One more reference on what this box names.
+        ///
+        /// For the one handle that has more than one: a Run's box is named by
+        /// its port and by every control lease taken from it. The execution
+        /// half keeps the same tally, so this is each half counting its own
+        /// names rather than one half being told the other's.
+        pub fn retained(self: *Self, handle: *const anyopaque) Error!void {
+            const slot = try self.slotOf(handle);
+            if (!slot.id.valid()) return error.UnknownBox;
+            slot.holds += 1;
+        }
+
+        /// One fewer, and whether that was the last.
+        ///
+        /// `true` means the slot is free again: nothing on this side can name
+        /// what it named, which is the same moment the other half retires its
+        /// own entry. Cleared after the count reaches zero and not before,
+        /// for `releaseThrough`'s reason -- a slot given up early can be
+        /// taken by another `open` while this handle's call is still in
+        /// flight.
+        pub fn released(self: *Self, handle: *const anyopaque) Error!bool {
+            const slot = try self.slotOf(handle);
+            if (!slot.id.valid()) return error.UnknownBox;
+            std.debug.assert(slot.holds > 0);
+            slot.holds -= 1;
+            if (slot.holds != 0) return false;
+            slot.id = .none;
+            slot.live = false;
+            return true;
         }
     };
 }

@@ -17,16 +17,31 @@
 //! is supposed to buy -- and until this file existed, `fault.install` ran
 //! after the fork in `app.run`, so the execution half had no handler at all.
 //!
-//! ## Why requests are answered on workers
+//! ## Why requests are answered on two kinds of thread
 //!
 //! `method.caller` marks four methods `.worker`, and `run.execute` is the
 //! reason: it blocks until the Run reaches a terminal. Answering it on the
 //! thread that reads frames would stop the link from reading for the length
 //! of a Run -- so a Stop, which is registered on the control transport
-//! precisely so it can overtake queued fragments, could never arrive. The
-//! reader therefore only queues, and a small pool answers.
+//! precisely so it can overtake queued fragments, could never arrive.
 //!
-//! The queue is bounded and the reader blocks when it is full. That is
+//! A single pool is not enough either, and the arithmetic is what says so.
+//! Product runs `host_worker_count` workers -- sixteen -- and every one of
+//! them can be inside `execute`. A pool of four would be fully occupied by
+//! four Runs, and then a Stop or a permission answer, which are ordinary
+//! requests on this side, would queue *behind* the Runs they are meant to
+//! end: four Runs waiting on a permission answer that cannot be delivered is
+//! a deadlock, not a slow link.
+//!
+//! So the split follows the registry rather than a number. A `.worker`
+//! request -- the four that can block until something they started finishes
+//! -- gets a thread of its own, bounded by how many the caller can have in
+//! flight, which is bounded in turn by the caller's own threads: each one
+//! waits for its answer. Everything else is answered by a small pool that
+//! never runs a blocking method, so a Stop and a UI answer always have a free
+//! thread.
+//!
+//! The pool's queue is bounded and the reader blocks when it is full. That is
 //! deliberate: blocking the reader is backpressure on a pipe, which the peer
 //! feels as a slow link rather than as a refusal, and a refusal is not
 //! something a request frame can carry.
@@ -90,12 +105,19 @@ pub const Options = struct {
     /// open anything, which is the fail-closed answer rather than accepting
     /// bytes nobody will find again.
     store: call_frame.BlobStore = call_frame.BlobStore.empty,
-    /// How many requests can be answered at once. One is enough to answer
-    /// anything; more than one is what keeps a blocking `execute` from
-    /// holding up every other call.
+    /// Threads for the methods that cannot block. Small on purpose: what they
+    /// answer is short, and the only requirement is that one is always free
+    /// so a Stop or a UI answer is never behind a Run.
     workers: usize = 4,
-    /// Requests the reader may queue before it blocks.
+    /// Requests the reader may queue for those threads before it blocks.
     queue_depth: usize = 16,
+    /// Blocking requests that can be in flight at once -- a thread each.
+    ///
+    /// The real bound is the caller's: a `.worker` request blocks the thread
+    /// that made it until its answer arrives, so the caller cannot have more
+    /// outstanding than it has threads. This is the ceiling above that, and
+    /// hitting it means the caller is not the half this was built for.
+    blocking_slots: usize = 64,
 };
 
 /// Composes this half and serves the link until it ends.
@@ -143,6 +165,26 @@ const Queued = struct {
     payload: []u8,
 };
 
+/// One blocking request and the thread answering it.
+///
+/// The slot outlives the thread so the thread can be joined later: a thread
+/// handle has to be joined by someone, and the someone cannot be itself.
+/// `done` is what lets the reader reuse a slot without waiting -- it joins a
+/// finished thread on its way past, which is the only point where joining
+/// costs nothing.
+const Blocking = struct {
+    thread: ?std.Thread = null,
+    done: std.atomic.Value(bool) = .init(false),
+    half: *Answering = undefined,
+    queued: Queued = undefined,
+
+    fn main(self: *Blocking) void {
+        defer self.done.store(true, .release);
+        defer self.half.allocator.free(self.queued.payload);
+        self.half.answer(self.queued);
+    }
+};
+
 /// The Runtime, the tables it is named through, and the pool that answers.
 const Answering = struct {
     io: std.Io,
@@ -158,9 +200,15 @@ const Answering = struct {
     queue: []?Queued,
     head: usize = 0,
     count: usize = 0,
-    stopping: bool = false,
+    /// Read by the drain thread under `signal_mutex` and by the pool under
+    /// `mutex`, so it is atomic rather than guarded: two locks around one
+    /// flag is two answers to the same question.
+    stopping: std.atomic.Value(bool) = .init(false),
     workers: []std.Thread,
     started: usize = 0,
+    /// A thread each, for the methods that can block until something they
+    /// started finishes.
+    blocking: []Blocking,
 
     /// The wake bit a Core callback thread sets, and the thread that acts on
     /// it. Its own mutex, held for nothing but the flag: a callback thread
@@ -184,11 +232,15 @@ const Answering = struct {
         options: Options,
     ) InitError!void {
         std.debug.assert(options.workers > 0 and options.queue_depth > 0);
+        std.debug.assert(options.blocking_slots > 0);
         const queue = try allocator.alloc(?Queued, options.queue_depth);
         errdefer allocator.free(queue);
         @memset(queue, null);
         const workers = try allocator.alloc(std.Thread, options.workers);
         errdefer allocator.free(workers);
+        const blocking = try allocator.alloc(Blocking, options.blocking_slots);
+        errdefer allocator.free(blocking);
+        @memset(blocking, .{});
 
         self.* = .{
             .io = io,
@@ -199,6 +251,7 @@ const Answering = struct {
             .store = options.store,
             .queue = queue,
             .workers = workers,
+            .blocking = blocking,
         };
         try self.tables.init(allocator, options.tables);
         errdefer self.tables.deinit();
@@ -210,9 +263,15 @@ const Answering = struct {
     }
 
     fn deinit(self: *Answering) void {
+        // Every thread this half started is joined first, whatever path got
+        // here: `begin` can fail with the pool already running, and freeing
+        // the queue those threads are waiting on would be a use-after-free
+        // with a race in front of it.
+        Answering.end(self);
         self.factory.destroy_fn(self.factory.context, self.runtime);
         self.tables.deinit();
         self.allocator.free(self.workers);
+        self.allocator.free(self.blocking);
         for (self.queue) |entry| if (entry) |queued| self.allocator.free(queued.payload);
         self.allocator.free(self.queue);
         self.* = undefined;
@@ -235,7 +294,7 @@ const Answering = struct {
         const self: *Answering = @ptrCast(@alignCast(context orelse return .unavailable));
         self.signal_mutex.lockUncancelable(self.io);
         defer self.signal_mutex.unlock(self.io);
-        if (self.stopping) return .unavailable;
+        if (self.stopping.load(.acquire)) return .unavailable;
         const already = self.events_ready;
         self.events_ready = true;
         self.signal.broadcast(self.io);
@@ -245,9 +304,9 @@ const Answering = struct {
     fn drainMain(self: *Answering) void {
         while (true) {
             self.signal_mutex.lockUncancelable(self.io);
-            while (!self.events_ready and !self.stopping)
+            while (!self.events_ready and !self.stopping.load(.acquire))
                 self.signal.waitUncancelable(self.io, &self.signal_mutex);
-            const ending = self.stopping;
+            const ending = self.stopping.load(.acquire);
             self.events_ready = false;
             self.signal_mutex.unlock(self.io);
 
@@ -314,11 +373,15 @@ const Answering = struct {
             thread.* = std.Thread.spawn(.{}, workerMain, .{self}) catch break;
             self.started += 1;
         }
-        if (self.started == 0) return null;
         // Its own thread, because events have to flow while a Run is running
         // rather than only when something else is answered. A response flushes
         // too, for ordering; this is what makes the stream live.
-        self.drain = std.Thread.spawn(.{}, drainMain, .{self}) catch return null;
+        self.drain = std.Thread.spawn(.{}, drainMain, .{self}) catch null;
+        // A half that cannot answer must not pretend to: refusing here is
+        // what makes the process exit with `resource_unavailable` instead of
+        // serving a link that drops everything. `end` is what stops whatever
+        // did start, and `deinit` calls it on every path.
+        if (self.started == 0 or self.drain == null) return null;
         return .{ .context = self, .deliver_fn = deliver };
     }
 
@@ -330,8 +393,8 @@ const Answering = struct {
     /// bounded from the other side.
     fn end(context: ?*anyopaque) void {
         const self: *Answering = @ptrCast(@alignCast(context.?));
+        self.stopping.store(true, .release);
         self.mutex.lockUncancelable(self.io);
-        self.stopping = true;
         self.condition.broadcast(self.io);
         self.mutex.unlock(self.io);
         self.signal_mutex.lockUncancelable(self.io);
@@ -343,6 +406,15 @@ const Answering = struct {
             thread.join();
             self.drain = null;
         }
+        // A blocking request cannot be interrupted -- a worker inside
+        // `execute` returns when its Run reaches a terminal and not before.
+        // Waiting is still the right bound here: the UI half closes the pipe,
+        // waits out a grace period and then kills this process, so the
+        // unbounded case is bounded from the other side.
+        for (self.blocking) |*slot| if (slot.thread) |thread| {
+            thread.join();
+            slot.thread = null;
+        };
     }
 
     fn deliver(
@@ -366,21 +438,78 @@ const Answering = struct {
             },
         }
         const owned = self.allocator.dupe(u8, payload) catch return .stop;
+        var kept = false;
+        defer if (!kept) self.allocator.free(owned);
+        if (self.stopping.load(.acquire)) return .stop;
+
+        // A method that can block gets a thread of its own. Which methods
+        // those are is the registry's answer, not a list here: `.worker` is
+        // the column that says "this one may wait for something it started".
+        if (blockingRequest(payload)) {
+            const slot = self.freeBlockingSlot() orelse {
+                // Above the ceiling, which means the caller has more
+                // outstanding than it has threads to wait on them with. No
+                // thread to answer on, and this one must not block: the
+                // reader is what a Stop arrives through.
+                self.refuse(correlation, error.OutOfMemory);
+                return .ok;
+            };
+            slot.* = .{
+                .half = self,
+                .queued = .{ .correlation = correlation, .payload = owned },
+            };
+            slot.thread = std.Thread.spawn(.{}, Blocking.main, .{slot}) catch {
+                slot.* = .{};
+                self.refuse(correlation, error.OutOfMemory);
+                return .ok;
+            };
+            kept = true;
+            return .ok;
+        }
+
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        while (self.count == self.queue.len and !self.stopping)
+        while (self.count == self.queue.len and !self.stopping.load(.acquire))
             self.condition.waitUncancelable(self.io, &self.mutex);
-        if (self.stopping) {
-            self.allocator.free(owned);
-            return .stop;
-        }
+        if (self.stopping.load(.acquire)) return .stop;
         self.queue[(self.head + self.count) % self.queue.len] = .{
             .correlation = correlation,
             .payload = owned,
         };
         self.count += 1;
+        kept = true;
         self.condition.broadcast(self.io);
         return .ok;
+    }
+
+    /// A slot with no thread in it, joining one that has finished on the way.
+    ///
+    /// Joining here is what makes the slots reusable without a thread that
+    /// outlives the link: a finished thread is cheap to join, and this is the
+    /// only place that passes one.
+    fn freeBlockingSlot(self: *Answering) ?*Blocking {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.blocking) |*slot| {
+            if (slot.thread) |thread| {
+                if (!slot.done.load(.acquire)) continue;
+                thread.join();
+                slot.* = .{};
+            }
+            return slot;
+        }
+        return null;
+    }
+
+    /// Answers a request this half will not perform, on the reader's thread.
+    ///
+    /// Only for the conditions that have no thread to answer on. It is two
+    /// bytes, so the wait it can meet is the writer draining rather than a
+    /// consumer that may never come back.
+    fn refuse(self: *Answering, correlation: u64, failure: error_code.LinkError) void {
+        var header: [envelope.header_bytes]u8 = undefined;
+        envelope.encodeResponseHeader(&header, error_code.encode(failure));
+        self.submit(correlation, &header);
     }
 
     fn take(self: *Answering) ?Queued {
@@ -395,7 +524,7 @@ const Answering = struct {
                 self.condition.broadcast(self.io);
                 return queued;
             }
-            if (self.stopping) return null;
+            if (self.stopping.load(.acquire)) return null;
             self.condition.waitUncancelable(self.io, &self.mutex);
         }
     }
@@ -443,6 +572,19 @@ const Answering = struct {
     }
 };
 
+/// Whether this request names a method that can block until something it
+/// started finishes.
+///
+/// Read off the registry's `caller` column rather than from a list here: that
+/// column exists to say which thread may start a method, and `.worker` is
+/// exactly "this one may block as long as it likes, because blocking is what
+/// that thread already does". A request this half cannot classify is not one
+/// of them -- it is refused by the pool, which is where a refusal belongs.
+fn blockingRequest(payload: []const u8) bool {
+    const request = dispatch.classify(payload) catch return false;
+    return request.entry.caller == .worker;
+}
+
 /// The wire code for a dispatch failure, or `null` when there is none.
 ///
 /// Absence lands on the restrictive side on purpose: a failure with no honest
@@ -457,6 +599,19 @@ fn responseCode(failure: dispatch.InvokeError) ?u16 {
         error.HandleCapacity,
         error.GenerationExhausted,
         => error_code.encode(error.SessionCapacity),
+        // An id this half no longer holds. It was ending the process, on the
+        // argument that the caller's own box table refuses a stale handle
+        // before sending, so arriving here means a defect. That argument
+        // holds as far as I can construct it -- every stale case I can follow
+        // is refused locally -- but the consequence if it is wrong is one
+        // Task's stale handle ending every other Task's Run, and the cost of
+        // not relying on it is one response.
+        //
+        // `DependencyUnreachable` rather than a near-miss: the object the
+        // request named is gone, which is what each stub turns into its own
+        // restricting answer. Nothing is retried and nothing is claimed about
+        // the far side's state, so the single failure model is intact.
+        error.UnknownHandle => error_code.encode(error.DependencyUnreachable),
         else => null,
     };
 }
@@ -497,6 +652,53 @@ fn eventLost(failure: anyerror) noreturn {
     std.process.exit(@intFromEnum(Exit.transport_failed));
 }
 
+/// A request header for one method, which is all `blockingRequest` reads.
+fn headerFor(
+    storage: []u8,
+    comptime owner: agent_link.method.Owner,
+    comptime name: []const u8,
+) []const u8 {
+    const entry = agent_link.method.find(agent_link.method.codeOf(owner, name)) catch
+        unreachable;
+    const bytes = agent_link.envelope.requestHeaderBytes(owner);
+    const receiver: agent_link.handle_table.Id = if (agent_link.envelope.receiverOf(owner) == null)
+        .none
+    else
+        .{ .slot = 1, .generation = 1 };
+    agent_link.envelope.encodeRequestHeader(storage[0..bytes], entry, receiver);
+    return storage[0..bytes];
+}
+
+test "the methods that get a thread of their own are the ones the registry calls worker" {
+    // The split this pins prevents a deadlock, not a slowdown. A Stop travels
+    // on the control transport so it can overtake queued fragments, and a
+    // permission answer releases a Core callback thread a Run is waiting on
+    // -- so if either could queue behind `execute`, four Runs would be enough
+    // to make the answer they are waiting for undeliverable.
+    var storage: [64]u8 = undefined;
+
+    // Blocks until its Run reaches a terminal, and the same for a compact.
+    try std.testing.expect(blockingRequest(headerFor(&storage, .run, "execute")));
+    try std.testing.expect(blockingRequest(
+        headerFor(&storage, .session, "execute_prepared_compact"),
+    ));
+
+    // The two that must never wait behind one.
+    try std.testing.expect(!blockingRequest(
+        headerFor(&storage, .runtime, "request_run_termination"),
+    ));
+    try std.testing.expect(!blockingRequest(
+        headerFor(&storage, .session, "respond_permission"),
+    ));
+    // And an ordinary short call.
+    try std.testing.expect(!blockingRequest(headerFor(&storage, .session, "set_model")));
+
+    // Bytes that name no method are not blocking either: the pool answers
+    // them, which is where a refusal belongs.
+    try std.testing.expect(!blockingRequest(&[_]u8{ 0xff, 0xff }));
+    try std.testing.expect(!blockingRequest(&.{}));
+}
+
 test "the role this half records under is not the caller's to choose" {
     // `FaultRecording` carries the identity and the root and nothing else, so
     // a caller cannot ask for `.ui` and overwrite the record the other half
@@ -521,7 +723,14 @@ test "a failure with no honest code is not answered with a near-miss" {
     try std.testing.expect(responseCode(error.UnknownMethod) == null);
     try std.testing.expect(responseCode(error.NotACall) == null);
     try std.testing.expect(responseCode(error.NotDispatchable) == null);
-    try std.testing.expect(responseCode(error.UnknownHandle) == null);
+
+    // A stale handle is answered rather than fatal, and this is the
+    // assertion that keeps it that way: the alternative costs one Task's
+    // stale handle every other Task's Run.
+    try std.testing.expectEqual(
+        error_code.encode(error.DependencyUnreachable),
+        responseCode(error.UnknownHandle).?,
+    );
 
     // And the codes are the surface's own, not numbers invented here.
     try std.testing.expectEqual(
