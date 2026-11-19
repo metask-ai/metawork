@@ -612,13 +612,37 @@ const gone_snapshot: surface.SessionSnapshot = .{
     .pending_ui_request_id = null,
 };
 
-/// `run.execute`: a terminal whose failure is `dependency_contract`, which
-/// `control.terminationEffect` already reads as "the termination effect is
-/// unknown" before looking at anything else, and which the consuming
-/// classifier's catch-all already handles. Built rather than declared
-/// because the type owns its diagnostic through an allocator; the storage is
-/// empty, and `std.mem.Allocator.free` returns immediately on a zero-length
-/// slice, so Product's own `deinit` is correct either way.
+/// `run.execute`: a Run that was interrupted because its Session is gone.
+///
+/// The signal is the whole of it. A link that cannot be reached is an
+/// execution process that is not there, and a Session in a process that is
+/// not there is a closed Session -- so `.interrupted` with `.session_close`
+/// is not a stand-in for the answer, it is the answer. `policy.zig` turns it
+/// into the `interrupted` phase and outcome with a `session_close` cause,
+/// which are the states a Run that was cut off already has, and which is what
+/// lets the next message pick the conversation up from its checkpoint.
+///
+/// It said `failure = .dependency_contract` before, which read as "the
+/// termination effect is unknown" and landed in the classifier's catch-all as
+/// a dependency-contract *failure*. That was defensible and it was wrong
+/// about the thing a user sees: a Run nobody could finish had failed on its
+/// own merits, with nothing to resume from. The effect is not unknown -- the
+/// process is gone, which is as known as it gets.
+///
+/// `raw_status_code` stays null, and that is load-bearing twice over:
+/// `coreWasInvoked` reads it, and it is false here that routes this terminal
+/// to the signal rather than to the catch-all; and `terminationEffect` reads
+/// it as `prevented_core_call`, which is what a request that never reached
+/// the far side is.
+///
+/// `session_disposition_at_completion` stays `.poisoned`. Nothing about this
+/// Session is reusable, and the Run's outcome being interruption rather than
+/// failure says nothing about the Session it ran in.
+///
+/// Built rather than declared because the type owns its diagnostic through an
+/// allocator; the storage is empty, and `std.mem.Allocator.free` returns
+/// immediately on a zero-length slice, so Product's own `deinit` is correct
+/// either way.
 fn goneTerminal(context: ?*anyopaque) control.TerminalResult {
     return .{
         .allocator = client.Client.linkFrom(context).allocator,
@@ -631,11 +655,11 @@ fn goneTerminal(context: ?*anyopaque) control.TerminalResult {
         .raw_stop_reason_code = null,
         .abort_status = null,
         .raw_abort_status_code = null,
-        .termination_signal = null,
+        .termination_signal = .{ .interrupted = .session_close },
         .file_changes_lost = false,
         .event_delivery_lost = false,
         .receipts = .{},
-        .failure = .dependency_contract,
+        .failure = null,
         .session_disposition_at_completion = .poisoned,
         .durable_budget = null,
         .input_counts = null,

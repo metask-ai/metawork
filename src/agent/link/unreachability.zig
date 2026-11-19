@@ -152,12 +152,16 @@ pub const exemptions = [_]Exemption{
         .name = "execute",
         .category = .already_total,
         .consumer = "src/product/task/policy.zig classifyAgentTerminal",
-        .reason = "A TerminalResult whose failure is dependency_contract already means the " ++
-            "termination effect is unknown -- control.zig's terminationEffect returns " ++
-            ".unknown on that branch before reading anything else. The consuming " ++
-            "classifier is total and its catch-all is dependency_contract_failure, and " ++
-            "every field a gone link makes unknowable is already optional, so the answer " ++
-            "is a truthful one rather than an invented one.",
+        .reason = "The answer is a termination signal: interrupted, because the Session " ++
+            "is closed, because the process it lived in is gone. classifyAgentTerminal " ++
+            "is total, and a terminal with a signal and no raw status code reaches " ++
+            "decisionForSignal, whose session_close arm is the interrupted phase and " ++
+            "outcome -- values a Run that was cut off already has. Every field a gone " ++
+            "link makes unknowable is optional and left null, so nothing is invented. " ++
+            "This used to answer failure=dependency_contract, which the same classifier " ++
+            "read as a failure of the Run itself; that was the restrictive answer by " ++
+            "instinct and the wrong one by meaning, since a Run nobody could finish has " ++
+            "not failed and does have somewhere to resume from.",
     },
     .{
         .owner = .run_control,

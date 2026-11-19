@@ -958,11 +958,13 @@ test "an execution process that dies under a live Task does not take Product wit
     // process too, which is the whole of what the isolation was supposed to
     // prevent.
     //
-    // What this does *not* assert is a Run marked interrupted. Today the
-    // stub's answer for a lost `execute` is a dependency-contract failure, so
-    // the Run ends failed; the interrupted outcome, the respawn and the
-    // resume from the checkpoint are the UI side of the disconnect work and
-    // are not written yet.
+    // The Run ends interrupted, which is the half of the disconnect
+    // behaviour that needs nothing new: the Session is gone, so the stub's
+    // answer for a lost `execute` is a `session_close` interruption, and
+    // Product's own classifier turns that into the interrupted phase. What is
+    // still missing is what happens next -- a respawn, and the next message
+    // resuming from the checkpoint -- because both need the checkpoint path
+    // and a fact that outlives the call that discovered the loss.
     const fixture = try fixturePath();
     defer allocator.free(fixture);
 
@@ -1020,11 +1022,11 @@ test "an execution process that dies under a live Task does not take Product wit
 
         // Product's own worker is waiting on that `execute`. The reader
         // thread reads end-of-stream, closes the table and answers it, so the
-        // Run reaches a terminal with nothing crossing the link.
-        try product.waitProductControlSnapshot(
-            &control,
-            "\"outcome\":\"dependency_contract_failure\"",
-        );
+        // Run reaches a terminal with nothing crossing the link -- and the
+        // terminal says it was interrupted, not that it failed. The
+        // difference is the one a user acts on: a failed Run is over, and an
+        // interrupted one is a conversation to carry on.
+        try product.waitProductControlSnapshot(&control, "\"outcome\":\"interrupted\"");
 
         // And here is what this side knows about it: nothing.
         //
