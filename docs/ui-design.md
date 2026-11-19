@@ -924,7 +924,7 @@ Renderer 只显示 Host capability projection 声明的模式，不独立审核�
 
 - Run 的 input/output/cache read/cache creation 统计不进入对话、任务信息或右栏，也不保留空 disclosure、隐藏组件或兼容入口；Host/Bridge 的统计、持久化和数据合同不变。不合并为 Task 用量，也不推算总运行耗时；
 - Composer 仅在当前 attached Conversation 有 Host pressure 观测时显示对应 warning/critical 的可读提醒；只有用户打开后才展示最近观测说明和 current/auto-compact/blocking token 数。没有 pressure 时整块隐藏，即使存在 lastAutoCompact 历史也不创建入口；不展示压缩前后 token、dropped/kept、伪百分比、连续实时用量、raw source Run identity 或跨 attachment 历史。Host 清除 pressure 后提醒与已展开详情同步卸载，不由 Renderer 计时或历史推断恢复；
-- Task 标题附近的“任务信息”使用独立 info 图标，仅在用户打开后分别展示项目归属、已绑定的 Manual 工作目录名称、实际执行模型、固定 permission profile（受 capability gate 控制）与创建时 MCP 三态。工作目录行仅在目录名称可公开时显示，并提供打开目录的图标按钮。按钮复用项目菜单的打开资格与失败反馈，长名称可以换行。模型取当前 Run 的冻结 execution；没有当前 Run 时取最近一轮 Run，并标明“最近一轮模型”；没有 Run 时不展示执行模型，不用 Composer 选择或 global default 伪造执行事实。MCP 不是实时连接状态，不暗示可热附加。不增加通用设置页或第二个概览；
+- Task 标题附近的“任务信息”使用独立 info 图标，仅在用户打开后展示已绑定的 Manual 工作目录名称、实际执行模型、固定 permission profile（受 capability gate 控制）与创建时 MCP 三态。工作目录行仅在目录名称可公开时显示，并提供打开目录的图标按钮。按钮复用项目菜单的打开资格与失败反馈，长名称可以换行。模型取当前 Run 的冻结 execution；没有当前 Run 时取最近一轮 Run，并标明“最近一轮模型”；没有 Run 时不展示执行模型，不用 Composer 选择或 global default 伪造执行事实。MCP 不是实时连接状态，不暗示可热附加。不增加通用设置页或第二个概览；
 - pendingUi 派生“需要处理”定位入口，不存已读或自动展开记忆；只有原始主区审批提供操作按钮。用户点击定位时，overlay 先关闭再滚动/聚焦原请求；停靠面板保持。新请求自身不触发滚动、焦点移动或面板开合，全宽覆盖时定位入口仍可达。
 
 右栏显隐不属于内容目标。内容是当前 Task 内的对象标签会话：可以同时保留多个精确文件预览，File Changes Review 最多保留一个；未打开对象时呈现通用空态。文件预览从对话内联引用或工作区文件树进入，工作过程不重复文件入口；记录审查保留所属 Run 的入口；文件树只按用户展开读取当前目录，不递归扫描、不自动读取正文。Review 是按文件首次出现顺序纵向展开的连续差异文档，同一 `displayPath` 的稳定顺序记录汇入一个文件区块；Review 不建立记录列表、单条详情页、返回层级或旧概览兼容开关。

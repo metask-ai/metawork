@@ -1578,7 +1578,11 @@ test("Task information shows the directory name and opens the bound Workspace by
     async () => ({ opened: false, reason: "directory_unavailable" }),
   );
   await user.click(screen.getByRole("button", { name: "Task information" }));
-  const directory = screen.getByText("Working directory").parentElement;
+  const information = within(
+    screen.getByRole("dialog", { name: "Task information" }),
+  );
+  assert.equal(information.queryByText("Project", { exact: true }), null);
+  const directory = information.getByText("Working directory").parentElement;
   assert.equal(
     directory.querySelector("dd").textContent,
     workspace.displayName,

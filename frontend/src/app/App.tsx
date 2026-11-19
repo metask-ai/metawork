@@ -5212,13 +5212,6 @@ export default function App() {
             {pendingLocator}
             {activeTask && (
               <TaskInformation
-                projectName={
-                  activeTask?.projectId === null
-                    ? t("task.no_project")
-                    : (projects.find(
-                        (project) => project.id === activeTask?.projectId,
-                      )?.displayName ?? t("task.project_removed"))
-                }
                 key={activeTask.id}
                 task={activeTask}
                 models={snapshot.models}
