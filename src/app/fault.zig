@@ -38,10 +38,15 @@
 const builtin = @import("builtin");
 const std = @import("std");
 
-/// Which half of the process wrote the record. Execution isolation adds an
-/// `exec` value with its own install call; the Application is the only caller
-/// today and hard-codes `ui`.
-pub const Role = enum(u8) { ui = 1 };
+/// Which half of the process wrote the record.
+///
+/// Both halves install their own. The record this exists to produce is read
+/// after the fact by someone asking which half died, and the isolated half is
+/// the one whose record matters -- so the role is not a label on one shared
+/// file but what decides which file is written. Sharing one would let the
+/// surviving half's later fault overwrite the evidence for the crash it was
+/// isolated from.
+pub const Role = enum(u8) { ui = 1, exec = 2 };
 
 pub const ArtifactKind = enum(u8) {
     unknown = 0,
@@ -117,7 +122,22 @@ pub const Options = struct {
 
 pub const directory_name = "faults";
 pub const record_file_name = "last-fault.bin";
+pub const exec_record_file_name = "last-fault-exec.bin";
 pub const report_file_name = "last-fault.txt";
+
+/// The record file a role writes and reads back.
+///
+/// The UI half keeps the original name, so a record written by an earlier
+/// build is still the one this build reports. The execution half gets its own
+/// file rather than a field in a shared one: the two processes fault
+/// independently, and one file means whichever faulted second erases the
+/// other's record.
+pub fn recordFileName(role: Role) []const u8 {
+    return switch (role) {
+        .ui => record_file_name,
+        .exec => exec_record_file_name,
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Record layout
@@ -279,7 +299,7 @@ pub fn install(io: std.Io, options: Options) InstallError!void {
     // Never truncated: the previous process's record is the evidence this
     // process reports at startup, and a fault here overwrites it in place
     // with a record of identical length.
-    const file = dir.createFile(io, record_file_name, .{
+    const file = dir.createFile(io, recordFileName(options.role), .{
         .read = false,
         .truncate = false,
         .permissions = filePermissions(),
@@ -891,6 +911,9 @@ pub fn decodeMarker(bytes: []const u8) ?Marker {
     var result: Marker = .{
         .pid = std.mem.readInt(u32, bytes[markerLayout.pid..][0..4], .little),
         .started_at_unix_ms = std.mem.readInt(i64, bytes[markerLayout.started_at_unix_ms..][0..8], .little),
+        // The marker rides the single-instance lease, which only the UI half
+        // holds, so a marker claiming any other role was not written by this
+        // code and is refused rather than adopted.
         .role = switch (bytes[markerLayout.role]) {
             @intFromEnum(Role.ui) => .ui,
             else => return null,
@@ -1070,6 +1093,7 @@ pub fn decodeRecord(bytes: []const u8) DecodeError!Record {
     var result: Record = .{
         .role = switch (bytes[recordLayout.role]) {
             @intFromEnum(Role.ui) => .ui,
+            @intFromEnum(Role.exec) => .exec,
             else => return error.Malformed,
         },
         .artifact_kind = artifactKind(bytes[recordLayout.artifact_kind]),
@@ -1136,12 +1160,17 @@ pub fn decodeRecord(bytes: []const u8) DecodeError!Record {
 /// Reads the record the previous process left, if any. Call before `install`:
 /// install keeps the file's contents, but a fault in this process overwrites
 /// them.
-pub fn readRecord(io: std.Io, data_root: []const u8, storage: *[record_bytes]u8) ?Record {
+pub fn readRecord(
+    io: std.Io,
+    data_root: []const u8,
+    role: Role,
+    storage: *[record_bytes]u8,
+) ?Record {
     var path_storage: [4096]u8 = undefined;
     const path = std.fmt.bufPrint(
         &path_storage,
-        "{s}" ++ std.fs.path.sep_str ++ directory_name ++ std.fs.path.sep_str ++ record_file_name,
-        .{data_root},
+        "{s}" ++ std.fs.path.sep_str ++ directory_name ++ std.fs.path.sep_str ++ "{s}",
+        .{ data_root, recordFileName(role) },
     ) catch return null;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{ .follow_symlinks = false }) catch
         return null;
@@ -1764,7 +1793,7 @@ test "install opens one record file, keeps the previous record, and reports it" 
 
     // No record yet.
     var storage: [record_bytes]u8 = undefined;
-    try std.testing.expect(readRecord(std.testing.io, root, &storage) == null);
+    try std.testing.expect(readRecord(std.testing.io, root, .ui, &storage) == null);
 
     // Install writes nothing by itself, so a record only appears once a fault
     // lands one. Drive that without installing handlers in the test process.
@@ -1785,7 +1814,7 @@ test "install opens one record file, keeps the previous record, and reports it" 
     record_handle = null;
     file.close(std.testing.io);
 
-    const previous = readRecord(std.testing.io, root, &storage) orelse return error.MissingRecord;
+    const previous = readRecord(std.testing.io, root, .ui, &storage) orelse return error.MissingRecord;
     try std.testing.expectEqual(@as(u32, 0xc0000005), previous.fault.?.code);
     var report_storage: [4096]u8 = undefined;
     const summary = reportPreviousRun(std.testing.io, root, .{
@@ -1812,6 +1841,46 @@ test "install opens one record file, keeps the previous record, and reports it" 
     );
     defer std.testing.allocator.free(written);
     try std.testing.expectEqualStrings(summary, written);
+}
+
+test "each half's record is its own file, and the role survives the round trip" {
+    // The point of the split is that the isolated half can die on its own, so
+    // its record has to survive the other half faulting afterwards. One file
+    // with a role byte in it would not: whichever wrote second would erase
+    // the evidence for the crash the isolation exists to explain.
+    try std.testing.expect(!std.mem.eql(u8, recordFileName(.ui), recordFileName(.exec)));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+
+    resetBreadcrumbs();
+    capture_attempts.store(0, .monotonic);
+    fillIdentity(.{ .role = .exec, .data_root = root, .identity = test_identity });
+    var directory_storage: [4096]u8 = undefined;
+    const dir = try std.Io.Dir.cwd().createDirPathOpen(std.testing.io, try std.fmt.bufPrint(
+        &directory_storage,
+        "{s}" ++ std.fs.path.sep_str ++ directory_name,
+        .{root},
+    ), .{ .permissions = directoryPermissions() });
+    defer dir.close(std.testing.io);
+    const file = try dir.createFile(std.testing.io, recordFileName(.exec), .{ .truncate = false });
+    record_handle = file.handle;
+    _ = beginRun(21, 5);
+    capture(.{ .kind = .posix_signal, .code = 11 });
+    record_handle = null;
+    file.close(std.testing.io);
+
+    // Read back as the execution half, where the record is. Reading as the UI
+    // half finds nothing, which is the separation the two files buy.
+    var storage: [record_bytes]u8 = undefined;
+    const written = readRecord(std.testing.io, root, .exec, &storage) orelse
+        return error.MissingRecord;
+    try std.testing.expectEqual(Role.exec, written.role);
+    try std.testing.expectEqual(@as(u32, 11), written.fault.?.code);
+    var ui_storage: [record_bytes]u8 = undefined;
+    try std.testing.expect(readRecord(std.testing.io, root, .ui, &ui_storage) == null);
 }
 
 test "the digest helper decodes the manifest hex the composition root holds" {

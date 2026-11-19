@@ -306,6 +306,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-contract", .root_module = test_modules.agent_contract },
         .{ .name = "metawork-agent-link", .root_module = test_modules.agent_link },
         .{ .name = "metawork-app-execution-mode", .root_module = test_modules.app_execution_mode },
+        .{ .name = "metawork-app-execution-half", .root_module = test_modules.app_execution_half },
         .{ .name = "metawork-app-execution-host", .root_module = test_modules.app_execution_host },
         .{ .name = "metawork-agent-file-delivery", .root_module = test_modules.agent_file_delivery },
         .{ .name = "metawork-product-attachment", .root_module = test_modules.product_attachment },
@@ -710,7 +711,7 @@ pub fn build(b: *std.Build) void {
         .optimize = test_modules.app_execution_mode.optimize,
         .link_libc = bundle.link_libc,
     });
-    execution_link_fixture_module.addImport("app_execution_mode", test_modules.app_execution_mode);
+    execution_link_fixture_module.addImport("app_execution_half", test_modules.app_execution_half);
     execution_link_fixture_module.addImport("metawork_agent_link", test_modules.agent_link);
     const execution_link_fixture = b.addExecutable(.{
         .name = "metawork-execution-link-fixture",
@@ -726,6 +727,7 @@ pub fn build(b: *std.Build) void {
     execution_link_module.addImport("app_execution_host", test_modules.app_execution_host);
     execution_link_module.addImport("app_execution_mode", test_modules.app_execution_mode);
     execution_link_module.addImport("metawork_agent_link", test_modules.agent_link);
+    execution_link_module.addImport("app_fault", test_modules.app_fault);
     const execution_link_tests_run = b.addRunArtifact(b.addTest(.{
         .name = "metawork-execution-link",
         .root_module = execution_link_module,
@@ -738,6 +740,14 @@ pub fn build(b: *std.Build) void {
         else
             "metawork-execution-link-fixture",
     ));
+    // The execution half records a process-level fault under a data root the
+    // caller gives it. The application resolves that root from the
+    // environment; the fixture is handed one here so the install runs in a
+    // real child process rather than only in a unit test.
+    execution_link_tests_run.setEnvironmentVariable(
+        "METAWORK_EXEC_LINK_FAULT_ROOT",
+        b.pathFromRoot(".zig-cache/exec-link-faults"),
+    );
     execution_link_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_VERSION", "fixture-0");
     execution_link_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_DIGEST", "1");
     artifacts.tests.step.dependOn(&execution_link_tests_run.step);
@@ -959,6 +969,7 @@ const WiredModules = struct {
     agent_contract: *std.Build.Module,
     agent_link: *std.Build.Module,
     app_execution_host: *std.Build.Module,
+    app_execution_half: *std.Build.Module,
     app_execution_mode: *std.Build.Module,
     agent_file_delivery: *std.Build.Module,
     agent_catalog: *std.Build.Module,
@@ -1846,6 +1857,19 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
         .link_libc = bundle.link_libc,
     });
+    // What the execution half owns, above the link entry point. Separate from
+    // `app_execution_mode` so the entry point keeps its "link and nothing
+    // else" dependencies, and separate from `src/app.zig` so the test fixture
+    // composes the same code the application does.
+    const app_execution_half = b.createModule(.{
+        .root_source_file = b.path("src/app/execution_half.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    app_execution_half.addImport("metawork_agent_link", agent_link);
+    app_execution_half.addImport("app_execution_mode", app_execution_mode);
+    app_execution_half.addImport("app_fault", app_fault);
     const metawork_http_memory = b.createModule(.{
         .root_source_file = b.path("src/foundation/http/memory.zig"),
         .target = target,
@@ -2791,6 +2815,7 @@ fn wireAgentCore(
     app.addImport("metawork_agent_link", agent_link);
     app.addImport("app_execution_host", app_execution_host);
     app.addImport("app_execution_mode", app_execution_mode);
+    app.addImport("app_execution_half", app_execution_half);
     app.addImport("event_pump", event_pump);
     app.addImport("metawork_product_update", product_update);
     app.addImport("app_output_file", output_file);
@@ -2885,6 +2910,7 @@ fn wireAgentCore(
         .agent_link = agent_link,
         .app_execution_host = app_execution_host,
         .app_execution_mode = app_execution_mode,
+        .app_execution_half = app_execution_half,
         .agent_file_delivery = agent_file_delivery,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,

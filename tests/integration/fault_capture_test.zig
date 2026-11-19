@@ -85,7 +85,7 @@ fn expectFaulted(termination: std.process.Child.Term) !void {
 }
 
 fn readRecord(root: []const u8, storage: *[fault.record_bytes]u8) !fault.Record {
-    return fault.readRecord(std.testing.io, root, storage) orelse error.MissingFaultRecord;
+    return fault.readRecord(std.testing.io, root, .ui, storage) orelse error.MissingFaultRecord;
 }
 
 fn expectFixtureIdentity(record: fault.Record, nonce: []const u8) !void {

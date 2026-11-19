@@ -12,6 +12,7 @@ const std = @import("std");
 const execution_host = @import("app_execution_host");
 const execution_mode = @import("app_execution_mode");
 const agent_link = @import("metawork_agent_link");
+const fault = @import("app_fault");
 
 const io = std.testing.io;
 const allocator = std.testing.allocator;
@@ -23,6 +24,7 @@ const matching_identity: agent_link.Identity = .{
 };
 
 const fixture_variable = "METAWORK_EXECUTION_LINK_FIXTURE";
+const fault_root_variable = "METAWORK_EXEC_LINK_FAULT_ROOT";
 
 /// A missing fixture is a misconfigured build entry, never a reason to pass.
 fn fixturePath() ![]u8 {
@@ -61,6 +63,64 @@ test "the execution half starts, agrees on identity and exits on end of stream" 
         execution_host.Stopped{ .exited = @intFromEnum(execution_mode.Exit.link_closed) },
         stopped,
     );
+}
+
+test "the execution half installs its own fault record, under its own name" {
+    // The half the isolation exists to survive is the one whose crash record
+    // matters, and until this ran `fault.install` happened after the fork in
+    // `app.run` -- so the execution half had no handler at all. A unit test
+    // can check the file names; only a real child can show that the install
+    // succeeded in the process that has no window and no data root of its own.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    const root = try std.process.Environ.getAlloc(std.testing.environ, allocator, fault_root_variable);
+    defer allocator.free(root);
+
+    // The root outlives one run of the suite, so both names start absent --
+    // otherwise the assertion below would be about what an earlier run left
+    // rather than about what this child wrote.
+    var exec_storage: [4096]u8 = undefined;
+    const exec_record = try recordPath(&exec_storage, root, fault.recordFileName(.exec));
+    var ui_storage: [4096]u8 = undefined;
+    const ui_record = try recordPath(&ui_storage, root, fault.recordFileName(.ui));
+    std.Io.Dir.deleteFileAbsolute(io, exec_record) catch {};
+    std.Io.Dir.deleteFileAbsolute(io, ui_record) catch {};
+
+    var host: execution_host.Host = undefined;
+    const failure = try host.start(
+        io,
+        allocator,
+        matching_identity,
+        .{},
+        .{ .explicit = &.{fixture} },
+    );
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer host.deinit();
+    try std.testing.expectEqual(agent_link.Role.exec, host.peer.role);
+    _ = host.stop();
+
+    // The record file the execution role writes is there, and the one the UI
+    // role writes is not: the role picks the file, so one half's later fault
+    // cannot erase the other's evidence.
+    const written = try std.Io.Dir.openFileAbsolute(io, exec_record, .{});
+    written.close(io);
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.openFileAbsolute(io, ui_record, .{}),
+    );
+}
+
+fn recordPath(storage: []u8, root: []const u8, name: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(storage, "{s}{c}{s}{c}{s}", .{
+        root,
+        std.fs.path.sep,
+        fault.directory_name,
+        std.fs.path.sep,
+        name,
+    });
 }
 
 test "a peer built from other sources is refused, and does not keep running" {

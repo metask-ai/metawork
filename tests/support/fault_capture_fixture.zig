@@ -124,7 +124,7 @@ pub fn main(init: std.process.Init) !void {
 
     var record_storage: [fault.record_bytes]u8 = undefined;
     const previous: fault.PreviousRun = .{
-        .record = fault.readRecord(init.io, root, &record_storage),
+        .record = fault.readRecord(init.io, root, .ui, &record_storage),
         .marker = fault.adoptInstanceMarker(lease, .{
             .role = .ui,
             .data_root = root,

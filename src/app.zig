@@ -36,7 +36,7 @@ const attachment_images = @import("app/attachment_images.zig");
 const app_single_instance = @import("app/single_instance_coordinator.zig");
 const fault = @import("app_fault");
 const execution_host = @import("app_execution_host");
-const execution_mode = @import("app_execution_mode");
+const execution_half = @import("app_execution_half");
 const agent_link = @import("metawork_agent_link");
 const event_pump = @import("event_pump");
 const app_stores = @import("app/stores.zig");
@@ -650,6 +650,36 @@ const App = struct {
     }
 };
 
+/// Resolves what the execution half needs and hands it over.
+///
+/// The data root is resolved from the environment by the same call the UI
+/// half makes, rather than taken from an argument: the two halves then cannot
+/// disagree about where anything is, and a data root arriving on a command
+/// line would be a path redirect in the half that writes crash evidence.
+/// Everything else the execution half owns is `execution_half.run`'s, so that
+/// a test fixture composes the same code with its own identity and root.
+fn runExecutionHalf(init: std.process.Init) execution_half.Exit {
+    var automation = app_automation.Adapter.init(init.environ_map);
+    defer automation.deinit();
+    var paths_state: app_paths.Paths = undefined;
+    paths_state.init(
+        init.io,
+        std.heap.c_allocator,
+        init.environ_map,
+        automation.canonicalUserHome(),
+    ) catch |failure| {
+        std.log.err("execution half cannot resolve its data root: {s}", .{@errorName(failure)});
+        return .resource_unavailable;
+    };
+    defer paths_state.deinit();
+
+    return execution_half.run(init.io, std.heap.c_allocator, .{
+        .identity = link_identity,
+        .message_limits = link_message_limits,
+        .fault = .{ .identity = fault_identity, .data_root = paths_state.dataDir() },
+    });
+}
+
 fn createAgentRuntime(
     io: std.Io,
     notifier: agent.EventReadyNotifier,
@@ -697,11 +727,7 @@ pub fn run(init: std.process.Init) !void {
     // the Native SDK runner is entered, because a process that reaches the
     // runner has a window, and this one must never have one.
     if (execution_host.requested(init.minimal.args, init.gpa)) {
-        const exit = execution_mode.run(init.io, std.heap.c_allocator, .{
-            .identity = link_identity,
-            .message_limits = link_message_limits,
-        });
-        std.process.exit(@intFromEnum(exit));
+        std.process.exit(@intFromEnum(runExecutionHalf(init)));
     }
     var http_engine: @import("metawork_http_transport").Engine = undefined;
     http_engine.init(std.heap.c_allocator, init.io);
@@ -781,6 +807,7 @@ pub fn run(init: std.process.Init) !void {
     const previous_record = fault.readRecord(
         init.io,
         paths_state.dataDir(),
+        .ui,
         &previous_record_storage,
     );
     fault.install(init.io, fault_options) catch |failure|
