@@ -629,22 +629,44 @@ test "the data bound is enforced without blocking the caller that cannot wait" {
     const file = try tmp.dir.createFile(io, "link", .{ .truncate = true });
     defer file.close(io);
 
-    // One data slot, and a writer that cannot run until we let it: the second
-    // try must come back `busy` rather than park the caller.
-    var outbound: Outbound = undefined;
-    try outbound.start(io, allocator, file, .{
+    // One data slot and nothing draining it. This is about what `submit`
+    // admits, so the `Outbound` is built by hand and never gets a writer
+    // thread: a started writer may take the held message at any moment, and
+    // whether the next try still found the queue full would then depend on
+    // how far that thread had got. The file is only there because the struct
+    // holds one; nothing is written to it.
+    const limits: Limits = .{
         .data_count = 1,
         .data_bytes = 8,
         .control_count = 1,
         .control_bytes = frame.max_fragment_payload_bytes,
-    });
-    outbound.mutex.lockUncancelable(io);
-    outbound.data.push(.{
-        .kind = .request,
-        .correlation = 1,
-        .payload = try allocator.dupe(u8, "hold"),
-    });
-    outbound.mutex.unlock(io);
+    };
+    var outbound: Outbound = build: {
+        const data_slots = try allocator.alloc(?Message, limits.data_count);
+        errdefer allocator.free(data_slots);
+        @memset(data_slots, null);
+        const control_slots = try allocator.alloc(?Message, limits.control_count);
+        @memset(control_slots, null);
+        break :build .{
+            .io = io,
+            .allocator = allocator,
+            .file = file,
+            .limits = limits,
+            .data = .{ .slots = data_slots },
+            .control = .{ .slots = control_slots },
+        };
+    };
+    // `stop` releases the slots and whatever is still queued, and joins
+    // nothing when there is no writer. Deferred, so a failed expectation
+    // below is reported on its own rather than with leaks on top of it.
+    defer outbound.stop();
+
+    try testing.expectEqual(
+        Submission.queued,
+        try outbound.trySubmit(.request, 1, "hold"),
+    );
+    // The slot is taken: the second try comes back `busy` rather than
+    // parking the caller.
     try testing.expectEqual(
         Submission.busy,
         try outbound.trySubmit(.request, 2, "more"),
@@ -659,7 +681,6 @@ test "the data bound is enforced without blocking the caller that cannot wait" {
         Submission.queued,
         try outbound.trySubmit(.control, 0, "stop"),
     );
-    outbound.stop();
 }
 
 test "a closed outbound reports closed rather than accepting bytes it cannot send" {
