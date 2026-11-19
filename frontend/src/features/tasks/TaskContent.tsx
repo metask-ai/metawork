@@ -627,13 +627,17 @@ export function TaskContent({
     ) : null;
   }
   function renderSubmission(record: WaitingInputView) {
+    // The reading plan places later Run inputs at their submission anchors.
+    const executed = task?.runs.find(
+      (run) => run.submission?.operationId === record.submission.operationId,
+    );
+    if (task && executed)
+      return renderRunInput(task, executed, record.submission.operationId);
+
     const time = formatRunTimestamp(
       locale,
       record.submission.receivedAtUnixMs,
       nowUnixMs,
-    );
-    const executed = task?.runs.some(
-      (run) => run.submission?.operationId === record.submission.operationId,
     );
     return (
       <UserInputMessage
@@ -648,17 +652,15 @@ export function TaskContent({
         }
         notice={
           <>
-            {!executed && (
-              <p className="projection-note">
-                {t(
-                  record.state === "waiting"
-                    ? "input.waiting"
-                    : record.state === "cancelled"
-                      ? "input.cancelled"
-                      : "input.unexecuted",
-                )}
-              </p>
-            )}
+            <p className="projection-note">
+              {t(
+                record.state === "waiting"
+                  ? "input.waiting"
+                  : record.state === "cancelled"
+                    ? "input.cancelled"
+                    : "input.unexecuted",
+              )}
+            </p>
             {record.reason && record.state === "failed" && (
               <p className="projection-note">
                 {t(`mutation.reason.${record.reason}` as MessageId, {
@@ -741,7 +743,11 @@ export function TaskContent({
           run.additionalInputs.length > 0 || !transferredRunIds.has(run.id),
       )
       .at(-1)?.id ?? null;
-  function renderRunInput(task: TaskView, run: RunView) {
+  function renderRunInput(
+    task: TaskView,
+    run: RunView,
+    anchoredOperationId?: string,
+  ) {
     const readingId = run.submission
       ? `submission:${run.submission.operationId}`
       : `${run.id}:root`;
@@ -759,6 +765,7 @@ export function TaskContent({
     if (editing?.taskId === task.id && editing.runId === run.id) {
       return (
         <RunInputEditor
+          key={anchoredOperationId}
           readingId={readingId}
           text={editing.text}
           disabled={editText === null}
@@ -794,12 +801,24 @@ export function TaskContent({
     const input = (
       <TaskInput
         input={run.input}
-        media={{ taskId: task.id, runId: run.id }}
+        media={
+          anchoredOperationId
+            ? { taskId: task.id, operationId: anchoredOperationId }
+            : { taskId: task.id, runId: run.id }
+        }
         loadThumbnail={loadAttachmentThumbnail}
         onOpenAttachment={onOpenSentAttachment}
       />
     );
-    return (
+    return anchoredOperationId ? (
+      <UserInputMessage
+        key={anchoredOperationId}
+        operationId={anchoredOperationId}
+        footer={footer}
+      >
+        {input}
+      </UserInputMessage>
+    ) : (
       <>
         <Message
           role="user"

@@ -9985,11 +9985,14 @@ test("same Task history refill restores the visible Run anchor despite changed e
   }
 });
 
-test("previous execution details precede the next anchored Run instruction", () => {
-  const first = run({ tools: [technicalTool()] });
+test("anchored Run input stays editable after the previous execution details", async (context) => {
+  const user = userEvent.setup();
+  const onEditInput = context.mock.fn(async () => false);
+  const first = run({ tools: [technicalTool()], editAdmitted: true });
   const next = run({
     id: "10",
     input: { kind: "text", text: "CONTINUE", redacted: false },
+    editAdmitted: true,
     submission: {
       operationId: "continue",
       receivedAtUnixMs: null,
@@ -10008,9 +10011,13 @@ test("previous execution details precede the next anchored Run instruction", () 
       provisionalRedacted: false,
     },
   });
-  const view = render(
-    taskContentElement(task({ runs: [first, next], currentRunId: "10" })),
-  );
+  const busy = task({
+    runs: [first, next],
+    currentRunId: next.id,
+    currentRunPhase: "running",
+    activeOperation: { kind: "run", id: next.id },
+  });
+  const view = render(taskContentElement(busy, "1", { onEditInput }));
   const details = view.container.querySelector(
     '[data-run-id="9"] .run-process',
   );
@@ -10027,6 +10034,72 @@ test("previous execution details precede the next anchored Run instruction", () 
     null,
   );
   assert.equal(screen.getAllByText("CONTINUE").length, 1);
+  assert.equal(screen.queryByRole("button", { name: "Edit" }), null);
+
+  const completed = { ...next, phase: "completed", terminal: terminal() };
+  const idle = task({ runs: [first, completed] });
+  view.rerender(taskContentElement(idle, "2", { onEditInput }));
+  assert.equal(screen.getAllByRole("button", { name: "Edit" }).length, 2);
+
+  await user.click(within(message).getByRole("button", { name: "Edit" }));
+  const editor = screen.getByRole("textbox", { name: "Edit" });
+  const form = editor.closest("form");
+  assert.equal(form.dataset.readingId, "submission:continue");
+  assert.ok(
+    details.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.equal(document.activeElement, editor);
+  assert.equal(editor.selectionStart, "CONTINUE".length);
+  await user.type(editor, " with changes");
+  assert.equal(onEditInput.mock.callCount(), 0);
+
+  const later = { ...next, id: "11", submission: null };
+  const restarted = {
+    ...busy,
+    runs: [first, completed, later],
+    currentRunId: later.id,
+    activeOperation: { kind: "run", id: later.id },
+  };
+  view.rerender(taskContentElement(restarted, "3", { onEditInput }));
+  assert.equal(screen.queryByRole("button", { name: "Edit" }), null);
+  assert.equal(editor.readOnly, true);
+  const send = within(form).getByRole("button", { name: "Send" });
+  assert.equal(send.disabled, true);
+  fireEvent.submit(form);
+  assert.equal(onEditInput.mock.callCount(), 0);
+
+  view.rerender(taskContentElement(idle, "4", { onEditInput }));
+  assert.equal(screen.getByRole("textbox", { name: "Edit" }), editor);
+  assert.equal(editor.value, "CONTINUE with changes");
+  assert.equal(editor.readOnly, false);
+  await user.click(send);
+  assert.equal(editor.value, "CONTINUE with changes");
+  assert.equal(send.disabled, false);
+  onEditInput.mock.mockImplementation(async () => true);
+  await user.click(send);
+  assert.deepEqual(
+    onEditInput.mock.calls.map((call) => call.arguments),
+    [
+      [idle.id, next.id, "CONTINUE with changes"],
+      [idle.id, next.id, "CONTINUE with changes"],
+    ],
+  );
+
+  const completedMessage = view.container.querySelector(
+    '[data-operation-id="continue"]',
+  );
+  assert.ok(within(completedMessage).getByRole("button", { name: "Edit" }));
+  view.rerender(
+    taskContentElement(
+      { ...idle, runs: [first, { ...completed, editAdmitted: false }] },
+      "5",
+      { onEditInput },
+    ),
+  );
+  assert.equal(
+    within(completedMessage).queryByRole("button", { name: "Edit" }),
+    null,
+  );
 });
 
 test("history anchor refill keeps the visible operation offset when its bubble changes Run parent", () => {
