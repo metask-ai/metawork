@@ -1577,25 +1577,10 @@ const WorkspaceSkillQueryProbe = struct {
     }
 };
 
-fn settleWorkspaceSkillQueries(workbench: *product_control.Runtime, id: u64) !void {
-    for (0..5_000) |_| {
-        workbench.syncLifecycle();
-        const discovery = workbench.skill.workspaceSourceDiscovery(id, try workbench.workspaceEpoch(id));
-        if (!workbench.skill.hasWorkspaceJob(id) and workbench.skill.personal_job == null and
-            (discovery == null or !discovery.?.checking)) return;
-        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-    }
-    return error.TestUnexpectedResult;
-}
-
-fn waitInitialTaskCatalog(workbench: *product_control.Runtime, task_id: u64) !void {
-    for (0..5000) |_| {
-        try workbench.drainAgentEvents();
-        if ((try workbench.taskCatalog(task_id)).availability != .loading) return;
-        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-    }
-    return error.TestUnexpectedResult;
-}
+// Both of these live in the fixture now: the execution-link suite drives
+// Product over a real link and needs the same two waits.
+const settleWorkspaceSkillQueries = fixture.settleWorkspaceSkillQueries;
+const waitInitialTaskCatalog = fixture.waitInitialTaskCatalog;
 
 fn expectWorkspaceSkillProjection(workbench: *product_control.Runtime, id: u64, present: bool) !void {
     var storage: [256 * 1024]u8 = undefined;

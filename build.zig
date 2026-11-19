@@ -736,6 +736,11 @@ pub fn build(b: *std.Build) void {
     execution_link_module.addImport("metawork_agent", test_modules.agent);
     execution_link_module.addImport("metawork_agent_contract", test_modules.agent_contract);
     execution_link_module.addImport("execution_link_fixture", execution_link_fixture_module);
+    // Product, on the caller's side of the link. This is the import that lets
+    // a test say "Product submits over the link": the fixture re-exports
+    // Product's own test support, and the half under test is the one Product
+    // is composed over.
+    execution_link_module.addImport("lifecycle_fixture", lifecycle_fixture);
     const execution_link_tests_run = b.addRunArtifact(b.addTest(.{
         .name = "metawork-execution-link",
         .root_module = execution_link_module,

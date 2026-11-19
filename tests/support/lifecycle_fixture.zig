@@ -64,6 +64,33 @@ pub fn fixtureIo() std.Io {
 // tasks.run is synchronous: a fresh catalog wait returns no Run identity.
 // Only successful direct-admission fixtures wait and retry that public command;
 // sendInput tests below exercise one-shot reception and Host-owned preparation.
+/// Waits out the skill discovery a new workspace starts.
+///
+/// Here rather than in one test file because two suites need it now: a Task
+/// whose workspace is still checking its skill sources has a catalog that is
+/// still loading, and a Run submitted against that is a Run waiting on
+/// something the test never asked about.
+pub fn settleWorkspaceSkillQueries(workbench: *product_control.Runtime, id: u64) !void {
+    for (0..5_000) |_| {
+        workbench.syncLifecycle();
+        const discovery = workbench.skill.workspaceSourceDiscovery(id, try workbench.workspaceEpoch(id));
+        if (!workbench.skill.hasWorkspaceJob(id) and workbench.skill.personal_job == null and
+            (discovery == null or !discovery.?.checking)) return;
+        try std.Io.sleep(fixtureIo(), .fromMilliseconds(1), .awake);
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// Waits until a new Task's catalog has loaded once.
+pub fn waitInitialTaskCatalog(workbench: *product_control.Runtime, task_id: u64) !void {
+    for (0..5000) |_| {
+        try workbench.drainAgentEvents();
+        if ((try workbench.taskCatalog(task_id)).availability != .loading) return;
+        try std.Io.sleep(fixtureIo(), .fromMilliseconds(1), .awake);
+    }
+    return error.TestUnexpectedResult;
+}
+
 pub fn runPreparedTask(workbench: *product_control.Runtime, task_id: u64, input: product_control.TaskRunInput) !u64 {
     for (0..5000) |_| {
         return workbench.runTask(task_id, input) catch |err| switch (err) {

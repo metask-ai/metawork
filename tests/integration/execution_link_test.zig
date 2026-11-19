@@ -17,6 +17,7 @@ const execution_link_fixture = @import("execution_link_fixture");
 const execution_mode = @import("app_execution_mode");
 const agent_link = @import("metawork_agent_link");
 const fault = @import("app_fault");
+const product = @import("lifecycle_fixture");
 
 /// The limits the fixture states. Each side enforces its own, so they need
 /// not agree -- but a response larger than this half's bound is refused as a
@@ -98,6 +99,16 @@ fn waitForEvent(runtime: agent.RuntimePort, what: []const u8) !void {
 /// The exit a child that saw its link end and tidied up reports.
 const exited_on_link_close: execution_host.Stopped = .{
     .exited = @intFromEnum(execution_mode.Exit.link_closed),
+};
+
+/// And the exit of one that could not finish tidying up and went anyway.
+///
+/// A separate code, which is why these tests can say which of the two
+/// happened. While both were `link_closed`, a test asserting the child exited
+/// could not tell the fix from the backstop that covers it -- and neither
+/// could anyone reading a production exit.
+const exited_on_deadline: execution_host.Stopped = .{
+    .exited = @intFromEnum(execution_mode.Exit.cleanup_deadline),
 };
 
 test "the execution half starts, agrees on identity and exits on end of stream" {
@@ -612,9 +623,10 @@ test "a reference the caller never gave back does not keep this half alive" {
     // its link died -- holding the pipe it had inherited, which is how it
     // took a build runner down with it.
     //
-    // The deadline is pushed past the UI half's grace period on purpose: with
-    // it inside, a close that waits for good still ends as `.exited` and
-    // this test would pass on the backstop rather than on the fix.
+    // The ordinary deadline, because the deadline's exit has a code of its
+    // own: a close that waits for good still ends the process, but it ends it
+    // as `cleanup_deadline`, so this test cannot pass on the backstop
+    // instead of on the fix.
     const fixture = try fixturePath();
     defer allocator.free(fixture);
     var workspace = std.testing.tmpDir(.{});
@@ -631,7 +643,6 @@ test "a reference the caller never gave back does not keep this half alive" {
             fixture,
             execution_link_fixture.runtime_flag,
             execution_link_fixture.fake_core_flag,
-            execution_link_fixture.slow_exit_flag,
         } },
         .tables = execution_link_fixture.fixture_tables,
         .wake = wake.notifier(),
@@ -672,9 +683,9 @@ test "a reference the caller never gave back does not keep this half alive" {
     // reference the far side is counting.
     execution_link.TestSupport.abandonLink(&supervisor);
 
-    // Exits by itself, which it can only do if this half gave the reference
-    // back on the way out. Without that it waits in `Session.close` for the
-    // rest of the grace period and comes back `.killed`.
+    // Exits *cleanly* by itself, which it can only do if this half gave the
+    // reference back on the way out. Without that it waits in
+    // `Session.close` until the deadline and comes back `cleanup_deadline`.
     try std.testing.expectEqual(exited_on_link_close, supervisor.stop());
 }
 
@@ -688,7 +699,9 @@ test "cleanup that does not finish costs this half its deadline, not its exit" {
     //
     // The deadline here is the ordinary one, so it falls well inside the UI
     // half's grace period: the child decides to go before the UI gives up on
-    // it, and the stop sees a process that exited rather than one it killed.
+    // it, and the stop sees a process that exited rather than one it killed
+    // -- with the code that says it went on the deadline, which is the whole
+    // of what this test claims.
     const fixture = try fixturePath();
     defer allocator.free(fixture);
 
@@ -713,7 +726,50 @@ test "cleanup that does not finish costs this half its deadline, not its exit" {
     defer supervisor.deinit();
 
     execution_link.TestSupport.abandonLink(&supervisor);
-    try std.testing.expectEqual(exited_on_link_close, supervisor.stop());
+    try std.testing.expectEqual(exited_on_deadline, supervisor.stop());
+}
+
+test "the deadline's exit runs none of the C runtime's exit handlers" {
+    // The deadline fires in exactly one state: a thread of this process is
+    // stuck somewhere it will not come back from. An ordinary exit runs
+    // `atexit` handlers and C++ static destructors before it goes, so on that
+    // path those run beside live threads and under whatever locks they hold
+    // -- a crash on the way out, or a second hang in a handler, which is the
+    // hang the deadline exists to end.
+    //
+    // So the fixture registers a handler that never returns and refuses to
+    // finish its cleanup, which is the pairing that matters: without the
+    // hang the half tidies up and leaves through `main`, where running those
+    // handlers is the correct thing to do.
+    //
+    // Without libc there is nothing to register, and nothing was ever at
+    // risk: this then asserts the same exit for a plainer reason.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+
+    var wake: Wake = .{};
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .spawn = .{ .explicit = &.{
+            fixture,
+            execution_link_fixture.runtime_flag,
+            execution_link_fixture.fake_core_flag,
+            execution_link_fixture.hang_cleanup_flag,
+            execution_link_fixture.wedge_at_exit_flag,
+        } },
+        .tables = execution_link_fixture.fixture_tables,
+        .wake = wake.notifier(),
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer supervisor.deinit();
+
+    execution_link.TestSupport.abandonLink(&supervisor);
+    try std.testing.expectEqual(exited_on_deadline, supervisor.stop());
 }
 
 test "a Run still executing does not keep this half alive either" {
@@ -800,8 +856,92 @@ test "a Run still executing does not keep this half alive either" {
     begun.deinit();
 
     // With a worker still inside `execute` over there, the child went on its
-    // deadline rather than waiting for a Run nobody can end any more.
-    try std.testing.expectEqual(exited_on_link_close, stopped);
+    // deadline rather than waiting for a Run nobody can end any more -- and
+    // says so, which is what makes the cost of an in-flight Run a fact
+    // somebody can read rather than a clean exit two seconds late.
+    try std.testing.expectEqual(exited_on_deadline, stopped);
+}
+
+test "Product submits a Task and its Run reaches a terminal in the other process" {
+    // The whole of the caller's half, driven by the thing it exists for.
+    // Everything above this exercises one call or one failure; this submits a
+    // Task the way the application does and asks for the Run's terminal --
+    // route creation, the skill catalog, the Task's own queue, prepare,
+    // begin, execute, the events, and the terminal, each crossing a real
+    // process boundary.
+    //
+    // It is also the regression that holds the rest of this work in place.
+    // The leak that kept an execution process alive after its caller died
+    // was Product's Session access lease, and nothing but Product takes one:
+    // the stop at the end asserts a *clean* exit, which is only reachable if
+    // every lease this submission took came back.
+    //
+    // Product here is composed without the image, video, delivery or MCP
+    // effects, which is what makes the Run's four tool capabilities absent
+    // and the prepare answerable. A Task that wants one of them is refused by
+    // `stubs.sessionPrepareRunWithTools` until the MCP step and the two
+    // capability steps beside it land; the application always composes the
+    // MCP input, so in link mode that refusal is what a real Run meets today.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+
+    var wake: Wake = .{};
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .spawn = .{ .explicit = &.{
+            fixture,
+            execution_link_fixture.runtime_flag,
+            execution_link_fixture.fake_core_flag,
+        } },
+        .tables = execution_link_fixture.fixture_tables,
+        .wake = wake.notifier(),
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer supervisor.deinit();
+
+    // Product in a scope of its own, so it is torn down *before* the link
+    // is stopped. That order is the application's too -- the UI closes its
+    // Tasks and then stops the child -- and it is not optional: closing a
+    // Session is a call, so a Product torn down after the link is gone gets
+    // the restricting answer and panics on a close it cannot complete.
+    {
+        var control = try product.product_control.Runtime.init(allocator, io, supervisor.runtimePort(), .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        }, product.productControlConfiguration());
+        defer control.deinit();
+        try product.installProductControlExecution(&control);
+
+        const task_id = try control.createTask(
+            product.productControlTaskInput(),
+            try product.product_control.TestSupport.fixtureModelSelection(&control),
+        );
+        try product.waitInitialTaskCatalog(&control, task_id);
+        try product.settleWorkspaceSkillQueries(&control, try control.taskWorkspaceId(task_id));
+        _ = try product.runPreparedTask(&control, task_id, .{ .text = "Say something short" });
+
+        // The terminal, read off the aggregate Product publishes rather than
+        // from the port: what this test is about is the whole path, and the
+        // aggregate is where that path ends.
+        try product.waitProductControlSnapshot(&control, "\"terminal\":{\"outcome\":\"completed\"");
+
+        try std.testing.expectEqual(agent_link.client.LinkFault.none, supervisor.fault());
+        // The events came back through the notifier, which is the half of the
+        // stream a terminal alone would not prove.
+        try std.testing.expect(wake.count.load(.acquire) > 0);
+    }
+
+    // A clean exit, not one on the deadline. See the note at the top: this is
+    // where a Session reference Product never gave back would show.
+    try std.testing.expectEqual(exited_on_link_close, supervisor.stop());
 }
 
 test "a start that refuses leaves no child running and nothing allocated" {

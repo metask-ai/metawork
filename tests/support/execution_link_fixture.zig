@@ -33,6 +33,7 @@
 //! and the stand-in is what shows a Run.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const agent = @import("metawork_agent");
 const execution_half = @import("app_execution_half");
@@ -97,16 +98,33 @@ pub const hold_runs_flag = "--hold-runs";
 /// its own.
 pub const hang_cleanup_flag = "--hang-on-cleanup";
 
-/// Puts the exit deadline past the UI half's grace period.
+/// Registers a C `atexit` handler that never returns.
 ///
-/// Which is what lets a test tell the two outcomes apart: with the deadline
-/// inside the grace, a teardown that never finishes still ends as `.exited`,
-/// and "cleanup completed" and "the deadline ended it" look the same from
-/// out here. Past the grace, a teardown that does not finish is a child that
-/// had to be killed.
-pub const slow_exit_flag = "--slow-exit-deadline";
+/// Which is the whole difference between the two ways out. The ordinary exit
+/// runs these -- and the C++ static destructors beside them -- on a process
+/// whose threads are still going, and the deadline's exit must run nothing at
+/// all. Pair it with `hang_cleanup_flag`, or the half finishes tidying up and
+/// leaves through `main`, where running them is correct.
+///
+/// Without libc there is nothing to register and this does nothing, which is
+/// the same build condition under which the ordinary exit was never the
+/// danger.
+pub const wedge_at_exit_flag = "--wedge-at-exit";
 
-const slow_exit_ms: u64 = 60_000;
+/// The `Io` the handler above waits on. A C callback takes no context, so
+/// this is the only way to hand it one.
+var exit_wedge_io: ?std.Io = null;
+
+fn wedgeAtExit() callconv(.c) void {
+    const io = exit_wedge_io orelse return;
+    var never: std.Io.Event = .unset;
+    never.waitTimeout(io, .{ .duration = .{
+        .raw = .fromMilliseconds(wedge_ms),
+        .clock = .awake,
+    } }) catch {};
+}
+
+extern "c" fn atexit(handler: *const fn () callconv(.c) void) c_int;
 
 const Composer = struct {
     io: std.Io,
@@ -175,6 +193,12 @@ pub fn main(init: std.process.Init) !void {
     // Read before the half runs, because it decides the deadline the half is
     // composed with and not only what happens afterwards.
     const wedge = requested(init.minimal.args, init.gpa, wedge_flag);
+    if (comptime builtin.link_libc) {
+        if (requested(init.minimal.args, init.gpa, wedge_at_exit_flag)) {
+            exit_wedge_io = init.io;
+            _ = atexit(wedgeAtExit);
+        }
+    }
     const version = init.environ_map.get("METAWORK_EXEC_LINK_VERSION") orelse "fixture-0";
     const digest_text = init.environ_map.get("METAWORK_EXEC_LINK_DIGEST") orelse "11";
     var digest: [32]u8 = @splat(0);
@@ -216,12 +240,7 @@ pub fn main(init: std.process.Init) !void {
             null,
         .tables = fixture_tables,
         .drain_events = !requested(init.minimal.args, init.gpa, no_drain_flag),
-        .exit_deadline_ms = if (wedge)
-            0
-        else if (requested(init.minimal.args, init.gpa, slow_exit_flag))
-            slow_exit_ms
-        else
-            execution_half.default_exit_deadline_ms,
+        .exit_deadline_ms = if (wedge) 0 else execution_half.default_exit_deadline_ms,
         .workers = if (requested(init.minimal.args, init.gpa, hold_runs_flag)) 1 else 4,
     });
     if (wedge) {

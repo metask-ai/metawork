@@ -166,7 +166,7 @@ pub fn buildsCapability(comptime owner: method.Owner, comptime name: []const u8)
 }
 
 /// The methods with a prong written for them below.
-const capability_prongs = [_][]const u8{"export_checkpoint"};
+const capability_prongs = [_][]const u8{ "export_checkpoint", "prepare_run_with_tools" };
 
 fn hasProng(comptime name: []const u8) bool {
     comptime {
@@ -209,7 +209,10 @@ fn invokeOne(
     request: Request,
 ) InvokeError![]u8 {
     if (comptime entry.transport == .stream) return error.NotACall;
-    if (comptime hasProng(entry.name)) return exportCheckpoint(arena, bindings, request);
+    if (comptime std.mem.eql(u8, entry.name, "export_checkpoint"))
+        return exportCheckpoint(arena, bindings, request);
+    if (comptime std.mem.eql(u8, entry.name, "prepare_run_with_tools"))
+        return prepareRunWithTools(arena, bindings, request);
     if (comptime std.mem.eql(u8, entry.name, "create_session_route"))
         return createSessionRoute(arena, bindings, request);
     if (comptime std.mem.eql(u8, entry.name, "begin_run_outcome"))
@@ -471,6 +474,54 @@ fn releaseRun(
     // between.
     adapters.releaseRun(bindings, request.receiver) orelse return error.UnknownHandle;
     return successResponse(arena, void, {});
+}
+
+/// `session.prepare_run_with_tools`, for a Run that brought no tools.
+///
+/// A prong rather than the generic path because the four tool parameters have
+/// no adapters and must not get one: an adapter is a statement that the type
+/// can be rebuilt on this side, and these four cannot be -- they stay on
+/// `adapters.owedParameters`, which is the worklist that says so. What this
+/// answers is the case where none of them is there, which is every Run from a
+/// Product composed without those effects.
+///
+/// A capability that *is* there is refused. The caller refuses it first and
+/// never sends one, so reaching this is a peer that forwards what this build
+/// does not -- and the identity exchange already makes that unreachable. It
+/// is answered rather than asserted because an unreachable boundary still has
+/// to be able to say so, and because the alternative is preparing a Run whose
+/// tool is quietly absent.
+fn prepareRunWithTools(
+    arena: std.mem.Allocator,
+    bindings: adapters.Bindings,
+    request: Request,
+) InvokeError![]u8 {
+    const Fn = comptime @typeInfo(
+        @FieldType(port.SessionPort.VTable, "prepare_run_with_tools"),
+    ).pointer.child;
+    const Arguments = comptime wire_types.Request(Fn);
+    const wired = try payload.decodeExact(Arguments, arena, request.arguments);
+    const receiver = (try resolveReceiver(bindings, request)) orelse return error.UnknownHandle;
+
+    if (wired[1] != null or wired[2] != null or wired[3] != null or wired[4] != null)
+        return failureResponse(arena, error.DependencyUnreachable);
+
+    // The Run input itself goes through its own adapter, the way the generic
+    // path would have taken it: naming the type off the signature rather than
+    // here means a parameter that gains a wire form is rebuilt by whatever
+    // the registry says rebuilds it.
+    const Input = comptime @typeInfo(Fn).@"fn".params[1].type.?;
+    const adapter = comptime adapters.parameterAdapter(Input).?;
+    const input = try adapter.apply(bindings, wired[0]);
+
+    const run_id = receiver.session.port.prepareRunWithTools(
+        input,
+        null,
+        null,
+        null,
+        null,
+    ) catch |err| return failureResponse(arena, err);
+    return successResponse(arena, u64, run_id);
 }
 
 /// `session.retain_reference`, which counts what the caller took.
@@ -1027,14 +1078,22 @@ test "each refusal leaves nothing behind" {
     }
 
     // A method this build cannot answer end to end. A statement about the
-    // build, and it still leaves nothing behind. `prepare_run_with_tools`
-    // takes capabilities with no prong yet, and the prong check runs before
-    // the generic path, so this is the refusal it gets.
+    // build, and it still leaves nothing behind.
+    //
+    // This was `prepare_run_with_tools` until that method got a prong. It
+    // takes four capabilities this half still cannot rebuild, but a Run that
+    // brought none of them is answered now, so the refusal it gives is about
+    // its payload and not about the build. `query_skill_catalog` is the
+    // plainer case: its *result* names a lease this half would have to put in
+    // a table, which nothing yet writes into a response.
     {
-        const entry = try method.find(method.codeOf(.session, "prepare_run_with_tools"));
+        const entry = try method.find(method.codeOf(.runtime, "query_skill_catalog"));
         const header = envelope.requestHeaderBytes(entry.owner);
         const bytes = try arena.alloc(u8, header);
-        envelope.encodeRequestHeader(bytes, entry, id);
+        // No receiver: a Runtime method is called on the half itself, and
+        // the encoder asserts that rather than carrying an id nothing would
+        // resolve.
+        envelope.encodeRequestHeader(bytes, entry, .none);
         try testing.expectError(
             error.NotDispatchable,
             invoke(arena, harness.bindings(), try classify(bytes)),
@@ -1561,7 +1620,7 @@ test "how much of the surface this build answers is counted, not claimed" {
     // number kept here: arguments still owed, results still owed.
     try testing.expect(answered < callable);
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 40), answered);
+    try testing.expectEqual(@as(usize, 41), answered);
 
     // Three of those are answered by a prong rather than by the generic
     // chain, for two different reasons, and `dispatchable` has to know both.
@@ -1570,6 +1629,12 @@ test "how much of the surface this build answers is counted, not claimed" {
     // half does answer.
     try testing.expect(comptime !adapters.argumentsRebuildable(.session, "export_checkpoint"));
     try testing.expect(comptime dispatchable(.session, "export_checkpoint"));
+    // The same shape, and the reason to assert it twice: both methods are
+    // answered by a prong *because* their parameters are not rebuildable, so
+    // a build that quietly gave one of those types an adapter would make the
+    // worklist shorter without making the capability cross.
+    try testing.expect(comptime !adapters.argumentsRebuildable(.session, "prepare_run_with_tools"));
+    try testing.expect(comptime dispatchable(.session, "prepare_run_with_tools"));
 
     // The two route methods have no result adapter and cannot have one -- the
     // slot is reserved before the call -- so asking only `resultAdapter`

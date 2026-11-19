@@ -39,6 +39,17 @@ pub const Exit = enum(u8) {
     transport_failed = 12,
     /// A resource this process needs at startup was unavailable.
     resource_unavailable = 13,
+    /// The link ended, and the teardown after it did not finish inside
+    /// `exit_deadline` -- so the process went without finishing it.
+    ///
+    /// Its own code and not the link's, because they are different facts and
+    /// only one of them is a defect. A half that cannot finish tidying up is
+    /// holding something nobody will ever take back, and the reason the
+    /// deadline exists at all is that such a thing is otherwise invisible:
+    /// reported as a normal end, the next leak of the kind that caused this
+    /// one would show up in the field as "exits two seconds late" and nothing
+    /// else. It is not a crash code either -- the process did decide to go.
+    cleanup_deadline = 14,
 };
 
 /// Who answers the frames this file reads.
@@ -72,6 +83,25 @@ pub const Options = struct {
     exit_deadline_ms: u64 = exit_deadline.default_ms,
 };
 
+/// Arms the deadline on everything that happens after this, and reports the
+/// exit it was given.
+///
+/// Every return from `run` goes through here, not just the one after the read
+/// loop. The caller composes what answers the link *before* entering this --
+/// `execution_half` has an Agent Runtime built by then -- so a refused
+/// identity returns into a teardown that destroys a Runtime, as unbounded as
+/// any other. The only returns with nothing behind them are the two before
+/// the read buffer exists, and arming for those costs a thread that the
+/// process outlives by microseconds.
+fn armed(io: std.Io, options: Options, exit: Exit) Exit {
+    exit_deadline.arm(
+        io,
+        options.exit_deadline_ms,
+        @intFromEnum(Exit.cleanup_deadline),
+    );
+    return exit;
+}
+
 /// Serves the link until it ends, and returns the exit code to use.
 pub fn run(
     io: std.Io,
@@ -82,7 +112,7 @@ pub fn run(
     const output = std.Io.File.stdout();
 
     const read_buffer = allocator.alloc(u8, options.read_buffer_bytes) catch
-        return .resource_unavailable;
+        return armed(io, options, .resource_unavailable);
     defer allocator.free(read_buffer);
     var reader = input.readerStreaming(io, read_buffer);
 
@@ -92,24 +122,24 @@ pub fn run(
         &reader.interface,
         .exec,
         options.identity,
-    ) catch return .identity_refused;
+    ) catch return armed(io, options, .identity_refused);
     switch (outcome) {
-        .failure => |failure| return switch (failure) {
+        .failure => |failure| return armed(io, options, switch (failure) {
             .transport_failed => .transport_failed,
             else => .identity_refused,
-        },
+        }),
         .accepted => {},
     }
 
     var outbound: agent_link.channel.Outbound = undefined;
     outbound.start(io, allocator, output, options.queue_limits) catch
-        return .resource_unavailable;
+        return armed(io, options, .resource_unavailable);
     defer outbound.stop();
 
     var discard: Discard = .{};
     const sink = if (options.answering) |answering|
         answering.begin_fn(answering.context, io, &outbound) orelse
-            return .resource_unavailable
+            return armed(io, options, .resource_unavailable)
     else
         discard.sink();
     defer if (options.answering) |answering| answering.end_fn(answering.context);
@@ -121,25 +151,20 @@ pub fn run(
         &reader.interface,
         options.message_limits,
         sink,
-    ) catch return .resource_unavailable;
+    ) catch return armed(io, options, .resource_unavailable);
     defer inbound.deinit();
 
-    const exit: Exit = switch (inbound.run()) {
-        .peer_closed, .consumer_stopped => .link_closed,
-        .read_failed => .transport_failed,
-        .violation => .protocol_violation,
-    };
     // The link is over. Every `defer` below it, and the caller's own teardown
     // after this returns, is this process tidying up after a caller that is
     // not listening -- including the join in `end_fn`, which waits for a
     // worker inside `execute` that only its own Run can release. One bound
     // over all of it, armed here because this is the first line that knows
     // the link has ended and the last one before the waiting starts.
-    //
-    // The returns above are startup and not exit: nothing has been composed
-    // yet, so there is nothing for a deadline to cut short.
-    exit_deadline.arm(io, options.exit_deadline_ms, @intFromEnum(exit));
-    return exit;
+    return armed(io, options, switch (inbound.run()) {
+        .peer_closed, .consumer_stopped => .link_closed,
+        .read_failed => .transport_failed,
+        .violation => .protocol_violation,
+    });
 }
 
 /// For a caller that composed nothing to answer with. Dropping a message is

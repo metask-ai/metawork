@@ -203,12 +203,6 @@ const not_forwarded = [_]NotForwarded{
             "for what looked like the same reason and is not, because an export names a " ++
             "blob that does not exist yet",
     },
-    .{
-        .owner = .session,
-        .name = "prepare_run_with_tools",
-        .why = "the MCP installation input is a reverse call; see " ++
-            "`shapes.McpInstallationTarget` and the MCP step",
-    },
 
     // The entries below are the execution half's side, and they are here
     // because `forwardable` spans both halves. Each one's result puts a
@@ -898,6 +892,27 @@ fn sessionPrepareRunWithTools(
     mcp: ?mcp_install.Input,
     video: ?generate_video.Input,
 ) Allocating!u64 {
+    // The Run crosses; the four tool capabilities do not, yet. Each is still
+    // on `adapters.owedParameters` for its own reason -- the delivery
+    // inspection and the MCP installation are reverse calls into this half,
+    // and the image and video bindings are objects the execution half would
+    // have to keep past the call -- and none of them is a thing this build
+    // can put on the wire.
+    //
+    // So a call that carries one is refused *here*, before it is sent. The
+    // answer that must never happen is the other one: a Run prepared without
+    // a tool it asked for, where the model finds the tool missing and
+    // nothing anywhere says why. A refusal is a Run that did not start.
+    //
+    // `DependencyUnreachable` is the restrictive answer rather than a precise
+    // one. It is exact for the two reverse calls -- the half that performs
+    // those effects cannot be reached from where the Run would run -- and for
+    // the image and video bindings it overstates the cause while getting the
+    // consequence right. A member of its own would be a change to
+    // `surface.Error`, which every in-process caller shares, for a condition
+    // that disappears when these four cross.
+    if (image != null or delivery_input != null or mcp != null or video != null)
+        return error.DependencyUnreachable;
     return forward(.session, "prepare_run_with_tools", context, .{ input, image, delivery_input, mcp, video });
 }
 
@@ -1422,6 +1437,43 @@ const test_open_options: surface.SessionOpenOptions = .{
     .canonical_user_home = "home",
     .workspace_epoch = "epoch",
 };
+
+test "a Run that brought a tool this build cannot carry is refused, not sent" {
+    // The refusal is the first thing the stub does, before it touches the
+    // link at all. That is the claim, and it is why this test needs neither a
+    // link nor a context: a call that reached the wire would be a Run
+    // prepared on the far side without the capability it named, and the model
+    // would find the tool missing with nothing anywhere saying why.
+    //
+    // Each capability is present but `undefined` inside, which is the sharper
+    // form of the same claim: the stub may read whether one is there and
+    // nothing else, so a version that looked inside one would be reading
+    // memory it was never given. One case each, because the four are owed for
+    // three different reasons and a single check that happened to cover one
+    // would read as covering all four.
+    const input: surface.RunInput = .{ .text = "hello" };
+    const image: ?surface.ImageGenerationRunInput = @as(surface.ImageGenerationRunInput, undefined);
+    const delivered: ?delivery.Input = @as(delivery.Input, undefined);
+    const install: ?mcp_install.Input = @as(mcp_install.Input, undefined);
+    const clip: ?generate_video.Input = @as(generate_video.Input, undefined);
+
+    try testing.expectError(
+        error.DependencyUnreachable,
+        sessionPrepareRunWithTools(null, input, image, null, null, null),
+    );
+    try testing.expectError(
+        error.DependencyUnreachable,
+        sessionPrepareRunWithTools(null, input, null, delivered, null, null),
+    );
+    try testing.expectError(
+        error.DependencyUnreachable,
+        sessionPrepareRunWithTools(null, input, null, null, install, null),
+    );
+    try testing.expectError(
+        error.DependencyUnreachable,
+        sessionPrepareRunWithTools(null, input, null, null, null, clip),
+    );
+}
 
 test "a Session created on the far side comes back as a port this half can name" {
     // The first result that *puts something into* the execution half's table
@@ -2122,7 +2174,7 @@ test "how much of the surface this build answers end to end, counted across both
     // measurement and not the prose. So the count stays in the assertions and
     // the prose stops repeating it.
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 40), end_to_end);
+    try testing.expectEqual(@as(usize, 41), end_to_end);
     try testing.expectEqual(not_forwarded.len, callable - end_to_end);
 
     // And the execution half is the binding constraint: every method the
@@ -2132,7 +2184,7 @@ test "how much of the surface this build answers end to end, counted across both
     // have diverged and the shorter one would start looking like the answer.
     try testing.expectEqual(exec_gap, callable - end_to_end);
     try testing.expect(caller_gap <= exec_gap);
-    try testing.expectEqual(@as(usize, 40), comptime dispatch.dispatchableCount());
+    try testing.expectEqual(@as(usize, 41), comptime dispatch.dispatchableCount());
 }
 
 test "the list says how many of its entries belong to which half" {
@@ -2146,7 +2198,11 @@ test "the list says how many of its entries belong to which half" {
 
     // The rest are ones this half cannot send or read either, which is the
     // only other way to be on the list.
-    try testing.expectEqual(@as(usize, 10), not_forwarded.len);
+    try testing.expectEqual(@as(usize, 9), not_forwarded.len);
     try testing.expectEqual(@as(usize, 7), exec_only);
-    try testing.expectEqual(@as(usize, 3), not_forwarded.len - exec_only);
+    // Two, down from three: `prepare_run_with_tools` is answered now. Its
+    // four capabilities are still owed and still on the parameter worklist --
+    // what changed is that a Run without any of them crosses, and a Run with
+    // one is refused where it is made rather than panicking where it is sent.
+    try testing.expectEqual(@as(usize, 2), not_forwarded.len - exec_only);
 }

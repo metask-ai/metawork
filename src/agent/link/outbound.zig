@@ -106,6 +106,20 @@ pub fn adapter(comptime T: type) ?Adapter(T) {
     }.apply };
     if (T == contract.VideoGenerationRunInput) return mirrorFrom(T, shapes.VideoGenerationBinding);
 
+    // The install request is handed to the caller and its answer read back,
+    // so the capability itself is a reverse call and the far side cannot
+    // rebuild one -- it stays on `adapters.owedParameters` until the MCP step
+    // writes that path. What crosses here is the one field the target shape
+    // carries, which is what makes the *call* sendable; a call that actually
+    // has an installation input is refused by the stub before it is sent,
+    // because a Run prepared without the tool it asked for is the one answer
+    // worse than a refusal.
+    if (T == contract.McpInstallationInput) return .{ .apply = struct {
+        fn apply(_: *client.Client, value: T) Error!shapes.McpInstallationTarget {
+            return .{ .task_id = value.task_id };
+        }
+    }.apply };
+
     // A capability whose whole content is its presence. The inspection is a
     // reverse call answered by the half that holds the delivery root, so
     // nothing about the root travels and there is nothing here to carry.
@@ -403,10 +417,16 @@ test "the argument direction is counted on its own" {
     //     *not* exist yet, and every fact needed to open one turned out to
     //     be on the Session or in the call's own limits, so its wire form is
     //     nothing at all.
-    //   * `prepare_run_with_tools`' MCP install input is a reverse call --
-    //     `shapes.McpInstallationTarget` records why -- and belongs to the
-    //     MCP step with the rest of it.
-    try testing.expectEqual(@as(usize, 2), owed.len);
+    //
+    // `prepare_run_with_tools`' MCP install input was the second entry and is
+    // not one any more, which is worth saying because nothing about the MCP
+    // step changed. Its wire form was always derivable -- the target shape is
+    // one field the input already has -- so this direction was never what
+    // blocked it. What is still missing is the far side rebuilding a
+    // capability from that field, and that is a different list:
+    // `adapters.owedParameters`, where all four of this method's tool
+    // capabilities remain.
+    try testing.expectEqual(@as(usize, 1), owed.len);
 
     // What that leaves: the callable methods that can put every argument
     // they are given on the wire. Counted rather than claimed, same as the
