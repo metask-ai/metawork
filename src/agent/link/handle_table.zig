@@ -76,6 +76,22 @@ pub fn Table(comptime T: type) type {
             /// state.
             generation: u32 = 0,
             value: ?*T = null,
+            /// Promised to a caller that has not filled it yet. `insert`
+            /// skips one, because the whole point of a reservation is that
+            /// its id already exists and cannot be handed to anyone else.
+            reserved: bool = false,
+        };
+
+        /// A slot promised before the thing that will fill it exists.
+        ///
+        /// Taken as a parameter by the calls whose success cannot be undone,
+        /// so that beginning something this half cannot name back is not an
+        /// order anyone has to remember avoiding -- it is an order that
+        /// cannot be written. A forged one is refused: `fill` and `release`
+        /// check that the slot is still reserved at this exact generation,
+        /// and nothing but `reserve` produces that pairing.
+        pub const Reservation = struct {
+            id: Id,
         };
 
         allocator: std.mem.Allocator,
@@ -98,14 +114,71 @@ pub fn Table(comptime T: type) type {
             self.* = undefined;
         }
 
+        /// For a value that already exists, from a call that could be undone
+        /// if naming it failed. A value from a call that could not be undone
+        /// goes through `reserve` first.
         pub fn insert(self: *Self, value: *T) InsertError!Id {
+            const index = try self.freeSlot();
+            const slot = &self.slots[index];
+            slot.generation += 1;
+            slot.value = value;
+            self.live += 1;
+            return .{ .slot = @intCast(index + 1), .generation = slot.generation };
+        }
+
+        /// Promises a slot before the thing that will fill it exists.
+        ///
+        /// The id is final from here: the generation has already moved, so
+        /// what fills the slot gets the name the caller was promised, and no
+        /// other caller can be given it meanwhile.
+        pub fn reserve(self: *Self) InsertError!Reservation {
+            const index = try self.freeSlot();
+            const slot = &self.slots[index];
+            slot.generation += 1;
+            slot.reserved = true;
+            self.live += 1;
+            return .{ .id = .{ .slot = @intCast(index + 1), .generation = slot.generation } };
+        }
+
+        /// Puts the value in the slot it was promised. Refuses a reservation
+        /// this table did not make, or one already filled or released.
+        pub fn fill(self: *Self, reservation: Reservation, value: *T) ?Id {
+            const slot = self.reservedSlot(reservation) orelse return null;
+            slot.reserved = false;
+            slot.value = value;
+            return reservation.id;
+        }
+
+        /// Gives the slot back because the thing that would have filled it
+        /// does not exist after all. The generation moves again, so the
+        /// promised id can never be filled later.
+        pub fn releaseReservation(self: *Self, reservation: Reservation) bool {
+            const slot = self.reservedSlot(reservation) orelse return false;
+            slot.reserved = false;
+            if (slot.generation != std.math.maxInt(u32)) slot.generation += 1;
+            self.live -= 1;
+            return true;
+        }
+
+        /// Whether this promise is still outstanding: made by this table, at
+        /// this generation, and neither filled nor given back. The table is
+        /// asked rather than a flag kept beside it, so there is one answer.
+        pub fn stillReserved(self: *Self, reservation: Reservation) bool {
+            return self.reservedSlot(reservation) != null;
+        }
+
+        fn reservedSlot(self: *Self, reservation: Reservation) ?*Slot {
+            const index = self.indexOf(reservation.id) orelse return null;
+            const slot = &self.slots[index];
+            if (!slot.reserved) return null;
+            return slot;
+        }
+
+        fn freeSlot(self: *Self) InsertError!usize {
             for (self.slots, 0..) |*slot, index| {
-                if (slot.value != null) continue;
+                if (slot.value != null or slot.reserved) continue;
                 if (slot.generation == std.math.maxInt(u32)) return error.GenerationExhausted;
-                slot.generation += 1;
-                slot.value = value;
-                self.live += 1;
-                return .{ .slot = @intCast(index + 1), .generation = slot.generation };
+                return index;
             }
             return error.HandleCapacity;
         }
@@ -145,6 +218,16 @@ pub fn Table(comptime T: type) type {
         pub fn drain(self: *Self, output: []*T) []*T {
             var count: usize = 0;
             for (self.slots) |*slot| {
+                // A reservation nobody filled has no object to hand back, and
+                // leaving it would keep the slot live for a caller that can
+                // no longer fill it -- including past `deinit`, which asserts
+                // the table is empty.
+                if (slot.reserved) {
+                    slot.reserved = false;
+                    if (slot.generation != std.math.maxInt(u32)) slot.generation += 1;
+                    self.live -= 1;
+                    continue;
+                }
                 if (count == output.len) break;
                 const value = slot.value orelse continue;
                 slot.value = null;
@@ -274,4 +357,84 @@ test "a zero id is invalid by construction, not by convention" {
     try testing.expect(!zeroed.valid());
     try testing.expect((Id{ .slot = 1, .generation = 0 }).valid());
     try testing.expectEqual(Id.fromBits((Id{ .slot = 3, .generation = 9 }).bits()).slot, 3);
+}
+
+test "a reserved slot is promised to one caller and to nobody else" {
+    var first: Thing = .{ .tag = 1 };
+    var second: Thing = .{ .tag = 2 };
+    var table = try Table(Thing).init(testing.allocator, 1);
+    defer table.deinit();
+
+    const promised = try table.reserve();
+    try testing.expect(promised.id.valid());
+    // The one slot is taken even though nothing fills it yet, which is the
+    // point: capacity was spent before the irreversible call, not after.
+    try testing.expectEqual(@as(usize, 1), table.liveCount());
+    try testing.expectError(error.HandleCapacity, table.insert(&first));
+    try testing.expectError(error.HandleCapacity, table.reserve());
+    // And it resolves to nothing until it is filled.
+    try testing.expect(table.resolve(promised.id) == null);
+
+    const id = table.fill(promised, &second).?;
+    try testing.expectEqual(promised.id.bits(), id.bits());
+    try testing.expectEqual(@as(u32, 2), table.resolve(id).?.tag);
+    _ = table.take(id);
+}
+
+test "a reservation given back can never be filled later" {
+    var thing: Thing = .{ .tag = 7 };
+    var table = try Table(Thing).init(testing.allocator, 1);
+    defer table.deinit();
+
+    const promised = try table.reserve();
+    try testing.expect(table.releaseReservation(promised));
+    try testing.expectEqual(@as(usize, 0), table.liveCount());
+
+    // The generation moved, so the promised name is dead even though its slot
+    // is free again -- the same reason a retired id never answers.
+    try testing.expect(table.fill(promised, &thing) == null);
+    try testing.expect(!table.releaseReservation(promised));
+
+    // The slot itself is reusable, under a new name.
+    const reused = try table.insert(&thing);
+    try testing.expect(reused.bits() != promised.id.bits());
+    _ = table.take(reused);
+}
+
+test "a forged reservation is refused, because only reserve makes a live one" {
+    var thing: Thing = .{ .tag = 3 };
+    var table = try Table(Thing).init(testing.allocator, 2);
+    defer table.deinit();
+
+    // Shaped like a reservation and never made by this table.
+    try testing.expect(table.fill(.{ .id = .{ .slot = 1, .generation = 1 } }, &thing) == null);
+    try testing.expect(table.fill(.{ .id = .none }, &thing) == null);
+    try testing.expect(!table.releaseReservation(.{ .id = .{ .slot = 2, .generation = 9 } }));
+
+    // A filled slot is no longer a reservation either, so a second fill of
+    // the same promise cannot overwrite what is there.
+    const promised = try table.reserve();
+    _ = table.fill(promised, &thing).?;
+    var other: Thing = .{ .tag = 4 };
+    try testing.expect(table.fill(promised, &other) == null);
+    try testing.expectEqual(@as(u32, 3), table.resolve(promised.id).?.tag);
+    _ = table.take(promised.id);
+}
+
+test "closure clears a reservation nobody filled" {
+    var thing: Thing = .{ .tag = 5 };
+    var table = try Table(Thing).init(testing.allocator, 2);
+    defer table.deinit();
+
+    const filled = try table.insert(&thing);
+    _ = try table.reserve();
+    try testing.expectEqual(@as(usize, 2), table.liveCount());
+
+    var storage: [2]*Thing = undefined;
+    const drained = table.drain(&storage);
+    // One object came back; the reservation had none to give, and is gone
+    // rather than left holding a slot for a caller that cannot fill it.
+    try testing.expectEqual(@as(usize, 1), drained.len);
+    try testing.expectEqual(@as(usize, 0), table.liveCount());
+    try testing.expect(table.resolve(filled) == null);
 }

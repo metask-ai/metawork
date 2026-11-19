@@ -187,6 +187,27 @@ pub const OperationIdFloor = struct {
 };
 
 pub const SessionOpenOptions = struct {
+    /// Which Task this Session belongs to, and at which binding epoch.
+    ///
+    /// Product's own identity for the Session, given once at creation and
+    /// restore and held for the Session's life. Neither is derivable here:
+    /// the Agent names Sessions by its own route id, and a checkpoint's
+    /// `logical_session_id` is AgentCore's and exists only once a checkpoint
+    /// does.
+    ///
+    /// They are carried because a checkpoint the Agent stages *without being
+    /// asked* -- after the caller is gone -- still has to be a record Product
+    /// can accept, and `src/product/task/state.zig`'s
+    /// `CheckpointExportContext` needs both. An export the caller asked for
+    /// could carry them per call; one nobody asked for cannot, so they belong
+    /// to the Session.
+    ///
+    /// Neither has a default on purpose. A zero would make a staged record
+    /// with `binding_epoch = 0` indistinguishable from a real one, which is
+    /// the acceptance path's one way to go wrong quietly -- so every caller
+    /// says which Task it is opening a Session for, and the compiler asks.
+    task_id: u64,
+    binding_epoch: u64,
     model_binding: ModelBinding,
     permission_mode: PermissionMode,
     shell_policy: ShellPolicy,
@@ -277,6 +298,15 @@ pub const Error = error{
     PermissionModeUpdateFailed,
     PermissionModeBudgetRequired,
     RewindFailed,
+    /// The half that performs this call cannot be reached.
+    ///
+    /// No other member means it. Reusing one would assert something false --
+    /// `SessionClosing` would tell the caller its Session is winding down,
+    /// `CoreCallFailed` that Core was reached and failed -- and a caller
+    /// acting on either would be acting on a fact nobody established. The
+    /// execution link numbers this in `error_code.zig`; in process nothing
+    /// produces it, because in process there is no other half to lose.
+    DependencyUnreachable,
     QueueFull,
     SessionNotIdle,
     SessionPoisoned,

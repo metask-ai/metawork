@@ -36,6 +36,13 @@ pub const reverse = @import("link/reverse.zig");
 pub const channel = @import("link/channel.zig");
 pub const unreachability = @import("link/unreachability.zig");
 pub const adapters = @import("link/adapters.zig");
+pub const handle_repr = @import("link/handle_repr.zig");
+pub const client = @import("link/client.zig");
+pub const inbound = @import("link/inbound.zig");
+pub const outbound = @import("link/outbound.zig");
+pub const stubs = @import("link/stubs.zig");
+pub const call_frame = @import("link/call_frame.zig");
+pub const run_tools = @import("link/run_tools.zig");
 pub const dispatch = @import("link/dispatch.zig");
 
 pub const revision = handshake.revision;
@@ -179,6 +186,13 @@ test {
     _ = channel;
     _ = unreachability;
     _ = adapters;
+    _ = handle_repr;
+    _ = client;
+    _ = inbound;
+    _ = outbound;
+    _ = stubs;
+    _ = call_frame;
+    _ = run_tools;
     _ = dispatch;
 }
 

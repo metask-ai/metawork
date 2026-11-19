@@ -256,7 +256,9 @@ exec 死亡时 UI 侧：令牌桶重启，5 分钟窗口内至多 3 次，超限
 
 ### 4.8 shutdown
 
-正常退出仍由 UI 发起，既有的 Application 关闭顺序（Control executor 停止、Runtime shutdown、lifecycle 同步）保持不变，只在其间插入跨进程一步：UI 发关闭 → exec 停接纳、终止并等待 Run、按今天的路径导出 checkpoint（字节流回 UI，由 UI 提交记录）→ exec 退出 → UI 回收并清理自己的标记。exec 内部仍走 `Runtime.shutdown` 与 `session.close(.app_shutdown)`。
+正常退出仍由 UI 发起，既有的 Application 关闭顺序（Control executor 停止、Runtime shutdown、lifecycle 同步）保持不变，只在其间插入跨进程一步：UI 发关闭 → exec 停接纳、终止并等待 Run、导出 checkpoint 落 exec 自己的 stage 区（**记录与 blob 身份过界，字节不过界**）→ exec 退出 → UI 立即接纳该记录、把 blob 纳入 FileStore，再回收并清理自己的标记。exec 内部仍走 `Runtime.shutdown` 与 `session.close(.app_shutdown)`。
+
+这里原先写的是「按今天的路径导出 checkpoint（字节流回 UI，由 UI 提交记录）」，与 4.3 归属表「字节回调，exec 直接读写文件；字节不过界」直接冲突。归属表是定论——它与第 3 节的归属表、`architecture.md` 第 5 节一致，`src/agent/link/call_frame.zig` 的 `BlobStore` 也是照它写的——所以错的是「字节」这两个字，不是「由 UI 提交记录」：提交与接纳确实留 UI。保留原文会让正常退出这一条路独自保留 Sink 形状，于是同一件事有两套机制，而两套机制里总有一套是没人跑过的那套。正常退出与崩溃退出因此共用第 5 节那条 staged 接纳路径，区别只在接纳发生得多早：正常退出当场接纳，崩溃退出等下次启动。
 
 强杀只作为宽限期之后的兜底，不作为正常路径。
 
@@ -272,7 +274,11 @@ exec 死亡时 UI 侧：令牌桶重启，5 分钟窗口内至多 3 次，超限
 
 staged 导出的接纳路径必须具体，这是一期最容易做成「看起来对」的地方：
 
-- stage 区在 checkpoint FileStore 之外、由 exec 拥有，内容是 blob 加一份自描述的待接纳记录（`task_id`、`binding_epoch`、generation、byte_size、digest、`logical_session_id`、`last_run_id`、`last_compact_id`、model、terminal anchor）。
+- stage 区在 checkpoint FileStore 之外、由 exec 拥有。里面有两种东西，区别是谁拼记录：
+  - **被要求的导出**（UI 还在，调用了 `exportCheckpoint`）只 stage 裸 blob。记录由 UI 拼，它手里有 `task_id`、`binding_epoch` 与 terminal anchor，其余字段在导出结果里；过界的是 blob 放在哪，即 `checkpoint.Placement.own_area`。
+  - **没人要求的导出**（UI 已死，exec 自发保存）stage blob 加一份自描述的待接纳记录（`task_id`、`binding_epoch`、generation、byte_size、digest、`logical_session_id`、`last_run_id`、`last_compact_id`、model、terminal anchor）。前两项来自 Session 创建时带过去的 Product 身份（见 4.4 第三项），anchor 的种类是 exec 刚执行的 Run 或 compact、id 就是调用里已有的 `last_run_id`/`last_compact_id`；`approval` 那一种只会出现在被要求的导出里。
+- **没有记录的 stage blob 启动时永不接纳，只清理。** 它要么是一次被要求的导出、UI 当时就该接纳而没来得及（那条路的权威在 UI，重建不出来），要么是半截。把它当证据留着会让一个没人能证明来源的 blob 看起来像一个待接纳的 checkpoint。
+- 早先定过一版 `CheckpointDestination = {hard_bytes, terminal_kind, terminal_id}` 让 anchor 过界，**作废**：被要求的导出里 UI 自己拼记录，没人要求的导出里 anchor 是 exec 自己知道的，两种情况都不需要它过界。导出的 sink 因此完全没有 wire 形状。
 - 不得直接写进 FileStore 的 task 目录。`cleanupOrphans` 的引用集由内存中 Task 行的 `durable.checkpoint` 构成，没有行指向的 blob 会被删掉——直接 stage 进去等于把证据交给清理逻辑。
 - 接纳由 Product owner 在下次启动、读入 Task 行之后、orphan 清理之前执行。插入点是确定的：`restoreTaskState` 之后、`reconcileCheckpointStoreNoFail` 之前，也在 `recoverInterruptedNoFail` 之前，因为被接纳的 checkpoint 会改变该 Task 的续跑起点。校验 digest 与 identity，与该 Task 当前 checkpoint 比较 generation 与 terminal anchor，接纳则按正常提交路径写入并把 blob 纳入 FileStore，拒绝则保留为证据并明确记录，不静默丢弃也不自动修复。
 - 拒绝或接纳失败不得阻塞启动，也不得使 Task 不可用。

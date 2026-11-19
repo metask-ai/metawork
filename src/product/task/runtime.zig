@@ -2329,10 +2329,23 @@ pub const Runtime = struct {
             input.permission_profile,
             input.permission_interaction,
         );
+        // Read, not taken. A Session now carries the Task it belongs to, so
+        // the identity has to exist before the Session does -- but *taking*
+        // it here would burn an id whenever opening the Session fails, and
+        // Task ids are durable and user-visible, so they would start
+        // skipping for a reason nobody could see. `create` still takes it,
+        // and asserts it got the one the Session was opened with: nothing
+        // else can take an id in between, and that is now checked rather
+        // than assumed.
+        const task_id = try self.peekTaskId();
         var image_capabilities: [models_contract.max_model_image_capabilities]agent.ModelImageCapability = undefined;
         std.debug.assert(input.execution.target.image_capabilities.len <= image_capabilities.len);
         for (input.execution.target.image_capabilities, 0..) |entry, index| image_capabilities[index] = .{ .model = entry.model, .supported = entry.supported };
         var binding = try task_agent_session.Binding.open(input.agent_runtime, .{
+            .task_id = task_id,
+            // A fresh Task starts at the durable default, and this is the one
+            // place that has to agree with it.
+            .binding_epoch = task_state.DurableTaskRecord.initial_binding_epoch,
             .model_binding = .{
                 .image_capabilities = image_capabilities[0..input.execution.target.image_capabilities.len],
                 .target = .{
@@ -2391,6 +2404,7 @@ pub const Runtime = struct {
         input.workspace_order.apply();
         const result = self.create(
             &candidate,
+            task_id,
             input.max_runs,
             input.max_compacts,
             input.max_ui_history,
@@ -2409,6 +2423,7 @@ pub const Runtime = struct {
     pub fn create(
         self: *Runtime,
         candidate: *CreateCandidate,
+        task_id: u64,
         max_runs: usize,
         max_compacts: usize,
         max_ui_history: usize,
@@ -2431,7 +2446,11 @@ pub const Runtime = struct {
         var ui_history_owned = true;
         errdefer if (ui_history_owned) self.allocator.free(ui_history);
         @memset(ui_history, null);
-        const task_id = try self.takeTaskId();
+        // The Session was opened for this id, so the two must be the same id.
+        // Checked rather than trusted: the gap between the read and the take
+        // is where a second taker would show up.
+        const taken = try self.takeTaskId();
+        std.debug.assert(taken == task_id);
         const previous_next_recent_order = self.next_recent_order;
         const record = try self.allocator.create(task_state.Task);
         record.* = .{
@@ -5739,12 +5758,21 @@ pub const Runtime = struct {
     }
 
     fn takeTaskId(self: *Runtime) error{TaskIdentityExhausted}!u64 {
+        const result = try self.peekTaskId();
+        self.next_task_id += 1;
+        return result;
+    }
+
+    /// The id the next `takeTaskId` will return, without spending it.
+    ///
+    /// For the one caller that has to name a Task before the Task exists:
+    /// a Session carries the Task it belongs to, and it is opened before
+    /// `create` runs.
+    fn peekTaskId(self: *const Runtime) error{TaskIdentityExhausted}!u64 {
         if (self.next_task_id == 0 or
             self.next_task_id == std.math.maxInt(u64))
             return error.TaskIdentityExhausted;
-        const result = self.next_task_id;
-        self.next_task_id += 1;
-        return result;
+        return self.next_task_id;
     }
 
     pub fn noteLateTerminal(self: *Runtime) u64 {
@@ -8292,12 +8320,17 @@ pub const Runtime = struct {
                         .pending, .outcome_unknown => break,
                         .not_started => if (allowed) adoption: {
                             const previous_epoch = task.durable.binding_epoch;
-                            if (advances_binding and previous_epoch == std.math.maxInt(u64)) {
+                            // The same function the Session was opened
+                            // through, so the epoch it carries and the epoch
+                            // installed here cannot be two different numbers.
+                            const next_epoch = checkpoint_record.installedBindingEpoch(
+                                previous_epoch,
+                                advances_binding,
+                            ) catch {
                                 task.runtime.last_restore_failure = .binding_epoch_exhausted;
                                 install_candidate = false;
                                 break :adoption;
-                            }
-                            const next_epoch = previous_epoch + @as(u64, if (advances_binding) 1 else 0);
+                            };
                             const previous_checkpoint = task.durable.checkpoint;
                             const previous_model = task.durable.execution_model;
                             const previous_protocol = task.durable.execution_protocol;
@@ -8344,7 +8377,17 @@ pub const Runtime = struct {
                             std.debug.assert(task.durable.binding_epoch == job.attempt.binding_epoch);
                             std.debug.assert(task.durable.execution_generation == job.attempt.source_execution_generation);
                             const previous_epoch = task.durable.binding_epoch;
-                            const next_epoch = previous_epoch + @as(u64, if (advances_binding) 1 else 0);
+                            // The same function the open and the `.not_started`
+                            // arm use. `unreachable` is sound here and nowhere
+                            // else: the assert above pins this epoch to the
+                            // attempt's, and the attempt could not have been
+                            // opened at `maxInt` with an advancing binding --
+                            // `openSession` refuses that before a Session
+                            // exists.
+                            const next_epoch = checkpoint_record.installedBindingEpoch(
+                                previous_epoch,
+                                advances_binding,
+                            ) catch unreachable;
                             if (job.rebind) |*rebind| {
                                 if (job.outcome.candidate.checkpoint) |value| {
                                     var record = value;
@@ -10948,6 +10991,13 @@ fn cancelCompactRecord(
     ) catch |err| switch (err) {
         error.NoSuchCompact => return .already_terminal,
         error.SessionClosing => return .session_closing,
+        // The cancellation did not happen and nothing here can find out
+        // whether it ever will, so this lands where an unreachable Session
+        // already lands: the caller stops asking about this compact. The
+        // other choice, `.already_terminal`, would tell Product the compact
+        // is over -- a claim about the Session's state that nobody
+        // established.
+        error.DependencyUnreachable => return .session_closing,
     };
     task.durable.recent_order = self.takeRecentOrder();
     return if (prior == null) .requested else .already_requested;

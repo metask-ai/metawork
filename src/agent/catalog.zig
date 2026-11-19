@@ -68,6 +68,42 @@ pub const Projection = struct {
     issues: []const Issue,
     storage: *anyopaque,
 
+    /// Builds a projection that owns its own contents.
+    ///
+    /// `copyProjection` below does this from an SDK catalog, but its storage
+    /// is private, so a caller that already has the flat contents -- one that
+    /// read them off a process boundary rather than out of Core -- had no way
+    /// to produce a value whose `deinit` works. Duplicating the storage
+    /// layout outside this file would be the alternative, and a layout known
+    /// in two places is a layout that will differ in one of them.
+    ///
+    /// Everything is copied, so the slices passed in may be borrowed and may
+    /// go away as soon as this returns.
+    pub fn own(
+        allocator: std.mem.Allocator,
+        revision: []const u8,
+        health: Health,
+        skills: []const Skill,
+        issues: []const Issue,
+    ) std.mem.Allocator.Error!Projection {
+        const storage = try allocator.create(ProjectionStorage);
+        errdefer allocator.destroy(storage);
+        storage.* = .{
+            .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(allocator),
+        };
+        errdefer storage.arena.deinit();
+        const arena = storage.arena.allocator();
+
+        return .{
+            .revision = try arena.dupe(u8, revision),
+            .health = health,
+            .skills = try dupeDeep([]const Skill, arena, skills),
+            .issues = try dupeDeep([]const Issue, arena, issues),
+            .storage = storage,
+        };
+    }
+
     pub fn deinit(self: *Projection) void {
         const owned: *ProjectionStorage = @ptrCast(@alignCast(self.storage));
         const allocator = owned.allocator;
@@ -164,6 +200,43 @@ const ProjectionStorage = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 };
+
+/// Copies a value and everything it points at into `arena`.
+///
+/// Walked at comptime rather than written field by field, because a field
+/// added to `Skill` or `Issue` must be copied too and a hand-written copy is
+/// where that is forgotten -- the copy would compile, and the new field would
+/// point into memory the caller had already given back.
+fn dupeDeep(comptime T: type, arena: std.mem.Allocator, value: T) std.mem.Allocator.Error!T {
+    return switch (@typeInfo(T)) {
+        .pointer => |info| blk: {
+            if (info.size != .slice) @compileError(
+                "a catalog projection holds no pointer but a slice: " ++ @typeName(T),
+            );
+            const out = try arena.alloc(info.child, value.len);
+            for (value, out) |source, *target| {
+                target.* = try dupeDeep(info.child, arena, source);
+            }
+            break :blk out;
+        },
+        .optional => |info| if (value) |inner|
+            try dupeDeep(info.child, arena, inner)
+        else
+            null,
+        .@"struct" => |info| blk: {
+            var out: T = undefined;
+            inline for (info.fields) |field| {
+                @field(out, field.name) = try dupeDeep(
+                    field.type,
+                    arena,
+                    @field(value, field.name),
+                );
+            }
+            break :blk out;
+        },
+        else => value,
+    };
+}
 
 const LeaseStorage = struct {
     references: std.atomic.Value(usize) = .init(1),

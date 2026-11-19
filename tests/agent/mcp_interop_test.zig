@@ -13,6 +13,13 @@ const models_ports = @import("product_models_ports");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const mcp_types = @import("metawork_product_mcp");
 
+/// A Session belongs to a Task, and these tests do not model one. The values
+/// are therefore fixed and nonzero: zero is invalid by construction on the
+/// acceptance path, so a test opening a Session at Task 0 would be exercising
+/// a state Product never produces.
+const test_task_id: u64 = 1;
+const test_binding_epoch: u64 = 1;
+
 const Fixture = struct {
     transport_owner: agent.McpTransportOwner = undefined,
     bound: bool = false,
@@ -1248,6 +1255,8 @@ fn expectMcpAdmissionDuringApply(reject_candidate: bool) !void {
     const host_selection = activation.takeSelection() orelse return error.TestUnexpectedResult;
     defer host_selection.deinit();
     const host_options: agent.SessionOpenOptions = .{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = .{ .target = .{ .provider_id = "fixture-provider", .protocol = .anthropic_messages, .base_url = healthy.provider_endpoint, .model = "fixture-model" }, .credential = "fixture-credential" },
         .permission_mode = .full_access,
         .shell_policy = .unrestricted,
@@ -1448,6 +1457,8 @@ test "an untrusted report after real MCP adoption retains resources and fences f
     try std.testing.expectError(error.McpConfigurationApplyUncertain, runtime.prepareMcpMembership(1, null, &.{}));
     // Optional MCP failure does not close ordinary text Session admission.
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = .{ .target = .{ .provider_id = "fixture-provider", .protocol = .anthropic_messages, .base_url = fixture.provider_endpoint, .model = "fixture-model" }, .credential = "fixture-credential" },
         .permission_mode = .full_access,
         .shell_policy = .unrestricted,
@@ -1531,6 +1542,8 @@ test "canonical MCP ABI accepts original selectors during refresh and after publ
     const host_selection = first.takeSelection() orelse return error.TestUnexpectedResult;
     defer host_selection.deinit();
     const host_options: agent.SessionOpenOptions = .{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = .{
             .target = .{ .provider_id = "fixture-provider", .protocol = .anthropic_messages, .base_url = fixture.provider_endpoint, .model = "fixture-model" },
             .credential = "fixture-credential",
@@ -1851,6 +1864,8 @@ fn expectRepeatedMcpPermission(protocol_version: []const u8, timing: McpRepeatTi
     const selection = activation.takeSelection() orelse return error.TestUnexpectedResult;
     defer selection.deinit();
     const session = try runtime.createSession(.{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = .{
             .target = .{
                 .provider_id = "fixture-provider",
@@ -2120,6 +2135,8 @@ fn expectProductIncrementalConvergence(bad_first: bool) !void {
     try std.testing.expect(admission.available);
     try std.testing.expect(admission.selection != null);
     try expectHostMcpCreateAndRestore(runtime, .{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = .{ .target = .{ .provider_id = "fixture-provider", .protocol = .anthropic_messages, .base_url = fixture.provider_endpoint, .model = "fixture-model" }, .credential = "fixture-credential" },
         .permission_mode = .full_access,
         .shell_policy = .unrestricted,
@@ -2434,6 +2451,8 @@ fn expectSelectedHttpToolResult(result_kind: []const u8, framing: []const u8) !v
         if (std.mem.eql(u8, skill.invocation_name, "restore-blocked")) break skill;
     } else return error.TestUnexpectedResult;
     const open_options: agent.SessionOpenOptions = .{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = .{
             .target = .{
                 .provider_id = "fixture-provider",
@@ -2745,6 +2764,8 @@ test "expired MCP authority is typed and the same model succeeds after refresh" 
     );
     defer std.testing.allocator.free(workspace_root);
     const open_options: agent.SessionOpenOptions = .{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = .{
             .target = .{
                 .provider_id = "fixture-provider",

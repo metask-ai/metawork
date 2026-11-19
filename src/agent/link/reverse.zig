@@ -318,6 +318,27 @@ pub fn Answerer(comptime call: Call, comptime Context: type) type {
     }
 }
 
+fn carriesSlice(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => |info| info.size == .slice,
+        .optional => |info| carriesSlice(info.child),
+        .array => |info| carriesSlice(info.child),
+        .@"struct" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (carriesSlice(field.type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .@"union" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (carriesSlice(field.type)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
 /// The answer when the caller cannot be reached at all. A reverse call must
 /// have one, or the execution half would have to wait for a peer that is gone.
 pub fn unreachableAnswer(comptime call: Call) Response(call) {
@@ -327,6 +348,126 @@ pub fn unreachableAnswer(comptime call: Call) Response(call) {
         // side: nothing was checked, so nothing is verified.
         .file_delivery_inspection => .{ .failed = .unavailable },
     };
+}
+
+// ---------------------------------------------------------------------------
+// Performing one
+// ---------------------------------------------------------------------------
+
+/// A reverse request opens with its call's registered number, for the same
+/// reason a forward request opens with its method's: the frame header is the
+/// transport and the call is the contract. The numbers are the enum's own
+/// order, which is fixed by the count assertion above -- a call cannot be
+/// inserted in the middle without that assertion changing too.
+pub const header_bytes: usize = 2;
+
+pub const DecodeError = error{
+    Truncated,
+    /// A call number this build does not register. The peer is our own
+    /// binary, so an unknown number means the link is talking to something
+    /// else.
+    UnknownCall,
+};
+
+pub fn numberOf(comptime call: Call) u16 {
+    return @intFromEnum(call);
+}
+
+pub fn encodeHeader(output: *[header_bytes]u8, comptime call: Call) void {
+    std.mem.writeInt(u16, output, numberOf(call), .little);
+}
+
+pub fn decodeHeader(bytes: []const u8) DecodeError!struct {
+    call: Call,
+    arguments: []const u8,
+} {
+    if (bytes.len < header_bytes) return error.Truncated;
+    const number = std.mem.readInt(u16, bytes[0..header_bytes], .little);
+    const call = std.enums.fromInt(Call, number) orelse return error.UnknownCall;
+    return .{ .call = call, .arguments = bytes[header_bytes..] };
+}
+
+/// The answer when the caller is there but cannot take another request right
+/// now. Distinct from `unreachableAnswer`, because "try later" and "there is
+/// nobody" are the two different exhaustions the pending table already tells
+/// apart, and a diagnostic that merged them would name the wrong cause.
+pub fn busyAnswer(comptime call: Call) Response(call) {
+    return switch (call) {
+        .mcp_installation => .busy,
+        // The inspection has no "later": a Run's tool call cannot be parked
+        // and resumed, so the capacity refusal it already has is the answer.
+        .file_delivery_inspection => .{ .failed = .capacity },
+    };
+}
+
+/// Performs one reverse call and waits for the answer.
+///
+/// Blocking here is safe because of the first rule: the answer is produced by
+/// a caller-side thread that never blocks on a forward call. The second rule
+/// is why the guard is in the request rather than a lock being held across
+/// this.
+///
+/// Every way this can fail has an answer in the call's own vocabulary, so the
+/// execution half never waits on a peer that is gone and never reports a
+/// refusal as an acceptance.
+pub fn perform(
+    comptime call: Call,
+    caller: *Caller,
+    allocator: std.mem.Allocator,
+    request: Request(call),
+) std.mem.Allocator.Error!Response(call) {
+    // One allocation, freed here. Not an arena: a Run can ask several times,
+    // and a bridge that held every request's bytes until the Run ended would
+    // be a leak paced by how much the model delivers.
+    const framed = try allocator.alloc(
+        u8,
+        header_bytes + payload.encodedSize(Request(call), request),
+    );
+    defer allocator.free(framed);
+    encodeHeader(framed[0..header_bytes], call);
+    _ = payload.encode(Request(call), request, framed[header_bytes..]);
+
+    const correlation = caller.pending.open() catch return busyAnswer(call);
+    // An allocation failure inside the submit is also "nothing was sent", and
+    // it used to be the one way out of here that kept the slot: the `.busy`
+    // and `.closed` arms below give it back, and `try` walked past them. A
+    // caller that hit it repeatedly would exhaust the table on requests it
+    // never made -- which is what those two arms exist to prevent.
+    switch (caller.outbound.trySubmit(.ui_request, correlation, framed) catch |err| {
+        caller.pending.discardUnsent(correlation);
+        return err;
+    }) {
+        .queued => {},
+        // Nothing was sent, so nothing is owed: the slot goes back now
+        // rather than being held for an answer that cannot come. Abandoning
+        // would keep it, which is right after a send and wrong here -- a
+        // caller refused repeatedly would exhaust the table on requests it
+        // never made.
+        .busy => {
+            caller.pending.discardUnsent(correlation);
+            return busyAnswer(call);
+        },
+        .closed => {
+            caller.pending.discardUnsent(correlation);
+            return unreachableAnswer(call);
+        },
+    }
+
+    switch (caller.pending.claim(correlation)) {
+        .response => |bytes| {
+            defer caller.pending.allocator.free(bytes);
+            const Wire = wire_types.Wire(Response(call));
+            // Both answers are plain data with no slices, so decoding
+            // allocates nothing; if one ever carries a slice this needs an
+            // arena rather than the allocator the temporaries used.
+            comptime std.debug.assert(!carriesSlice(Wire));
+            const decoded = payload.decodeExact(Wire, allocator, bytes) catch
+                return unreachableAnswer(call);
+            return decoded;
+        },
+        // Not an answer, and never reported as one.
+        .link_closed => return unreachableAnswer(call),
+    }
 }
 
 const testing = std.testing;
@@ -453,10 +594,14 @@ test "a call whose effect refuses the main thread cannot be answered without the
     try testing.expect(!captured.?.holds());
 }
 
-test "the one registered reverse call has an inspectable handler" {
+test "a reverse call's handler is a type the link can look inside" {
     // Compiles only because the context is a type the link can look inside
     // and it reaches no caller; a context that did would fail the build with
     // the reason, which is the point of putting the check in `Handler`.
+    //
+    // Only the installation is spelled out here: the inspection's signature
+    // carries the off-main-thread witness, so it is checked by the test that
+    // owns that rule rather than by a second copy of this one.
     const Context = struct { task_id: u64 };
     const Expected = *const fn (*Context, McpInstallationRequest) McpInstallationResponse;
     try testing.expectEqual(Expected, Handler(.mcp_installation, Context));
@@ -474,4 +619,173 @@ test "the platform's own erased capabilities do not poison a handler context" {
     // The exemption is narrow: an arbitrary erased pointer is still refused.
     const WithErased = struct { io: std.Io, smuggled: *anyopaque };
     try testing.expect(reachesForwardCaller(WithErased));
+}
+
+test "a reverse request names its call, and an unregistered number is refused" {
+    var bytes: [header_bytes + 2]u8 = undefined;
+    encodeHeader(bytes[0..header_bytes], .file_delivery_inspection);
+    @memcpy(bytes[header_bytes..], "hi");
+    const decoded = try decodeHeader(&bytes);
+    try testing.expectEqual(Call.file_delivery_inspection, decoded.call);
+    try testing.expectEqualStrings("hi", decoded.arguments);
+
+    var unknown: [header_bytes]u8 = undefined;
+    std.mem.writeInt(u16, &unknown, 0x4242, .little);
+    try testing.expectError(error.UnknownCall, decodeHeader(&unknown));
+    try testing.expectError(error.Truncated, decodeHeader(&.{1}));
+}
+
+const Harness = struct {
+    io: std.Io,
+    pending_table: pending.Table,
+    outbound: channel.Outbound,
+    tmp: std.testing.TmpDir,
+    file: std.Io.File,
+
+    fn init(slots: usize, limits: channel.Limits) !*Harness {
+        const io = testing.io;
+        const self = try testing.allocator.create(Harness);
+        self.* = .{
+            .io = io,
+            .pending_table = undefined,
+            .outbound = undefined,
+            .tmp = std.testing.tmpDir(.{}),
+            .file = undefined,
+        };
+        self.file = try self.tmp.dir.createFile(io, "link", .{ .truncate = true });
+        try self.pending_table.init(io, testing.allocator, slots);
+        try self.outbound.start(io, testing.allocator, self.file, limits);
+        return self;
+    }
+
+    fn deinit(self: *Harness) void {
+        self.outbound.stop();
+        self.pending_table.close();
+        self.pending_table.deinit();
+        self.file.close(self.io);
+        self.tmp.cleanup();
+        testing.allocator.destroy(self);
+    }
+
+    fn caller(self: *Harness) Caller {
+        return .{ .outbound = &self.outbound, .pending = &self.pending_table };
+    }
+};
+
+const sample: FileDeliveryInspectionRequest = .{
+    .task_id = 3,
+    .run_id = 9,
+    .generation = 1,
+    .path = "out/report.pdf",
+};
+
+test "a caller that cannot take the request is answered busy, and keeps no slot" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // One correlation, already spent, so the table refuses before anything is
+    // sent.
+    var harness = try Harness.init(1, .{});
+    defer harness.deinit();
+    const held = try harness.pending_table.open();
+    var link = harness.caller();
+
+    const answer = try perform(.file_delivery_inspection, &link, arena, sample);
+    try testing.expectEqual(contract.FileDeliveryFailure.capacity, answer.failed);
+    // The held slot is the only one, and the refused call took none.
+    try testing.expectEqual(@as(usize, 1), harness.pending_table.liveCount());
+    harness.pending_table.discardUnsent(held);
+    try testing.expectEqual(@as(usize, 0), harness.pending_table.liveCount());
+}
+
+test "a queue at its bound answers busy without holding a slot for an answer that cannot come" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A queue that admits nothing, so the submit is refused rather than the
+    // table.
+    var harness = try Harness.init(4, .{ .data_bytes = 1 });
+    defer harness.deinit();
+    var link = harness.caller();
+
+    const answer = try perform(.file_delivery_inspection, &link, arena, sample);
+    try testing.expectEqual(contract.FileDeliveryFailure.capacity, answer.failed);
+
+    // This is the one that would leak: the slot was opened before the submit
+    // was refused, and nothing will ever answer it. Abandoning would have
+    // kept it live until the link ended.
+    try testing.expectEqual(@as(usize, 0), harness.pending_table.liveCount());
+    try testing.expectEqual(@as(usize, 0), harness.pending_table.unsettledCount());
+
+    // Repeating it cannot exhaust the table, which is the point of counting.
+    var index: usize = 0;
+    while (index < 16) : (index += 1) {
+        _ = try perform(.file_delivery_inspection, &link, arena, sample);
+    }
+    try testing.expectEqual(@as(usize, 0), harness.pending_table.liveCount());
+}
+
+test "a closed link is unreachable, not busy" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var harness = try Harness.init(4, .{});
+    defer harness.deinit();
+    // Stopped, so nothing further is written and `trySubmit` says so.
+    harness.outbound.stop();
+    var link = harness.caller();
+
+    // The two exhaustions stay apart all the way out to the answer: "try
+    // later" and "there is nobody" are different facts, and the delivery
+    // vocabulary has a value for each.
+    const answer = try perform(.file_delivery_inspection, &link, arena, sample);
+    try testing.expectEqual(contract.FileDeliveryFailure.unavailable, answer.failed);
+    try testing.expectEqual(@as(usize, 0), harness.pending_table.liveCount());
+
+    const install = try perform(.mcp_installation, &link, arena, .{
+        .task_id = 1,
+        .run_id = 2,
+        .generation = 3,
+        .request_json = "{}",
+    });
+    try testing.expectEqual(contract.McpInstallationResult.unavailable, install);
+}
+
+test "a submit that cannot allocate gives the slot back here too" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var harness = try Harness.init(4, .{});
+    defer harness.deinit();
+    var link = harness.caller();
+
+    // Only the queue's own allocator fails: it is the one the submit
+    // duplicates the frame with, and swapping it keeps this from depending on
+    // how many allocations starting a channel happens to make.
+    harness.outbound.allocator = std.testing.failing_allocator;
+    try testing.expectError(
+        error.OutOfMemory,
+        perform(.file_delivery_inspection, &link, arena, sample),
+    );
+    harness.outbound.allocator = testing.allocator;
+
+    // The two arms beside it already answered this: nothing was sent, so
+    // nothing is owed. `try` was the one way out that kept the slot.
+    try testing.expectEqual(@as(usize, 0), harness.pending_table.liveCount());
+    try testing.expectEqual(@as(usize, 0), harness.pending_table.unsettledCount());
+
+    var index: usize = 0;
+    while (index < 16) : (index += 1) {
+        harness.outbound.allocator = std.testing.failing_allocator;
+        try testing.expectError(
+            error.OutOfMemory,
+            perform(.file_delivery_inspection, &link, arena, sample),
+        );
+        harness.outbound.allocator = testing.allocator;
+    }
+    try testing.expectEqual(@as(usize, 0), harness.pending_table.liveCount());
 }

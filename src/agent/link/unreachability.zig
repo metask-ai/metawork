@@ -31,9 +31,13 @@
 //! demanded an answer at all. Two consequences worth stating rather than
 //! discovering later:
 //!
-//! - An error union counts as expressible even though its error set may not
-//!   yet have a member that names a gone link. Which error names it belongs
-//!   to `error_code.zig`, not here.
+//! - An error union counts as expressible because the call site is forced to
+//!   handle a failure. *Which* error names a gone link was left to
+//!   `error_code.zig`, and it now has an answer: `DependencyUnreachable`,
+//!   added because no other member means it. Reusing one would assert
+//!   something false -- `SessionClosing` that the Session is winding down,
+//!   `CoreCallFailed` that Core was reached -- and a caller acting on either
+//!   would act on a fact nobody established.
 //! - A comparison is not a switch. `if (result == .stale_run)` keeps
 //!   compiling when a variant is added, so a new answer can land nowhere.
 //!   Two sites in the surface this change touches compare that way, both of
@@ -395,7 +399,128 @@ pub fn counts() Counts {
     return tally;
 }
 
+// ---------------------------------------------------------------------------
+// The second fact: reached, but not now
+// ---------------------------------------------------------------------------
+//
+// "The link is gone" and "the link is busy" are two facts, and the whole
+// point of separating them is that they call for opposite behaviour: gone
+// means stop asking, busy means ask again. A caller told the wrong one acts
+// correctly on something nobody established -- and this one has a worked
+// example. `runtime.zig` maps a compact cancellation's
+// `DependencyUnreachable` onto `.session_closing`, so Product stops
+// following that compact. If a cancellation refused for queue capacity were
+// reported as unreachable, Product would stop following a compact that is
+// still running. That is a wrong answer shaped exactly like a right one,
+// which is the failure class this whole boundary exists to remove.
+//
+// So the rule is the sibling of the one above: **a method that can be refused
+// for capacity must have a return type that can say so.** The vocabulary is
+// the same shape -- an error-set member for an error union, a declared
+// variant for an enum or union -- and nothing in the surface has either yet.
+// That is why `pressureCounts().owed` is currently every callable method: the
+// table is what the rule produces, not what it assumes, and the number falls
+// on its own as the contract gains the vocabulary rather than by anyone
+// editing a list.
+//
+// One asymmetry is worth stating rather than discovering. An optional counts
+// as expressible for *gone*, because a call site is forced to say what
+// absence means. It does not count here: absence already means gone for those
+// methods, and one absence cannot carry two facts that call for opposite
+// behaviour. A method whose answer is `?T` therefore needs a different return
+// type to say "not now", not a second reading of `null`.
+
+/// The declaration an enum or union uses to name its own backpressure answer.
+pub const pressure_decl = "link_busy";
+
+/// The error-set member an error union uses for the same.
+pub const pressure_error = "LinkBusy";
+
+fn errorSetHas(comptime Set: type, comptime wanted: []const u8) bool {
+    @setEvalBranchQuota(100_000);
+    const members = @typeInfo(Set).error_set orelse return false; // `anyerror`
+    for (members) |member| {
+        if (std.mem.eql(u8, member.name, wanted)) return true;
+    }
+    return false;
+}
+
+/// Whether a return type can say "the far side was reached and has no room
+/// right now", as distinct from saying the far side is gone.
+pub fn saysPressure(comptime T: type) bool {
+    // Each guard is forced comptime for the same reason `declaresAnswer`
+    // does it: `@hasDecl` is only legal on a container, so the branch has to
+    // be resolved before this one is analysed at all. A `comptime { ... }`
+    // body would not do -- a `return` inside one breaks at runtime call
+    // sites.
+    if (comptime @typeInfo(T) == .error_union)
+        return errorSetHas(@typeInfo(T).error_union.error_set, pressure_error);
+    if (comptime !canHaveDecls(T)) return false;
+    if (comptime !@hasDecl(T, pressure_decl)) return false;
+    const Declared = @TypeOf(@field(T, pressure_decl));
+    if (Declared == T) return true;
+    return switch (@typeInfo(T)) {
+        .@"union" => |info| if (info.tag_type) |Tag| Declared == Tag else false,
+        else => false,
+    };
+}
+
+pub const PressureCounts = struct {
+    total: usize,
+    /// Not a call, so capacity on the send path cannot refuse it.
+    not_a_call: usize,
+    answerable: usize,
+    owed: usize,
+};
+
+pub fn pressureCounts() PressureCounts {
+    @setEvalBranchQuota(1_000_000);
+    var tally: PressureCounts = .{ .total = 0, .not_a_call = 0, .answerable = 0, .owed = 0 };
+    inline for (method.entries) |entry| {
+        tally.total += 1;
+        if (entry.transport == .stream) {
+            tally.not_a_call += 1;
+            continue;
+        }
+        const Return = switch (entry.owner) {
+            inline else => |tag| ReturnType(tag, entry.name),
+        };
+        if (comptime saysPressure(Return)) tally.answerable += 1 else tally.owed += 1;
+    }
+    return tally;
+}
+
 const testing = std.testing;
+
+test "no method can yet say it was refused for capacity" {
+    const tally = comptime pressureCounts();
+    try testing.expectEqual(method.entries.len, tally.total);
+    try testing.expectEqual(
+        tally.total,
+        tally.not_a_call + tally.answerable + tally.owed,
+    );
+    try testing.expectEqual(@as(usize, 4), tally.not_a_call);
+    // The number that has to fall. It is zero answerable today, which is a
+    // statement about the Agent contract and not about this file: no return
+    // type in the surface carries `LinkBusy` or declares `link_busy`, so
+    // `stubs.zig` has nothing to say when the outbound queue refuses a call
+    // and refuses loudly instead of choosing a fact.
+    try testing.expectEqual(@as(usize, 0), tally.answerable);
+    try testing.expectEqual(@as(usize, 50), tally.owed);
+}
+
+test "an optional does not double as the backpressure answer" {
+    // It qualifies for gone, because a call site must say what absence
+    // means. Absence cannot then also mean "not now": the two call for
+    // opposite behaviour.
+    try testing.expect(expressibility(?u64) != null);
+    try testing.expect(!saysPressure(?u64));
+
+    // And the vocabulary is read from the type, not pattern-matched on a
+    // spelling: a set with the member qualifies, one without it does not.
+    try testing.expect(saysPressure(error{ Whatever, LinkBusy }!void));
+    try testing.expect(!saysPressure(error{Whatever}!void));
+}
 
 test "the surface divides into expressible, exempt and pending, with nothing left over" {
     const tally = comptime counts();

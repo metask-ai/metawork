@@ -30,6 +30,8 @@ const wire_types = @import("wire_types.zig");
 const port = contract.port;
 const surface = contract.surface;
 const control = contract.control;
+const call_frame = @import("call_frame.zig");
+const run_tools = @import("run_tools.zig");
 const shapes = @import("shapes.zig");
 const catalog = @import("agent_catalog");
 const mcp_catalog = @import("agent_mcp_catalog");
@@ -72,8 +74,10 @@ const checkpoint = @import("agent_checkpoint");
 pub const BegunRun = struct {
     /// The Session the port named, as this half named it.
     context: ?*anyopaque,
-    /// The one method `RunPort.VTable` has.
-    execute: *const fn (?*anyopaque, u64, u64) control.TerminalResult,
+    /// The Run's vtable, kept as a vtable rather than as its one function
+    /// pointer so that every owner is reached by the same `@field(vtable,
+    /// name)` and the dispatcher needs no case for this one.
+    run_vtable: *const port.RunPort.VTable,
     run_id: u64,
     generation: u64,
     /// The control handle every retain and release goes through.
@@ -90,7 +94,7 @@ pub const BegunRun = struct {
     pub fn fromPort(value: port.RunPort) BegunRun {
         return .{
             .context = value.context,
-            .execute = value.vtable.execute,
+            .run_vtable = value.vtable,
             .run_id = value.run_id,
             .generation = value.generation,
             .control_handle = value.base_lease.control,
@@ -139,8 +143,16 @@ pub const Bindings = struct {
     /// encoded before the call returns, so nothing allocated here outlives
     /// the dispatch.
     allocator: std.mem.Allocator,
-    /// Sessions this half holds for the other half to name.
-    sessions: *handle_table.Table(port.SessionPort),
+    /// The one Runtime. A `runtime` method names no receiver because there is
+    /// nothing to choose between, so this is where its calls land.
+    runtime: port.RuntimePort,
+    /// Where checkpoint blob bytes go and come from. The link holds no store;
+    /// `call_frame.BlobStore` says why this half carries the bytes at all.
+    store: call_frame.BlobStore,
+    /// Sessions this half holds for the other half to name, each with the
+    /// tool capabilities of its current prepared Run. Those are not
+    /// call-scoped, and `run_tools.zig` says why they live here.
+    sessions: *handle_table.Table(run_tools.HeldSession),
     /// Runs, which also answer their control handle: in process both are the
     /// Session's control block, so `envelope.Receiver.run` names one entry.
     runs: *handle_table.Table(BegunRun),
@@ -201,7 +213,7 @@ pub fn parameterAdapter(comptime T: type) ?Adapter(T) {
     if (T == port.SessionPort) return .{ .apply = struct {
         fn apply(bindings: Bindings, id: handle_table.Id) ResolveError!T {
             const held = bindings.sessions.resolve(id) orelse return error.UnknownHandle;
-            return held.*;
+            return held.port;
         }
     }.apply };
 
@@ -362,15 +374,39 @@ pub const Owed = struct {
 
 /// Why a parameter is still owed, which is never "nobody got to it yet".
 pub const Disposition = enum {
-    /// The execution half performs the effect. The dispatcher builds the
-    /// capability from the descriptor when it invokes the method, and nothing
-    /// may keep its backing object past the call -- a per-call allocation the
-    /// far side still points at is a cross-process use-after-free, the worst
-    /// failure available here. That has to be checked where the dispatcher
-    /// is, not promised here.
-    execution_side_effect,
+    /// The execution half performs the effect *during the call*, so its
+    /// backing lives exactly as long as the call and nothing may keep it
+    /// afterwards: a per-call allocation the far side still points at is a
+    /// cross-process use-after-free, the worst failure available here.
+    /// `dispatch.Frame` is for these, and the no-retention rule is checked
+    /// there rather than promised here.
+    ///
+    /// The two checkpoint effects are the ones: Core writes the blob through
+    /// the sink, and reads it through the source, before the call returns.
+    call_scoped_effect,
+    /// The execution half performs the effect, but the Session keeps the
+    /// capability for its current prepared Run rather than using it during
+    /// the call that handed it over.
+    ///
+    /// An earlier version of this file said no backing may outlive its call,
+    /// full stop. That is false for these four and it was the dangerous kind
+    /// of false: retiring their frame when `prepare_run_with_tools` returned
+    /// would leave the Session holding a capability that answers only its
+    /// failure value, so the tool would be permanently unavailable without
+    /// anything crashing or going red.
+    ///
+    /// `session.zig` stores them (`run_delivery`, `run_mcp_installation`,
+    /// `run_image`, `run_video`), uses them while the Run executes, and
+    /// clears them in `clearRunToolsLocked`. There is at most one set per
+    /// Session, asserted there before each store, so the backing is one set
+    /// on the Session's own entry -- not a table keyed by prepared Run, which
+    /// would make "many at once" representable when it is not.
+    run_scoped_capability,
     /// The caller performs the effect, so it is a reverse call and lives in
-    /// `reverse.zig` under its rules.
+    /// `reverse.zig` under its rules. Being the caller's says nothing about
+    /// how long the execution half must hold the means of asking: the
+    /// delivery inspection is asked during the Run, so its bridge is
+    /// Run-scoped as well.
     reverse_call,
     /// Deferred to the MCP step with the rest of the MCP handle surface.
     mcp_step,
@@ -380,21 +416,30 @@ pub const Disposition = enum {
 /// the chain cannot rebuild must appear here, and a type that gains an adapter
 /// must leave. A list that outlives its reason teaches the wrong rule.
 const dispositions = [_]struct { name: []const u8, disposition: Disposition }{
-    .{ .name = @typeName(checkpoint.Sink), .disposition = .execution_side_effect },
+    .{ .name = @typeName(checkpoint.Sink), .disposition = .call_scoped_effect },
     .{
         .name = @typeName(surface.SessionRestoreOptions),
-        .disposition = .execution_side_effect,
+        .disposition = .call_scoped_effect,
     },
     .{
         .name = @typeName(?surface.ImageGenerationRunInput),
-        .disposition = .execution_side_effect,
+        .disposition = .run_scoped_capability,
     },
     .{ .name = @typeName(?contract.FileDeliveryInput), .disposition = .reverse_call },
     .{ .name = @typeName(?contract.McpInstallationInput), .disposition = .reverse_call },
-    .{ .name = @typeName(?contract.VideoGenerationRunInput), .disposition = .execution_side_effect },
+    .{
+        .name = @typeName(?contract.VideoGenerationRunInput),
+        .disposition = .run_scoped_capability,
+    },
     .{ .name = @typeName(*const mcp_catalog.Activation), .disposition = .mcp_step },
     .{ .name = @typeName(*const mcp_catalog.RestoreSelection), .disposition = .mcp_step },
 };
+
+/// The disposition recorded for a type, by type rather than by its printed
+/// name, so a caller does not have to spell it.
+pub fn dispositionOfType(comptime T: type) ?Disposition {
+    return dispositionOf(@typeName(T));
+}
 
 fn dispositionOf(comptime name: []const u8) ?Disposition {
     comptime {
@@ -520,7 +565,7 @@ test "an allocator is supplied locally rather than carried" {
 }
 
 test "a stale handle resolves to a refusal, never to the slot's next occupant" {
-    var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
     defer sessions.deinit();
     var runs = try handle_table.Table(BegunRun).init(testing.allocator, 1);
     defer runs.deinit();
@@ -533,10 +578,12 @@ test "a stale handle resolves to a refusal, never to the slot's next occupant" {
     var selections = try handle_table.Table(mcp_catalog.Selection).init(testing.allocator, 1);
     defer selections.deinit();
 
-    var first: port.SessionPort = .{ .context = null, .vtable = undefined };
-    var second: port.SessionPort = .{ .context = null, .vtable = undefined };
+    var first = run_tools.HeldSession.init(.{ .context = null, .vtable = undefined });
+    var second = run_tools.HeldSession.init(.{ .context = null, .vtable = undefined });
     const bindings: Bindings = .{
         .allocator = testing.allocator,
+        .runtime = port.RuntimePort.quiet,
+        .store = call_frame.BlobStore.empty,
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -610,17 +657,22 @@ test "the worklist is what the step still owes, counted by the compiler" {
     // is not where to put a capability but that nothing keeps its backing
     // object past the call.
     var reverse: usize = 0;
-    var ours: usize = 0;
+    var call_scoped: usize = 0;
+    var run_scoped: usize = 0;
     var mcp: usize = 0;
     for (owed) |entry| switch (entry.disposition) {
         .reverse_call => reverse += 1,
-        .execution_side_effect => ours += 1,
+        .call_scoped_effect => call_scoped += 1,
+        .run_scoped_capability => run_scoped += 1,
         .mcp_step => mcp += 1,
     };
-    // The delivery inspection and the MCP installation are the caller's; the
-    // checkpoint pair and the image and video bindings are this half's.
+    // The delivery inspection and the MCP installation are the caller's. Of
+    // this half's own, the two checkpoint effects are used during their call
+    // and the image and video bindings are kept for the Run -- which is the
+    // distinction a single "execution side effect" was hiding.
     try testing.expectEqual(@as(usize, 2), reverse);
-    try testing.expectEqual(@as(usize, 4), ours);
+    try testing.expectEqual(@as(usize, 2), call_scoped);
+    try testing.expectEqual(@as(usize, 2), run_scoped);
     try testing.expectEqual(@as(usize, 3), mcp);
 }
 
@@ -645,6 +697,8 @@ test "a type absent from the chain is owed, not assumed trivial" {
 fn testBindings() Bindings {
     return .{
         .allocator = testing.allocator,
+        .runtime = port.RuntimePort.quiet,
+        .store = call_frame.BlobStore.empty,
         .sessions = undefined,
         .runs = undefined,
         .leases = undefined,
@@ -655,7 +709,7 @@ fn testBindings() Bindings {
 }
 
 test "an options mirror is read back with its handle resolved and its absence kept" {
-    var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
     defer sessions.deinit();
     var runs = try handle_table.Table(BegunRun).init(testing.allocator, 1);
     defer runs.deinit();
@@ -669,6 +723,8 @@ test "an options mirror is read back with its handle resolved and its absence ke
     defer selections.deinit();
     const bindings: Bindings = .{
         .allocator = testing.allocator,
+        .runtime = port.RuntimePort.quiet,
+        .store = call_frame.BlobStore.empty,
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -682,6 +738,8 @@ test "an options mirror is read back with its handle resolved and its absence ke
     const lease_id = try leases.insert(lease);
 
     const mirror: shapes.SessionOpenOptions = .{
+        .task_id = 11,
+        .binding_epoch = 3,
         .model_binding = .{
             .image_capabilities = &.{},
             .target = .{
@@ -775,15 +833,135 @@ pub fn resultAdapter(comptime T: type) ?ResultAdapter(T) {
         }
     }.apply };
 
-    // Mirrors the execution half can state without owning anything new: each
-    // is a plain-data reading of a value it already has.
+    // Mirrors that reshape rather than copy: each has its own `from`, and
+    // what it does -- numbering an error, dropping a diagnostic the caller
+    // must not read -- is not a field-by-field copy.
     if (T == surface.CloseOutcome) return .{ .apply = struct {
         fn apply(_: Bindings, value: T) ResultError!shapes.CloseOutcome {
             return shapes.CloseOutcome.from(value);
         }
     }.apply };
+    if (T == surface.BeginRunFailure) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResultError!shapes.BeginRunFailure {
+            return shapes.BeginRunFailure.from(value);
+        }
+    }.apply };
+    if (T == control.TerminalResult) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResultError!shapes.TerminalResult {
+            return shapes.TerminalResult.from(&value);
+        }
+    }.apply };
+    if (T == control.CompactTerminalResult) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResultError!shapes.CompactTerminalResult {
+            return shapes.CompactTerminalResult.from(&value);
+        }
+    }.apply };
+    if (T == surface.PendingUiRequest) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResultError!shapes.PendingUiRequest {
+            return shapes.PendingUiRequest.from(&value);
+        }
+    }.apply };
+    if (T == catalog.Projection) return .{ .apply = struct {
+        fn apply(_: Bindings, value: T) ResultError!shapes.CatalogProjection {
+            return shapes.CatalogProjection.from(value);
+        }
+    }.apply };
+
+    // Mirrors whose fields all correspond, copied by the generic reader
+    // rather than by hand.
+    if (T == checkpoint.Description) return resultMirror(T, shapes.CheckpointDescription);
+    // `catalog.Acquisition` is not here: its lease has to be *put into* a
+    // table, and `named_handles` classifies its method as irreversible, so it
+    // waits for the path that carries a reservation into the result encoding.
+
+    // A union, so the two sides are stated rather than looped over: the
+    // success carries a description that is itself a mirror, and the failure
+    // is already plain data.
+    if (T == checkpoint.Outcome) return .{
+        .apply = struct {
+            fn apply(bindings: Bindings, value: T) ResultError!shapes.CheckpointOutcome {
+                return switch (value) {
+                    .success => |success| .{
+                        .success = .{
+                            .checkpoint = success.checkpoint,
+                            // As the Session answered it. `dispatch.exportCheckpoint`
+                            // is what replaces `caller_sink` with its own area,
+                            // because it is the half that opened the blob -- this
+                            // encoder only carries what it was given.
+                            .placement = success.placement,
+                            .description = try (comptime resultAdapter(checkpoint.Description).?)
+                                .apply(bindings, success.description),
+                        },
+                    },
+                    .failure => |failure| .{ .failure = failure },
+                };
+            }
+        }.apply,
+    };
 
     return null;
+}
+
+/// A port value copied into the mirror that carries it, field by field.
+///
+/// The inverse of `mirrorAdapter`, and generic for the same reason: a
+/// hand-written copy is a second place for a shape to drift, and
+/// `shapes.mirrors` only checks that a mirror field still names something.
+/// Only for mirrors whose fields all correspond -- the ones `shapes.zig`
+/// records with an empty reshaped list. A mirror that renames or recomputes
+/// a field has its own `from`, because what it does is not a copy.
+/// Whether a mirror field borrows what the original owns: the same bytes,
+/// read-only. Ownership does not cross -- the original frees them after the
+/// response is encoded -- so the mirror naming them `const` is the honest
+/// shape rather than a different encoding.
+fn borrowsFrom(comptime Mirrored: type, comptime Origin: type) bool {
+    const mirrored = @typeInfo(Mirrored);
+    const origin = @typeInfo(Origin);
+    // An optional of each is the same question one level down.
+    if (mirrored == .optional and origin == .optional)
+        return borrowsFrom(mirrored.optional.child, origin.optional.child);
+    if (mirrored != .pointer or origin != .pointer) return false;
+    if (mirrored.pointer.size != .slice or origin.pointer.size != .slice) return false;
+    return mirrored.pointer.child == origin.pointer.child and
+        mirrored.pointer.is_const and !origin.pointer.is_const;
+}
+
+fn resultMirror(comptime T: type, comptime Mirror: type) ResultAdapter(T) {
+    if (wire_types.Wire(T) != Mirror) @compileError(
+        "the mirror for " ++ @typeName(T) ++ " is not its wire form",
+    );
+    return .{
+        .apply = struct {
+            fn apply(bindings: Bindings, value: T) ResultError!Mirror {
+                var out: Mirror = undefined;
+                inline for (@typeInfo(Mirror).@"struct".fields) |field| {
+                    if (!@hasField(T, field.name)) @compileError(
+                        @typeName(Mirror) ++ "." ++ field.name ++ " does not name a field of " ++
+                            @typeName(T) ++ ", so this is a reshaping rather than a copy and " ++
+                            "belongs in that mirror's own `from`",
+                    );
+                    const Origin = @FieldType(T, field.name);
+                    if (Origin == field.type or comptime borrowsFrom(field.type, Origin)) {
+                        @field(out, field.name) = @field(value, field.name);
+                        continue;
+                    }
+                    const nested = comptime resultAdapter(Origin) orelse @compileError(
+                        @typeName(T) ++ "." ++ field.name ++ " is carried as " ++
+                            @typeName(field.type) ++ " and nothing turns " ++
+                            @typeName(Origin) ++ " into it",
+                    );
+                    if (field.type != wire_types.Wire(Origin)) @compileError(
+                        @typeName(Mirror) ++ "." ++ field.name ++ " is " ++
+                            @typeName(field.type) ++ " but " ++ @typeName(Origin) ++
+                            " crosses as " ++ @typeName(wire_types.Wire(Origin)) ++
+                            "; one field cannot have two encodings",
+                    );
+                    @field(out, field.name) = try nested.apply(bindings, @field(value, field.name));
+                }
+                return out;
+            }
+        }.apply,
+    };
 }
 
 /// One return type still owed, with the same discipline as the argument side:
@@ -830,7 +1008,7 @@ test "the return direction is counted on its own, because it is not the mirror i
     // Most returns are plain data and need nothing, which is the same reason
     // most arguments needed nothing.
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 15), owed.len);
+    try testing.expectEqual(@as(usize, 11), owed.len);
 
     for (owed) |entry| {
         try testing.expect(entry.name.len > 0);
@@ -891,7 +1069,17 @@ pub const Reclaim = struct {
     bound_to: enum {
         /// Ends when the Session closes, or when the link does.
         session,
-        /// Ends when the Run reaches its terminal, or when the link does.
+        /// Ends when this Run's life ends by any means, or when the link
+        /// does.
+        ///
+        /// Deliberately not "reaches its terminal", which is what this said
+        /// before and is narrower than the truth. A Run prepared and never
+        /// executed ends too: `session.zig` clears a prepared Run's tools
+        /// from five places -- a begin that refused, a cancel, the Session
+        /// closing, an identity contract failure, and the terminal itself.
+        /// Binding to the terminal would leave the other four holding
+        /// capacity for something that never happened, which is the shape
+        /// this change has already hit twice.
         run,
         /// Held by the caller between two of its own calls. Nothing but its
         /// release or the link bounds it, which is why these are the entries
@@ -1006,7 +1194,7 @@ test "every handle table says what reclaims its entries, and only in two ways" {
 }
 
 test "a capacity refusal can name the table it came from" {
-    var sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 1);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
     defer sessions.deinit();
     var runs = try handle_table.Table(BegunRun).init(testing.allocator, 2);
     defer runs.deinit();
@@ -1020,6 +1208,8 @@ test "a capacity refusal can name the table it came from" {
     defer selections.deinit();
     const bindings: Bindings = .{
         .allocator = testing.allocator,
+        .runtime = port.RuntimePort.quiet,
+        .store = call_frame.BlobStore.empty,
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -1028,7 +1218,7 @@ test "a capacity refusal can name the table it came from" {
         .selections = &selections,
     };
 
-    var held: port.SessionPort = .{ .context = null, .vtable = undefined };
+    var held = run_tools.HeldSession.init(.{ .context = null, .vtable = undefined });
     const id = try sessions.insert(&held);
 
     const counts = liveCounts(bindings);
@@ -1043,7 +1233,7 @@ test "a capacity refusal can name the table it came from" {
     }
 
     // Full, and the refusal is a typed failure rather than a growth.
-    var second: port.SessionPort = .{ .context = null, .vtable = undefined };
+    var second = run_tools.HeldSession.init(.{ .context = null, .vtable = undefined });
     try testing.expectError(error.HandleCapacity, sessions.insert(&second));
     _ = sessions.take(id);
 }
@@ -1115,7 +1305,7 @@ const ReleaseLog = struct {
 
     fn release(self: *ReleaseLog, comptime T: type, value: *T) void {
         _ = value;
-        if (T == port.SessionPort) self.sessions += 1;
+        if (T == run_tools.HeldSession) self.sessions += 1;
         if (T == BegunRun) self.runs += 1;
         if (T == catalog.Lease) self.leases += 1;
         if (T == port.SkillRestoreInputs) self.skill_restore += 1;
@@ -1130,7 +1320,7 @@ const ReleaseLog = struct {
 };
 
 const Tables = struct {
-    sessions: handle_table.Table(port.SessionPort),
+    sessions: handle_table.Table(run_tools.HeldSession),
     runs: handle_table.Table(BegunRun),
     leases: handle_table.Table(catalog.Lease),
     skill_restore: handle_table.Table(port.SkillRestoreInputs),
@@ -1139,7 +1329,7 @@ const Tables = struct {
 
     fn init() !Tables {
         return .{
-            .sessions = try handle_table.Table(port.SessionPort).init(testing.allocator, 4),
+            .sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 4),
             .runs = try handle_table.Table(BegunRun).init(testing.allocator, 4),
             .leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 4),
             .skill_restore = try handle_table.Table(port.SkillRestoreInputs)
@@ -1162,6 +1352,8 @@ const Tables = struct {
     fn bindings(self: *Tables) Bindings {
         return .{
             .allocator = testing.allocator,
+            .runtime = port.RuntimePort.quiet,
+            .store = call_frame.BlobStore.empty,
             .sessions = &self.sessions,
             .runs = &self.runs,
             .leases = &self.leases,
@@ -1188,7 +1380,7 @@ const Tables = struct {
 };
 
 const Storage = struct {
-    session: port.SessionPort = .{ .context = null, .vtable = undefined },
+    session: run_tools.HeldSession = run_tools.HeldSession.init(.{ .context = null, .vtable = undefined }),
     run: BegunRun = undefined,
     lease: [8]u8 align(8) = @splat(0),
     skill: [8]u8 align(8) = @splat(0),
@@ -1384,4 +1576,241 @@ test "a request naming another Run is not executed as this one" {
     try testing.expect(run.names(11, 4));
     try testing.expect(!run.names(11, 5));
     try testing.expect(!run.names(12, 4));
+}
+
+/// Whether a wire type names a handle anywhere inside it, which is how a
+/// result ends up putting something in a table.
+pub fn namesHandle(comptime T: type) bool {
+    if (T == handle_table.Id) return true;
+    return switch (@typeInfo(T)) {
+        .optional => |info| namesHandle(info.child),
+        .array => |info| namesHandle(info.child),
+        .pointer => |info| info.size == .slice and namesHandle(info.child),
+        .@"struct" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (namesHandle(field.type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .@"union" => |info| blk: {
+            inline for (info.fields) |field| {
+                if (namesHandle(field.type)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+/// How the thing a result names came to exist, which decides whether its slot
+/// has to be promised before the call or can be filled after it.
+///
+/// Derived from the question nobody can answer from a signature: if naming
+/// the result fails, can what the call created be undone? For a begun Run the
+/// answer is no at all -- its own contract says it must execute and
+/// deinitialize exactly once -- and for the rest the undo is a call that can
+/// itself fail. Only where nothing new was created is "insert afterwards"
+/// safe.
+pub const Creation = enum {
+    /// Success cannot be taken back, or can only be taken back by a call that
+    /// may fail. The slot is promised before this runs, so a refusal happens
+    /// while there is still nothing to deliver.
+    irreversible,
+    /// The result names something that already exists, so there is nothing to
+    /// insert and nothing to promise.
+    names_existing,
+    /// Deferred to the MCP step with the rest of that surface.
+    mcp_step,
+};
+
+pub const Named = struct {
+    name: []const u8,
+    creation: Creation,
+    reason: []const u8,
+};
+
+/// Every method whose wire result names a handle, with how that handle came
+/// to exist. Closed against the derivation below, so a method that starts
+/// naming one cannot slip in unclassified -- and a classification cannot
+/// outlive the result it describes.
+pub const named_handles = [_]Named{
+    .{
+        .name = "create_session_route",
+        .creation = .irreversible,
+        .reason = "undoing it means closing the Session and then releasing it, and the close " ++
+            "can fail, so a naming failure afterwards could leave a Session open with no " ++
+            "name to reach it by",
+    },
+    .{
+        .name = "restore_session_route",
+        .creation = .irreversible,
+        .reason = "as create_session_route, and it has read a checkpoint besides",
+    },
+    .{
+        .name = "activate_mcp",
+        .creation = .mcp_step,
+        .reason = "deferred with the rest of the MCP handle surface, which brings its own " ++
+            "tables and its own release methods, so classifying this one alone would " ++
+            "decide half of a question",
+    },
+    .{
+        .name = "create_mcp_admission_selection",
+        .creation = .mcp_step,
+        .reason = "deferred with the rest of the MCP handle surface, which brings its own " ++
+            "tables and its own release methods, so classifying this one alone would " ++
+            "decide half of a question",
+    },
+    .{
+        .name = "prepare_mcp_restore_selection",
+        .creation = .mcp_step,
+        .reason = "deferred with the rest of the MCP handle surface, which brings its own " ++
+            "tables and its own release methods, so classifying this one alone would " ++
+            "decide half of a question",
+    },
+    .{
+        .name = "query_skill_catalog",
+        .creation = .irreversible,
+        .reason = "the acquisition holds a catalog lease, and release_skill_catalog returns " ++
+            "an error union, so the undo is a call that can fail",
+    },
+    .{
+        .name = "narrow_skill_restore_inputs",
+        .creation = .irreversible,
+        .reason = "allocates new inputs whose release returns an error union",
+    },
+    .{
+        .name = "clone_skill_restore_inputs",
+        .creation = .irreversible,
+        .reason = "allocates new inputs whose release returns an error union",
+    },
+    .{
+        .name = "borrow_skill_restore_inputs",
+        .creation = .names_existing,
+        .reason = "reads a lease the caller already holds rather than creating one, so there " ++
+            "is nothing to promise. It needs the id that lease was already issued, which " ++
+            "the table cannot answer yet: it maps an id to an object and not the other way " ++
+            "round. Inserting again would give one lease two names and two releases",
+    },
+    .{
+        .name = "capture_restore_inputs",
+        .creation = .irreversible,
+        .reason = "captures new inputs whose release returns an error union",
+    },
+    .{
+        .name = "begin_run_outcome",
+        .creation = .irreversible,
+        .reason = "the strongest case and the one that found this rule: a begun Run is a " ++
+            "linear value that must execute and deinitialize exactly once, and RunPort.deinit " ++
+            "asserts it executed. A Run begun and then not namable is neither deliverable " ++
+            "nor droppable",
+    },
+};
+
+fn namedHandle(comptime name: []const u8) ?Named {
+    comptime {
+        for (named_handles) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) return entry;
+        }
+        return null;
+    }
+}
+
+fn WireResult(comptime owner: method.Owner, comptime name: []const u8) type {
+    comptime {
+        const Fn = @typeInfo(@FieldType(owner.VTable(), name)).pointer.child;
+        const Returned = wire_types.Payload(@typeInfo(Fn).@"fn".return_type.?);
+        return wire_types.Wire(Returned);
+    }
+}
+
+comptime {
+    @setEvalBranchQuota(1_000_000);
+    // Every result that names a handle says how that handle came to exist,
+    // and nothing else claims to.
+    for (method.entries) |entry| {
+        if (entry.transport == .stream) continue;
+        const Wired = switch (entry.owner) {
+            inline else => |owner| WireResult(owner, entry.name),
+        };
+        const names = Wired != void and namesHandle(Wired);
+        const listed = namedHandle(entry.name) != null;
+        if (names and !listed) @compileError(
+            "the result of " ++ entry.name ++ " names a handle and nothing says how that " ++
+                "handle came to exist. Add it to `named_handles` in " ++
+                "src/agent/link/adapters.zig: if the call cannot be undone, its slot has to " ++
+                "be promised before the call rather than filled after it",
+        );
+        if (!names and listed) @compileError(
+            "`named_handles` classifies " ++ entry.name ++ ", whose result no longer names a " ++
+                "handle; remove it so the table cannot outlive its reason",
+        );
+    }
+}
+
+test "every result that names a handle says how the handle came to exist" {
+    // The comptime block fails the build otherwise; this records the division,
+    // because which of these must promise a slot first is the whole content of
+    // the rule.
+    var irreversible: usize = 0;
+    var existing: usize = 0;
+    var mcp: usize = 0;
+    for (named_handles) |entry| {
+        try testing.expect(entry.reason.len > 40);
+        switch (entry.creation) {
+            .irreversible => irreversible += 1,
+            .names_existing => existing += 1,
+            .mcp_step => mcp += 1,
+        }
+    }
+    try testing.expectEqual(@as(usize, 11), named_handles.len);
+    try testing.expectEqual(@as(usize, 7), irreversible);
+    try testing.expectEqual(@as(usize, 1), existing);
+    try testing.expectEqual(@as(usize, 3), mcp);
+}
+
+test "naming a handle is detected through the shapes that carry one" {
+    // The derivation, not the list: a handle inside a union inside a struct
+    // still counts, which is how `begin_run_outcome` was found.
+    try testing.expect(namesHandle(handle_table.Id));
+    try testing.expect(namesHandle(shapes.SessionRoute));
+    try testing.expect(namesHandle(shapes.BeginRunOutcome));
+    try testing.expect(namesHandle(?shapes.RunRoute));
+    try testing.expect(namesHandle([]const shapes.SkillRestoreBorrow));
+    try testing.expect(!namesHandle(u64));
+    try testing.expect(!namesHandle(void));
+    try testing.expect(!namesHandle(shapes.CloseOutcome));
+}
+
+test "a reshaping mirror numbers its error, and a copying one borrows the bytes" {
+    const bindings = testBindings();
+
+    // Reshaping: the error becomes the number the registry assigns it, which
+    // is the whole reason this one is not a copy.
+    const failure = try (resultAdapter(surface.BeginRunFailure).?).apply(bindings, .{
+        .err = error.SessionPoisoned,
+        .session_disposition = .poisoned,
+    });
+    try testing.expectEqual(
+        @import("error_code.zig").encode(error.SessionPoisoned),
+        failure.error_code,
+    );
+    try testing.expectEqual(control.SessionDisposition.poisoned, failure.session_disposition);
+
+    // Copying: a mirror field may borrow what the original owns, because
+    // ownership does not cross -- the original frees the bytes after the
+    // response is encoded. Only that direction, and only the same bytes.
+    try testing.expect(borrowsFrom([]const u8, []u8));
+    try testing.expect(borrowsFrom(?[]const u8, ?[]u8));
+    try testing.expect(!borrowsFrom([]u8, []const u8));
+    try testing.expect(!borrowsFrom([]const u16, []u8));
+    try testing.expect(!borrowsFrom([]const u8, []const u8));
+    try testing.expect(!borrowsFrom(u64, u64));
+
+    // The checkpoint description's copier is instantiated by the outcome
+    // adapter above it, so every one of its fields has found a rule at
+    // comptime. That is not the same as having been run, and it is recorded
+    // here as the weaker fact it is: the description's own round trip waits
+    // for a dispatcher test that produces a real one.
+    try testing.expect(resultAdapter(checkpoint.Description) != null);
+    try testing.expect(resultAdapter(checkpoint.Outcome) != null);
 }

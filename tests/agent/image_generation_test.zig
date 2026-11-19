@@ -5,6 +5,13 @@ const options = @import("image_fixture_options");
 const sdk = @import("lifecycle_fixture").sdk;
 const workspace_output = @import("image_output");
 
+/// A Session belongs to a Task, and these tests do not model one. The values
+/// are therefore fixed and nonzero: zero is invalid by construction on the
+/// acceptance path, so a test opening a Session at Task 0 would be exercising
+/// a state Product never produces.
+const test_task_id: u64 = 1;
+const test_binding_epoch: u64 = 1;
+
 // Pass-through instrumentation over the exact staged binary. No result, issue,
 // checkpoint or status is fabricated. Test-only inputs reproduce the previous
 // zero-Host-tool release and a changed GenerateImage schema.
@@ -172,6 +179,8 @@ fn open(runtime: *agent.Runtime, root: []const u8, fixture: *Fixture, mode: agen
 
 fn openOptions(root: []const u8, fixture: *Fixture, mode: agent.PermissionMode) agent.SessionOpenOptions {
     return .{
+        .task_id = test_task_id,
+        .binding_epoch = test_binding_epoch,
         .model_binding = .{ .target = .{ .provider_id = "fixture", .protocol = .anthropic_messages, .base_url = fixture.provider_endpoint, .model = "claude-sonnet-4-20250514" }, .credential = "synthetic-dialogue-key" },
         .permission_mode = mode,
         .shell_policy = .unrestricted,
@@ -431,6 +440,8 @@ fn checkpointTools(old_host_count: usize, grant: bool, target: enum { current, c
     h.runtime = try agent.Runtime.initImageGenerationWithApiForTesting(std.testing.io, std.testing.allocator, &probe.api, .{ .max_sessions = 2 }, .{ .transport = h.network.transport() });
     const restored = try h.runtime.restoreSessionRoute(.{
         .session = .{
+            .task_id = test_task_id,
+            .binding_epoch = test_binding_epoch,
             .model_binding = .{ .target = .{ .provider_id = "fixture", .protocol = .anthropic_messages, .base_url = h.fixture.provider_endpoint, .model = "claude-sonnet-4-20250514" }, .credential = "synthetic-dialogue-key" },
             .permission_mode = .default,
             .shell_policy = .unrestricted,

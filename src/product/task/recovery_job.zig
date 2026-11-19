@@ -525,7 +525,28 @@ pub const Job = struct {
             .borrowed => |value| value,
             .unavailable => return .{ .failure = .runtime_unavailable },
         };
+        // The epoch this Session will be installed under, not the one the
+        // attempt started from. Both inputs are already on the attempt, so
+        // there is nothing to wait for -- and waiting was the bug: the
+        // adoption moves the Task to `+ 1` when the binding advances, so a
+        // Session carrying the attempt's own epoch spent its whole life one
+        // behind its Task, and a record it staged could not be told from one
+        // staged by the Session it replaced. `adoptBindingEpoch` does not
+        // rescue that: it migrates the record *this job* exported before
+        // adoption, which Product composes, not anything the Session carries.
+        //
+        // Exhaustion refuses the recovery here rather than opening a Session
+        // the adoption would then refuse for the same reason.
+        const advances_binding =
+            self.attempt.source_execution_generation != self.attempt.target_execution_generation;
+        const installed_epoch = checkpoint_record.installedBindingEpoch(
+            self.attempt.binding_epoch,
+            advances_binding,
+        ) catch return .{ .failure = .binding_epoch_exhausted };
+
         const options: agent.SessionOpenOptions = .{
+            .task_id = self.attempt.task_id,
+            .binding_epoch = installed_epoch,
             .model_binding = .{
                 .image_capabilities = image_capabilities[0..execution.target.image_capabilities.len],
                 .target = .{

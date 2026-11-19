@@ -160,6 +160,40 @@ pub const CallbackRejection = struct {
             } else null,
         };
     }
+
+    /// An error the peer recorded but this build does not name.
+    ///
+    /// Declared here rather than taken from the registry, because its whole
+    /// job is to name nothing else: the mirror's rule is that a diagnostic
+    /// must not name the wrong cause, and reading "present but unnamed" back
+    /// as some registered error would do exactly that. `null` would be worse
+    /// still -- it says no failure was recorded, when one was.
+    pub const unnamed_failure: anyerror = error.AgentFailureNotNamedByThisBuild;
+
+    pub fn into(self: CallbackRejection) control.CallbackRejection {
+        return .{
+            .boundary = self.boundary,
+            .reason = self.reason,
+            .event = self.event,
+            .failure = if (self.failure_unnamed)
+                unnamed_failure
+            else if (self.failure_code) |code|
+                error_code.decode(code) orelse unnamed_failure
+            else
+                null,
+            .encoded_bytes = if (self.encoded_bytes) |bytes| @intCast(bytes) else null,
+            .host_run_id = self.host_run_id,
+            .observed_run_id = self.observed_run_id,
+            .session_handle_matches = self.session_handle_matches,
+            .session_identity_matches = self.session_identity_matches,
+            .state = self.state,
+            .input_adoption = if (self.input_adoption) |adoption| .{
+                .id = adoption.id,
+                .sequence = adoption.sequence,
+                .turn = adoption.turn,
+            } else null,
+        };
+    }
 };
 
 fn registered(err: anyerror) ?u16 {
@@ -223,6 +257,44 @@ pub const TerminalResult = struct {
             .model_error = value.model_error,
         };
     }
+
+    /// The diagnostic's bytes copied into this half's own storage, which
+    /// `control.TerminalResult.deinit` then frees through the `allocator`
+    /// field set here. The truncation flag keeps its meaning because the
+    /// bytes it describes are the same bytes.
+    pub fn into(
+        self: TerminalResult,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!control.TerminalResult {
+        const storage = try allocator.dupe(u8, self.diagnostic);
+        return .{
+            .allocator = allocator,
+            .diagnostic_storage = storage,
+            .diagnostic_len = storage.len,
+            .diagnostic_truncated = self.diagnostic_truncated,
+            .abi_status = self.abi_status,
+            .raw_status_code = self.raw_status_code,
+            .stop_reason = self.stop_reason,
+            .raw_stop_reason_code = self.raw_stop_reason_code,
+            .abort_status = self.abort_status,
+            .raw_abort_status_code = self.raw_abort_status_code,
+            .termination_signal = self.termination_signal,
+            .file_changes_lost = self.file_changes_lost,
+            .event_delivery_lost = self.event_delivery_lost,
+            .receipts = self.receipts,
+            .failure = self.failure,
+            .session_disposition_at_completion = self.session_disposition_at_completion,
+            .durable_budget = self.durable_budget,
+            .input_counts = self.input_counts,
+            .first_callback_rejection = if (self.first_callback_rejection) |rejection|
+                rejection.into()
+            else
+                null,
+            .first_host_failure = self.first_host_failure,
+            .controlled_callback_close = self.controlled_callback_close,
+            .model_error = self.model_error,
+        };
+    }
 };
 
 /// `control.CompactTerminalResult` with the same treatment.
@@ -264,6 +336,33 @@ pub const CompactTerminalResult = struct {
             .session_disposition_at_completion = value.session_disposition_at_completion,
         };
     }
+
+    pub fn into(
+        self: CompactTerminalResult,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!control.CompactTerminalResult {
+        const storage = try allocator.dupe(u8, self.diagnostic);
+        return .{
+            .allocator = allocator,
+            .diagnostic_storage = storage,
+            .diagnostic_len = storage.len,
+            .diagnostic_truncated = self.diagnostic_truncated,
+            .abi_status = self.abi_status,
+            .raw_status_code = self.raw_status_code,
+            .abort_status = self.abort_status,
+            .raw_abort_status_code = self.raw_abort_status_code,
+            .outcome = self.outcome,
+            .before_context_tokens = self.before_context_tokens,
+            .after_context_tokens = self.after_context_tokens,
+            .input_tokens = self.input_tokens,
+            .output_tokens = self.output_tokens,
+            .cache_read_input_tokens = self.cache_read_input_tokens,
+            .cache_creation_input_tokens = self.cache_creation_input_tokens,
+            .interruption = self.interruption,
+            .failure = self.failure,
+            .session_disposition_at_completion = self.session_disposition_at_completion,
+        };
+    }
 };
 
 /// `checkpoint.Description` without its allocator. The blob itself never
@@ -288,6 +387,71 @@ pub const CheckpointDescription = struct {
     budget_soft_bytes: u64,
     durable_usage_bytes: u64,
     available_bytes: u64,
+    // The seven below were missing, and building the direction that reads a
+    // mirror *back* is what found it. Outbound, a mirror that is a subset of
+    // its original compiles and sends less than the caller had in process --
+    // the generic reader walks the mirror's fields, so a field that is not
+    // there is not a question anyone is asked. Inbound there is no value to
+    // put in them at all, which is the same loss made visible.
+    //
+    // `mirror_completeness` below is the check, so the next field added to a
+    // `checkpoint.Description` is named by the compiler instead.
+    compaction_recommended: bool,
+    budget_outcome: checkpoint.DurableBudgetOutcome,
+    required_bytes: u64,
+    restore_health: checkpoint.RestoreHealth,
+    invalidated_skill_authority: u32,
+    invalidated_permission_rules: u32,
+    invalidated_mcp_bindings: u32,
+
+    /// Allocated here, freed by `checkpoint.Description.deinit` through the
+    /// `allocator` field this sets: the caller's half owns its own copy and
+    /// Product frees it exactly as it does in process.
+    pub fn into(
+        self: CheckpointDescription,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!checkpoint.Description {
+        const session_id = try allocator.dupe(u8, self.session_id);
+        errdefer allocator.free(session_id);
+        const model = try allocator.dupe(u8, self.model);
+        errdefer allocator.free(model);
+        const revision: ?[]u8 = if (self.skill_catalog_revision) |value|
+            try allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (revision) |value| allocator.free(value);
+        const fingerprint = try allocator.dupe(u8, self.mcp_selection_fingerprint);
+
+        return .{
+            .allocator = allocator,
+            .session_id = session_id,
+            .origin = self.origin,
+            .lifecycle = self.lifecycle,
+            .registered = self.registered,
+            .last_run_id = self.last_run_id,
+            .last_compact_id = self.last_compact_id,
+            .checkpoint_generation = self.checkpoint_generation,
+            .permission_mode = self.permission_mode,
+            .policy_generation = self.policy_generation,
+            .catalog_generation = self.catalog_generation,
+            .model = model,
+            .message_count = self.message_count,
+            .compact_boundary = self.compact_boundary,
+            .skill_catalog_revision = revision,
+            .mcp_selection_fingerprint = fingerprint,
+            .budget_hard_bytes = self.budget_hard_bytes,
+            .budget_soft_bytes = self.budget_soft_bytes,
+            .durable_usage_bytes = self.durable_usage_bytes,
+            .available_bytes = self.available_bytes,
+            .compaction_recommended = self.compaction_recommended,
+            .budget_outcome = self.budget_outcome,
+            .required_bytes = self.required_bytes,
+            .restore_health = self.restore_health,
+            .invalidated_skill_authority = self.invalidated_skill_authority,
+            .invalidated_permission_rules = self.invalidated_permission_rules,
+            .invalidated_mcp_bindings = self.invalidated_mcp_bindings,
+        };
+    }
 };
 
 /// `checkpoint.Outcome`: the export's identity and the description, or the
@@ -295,9 +459,28 @@ pub const CheckpointDescription = struct {
 pub const CheckpointOutcome = union(enum) {
     success: struct {
         checkpoint: checkpoint.Export,
+        /// Where the bytes are. Plain data already -- a tag and a bounded
+        /// name -- and it has to cross, because it is the one thing the
+        /// caller cannot work out for itself: the execution half wrote into
+        /// its own stage area, and nothing in the export's own facts says so.
+        placement: checkpoint.Placement,
         description: CheckpointDescription,
     },
     failure: checkpoint.Failure,
+
+    pub fn into(
+        self: CheckpointOutcome,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!checkpoint.Outcome {
+        return switch (self) {
+            .success => |success| .{ .success = .{
+                .checkpoint = success.checkpoint,
+                .placement = success.placement,
+                .description = try success.description.into(allocator),
+            } },
+            .failure => |failure| .{ .failure = failure },
+        };
+    }
 };
 
 /// `surface.PendingUiRequest` without its allocator.
@@ -317,33 +500,39 @@ pub const PendingUiRequest = struct {
             .json = value.json,
         };
     }
+
+    pub fn into(
+        self: PendingUiRequest,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!surface.PendingUiRequest {
+        return .{
+            .session_id = self.session_id,
+            .run_id = self.run_id,
+            .request_id = self.request_id,
+            .input_adopted_count = self.input_adopted_count,
+            .json = try allocator.dupe(u8, self.json),
+            .allocator = allocator,
+        };
+    }
 };
 
 // ---------------------------------------------------------------------------
 // A capability the far side composes, and the inputs it needs to
 // ---------------------------------------------------------------------------
 
-/// Where an exported checkpoint's bytes go. The sink itself is a byte callback
-/// and never crosses: the execution half composes its own against this
-/// destination and writes the blob, so the bytes stay on one side of the pipe
-/// and only the identity of the blob comes back in the outcome.
-pub const CheckpointDestination = struct {
-    task_id: u64,
-    /// The generation this export belongs to. It travels because the caller's
-    /// admission compares it against the Task's current checkpoint, so it is a
-    /// correlation fact, not a defence: the store already makes an overwrite
-    /// structurally impossible, since a blob is named by its generation and
-    /// its digest and the commit refuses a name that exists.
-    ///
-    /// It deliberately does not promise an early refusal of a stale export.
-    /// Claiming that would need a result the caller can tell apart from any
-    /// other contract failure, and `SinkWriteResult` has no such value; folding
-    /// it into `contract_failed` would make a diagnostic name the wrong cause.
-    /// Adding one for an optimisation is not worth changing the sink contract
-    /// the Core writes through.
-    generation: u64,
-    hard_bytes: u64,
-};
+// Nothing crosses for an export's destination.
+//
+// This used to be `CheckpointDestination`, carrying `task_id`, `generation`
+// and `hard_bytes`. Working out what it actually had to contain emptied it:
+// `task_id` is on the Session, `hard_bytes` is in the call's own `limits`,
+// and `generation` was the wrong kind of field altogether -- the export
+// assigns it, so a caller filling it in asserted something it could not
+// know. What the execution half needs is composed over there, as
+// `call_frame.BlobDestination`.
+//
+// Kept as a comment rather than deleted silently, because
+// `crossings.zig` records this type as owing a shape, and "its shape is
+// nothing" is an answer that has to be readable somewhere.
 
 /// That a Run may deliver files, and nothing else.
 ///
@@ -465,7 +654,14 @@ pub const SessionRestoreRoute = struct {
 pub const RunRoute = struct {
     run_id: u64,
     generation: u64,
-    control: handle_table.Id,
+    /// The Run's entry, which is also its control's.
+    ///
+    /// One id rather than two, because over there one entry holds both: a
+    /// `RunPort`'s vtable and the `RunControl` every retain and release goes
+    /// through live in the same `adapters.BegunRun`. Sending a second id for
+    /// the same entry would be a second lifetime to keep in step with the
+    /// first, and nothing would notice when they stopped agreeing.
+    run: handle_table.Id,
 };
 
 /// `port.BeginRunOutcome` with the Run named as above.
@@ -521,6 +717,12 @@ pub const SkillRestoreBorrow = struct {
 /// half, issued by an earlier call and handed straight back here. Nothing else
 /// in the options is a capability, so everything else is itself.
 pub const SessionOpenOptions = struct {
+    /// Product's own identity for the Session. Plain data, and the reason it
+    /// crosses is in `surface.SessionOpenOptions`: a checkpoint the execution
+    /// half stages without being asked still has to be a record Product can
+    /// accept.
+    task_id: u64,
+    binding_epoch: u64,
     model_binding: model_binding_type,
     permission_mode: control.PermissionMode,
     shell_policy: control.ShellPolicy,
@@ -648,7 +850,6 @@ comptime {
     payload.requireStructural(CheckpointDescription);
     payload.requireStructural(CheckpointOutcome);
     payload.requireStructural(PendingUiRequest);
-    payload.requireStructural(CheckpointDestination);
     payload.requireStructural(FileDeliveryEnabled);
     payload.requireStructural(CatalogProjection);
     payload.requireStructural(CatalogQuery);
@@ -669,37 +870,115 @@ comptime {
     payload.requireStructural(McpInstallationTarget);
 }
 
-/// Asserts that a mirror and its original describe the same thing: every
-/// mirror field must exist on the original, under the same name, except the
-/// ones this file deliberately reshapes. A field added to the original is not
-/// caught here -- `crossings.zig` catches that by re-classifying the type --
-/// but a mirror field that no longer corresponds to anything is.
-fn mirrors(comptime Mirror: type, comptime Origin: type, comptime reshaped: []const []const u8) void {
+/// Asserts that a mirror and its original describe the same thing, in both
+/// directions: every mirror field names a field of the original unless it is
+/// listed as reshaped, and every field of the original is on the mirror
+/// unless it is listed as left behind.
+///
+/// The second direction was missing, and its absence cost real data: the
+/// mirror for `checkpoint.Description` was a seven-field subset of it. That
+/// is invisible on the way out, because the generic reader walks the
+/// *mirror's* fields -- a field that is not there is not a question anyone is
+/// asked -- and it was only building the direction that reads a mirror back
+/// that made it show, as seven fields with no value to put in them.
+///
+/// An earlier version of this comment said `crossings.zig` catches a field
+/// added to the original. It does not: it classifies the type as a whole and
+/// has nothing to say about which of its fields a mirror carries. So the
+/// check belongs here, where both lists are, and each entry in `left_behind`
+/// is a decision with a reason rather than an omission.
+fn mirrors(comptime Mirror: type, comptime Origin: type, comptime decided: Decided) void {
     comptime {
+        @setEvalBranchQuota(100_000);
         for (@typeInfo(Mirror).@"struct".fields) |field| {
-            for (reshaped) |name| {
+            for (decided.reshaped) |name| {
                 if (std.mem.eql(u8, name, field.name)) break;
             } else if (!@hasField(Origin, field.name)) @compileError(
                 @typeName(Mirror) ++ "." ++ field.name ++ " does not name a field of " ++
                     @typeName(Origin) ++ ", and is not listed as reshaped",
             );
         }
+        for (@typeInfo(Origin).@"struct".fields) |field| {
+            for (decided.left_behind) |name| {
+                if (std.mem.eql(u8, name, field.name)) break;
+            } else if (!@hasField(Mirror, field.name)) @compileError(
+                @typeName(Origin) ++ "." ++ field.name ++ " is on neither " ++
+                    @typeName(Mirror) ++ " nor its `left_behind` list, so it would simply " ++
+                    "not cross. Carry it, or say here why it must not and what the " ++
+                    "receiving side has instead",
+            );
+        }
     }
 }
 
+const Decided = struct {
+    /// Mirror fields that name no field of the original because this file
+    /// reshapes them -- an error set into a number, storage into its bytes.
+    reshaped: []const []const u8 = &.{},
+    /// Fields of the original that do not cross, each for a stated reason.
+    left_behind: []const []const u8 = &.{},
+};
+
+/// Storage a value owns through an allocator. Its *contents* cross; the
+/// ownership does not, and the receiving side owns its own copy.
+const owned_storage: []const []const u8 = &.{ "allocator", "diagnostic_storage", "diagnostic_len" };
+
 comptime {
-    mirrors(TerminalResult, control.TerminalResult, &.{"diagnostic"});
-    mirrors(CompactTerminalResult, control.CompactTerminalResult, &.{"diagnostic"});
-    mirrors(PendingUiRequest, surface.PendingUiRequest, &.{});
-    mirrors(CheckpointDescription, checkpoint.Description, &.{});
-    mirrors(BeginRunFailure, surface.BeginRunFailure, &.{"error_code"});
-    mirrors(CatalogProjection, catalog.Projection, &.{});
-    mirrors(CatalogQuery, catalog.Query, &.{});
-    mirrors(ImageGenerationBinding, image_generation.BindingInput, &.{});
-    mirrors(VideoGenerationBinding, generate_video.Input, &.{});
-    mirrors(SessionOpenOptions, surface.SessionOpenOptions, &.{});
-    mirrors(SessionRestoreOptions, surface.SessionRestoreOptions, &.{});
-    mirrors(CatalogAcquisition, catalog.Acquisition, &.{});
+    mirrors(TerminalResult, control.TerminalResult, .{
+        .reshaped = &.{"diagnostic"},
+        .left_behind = owned_storage,
+    });
+    mirrors(CompactTerminalResult, control.CompactTerminalResult, .{
+        .reshaped = &.{"diagnostic"},
+        .left_behind = owned_storage,
+    });
+    mirrors(PendingUiRequest, surface.PendingUiRequest, .{
+        .left_behind = &.{"allocator"},
+    });
+    mirrors(CheckpointDescription, checkpoint.Description, .{
+        .left_behind = &.{"allocator"},
+    });
+    mirrors(BeginRunFailure, surface.BeginRunFailure, .{
+        .reshaped = &.{"error_code"},
+        // The error itself crosses as its registered number.
+        .left_behind = &.{"err"},
+    });
+    mirrors(CatalogProjection, catalog.Projection, .{
+        // An opaque pointer to the arena the projection's contents live in.
+        // The contents cross; which arena holds them is the receiver's.
+        .left_behind = &.{"storage"},
+    });
+    mirrors(CatalogQuery, catalog.Query, .{
+        // Nonblocking reference accounting, and a cross-process call blocks.
+        // The caller retaining before the call is what replaces it.
+        .left_behind = &.{"source_lifetime"},
+    });
+    mirrors(ImageGenerationBinding, image_generation.BindingInput, .{
+        // The execution half reads a credential live from the one source the
+        // link renews, so a copy sent per request would be zeroed and never
+        // read. Section 6 also does not list a link payload as somewhere a
+        // credential may live. The mirror's own doc comment has the whole
+        // argument; this is the entry that makes the compiler ask for it.
+        //
+        // `credential_reader` and `output` are capabilities, composed in the
+        // execution half rather than sent: a function pointer into this
+        // process means nothing over there.
+        .left_behind = &.{ "credential", "credential_reader", "output" },
+    });
+    mirrors(VideoGenerationBinding, generate_video.Input, .{
+        // The same three, and this one never had the credential question:
+        // its original takes only a reader.
+        .left_behind = &.{ "credential", "transport", "output" },
+    });
+    mirrors(SessionOpenOptions, surface.SessionOpenOptions, .{});
+    mirrors(SessionRestoreOptions, surface.SessionRestoreOptions, .{});
+    mirrors(CatalogAcquisition, catalog.Acquisition, .{});
+    mirrors(CallbackRejection, control.CallbackRejection, .{
+        .reshaped = &.{ "failure_code", "failure_unnamed" },
+        // Any error in the program, so it crosses as its number when the
+        // registry names it and as "present but unnamed" when it does not.
+        .left_behind = &.{"failure"},
+    });
 }
 
 const testing = std.testing;

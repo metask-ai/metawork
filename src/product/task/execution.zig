@@ -818,6 +818,18 @@ fn postprocessCheckpoint(
             return true;
         },
         .success => |*success| {
+            // Same decision as `approval_job.exportCheckpoint`, for the same
+            // reason: the writer below is this process's, and `.own_area`
+            // means the bytes are in a stage area that step 7's acceptance
+            // path owns. Failing is the honest answer until it exists.
+            switch (success.placement) {
+                .caller_sink => {},
+                .own_area => {
+                    outcome.deinit();
+                    publishCheckpointFailure(postprocess, .export_failed);
+                    return true;
+                },
+            }
             postprocess.session_disposition = .reusable;
             const chunk_count = success.checkpoint.chunk_count;
             var candidate = state.CheckpointCandidate{
