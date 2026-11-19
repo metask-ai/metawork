@@ -529,7 +529,9 @@ fn stoppedBy(err: Stopped) Reason {
         // object is not there, permanently; asking again names the same
         // missing thing.
         error.UnknownHandle, error.UnknownBox => .gone,
-        // Room on the far side, not reachability.
+        // Both are this half's own resources -- the outbound queue and the
+        // box table -- and both refuse before the request is sent, so the
+        // call was not performed and nothing is claimed about the far side.
         error.Busy, error.BoxCapacity => .no_room,
         // Room on this side. Grouped with the two above until it was worth
         // saying that most methods can report it themselves.
@@ -1878,8 +1880,34 @@ test "a lost answer is not a call that did not happen" {
     try testing.expect(!hasMember(client.AfterHandover, "OutOfMemory"));
     try testing.expect(!hasMember(client.AfterHandover, "Busy"));
     try testing.expect(!hasMember(inbound.AfterAnswer, "OutOfMemory"));
+    try testing.expect(!hasMember(inbound.AfterAnswer, "BoxCapacity"));
     try testing.expect(hasMember(client.BeforeHandover, "OutOfMemory"));
     try testing.expect(hasMember(client.BeforeHandover, "Busy"));
+
+    // And the list those sets are checked against is this file's own
+    // classification, asserted in the direction the guards cannot see: every
+    // member `stoppedBy` reads as not-performed is named in it, and no other
+    // member is.
+    try testing.expectEqual(@as(usize, 3), client.not_performed.len);
+    inline for (.{ error.Busy, error.BoxCapacity, error.OutOfMemory }) |err| {
+        const reason = stoppedBy(err);
+        try testing.expect(reason == .no_room or reason == .out_of_memory);
+        try testing.expect(client.meansNotPerformed(@errorName(err)));
+    }
+    inline for (.{
+        error.Unreachable,
+        error.Unreadable,
+        error.UnknownHandle,
+        error.UnknownBox,
+        error.AnswerLost,
+    }) |err| {
+        const reason = stoppedBy(err);
+        try testing.expect(reason == .gone or reason == .answer_lost);
+        try testing.expect(!client.meansNotPerformed(@errorName(err)));
+    }
+    // Three plus five is every way a call can stop, so neither group above is
+    // a sample of the set.
+    try testing.expectEqual(@as(usize, 8), @typeInfo(Stopped).error_set.?.len);
 
     // And the error both phases name an allocation failure with lands on the
     // gone answers, never on busy.

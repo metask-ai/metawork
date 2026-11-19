@@ -170,20 +170,47 @@ pub const AfterHandover = error{
 
 pub const CallError = BeforeHandover || AfterHandover;
 
-comptime {
-    // The subtraction above is load-bearing, so it is checked rather than
-    // trusted to survive the next edit. Either member here would let a stub
-    // answer "this did not happen" for a request the peer may have carried
-    // out.
-    for (@typeInfo(AfterHandover).error_set.?) |member| {
-        if (std.mem.eql(u8, member.name, "OutOfMemory") or
-            std.mem.eql(u8, member.name, "Busy")) @compileError(
-            "client.AfterHandover must not contain " ++ member.name ++
-                ": it is the set for failures that happen once the request is " ++
-                "the peer's, and both of those are read by `stubs.zig` as " ++
-                "\"nothing was performed, ask again\"",
+/// The error names a stub reads as "this call was not performed".
+///
+/// `stubs.stoppedBy` classifies each of these as `.no_room` or
+/// `.out_of_memory`, and both of those answer the caller that the far side's
+/// state is unchanged and it may ask again. That is true only before the
+/// handover, so this is the list every post-handover set is checked against --
+/// `AfterHandover` here and `inbound.AfterAnswer` there, against one list
+/// rather than two spellings of it. `stubs.zig` asserts the other direction:
+/// that nothing it reads that way is missing from here.
+///
+/// Naming the classification rather than the members is the point. The first
+/// version of the guard below named `OutOfMemory` and `Busy`, which is the
+/// same hand-written list the rest of this work keeps replacing -- and it let
+/// `BoxCapacity` through for exactly as long as nobody looked.
+pub const not_performed = [_][]const u8{ "Busy", "BoxCapacity", "OutOfMemory" };
+
+pub fn meansNotPerformed(name: []const u8) bool {
+    for (not_performed) |member| {
+        if (std.mem.eql(u8, member, name)) return true;
+    }
+    return false;
+}
+
+/// Checks one post-handover set against `not_performed`.
+///
+/// Shared so that the rule is stated once and applied in both files: a set
+/// for failures that happen once the request is the peer's may not contain a
+/// member that answers "it did not happen".
+pub fn refuseNotPerformed(comptime Set: type, comptime named: []const u8) void {
+    for (@typeInfo(Set).error_set.?) |member| {
+        if (meansNotPerformed(member.name)) @compileError(
+            named ++ " must not contain " ++ member.name ++ ": it is a set for " ++
+                "failures that happen once the request is the peer's, and " ++
+                "`stubs.stoppedBy` reads that member as \"nothing was performed, ask " ++
+                "again\". Map it to the member that says the answer was lost instead",
         );
     }
+}
+
+comptime {
+    refuseNotPerformed(AfterHandover, "client.AfterHandover");
 }
 
 /// Sends one request and reads the answer.

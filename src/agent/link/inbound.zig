@@ -499,30 +499,31 @@ pub fn invoke(
 pub const AfterAnswer = error{
     Unreadable,
     AnswerLost,
-    BoxCapacity,
     UnknownBox,
 };
 
 comptime {
-    for (@typeInfo(AfterAnswer).error_set.?) |member| {
-        if (std.mem.eql(u8, member.name, "OutOfMemory")) @compileError(
-            "inbound.AfterAnswer must not contain OutOfMemory: it is the set for " ++
-                "failures that happen once the peer has answered, and `stubs.zig` reads " ++
-                "a method's own OutOfMemory as \"this call did not happen\"",
-        );
-    }
+    // Checked against `client.not_performed`, which is the classification
+    // `stubs.stoppedBy` makes, rather than against a list written here. The
+    // first version of this guard named `OutOfMemory` alone and let
+    // `BoxCapacity` through -- a member that means "no room in this half's
+    // box table", which is true before the request is sent and says the wrong
+    // thing entirely once the peer has answered.
+    client.refuseNotPerformed(AfterAnswer, "inbound.AfterAnswer");
 }
 
 /// An answer-phase failure, named for what it is.
 ///
-/// The one mapping that matters is `OutOfMemory`; the rest pass through. The
+/// Two mappings, and both are the same statement: a resource this half ran
+/// out of while reading an answer has lost that answer, and has not refused
+/// the call -- the peer already performed it. `UnknownBox` passes through
+/// because it is permanent and lands on the gone answer either way. The
 /// switch is exhaustive over `Error`, so a new member has to be placed here
 /// rather than inheriting whatever the previous one meant.
 fn afterAnswer(err: Error) AfterAnswer {
     return switch (err) {
-        error.OutOfMemory => error.AnswerLost,
+        error.OutOfMemory, error.BoxCapacity => error.AnswerLost,
         error.Unreadable => error.Unreadable,
-        error.BoxCapacity => error.BoxCapacity,
         error.UnknownBox => error.UnknownBox,
     };
 }
