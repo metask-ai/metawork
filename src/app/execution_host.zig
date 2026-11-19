@@ -62,10 +62,65 @@ pub const Stopped = union(enum) {
     gone,
 };
 
+/// What ends the child, held apart from the `Child` the reaper owns.
+///
+/// On Windows a duplicate of the process handle, because a handle value is
+/// only a name: the reaper's `wait` closes the child's copy, and a closed
+/// value can name a different process by the time somebody uses it. A
+/// duplicate is an independent reference, and while it is open the process
+/// object -- and therefore the identity -- cannot be reused.
+///
+/// Elsewhere the pid, which is the only name there is. A pid is reusable once
+/// the child has been reaped, so the one remaining window is a reap that lands
+/// between the grace period expiring and the signal going out; closing it
+/// would need a pidfd, which is Linux-only, and reaching it would need the
+/// system to allocate the whole pid space between two adjacent instructions.
+const Termination = switch (builtin.os.tag) {
+    .windows => std.os.windows.HANDLE,
+    else => std.posix.pid_t,
+};
+
+/// `DuplicateHandle`, which `std.os.windows` does not wrap.
+extern "kernel32" fn DuplicateHandle(
+    source_process: std.os.windows.HANDLE,
+    source: std.os.windows.HANDLE,
+    target_process: std.os.windows.HANDLE,
+    target: *std.os.windows.HANDLE,
+    desired_access: std.os.windows.DWORD,
+    inherit: std.os.windows.BOOL,
+    options: std.os.windows.DWORD,
+) callconv(.winapi) std.os.windows.BOOL;
+
+fn takeTermination(child: *const std.process.Child) ?Termination {
+    const id = child.id orelse return null;
+    if (builtin.os.tag != .windows) return id;
+    var duplicate: std.os.windows.HANDLE = undefined;
+    if (DuplicateHandle(
+        std.os.windows.GetCurrentProcess(),
+        id,
+        std.os.windows.GetCurrentProcess(),
+        &duplicate,
+        0,
+        .FALSE,
+        std.os.windows.DUPLICATE_SAME_ACCESS,
+    ) == .FALSE) return null;
+    return duplicate;
+}
+
+fn releaseTermination(value: Termination) void {
+    if (builtin.os.tag == .windows) std.os.windows.CloseHandle(value);
+}
+
 pub const Host = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     child: std.process.Child,
+    /// Taken at spawn and released on the way out, so it outlives every
+    /// reap. `termination_released` is what makes releasing it idempotent:
+    /// a refused start ends in `abandon` and never sees a `deinit`, while an
+    /// ordinary life ends in `deinit`, and neither knows about the other.
+    termination: Termination,
+    termination_released: bool = false,
     /// Our write end of the child's stdin.
     to_child: std.Io.File,
     /// Our read end of the child's stdout.
@@ -131,6 +186,16 @@ pub const Host = struct {
         if (builtin.os.tag == .windows) windows_spawn_mutex.unlock(io);
         errdefer child.kill(io);
 
+        // Before anything else can fail, because every failure below has to
+        // be able to end this child, and `abandon` is what does it.
+        //
+        // A start that cannot arm this is refused rather than served: a host
+        // whose stop cannot guarantee the child is gone would hand the caller
+        // a link it cannot wind up, and on Windows the only way to fail here
+        // is to be out of handles.
+        const termination = takeTermination(&child) orelse return .resource_unavailable;
+        errdefer releaseTermination(termination);
+
         const to_child = child.stdin orelse return .link_unavailable;
         const from_child = child.stdout orelse return .link_unavailable;
         child.stdin = null;
@@ -147,6 +212,7 @@ pub const Host = struct {
             .io = io,
             .allocator = allocator,
             .child = child,
+            .termination = termination,
             .to_child = to_child,
             .from_child = from_child,
             .read_buffer = read_buffer,
@@ -191,12 +257,56 @@ pub const Host = struct {
     /// is left unusable on purpose, so a caller that ignores the failure
     /// trips an assertion rather than driving a dead link.
     fn abandon(self: *Host) void {
+        // `Child.kill` is the whole of it here, and only here: this runs
+        // before the reaper exists, so this thread is the single owner of the
+        // child's corpse and its handles, which is exactly what that call
+        // assumes. Once a reaper is running, `terminate` is the only way to
+        // end the child -- see what that function says about why.
+        //
+        // Asserted rather than left to the reading. The other `Child.kill` is
+        // the `errdefer` in `start`, which can only fire before the reaper is
+        // assigned, and the only `wait` is the reaper's own.
+        std.debug.assert(self.reaper == null);
         self.child.kill(self.io);
+        self.releaseTerminationOnce();
         self.to_child.close(self.io);
         self.from_child.close(self.io);
         self.allocator.free(self.read_buffer);
         self.read_buffer = &.{};
         self.stopped = true;
+    }
+
+    /// Asks the operating system to end the child, and does nothing else.
+    ///
+    /// Not `std.process.Child.kill`, which terminates and then waits for the
+    /// corpse and then closes the handles. All three of those belong to the
+    /// reaper, and the reaper is inside `wait` whenever this is called:
+    ///
+    ///   * Two threads waiting on one child means one of them is told the
+    ///     child is not theirs -- `ECHILD`, which `std.Io.Threaded` reports
+    ///     through `errnoBug` and which panics outright in a Debug build.
+    ///   * Two cleanups means one thread closes a handle the other is still
+    ///     waiting on, and then clears fields the other is reading.
+    ///   * The Windows kill path waits with no timeout, so a child that did
+    ///     not die would hang the very stop the kill exists to bound.
+    ///   * On POSIX the signal it sends is `SIGTERM`, which a wedged child may
+    ///     be handling or ignoring -- and a wedged child is the only reason
+    ///     this is ever reached.
+    ///
+    /// So one owner for the corpse and the handles, which is the reaper, and
+    /// one job here: the signal. `reaperMain` collects what this ends, and
+    /// `stop` joins it afterwards, which is what makes the child's death
+    /// observable rather than assumed.
+    fn terminate(self: *Host) void {
+        switch (builtin.os.tag) {
+            .windows => _ = std.os.windows.ntdll.NtTerminateProcess(
+                self.termination,
+                @enumFromInt(@as(u32, 1)),
+            ),
+            // `SIGKILL`, not `SIGTERM`: this is the path for a child that is
+            // not responding to anything it could choose to ignore.
+            else => std.posix.kill(self.termination, .KILL) catch {},
+        }
     }
 
     fn reaperMain(self: *Host) void {
@@ -252,7 +362,9 @@ pub const Host = struct {
             } }) catch break :blk false;
             break :blk true;
         };
-        if (!graceful) self.child.kill(self.io);
+        // The signal only. The join below is what waits for the child to
+        // actually be gone, because the reaper is the one holding the wait.
+        if (!graceful) self.terminate();
         if (self.reaper) |thread| thread.join();
         self.reaper = null;
         if (quiesce) |settle| settle.settle_fn(settle.context);
@@ -265,8 +377,18 @@ pub const Host = struct {
         };
     }
 
+    fn releaseTerminationOnce(self: *Host) void {
+        if (self.termination_released) return;
+        self.termination_released = true;
+        releaseTermination(self.termination);
+    }
+
     pub fn deinit(self: *Host) void {
         if (!self.stopped) _ = self.stop(null);
+        // After the stop, which is after the reaper has been joined: the
+        // reference has to stay valid for as long as anything could still
+        // need to end this child.
+        self.releaseTerminationOnce();
         self.allocator.free(self.read_buffer);
         self.* = undefined;
     }
@@ -300,7 +422,7 @@ pub const TestSupport = if (builtin.is_test) struct {
     /// a worker waiting inside `execute` -- was valid a moment ago and names
     /// nothing now, and the caller finds out by reading end-of-stream.
     pub fn killChild(host: *Host) void {
-        host.child.kill(host.io);
+        host.terminate();
     }
 } else struct {};
 

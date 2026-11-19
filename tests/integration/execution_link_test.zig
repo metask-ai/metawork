@@ -1040,10 +1040,18 @@ test "an execution process that dies under a live Task does not take Product wit
         // is where somebody is told to come and use it.
         try std.testing.expectEqual(agent_link.client.LinkFault.none, supervisor.fault());
 
-        // An ordinary operation afterwards. What matters is that it returns:
-        // submitting into a Task whose execution process is gone is a
-        // refusal, and a refusal is something Product can show.
-        _ = product.runPreparedTask(&control, task_id, .{ .text = "Again" }) catch {};
+        // An ordinary operation afterwards, and the refusal it earns.
+        //
+        // `TaskClosing` is what the caller gets, and it is honest as far as it
+        // goes: the interrupted Run detached the Task and Product is closing
+        // what is left of it. What it does not say is that the execution
+        // process is gone and a new one could be started, which is the same
+        // missing fact as the one below -- so this pins today's answer, and
+        // the UI side of the disconnect work is what will change it.
+        try std.testing.expectError(
+            error.TaskClosing,
+            product.runPreparedTask(&control, task_id, .{ .text = "Again" }),
+        );
 
         // Still none, after a call that did reach the link. The writer
         // thread failed on the closed pipe and marked the queue failed, and a
