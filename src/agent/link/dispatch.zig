@@ -873,46 +873,48 @@ const SucceedingExporter = struct {
         const self: *SucceedingExporter = @ptrCast(@alignCast(context.?));
         if (sink.write_fn(sink.context, self.bytes) != .ok) return error.CoreCallFailed;
         const allocator = testing.allocator;
-        return .{ .success = .{
-            .checkpoint = .{
-                .generation = self.generation,
-                .total_bytes = self.claimed_bytes orelse self.bytes.len,
-                .chunk_count = 1,
-                .digest = @splat(0xab),
+        return .{
+            .success = .{
+                .checkpoint = .{
+                    .generation = self.generation,
+                    .total_bytes = self.claimed_bytes orelse self.bytes.len,
+                    .chunk_count = 1,
+                    .digest = @splat(0xab),
+                },
+                // What the Session can see, and no more: it wrote through the
+                // sink it was handed and knows nothing about what that sink was.
+                .placement = .caller_sink,
+                .description = .{
+                    .allocator = allocator,
+                    .session_id = allocator.dupe(u8, "session") catch return error.CoreCallFailed,
+                    .origin = .fresh,
+                    .lifecycle = .idle,
+                    .registered = true,
+                    .last_run_id = 7,
+                    .last_compact_id = 0,
+                    .checkpoint_generation = self.generation,
+                    .permission_mode = .default,
+                    .policy_generation = 1,
+                    .catalog_generation = 1,
+                    .model = allocator.dupe(u8, "model") catch return error.CoreCallFailed,
+                    .message_count = 2,
+                    .compact_boundary = 0,
+                    .skill_catalog_revision = null,
+                    .mcp_selection_fingerprint = allocator.dupe(u8, "fingerprint") catch return error.CoreCallFailed,
+                    .budget_hard_bytes = 32,
+                    .budget_soft_bytes = 16,
+                    .durable_usage_bytes = 8,
+                    .available_bytes = 24,
+                    .compaction_recommended = false,
+                    .budget_outcome = .none,
+                    .required_bytes = 0,
+                    .restore_health = .complete,
+                    .invalidated_skill_authority = 0,
+                    .invalidated_permission_rules = 0,
+                    .invalidated_mcp_bindings = 0,
+                },
             },
-            // What the Session can see, and no more: it wrote through the
-            // sink it was handed and knows nothing about what that sink was.
-            .placement = .caller_sink,
-            .description = .{
-                .allocator = allocator,
-                .session_id = allocator.dupe(u8, "session") catch return error.CoreCallFailed,
-                .origin = .fresh,
-                .lifecycle = .idle,
-                .registered = true,
-                .last_run_id = 7,
-                .last_compact_id = 0,
-                .checkpoint_generation = self.generation,
-                .permission_mode = .default,
-                .policy_generation = 1,
-                .catalog_generation = 1,
-                .model = allocator.dupe(u8, "model") catch return error.CoreCallFailed,
-                .message_count = 2,
-                .compact_boundary = 0,
-                .skill_catalog_revision = null,
-                .mcp_selection_fingerprint = allocator.dupe(u8, "fingerprint") catch return error.CoreCallFailed,
-                .budget_hard_bytes = 32,
-                .budget_soft_bytes = 16,
-                .durable_usage_bytes = 8,
-                .available_bytes = 24,
-                .compaction_recommended = false,
-                .budget_outcome = .none,
-                .required_bytes = 0,
-                .restore_health = .complete,
-                .invalidated_skill_authority = 0,
-                .invalidated_permission_rules = 0,
-                .invalidated_mcp_bindings = 0,
-            },
-        } };
+        };
     }
 
     fn port(self: *SucceedingExporter, vtable: *port_namespace.SessionPort.VTable) port_namespace.SessionPort {

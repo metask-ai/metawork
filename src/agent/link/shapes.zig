@@ -520,19 +520,19 @@ pub const PendingUiRequest = struct {
 // A capability the far side composes, and the inputs it needs to
 // ---------------------------------------------------------------------------
 
-/// Nothing crosses for an export's destination.
-///
-/// This used to be `CheckpointDestination`, carrying `task_id`, `generation`
-/// and `hard_bytes`. Working out what it actually had to contain emptied it:
-/// `task_id` is on the Session, `hard_bytes` is in the call's own `limits`,
-/// and `generation` was the wrong kind of field altogether -- the export
-/// assigns it, so a caller filling it in asserted something it could not
-/// know. What the execution half needs is composed over there, as
-/// `call_frame.BlobDestination`.
-///
-/// Kept as a comment rather than deleted silently, because
-/// `crossings.zig` records this type as owing a shape, and "its shape is
-/// nothing" is an answer that has to be readable somewhere.
+// Nothing crosses for an export's destination.
+//
+// This used to be `CheckpointDestination`, carrying `task_id`, `generation`
+// and `hard_bytes`. Working out what it actually had to contain emptied it:
+// `task_id` is on the Session, `hard_bytes` is in the call's own `limits`,
+// and `generation` was the wrong kind of field altogether -- the export
+// assigns it, so a caller filling it in asserted something it could not
+// know. What the execution half needs is composed over there, as
+// `call_frame.BlobDestination`.
+//
+// Kept as a comment rather than deleted silently, because
+// `crossings.zig` records this type as owing a shape, and "its shape is
+// nothing" is an answer that has to be readable somewhere.
 
 /// That a Run may deliver files, and nothing else.
 ///

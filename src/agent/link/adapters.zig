@@ -877,23 +877,27 @@ pub fn resultAdapter(comptime T: type) ?ResultAdapter(T) {
     // A union, so the two sides are stated rather than looped over: the
     // success carries a description that is itself a mirror, and the failure
     // is already plain data.
-    if (T == checkpoint.Outcome) return .{ .apply = struct {
-        fn apply(bindings: Bindings, value: T) ResultError!shapes.CheckpointOutcome {
-            return switch (value) {
-                .success => |success| .{ .success = .{
-                    .checkpoint = success.checkpoint,
-                    // As the Session answered it. `dispatch.exportCheckpoint`
-                    // is what replaces `caller_sink` with its own area,
-                    // because it is the half that opened the blob -- this
-                    // encoder only carries what it was given.
-                    .placement = success.placement,
-                    .description = try (comptime resultAdapter(checkpoint.Description).?)
-                        .apply(bindings, success.description),
-                } },
-                .failure => |failure| .{ .failure = failure },
-            };
-        }
-    }.apply };
+    if (T == checkpoint.Outcome) return .{
+        .apply = struct {
+            fn apply(bindings: Bindings, value: T) ResultError!shapes.CheckpointOutcome {
+                return switch (value) {
+                    .success => |success| .{
+                        .success = .{
+                            .checkpoint = success.checkpoint,
+                            // As the Session answered it. `dispatch.exportCheckpoint`
+                            // is what replaces `caller_sink` with its own area,
+                            // because it is the half that opened the blob -- this
+                            // encoder only carries what it was given.
+                            .placement = success.placement,
+                            .description = try (comptime resultAdapter(checkpoint.Description).?)
+                                .apply(bindings, success.description),
+                        },
+                    },
+                    .failure => |failure| .{ .failure = failure },
+                };
+            }
+        }.apply,
+    };
 
     return null;
 }

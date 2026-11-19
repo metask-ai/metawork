@@ -253,14 +253,16 @@ pub fn create(
         },
     );
     return switch (description) {
-        .success => |value| .{ .success = .{
-            .checkpoint = export_result,
-            // All this half can say: the bytes went through the sink it was
-            // handed. Whether that sink was the caller's writer or a stage
-            // area belongs to whoever composed it, and is replaced there.
-            .placement = .caller_sink,
-            .description = value,
-        } },
+        .success => |value| .{
+            .success = .{
+                .checkpoint = export_result,
+                // All this half can say: the bytes went through the sink it was
+                // handed. Whether that sink was the caller's writer or a stage
+                // area belongs to whoever composed it, and is replaced there.
+                .placement = .caller_sink,
+                .description = value,
+            },
+        },
         .failure => |failure| .{ .failure = failure },
     };
 }
