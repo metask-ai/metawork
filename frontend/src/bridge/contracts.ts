@@ -2015,6 +2015,7 @@ export type TaskProjectResult =
 
 export type TaskCreateReason =
   | "project_unavailable"
+  | "project_capacity"
   | "execution_unavailable"
   | "schedule_persistence_unavailable"
   | "schedule_persistence_failed"
@@ -2057,6 +2058,7 @@ export type TaskWorkspaceIntent =
       kind: "manual";
       workspaceId: string;
       expectedWorkspaceEpoch: string;
+      ensureProjectEntry?: boolean;
     };
 export type NewTaskModelSelectionIntent = {
   targetModelRef: ModelRef;

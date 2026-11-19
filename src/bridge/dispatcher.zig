@@ -3659,7 +3659,8 @@ pub const Dispatcher = struct {
             "automatic",
         )) automatic: {
             if (parsed.value.workspace.workspaceId != null or
-                parsed.value.workspace.expectedWorkspaceEpoch != null)
+                parsed.value.workspace.expectedWorkspaceEpoch != null or
+                parsed.value.workspace.ensureProjectEntry)
                 return error.InvalidBridgePayload;
             break :automatic .automatic;
         } else if (std.mem.eql(u8, parsed.value.workspace.kind, "manual")) manual: {
@@ -3672,6 +3673,7 @@ pub const Dispatcher = struct {
             break :manual .{ .manual = .{
                 .workspace_id = workspace_id,
                 .expected_epoch = workspace_epoch,
+                .ensure_project_entry = parsed.value.workspace.ensureProjectEntry,
             } };
         } else return error.InvalidBridgePayload;
         const selection = parsed.value.modelSelection;
@@ -3695,6 +3697,8 @@ pub const Dispatcher = struct {
         ) orelse return error.InvalidBridgePayload;
         const project_id = if (parsed.value.projectId) |id| try handlers.parseWireId(id) else null;
         if (project_id == 0) return error.InvalidBridgeId;
+        if (parsed.value.workspace.ensureProjectEntry and project_id != null)
+            return error.InvalidBridgePayload;
         const task_id = workbench.createTaskForWorkspace(workspace_request, project_id, model_selection, parsed.value.expectedSkillCatalogRevision, skill_selection_revision, .{ .interactive = approval_mode }) catch |err| {
             if (taskCreateRejection(err)) |reason|
                 return encodeTaskCreateResult(output, false, null, null, null, reason, if (err == error.SessionReleaseFailed) workbench.sessionReleaseFailureTaskId() else null, null);
@@ -3702,8 +3706,9 @@ pub const Dispatcher = struct {
         };
         const binding_epoch = try workbench.taskBindingEpoch(task_id);
         const mcp_authority = try workbench.taskMcpAuthority(task_id);
+        const actual_project_id = try workbench.taskProjectId(task_id);
         self.notifyCommitted();
-        return encodeTaskCreateResult(output, true, task_id, binding_epoch, mcp_authority, null, null, project_id);
+        return encodeTaskCreateResult(output, true, task_id, binding_epoch, mcp_authority, null, null, actual_project_id);
     }
 
     fn runTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -5951,6 +5956,7 @@ fn taskCreateRejection(err: anyerror) ?[]const u8 {
         error.ScheduledTaskPersistenceFailed => "schedule_persistence_failed",
         error.ScheduledTaskPersistenceOutcomeUnknown => "schedule_persistence_outcome_unknown",
         error.ProjectUnavailable => "project_unavailable",
+        error.ProjectCapacity => "project_capacity",
         error.WorkspaceEpochMismatch => "workspace_changed",
         error.UnknownWorkspace, error.WorkspaceUnavailable, error.WorkspaceIdentityUntrusted => "workspace_unavailable",
         error.WorkspaceRemovalInProgress => "workspace_removing",
@@ -8517,6 +8523,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const digits_end = std.mem.indexOfPos(u8, chosen, digits_start, "\"") orelse
         return error.TestUnexpectedResult;
     const workspace_id = try handlers.parseWireId(chosen[digits_start..digits_end]);
+    try std.testing.expectEqual(@as(u64, 1), workspace_id);
 
     var workspace_request_storage: [512]u8 = undefined;
     const refresh_workspace_request = try std.fmt.bufPrint(
@@ -8537,7 +8544,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     const stale_create = try std.fmt.bufPrint(
         &workspace_request_storage,
-        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"projectId\":null,\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"modelSelection\":{{\"targetModelRef\":{{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"}},\"expectedSourceGeneration\":\"99\",\"expectedCatalogGeneration\":\"4\"}},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
+        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"projectId\":null,\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\",\"ensureProjectEntry\":true}},\"modelSelection\":{{\"targetModelRef\":{{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"}},\"expectedSourceGeneration\":\"99\",\"expectedCatalogGeneration\":\"4\"}},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
         .{workspace_id},
     );
     const rejected_create = native_dispatcher.dispatch(
@@ -8550,6 +8557,10 @@ test "Dispatcher validates authority before domain calls and preserves committed
         rejected_create,
         "\"reason\":\"model_selection_changed\"",
     ) != null);
+    var workspaces: [1]product_control.WorkspaceProjection = undefined;
+    const after_rejection = try workbench.copyWorkspaceProjections(&workspaces);
+    try std.testing.expectEqual(@as(usize, 1), after_rejection.len);
+    try std.testing.expect(!after_rejection[0].project_entry);
 
     const automatic_create = native_dispatcher.dispatch(
         "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"projectId\":null,\"workspace\":{\"kind\":\"automatic\"},\"modelSelection\":{\"targetModelRef\":{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"},\"expectedSourceGeneration\":\"1\",\"expectedCatalogGeneration\":\"4\"},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}",
@@ -8565,13 +8576,16 @@ test "Dispatcher validates authority before domain calls and preserves committed
     var request_storage: [512]u8 = undefined;
     const request = try std.fmt.bufPrint(
         &request_storage,
-        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"projectId\":null,\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"modelSelection\":{{\"targetModelRef\":{{\"sourceId\":\"metask\",\"modelId\":\"fixture-model\"}},\"expectedSourceGeneration\":\"1\",\"expectedCatalogGeneration\":\"4\"}},\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
-        .{workspace_id},
+        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{s}}}",
+        .{std.mem.trim(u8, @embedFile("task_create_project.fixture"), "\r\n")},
     );
     var lost_response: [32]u8 = undefined;
     _ = native_dispatcher.dispatch(request, source, &lost_response);
     try std.testing.expect(workbench.currentRevision() > 0);
     try std.testing.expect(harness.wake_calls >= 2);
+    try std.testing.expectEqual(@as(?u64, workspace_id), try workbench.taskProjectId(1));
+    const after_creation = try workbench.copyWorkspaceProjections(&workspaces);
+    try std.testing.expect(after_creation[0].project_entry);
 
     const approval_requests = [_]struct { payload: []const u8, expected: []const u8 }{
         .{ .payload = "{\"id\":\"mode-noop\",\"command\":\"metawork.tasks.setApprovalMode\",\"payload\":{\"taskId\":\"1\",\"targetMode\":\"manual\",\"expectedBindingEpoch\":\"1\",\"expectedApprovalRevision\":\"1\"}}", .expected = "\"accepted\":true,\"taskId\":\"1\",\"approvalRevision\":\"1\",\"reason\":null" },

@@ -1239,6 +1239,50 @@ test("Skill import commands bind targets and revisions without source authority 
   ]);
 });
 
+test("Task creation can request a project for the chosen directory with the shared Host payload", async () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL("../src/bridge/task_create_project.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  const accepted = {
+    accepted: true,
+    taskId: "1",
+    projectId: "1",
+    bindingEpoch: "1",
+    mcpAuthority: { kind: "unavailable", selection: null },
+    reason: null,
+  };
+  let result = accepted;
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      assert.equal(command, "metawork.tasks.create");
+      assert.deepEqual(payload, fixture);
+      return result;
+    }),
+  });
+  const create = () =>
+    client.createTask(
+      fixture.workspace,
+      fixture.modelSelection,
+      fixture.expectedSkillCatalogRevision,
+      fixture.expectedSkillSelectionRevision,
+      fixture.approvalMode,
+      fixture.projectId,
+    );
+  assert.deepEqual(await create(), accepted);
+  result = {
+    accepted: false,
+    taskId: null,
+    projectId: null,
+    bindingEpoch: null,
+    mcpAuthority: null,
+    reason: "project_capacity",
+  };
+  assert.deepEqual(await create(), result);
+});
+
 test("Workspace opening sends only identity and epoch and decodes shared Host results", async () => {
   const fixture = JSON.parse(
     readFileSync(

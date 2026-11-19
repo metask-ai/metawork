@@ -147,6 +147,7 @@ pub const Error = StorageError || error{
     WorkspaceNotTrusted,
     WorkspaceCapacity,
     WorkspaceDirectoryCapacity,
+    ProjectCapacity,
     WorkspaceIdentityExhausted,
     WorkspaceIdentityUntrusted,
     WorkspaceOrderExhausted,
@@ -1009,6 +1010,13 @@ pub const Runtime = struct {
         const previous = record.project_entry;
         record.project_entry = entry;
         return previous;
+    }
+
+    /// Returns whether this operation installed a new entry.
+    pub fn ensureProjectEntry(self: *Runtime, id: u64, expected_epoch: u64) Error!bool {
+        const workspace = self.facts(id) orelse return error.UnknownWorkspace;
+        if (!workspace.project_entry and !self.manualCapacityAvailable()) return error.ProjectCapacity;
+        return !(try self.setProjectEntry(id, expected_epoch, true));
     }
 
     pub fn prepareRemoval(

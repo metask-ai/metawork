@@ -277,6 +277,7 @@ type MutationReason =
   | SendInputReason
   | TaskModelSelectionReason;
 function mutationReasonMessageId(reason: MutationReason): MessageId {
+  if (reason === "project_capacity") return "workspace.selection_capacity";
   return `mutation.reason.${reason}`;
 }
 type FileChangeDiffUiState =

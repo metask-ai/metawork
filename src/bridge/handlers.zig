@@ -396,6 +396,7 @@ pub const TaskWorkspaceIntent = struct {
     kind: []const u8,
     workspaceId: ?[]const u8 = null,
     expectedWorkspaceEpoch: ?[]const u8 = null,
+    ensureProjectEntry: bool = false,
 };
 pub const NewTaskModelSelection = struct {
     targetModelRef: struct {
