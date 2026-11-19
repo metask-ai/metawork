@@ -207,6 +207,81 @@ test "a port call crosses the process, and the execution half's Runtime answers 
     );
 }
 
+test "a Session the far side's Runtime refuses answers in that method's own words" {
+    // `create_session_route` is the first method whose result *puts something
+    // into* the execution half's table, so it is the first one with a
+    // reservation to get wrong. What this drives across a real process: the
+    // request, the dispatcher taking a slot before the call, the real
+    // AgentCore refusing these synthetic options, the refusal coming back as
+    // the method's own error rather than as a link failure, and the promised
+    // slot being given back.
+    //
+    // The refusal is the far side's, not a stand-in's. What is *not* covered
+    // here is the success path: a Session AgentCore accepts needs options it
+    // accepts, and the repository's own Session tests use a fake AgentCore
+    // for exactly that reason -- a fake this fixture cannot link, because
+    // `tests/support/lifecycle_fixture.zig` is written against `std.testing`
+    // and does not compile into an executable.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var workspace = std.testing.tmpDir(.{});
+    defer workspace.cleanup();
+    const root = try workspace.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+
+    var wake: Wake = .{};
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .spawn = .{ .explicit = &.{ fixture, execution_link_fixture.runtime_flag } },
+        .wake = wake.notifier(),
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer supervisor.deinit();
+
+    const runtime = supervisor.runtimePort();
+    const options: agent.SessionOpenOptions = .{
+        .task_id = 41,
+        .binding_epoch = 2,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "provider",
+                .protocol = .anthropic_messages,
+                .base_url = "https://example.invalid",
+                .model = "model",
+            },
+            .credential = "secret",
+        },
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{ .canonical_root = root, .trust = .{ .temporary = root } },
+        .canonical_user_home = root,
+        .workspace_epoch = "epoch",
+    };
+
+    // Three attempts against a two-slot table. If a refused create kept its
+    // promised slot, the third would come back `SessionCapacity` from the
+    // dispatcher instead -- so three identical answers is what shows the
+    // reservation is released rather than spent.
+    var attempt: usize = 0;
+    while (attempt < 3) : (attempt += 1) {
+        try std.testing.expectError(
+            error.CoreCallFailed,
+            runtime.createSessionRoute(options),
+        );
+    }
+
+    // And the link itself never concluded anything was wrong with it: a
+    // method's refusal is not a transport fault, which is the split the
+    // caller's half exists to keep.
+    try std.testing.expectEqual(agent_link.client.LinkFault.none, supervisor.fault());
+    _ = supervisor.stop();
+}
+
 test "a peer built from other sources is refused, and does not keep running" {
     const fixture = try fixturePath();
     defer allocator.free(fixture);

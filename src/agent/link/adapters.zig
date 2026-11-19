@@ -964,6 +964,32 @@ fn resultMirror(comptime T: type, comptime Mirror: type) ResultAdapter(T) {
     };
 }
 
+/// The methods whose result `dispatch.zig` encodes itself.
+///
+/// A result that *names a handle this half creates* cannot be encoded by a
+/// `resultAdapter`: the slot has to be reserved before the call that creates
+/// the thing, and an adapter only runs afterwards. `named_handles` says why
+/// that ordering is not optional -- undoing one of these means a call that can
+/// itself fail -- so the encoding lives beside the reservation, in the
+/// dispatcher, and this is what tells the counting below that it is not owed.
+///
+/// Named here rather than in `dispatch.zig` because this is the file that
+/// counts the return direction, and a count that calls an answered method
+/// owed is the thing this file keeps refusing to produce. It needs no guard:
+/// a name that no longer has a prong falls through to the generic path, whose
+/// `resultAdapter(...).?` fails the build.
+pub const reserved_prongs = [_][]const u8{ "create_session_route", "begin_run_outcome" };
+
+/// No `comptime { ... }` body: a `return` inside one breaks at runtime call
+/// sites, and this is read both by `dispatchable` at compile time and by a
+/// test that names a method as a value.
+pub fn encodedByProng(comptime name: []const u8) bool {
+    inline for (reserved_prongs) |listed| {
+        if (comptime std.mem.eql(u8, listed, name)) return true;
+    }
+    return false;
+}
+
 /// One return type still owed, with the same discipline as the argument side:
 /// never "nobody got to it yet".
 pub const OwedResult = struct {
@@ -997,6 +1023,11 @@ fn blockingResult(comptime owner: method.Owner, comptime name: []const u8) ?[]co
         const Returned = wire_types.Payload(@typeInfo(Fn).@"fn".return_type.?);
         if (Returned == void) return null;
         if (resultAdapter(Returned) != null) return null;
+        // Answered, just not by an adapter: the dispatcher encodes it beside
+        // the reservation the result depends on. Counting it as owed would be
+        // a number claiming something the build does not do, in the other
+        // direction.
+        if (encodedByProng(name)) return null;
         return @typeName(Returned);
     }
 }
@@ -1008,7 +1039,13 @@ test "the return direction is counted on its own, because it is not the mirror i
     // Most returns are plain data and need nothing, which is the same reason
     // most arguments needed nothing.
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 11), owed.len);
+    // Nine, down from eleven: the two route methods are answered by a
+    // dispatcher prong beside the reservation their result depends on, and
+    // counting an answered method as owed would be a number claiming
+    // something the build does not do -- the same fault in the other
+    // direction.
+    try testing.expectEqual(@as(usize, 9), owed.len);
+    try testing.expectEqual(@as(usize, 2), reserved_prongs.len);
 
     for (owed) |entry| {
         try testing.expect(entry.name.len > 0);
@@ -1023,14 +1060,22 @@ test "the return direction is counted on its own, because it is not the mirror i
     try testing.expect(encoded == .closed);
 }
 
-test "a return that puts something in a table is owed, not assumed trivial" {
+test "a return that puts something in a table has no adapter, and cannot have one" {
     // The asymmetry this direction exists for: reading a handle out of a
     // table is settled, but putting one in decides who owns the entry and
-    // when it leaves. Until that is decided these stay owed, because a
-    // half-decided owner is how a handle leaks or is released twice.
+    // when it leaves -- and the slot has to be promised *before* the call
+    // that creates what fills it. An adapter runs after, so these three have
+    // no adapter by construction rather than by omission.
     try testing.expect(resultAdapter(port.SessionRoute) == null);
     try testing.expect(resultAdapter(port.BeginRunOutcome) == null);
     try testing.expect(resultAdapter(port.SkillRestoreBorrow) == null);
+
+    // Two of them are answered anyway, by a prong that holds the reservation.
+    // The third is not, and the list is what tells the count apart from a
+    // guess.
+    try testing.expect(encodedByProng("create_session_route"));
+    try testing.expect(encodedByProng("begin_run_outcome"));
+    try testing.expect(!encodedByProng("borrow_skill_restore_inputs"));
 }
 
 // ---------------------------------------------------------------------------

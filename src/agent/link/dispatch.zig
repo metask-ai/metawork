@@ -121,7 +121,11 @@ pub fn dispatchable(comptime owner: method.Owner, comptime name: []const u8) boo
         const Fn = @typeInfo(@FieldType(owner.VTable(), name)).pointer.child;
         const Returned = wire_types.Payload(@typeInfo(Fn).@"fn".return_type.?);
         if (Returned == void) return true;
-        return adapters.resultAdapter(Returned) != null;
+        if (adapters.resultAdapter(Returned) != null) return true;
+        // A result that names a handle this half creates has no adapter and
+        // cannot have one: the slot is reserved before the call, and an
+        // adapter only runs after it. Those are encoded by a prong below.
+        return adapters.encodedByProng(name);
     }
 }
 
@@ -206,6 +210,10 @@ fn invokeOne(
 ) InvokeError![]u8 {
     if (comptime entry.transport == .stream) return error.NotACall;
     if (comptime hasProng(entry.name)) return exportCheckpoint(arena, bindings, request);
+    if (comptime std.mem.eql(u8, entry.name, "create_session_route"))
+        return createSessionRoute(arena, bindings, request);
+    if (comptime std.mem.eql(u8, entry.name, "begin_run_outcome"))
+        return beginRunOutcome(arena, bindings, request);
     if (comptime !dispatchable(entry.owner, entry.name)) return error.NotDispatchable;
 
     const VTable = comptime entry.owner.VTable();
@@ -246,6 +254,103 @@ fn invokeOne(
     if (comptime Returned == void) return successResponse(arena, void, {});
     const encoded = try (comptime adapters.resultAdapter(Returned).?).apply(bindings, value);
     return successResponse(arena, @TypeOf(encoded), encoded);
+}
+
+/// `create_session_route`, whose Session this half has to name.
+///
+/// The order is the whole content, and `adapters.named_handles` is where the
+/// reason is written: creating a Session cannot be undone except by closing
+/// it, and a close can itself fail. So the slot and the object are both in
+/// hand *before* the call. A table that filled up afterwards would leave a
+/// Session open on this side with no name the caller could reach it by --
+/// neither deliverable nor droppable -- and reserving first turns that into a
+/// refusal while there is still nothing to deliver.
+///
+/// The entry is allocated from this half's own allocator rather than the
+/// call's arena, because it outlives the response: the arena is reset the
+/// moment the bytes are written, and the table holds the object until the
+/// caller releases it or the process ends.
+fn createSessionRoute(
+    arena: std.mem.Allocator,
+    bindings: adapters.Bindings,
+    request: Request,
+) InvokeError![]u8 {
+    const Fn = comptime @typeInfo(
+        @FieldType(port.RuntimePort.VTable, "create_session_route"),
+    ).pointer.child;
+    const Arguments = comptime wire_types.Request(Fn);
+    const wired = try payload.decodeExact(Arguments, arena, request.arguments);
+    const options = try (comptime adapters.parameterAdapter(
+        contract.surface.SessionOpenOptions,
+    ).?).apply(bindings, wired[0]);
+
+    var kept = false;
+    const held = try bindings.allocator.create(run_tools.HeldSession);
+    defer if (!kept) bindings.allocator.destroy(held);
+    const reservation = try bindings.sessions.reserve();
+    defer if (!kept) std.debug.assert(bindings.sessions.releaseReservation(reservation));
+
+    const route = bindings.runtime.createSessionRoute(options) catch |err|
+        return failureResponse(arena, err);
+
+    // The identity Product gave with the options, not one invented here: a
+    // checkpoint this half stages without being asked carries it, and a zero
+    // would make such a record indistinguishable from a real one.
+    held.* = run_tools.HeldSession.initFor(route.session, .{
+        .task_id = options.task_id,
+        .binding_epoch = options.binding_epoch,
+    });
+    std.debug.assert(bindings.sessions.fill(reservation, held) != null);
+    kept = true;
+    return successResponse(arena, shapes.SessionRoute, .{
+        .route_id = route.id,
+        .session = reservation.id,
+    });
+}
+
+/// `begin_run_outcome`, whose Run has to be named for the same reason, more
+/// sharply: a begun Run is a linear value that must execute and deinitialize
+/// exactly once, and `RunPort.deinit` asserts it executed. A Run begun and
+/// then not namable is neither.
+///
+/// The failure arm takes nothing and names nothing, so the reservation it did
+/// not need is given back by the same `defer` that would have released it on
+/// a refusal.
+fn beginRunOutcome(
+    arena: std.mem.Allocator,
+    bindings: adapters.Bindings,
+    request: Request,
+) InvokeError![]u8 {
+    const Fn = comptime @typeInfo(
+        @FieldType(port.SessionPort.VTable, "begin_run_outcome"),
+    ).pointer.child;
+    const Arguments = comptime wire_types.Request(Fn);
+    const wired = try payload.decodeExact(Arguments, arena, request.arguments);
+    const receiver = (try resolveReceiver(bindings, request)) orelse return error.UnknownHandle;
+
+    var kept = false;
+    const begun = try bindings.allocator.create(adapters.BegunRun);
+    defer if (!kept) bindings.allocator.destroy(begun);
+    const reservation = try bindings.runs.reserve();
+    defer if (!kept) std.debug.assert(bindings.runs.releaseReservation(reservation));
+
+    switch (receiver.session.port.beginRunOutcome(wired[0])) {
+        .failure => |failure| return successResponse(arena, shapes.BeginRunOutcome, .{
+            .failure = shapes.BeginRunFailure.from(failure),
+        }),
+        .run => |value| {
+            // Consumes the port: `fromPort` takes the Run's base lease with
+            // it, so the value handed in must not be used afterwards.
+            begun.* = adapters.BegunRun.fromPort(value);
+            std.debug.assert(bindings.runs.fill(reservation, begun) != null);
+            kept = true;
+            return successResponse(arena, shapes.BeginRunOutcome, .{ .run = .{
+                .run_id = begun.run_id,
+                .generation = begun.generation,
+                .run = reservation.id,
+            } });
+        },
+    }
 }
 
 /// `export_checkpoint`, whose sink this half opens from the store.
@@ -1131,12 +1236,21 @@ test "how much of the surface this build answers is counted, not claimed" {
     // number kept here: arguments still owed, results still owed.
     try testing.expect(answered < callable);
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 38), answered);
+    try testing.expectEqual(@as(usize, 40), answered);
 
-    // One of those is answered by a prong rather than by the generic chain,
-    // and `dispatchable` says so: `export_checkpoint`'s capability is built
-    // here, so asking `argumentsRebuildable` about it would report "no"
-    // about a method this half does answer.
+    // Three of those are answered by a prong rather than by the generic
+    // chain, for two different reasons, and `dispatchable` has to know both.
+    // `export_checkpoint`'s capability is built here, so asking
+    // `argumentsRebuildable` about it would report "no" about a method this
+    // half does answer.
     try testing.expect(comptime !adapters.argumentsRebuildable(.session, "export_checkpoint"));
     try testing.expect(comptime dispatchable(.session, "export_checkpoint"));
+
+    // The two route methods have no result adapter and cannot have one -- the
+    // slot is reserved before the call -- so asking only `resultAdapter`
+    // would report "no" about them too.
+    try testing.expect(comptime adapters.resultAdapter(port.SessionRoute) == null);
+    try testing.expect(comptime dispatchable(.runtime, "create_session_route"));
+    try testing.expect(comptime adapters.resultAdapter(port.BeginRunOutcome) == null);
+    try testing.expect(comptime dispatchable(.session, "begin_run_outcome"));
 }

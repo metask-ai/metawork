@@ -225,12 +225,6 @@ const not_forwarded = [_]NotForwarded{
     // instead, and a test reads it.
     .{
         .owner = .runtime,
-        .name = "create_session_route",
-        .why = "`adapters.owedResults` owes `port.SessionRoute`: the Session has to be put " ++
-            "into the execution half's table, which needs the reservation path",
-    },
-    .{
-        .owner = .runtime,
         .name = "query_skill_catalog",
         .why = "`adapters.owedResults` owes `catalog.Acquisition`, whose lease is put into " ++
             "a table; `named_handles` classifies it irreversible",
@@ -267,12 +261,6 @@ const not_forwarded = [_]NotForwarded{
         .name = "capture_restore_inputs",
         .why = "`adapters.owedResults` owes `port.SessionRestoreInputs`, which names two " ++
             "captured capabilities",
-    },
-    .{
-        .owner = .session,
-        .name = "begin_run_outcome",
-        .why = "`adapters.owedResults` owes `port.BeginRunOutcome`: a begun Run is an entry " ++
-            "in the execution half's `runs` table, taken before the call that begins it",
     },
 };
 
@@ -1230,6 +1218,9 @@ const Peer = struct {
     dir: std.Io.Dir,
     slots: *pending.Table,
     sessions: *handle_table.Table(run_tools.HeldSession),
+    /// The Runtime a `runtime` method lands on. Quiet unless a test needs an
+    /// answer, so a test drives exactly what it says it drives.
+    runtime: port.RuntimePort = port.RuntimePort.quiet,
     answered: usize = 0,
     /// The frame kind the request arrived on. Recorded rather than assumed:
     /// the transport column is only a design claim until something reads
@@ -1295,7 +1286,7 @@ const Peer = struct {
     fn bindings(self: *Peer) adapters.Bindings {
         return .{
             .allocator = testing.allocator,
-            .runtime = port.RuntimePort.quiet,
+            .runtime = self.runtime,
             .store = call_frame.BlobStore.empty,
             .sessions = self.sessions,
             .runs = undefined,
@@ -1306,6 +1297,168 @@ const Peer = struct {
         };
     }
 };
+
+/// A Runtime that answers `create_session_route` and nothing else.
+///
+/// Built over the quiet vtable so every other method keeps the quiet answer:
+/// a stand-in that answered more than the test drives would be a stand-in
+/// whose behaviour nobody states.
+const FakeRuntime = struct {
+    vtable: port.RuntimePort.VTable = undefined,
+    session_vtable: port.SessionPort.VTable = undefined,
+    recorder: Recorder = .{},
+    opened: usize = 0,
+    opened_for: ?run_tools.SessionIdentity = null,
+
+    const route_id: u64 = 77;
+
+    fn portValue(self: *FakeRuntime) port.RuntimePort {
+        self.vtable = port.RuntimePort.quiet.vtable.*;
+        self.vtable.create_session_route = createSessionRoute;
+        return .{ .context = self, .vtable = &self.vtable };
+    }
+
+    fn createSessionRoute(
+        context: ?*anyopaque,
+        options: surface.SessionOpenOptions,
+    ) Allocating!port.SessionRoute {
+        const self: *FakeRuntime = @ptrCast(@alignCast(context.?));
+        self.opened += 1;
+        self.opened_for = .{
+            .task_id = options.task_id,
+            .binding_epoch = options.binding_epoch,
+        };
+        return .{
+            .id = route_id,
+            .session = self.recorder.sessionPortFor(&self.session_vtable),
+        };
+    }
+};
+
+const test_open_options: surface.SessionOpenOptions = .{
+    .task_id = 11,
+    .binding_epoch = 3,
+    .model_binding = .{
+        .image_capabilities = &.{},
+        .target = .{
+            .provider_id = "provider",
+            .protocol = .anthropic_messages,
+            .base_url = "https://example.invalid",
+            .model = "model",
+        },
+        .credential = "secret",
+    },
+    .permission_mode = .default,
+    .shell_policy = .unrestricted,
+    .workspace = .{ .canonical_root = "root", .trust = .explicitly_trusted },
+    .canonical_user_home = "home",
+    .workspace_epoch = "epoch",
+};
+
+test "a Session created on the far side comes back as a port this half can name" {
+    // The first result that *puts something into* the execution half's table
+    // rather than reading one out of it. What has to hold end to end: the
+    // slot is promised before the create, the entry carries the identity
+    // Product gave, and what the caller receives is a `SessionPort` whose
+    // context names that entry -- not a pointer into the other process.
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "link", .{ .read = true, .truncate = true });
+    defer file.close(io);
+
+    var queue: channel.Outbound = undefined;
+    try queue.start(io, testing.allocator, file, .{});
+    defer queue.stop();
+    var slots: pending.Table = undefined;
+    try slots.init(io, testing.allocator, 4);
+    defer slots.deinit();
+    const half = try testing.allocator.create(client.Client);
+    defer testing.allocator.destroy(half);
+    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    defer half.deinit();
+
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2);
+    defer sessions.deinit();
+    var runtime_fake: FakeRuntime = .{};
+    var peer: Peer = .{
+        .io = io,
+        .dir = tmp.dir,
+        .slots = &slots,
+        .sessions = &sessions,
+        .runtime = runtime_fake.portValue(),
+    };
+    var thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+
+    const runtime: port.RuntimePort = .{ .context = half, .vtable = &runtimePort };
+    const route = try runtime.createSessionRoute(test_open_options);
+    thread.join();
+
+    try testing.expectEqual(@as(usize, 1), runtime_fake.opened);
+    try testing.expectEqual(FakeRuntime.route_id, route.id);
+
+    // The entry exists on the far side and carries the identity the options
+    // gave. A zero there would make a checkpoint this half stages without
+    // being asked indistinguishable from a real record.
+    const entry_id = try client.Client.receiverFrom(route.session.context);
+    const held = sessions.resolve(entry_id) orelse return error.MissingEntry;
+    try testing.expectEqual(@as(u64, 11), held.identity.task_id);
+    try testing.expectEqual(@as(u64, 3), held.identity.binding_epoch);
+    try testing.expect(held.identity.valid());
+
+    // And the port handed back is this half's own stub table, reached through
+    // a box -- the only thing a port value may carry across a process.
+    try testing.expectEqual(half.vtables.session, route.session.vtable);
+    try testing.expectEqual(@as(usize, 1), half.boxes.liveCount());
+    try testing.expectEqual(@as(usize, 0), slots.liveCount());
+
+    const taken = sessions.take(entry_id) orelse return error.MissingEntry;
+    testing.allocator.destroy(taken);
+}
+
+test "a create the far side refuses leaves no promised slot behind" {
+    // The reservation is the whole mechanism, so the path where it is given
+    // back matters as much as the path where it is filled. A refused create
+    // must leave the table exactly as it was -- otherwise the first few
+    // failures would quietly spend the capacity that the next success needs.
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "link", .{ .read = true, .truncate = true });
+    defer file.close(io);
+
+    var queue: channel.Outbound = undefined;
+    try queue.start(io, testing.allocator, file, .{});
+    defer queue.stop();
+    var slots: pending.Table = undefined;
+    try slots.init(io, testing.allocator, 4);
+    defer slots.deinit();
+    const half = try testing.allocator.create(client.Client);
+    defer testing.allocator.destroy(half);
+    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    defer half.deinit();
+
+    // One slot, so a reservation that was not given back is visible as the
+    // table still counting it live.
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
+    defer sessions.deinit();
+    var peer: Peer = .{ .io = io, .dir = tmp.dir, .slots = &slots, .sessions = &sessions };
+    var thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+
+    const runtime: port.RuntimePort = .{ .context = half, .vtable = &runtimePort };
+    // The quiet Runtime refuses with its own words, and that is what has to
+    // come back: the method's error, not a link failure.
+    try testing.expectError(error.SessionCapacity, runtime.createSessionRoute(test_open_options));
+    thread.join();
+
+    // Nothing was spent on either side. A reservation held after a refusal
+    // would quietly consume the capacity the next success needs, and
+    // `Table.deinit` asserts an empty table, so a leak here would also take
+    // the test down at the `defer` rather than here.
+    try testing.expectEqual(@as(usize, 0), sessions.live);
+    try testing.expectEqual(@as(usize, 0), half.boxes.liveCount());
+    try testing.expectEqual(@as(usize, 0), slots.liveCount());
+}
 
 test "a call through the port Product already uses reaches a real Session" {
     const io = testing.io;
@@ -1773,7 +1926,7 @@ test "how much of the surface this build answers end to end, counted across both
     // measurement and not the prose. So the count stays in the assertions and
     // the prose stops repeating it.
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 38), end_to_end);
+    try testing.expectEqual(@as(usize, 40), end_to_end);
     try testing.expectEqual(not_forwarded.len, callable - end_to_end);
 
     // And the execution half is the binding constraint: every method the
@@ -1783,7 +1936,7 @@ test "how much of the surface this build answers end to end, counted across both
     // have diverged and the shorter one would start looking like the answer.
     try testing.expectEqual(exec_gap, callable - end_to_end);
     try testing.expect(caller_gap <= exec_gap);
-    try testing.expectEqual(@as(usize, 38), comptime dispatch.dispatchableCount());
+    try testing.expectEqual(@as(usize, 40), comptime dispatch.dispatchableCount());
 }
 
 test "the list says how many of its entries belong to which half" {
@@ -1797,7 +1950,7 @@ test "the list says how many of its entries belong to which half" {
 
     // The rest are ones this half cannot send or read either, which is the
     // only other way to be on the list.
-    try testing.expectEqual(@as(usize, 12), not_forwarded.len);
-    try testing.expectEqual(@as(usize, 9), exec_only);
+    try testing.expectEqual(@as(usize, 10), not_forwarded.len);
+    try testing.expectEqual(@as(usize, 7), exec_only);
     try testing.expectEqual(@as(usize, 3), not_forwarded.len - exec_only);
 }
