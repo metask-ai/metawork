@@ -314,8 +314,14 @@ pub const Error = error{
     /// execution link numbers this in `error_code.zig`; in process nothing
     /// produces it, because in process there is no other half to lose.
     DependencyUnreachable,
-    /// The half that performs this call was reached, and has no room right
-    /// now.
+    /// This call was not performed, and asking again is worth something.
+    ///
+    /// Nothing is claimed about the far side, deliberately. The producer is
+    /// the link's own send path -- a full outbound queue, a full handle-box
+    /// table -- and at that point the request has not left this half, so
+    /// whether the peer is there, idle or busy is not a fact anyone has. What
+    /// the caller can rely on is the pair that matters to it: the far side's
+    /// state is unchanged, and a later attempt may get through.
     ///
     /// The sibling of `DependencyUnreachable`, and separate from it for one
     /// reason: the two call for opposite behaviour. Gone means stop asking,

@@ -125,19 +125,66 @@ pub const Client = struct {
     }
 };
 
-/// Why a call did not produce an answer. Never returned to Product as such:
-/// each stub turns it into what its own return type can say.
-pub const Failure = error{
+/// Why a call did not produce an answer, split by whether the request had
+/// already been handed to the peer. Never returned to Product as such: each
+/// stub turns it into what its own return type can say.
+///
+/// The split is the whole reason these are two sets. Before the handover the
+/// request is still this half's to throw away: nothing was performed, the far
+/// side's state is unchanged, and "it did not happen, ask again" is a true
+/// thing to say. After the handover the request is the peer's and may already
+/// have been carried out, so a failure here is not a refusal of the call --
+/// it is the loss of its answer. Telling the caller it did not happen would
+/// be a wrong answer shaped exactly like a right one: an input submitted
+/// twice, a Session reported reusable after it was closed.
+///
+/// So `AfterHandover` has no `OutOfMemory` and no `Busy`, and that absence is
+/// the mechanism rather than a note. `collect` below is declared to return
+/// only this set, so an allocation inside it cannot be `try`-ed out: the
+/// compiler demands it be named as `AnswerLost` instead. A stub reading
+/// `AnswerLost` therefore knows, from the type and not from a convention,
+/// that it must not answer "no room, ask again".
+pub const BeforeHandover = error{
     /// Nothing is there, or nothing will be.
     Unreachable,
     /// There is someone, but not room right now.
     Busy,
+} || std.mem.Allocator.Error;
+
+pub const AfterHandover = error{
+    /// The link closed with the answer still outstanding. The request may
+    /// have been performed first; this says only that no answer is coming.
+    Unreachable,
     /// An answer arrived that this build does not encode, which means the
     /// peer is not this build.
     Unreadable,
+    /// An answer arrived and this half could not keep it.
+    ///
+    /// The peer has already done the work. What failed is an allocation on
+    /// the way to reading its answer, so the honest fact is that the answer
+    /// is gone, not that the call was refused -- and not that this half ran
+    /// out of memory *doing* it, which is what the method's own `OutOfMemory`
+    /// would say.
+    AnswerLost,
 };
 
-pub const CallError = Failure || std.mem.Allocator.Error;
+pub const CallError = BeforeHandover || AfterHandover;
+
+comptime {
+    // The subtraction above is load-bearing, so it is checked rather than
+    // trusted to survive the next edit. Either member here would let a stub
+    // answer "this did not happen" for a request the peer may have carried
+    // out.
+    for (@typeInfo(AfterHandover).error_set.?) |member| {
+        if (std.mem.eql(u8, member.name, "OutOfMemory") or
+            std.mem.eql(u8, member.name, "Busy")) @compileError(
+            "client.AfterHandover must not contain " ++ member.name ++
+                ": it is the set for failures that happen once the request is " ++
+                "the peer's, and both of those are read by `stubs.zig` as " ++
+                "\"nothing was performed, ask again\"",
+        );
+    }
+}
 
 /// Sends one request and reads the answer.
 ///
@@ -191,6 +238,9 @@ pub fn call(
         client.pending.discardUnsent(correlation);
         return err;
     }) {
+        // The handover. Everything above this line failed with the request
+        // still in hand; everything below is `collect`'s, whose set cannot
+        // say that nothing happened.
         .queued => {},
         // Nothing was sent, so nothing is owed: the slot goes back now rather
         // than being held for an answer that cannot come.
@@ -204,11 +254,27 @@ pub fn call(
         },
     }
 
+    return collect(owner, name, client, arena, correlation);
+}
+
+/// Waits for the answer to a request the peer already has, and reads it.
+///
+/// Split out from `call` so that its error set is a declaration rather than a
+/// comment: `AfterHandover` has no `OutOfMemory`, so the allocation below
+/// cannot be `try`-ed and the compiler is what keeps a lost answer from being
+/// reported as a call that did not happen.
+fn collect(
+    comptime owner: method.Owner,
+    comptime name: []const u8,
+    client: *Client,
+    arena: std.mem.Allocator,
+    correlation: pending.Correlation,
+) AfterHandover!Answer(owner, name) {
     switch (client.pending.claim(correlation)) {
         .link_closed => return error.Unreachable,
         .response => |bytes| {
             defer client.pending.allocator.free(bytes);
-            const held = try arena.dupe(u8, bytes);
+            const held = arena.dupe(u8, bytes) catch return error.AnswerLost;
             const outcome = envelope.decodeResponse(held) catch return error.Unreadable;
             return switch (outcome) {
                 .failure => |err| .{ .failed = err },
@@ -218,6 +284,14 @@ pub fn call(
                         if (value.len != 0) return error.Unreadable;
                         break :blk .{ .returned = {} };
                     }
+                    // `decodeExact` allocates, and its allocation failure
+                    // arrives here as `Unreadable` along with every other way
+                    // it can refuse. That is an existing conflation and it
+                    // lands on the same side as `AnswerLost` would -- both are
+                    // answers this half could not use -- so nothing is wrong
+                    // today; it is named here because the two facts being one
+                    // value is worth finding deliberately rather than by
+                    // accident.
                     const decoded = payload.decodeExact(Wired, arena, value) catch
                         return error.Unreadable;
                     break :blk .{ .returned = decoded };
@@ -278,16 +352,16 @@ test "a request carries its method, its receiver and its arguments" {
 
 test "the method's failure and the call's failure are different things" {
     // A `surface.Error` is an answer: the far side was reached and said no.
-    // The three in `Failure` are about not having been answered at all, and
-    // no stub may report one as the other.
+    // The members of `CallError` are about not having been answered at all,
+    // and no stub may report one as the other.
     const Session = Answer(.session, "set_model");
     try testing.expectEqual(void, @FieldType(Session, "returned"));
     try testing.expectEqual(error_code.LinkError, @FieldType(Session, "failed"));
 
-    // And they stay apart by construction: no member of `Failure` is a
+    // And they stay apart by construction: no member of `CallError` is a
     // member of the contract's set, so a stub cannot hand one to Product by
     // accident -- it has to translate, which is where the decision belongs.
-    inline for (@typeInfo(Failure).error_set.?) |member| {
+    inline for (@typeInfo(CallError).error_set.?) |member| {
         for (error_code.entries) |entry| {
             try testing.expect(!std.mem.eql(u8, entry.name, member.name));
         }

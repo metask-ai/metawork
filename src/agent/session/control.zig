@@ -162,14 +162,18 @@ pub const InputSubmission = union(enum) {
     rejected: InputRejection,
     /// A dependency contract failure cannot be reported as a refusal.
     unknown,
-    /// The dependency was reached and had no room to take this input.
+    /// This input was not submitted, and submitting it again is worth
+    /// something.
     ///
-    /// Separate from `unknown` because the two ask for opposite things: this
-    /// one says submit it again, `unknown` says stop. No member of
-    /// `InputRejection` means it either -- `resource_limit` is the Session's
-    /// own input ledger and `not_ready` is a statement about the Session's
-    /// state, and both would be false of a Session sitting idle behind a
-    /// full link.
+    /// Says nothing about the Session, which is the point: the link refused
+    /// the send before it left this half, so nobody established whether the
+    /// Session is busy, idle or there at all. Separate from `unknown` because
+    /// the two ask for opposite things -- this one says submit it again,
+    /// `unknown` says stop, because under `unknown` it may already have been
+    /// taken. No member of `InputRejection` means it either:
+    /// `resource_limit` is the Session's own input ledger and `not_ready` is
+    /// a statement about the Session's state, and both would be false of a
+    /// Session sitting idle behind a full link.
     dependency_busy,
 
     /// The answer when the dependency cannot be reached at all. Named here
@@ -178,11 +182,11 @@ pub const InputSubmission = union(enum) {
     /// spelling, and so a forwarding stub has one place to read it from.
     pub const link_unreachable: std.meta.Tag(@This()) = .unknown;
 
-    /// The answer when the dependency was reached and had no room. Named
-    /// here for the same reason as the one above, and kept apart from it
-    /// because a caller told the wrong one either stops asking about input
-    /// that would have been taken, or keeps asking for input that will never
-    /// be taken.
+    /// The answer when the input was not submitted and can be submitted
+    /// again. Named here for the same reason as the one above, and kept apart
+    /// from it because a caller told the wrong one either stops asking about
+    /// input that was never taken, or submits a second time input the Session
+    /// may already hold.
     pub const link_busy: std.meta.Tag(@This()) = .dependency_busy;
 };
 

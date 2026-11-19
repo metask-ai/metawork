@@ -260,7 +260,7 @@ pub const RunControlLease = struct {
 /// `src/product/task/runtime.zig` switches on it exhaustively, which is the
 /// whole value of a narrow set, and a method that can be called across a
 /// process boundary has to be able to say that the boundary is gone -- and,
-/// separately, that it was reached and had no room. Neither Session-side
+/// separately, that the call was not performed and can be made again. Neither
 /// member means either one -- `NoSuchCompact` would claim the compact was
 /// already over, `SessionClosing` that the Session is winding down -- and the
 /// exhaustive switch is what makes the caller say which side it chooses
@@ -504,7 +504,8 @@ pub const RuntimePort = struct {
         capacity_reached,
         mcp_busy,
         unavailable,
-        /// Reached, and no room on the link right now.
+        /// The question was not put to the runtime, and asking again is worth
+        /// something.
         ///
         /// Not `capacity_reached`: that one is this runtime's own restore
         /// capacity, and Product turns it into `error.SessionCapacity` --

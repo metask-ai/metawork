@@ -162,7 +162,8 @@ fn derivedBusy(comptime owner: method.Owner, comptime name: []const u8) ?Returns
     return null;
 }
 
-/// What this stub answers when the far side was reached and had no room.
+/// What this stub answers when the link refused the send and the call was
+/// therefore not performed.
 ///
 /// Three outcomes, and each is a different claim about the method:
 ///
@@ -464,7 +465,7 @@ fn notForwarded(comptime owner: method.Owner, comptime name: []const u8) noretur
 /// cancellation's `DependencyUnreachable` into `.session_closing` and stops
 /// following that compact -- so a cancellation refused because the outbound
 /// queue was full, reported as unreachable, would abandon a compact that is
-/// still running. `client.Failure`'s own comment says "nobody is there" and
+/// still running. `client.BeforeHandover`'s comment says "nobody is there" and
 /// "not right now" are two facts; this is where that stops being a comment.
 ///
 /// The split is by whether the condition is permanent, because that is what
@@ -495,8 +496,8 @@ const Reason = enum {
     /// Permanent: no retry would reach a different outcome, so the gone
     /// answer leads the caller to the same action the truth would.
     gone,
-    /// Transient: the far side was reached, or would have been, and the
-    /// correct behaviour is to ask again.
+    /// Transient: the link refused the send, so the call was not performed
+    /// and the correct behaviour is to ask again.
     no_room,
     /// Transient as well, and separate because most of the surface can
     /// already say it. `Allocating!T` is `surface.Error` plus
@@ -504,6 +505,14 @@ const Reason = enum {
     /// existing answer in the method's own set -- and it is not a statement
     /// about the far side, which `LinkBusy` is.
     out_of_memory,
+    /// The request is the peer's and may already have been carried out; what
+    /// was lost is the answer. Neither of the two above is true of it --
+    /// nothing can be said about whether it happened, and asking again could
+    /// submit the same input twice -- so it cannot share their treatment.
+    /// `client.AfterHandover` is where the phase is a declared fact rather
+    /// than a convention: it has no `OutOfMemory` and no `Busy`, so the
+    /// compiler is what keeps this case out of them.
+    answer_lost,
 };
 
 /// Split out from `linkAnswer` so it can be tested over every member of the
@@ -525,6 +534,11 @@ fn stoppedBy(err: Stopped) Reason {
         // Room on this side. Grouped with the two above until it was worth
         // saying that most methods can report it themselves.
         error.OutOfMemory => .out_of_memory,
+        // The peer has the request, so nothing here may say it did not
+        // happen. Lands with the gone answers, which is where `Unreadable`
+        // -- the same fact with a different cause, an answer that arrived and
+        // could not be used -- already lands.
+        error.AnswerLost => .answer_lost,
     };
 }
 
@@ -565,6 +579,20 @@ fn linkAnswer(
 ) Returns(owner, name) {
     return switch (stoppedBy(err)) {
         .gone => gone,
+        // The peer has the request and may have carried it out. The gone
+        // answer is the restricting one for every method here by
+        // construction, and it is already where `Unreadable` lands -- an
+        // answer that arrived and could not be used, which is this fact with
+        // a different cause. What it is *not* is exact: for an error union
+        // the gone answer is `DependencyUnreachable`, whose own words claim
+        // the far side was not reached, and this half did reach it. That
+        // overstatement is older than this arm and shared with `Unreadable`;
+        // it belongs to the disconnect step, which is where "the answer is
+        // lost" needs vocabulary of its own. A panic would be the only
+        // alternative with no overstatement in it, and killing the Host for a
+        // transient allocation failure is the failure mode this whole issue
+        // exists to remove.
+        .answer_lost => gone,
         .out_of_memory => if (comptime derivedOutOfMemory(owner, name)) |own|
             own
         else
@@ -777,18 +805,27 @@ const gone_begin_run: port.BeginRunOutcome = .{ .failure = .{
 
 /// `session.close_outcome` again, for the other fact. Same arm, and two
 /// things differ: the `err`, which is what the caller reads to tell them
-/// apart, and the disposition. `.poisoned` would be false here -- the call
-/// never left this half, so nothing happened to the Session and `.reusable`
-/// is the known fact rather than the permissive guess. Answering `.poisoned`
-/// for a full queue would destroy a healthy Session, which is the whole
-/// reason these two facts are kept apart.
+/// apart, and the disposition.
+///
+/// `.poisoned` would be false here, and what makes that safe to say is a
+/// type and not a hope. This value is only ever reached through
+/// `Reason.no_room`, whose errors are `client.BeforeHandover`'s --
+/// `error.Busy` from the outbound queue and `error.BoxCapacity` from this
+/// half's box table, both raised before `trySubmit` reported `.queued`. The
+/// set that covers everything after that point does not contain either of
+/// them, so the compiler is what keeps this value away from a call the peer
+/// may have carried out. Nothing happened to the Session, `.reusable` is the
+/// known fact rather than the permissive guess, and answering `.poisoned`
+/// for a full queue would destroy a healthy Session.
 const busy_close: surface.CloseOutcome = .{ .failure = .{
     .err = error.LinkBusy,
     .session_disposition = .reusable,
 } };
 
 /// `session.begin_run_outcome` again, for the same reason and with the same
-/// two differences: nothing was begun and nothing was touched.
+/// two differences, and resting on the same typed fact: nothing was begun
+/// and nothing was touched, because this value cannot be reached for a
+/// request the peer already has.
 const busy_begin_run: port.BeginRunOutcome = .{ .failure = .{
     .err = error.LinkBusy,
     .session_disposition = .reusable,
@@ -1552,7 +1589,7 @@ test "capacity is never answered as a gone link" {
     // exhaustive, so this is about the *list here* staying complete: a new
     // way for a call to stop would otherwise be classified in code and
     // unexamined in the suite.
-    try testing.expectEqual(@as(usize, 7), @typeInfo(Stopped).error_set.?.len);
+    try testing.expectEqual(@as(usize, 8), @typeInfo(Stopped).error_set.?.len);
 }
 
 test "a Stop travels on the transport it is registered with" {
@@ -1654,7 +1691,7 @@ test "a method the far side refuses comes back as that method's own error" {
 
     // Longer than the recorder will take, so the Session itself refuses --
     // and what comes back has to be that refusal and not a link failure,
-    // which is the split `client.Failure` exists to keep.
+    // which is the split `client.CallError` exists to keep.
     const too_long = "m" ** 100;
     try testing.expectError(error.CoreCallFailed, session.setModel(too_long));
     thread.join();
@@ -1747,7 +1784,7 @@ test "every method has exactly one way its gone answer can be written" {
     try testing.expectEqual(chosen, accounted);
 }
 
-test "the busy answer comes from one place too, and the panic is left to the five that owe one" {
+test "the busy answer comes from one place too, and the panic is left to the ones that owe one" {
     @setEvalBranchQuota(10_000_000);
     // The sibling of the partition above, for the other fact. Four groups,
     // and a method in two of them would be a method whose "not now" could
@@ -1787,7 +1824,7 @@ test "the busy answer comes from one place too, and the panic is left to the fiv
     // The five that still have no way to say it. This number is what the next
     // step has to move, and it is the one the suite will notice changing.
     try testing.expectEqual(unreachability.pressure_pending.len, panics);
-    try testing.expectEqual(@as(usize, 5), panics);
+    try testing.expectEqual(@as(usize, 6), panics);
 
     // Every method that panics is named as pending, and no method that can
     // answer is. The compile-time guards in `noRoom` enforce the second half
@@ -1831,13 +1868,82 @@ test "a close refused for room does not poison the Session" {
     try testing.expect(derivedBusy(.session, "begin_run_outcome") == null);
 }
 
+test "a lost answer is not a call that did not happen" {
+    // The phase is a declared fact rather than a convention. The set for
+    // failures that happen once the request is the peer's has neither member
+    // a stub reads as "nothing happened", so `client.collect` cannot `try` an
+    // allocation out of itself and `inbound.received` cannot either -- the
+    // compiler is what holds the rule, and these four assertions are what
+    // keep the sets from quietly gaining a member back.
+    try testing.expect(!hasMember(client.AfterHandover, "OutOfMemory"));
+    try testing.expect(!hasMember(client.AfterHandover, "Busy"));
+    try testing.expect(!hasMember(inbound.AfterAnswer, "OutOfMemory"));
+    try testing.expect(hasMember(client.BeforeHandover, "OutOfMemory"));
+    try testing.expect(hasMember(client.BeforeHandover, "Busy"));
+
+    // And the error both phases name an allocation failure with lands on the
+    // gone answers, never on busy.
+    try testing.expectEqual(Reason.answer_lost, stoppedBy(error.AnswerLost));
+
+    // `close_outcome` is where the mistake would have been invisible: both
+    // answers ride the `failure` arm, so what Product reads is the
+    // disposition, and `.reusable` would say a Session the peer may already
+    // have closed is fine to keep using.
+    const lost = linkAnswer(.session, "close_outcome", gone_close, busy_close, error.AnswerLost);
+    try testing.expectEqual(
+        control.SessionDisposition.poisoned,
+        lost.failure.session_disposition,
+    );
+    try testing.expectEqual(error.DependencyUnreachable, lost.failure.err);
+
+    // A method with its own `OutOfMemory` must not answer that either. It
+    // means "this call could not allocate", and this call was performed --
+    // the allocation that failed was the one for reading what it answered.
+    try testing.expectError(error.DependencyUnreachable, linkAnswer(
+        .session,
+        "set_model",
+        error.DependencyUnreachable,
+        error.LinkBusy,
+        error.AnswerLost,
+    ));
+    // Stopped *before* the handover, the same two conditions do answer. An
+    // `Allocating!T` method says `OutOfMemory`, which is its own word for
+    // what happened; a plain `Error!T` method has no such member, so the
+    // nearest true statement is the busy one -- same action, and it does not
+    // claim the far side did anything.
+    try testing.expectError(error.OutOfMemory, linkAnswer(
+        .session,
+        "prepare_run",
+        error.DependencyUnreachable,
+        error.LinkBusy,
+        error.OutOfMemory,
+    ));
+    try testing.expectError(error.LinkBusy, linkAnswer(
+        .session,
+        "set_model",
+        error.DependencyUnreachable,
+        error.LinkBusy,
+        error.OutOfMemory,
+    ));
+    try testing.expectError(error.LinkBusy, linkAnswer(
+        .session,
+        "set_model",
+        error.DependencyUnreachable,
+        error.LinkBusy,
+        error.Busy,
+    ));
+}
+
 test "an exempt method answers what its exemption argues for, not a panic" {
     // The exemption's claim is that the value it already gives is true of a
     // busy link as well, so the stub must *answer* it. `noRoom` refuses at
     // compile time for these, which this cannot show; what it can show is
     // that the value handed back is the gone value and not something new.
     try testing.expectEqual(false, busyFor(.run_control, "try_retain", false).?);
-    try testing.expectEqual(false, busyFor(.session, "retain_reference", false).?);
+    // `retain_reference` was in this list and is not any more: one of its
+    // consumers throws away a Session that was just restored, so it moved to
+    // `pressure_pending` and now has no busy answer at all.
+    try testing.expect(busyFor(.session, "retain_reference", false) == null);
     try testing.expectEqual(false, busyFor(.session, "skill_policy_matches", false).?);
     try testing.expect(busyFor(.run_control, "input_observation", null).? == null);
     try testing.expect(busyFor(.session, "permission_stop_request", null).? == null);

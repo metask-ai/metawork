@@ -400,7 +400,7 @@ pub fn counts() Counts {
 }
 
 // ---------------------------------------------------------------------------
-// The second fact: reached, but not now
+// The second fact: not performed, and worth asking again
 // ---------------------------------------------------------------------------
 //
 // "The link is gone" and "the link is busy" are two facts, and the whole
@@ -445,8 +445,8 @@ fn errorSetHas(comptime Set: type, comptime wanted: []const u8) bool {
     return false;
 }
 
-/// Whether a return type can say "the far side was reached and has no room
-/// right now", as distinct from saying the far side is gone.
+/// Whether a return type can say "this call was not performed and asking
+/// again is worth something", as distinct from saying the far side is gone.
 pub fn saysPressure(comptime T: type) bool {
     // Each guard is forced comptime for the same reason `declaresAnswer`
     // does it: `@hasDecl` is only legal on a container, so the branch has to
@@ -470,8 +470,8 @@ pub fn saysPressure(comptime T: type) bool {
 /// Two categories, not the three the gone rule has, and the missing one is
 /// the point: there is no `void_release` here. That category's claim is that
 /// an unreachable peer has already dropped what was to be released -- true
-/// of a peer that is gone, false of a peer that was reached and had no room.
-/// A release refused for capacity leaves the object live on the far side with
+/// of a peer that is gone, false of a send the link itself refused: the peer
+/// is still there holding it. A release refused for capacity leaves the
 /// nothing on this side able to name it again, so the three `void_release`
 /// methods are *pending* below rather than exempt here.
 pub const PressureCategory = enum {
@@ -497,7 +497,7 @@ pub const PressureExemption = struct {
 /// answer it already gives is true of a busy link as well.
 ///
 /// Every entry claims the same two things and both are checkable: the value
-/// is *true* of a link that was reached and had no room, and the consumer's
+/// is *true* of a call the link refused before sending it, and the consumer's
 /// action on it is one a caller would accept for a transient refusal. What no
 /// entry claims is that the caller can tell busy from gone -- it cannot, and
 /// the cost is diagnostic. The gone side already pays exactly that cost for
@@ -516,17 +516,6 @@ pub const pressure_exemptions = [_]PressureExemption{
     },
     .{
         .owner = .session,
-        .name = "retain_reference",
-        .category = .restrictive_default,
-        .consumer = "src/product/task/agent_session.zig Binding.attach",
-        .reason = "false becomes error.SessionClosing there, which is the wrong " ++
-            "diagnosis for a busy link exactly as it is for a gone one -- the gone " ++
-            "exemption already accepts that -- and the action it leads to is the only " ++
-            "safe one: a reference to a Session this half could not even ask about must " ++
-            "not be handed out.",
-    },
-    .{
-        .owner = .session,
         .name = "skill_policy_matches",
         .category = .already_total,
         .consumer = "src/product/task/runtime.zig catalogBindingMatches",
@@ -540,9 +529,10 @@ pub const pressure_exemptions = [_]PressureExemption{
         .owner = .run_control,
         .name = "input_observation",
         .category = .restrictive_default,
-        .consumer = "src/product/task/runtime.zig:2689 (.wait), :3154 " ++
-            "(error.RunNotReady), :11066 (true, blocks automatic approval), and " ++
-            "src/product/task/view.zig:800 (false, offers no input box)",
+        .consumer = "src/product/task/runtime.zig inputAction (.wait), submitInputImpl " ++
+            "(error.RunNotReady), inputBlocksAutomaticAllow (true, blocks automatic " ++
+            "approval), and src/product/task/view.zig inputReady (false, offers no " ++
+            "input box)",
         .reason = "All four already answer that way for a lease they could not acquire " ++
             "one line above, and none of them asserts anything about the Run. Three are " ++
             "states that come round again on their own: `.wait` asks again by " ++
@@ -553,8 +543,9 @@ pub const pressure_exemptions = [_]PressureExemption{
         .owner = .session,
         .name = "pending_ui_observation",
         .category = .restrictive_default,
-        .consumer = "src/product/task/runtime.zig:3934 (error.NoPendingUiRequest), " ++
-            ":4007 (null, no automatic approval), :7639 (projected as none)",
+        .consumer = "src/product/task/runtime.zig respondUi (error.NoPendingUiRequest), " ++
+            "preparePermissionReview (null, no automatic approval), " ++
+            "syncOperationRecords (projected as none)",
         .reason = "Nothing is committed on the absence: the user's answer is refused " ++
             "and can be given again, the automatic path declines to act, and the " ++
             "projection shows no parked request until one is observed. The request " ++
@@ -565,7 +556,7 @@ pub const pressure_exemptions = [_]PressureExemption{
         .owner = .session,
         .name = "permission_stop_request",
         .category = .restrictive_default,
-        .consumer = "src/product/task/runtime.zig:7807",
+        .consumer = "src/product/task/runtime.zig requestPermissionStops",
         .reason = "The sweep skips this Task and nothing is recorded, and the read does " ++
             "not consume the request on the far side, so the stop is delayed rather " ++
             "than dropped. Answering a run id nobody reported would terminate a Run on " ++
@@ -575,9 +566,11 @@ pub const pressure_exemptions = [_]PressureExemption{
         .owner = .runtime,
         .name = "borrow_skill_restore_inputs",
         .category = .restrictive_default,
-        .consumer = "src/product/task/recovery_job.zig:327 (.unavailable), " ++
-            "src/product/task/runtime.zig:7160 and :7165 (false), :8452 (empty list, " ++
-            "which the comment there says cannot be mistaken for an unchanged one)",
+        .consumer = "src/product/task/recovery_job.zig borrowRestoreSkills (.unavailable, which " ++
+            "its own caller turns into a failed recovery attempt), " ++
+            "src/product/task/runtime.zig sameRestoreFilters (false) and " ++
+            "syncTaskRecovery (empty list, which the comment there says cannot be " ++
+            "mistaken for an unchanged one)",
         .reason = "Every consumer treats a borrow it could not take as a capability it " ++
             "cannot vouch for, which is what a busy link leaves it with. The one that " ++
             "substitutes a list substitutes the empty one deliberately, and the " ++
@@ -586,18 +579,41 @@ pub const pressure_exemptions = [_]PressureExemption{
 };
 
 /// A method that can be refused for capacity and has no way to say so.
+///
+/// What happens today is not in the field below: it is `stubs.noRoom`, a
+/// panic. `gone_answer_lands` says where the method's *gone* answer would
+/// land if the panic were replaced by it, which is what makes each entry a
+/// change still owed rather than a defect being tolerated -- the panic is
+/// loud, and the answer it stands in for would not be.
 pub const PressurePending = struct {
     owner: method.Owner,
     name: []const u8,
-    lands: []const u8,
+    gone_answer_lands: []const u8,
     step: []const u8,
 };
 
 pub const pressure_pending = [_]PressurePending{
     .{
+        .owner = .session,
+        .name = "retain_reference",
+        .gone_answer_lands = "`false`, which `agent_session.Binding.acquireAccess` turns " ++
+            "into error.SessionClosing -- and that is where this stopped being " ++
+            "exemptible. Most of the twenty-odd consumers answer restrictively and " ++
+            "harmlessly (TaskClosing, null, false, continue), but " ++
+            "`recovery_job.zig` has two that call " ++
+            "`rejectCandidate(.restore_rejected)`: a Session that was just restored " ++
+            "successfully is thrown away because one `retain_reference` could not be " ++
+            "sent. Destroying completed work over a refusal the link itself made is " ++
+            "the same harm as `snapshot` poisoning a healthy Session, and the gone " ++
+            "exemption does not cover it because a gone link really has no Session to " ++
+            "keep. `bool` has no room for a refusal, so what is owed is a type that " ++
+            "can say it.",
+        .step = "retain refusal",
+    },
+    .{
         .owner = .run,
         .name = "execute",
-        .lands = "The Run is failed rather than started: the chosen gone answer is a " ++
+        .gone_answer_lands = "The Run is failed rather than started: the chosen gone answer is a " ++
             "TerminalResult whose failure classifies as dependency_contract_failure, " ++
             "which is true -- nothing ran -- but it ends a Run that asking again would " ++
             "have begun. A vocabulary word is not the fix here. `execute` blocks until " ++
@@ -611,17 +627,18 @@ pub const pressure_pending = [_]PressurePending{
     .{
         .owner = .run_control,
         .name = "release",
-        .lands = "Nowhere. It returns void, so the refusal is invisible to the caller " ++
+        .gone_answer_lands = "Nowhere. It returns void, so the refusal is invisible to the caller " ++
             "and the retained Run control block stays live on the far side with nothing " ++
             "on this side able to name it again. This is precisely where the gone " ++
             "rule's `void_release` stops carrying: that category rests on the peer " ++
-            "having dropped what was to be released, which a reached peer has not.",
+            "having dropped what was to be released, which a peer the link never " ++
+            "reached for has not.",
         .step = "release quota",
     },
     .{
         .owner = .session,
         .name = "release_reference",
-        .lands = "Nowhere, and the Session reference stays held on the far side. Same " ++
+        .gone_answer_lands = "Nowhere, and the Session reference stays held on the far side. Same " ++
             "reason as `run_control.release`: void cannot report a refusal, and a peer " ++
             "with no room has not dropped the thing being released.",
         .step = "release quota",
@@ -629,7 +646,7 @@ pub const pressure_pending = [_]PressurePending{
     .{
         .owner = .session,
         .name = "stop_event_delivery",
-        .lands = "Nowhere, and delivery continues. The gone exemption's fact is that " ++
+        .gone_answer_lands = "Nowhere, and delivery continues. The gone exemption's fact is that " ++
             "the link is what carried the events, so losing it stops them; a link that " ++
             "is merely full still carries them, so the request has to arrive to have " ++
             "any effect at all.",
@@ -638,7 +655,7 @@ pub const pressure_pending = [_]PressurePending{
     .{
         .owner = .session,
         .name = "snapshot",
-        .lands = "`.poisoned`, through the chosen gone answer, and four Product " ++
+        .gone_answer_lands = "`.poisoned`, through the chosen gone answer, and four Product " ++
             "downstreams act on it: two approval-job dispositions, a checkpoint " ++
             "session_disposition, and credential renewal's error.SessionPoisoned. The " ++
             "gone exemption rests on `.poisoned` being *true* of a Session whose link " ++
@@ -704,7 +721,7 @@ comptime {
                     "its pressure listing from src/agent/link/unreachability.zig",
             );
         } else if (listed == null and owed == null) @compileError(
-            described ++ " returns " ++ @typeName(Return) ++ ", which cannot say the far " ++
+            "call was not performed and can be made again. Either give it a type " ++
                 "side was reached and had no room. Either give it a type that can -- an " ++
                 "error union carrying `" ++ pressure_error ++ "`, or an enum or union " ++
                 "declaring `" ++ pressure_decl ++ "` -- or list it in " ++
@@ -739,9 +756,9 @@ comptime {
             "src/agent/link/unreachability.zig lists " ++ @tagName(entry.owner) ++ "." ++
                 entry.name ++ " as pressure-pending, which is not a registered method",
         );
-        if (entry.lands.len < 40 or entry.step.len == 0) @compileError(
-            "the pressure-pending entry for " ++ entry.name ++ " must say what the " ++
-                "refusal lands on today and which step owes the change",
+        if (entry.gone_answer_lands.len < 40 or entry.step.len == 0) @compileError(
+            "the pressure-pending entry for " ++ entry.name ++ " must say where the gone " ++
+                "answer would land and which step owes the change",
         );
         for (pressure_pending[index + 1 ..]) |other| {
             if (other.owner == entry.owner and std.mem.eql(u8, other.name, entry.name))
@@ -810,14 +827,14 @@ test "the callable surface divides into answerable, exempt and pending" {
     // The ones whose existing answer is true of a busy link as well, each
     // with the call site the claim is about.
     try testing.expectEqual(pressure_exemptions.len, tally.exempt);
-    try testing.expectEqual(@as(usize, 7), tally.exempt);
+    try testing.expectEqual(@as(usize, 6), tally.exempt);
 
     // The ones still owed a change, and the number this rule exists to drive
     // to zero. Three of them are the `void_release` methods, which is the
     // finding this table records rather than inherits: a release refused for
     // capacity leaves the object held on a peer that is still there.
     try testing.expectEqual(pressure_pending.len, tally.owed);
-    try testing.expectEqual(@as(usize, 5), tally.owed);
+    try testing.expectEqual(@as(usize, 6), tally.owed);
     try testing.expectEqual(callable, tally.answerable + tally.exempt + tally.owed);
 }
 

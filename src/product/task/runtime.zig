@@ -11019,10 +11019,10 @@ fn cancelCompactRecord(
         // is over -- a claim about the Session's state that nobody
         // established.
         error.DependencyUnreachable => return .session_closing,
-        // Reached, and no room right now. The cancellation did not happen and
+        // The cancellation was not performed -- the link refused the send -- and
         // the correct next move is to ask again, which is the one thing
         // `.session_closing` above would prevent: it is the answer for a
-        // Session nobody can reach, and this Session was reached. There is no
+        // Session nobody can reach, and nobody established that. There is no
         // dispatch value for "ask again", so the fact leaves as the error it
         // arrived as -- `ControlError` carries it already, being `agent.Error`
         // plus allocation. In process nothing produces it, because in process
