@@ -51,6 +51,13 @@ pub const TestSupport = if (builtin.is_test) struct {
     pub fn abandonLink(self: *Supervisor) void {
         execution_host.TestSupport.abandonLink(&self.host);
     }
+
+    /// Kills the execution process, the way a fatal fault on an AgentCore
+    /// path kills it. Nothing here is told: the reader thread finds out, and
+    /// what every waiting caller gets is `stubs`' restricting answer.
+    pub fn killChild(self: *Supervisor) void {
+        execution_host.TestSupport.killChild(&self.host);
+    }
 } else struct {};
 
 pub const Options = struct {

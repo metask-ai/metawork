@@ -9872,6 +9872,37 @@ fn releaseProjectedSlice(
     self.allocator.free(value);
 }
 
+/// Reports a Session this half could not close, at the level the cause earns.
+///
+/// `DependencyUnreachable` is the one member that means the other half is
+/// gone -- `surface.Error` says in as many words that nothing in process
+/// produces it -- so after an execution process dies it is the expected
+/// cause, and expected is a warning. Any other cause is something only this
+/// build can explain, which is what an error is for; in a test it fails the
+/// run, which is the assertion these paths used to make with a panic.
+///
+/// Either way the window lives. A remote failure of any kind must not end the
+/// process that is watching it, which is the whole of why the execution half
+/// is a separate process at all.
+fn reportUnclosableSession(
+    comptime event: []const u8,
+    err: anyerror,
+    disposition: agent.SessionDisposition,
+) void {
+    if (err == error.DependencyUnreachable)
+        std.log.warn(event ++ " error={s} disposition={s}", .{ @errorName(err), @tagName(disposition) })
+    else
+        std.log.err(event ++ " error={s} disposition={s}", .{ @errorName(err), @tagName(disposition) });
+}
+
+/// The same judgement for a slot that could not be handed back.
+fn reportUnreturnableSlot(comptime event: []const u8, err: anyerror) void {
+    if (err == error.DependencyUnreachable)
+        std.log.warn(event ++ " error={s}", .{@errorName(err)})
+    else
+        std.log.err(event ++ " error={s}", .{@errorName(err)});
+}
+
 fn deinitCreateCandidate(
     self: *Runtime,
     candidate: *CreateCandidate,
@@ -9880,15 +9911,32 @@ fn deinitCreateCandidate(
     switch (candidate.binding.state()) {
         .owned => {
             switch (candidate.binding.closeOutcome(.session_close)) {
-                .closed => {},
-                .failure => @panic("fresh Task Session close failed during create rollback"),
+                .closed => candidate.binding.releaseClosed() catch |err| {
+                    if (err == error.RuntimeShuttingDown) {
+                        candidate.binding.abandonForRuntimeDeinit();
+                    } else {
+                        // The close succeeded and the slot cannot be handed
+                        // back, which leaves nothing to do with this Binding
+                        // and no reason to end the process over it.
+                        reportUnreturnableSlot("task.create_rollback_release_failed", err);
+                        candidate.binding.abandonUnclosable();
+                    }
+                },
+                // A close that cannot happen rather than one that went
+                // wrong. Across the execution link the ordinary cause is the
+                // process that held the Session being gone, and a slot in a
+                // dead process is not something to hand back. This used to
+                // panic, which turned a lost execution process into a lost
+                // window -- the one outcome the isolation exists to prevent.
+                .failure => |failure| {
+                    reportUnclosableSession(
+                        "task.create_rollback_close_failed",
+                        failure.err,
+                        failure.session_disposition,
+                    );
+                    candidate.binding.abandonUnclosable();
+                },
             }
-            candidate.binding.releaseClosed() catch |err| {
-                if (err == error.RuntimeShuttingDown)
-                    candidate.binding.abandonForRuntimeDeinit()
-                else
-                    @panic("fresh Task Session release failed during create rollback");
-            };
         },
         .closed => candidate.binding.releaseClosed() catch
             candidate.binding.abandonForRuntimeDeinit(),
@@ -11621,17 +11669,30 @@ fn releaseAttachmentNoFail(
     switch (live.binding.state()) {
         .owned => {
             switch (live.binding.closeOutcome(.session_close)) {
-                .closed => {},
-                .failure => @panic("Task Session close failed during attachment release"),
+                .closed => live.binding.releaseClosed() catch |err| {
+                    if (err == error.RuntimeShuttingDown) {
+                        if (self.agent_runtime_shutdown_complete)
+                            live.binding.relinquishAfterRuntimeShutdown()
+                        else
+                            live.binding.abandonForRuntimeDeinit();
+                    } else {
+                        reportUnreturnableSlot("task.detach_release_failed", err);
+                        live.binding.abandonUnclosable();
+                    }
+                },
+                // The same condition as the create rollback above, on the
+                // path a Task takes every time it is detached: an execution
+                // process that died during a Run is detached by the very next
+                // operation, so this is where that crash actually happened.
+                .failure => |failure| {
+                    reportUnclosableSession(
+                        "task.detach_close_failed",
+                        failure.err,
+                        failure.session_disposition,
+                    );
+                    live.binding.abandonUnclosable();
+                },
             }
-            live.binding.releaseClosed() catch |err| {
-                if (err == error.RuntimeShuttingDown) {
-                    if (self.agent_runtime_shutdown_complete)
-                        live.binding.relinquishAfterRuntimeShutdown()
-                    else
-                        live.binding.abandonForRuntimeDeinit();
-                } else @panic("Task Session slot release failed during attachment release");
-            };
         },
         .closed => live.binding.releaseClosed() catch |err| {
             if (err == error.RuntimeShuttingDown) {
@@ -11639,7 +11700,10 @@ fn releaseAttachmentNoFail(
                     live.binding.relinquishAfterRuntimeShutdown()
                 else
                     live.binding.abandonForRuntimeDeinit();
-            } else @panic("closed Task Session slot release failed during attachment release");
+            } else {
+                reportUnreturnableSlot("task.detach_closed_release_failed", err);
+                live.binding.abandonUnclosable();
+            }
         },
         .released, .relinquished, .moved, .fixture, .abandoned => {},
     }

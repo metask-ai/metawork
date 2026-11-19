@@ -961,8 +961,18 @@ fn querySkillCatalog(
 
 fn releaseSkillCatalog(context: *anyopaque, lease: *lifecycle.CatalogLease) void {
     const runtime: *lifecycle.RuntimePort = @ptrCast(@alignCast(context));
-    runtime.releaseSkillCatalog(lease) catch
-        @panic("Agent rejected a Product Skill catalog lease");
+    // The same condition as a Session that cannot be closed, on the other
+    // thing Product borrows from Agent. A lease the execution process is no
+    // longer there to take back is not a lease Product mishandled, and across
+    // the link that is the ordinary cause -- so the level carries the
+    // difference and the window lives either way. The execution half's own
+    // `adapters.reclamation` is what reclaims the lease when the link ends.
+    runtime.releaseSkillCatalog(lease) catch |err| {
+        if (err == error.DependencyUnreachable)
+            std.log.warn("skill.catalog_lease_release_failed error={s}", .{@errorName(err)})
+        else
+            std.log.err("skill.catalog_lease_release_failed error={s}", .{@errorName(err)});
+    };
 }
 
 fn productSkillPorts(

@@ -145,6 +145,28 @@ pub const Binding = struct {
         self.binding_state = .relinquished;
     }
 
+    /// Gives up a Session that cannot be closed or returned at all.
+    ///
+    /// Not a close that went wrong -- one that cannot happen. The Agent
+    /// Runtime holding the slot is unreachable, so there is no close to
+    /// complete and no slot to hand back: in process that is a Runtime whose
+    /// shutdown failed, and across the execution link it is the process that
+    /// held the Session being gone.
+    ///
+    /// Separate from `abandonForRuntimeDeinit` because the conditions are
+    /// different even where the transition is the same. That one is the
+    /// application on its way out; this one happens while Product is running
+    /// and expects to keep running, which is the whole point: insisting on a
+    /// close that cannot happen is how a lost execution process used to take
+    /// the window with it.
+    pub fn abandonUnclosable(self: *Binding) void {
+        std.debug.assert(self.binding_state == .owned or
+            self.binding_state == .closed);
+        self.owner = null;
+        self.route_id = 0;
+        self.binding_state = .abandoned;
+    }
+
     /// Last-resort Application teardown after Runtime.shutdown failed. Runtime
     /// still owns and destroys the slot during its own immediate deinit.
     pub fn abandonForRuntimeDeinit(self: *Binding) void {

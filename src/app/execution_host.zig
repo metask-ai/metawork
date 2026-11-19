@@ -291,6 +291,17 @@ pub const TestSupport = if (builtin.is_test) struct {
         host.outbound.stop();
         host.to_child.close(host.io);
     }
+
+    /// Ends the execution process where it stands.
+    ///
+    /// The failure this whole half exists for, and a different one from
+    /// `abandonLink`: there the child lives on and decides to go, while here
+    /// it is simply gone. Everything the caller is holding -- Sessions, Runs,
+    /// a worker waiting inside `execute` -- was valid a moment ago and names
+    /// nothing now, and the caller finds out by reading end-of-stream.
+    pub fn killChild(host: *Host) void {
+        host.child.kill(host.io);
+    }
 } else struct {};
 
 /// Whether this process was started as the execution half. Read from the real

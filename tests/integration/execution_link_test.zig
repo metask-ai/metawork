@@ -870,11 +870,11 @@ test "Product submits a Task and its Run reaches a terminal in the other process
     // begin, execute, the events, and the terminal, each crossing a real
     // process boundary.
     //
-    // It is also the regression that holds the rest of this work in place.
-    // The leak that kept an execution process alive after its caller died
-    // was Product's Session access lease, and nothing but Product takes one:
-    // the stop at the end asserts a *clean* exit, which is only reachable if
-    // every lease this submission took came back.
+    // What it does not prove is the reference leak. Product tears itself
+    // down below before the link is stopped, so it returns its own leases --
+    // and if it did not, `drainEverything` would return them when the link
+    // ended. The leak has a test of its own, where the caller is gone before
+    // anything can tidy up.
     //
     // Product here is composed without the image, video, delivery or MCP
     // effects, which is what makes the Run's four tool capabilities absent
@@ -939,9 +939,130 @@ test "Product submits a Task and its Run reaches a terminal in the other process
         try std.testing.expect(wake.count.load(.acquire) > 0);
     }
 
-    // A clean exit, not one on the deadline. See the note at the top: this is
-    // where a Session reference Product never gave back would show.
+    // A clean exit, not one on the deadline: Product tore down over a live
+    // link, so nothing was left for the deadline to cut short.
     try std.testing.expectEqual(exited_on_link_close, supervisor.stop());
+}
+
+test "an execution process that dies under a live Task does not take Product with it" {
+    // Issue 197, from the half it is for. A fatal fault on an AgentCore path
+    // ends the execution process while Product is holding a Task, a Session
+    // and a Run that is executing -- and what has to survive that is the
+    // window.
+    //
+    // It did not. Every one of these paths treated a Session close as a thing
+    // that cannot fail, because in process it cannot: `deinitCreateCandidate`
+    // and the attachment release both panicked on a close that came back a
+    // failure. Over the link the failure is ordinary -- the Session's process
+    // is gone -- so the first Task detached after a crash ended the UI
+    // process too, which is the whole of what the isolation was supposed to
+    // prevent.
+    //
+    // What this does *not* assert is a Run marked interrupted. Today the
+    // stub's answer for a lost `execute` is a dependency-contract failure, so
+    // the Run ends failed; the interrupted outcome, the respawn and the
+    // resume from the checkpoint are the UI side of the disconnect work and
+    // are not written yet.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+
+    var wake: Wake = .{};
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .spawn = .{ .explicit = &.{
+            fixture,
+            execution_link_fixture.runtime_flag,
+            execution_link_fixture.fake_core_flag,
+            execution_link_fixture.hold_runs_flag,
+        } },
+        .tables = execution_link_fixture.fixture_tables,
+        .wake = wake.notifier(),
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer supervisor.deinit();
+
+    {
+        var control = try product.product_control.Runtime.init(allocator, io, supervisor.runtimePort(), .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            // Two, because one of this test's operations after the crash is
+            // trying to run the Task again.
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        }, product.productControlConfiguration());
+        // The teardown that used to end the process: releasing the Task's
+        // attachment closes a Session whose Runtime is in a process that no
+        // longer exists.
+        defer control.deinit();
+        try product.installProductControlExecution(&control);
+
+        const task_id = try control.createTask(
+            product.productControlTaskInput(),
+            try product.product_control.TestSupport.fixtureModelSelection(&control),
+        );
+        try product.waitInitialTaskCatalog(&control, task_id);
+        try product.settleWorkspaceSkillQueries(&control, try control.taskWorkspaceId(task_id));
+        _ = try product.runPreparedTask(&control, task_id, .{ .text = "Say something short" });
+
+        // The held Run announces itself the moment it begins, so this is the
+        // observable form of "a worker is inside `execute` over there" --
+        // which is the state the crash has to be survived *in*, and not the
+        // same fact as "the request was sent".
+        try waitForEvent(supervisor.runtimePort(), "the held Run never started");
+
+        execution_link.TestSupport.killChild(&supervisor);
+
+        // Product's own worker is waiting on that `execute`. The reader
+        // thread reads end-of-stream, closes the table and answers it, so the
+        // Run reaches a terminal with nothing crossing the link.
+        try product.waitProductControlSnapshot(
+            &control,
+            "\"outcome\":\"dependency_contract_failure\"",
+        );
+
+        // And here is what this side knows about it: nothing.
+        //
+        // `LinkFault` is about this half's own failures to carry something --
+        // a refused send, a full correlation table, dropped events. A peer
+        // that died is end-of-stream, which is also how a peer that was told
+        // to stop ends, so there is no fault to read and no signal anywhere
+        // that says "the process serving this is gone". That is the gap the
+        // UI side of the disconnect work has to fill, and asserting it here
+        // rather than describing it means the day a signal exists, this line
+        // is where somebody is told to come and use it.
+        try std.testing.expectEqual(agent_link.client.LinkFault.none, supervisor.fault());
+
+        // An ordinary operation afterwards. What matters is that it returns:
+        // submitting into a Task whose execution process is gone is a
+        // refusal, and a refusal is something Product can show.
+        _ = product.runPreparedTask(&control, task_id, .{ .text = "Again" }) catch {};
+
+        // Still none, after a call that did reach the link. The writer
+        // thread failed on the closed pipe and marked the queue failed, and a
+        // failed queue answers `.closed` -- which `client.zig` turns into
+        // `error.Unreachable` and deliberately records no fault for, because
+        // a link that has ended is not a link that mishandled something.
+        //
+        // So the whole of what this side has is a per-call error. Nothing
+        // holds "the process behind this Task is gone", which is why there is
+        // no respawn and no resume: those need a fact that outlives the call
+        // that discovered it.
+        try std.testing.expectEqual(agent_link.client.LinkFault.none, supervisor.fault());
+
+        // And a read, which is what the Renderer does constantly.
+        _ = try control.taskCatalog(task_id);
+    }
+
+    // Already dead, so this only reaps. Its value is not the claim here --
+    // on Windows a terminated child reports the exit code the kill passed,
+    // and which of the two shapes that is says nothing about Product.
+    _ = supervisor.stop();
 }
 
 test "a start that refuses leaves no child running and nothing allocated" {
