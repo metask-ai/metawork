@@ -355,12 +355,20 @@ pub const Host = struct {
             self.to_child.close(self.io);
         }
 
-        const graceful = if (self.reaper == null) false else blk: {
+        // A started host has a reaper for the whole of its life: a start that
+        // could not spawn one abandoned the child and set `stopped`, which is
+        // the `.gone` above. This used to read `if (self.reaper == null)
+        // false`, which sent the stop straight to the kill -- and now that
+        // the kill only sends a signal, that arm would end the child with
+        // nobody left to collect it. A dead branch whose meaning has changed
+        // is worse than no branch, so this says what is true instead.
+        std.debug.assert(self.reaper != null);
+        const graceful = graceful: {
             self.reaped.waitTimeout(self.io, .{ .duration = .{
                 .raw = .fromMilliseconds(@intCast(stop_grace_ms)),
                 .clock = .awake,
-            } }) catch break :blk false;
-            break :blk true;
+            } }) catch break :graceful false;
+            break :graceful true;
         };
         // The signal only. The join below is what waits for the child to
         // actually be gone, because the reaper is the one holding the wait.
