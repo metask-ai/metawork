@@ -76,6 +76,24 @@ const outside = await realpath(
 );
 await mkdir(path.join(workspace, ".git"), { recursive: true });
 await writeFile(path.join(workspace, "edit-target.txt"), "before");
+// Issue #77. The needle is also in a file the calls never name, so a Grep
+// that searched the whole Workspace would report it.
+const spellingTarget = path.join(workspace, "argument-spelling-target.txt");
+await writeFile(spellingTarget, "spelling-needle in-target\n");
+await writeFile(
+  path.join(workspace, "argument-spelling-decoy.txt"),
+  "spelling-needle in-decoy\n",
+);
+// A JS object cannot spell these arguments, so they are sent as written.
+const duplicateKeyGrep = `{"output_mode":"content","path":${JSON.stringify(spellingTarget)},"pattern":"spelling-needle","-i":true,"-n":true,"glob":"*.txt","-i":true,"-n":true}`;
+const duplicateKeyRead = `{"file_path":${JSON.stringify(spellingTarget)},"file_path":${JSON.stringify(spellingTarget)}}`;
+const spacedColonGrep = `{"output_mode":"content","path" : ${JSON.stringify(spellingTarget)},"pattern":"spelling-needle"}`;
+const duplicateKeyScenarios = [
+  "duplicate_key_grep_full",
+  "duplicate_key_grep_accept",
+  "duplicate_key_read_full",
+  "duplicate_key_read_accept",
+];
 
 function shellQuote(value) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -360,7 +378,15 @@ const effects = {
       ),
     },
   },
+  duplicate_key_grep_full: { tool: "Grep", arguments: duplicateKeyGrep },
+  duplicate_key_grep_accept: { tool: "Grep", arguments: duplicateKeyGrep },
+  duplicate_key_read_full: { tool: "Read", arguments: duplicateKeyRead },
+  duplicate_key_read_accept: { tool: "Read", arguments: duplicateKeyRead },
+  spaced_colon_grep: { tool: "Grep", arguments: spacedColonGrep },
 };
+const spellingResults = new Map(
+  [...duplicateKeyScenarios, "spaced_colon_grep"].map((name) => [name, []]),
+);
 
 function textFromContent(content) {
   if (typeof content === "string") return content;
@@ -416,7 +442,10 @@ function toolSse(scenario, callIndex, effect) {
       index: 0,
       delta: {
         type: "input_json_delta",
-        partial_json: JSON.stringify(effect.arguments),
+        partial_json:
+          typeof effect.arguments === "string"
+            ? effect.arguments
+            : JSON.stringify(effect.arguments),
       },
     })}\n\n` +
     `data: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n` +
@@ -485,6 +514,16 @@ const server = createServer((request, response) => {
         payload.messages,
         scenario.messageIndex,
       );
+      if (spellingResults.has(scenario.name) && completedEffects === 1) {
+        const result = payload.messages
+          .slice(scenario.messageIndex + 1)
+          .flatMap((message) => message.content)
+          .find((item) => item?.type === "tool_result");
+        console.log(
+          `scenario=${scenario.name} tool_result=${JSON.stringify(result)}`,
+        );
+        spellingResults.get(scenario.name).push(result);
+      }
       const body =
         completedEffects >= sequence.length
           ? finalSse(scenario.name)
@@ -588,8 +627,46 @@ pub fn build(b: *std.Build) void {
     { cwd: consumerRoot, label: "isolated AgentCore permission probe" },
   );
   if (requestError) throw requestError;
+  const spellingResult = (name) => {
+    const results = spellingResults.get(name);
+    if (results.length !== 1)
+      throw new Error(
+        `${name} returned ${results.length} tool results instead of 1`,
+      );
+    return { ...results[0], text: textFromContent(results[0].content) };
+  };
+  for (const name of duplicateKeyScenarios) {
+    const result = spellingResult(name);
+    const { code, category, recoverable } = JSON.parse(result.text).error;
+    assert.deepEqual(
+      {
+        is_error: result.is_error,
+        code,
+        category,
+        recoverable,
+        returned_file_text: result.text.includes("in-target"),
+      },
+      {
+        is_error: true,
+        code: "invalid_args",
+        category: "user_error",
+        recoverable: true,
+        returned_file_text: false,
+      },
+      `${name}: ${result.text}`,
+    );
+  }
+  const spacedColon = spellingResult("spaced_colon_grep");
+  if (
+    spacedColon.is_error ||
+    !spacedColon.text.includes("in-target") ||
+    spacedColon.text.includes("decoy")
+  )
+    throw new Error(
+      `spaced_colon_grep did not search exactly ${spellingTarget}: ${spacedColon.text}`,
+    );
   // Restored Runs verify scope, tool admission and both requested permission modes.
-  const expectedRequestCount = process.platform === "win32" ? 86 : 90;
+  const expectedRequestCount = process.platform === "win32" ? 96 : 100;
   if (requestCount !== expectedRequestCount)
     throw new Error(
       `permission probe observed ${requestCount} provider requests instead of ${expectedRequestCount}`,
