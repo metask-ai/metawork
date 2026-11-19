@@ -18,20 +18,25 @@
 //! Fifty-four signatures the compiler checks are not a risk; fifty-four hand
 //! written encoders would have been.
 //!
-//! ## Two entry points, and the compiler picks
+//! ## Three entry points, and the compiler picks
 //!
-//! `forward` is for a method whose answer for a gone link follows from its
-//! return type: an error union answers `DependencyUnreachable`, an optional
-//! answers null, a type that declares its own answer as a whole value answers
-//! that. `forwardAnswering` is for the rest -- the nine methods
-//! `unreachability.exemptions` covers, plus the unions that name an arm
-//! without naming what fills it.
+//! `forward` is for a method whose answers follow from its return type: an
+//! error union answers `DependencyUnreachable` for a gone link and `LinkBusy`
+//! for a full one, an optional answers null, a type that declares its own
+//! answer as a whole value answers that. `forwardAnswering` is for the rest --
+//! the nine methods `unreachability.exemptions` covers -- and
+//! `forwardAnsweringBusy` for the two unions that name the arm both answers
+//! ride in without naming what fills it, where the `err` inside the arm is
+//! the only thing telling a caller which fact it has.
 //!
-//! Neither can be used where the other belongs: `forward` refuses at compile
-//! time when the answer is not derivable, and `forwardAnswering` refuses when
-//! it is. So a stub cannot quietly invent an answer for a method whose type
-//! already states one, and cannot quietly inherit a derived answer for a
-//! method whose exemption rests on a specific value.
+//! None can be used where another belongs: `forward` refuses at compile time
+//! when an answer is not derivable, `forwardAnswering` refuses when the gone
+//! answer is, and `forwardAnsweringBusy` refuses both when the busy answer is
+//! derivable and when the type cannot carry one at all. So a stub cannot
+//! quietly invent an answer for a method whose type already states one, cannot
+//! quietly inherit a derived answer for a method whose exemption rests on a
+//! specific value, and cannot answer "not now" for a method
+//! `unreachability.pressure_pending` says has no way to say it.
 
 const std = @import("std");
 const contract = @import("agent_contract");
@@ -130,6 +135,63 @@ fn hasMember(comptime Set: type, comptime wanted: []const u8) bool {
     return false;
 }
 
+/// The answer a busy link gets, when the return type alone decides it.
+///
+/// The sibling of `derivedAnswer`, and `null` means the same kind of thing:
+/// the type does not decide it. It can be `null` for two reasons that are not
+/// the same reason, which is why `busyFor` below tells them apart instead of
+/// sharing one fallback -- the type cannot say "no room" at all, or it says
+/// which arm carries the answer without saying what fills the arm.
+fn derivedBusy(comptime owner: method.Owner, comptime name: []const u8) ?Returns(owner, name) {
+    @setEvalBranchQuota(1_000_000);
+    const R = Returns(owner, name);
+    if (comptime !unreachability.saysPressure(R)) return null;
+    if (comptime @typeInfo(R) == .error_union) return error.LinkBusy;
+    const declared = @field(R, unreachability.pressure_decl);
+    if (@TypeOf(declared) == R) return declared;
+    // A tag rather than a whole value, and the same rule as the gone side: if
+    // the arm it names carries nothing, naming the arm is naming the value.
+    inline for (@typeInfo(R).@"union".fields) |field| {
+        if (field.name.len == @tagName(declared).len and
+            std.mem.eql(u8, field.name, @tagName(declared)) and
+            field.type == void)
+        {
+            return @unionInit(R, field.name, {});
+        }
+    }
+    return null;
+}
+
+/// What this stub answers when the far side was reached and had no room.
+///
+/// Three outcomes, and each is a different claim about the method:
+///
+///   * The type decides it -- that value, and nobody chooses anything.
+///   * The type cannot say it and the method is listed in
+///     `unreachability.pressure_exemptions` -- the gone answer, because that
+///     is exactly what the exemption claims is also true of a busy link.
+///   * Neither -- `null`, and `noRoom` refuses where it happens. The method
+///     is in `unreachability.pressure_pending` and the entry says what the
+///     refusal lands on today.
+///
+/// The fourth case is a compile error rather than an outcome: a type that
+/// names the arm without naming what fills it needs a chosen value, and
+/// `forwardAnsweringBusy` is where that is passed.
+fn busyFor(
+    comptime owner: method.Owner,
+    comptime name: []const u8,
+    gone: Returns(owner, name),
+) ?Returns(owner, name) {
+    if (comptime derivedBusy(owner, name)) |value| return value;
+    if (comptime unreachability.saysPressure(Returns(owner, name))) @compileError(
+        @tagName(owner) ++ "." ++ name ++ " names the arm its busy answer rides in " ++
+            "without naming what fills it, so the value is a decision: use " ++
+            "`forwardAnsweringBusy` and pass both answers",
+    );
+    if (comptime unreachability.pressureExempt(owner, name)) return gone;
+    return null;
+}
+
 /// Sends one call, for a method whose return type says what a gone link is.
 fn forward(
     comptime owner: method.Owner,
@@ -142,7 +204,7 @@ fn forward(
             "return type alone, so its answer is a decision: use `forwardAnswering` and " ++
             "pass the value, which is what `unreachability.exemptions` is about",
     );
-    return body(owner, name, gone, context, parameters);
+    return body(owner, name, gone, busyFor(owner, name, gone), context, parameters);
 }
 
 /// Sends one call, for a method whose answer is a value someone chose.
@@ -157,7 +219,38 @@ fn forwardAnswering(
         @tagName(owner) ++ "." ++ name ++ "'s return type already says what a gone link " ++
             "is; use `forward` rather than choosing a second answer beside it",
     );
-    return body(owner, name, gone, context, parameters);
+    return body(owner, name, gone, busyFor(owner, name, gone), context, parameters);
+}
+
+/// Sends one call, for the methods where *both* answers are chosen values.
+///
+/// A union that names which arm carries the answer without naming what fills
+/// the arm needs a value for each fact, and the two must not be the same
+/// value: `surface.CloseOutcome` and `port.BeginRunOutcome` both answer in
+/// their `failure` arm, and what tells the caller them apart is the `err`
+/// inside it. Refuses at compile time for a method whose busy answer the type
+/// already decides, so a stub cannot choose one beside a derived one, and for
+/// a method whose type cannot say it at all, so a stub cannot answer where
+/// `unreachability` says nothing may be answered yet.
+fn forwardAnsweringBusy(
+    comptime owner: method.Owner,
+    comptime name: []const u8,
+    gone: Returns(owner, name),
+    busy: Returns(owner, name),
+    context: ?*anyopaque,
+    parameters: Parameters(owner, name),
+) Returns(owner, name) {
+    if (comptime !unreachability.saysPressure(Returns(owner, name))) @compileError(
+        @tagName(owner) ++ "." ++ name ++ "'s return type cannot say it was refused for " ++
+            "capacity, so there is no value to choose: give the type the vocabulary, or " ++
+            "list the method in `unreachability.pressure_exemptions` with the call site " ++
+            "whose existing answer is true of a busy link",
+    );
+    if (comptime derivedBusy(owner, name) != null) @compileError(
+        @tagName(owner) ++ "." ++ name ++ "'s return type already decides its busy " ++
+            "answer; use `forwardAnswering` rather than choosing a second one beside it",
+    );
+    return body(owner, name, gone, busy, context, parameters);
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +498,12 @@ const Reason = enum {
     /// Transient: the far side was reached, or would have been, and the
     /// correct behaviour is to ask again.
     no_room,
+    /// Transient as well, and separate because most of the surface can
+    /// already say it. `Allocating!T` is `surface.Error` plus
+    /// `std.mem.Allocator.Error`, so an allocation that failed has an honest,
+    /// existing answer in the method's own set -- and it is not a statement
+    /// about the far side, which `LinkBusy` is.
+    out_of_memory,
 };
 
 /// Split out from `linkAnswer` so it can be tested over every member of the
@@ -421,37 +520,86 @@ fn stoppedBy(err: Stopped) Reason {
         // object is not there, permanently; asking again names the same
         // missing thing.
         error.UnknownHandle, error.UnknownBox => .gone,
-        // Room, not reachability.
-        error.Busy, error.BoxCapacity, error.OutOfMemory => .no_room,
+        // Room on the far side, not reachability.
+        error.Busy, error.BoxCapacity => .no_room,
+        // Room on this side. Grouped with the two above until it was worth
+        // saying that most methods can report it themselves.
+        error.OutOfMemory => .out_of_memory,
     };
+}
+
+/// The method's own `OutOfMemory`, when its error set has one.
+///
+/// Read from the type, the way `derivedAnswer` reads `DependencyUnreachable`,
+/// so there is no list of `Allocating!T` methods to maintain. `null` means the
+/// method cannot say it, and then an allocation failure is answered as
+/// backpressure: it is transient, the caller's correct action is to ask again,
+/// and that is what the busy answer means. It is the nearest true statement
+/// rather than an exact one, which is worth saying here instead of leaving the
+/// reader to notice.
+fn derivedOutOfMemory(comptime owner: method.Owner, comptime name: []const u8) ?Returns(owner, name) {
+    const R = Returns(owner, name);
+    if (comptime @typeInfo(R) != .error_union) return null;
+    if (comptime !hasMember(@typeInfo(R).error_union.error_set, "OutOfMemory")) return null;
+    return error.OutOfMemory;
+}
+
+/// Whether this method has a busy answer at all: its type says it, or a
+/// listed exemption says the answer it already gives is true of a busy link.
+///
+/// Exactly the condition `busyFor` produces a value under, asked here at
+/// comptime so that `noRoom` is not even analysed for a method that can
+/// answer -- its `@compileError` is the point, and a runtime `orelse` would
+/// fire it for every method at once.
+fn answersBusy(comptime owner: method.Owner, comptime name: []const u8) bool {
+    return unreachability.saysPressure(Returns(owner, name)) or
+        unreachability.pressureExempt(owner, name);
 }
 
 fn linkAnswer(
     comptime owner: method.Owner,
     comptime name: []const u8,
     gone: Returns(owner, name),
+    busy: ?Returns(owner, name),
     err: Stopped,
 ) Returns(owner, name) {
     return switch (stoppedBy(err)) {
         .gone => gone,
-        .no_room => noRoom(owner, name, err),
+        .out_of_memory => if (comptime derivedOutOfMemory(owner, name)) |own|
+            own
+        else
+            busyOrPanic(owner, name, busy, err),
+        .no_room => busyOrPanic(owner, name, busy, err),
     };
 }
 
-/// Reached, and no room. This build has nothing to answer with.
+fn busyOrPanic(
+    comptime owner: method.Owner,
+    comptime name: []const u8,
+    busy: ?Returns(owner, name),
+    err: Stopped,
+) Returns(owner, name) {
+    if (comptime !answersBusy(owner, name)) noRoom(owner, name, err);
+    // Non-null under exactly that condition, which is why the optional is
+    // unwrapped rather than defaulted: a `null` here would mean `busyFor` and
+    // `answersBusy` disagree.
+    return busy.?;
+}
+
+/// Reached, and no room, for a method that still has no way to say so.
 ///
 /// A panic rather than the gone answer, for the same reason `notForwarded`
 /// is one: the gone answer is a statement about the link, and the link is
-/// fine. What is missing is a piece of this build -- here, a return type
-/// that can say "not now", which is a change to the Agent contract rather
-/// than something a stub can decide. Until it lands, the condition is loud
-/// where it happens instead of silently becoming a different fact somewhere
-/// Product can act on it.
+/// fine. What is missing is a piece of this build -- here, a return type that
+/// can refuse -- and until it is there the condition is loud where it happens
+/// instead of silently becoming a different fact somewhere Product can act on
+/// it.
 ///
-/// `unreachability.pressureCounts().owed` is how many methods are in this
-/// state, and the plan's §4.2 row -- a saturated queue returns typed busy
-/// and never a user timeout, a user refusal or an Agent terminal cause -- is
-/// what closes it.
+/// The methods this can still happen to are `unreachability.pressure_pending`,
+/// and each entry says what the refusal lands on today. Three of them return
+/// void, which is why there is nothing to answer with rather than nothing
+/// chosen: a release refused for capacity leaves the object held on a peer
+/// that is still there.
 fn noRoom(
     comptime owner: method.Owner,
     comptime name: []const u8,
@@ -463,9 +611,14 @@ fn noRoom(
             "`" ++ unreachability.pressure_decl ++ "` or `" ++
             unreachability.pressure_error ++ "`",
     );
+    if (comptime unreachability.pressureExempt(owner, name)) @compileError(
+        @tagName(owner) ++ "." ++ name ++ " is listed in " ++
+            "`unreachability.pressure_exemptions`, which claims its own answer is true " ++
+            "of a busy link, so it must answer rather than panic",
+    );
     std.debug.panic(
         "agent link: {s}.{s} was refused for capacity ({s}) and its return type cannot " ++
-            "say so; see `unreachability.pressureCounts`",
+            "say so; see `unreachability.pressure_pending`",
         .{ @tagName(owner), name, @errorName(err) },
     );
 }
@@ -474,6 +627,7 @@ fn body(
     comptime owner: method.Owner,
     comptime name: []const u8,
     gone: Returns(owner, name),
+    busy: ?Returns(owner, name),
     context: ?*anyopaque,
     parameters: Parameters(owner, name),
 ) Returns(owner, name) {
@@ -489,12 +643,12 @@ fn body(
         handle_table.Id.none
     else
         client.Client.receiverFrom(context) catch |err|
-            return linkAnswer(owner, name, gone, err);
+            return linkAnswer(owner, name, gone, busy, err);
 
     const arguments = send(owner, name, half, parameters) catch |err|
-        return linkAnswer(owner, name, gone, err);
+        return linkAnswer(owner, name, gone, busy, err);
     const outcome = inbound.invoke(owner, name, half, receiver, arguments) catch |err|
-        return linkAnswer(owner, name, gone, err);
+        return linkAnswer(owner, name, gone, busy, err);
     return switch (outcome) {
         .returned => |value| value,
         .failed => |err| answered(owner, name, gone, err),
@@ -619,6 +773,25 @@ const gone_close: surface.CloseOutcome = .{ .failure = .{
 const gone_begin_run: port.BeginRunOutcome = .{ .failure = .{
     .err = error.DependencyUnreachable,
     .session_disposition = .poisoned,
+} };
+
+/// `session.close_outcome` again, for the other fact. Same arm, and two
+/// things differ: the `err`, which is what the caller reads to tell them
+/// apart, and the disposition. `.poisoned` would be false here -- the call
+/// never left this half, so nothing happened to the Session and `.reusable`
+/// is the known fact rather than the permissive guess. Answering `.poisoned`
+/// for a full queue would destroy a healthy Session, which is the whole
+/// reason these two facts are kept apart.
+const busy_close: surface.CloseOutcome = .{ .failure = .{
+    .err = error.LinkBusy,
+    .session_disposition = .reusable,
+} };
+
+/// `session.begin_run_outcome` again, for the same reason and with the same
+/// two differences: nothing was begun and nothing was touched.
+const busy_begin_run: port.BeginRunOutcome = .{ .failure = .{
+    .err = error.LinkBusy,
+    .session_disposition = .reusable,
 } };
 
 /// `session.snapshot`: `.poisoned` is the value the exemption rests on, and
@@ -788,7 +961,7 @@ fn sessionCloseOutcome(
     context: ?*anyopaque,
     interruption: session_control.ExternalInterruption,
 ) surface.CloseOutcome {
-    return forwardAnswering(.session, "close_outcome", gone_close, context, .{interruption});
+    return forwardAnsweringBusy(.session, "close_outcome", gone_close, busy_close, context, .{interruption});
 }
 
 fn sessionRefreshSkillCatalog(
@@ -890,7 +1063,7 @@ fn sessionBeginRunOutcome(
     context: ?*anyopaque,
     run_id: u64,
 ) BeginRunOutcome {
-    return forwardAnswering(.session, "begin_run_outcome", gone_begin_run, context, .{run_id});
+    return forwardAnsweringBusy(.session, "begin_run_outcome", gone_begin_run, busy_begin_run, context, .{run_id});
 }
 
 fn sessionCancelPreparedRun(
@@ -1362,7 +1535,13 @@ test "capacity is never answered as a gone link" {
     // compact that is still running.
     try testing.expectEqual(Reason.no_room, stoppedBy(error.Busy));
     try testing.expectEqual(Reason.no_room, stoppedBy(error.BoxCapacity));
-    try testing.expectEqual(Reason.no_room, stoppedBy(error.OutOfMemory));
+    // Transient as well, and told apart from the two above because most of
+    // the surface can report it itself: `Allocating!T` carries `OutOfMemory`,
+    // so answering `LinkBusy` for a failed allocation would say something
+    // about the far side that this half's own allocator decided.
+    try testing.expectEqual(Reason.out_of_memory, stoppedBy(error.OutOfMemory));
+    try testing.expect(derivedOutOfMemory(.session, "prepare_run") != null);
+    try testing.expect(derivedOutOfMemory(.session, "set_model") == null);
 
     try testing.expectEqual(Reason.gone, stoppedBy(error.Unreachable));
     try testing.expectEqual(Reason.gone, stoppedBy(error.Unreadable));
@@ -1519,10 +1698,10 @@ test "all four vtables are filled, with a real function behind every field" {
     try testing.expectEqual(@as(usize, 54), fields);
 }
 
-test "the two entry points partition the surface, and neither can take the other's method" {
+test "every method has exactly one way its gone answer can be written" {
     @setEvalBranchQuota(10_000_000);
     // What this is checking is that every callable method has exactly one
-    // way to be written: `forward` where the return type decides, and
+    // way to be written: `forward` where the return type decides it, and
     // `forwardAnswering` where someone had to. A method in neither group
     // would be a method whose stub cannot be written at all, and a method in
     // both would be a method whose answer could come from either place.
@@ -1566,6 +1745,113 @@ test "the two entry points partition the surface, and neither can take the other
         }
     }
     try testing.expectEqual(chosen, accounted);
+}
+
+test "the busy answer comes from one place too, and the panic is left to the five that owe one" {
+    @setEvalBranchQuota(10_000_000);
+    // The sibling of the partition above, for the other fact. Four groups,
+    // and a method in two of them would be a method whose "not now" could
+    // come from either place.
+    comptime var derived: usize = 0;
+    comptime var chosen: usize = 0;
+    comptime var exempt: usize = 0;
+    comptime var panics: usize = 0;
+    inline for (comptime method.entries) |entry| {
+        if (entry.transport == .stream) continue;
+        switch (entry.owner) {
+            inline else => |owner| {
+                const R = Returns(owner, entry.name);
+                if (comptime derivedBusy(owner, entry.name) != null) {
+                    derived += 1;
+                } else if (comptime unreachability.saysPressure(R)) {
+                    // Says which arm, not what fills it: a chosen value.
+                    chosen += 1;
+                } else if (comptime unreachability.pressureExempt(owner, entry.name)) {
+                    exempt += 1;
+                } else {
+                    panics += 1;
+                }
+            },
+        }
+    }
+    try testing.expectEqual(@as(usize, 50), derived + chosen + exempt + panics);
+    // `surface.Error` reaches every `Error!T` and `Allocating!T` method at
+    // once, `port.CompactCancellation` carries its own member, and three
+    // enums name a variant of their own.
+    try testing.expectEqual(@as(usize, 36), derived);
+    // `surface.CloseOutcome` and `port.BeginRunOutcome`: same arm as the gone
+    // answer, so the value is a decision and `forwardAnsweringBusy` is where
+    // it is passed.
+    try testing.expectEqual(@as(usize, 2), chosen);
+    try testing.expectEqual(unreachability.pressure_exemptions.len, exempt);
+    // The five that still have no way to say it. This number is what the next
+    // step has to move, and it is the one the suite will notice changing.
+    try testing.expectEqual(unreachability.pressure_pending.len, panics);
+    try testing.expectEqual(@as(usize, 5), panics);
+
+    // Every method that panics is named as pending, and no method that can
+    // answer is. The compile-time guards in `noRoom` enforce the second half
+    // too, but only for the methods a stub actually instantiates.
+    inline for (comptime method.entries) |entry| {
+        if (entry.transport == .stream) continue;
+        switch (entry.owner) {
+            inline else => |owner| {
+                var owed = false;
+                for (unreachability.pressure_pending) |pending_entry| {
+                    if (pending_entry.owner == owner and
+                        std.mem.eql(u8, pending_entry.name, entry.name)) owed = true;
+                }
+                try testing.expectEqual(owed, !answersBusy(owner, entry.name));
+            },
+        }
+    }
+}
+
+test "a close refused for room does not poison the Session" {
+    // Both answers ride `CloseOutcome.failure`, so the arm cannot be what
+    // tells them apart -- and the disposition must not be shared either. The
+    // gone answer poisons, because a Session behind a dead link is not
+    // reusable; this one must not, because nothing happened to the Session at
+    // all. Answering `.poisoned` for a full queue would destroy a healthy
+    // Session, which is the failure this whole vocabulary exists to prevent.
+    try testing.expectEqual(error.DependencyUnreachable, gone_close.failure.err);
+    try testing.expectEqual(control.SessionDisposition.poisoned, gone_close.failure.session_disposition);
+
+    try testing.expectEqual(error.LinkBusy, busy_close.failure.err);
+    try testing.expectEqual(control.SessionDisposition.reusable, busy_close.failure.session_disposition);
+
+    try testing.expectEqual(error.LinkBusy, busy_begin_run.failure.err);
+    try testing.expectEqual(control.SessionDisposition.reusable, busy_begin_run.failure.session_disposition);
+
+    // And the type does name the arm, which is what puts these two in
+    // `forwardAnsweringBusy` rather than letting a value be derived.
+    try testing.expect(unreachability.saysPressure(surface.CloseOutcome));
+    try testing.expect(derivedBusy(.session, "close_outcome") == null);
+    try testing.expect(unreachability.saysPressure(port.BeginRunOutcome));
+    try testing.expect(derivedBusy(.session, "begin_run_outcome") == null);
+}
+
+test "an exempt method answers what its exemption argues for, not a panic" {
+    // The exemption's claim is that the value it already gives is true of a
+    // busy link as well, so the stub must *answer* it. `noRoom` refuses at
+    // compile time for these, which this cannot show; what it can show is
+    // that the value handed back is the gone value and not something new.
+    try testing.expectEqual(false, busyFor(.run_control, "try_retain", false).?);
+    try testing.expectEqual(false, busyFor(.session, "retain_reference", false).?);
+    try testing.expectEqual(false, busyFor(.session, "skill_policy_matches", false).?);
+    try testing.expect(busyFor(.run_control, "input_observation", null).? == null);
+    try testing.expect(busyFor(.session, "permission_stop_request", null).? == null);
+
+    // A derived answer is not reached through the exemption path: the type
+    // decides it, and the gone value passed in is ignored.
+    try testing.expectError(
+        error.LinkBusy,
+        busyFor(.session, "set_model", error.DependencyUnreachable).?,
+    );
+    try testing.expectEqual(
+        control.TerminationRequestResult.dependency_busy,
+        busyFor(.run_control, "request_termination", .dependency_contract).?,
+    );
 }
 
 /// Whether `unreachability.zig` already says something about this method.
