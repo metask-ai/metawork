@@ -46,10 +46,20 @@ pub const Options = struct {
     /// needs a stand-in, because the application executable carries the
     /// Renderer bundle and a fixture does not.
     spawn: execution_host.Host.Spawn = .self,
-    /// Handles this half can name at once. A bound rather than a growth: the
-    /// reservation that keeps a created Session nameable is only possible
-    /// against a bound.
-    boxes: usize = 64,
+    /// How many handles the execution half can hold, which is also what
+    /// decides how many this half can name.
+    ///
+    /// One number, not two. A box is what this half carries for an entry over
+    /// there, so the bound on boxes is the bound on entries -- and the two
+    /// cannot be set apart without one of them being wrong in a direction
+    /// that matters: too few boxes refuses at a point where the far side has
+    /// already created something it can no longer be told about.
+    ///
+    /// The execution half takes the same `Capacity` for its own tables, and
+    /// both default to the same value, so a child built from these sources
+    /// agrees with this half by construction rather than by a second
+    /// constant kept in step.
+    tables: agent_link.adapters.Tables.Capacity = .{},
     /// Calls that can be unanswered at once. Sized by correlations the peer
     /// has not settled rather than by callers waiting, which is the larger of
     /// the two -- `pending.zig` says why.
@@ -122,11 +132,12 @@ pub const Supervisor = struct {
         try self.slots.init(io, allocator, options.correlations);
         defer if (!composed) self.slots.deinit();
         try self.half.init(
+            io,
             allocator,
             &self.host.outbound,
             &self.slots,
             agent_link.stubs.vtables,
-            options.boxes,
+            agent_link.adapters.Tables.boxes(options.tables),
         );
         defer if (!composed) self.half.deinit();
         try self.pump.init(allocator, io, options.events, options.wake);

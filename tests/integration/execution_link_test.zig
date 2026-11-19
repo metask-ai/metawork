@@ -174,6 +174,7 @@ test "a port call crosses the process, and the execution half's Runtime answers 
         .identity = matching_identity,
         .message_limits = fixture_message_limits,
         .spawn = .{ .explicit = &.{ fixture, execution_link_fixture.runtime_flag } },
+        .tables = execution_link_fixture.fixture_tables,
         .wake = wake.notifier(),
     });
     if (failure) |value| {
@@ -236,6 +237,7 @@ test "a Session the far side's Runtime refuses answers in that method's own word
         .identity = matching_identity,
         .message_limits = fixture_message_limits,
         .spawn = .{ .explicit = &.{ fixture, execution_link_fixture.runtime_flag } },
+        .tables = execution_link_fixture.fixture_tables,
         .wake = wake.notifier(),
     });
     if (failure) |value| {
@@ -313,6 +315,7 @@ test "a Run executes in the other process, and its event arrives before its term
             execution_link_fixture.fake_core_flag,
             execution_link_fixture.no_drain_flag,
         } },
+        .tables = execution_link_fixture.fixture_tables,
         .wake = wake.notifier(),
     });
     if (failure) |value| {
@@ -475,6 +478,7 @@ test "a Stop is answered while a Run is still executing in the other process" {
             execution_link_fixture.fake_core_flag,
             execution_link_fixture.hold_runs_flag,
         } },
+        .tables = execution_link_fixture.fixture_tables,
         .wake = wake.notifier(),
     });
     if (failure) |value| {
@@ -593,6 +597,7 @@ test "a start that refuses leaves no child running and nothing allocated" {
             .ui_response = 1 << 16,
         },
         .spawn = .{ .explicit = &.{fixture} },
+        .tables = execution_link_fixture.fixture_tables,
         .wake = wake.notifier(),
     });
     try std.testing.expectEqual(execution_host.StartFailure.resource_unavailable, failure.?);
@@ -618,6 +623,7 @@ test "a child that will not stop is killed, and the stop returns" {
         .identity = matching_identity,
         .message_limits = fixture_message_limits,
         .spawn = .{ .explicit = &.{ fixture, execution_link_fixture.wedge_flag } },
+        .tables = execution_link_fixture.fixture_tables,
         .wake = wake.notifier(),
     });
     if (failure) |value| {

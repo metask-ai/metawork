@@ -438,8 +438,13 @@ fn tryRetainRun(
         @FieldType(port.RunControl.VTable, "try_retain"),
     ).pointer.child;
     _ = try payload.decodeExact(comptime wire_types.Request(Fn), arena, request.arguments);
-    const receiver = (try resolveReceiver(bindings, request)) orelse return error.UnknownHandle;
-    return successResponse(arena, bool, receiver.run.retain());
+    // Not `resolveReceiver`: the entry this prong answers for would have the
+    // receiver resolved and the count moved under separate locks, and the
+    // whole question here is whether the Run the id named is still the Run
+    // whose count is being moved. `adapters.retainRun` decides both at once.
+    const retained = adapters.retainRun(bindings, request.receiver) orelse
+        return error.UnknownHandle;
+    return successResponse(arena, bool, retained);
 }
 
 /// `run_control.release`, which retires the Run's entry once nothing names it.
@@ -456,11 +461,11 @@ fn releaseRun(
         @FieldType(port.RunControl.VTable, "release"),
     ).pointer.child;
     _ = try payload.decodeExact(comptime wire_types.Request(Fn), arena, request.arguments);
-    const receiver = (try resolveReceiver(bindings, request)) orelse return error.UnknownHandle;
-    const begun = receiver.run;
-    if (begun.release() == 0) {
-        if (bindings.runs.take(request.receiver)) |entry| bindings.allocator.destroy(entry);
-    }
+    // The release, the zero and the take are one decision, for
+    // `retainRun`'s reason: a release that read zero and then took the entry
+    // under a second lock would be racing whatever resolved the id in
+    // between.
+    adapters.releaseRun(bindings, request.receiver) orelse return error.UnknownHandle;
     return successResponse(arena, void, {});
 }
 
@@ -728,17 +733,17 @@ test "a request is classified by the registry, and an unregistered one is refuse
 }
 
 test "a receiver is resolved through its table, and a stale id is refused" {
-    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.io, testing.allocator, 1);
     defer sessions.deinit();
-    var runs = try handle_table.Table(adapters.BegunRun).init(testing.allocator, 1);
+    var runs = try handle_table.Table(adapters.BegunRun).init(testing.io, testing.allocator, 1);
     defer runs.deinit();
-    var leases = try handle_table.Table(@import("agent_catalog").Lease).init(testing.allocator, 1);
+    var leases = try handle_table.Table(@import("agent_catalog").Lease).init(testing.io, testing.allocator, 1);
     defer leases.deinit();
-    var skill_restore = try handle_table.Table(port.SkillRestoreInputs).init(testing.allocator, 1);
+    var skill_restore = try handle_table.Table(port.SkillRestoreInputs).init(testing.io, testing.allocator, 1);
     defer skill_restore.deinit();
-    var session_restore = try handle_table.Table(port.SessionRestoreInputs).init(testing.allocator, 1);
+    var session_restore = try handle_table.Table(port.SessionRestoreInputs).init(testing.io, testing.allocator, 1);
     defer session_restore.deinit();
-    var selections = try handle_table.Table(@import("agent_mcp_catalog").Selection).init(testing.allocator, 1);
+    var selections = try handle_table.Table(@import("agent_mcp_catalog").Selection).init(testing.io, testing.allocator, 1);
     defer selections.deinit();
     const bindings: adapters.Bindings = .{
         .allocator = testing.allocator,
@@ -823,16 +828,16 @@ const Harness = struct {
 
     fn init() !Harness {
         return .{
-            .sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2),
-            .runs = try handle_table.Table(adapters.BegunRun).init(testing.allocator, 2),
+            .sessions = try handle_table.Table(run_tools.HeldSession).init(testing.io, testing.allocator, 2),
+            .runs = try handle_table.Table(adapters.BegunRun).init(testing.io, testing.allocator, 2),
             .leases = try handle_table.Table(@import("agent_catalog").Lease)
-                .init(testing.allocator, 2),
+                .init(testing.io, testing.allocator, 2),
             .skill_restore = try handle_table.Table(port.SkillRestoreInputs)
-                .init(testing.allocator, 2),
+                .init(testing.io, testing.allocator, 2),
             .session_restore = try handle_table.Table(port.SessionRestoreInputs)
-                .init(testing.allocator, 2),
+                .init(testing.io, testing.allocator, 2),
             .selections = try handle_table.Table(@import("agent_mcp_catalog").Selection)
-                .init(testing.allocator, 2),
+                .init(testing.io, testing.allocator, 2),
         };
     }
 

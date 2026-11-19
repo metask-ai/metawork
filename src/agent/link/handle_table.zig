@@ -95,19 +95,61 @@ pub fn Table(comptime T: type) type {
         };
 
         allocator: std.mem.Allocator,
+        /// Held across every operation below, because this half answers
+        /// requests on several threads: a pool thread, a thread of its own
+        /// per blocking method, and the thread that drains events. Two of
+        /// those scanning for a free slot at once would hand one slot to
+        /// both callers -- the stale-id confusion the generation exists to
+        /// prevent, arriving by another door.
+        ///
+        /// Every critical section here is a scan of the slots and a few
+        /// field writes. None of them calls out, waits, or allocates, so the
+        /// lock is never held across anything that could block. That is the
+        /// property which makes locking the whole table, rather than asking
+        /// every caller to do it, safe to do.
+        mutex: std.Io.Mutex = .init,
+        /// Stored rather than taken per call: `Io.Mutex` needs one to park a
+        /// contended waiter, and a table whose callers each passed their own
+        /// would have no single answer to "which Io is this".
+        io: std.Io,
         slots: []Slot,
         live: usize = 0,
 
-        pub fn init(allocator: std.mem.Allocator, slot_count: usize) std.mem.Allocator.Error!Self {
+        pub fn init(
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            slot_count: usize,
+        ) std.mem.Allocator.Error!Self {
             std.debug.assert(slot_count > 0);
             const slots = try allocator.alloc(Slot, slot_count);
             @memset(slots, .{});
-            return .{ .allocator = allocator, .slots = slots };
+            return .{ .allocator = allocator, .io = io, .slots = slots };
+        }
+
+        /// The table's own lock, for the caller that has to decide something
+        /// about a value and act on the decision before another resolve of
+        /// the same id can begin.
+        ///
+        /// Everything else locks internally. This exists because "nothing
+        /// names this any more" stops being true the moment the lock is
+        /// dropped: a release that read zero and then took the entry under a
+        /// second lock would be racing whatever resolved it in between. Pair
+        /// it with the `Locked` operations and nothing else.
+        pub fn lock(self: *Self) void {
+            self.mutex.lockUncancelable(self.io);
+        }
+
+        pub fn unlock(self: *Self) void {
+            self.mutex.unlock(self.io);
         }
 
         /// Releases the table itself. Every handle must already be taken: a
         /// table that dropped live objects would leak them silently, so the
         /// caller is required to have drained it.
+        ///
+        /// Takes no lock, and could not usefully: it frees the memory the
+        /// lock lives in. A table torn down while another thread is still
+        /// inside it is a composition error no lock here can answer.
         pub fn deinit(self: *Self) void {
             std.debug.assert(self.live == 0);
             self.allocator.free(self.slots);
@@ -118,6 +160,8 @@ pub fn Table(comptime T: type) type {
         /// if naming it failed. A value from a call that could not be undone
         /// goes through `reserve` first.
         pub fn insert(self: *Self, value: *T) InsertError!Id {
+            self.lock();
+            defer self.unlock();
             const index = try self.freeSlot();
             const slot = &self.slots[index];
             slot.generation += 1;
@@ -132,6 +176,8 @@ pub fn Table(comptime T: type) type {
         /// what fills the slot gets the name the caller was promised, and no
         /// other caller can be given it meanwhile.
         pub fn reserve(self: *Self) InsertError!Reservation {
+            self.lock();
+            defer self.unlock();
             const index = try self.freeSlot();
             const slot = &self.slots[index];
             slot.generation += 1;
@@ -143,6 +189,8 @@ pub fn Table(comptime T: type) type {
         /// Puts the value in the slot it was promised. Refuses a reservation
         /// this table did not make, or one already filled or released.
         pub fn fill(self: *Self, reservation: Reservation, value: *T) ?Id {
+            self.lock();
+            defer self.unlock();
             const slot = self.reservedSlot(reservation) orelse return null;
             slot.reserved = false;
             slot.value = value;
@@ -153,6 +201,8 @@ pub fn Table(comptime T: type) type {
         /// does not exist after all. The generation moves again, so the
         /// promised id can never be filled later.
         pub fn releaseReservation(self: *Self, reservation: Reservation) bool {
+            self.lock();
+            defer self.unlock();
             const slot = self.reservedSlot(reservation) orelse return false;
             slot.reserved = false;
             if (slot.generation != std.math.maxInt(u32)) slot.generation += 1;
@@ -164,6 +214,8 @@ pub fn Table(comptime T: type) type {
         /// this generation, and neither filled nor given back. The table is
         /// asked rather than a flag kept beside it, so there is one answer.
         pub fn stillReserved(self: *Self, reservation: Reservation) bool {
+            self.lock();
+            defer self.unlock();
             return self.reservedSlot(reservation) != null;
         }
 
@@ -185,7 +237,14 @@ pub fn Table(comptime T: type) type {
 
         /// The object, or `null` for an id this table never issued, already
         /// took back, or issued for an earlier occupant of the slot.
-        pub fn resolve(self: *const Self, id: Id) ?*T {
+        pub fn resolve(self: *Self, id: Id) ?*T {
+            self.lock();
+            defer self.unlock();
+            return self.resolveLocked(id);
+        }
+
+        /// `resolve` for a caller already holding the lock.
+        pub fn resolveLocked(self: *const Self, id: Id) ?*T {
             const slot = self.slotOf(id) orelse return null;
             return slot.value;
         }
@@ -194,6 +253,13 @@ pub fn Table(comptime T: type) type {
         /// id returns `null` rather than the object twice, so a duplicate
         /// release from the caller cannot become a double free here.
         pub fn take(self: *Self, id: Id) ?*T {
+            self.lock();
+            defer self.unlock();
+            return self.takeLocked(id);
+        }
+
+        /// `take` for a caller already holding the lock.
+        pub fn takeLocked(self: *Self, id: Id) ?*T {
             const index = self.indexOf(id) orelse return null;
             const slot = &self.slots[index];
             const value = slot.value orelse return null;
@@ -205,10 +271,14 @@ pub fn Table(comptime T: type) type {
             return value;
         }
 
-        pub fn liveCount(self: *const Self) usize {
+        pub fn liveCount(self: *Self) usize {
+            self.lock();
+            defer self.unlock();
             return self.live;
         }
 
+        /// Takes no lock: the slot count is decided at `init` and never
+        /// moves, so there is nothing here another thread could change.
         pub fn capacity(self: *const Self) usize {
             return self.slots.len;
         }
@@ -216,6 +286,8 @@ pub fn Table(comptime T: type) type {
         /// Every live object, for the closure that has to release what the
         /// other half can no longer ask about.
         pub fn drain(self: *Self, output: []*T) []*T {
+            self.lock();
+            defer self.unlock();
             var count: usize = 0;
             for (self.slots) |*slot| {
                 // A reservation nobody filled has no object to hand back, and
@@ -261,7 +333,7 @@ const Thing = struct { tag: u32 };
 test "an id round-trips to its object and nothing else does" {
     var first: Thing = .{ .tag = 1 };
     var second: Thing = .{ .tag = 2 };
-    var table = try Table(Thing).init(testing.allocator, 4);
+    var table = try Table(Thing).init(testing.io, testing.allocator, 4);
     defer table.deinit();
 
     const a = try table.insert(&first);
@@ -287,7 +359,7 @@ test "a retired id never resolves to the slot's next occupant" {
     // exactly like a right one.
     var first: Thing = .{ .tag = 1 };
     var second: Thing = .{ .tag = 2 };
-    var table = try Table(Thing).init(testing.allocator, 1);
+    var table = try Table(Thing).init(testing.io, testing.allocator, 1);
     defer table.deinit();
 
     const stale = try table.insert(&first);
@@ -306,7 +378,7 @@ test "a retired id never resolves to the slot's next occupant" {
 
 test "taking twice returns the object once" {
     var thing: Thing = .{ .tag = 7 };
-    var table = try Table(Thing).init(testing.allocator, 2);
+    var table = try Table(Thing).init(testing.io, testing.allocator, 2);
     defer table.deinit();
     const id = try table.insert(&thing);
     try testing.expectEqual(&thing, table.take(id).?);
@@ -316,7 +388,7 @@ test "taking twice returns the object once" {
 
 test "the bound is a typed failure, not a growth" {
     var things: [3]Thing = .{ .{ .tag = 0 }, .{ .tag = 1 }, .{ .tag = 2 } };
-    var table = try Table(Thing).init(testing.allocator, 2);
+    var table = try Table(Thing).init(testing.io, testing.allocator, 2);
     defer table.deinit();
     const a = try table.insert(&things[0]);
     const b = try table.insert(&things[1]);
@@ -333,7 +405,7 @@ test "the bound is a typed failure, not a growth" {
 
 test "drain hands back everything live, for the closure that has to release it" {
     var things: [3]Thing = .{ .{ .tag = 0 }, .{ .tag = 1 }, .{ .tag = 2 } };
-    var table = try Table(Thing).init(testing.allocator, 4);
+    var table = try Table(Thing).init(testing.io, testing.allocator, 4);
     defer table.deinit();
     const ids = [_]Id{
         try table.insert(&things[0]),
@@ -362,7 +434,7 @@ test "a zero id is invalid by construction, not by convention" {
 test "a reserved slot is promised to one caller and to nobody else" {
     var first: Thing = .{ .tag = 1 };
     var second: Thing = .{ .tag = 2 };
-    var table = try Table(Thing).init(testing.allocator, 1);
+    var table = try Table(Thing).init(testing.io, testing.allocator, 1);
     defer table.deinit();
 
     const promised = try table.reserve();
@@ -383,7 +455,7 @@ test "a reserved slot is promised to one caller and to nobody else" {
 
 test "a reservation given back can never be filled later" {
     var thing: Thing = .{ .tag = 7 };
-    var table = try Table(Thing).init(testing.allocator, 1);
+    var table = try Table(Thing).init(testing.io, testing.allocator, 1);
     defer table.deinit();
 
     const promised = try table.reserve();
@@ -403,7 +475,7 @@ test "a reservation given back can never be filled later" {
 
 test "a forged reservation is refused, because only reserve makes a live one" {
     var thing: Thing = .{ .tag = 3 };
-    var table = try Table(Thing).init(testing.allocator, 2);
+    var table = try Table(Thing).init(testing.io, testing.allocator, 2);
     defer table.deinit();
 
     // Shaped like a reservation and never made by this table.
@@ -421,9 +493,109 @@ test "a forged reservation is refused, because only reserve makes a live one" {
     _ = table.take(promised.id);
 }
 
+/// One thread's share of a table every thread is in at once.
+///
+/// Holds at most one handle at a time, so a table with a slot per thread
+/// always has a free one and a refusal means the table's own count drifted.
+const Hammer = struct {
+    table: *Table(Thing),
+    rounds: usize,
+    mine: Thing,
+    /// Ids this thread was issued, in order, for the uniqueness check the
+    /// whole run is judged on.
+    issued: []Id,
+    /// An answer that belonged to another thread, or a promise this table
+    /// would not honour. Either one is the table handing one slot out twice.
+    wrong: usize = 0,
+    refused: usize = 0,
+
+    fn run(self: *Hammer) void {
+        var round: usize = 0;
+        while (round < self.rounds) : (round += 1) {
+            const reservation = self.table.reserve() catch {
+                self.refused += 1;
+                self.issued[round] = .none;
+                continue;
+            };
+            const id = self.table.fill(reservation, &self.mine) orelse {
+                self.wrong += 1;
+                self.issued[round] = .none;
+                continue;
+            };
+            self.issued[round] = id;
+            // The object an id names must be the object this thread put
+            // there. Anything else is another thread's, reached through a
+            // name this one was promised.
+            if (self.table.resolve(id) != &self.mine) self.wrong += 1;
+            if (self.table.take(id) != &self.mine) self.wrong += 1;
+        }
+    }
+};
+
+fn lessThanId(_: void, left: Id, right: Id) bool {
+    return left.bits() < right.bits();
+}
+
+test "threads sharing one table are never handed one slot twice" {
+    // This half answers requests on a pool thread, on a thread of its own per
+    // blocking method, and on the thread that drains events, so every
+    // operation above can be running on several at once. What a lost scan
+    // produces is two ids naming one slot -- and then this half resolves one
+    // caller's id to another caller's object, which is exactly the confusion
+    // the generation exists to make impossible, arriving by another door.
+    //
+    // Few slots and many threads on purpose. The window a missing lock opens
+    // is a handful of instructions wide, and the way to land in it is to have
+    // every thread scanning the same small array at the same moment rather
+    // than to sleep inside one of them. One slot per thread, so a refusal is
+    // never legitimate: each thread holds at most one handle at a time.
+    const thread_count = 8;
+    const rounds = 4000;
+
+    var table = try Table(Thing).init(testing.io, testing.allocator, thread_count);
+    defer table.deinit();
+
+    const issued = try testing.allocator.alloc(Id, thread_count * rounds);
+    defer testing.allocator.free(issued);
+
+    var hammers: [thread_count]Hammer = undefined;
+    for (&hammers, 0..) |*hammer, index| {
+        hammer.* = .{
+            .table = &table,
+            .rounds = rounds,
+            .mine = .{ .tag = @intCast(index) },
+            .issued = issued[index * rounds ..][0..rounds],
+        };
+    }
+
+    var threads: [thread_count]std.Thread = undefined;
+    for (&threads, &hammers) |*thread, *hammer| {
+        thread.* = try std.Thread.spawn(.{}, Hammer.run, .{hammer});
+    }
+    for (&threads) |thread| thread.join();
+
+    for (&hammers) |*hammer| {
+        try testing.expectEqual(@as(usize, 0), hammer.wrong);
+        try testing.expectEqual(@as(usize, 0), hammer.refused);
+    }
+
+    // No id was issued twice, across every thread and every round. A table
+    // that let two scans pick one slot steps that slot's generation once for
+    // both, so the duplicate shows up here even when both callers happened to
+    // read their own object back.
+    std.mem.sort(Id, issued, {}, lessThanId);
+    for (issued[1..], issued[0 .. issued.len - 1]) |current, previous| {
+        try testing.expect(current.bits() != previous.bits());
+    }
+
+    // And the table's own count came back. A non-atomic increment and
+    // decrement under this much contention does not.
+    try testing.expectEqual(@as(usize, 0), table.liveCount());
+}
+
 test "closure clears a reservation nobody filled" {
     var thing: Thing = .{ .tag = 5 };
-    var table = try Table(Thing).init(testing.allocator, 2);
+    var table = try Table(Thing).init(testing.io, testing.allocator, 2);
     defer table.deinit();
 
     const filled = try table.insert(&thing);

@@ -103,7 +103,19 @@ pub const BegunRun = struct {
 
     /// A retain the caller asked for. The tally moves only when the retain
     /// actually happened, so a refused one cannot leave a reference behind.
+    ///
+    /// Called only through `Bindings.retainRun`, which holds the Run table's
+    /// lock across the resolve and this: see there for why the count and the
+    /// entry cannot be decided apart.
     pub fn retain(self: *BegunRun) bool {
+        // Nothing names the Run any more, so there is no reference to take a
+        // second one from. Under `retainRun`'s lock this cannot be reached --
+        // the release that reaches zero retires the entry before dropping the
+        // lock, so no later resolve can find it. It is still the answer and
+        // not an assertion, because the restrictive side of this boundary is
+        // a refusal the caller already handles and the permissive side is a
+        // lease on a Run that has ended.
+        if (self.outstanding.load(.acquire) == 0) return false;
         if (!self.control_handle.vtable.?.try_retain(self.control_handle.context)) return false;
         _ = self.outstanding.fetchAdd(1, .acq_rel);
         return true;
@@ -116,10 +128,19 @@ pub const BegunRun = struct {
     /// the other half can name this Run again, so the entry holding it is
     /// free. Reading `outstanding` after the call would be a second
     /// observation with another release able to land in between.
+    ///
+    /// Called only through `Bindings.releaseRun`, which holds the Run table's
+    /// lock across the resolve, this, and the take at zero.
     pub fn release(self: *BegunRun) u32 {
+        // Read before the count moves. The count reaching zero is what frees
+        // this entry, so a handle read afterwards would be read out of
+        // storage whose last reference has already gone -- true only because
+        // the caller holds a lock here, and true for no reason the code
+        // states. Copied first, it does not depend on that.
+        const handle = self.control_handle;
         const previous = self.outstanding.fetchSub(1, .acq_rel);
         std.debug.assert(previous > 0);
-        self.control_handle.vtable.?.release(self.control_handle.context);
+        handle.vtable.?.release(handle.context);
         return previous - 1;
     }
 
@@ -572,17 +593,17 @@ test "an allocator is supplied locally rather than carried" {
 }
 
 test "a stale handle resolves to a refusal, never to the slot's next occupant" {
-    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.io, testing.allocator, 1);
     defer sessions.deinit();
-    var runs = try handle_table.Table(BegunRun).init(testing.allocator, 1);
+    var runs = try handle_table.Table(BegunRun).init(testing.io, testing.allocator, 1);
     defer runs.deinit();
-    var leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 1);
+    var leases = try handle_table.Table(catalog.Lease).init(testing.io, testing.allocator, 1);
     defer leases.deinit();
-    var skill_restore = try handle_table.Table(port.SkillRestoreInputs).init(testing.allocator, 1);
+    var skill_restore = try handle_table.Table(port.SkillRestoreInputs).init(testing.io, testing.allocator, 1);
     defer skill_restore.deinit();
-    var session_restore = try handle_table.Table(port.SessionRestoreInputs).init(testing.allocator, 1);
+    var session_restore = try handle_table.Table(port.SessionRestoreInputs).init(testing.io, testing.allocator, 1);
     defer session_restore.deinit();
-    var selections = try handle_table.Table(mcp_catalog.Selection).init(testing.allocator, 1);
+    var selections = try handle_table.Table(mcp_catalog.Selection).init(testing.io, testing.allocator, 1);
     defer selections.deinit();
 
     var first = run_tools.HeldSession.init(.{ .context = null, .vtable = undefined });
@@ -716,17 +737,17 @@ fn testBindings() Bindings {
 }
 
 test "an options mirror is read back with its handle resolved and its absence kept" {
-    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.io, testing.allocator, 1);
     defer sessions.deinit();
-    var runs = try handle_table.Table(BegunRun).init(testing.allocator, 1);
+    var runs = try handle_table.Table(BegunRun).init(testing.io, testing.allocator, 1);
     defer runs.deinit();
-    var leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 2);
+    var leases = try handle_table.Table(catalog.Lease).init(testing.io, testing.allocator, 2);
     defer leases.deinit();
-    var skill_restore = try handle_table.Table(port.SkillRestoreInputs).init(testing.allocator, 1);
+    var skill_restore = try handle_table.Table(port.SkillRestoreInputs).init(testing.io, testing.allocator, 1);
     defer skill_restore.deinit();
-    var session_restore = try handle_table.Table(port.SessionRestoreInputs).init(testing.allocator, 1);
+    var session_restore = try handle_table.Table(port.SessionRestoreInputs).init(testing.io, testing.allocator, 1);
     defer session_restore.deinit();
-    var selections = try handle_table.Table(mcp_catalog.Selection).init(testing.allocator, 1);
+    var selections = try handle_table.Table(mcp_catalog.Selection).init(testing.io, testing.allocator, 1);
     defer selections.deinit();
     const bindings: Bindings = .{
         .allocator = testing.allocator,
@@ -1240,6 +1261,44 @@ comptime {
     }
 }
 
+/// A retain the caller asked for, decided under the Run table's lock.
+///
+/// The lock is the whole point of these two living here rather than in the
+/// dispatcher. Both read an entry out of the table and then move a count
+/// whose zero decides whether that entry still exists, so resolving and
+/// counting apart means two requests naming one Run can each hold a pointer
+/// the other is about to free, or one can take a lease on a Run the other
+/// has just retired. Under one lock the count's answer is still true when it
+/// is acted on.
+///
+/// What the critical section calls out to is bounded and never waits:
+/// `try_retain` is a compare-exchange loop (`session/binding.zig`) and
+/// `release` is a decrement plus a broadcast. Neither reaches back for a
+/// handle table, so there is no order in which this lock and the control
+/// block's own can be taken the wrong way round.
+///
+/// `null` is an id this half cannot name, which is the dispatcher's
+/// `UnknownHandle`.
+pub fn retainRun(bindings: Bindings, id: handle_table.Id) ?bool {
+    bindings.runs.lock();
+    defer bindings.runs.unlock();
+    const begun = bindings.runs.resolveLocked(id) orelse return null;
+    return begun.retain();
+}
+
+/// A release the caller asked for, retiring the entry once nothing names the
+/// Run. The same lock-held decision as `retainRun`, for the same reason.
+pub fn releaseRun(bindings: Bindings, id: handle_table.Id) ?void {
+    bindings.runs.lock();
+    defer bindings.runs.unlock();
+    const begun = bindings.runs.resolveLocked(id) orelse return null;
+    if (begun.release() != 0) return;
+    // Taken under the same lock the count was read under, so no resolve can
+    // land between "nothing names it" and the entry going away.
+    const entry = bindings.runs.takeLocked(id).?;
+    bindings.allocator.destroy(entry);
+}
+
 pub const TableCount = struct {
     field: []const u8,
     live: usize,
@@ -1290,17 +1349,17 @@ test "every handle table says what reclaims its entries, and only in two ways" {
 }
 
 test "a capacity refusal can name the table it came from" {
-    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.io, testing.allocator, 1);
     defer sessions.deinit();
-    var runs = try handle_table.Table(BegunRun).init(testing.allocator, 2);
+    var runs = try handle_table.Table(BegunRun).init(testing.io, testing.allocator, 2);
     defer runs.deinit();
-    var leases = try handle_table.Table(catalog.Lease).init(testing.allocator, 3);
+    var leases = try handle_table.Table(catalog.Lease).init(testing.io, testing.allocator, 3);
     defer leases.deinit();
-    var skill_restore = try handle_table.Table(port.SkillRestoreInputs).init(testing.allocator, 4);
+    var skill_restore = try handle_table.Table(port.SkillRestoreInputs).init(testing.io, testing.allocator, 4);
     defer skill_restore.deinit();
-    var session_restore = try handle_table.Table(port.SessionRestoreInputs).init(testing.allocator, 5);
+    var session_restore = try handle_table.Table(port.SessionRestoreInputs).init(testing.io, testing.allocator, 5);
     defer session_restore.deinit();
-    var selections = try handle_table.Table(mcp_catalog.Selection).init(testing.allocator, 6);
+    var selections = try handle_table.Table(mcp_catalog.Selection).init(testing.io, testing.allocator, 6);
     defer selections.deinit();
     const bindings: Bindings = .{
         .allocator = testing.allocator,
@@ -1455,24 +1514,42 @@ pub const Tables = struct {
 
     pub fn init(
         self: *Tables,
+        io: std.Io,
         allocator: std.mem.Allocator,
         capacity: Capacity,
     ) std.mem.Allocator.Error!void {
         self.sessions = try handle_table.Table(run_tools.HeldSession)
-            .init(allocator, capacity.sessions);
+            .init(io, allocator, capacity.sessions);
         errdefer self.sessions.deinit();
-        self.runs = try handle_table.Table(BegunRun).init(allocator, capacity.runs);
+        self.runs = try handle_table.Table(BegunRun).init(io, allocator, capacity.runs);
         errdefer self.runs.deinit();
-        self.leases = try handle_table.Table(catalog.Lease).init(allocator, capacity.leases);
+        self.leases = try handle_table.Table(catalog.Lease).init(io, allocator, capacity.leases);
         errdefer self.leases.deinit();
         self.skill_restore = try handle_table.Table(port.SkillRestoreInputs)
-            .init(allocator, capacity.skill_restore);
+            .init(io, allocator, capacity.skill_restore);
         errdefer self.skill_restore.deinit();
         self.session_restore = try handle_table.Table(port.SessionRestoreInputs)
-            .init(allocator, capacity.session_restore);
+            .init(io, allocator, capacity.session_restore);
         errdefer self.session_restore.deinit();
         self.selections = try handle_table.Table(mcp_catalog.Selection)
-            .init(allocator, capacity.selections);
+            .init(io, allocator, capacity.selections);
+    }
+
+    /// How many boxes the other half needs to name everything this set can
+    /// hold at once.
+    ///
+    /// Read off the capacities rather than configured beside them: a box is
+    /// what the calling half carries for an entry over here, so one more
+    /// Session this side can hold is one more box that side has to have. Two
+    /// numbers would drift, and the direction it drifts in matters -- too few
+    /// boxes is a refusal at a point where the far side has already created
+    /// something it can no longer be told about.
+    ///
+    /// Only the boxed tables count. The other three are named by the port
+    /// values that carry their id inline, which spend no box at all; the
+    /// comptime check in `handle_repr` is what keeps that division honest.
+    pub fn boxes(capacity: Capacity) usize {
+        return capacity.sessions + capacity.runs;
     }
 
     pub fn deinit(self: *Tables) void {
@@ -1515,9 +1592,10 @@ pub const Tables = struct {
         _ = try self.selections.insert(@ptrCast(&storage.selection));
     }
 
-    fn live(self: *const Tables) usize {
-        return self.sessions.live + self.runs.live + self.leases.live +
-            self.skill_restore.live + self.session_restore.live + self.selections.live;
+    fn live(self: *Tables) usize {
+        return self.sessions.liveCount() + self.runs.liveCount() + self.leases.liveCount() +
+            self.skill_restore.liveCount() + self.session_restore.liveCount() +
+            self.selections.liveCount();
     }
 };
 
@@ -1532,7 +1610,7 @@ const Storage = struct {
 
 test "an ending drains exactly the tables bound to it, and the link drains all" {
     var tables: Tables = undefined;
-    try tables.init(testing.allocator, .{
+    try tables.init(testing.io, testing.allocator, .{
         .sessions = 4,
         .runs = 4,
         .leases = 4,
@@ -1574,7 +1652,7 @@ test "the link ending leaves no table holding anything" {
     // editing this test. A table whose ending never arrives would show up
     // here as an entry that survived.
     var tables: Tables = undefined;
-    try tables.init(testing.allocator, .{
+    try tables.init(testing.io, testing.allocator, .{
         .sessions = 4,
         .runs = 4,
         .leases = 4,
@@ -1606,20 +1684,31 @@ test "the link ending leaves no table holding anything" {
 /// A control handle that counts, so the accounting can be asserted rather
 /// than reasoned about.
 const CountingControl = struct {
-    retains: u32 = 0,
-    releases: u32 = 0,
+    /// Atomic because the concurrency test below drives one of these from
+    /// every thread at once, and a tally that lost an increment there would
+    /// read as the imbalance that test exists to catch.
+    retains: std.atomic.Value(u32) = .init(0),
+    releases: std.atomic.Value(u32) = .init(0),
     refuse: bool = false,
 
     fn tryRetain(context: ?*anyopaque) bool {
         const self: *CountingControl = @ptrCast(@alignCast(context.?));
         if (self.refuse) return false;
-        self.retains += 1;
+        _ = self.retains.fetchAdd(1, .acq_rel);
         return true;
     }
 
     fn release(context: ?*anyopaque) void {
         const self: *CountingControl = @ptrCast(@alignCast(context.?));
-        self.releases += 1;
+        _ = self.releases.fetchAdd(1, .acq_rel);
+    }
+
+    fn retainCount(self: *const CountingControl) u32 {
+        return self.retains.load(.acquire);
+    }
+
+    fn releaseCount(self: *const CountingControl) u32 {
+        return self.releases.load(.acquire);
     }
 
     fn submitInput(
@@ -1689,7 +1778,7 @@ test "every reference this half holds for a Run is released exactly once" {
     // The Run's own reference is held without a retain crossing: it exists
     // because the Run does.
     try testing.expectEqual(@as(u32, 1), run.outstanding.load(.acquire));
-    try testing.expectEqual(@as(u32, 0), counting.retains);
+    try testing.expectEqual(@as(u32, 0), counting.retainCount());
 
     // Two retains the caller asked for, one release it asked for.
     try testing.expect(run.retain());
@@ -1701,14 +1790,137 @@ test "every reference this half holds for a Run is released exactly once" {
     // The link ends. What is left is released, and the totals balance: three
     // references held (one for the Run, two retained), three released.
     try testing.expectEqual(@as(u32, 2), run.releaseOutstanding());
-    try testing.expectEqual(@as(u32, 2), counting.retains);
-    try testing.expectEqual(@as(u32, 3), counting.releases);
-    try testing.expectEqual(counting.retains + 1, counting.releases);
+    try testing.expectEqual(@as(u32, 2), counting.retainCount());
+    try testing.expectEqual(@as(u32, 3), counting.releaseCount());
+    try testing.expectEqual(counting.retainCount() + 1, counting.releaseCount());
 
     // Draining twice releases nothing twice, which is the failure a guess
     // would produce here.
     try testing.expectEqual(@as(u32, 0), run.releaseOutstanding());
-    try testing.expectEqual(@as(u32, 3), counting.releases);
+    try testing.expectEqual(@as(u32, 3), counting.releaseCount());
+}
+
+/// One thread's share of a single Run every thread is naming at once.
+///
+/// Takes a reference and gives it straight back, so several of these hold the
+/// Run at the same moment and whichever gives up last is the one that retires
+/// its entry. Which thread that is is the race.
+const RunHammer = struct {
+    bindings: Bindings,
+    /// The Run every thread is naming right now. The main thread publishes a
+    /// fresh one each cycle and gives up its own reference while they are
+    /// asking, so zero is reached at a moment none of them chose.
+    current: *std.atomic.Value(u64),
+    stop: *std.atomic.Value(bool),
+    /// Retains answered, and the releases sent back for them. Equal at the
+    /// end or this thread left a reference behind.
+    taken: usize = 0,
+    given: usize = 0,
+    /// Rounds that found the Run already gone, which is the honest answer
+    /// once nothing names it any more.
+    gone: usize = 0,
+
+    fn run(self: *RunHammer) void {
+        while (!self.stop.load(.acquire)) {
+            const id = handle_table.Id.fromBits(self.current.load(.acquire));
+            if (!id.valid()) continue;
+            const retained = retainRun(self.bindings, id) orelse {
+                self.gone += 1;
+                continue;
+            };
+            if (!retained) {
+                self.gone += 1;
+                continue;
+            }
+            self.taken += 1;
+            // This half holds a reference now, so the id must still name the
+            // Run. An answer of "unknown" here means a release decided
+            // nothing names it while this thread's reference was standing.
+            releaseRun(self.bindings, id) orelse unreachable;
+            self.given += 1;
+        }
+    }
+};
+
+test "retains and releases racing on one Run retire its entry exactly once" {
+    // The entry a Run lives in is freed by whichever release takes the count
+    // to zero, and every one of those releases starts by resolving the id out
+    // of the table. Resolved under one lock and counted under another, two
+    // requests naming one Run each hold a pointer the other may be about to
+    // free -- so `retainRun` and `releaseRun` decide the resolve and the
+    // count together, and this is the test that says so.
+    //
+    // Five hundred crossings rather than one, and each one is made contended
+    // on purpose: the cycle does not give up the Run's own reference until
+    // two threads are holding it, so the release that reaches zero is always
+    // one of theirs and always has another resolve beside it. Splitting the
+    // pair back into separate locks fails this -- the test allocator writes
+    // over what it frees, so the release that lands on a retired entry either
+    // crashes or finds a count that cannot be reconciled.
+    const thread_count = 8;
+    const cycles = 500;
+
+    var tables: Tables = undefined;
+    try tables.init(testing.io, testing.allocator, .{ .sessions = 1, .runs = 1 });
+    defer tables.deinit();
+    const bindings = quietBindings(&tables);
+
+    var counting: CountingControl = .{};
+    var current: std.atomic.Value(u64) = .init(0);
+    var stop: std.atomic.Value(bool) = .init(false);
+
+    var hammers: [thread_count]RunHammer = undefined;
+    for (&hammers) |*hammer| {
+        hammer.* = .{ .bindings = bindings, .current = &current, .stop = &stop };
+    }
+    var threads: [thread_count]std.Thread = undefined;
+    for (&threads, &hammers) |*thread, *hammer| {
+        thread.* = try std.Thread.spawn(.{}, RunHammer.run, .{hammer});
+    }
+
+    var contended: usize = 0;
+    var cycle: usize = 0;
+    while (cycle < cycles) : (cycle += 1) {
+        const entry = try testing.allocator.create(BegunRun);
+        entry.* = counting.begunRun();
+        const id = try tables.runs.insert(entry);
+        current.store(id.bits(), .release);
+
+        // Waited for on purpose. Reading `outstanding` is safe only while
+        // this reference is still standing, which is why it is read before
+        // giving it up: two other references means two threads are inside the
+        // Run, and the release that reaches zero will be one of theirs with
+        // the other's resolve beside it.
+        var spins: usize = 0;
+        while (entry.outstanding.load(.acquire) < 3 and spins < 1 << 22) : (spins += 1) {}
+        if (entry.outstanding.load(.acquire) >= 3) contended += 1;
+
+        releaseRun(bindings, id) orelse unreachable;
+        // The slot has to come back before the next cycle can have it, and
+        // waiting for it is also the assertion that somebody retired the
+        // entry: nothing else ever will.
+        while (tables.runs.liveCount() != 0) {}
+        current.store(0, .release);
+    }
+    stop.store(true, .release);
+    for (&threads) |thread| thread.join();
+
+    var taken: usize = 0;
+    for (&hammers) |*hammer| {
+        try testing.expectEqual(hammer.taken, hammer.given);
+        taken += hammer.taken;
+    }
+    // The cycles were races and not a sequence of quiet handovers.
+    try testing.expect(contended > cycles / 2);
+
+    // Every reference this half ever held was released: the retains the
+    // threads were given, plus one Run's own per cycle.
+    try testing.expectEqual(@as(u32, @intCast(taken)), counting.retainCount());
+    try testing.expectEqual(counting.retainCount() + cycles, counting.releaseCount());
+
+    // Nothing is left, and every entry was freed exactly once -- the test
+    // allocator would say so otherwise.
+    try testing.expectEqual(@as(usize, 0), tables.runs.liveCount());
 }
 
 test "a refused retain leaves no reference behind" {
@@ -1720,7 +1932,7 @@ test "a refused retain leaves no reference behind" {
     // Session never gave out.
     try testing.expectEqual(@as(u32, 1), run.outstanding.load(.acquire));
     try testing.expectEqual(@as(u32, 1), run.releaseOutstanding());
-    try testing.expectEqual(@as(u32, 1), counting.releases);
+    try testing.expectEqual(@as(u32, 1), counting.releaseCount());
 }
 
 test "a request naming another Run is not executed as this one" {

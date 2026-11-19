@@ -296,7 +296,7 @@ const Answering = struct {
             .blocking = blocking,
             .drain_events = options.drain_events,
         };
-        try self.tables.init(allocator, options.tables);
+        try self.tables.init(io, allocator, options.tables);
         errdefer self.tables.deinit();
         // The notifier is this half's, so the Runtime cannot be built before
         // it exists -- which is why the caller passes a factory rather than a

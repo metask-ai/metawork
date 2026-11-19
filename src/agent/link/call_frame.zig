@@ -157,7 +157,7 @@ const Promised = struct {
 };
 
 test "a promise is given back when the call it was made for does not happen" {
-    var table = try Promised.Table.init(testing.allocator, 1);
+    var table = try Promised.Table.init(testing.io, testing.allocator, 1);
     defer table.deinit();
 
     // One slot, so a promise that was not given back would make the next
@@ -184,7 +184,7 @@ test "a promise is given back when the call it was made for does not happen" {
 }
 
 test "capacity is refused before the call that cannot be undone, not after" {
-    var table = try Promised.Table.init(testing.allocator, 1);
+    var table = try Promised.Table.init(testing.io, testing.allocator, 1);
     defer table.deinit();
     const held = try table.reserve();
 

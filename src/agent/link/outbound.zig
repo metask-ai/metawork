@@ -426,6 +426,7 @@ test "the argument direction is counted on its own" {
 fn testClient(count: usize) !*client.Client {
     const self = try testing.allocator.create(client.Client);
     try self.init(
+        testing.io,
         testing.allocator,
         undefined,
         undefined,

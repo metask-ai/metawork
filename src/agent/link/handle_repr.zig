@@ -296,6 +296,17 @@ pub fn Boxes(comptime Link: type) type {
         };
 
         allocator: std.mem.Allocator,
+        /// Held across the slot scan and the field writes, because this half
+        /// is in the table on more than one thread: Product's threads name
+        /// and release handles, and the link's reader thread names what a
+        /// reverse call carries in. Two scans at once would hand one slot to
+        /// both, which is two handles naming one box -- the window the
+        /// comments below already argue about, closed rather than reasoned
+        /// around.
+        mutex: std.Io.Mutex = .init,
+        /// Stored for the same reason the execution half's table stores one:
+        /// `Io.Mutex` needs an `Io` to park a contended waiter.
+        io: std.Io,
         slots: []Slot,
 
         pub const Error = error{
@@ -307,6 +318,7 @@ pub fn Boxes(comptime Link: type) type {
         };
 
         pub fn init(
+            io: std.Io,
             allocator: std.mem.Allocator,
             count: usize,
             link: *Link,
@@ -314,17 +326,30 @@ pub fn Boxes(comptime Link: type) type {
             std.debug.assert(count > 0);
             const slots = try allocator.alloc(Slot, count);
             @memset(slots, .{ .link = link });
-            return .{ .allocator = allocator, .slots = slots };
+            return .{ .allocator = allocator, .io = io, .slots = slots };
         }
 
+        /// Takes no lock: it frees the memory the lock lives in. A table torn
+        /// down while another thread is still inside it is a composition
+        /// error no lock here can answer.
         pub fn deinit(self: *Self) void {
             self.allocator.free(self.slots);
             self.* = undefined;
         }
 
+        fn lock(self: *Self) void {
+            self.mutex.lockUncancelable(self.io);
+        }
+
+        fn unlock(self: *Self) void {
+            self.mutex.unlock(self.io);
+        }
+
         /// Names an id, returning the box the caller will carry.
         pub fn open(self: *Self, id: handle_table.Id) Error!*Slot {
             std.debug.assert(id.valid());
+            self.lock();
+            defer self.unlock();
             const slot = try self.freeSlot();
             slot.id = id;
             return slot;
@@ -340,12 +365,16 @@ pub fn Boxes(comptime Link: type) type {
         /// it. Spending the capacity first turns that into a refusal before
         /// the call, which is a refusal that costs nothing.
         pub fn reserve(self: *Self) Error!*Slot {
+            self.lock();
+            defer self.unlock();
             return self.freeSlot();
         }
 
         /// Names the id the answer brought, on a box already taken.
         pub fn fill(self: *Self, slot: *Slot, id: handle_table.Id) void {
             std.debug.assert(id.valid());
+            self.lock();
+            defer self.unlock();
             std.debug.assert(slot.live and !slot.id.valid());
             std.debug.assert(self.holds(slot));
             slot.id = id;
@@ -353,6 +382,8 @@ pub fn Boxes(comptime Link: type) type {
 
         /// Gives back a box whose call did not produce a handle.
         pub fn releaseReservation(self: *Self, slot: *Slot) void {
+            self.lock();
+            defer self.unlock();
             std.debug.assert(slot.live and !slot.id.valid());
             std.debug.assert(self.holds(slot));
             slot.live = false;
@@ -365,6 +396,8 @@ pub fn Boxes(comptime Link: type) type {
         /// by construction and handing one out would push the refusal to
         /// whoever read it next.
         pub fn borrow(self: *Self, handle: *const anyopaque) Error!handle_table.Id {
+            self.lock();
+            defer self.unlock();
             const slot = try self.slotOf(handle);
             if (!slot.id.valid()) return error.UnknownBox;
             return slot.id;
@@ -393,11 +426,15 @@ pub fn Boxes(comptime Link: type) type {
         /// The link a handle belongs to, which is how a stub entered through
         /// an `in_context` port value finds its own half.
         pub fn linkOf(self: *Self, handle: *const anyopaque) Error!*Link {
+            self.lock();
+            defer self.unlock();
             const slot = try self.slotOf(handle);
             return slot.link;
         }
 
-        pub fn liveCount(self: *const Self) usize {
+        pub fn liveCount(self: *Self) usize {
+            self.lock();
+            defer self.unlock();
             var count: usize = 0;
             for (self.slots) |slot| {
                 if (slot.live) count += 1;
@@ -405,6 +442,8 @@ pub fn Boxes(comptime Link: type) type {
             return count;
         }
 
+        /// Takes no lock: the slot count is decided at `init` and never
+        /// moves, so there is nothing here another thread could change.
         pub fn capacity(self: *const Self) usize {
             return self.slots.len;
         }
@@ -438,6 +477,16 @@ pub fn Boxes(comptime Link: type) type {
         /// can take it, and the restore would then write this handle's id
         /// over that one -- two handles naming one slot. Clearing after
         /// success has no window at all.
+        ///
+        /// The one operation here that does not hold the lock throughout, and
+        /// it must not: `body` is a call to the other half that waits for the
+        /// answer, and the answer arrives on the reader thread, which needs
+        /// this same lock to name what a reverse call carries in. Held across
+        /// the call, this lock would be held across its own reply.
+        ///
+        /// Dropping it is safe for the reason the paragraph above gives: the
+        /// slot stays live for the whole call, so no scan can take it, and
+        /// the pointer stays good because the slots never move.
         pub fn releaseThrough(
             self: *Self,
             handle: *const anyopaque,
@@ -445,12 +494,19 @@ pub fn Boxes(comptime Link: type) type {
             context: anytype,
             comptime body: fn (@TypeOf(context), handle_table.Id) Result,
         ) (Error || @typeInfo(Result).error_union.error_set)!void {
-            const slot = try self.slotOf(handle);
-            // A reserved box names nothing yet, so there is nothing to
-            // release through: `releaseReservation` is that case's own call.
-            if (!slot.id.valid()) return error.UnknownBox;
-            const id = slot.id;
+            const slot, const id = found: {
+                self.lock();
+                defer self.unlock();
+                const slot = try self.slotOf(handle);
+                // A reserved box names nothing yet, so there is nothing to
+                // release through: `releaseReservation` is that case's own
+                // call.
+                if (!slot.id.valid()) return error.UnknownBox;
+                break :found .{ slot, slot.id };
+            };
             _ = try body(context, id);
+            self.lock();
+            defer self.unlock();
             slot.id = .none;
             slot.live = false;
             slot.holds = 0;
@@ -463,6 +519,8 @@ pub fn Boxes(comptime Link: type) type {
         /// half keeps the same tally, so this is each half counting its own
         /// names rather than one half being told the other's.
         pub fn retained(self: *Self, handle: *const anyopaque) Error!void {
+            self.lock();
+            defer self.unlock();
             const slot = try self.slotOf(handle);
             if (!slot.id.valid()) return error.UnknownBox;
             slot.holds += 1;
@@ -477,6 +535,8 @@ pub fn Boxes(comptime Link: type) type {
         /// taken by another `open` while this handle's call is still in
         /// flight.
         pub fn released(self: *Self, handle: *const anyopaque) Error!bool {
+            self.lock();
+            defer self.unlock();
             const slot = try self.slotOf(handle);
             if (!slot.id.valid()) return error.UnknownBox;
             std.debug.assert(slot.holds > 0);
@@ -495,6 +555,93 @@ const testing = std.testing;
 /// back out, so what it points at does not matter -- that it is typed does.
 const TestLink = struct { tag: u32 = 0 };
 const TestBoxes = Boxes(TestLink);
+
+/// One thread's share of a box table every thread is in at once.
+///
+/// Names an id, reads it back, takes a second reference the way a Run's
+/// control lease does, and gives both up. Holds at most one box at a time, so
+/// a table with a slot per thread always has a free one and a refusal means
+/// the table handed one slot to two callers.
+const BoxHammer = struct {
+    boxes: *TestBoxes,
+    rounds: usize,
+    /// This thread's own slot number, so the id it names is one no other
+    /// thread names. A box that read back another thread's id is the failure.
+    slot: u32,
+    wrong: usize = 0,
+    refused: usize = 0,
+
+    fn run(self: *BoxHammer) void {
+        var round: usize = 0;
+        while (round < self.rounds) : (round += 1) {
+            const id: handle_table.Id = .{
+                .slot = self.slot,
+                .generation = @intCast(round + 1),
+            };
+            const box = self.boxes.open(id) catch {
+                self.refused += 1;
+                continue;
+            };
+            const read = self.boxes.borrow(box) catch {
+                self.wrong += 1;
+                continue;
+            };
+            if (read.bits() != id.bits()) self.wrong += 1;
+            // Two names for one box, which is the shape a Run has: its port
+            // and every control lease taken from it.
+            self.boxes.retained(box) catch {
+                self.wrong += 1;
+                continue;
+            };
+            // The first release is not the last, the second is. Reversed or
+            // doubled, the count this slot carries is not this thread's.
+            if (self.boxes.released(box) catch true) self.wrong += 1;
+            if (!(self.boxes.released(box) catch false)) self.wrong += 1;
+        }
+    }
+};
+
+test "threads sharing one box table are never handed one slot twice" {
+    // This half is in the table on more than one thread: Product's threads
+    // name and release handles, and the link's reader thread names what a
+    // reverse call carries in. Two scans at once hand one slot to both, and
+    // then one caller's handle reads back the other's id -- which is a port
+    // value pointing at the wrong object on the far side.
+    //
+    // One slot per thread and a tight loop, for the reason the execution
+    // half's table test gives: the window is a few instructions wide and the
+    // way into it is to have every thread scanning the same small array at
+    // the same moment. Taking the lock out of `Boxes` fails this.
+    const thread_count = 8;
+    const rounds = 4000;
+
+    var link: TestLink = .{};
+    var boxes = try TestBoxes.init(testing.io, testing.allocator, thread_count, &link);
+    defer boxes.deinit();
+
+    var hammers: [thread_count]BoxHammer = undefined;
+    for (&hammers, 0..) |*hammer, index| {
+        hammer.* = .{
+            .boxes = &boxes,
+            .rounds = rounds,
+            .slot = @intCast(index + 1),
+        };
+    }
+
+    var threads: [thread_count]std.Thread = undefined;
+    for (&threads, &hammers) |*thread, *hammer| {
+        thread.* = try std.Thread.spawn(.{}, BoxHammer.run, .{hammer});
+    }
+    for (&threads) |thread| thread.join();
+
+    for (&hammers) |*hammer| {
+        try testing.expectEqual(@as(usize, 0), hammer.wrong);
+        try testing.expectEqual(@as(usize, 0), hammer.refused);
+    }
+    // Both sides of a handle's life came back: every box opened was released,
+    // so nothing is left naming anything.
+    try testing.expectEqual(@as(usize, 0), boxes.liveCount());
+}
 
 test "which representation a type gets is read off the type" {
     // A port value carries its own context, so the id rides there.
@@ -537,7 +684,7 @@ test "which representation a type gets is read off the type" {
 
 test "a box is a real pointer into live memory, and a forged one is refused" {
     var link: TestLink = .{ .tag = 9 };
-    var boxes = try TestBoxes.init(testing.allocator, 2, &link);
+    var boxes = try TestBoxes.init(testing.io, testing.allocator, 2, &link);
     defer boxes.deinit();
 
     const first = try boxes.open(.{ .slot = 3, .generation = 1 });
@@ -565,7 +712,7 @@ test "a box is a real pointer into live memory, and a forged one is refused" {
 
 test "a release clears the box only after it succeeded, with no window" {
     var link: TestLink = .{};
-    var boxes = try TestBoxes.init(testing.allocator, 1, &link);
+    var boxes = try TestBoxes.init(testing.io, testing.allocator, 1, &link);
     defer boxes.deinit();
     const handle = try boxes.open(.{ .slot = 5, .generation = 2 });
 
@@ -623,7 +770,7 @@ test "a box keeps no generation, because the id it holds has one" {
 
     var link: TestLink = .{ .tag = 4 };
     const id: handle_table.Id = .{ .slot = 2, .generation = 11 };
-    var boxes = try TestBoxes.init(testing.allocator, 1, &link);
+    var boxes = try TestBoxes.init(testing.io, testing.allocator, 1, &link);
     defer boxes.deinit();
     const handle = try boxes.open(id);
     try testing.expectEqual(id.bits(), (try boxes.borrow(handle)).bits());
@@ -641,7 +788,7 @@ test "both representations are carried by one box, differing only in who holds i
     // the same arithmetic that refuses a stale lease pointer, rather than
     // being a freed allocation nobody can check.
     var link: TestLink = .{};
-    var boxes = try TestBoxes.init(testing.allocator, 2, &link);
+    var boxes = try TestBoxes.init(testing.io, testing.allocator, 2, &link);
     defer boxes.deinit();
 
     const boxed = try boxes.open(.{ .slot = 1, .generation = 1 });
@@ -671,7 +818,7 @@ test "a box is taken before the call that names it, not after" {
     // with nothing here able to name or release it. Taking the box first
     // makes that a refusal before anything irreversible happened.
     var link: TestLink = .{};
-    var boxes = try TestBoxes.init(testing.allocator, 1, &link);
+    var boxes = try TestBoxes.init(testing.io, testing.allocator, 1, &link);
     defer boxes.deinit();
 
     const reserved = try boxes.reserve();

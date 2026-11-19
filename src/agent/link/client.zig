@@ -140,6 +140,7 @@ pub const Client = struct {
     /// belong to and that is this value's own address.
     pub fn init(
         self: *Client,
+        io: std.Io,
         allocator: std.mem.Allocator,
         outbound: *channel.Outbound,
         slots: *pending.Table,
@@ -153,7 +154,7 @@ pub const Client = struct {
             .boxes = undefined,
             .vtables = vtables,
         };
-        self.boxes = try Boxes.init(allocator, box_count, self);
+        self.boxes = try Boxes.init(io, allocator, box_count, self);
     }
 
     pub fn deinit(self: *Client) void {
@@ -544,6 +545,7 @@ test "a gone link has an answer in the contract's own set" {
 fn boxedClient(count: usize) !*Client {
     const self = try testing.allocator.create(Client);
     try self.init(
+        testing.io,
         testing.allocator,
         undefined,
         undefined,
@@ -615,7 +617,7 @@ test "a submit that cannot allocate gives the slot back" {
     defer slots.deinit();
     const half = try testing.allocator.create(Client);
     defer testing.allocator.destroy(half);
-    try half.init(testing.allocator, &queue, &slots, .{
+    try half.init(testing.io, testing.allocator, &queue, &slots, .{
         .session = undefined,
         .run = undefined,
         .run_control = undefined,

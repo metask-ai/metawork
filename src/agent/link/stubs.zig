@@ -1443,10 +1443,10 @@ test "a Session created on the far side comes back as a port this half can name"
     defer slots.deinit();
     const half = try testing.allocator.create(client.Client);
     defer testing.allocator.destroy(half);
-    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    try half.init(testing.io, testing.allocator, &queue, &slots, vtables, 4);
     defer half.deinit();
 
-    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.io, testing.allocator, 2);
     defer sessions.deinit();
     var runtime_fake: FakeRuntime = .{};
     var peer: Peer = .{
@@ -1505,10 +1505,10 @@ test "a link that has concluded it is unusable carries nothing further" {
     defer slots.deinit();
     const half = try testing.allocator.create(client.Client);
     defer testing.allocator.destroy(half);
-    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    try half.init(testing.io, testing.allocator, &queue, &slots, vtables, 4);
     defer half.deinit();
 
-    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.io, testing.allocator, 2);
     defer sessions.deinit();
     var recorder: Recorder = .{};
     var session_vtable: port.SessionPort.VTable = undefined;
@@ -1562,10 +1562,10 @@ test "closing a Session gives both halves' names back" {
     defer slots.deinit();
     const half = try testing.allocator.create(client.Client);
     defer testing.allocator.destroy(half);
-    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    try half.init(testing.io, testing.allocator, &queue, &slots, vtables, 4);
     defer half.deinit();
 
-    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.io, testing.allocator, 2);
     defer sessions.deinit();
     var runtime_fake: FakeRuntime = .{};
     var peer: Peer = .{
@@ -1631,12 +1631,12 @@ test "a create the far side refuses leaves no promised slot behind" {
     defer slots.deinit();
     const half = try testing.allocator.create(client.Client);
     defer testing.allocator.destroy(half);
-    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    try half.init(testing.io, testing.allocator, &queue, &slots, vtables, 4);
     defer half.deinit();
 
     // One slot, so a reservation that was not given back is visible as the
     // table still counting it live.
-    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 1);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.io, testing.allocator, 1);
     defer sessions.deinit();
     var peer: Peer = .{ .io = io, .dir = tmp.dir, .slots = &slots, .sessions = &sessions };
     var thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
@@ -1672,11 +1672,11 @@ test "a call through the port Product already uses reaches a real Session" {
     defer slots.deinit();
     const half = try testing.allocator.create(client.Client);
     defer testing.allocator.destroy(half);
-    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    try half.init(testing.io, testing.allocator, &queue, &slots, vtables, 4);
     defer half.deinit();
 
     // The execution half: a Session in a real table.
-    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.io, testing.allocator, 2);
     defer sessions.deinit();
     var recorder: Recorder = .{};
     var session_vtable: port.SessionPort.VTable = undefined;
@@ -1754,10 +1754,10 @@ test "a Stop travels on the transport it is registered with" {
     defer slots.deinit();
     const half = try testing.allocator.create(client.Client);
     defer testing.allocator.destroy(half);
-    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    try half.init(testing.io, testing.allocator, &queue, &slots, vtables, 4);
     defer half.deinit();
 
-    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.io, testing.allocator, 2);
     defer sessions.deinit();
     var recorder: Recorder = .{};
     var session_vtable: port.SessionPort.VTable = undefined;
@@ -1817,10 +1817,10 @@ test "a method the far side refuses comes back as that method's own error" {
     defer slots.deinit();
     const half = try testing.allocator.create(client.Client);
     defer testing.allocator.destroy(half);
-    try half.init(testing.allocator, &queue, &slots, vtables, 4);
+    try half.init(testing.io, testing.allocator, &queue, &slots, vtables, 4);
     defer half.deinit();
 
-    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.allocator, 2);
+    var sessions = try handle_table.Table(run_tools.HeldSession).init(testing.io, testing.allocator, 2);
     defer sessions.deinit();
     var recorder: Recorder = .{};
     var session_vtable: port.SessionPort.VTable = undefined;

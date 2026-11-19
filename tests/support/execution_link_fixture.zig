@@ -41,6 +41,15 @@ const fake = @import("lifecycle_fixture");
 
 pub const runtime_flag = "--with-runtime";
 
+/// The handle capacity both halves of a test link are composed with.
+///
+/// Shared rather than written twice. The number of boxes the calling half
+/// takes is read off this same `Capacity`, so a test that gave the two halves
+/// different ones would be testing a link no build produces -- and the small
+/// counts are what make a capacity refusal reachable in three calls instead
+/// of fifty.
+pub const fixture_tables: agent_link.adapters.Tables.Capacity = .{ .sessions = 2, .runs = 2 };
+
 /// Stays alive after the link ends, which is the one condition the UI half's
 /// kill exists for: a child that has been told to stop and does not stop. The
 /// real shape of it is a worker inside `run.execute`, which returns only when
@@ -161,7 +170,7 @@ pub fn main(init: std.process.Init) !void {
             composer.factory()
         else
             null,
-        .tables = .{ .sessions = 2, .runs = 2 },
+        .tables = fixture_tables,
         .drain_events = !requested(init.minimal.args, init.gpa, no_drain_flag),
         .workers = if (requested(init.minimal.args, init.gpa, hold_runs_flag)) 1 else 4,
     });
