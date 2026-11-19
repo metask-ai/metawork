@@ -88,6 +88,31 @@ pub const LinkFault = enum(u8) {
     /// A frame arrived that this build cannot decode, which means the peer is
     /// not this build.
     unreadable = 4,
+    /// Events arrived faster than this half's consumer drained them. Not a
+    /// refusal to carry one: an event dropped here shortens a conversation
+    /// Product then commits as complete, which nothing downstream can tell
+    /// from a finished one.
+    events_overflowed = 5,
+};
+
+/// Where this half's answers to the four `stream` methods come from.
+///
+/// They are not calls. The execution half pushes `event` frames and this half
+/// answers from what has already arrived, which is what the registry's
+/// `stream` classification means -- and the licence that makes it honest is
+/// narrow: the buffer holds nothing except what the far side sent, so the
+/// answer is still the far side's fact.
+///
+/// The signatures are read off the vtable rather than written out, so a
+/// method whose shape changes changes here too. What fills them is not the
+/// link's: parsing a Core event is the Agent's own decoder, and this module
+/// deliberately links no AgentCore archive.
+pub const EventSource = struct {
+    context: ?*anyopaque,
+    take_fn: @FieldType(port.RuntimePort.VTable, "take_event"),
+    has_pending_fn: @FieldType(port.RuntimePort.VTable, "has_pending_events"),
+    pending_count_fn: @FieldType(port.RuntimePort.VTable, "pending_event_count"),
+    notify_fn: @FieldType(port.RuntimePort.VTable, "notify_event_consumer"),
 };
 
 /// The caller's half of one link.
@@ -105,6 +130,11 @@ pub const Client = struct {
     /// into one from inside a stub would re-enter the link from a thread that
     /// may be holding the Session.
     fault: std.atomic.Value(u8) = .init(@intFromEnum(LinkFault.none)),
+    /// Where the four `stream` methods are answered from. `null` is a
+    /// composition that installed no buffer, which is a wiring mistake rather
+    /// than a condition -- the stubs panic, because answering "no events"
+    /// would read as a drained stream.
+    events: ?EventSource = null,
 
     /// Two-phase, because the boxes carry the way back to the link they
     /// belong to and that is this value's own address.
@@ -148,6 +178,13 @@ pub const Client = struct {
     /// peer is alive, which only the peer's own exit can tell anyone.
     pub fn faulted(self: *const Client) LinkFault {
         return @enumFromInt(self.fault.load(.acquire));
+    }
+
+    /// Installs the buffer the `stream` methods answer from. Separate from
+    /// `init` because the buffer belongs to the composition above this one:
+    /// it holds parsed Core events, and this module parses none.
+    pub fn bindEvents(self: *Client, source: EventSource) void {
+        self.events = source;
     }
 
     /// The link a port value belongs to, from the context it carries.

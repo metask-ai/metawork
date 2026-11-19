@@ -35,6 +35,7 @@ const std = @import("std");
 
 const agent = @import("metawork_agent");
 const agent_link = @import("metawork_agent_link");
+const execution_events = @import("app_execution_events");
 const execution_mode = @import("app_execution_mode");
 const fault = @import("app_fault");
 
@@ -161,6 +162,18 @@ const Answering = struct {
     workers: []std.Thread,
     started: usize = 0,
 
+    /// The wake bit a Core callback thread sets, and the thread that acts on
+    /// it. Its own mutex, held for nothing but the flag: a callback thread
+    /// may be holding the Session when it arrives here, so this must never
+    /// be the lock a drain is performed under.
+    signal_mutex: std.Io.Mutex = .init,
+    signal: std.Io.Condition = .init,
+    events_ready: bool = false,
+    /// Serialises draining, so the events of one Run cannot interleave with
+    /// another drain and arrive out of order.
+    drain_mutex: std.Io.Mutex = .init,
+    drain: ?std.Thread = null,
+
     const InitError = std.mem.Allocator.Error || error{RuntimeUnavailable};
 
     fn init(
@@ -209,11 +222,76 @@ const Answering = struct {
         return .{ .context = self, .notify_fn = notifyEventsReady };
     }
 
-    /// Carrying events is its own step. Until it lands, `.unavailable` is the
-    /// honest answer and it is one the Session already handles: it stops event
-    /// delivery rather than believing a consumer is there.
-    fn notifyEventsReady(_: ?*anyopaque) agent.EventReadyNotification {
-        return .unavailable;
+    /// A Core callback thread saying there are events to carry.
+    ///
+    /// It sets a bit and returns. Nothing else is allowed here: the caller may
+    /// be holding the Session, and the drain this wakes takes the event pump's
+    /// lock, which the same thread was holding moments ago.
+    ///
+    /// `.already_pending` rather than `.scheduled` when the bit was already
+    /// set, because that is what the in-process notifier answers and what
+    /// collapses a burst of events into one wake.
+    fn notifyEventsReady(context: ?*anyopaque) agent.EventReadyNotification {
+        const self: *Answering = @ptrCast(@alignCast(context orelse return .unavailable));
+        self.signal_mutex.lockUncancelable(self.io);
+        defer self.signal_mutex.unlock(self.io);
+        if (self.stopping) return .unavailable;
+        const already = self.events_ready;
+        self.events_ready = true;
+        self.signal.broadcast(self.io);
+        return if (already) .already_pending else .scheduled;
+    }
+
+    fn drainMain(self: *Answering) void {
+        while (true) {
+            self.signal_mutex.lockUncancelable(self.io);
+            while (!self.events_ready and !self.stopping)
+                self.signal.waitUncancelable(self.io, &self.signal_mutex);
+            const ending = self.stopping;
+            self.events_ready = false;
+            self.signal_mutex.unlock(self.io);
+
+            // Flushed before the check, so an event enqueued while this half
+            // was being told to stop still crosses: the UI is still reading
+            // until its own stop closes the pipe.
+            if (self.flushEvents() > 0) self.submitReady();
+            if (ending) return;
+        }
+    }
+
+    /// Sends every event the Runtime's pump holds, and says how many.
+    ///
+    /// Called from the drain thread and from every response: a Run's terminal
+    /// rides the same ordered queue as its events, so the events enqueued
+    /// before it has to be *submitted* before it. `method.zig` pins that
+    /// ordering, and it is what lets the caller read "my buffer holds nothing
+    /// for this route" as "every event of that terminal's Run has arrived".
+    fn flushEvents(self: *Answering) usize {
+        const outbound = self.outbound orelse return 0;
+        self.drain_mutex.lockUncancelable(self.io);
+        defer self.drain_mutex.unlock(self.io);
+        var sent: usize = 0;
+        while (self.runtime.takeEvent()) |taken| {
+            var event = taken;
+            defer event.deinit();
+            // An event that cannot be encoded is an event that is gone, and a
+            // conversation missing an event is one Product would commit as
+            // complete. Nothing downstream can tell those apart, so this half
+            // ends instead of carrying on one event short.
+            const bytes = execution_events.encode(self.allocator, &event) catch
+                eventLost(error.OutOfMemory);
+            defer self.allocator.free(bytes);
+            _ = outbound.submitWaiting(.event, 0, bytes) catch |failure|
+                eventLost(failure);
+            sent += 1;
+        }
+        return sent;
+    }
+
+    fn submitReady(self: *Answering) void {
+        const outbound = self.outbound orelse return;
+        _ = outbound.submitWaiting(.event_ready, 0, &.{}) catch |failure|
+            std.log.err("execution half lost an event wake: {s}", .{@errorName(failure)});
     }
 
     fn bindings(self: *Answering) adapters.Bindings {
@@ -237,6 +315,10 @@ const Answering = struct {
             self.started += 1;
         }
         if (self.started == 0) return null;
+        // Its own thread, because events have to flow while a Run is running
+        // rather than only when something else is answered. A response flushes
+        // too, for ordering; this is what makes the stream live.
+        self.drain = std.Thread.spawn(.{}, drainMain, .{self}) catch return null;
         return .{ .context = self, .deliver_fn = deliver };
     }
 
@@ -252,8 +334,15 @@ const Answering = struct {
         self.stopping = true;
         self.condition.broadcast(self.io);
         self.mutex.unlock(self.io);
+        self.signal_mutex.lockUncancelable(self.io);
+        self.signal.broadcast(self.io);
+        self.signal_mutex.unlock(self.io);
         for (self.workers[0..self.started]) |thread| thread.join();
         self.started = 0;
+        if (self.drain) |thread| {
+            thread.join();
+            self.drain = null;
+        }
     }
 
     fn deliver(
@@ -341,6 +430,11 @@ const Answering = struct {
 
     fn submit(self: *Answering, correlation: u64, bytes: []const u8) void {
         const outbound = self.outbound.?;
+        // Before the response, never after: a Run's terminal travels on the
+        // same ordered queue as its events, and an event queued behind its own
+        // terminal would reach a caller that had already read the stream as
+        // complete.
+        _ = self.flushEvents();
         // Waiting rather than refusing: a response is owed, and a caller
         // blocked on a correlation nobody will settle is the one failure a
         // refusal here would cause.
@@ -386,6 +480,21 @@ fn unanswerable(failure: dispatch.InvokeError) noreturn {
         .{@errorName(failure)},
     );
     std.process.exit(@intFromEnum(Exit.protocol_violation));
+}
+
+/// An event this half could not carry.
+///
+/// The same reasoning as `unanswerable` and a worse consequence if it were
+/// tolerated: an unanswered call blocks a caller, and a lost event silently
+/// shortens a conversation that Product then commits as complete. Nothing
+/// downstream can tell a short conversation from a finished one, which is why
+/// this ends the process rather than logging and continuing.
+fn eventLost(failure: anyerror) noreturn {
+    std.log.err(
+        "execution half cannot carry an event ({s}); ending the process",
+        .{@errorName(failure)},
+    );
+    std.process.exit(@intFromEnum(Exit.transport_failed));
 }
 
 test "the role this half records under is not the caller's to choose" {

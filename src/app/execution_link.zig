@@ -28,6 +28,7 @@ const std = @import("std");
 
 const agent = @import("metawork_agent");
 const agent_link = @import("metawork_agent_link");
+const execution_events = @import("app_execution_events");
 const execution_host = @import("app_execution_host");
 
 const channel = agent_link.channel;
@@ -53,6 +54,14 @@ pub const Options = struct {
     /// has not settled rather than by callers waiting, which is the larger of
     /// the two -- `pending.zig` says why.
     correlations: usize = 64,
+    /// How many arrived events this half may hold. The default is the
+    /// in-process pump's own bound, so the condition arrives at the same depth
+    /// it does today.
+    events: execution_events.Pump.Limits = .{},
+    /// How this half's own event consumer is woken. Product asks for a wake
+    /// through the port, and the execution half asks for one with an
+    /// `event_ready` frame; both end here.
+    wake: agent.EventReadyNotifier,
 };
 
 pub const Supervisor = struct {
@@ -61,6 +70,7 @@ pub const Supervisor = struct {
     host: execution_host.Host,
     slots: pending.Table,
     half: client.Client,
+    pump: execution_events.Pump,
     inbound: channel.Inbound,
     reader: ?std.Thread = null,
     ended: ?channel.Stopped = null,
@@ -83,6 +93,7 @@ pub const Supervisor = struct {
             .host = undefined,
             .slots = undefined,
             .half = undefined,
+            .pump = undefined,
             .inbound = undefined,
         };
         if (try self.host.start(
@@ -104,6 +115,12 @@ pub const Supervisor = struct {
             options.boxes,
         );
         errdefer self.half.deinit();
+        try self.pump.init(allocator, io, options.events, options.wake);
+        errdefer self.pump.deinit();
+        // The four `stream` methods are answered from here. Installed after
+        // the half exists, because the buffer holds parsed Core events and the
+        // link module parses none.
+        self.half.bindEvents(self.pump.source());
         self.inbound.init(
             io,
             allocator,
@@ -159,6 +176,7 @@ pub const Supervisor = struct {
         if (self.reader != null) _ = self.stop();
         if (self.composed) {
             self.inbound.deinit();
+            self.pump.deinit();
             self.half.deinit();
             self.slots.deinit();
         }
@@ -189,13 +207,33 @@ pub const Supervisor = struct {
                 // nobody awaits is still the table's to release.
                 self.slots.deposit(correlation, owned);
             },
-            // Carrying events is its own step. Dropping them silently is not
-            // something a later step may inherit, so this is loud: a Run whose
-            // events are gone is a conversation Product would commit short.
-            .event, .event_ready => {
-                std.log.err("execution link dropped an {s} frame", .{@tagName(kind)});
-                return .stop;
+            // The event's bytes, rebuilt into the value Product's consumer
+            // takes. Parsed here rather than queued raw, because a byte
+            // string that does not decode means the peer is not this build,
+            // and this is the thread that can say so.
+            .event => {
+                var event = execution_events.decode(self.allocator, payload) catch |failure| {
+                    std.log.err("execution link cannot read an event: {s}", .{@errorName(failure)});
+                    self.half.recordFault(.unreadable);
+                    return .stop;
+                };
+                if (!self.pump.push(event)) {
+                    // At its bound. Dropping the event is the one answer that
+                    // cannot be given: a conversation missing an event is one
+                    // Product commits as complete, and nothing downstream can
+                    // tell those apart. In process the same depth already
+                    // ends the Run it belongs to; from here only the link can
+                    // be ended.
+                    std.log.err("execution link is at its event bound", .{});
+                    event.deinit();
+                    self.half.recordFault(.events_overflowed);
+                    return .stop;
+                }
             },
+            // The execution half saying there is something to drain. Product's
+            // own consumer runs on the main loop, so this is a wake rather
+            // than a delivery.
+            .event_ready => _ = self.pump.wake.notify(),
             // A reverse call with nobody composed to answer it. Ending the
             // link is the restrictive answer: the alternative is an execution
             // half parked on a request this build will never answer, holding

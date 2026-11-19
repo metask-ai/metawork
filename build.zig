@@ -308,6 +308,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-app-execution-mode", .root_module = test_modules.app_execution_mode },
         .{ .name = "metawork-app-execution-half", .root_module = test_modules.app_execution_half },
         .{ .name = "metawork-app-execution-link", .root_module = test_modules.app_execution_link },
+        .{ .name = "metawork-app-execution-events", .root_module = test_modules.app_execution_events },
         .{ .name = "metawork-app-execution-host", .root_module = test_modules.app_execution_host },
         .{ .name = "metawork-agent-file-delivery", .root_module = test_modules.agent_file_delivery },
         .{ .name = "metawork-product-attachment", .root_module = test_modules.product_attachment },
@@ -976,6 +977,7 @@ const WiredModules = struct {
     app_execution_host: *std.Build.Module,
     app_execution_half: *std.Build.Module,
     app_execution_link: *std.Build.Module,
+    app_execution_events: *std.Build.Module,
     app_execution_mode: *std.Build.Module,
     agent_file_delivery: *std.Build.Module,
     agent_catalog: *std.Build.Module,
@@ -1863,6 +1865,18 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
         .link_libc = bundle.link_libc,
     });
+    // A Core event, across a process: the bytes plus the few facts the Agent
+    // verified rather than parsed. Application-level because rebuilding the
+    // value needs the Agent's own decoder, and the link module links no
+    // AgentCore archive.
+    const app_execution_events = b.createModule(.{
+        .root_source_file = b.path("src/app/execution_events.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    app_execution_events.addImport("metawork_agent_link", agent_link);
+    app_execution_events.addImport("metawork_agent", agent);
     // What the execution half owns, above the link entry point. Separate from
     // `app_execution_mode` so the entry point keeps its "link and nothing
     // else" dependencies, and separate from `src/app.zig` so the test fixture
@@ -1877,6 +1891,7 @@ fn wireAgentCore(
     app_execution_half.addImport("app_execution_mode", app_execution_mode);
     app_execution_half.addImport("app_fault", app_fault);
     app_execution_half.addImport("metawork_agent", agent);
+    app_execution_half.addImport("app_execution_events", app_execution_events);
     // The UI half's side of the same seam: the process, the correlation table
     // and the port Product is handed.
     const app_execution_link = b.createModule(.{
@@ -1888,6 +1903,7 @@ fn wireAgentCore(
     app_execution_link.addImport("metawork_agent_link", agent_link);
     app_execution_link.addImport("app_execution_host", app_execution_host);
     app_execution_link.addImport("metawork_agent", agent);
+    app_execution_link.addImport("app_execution_events", app_execution_events);
     const metawork_http_memory = b.createModule(.{
         .root_source_file = b.path("src/foundation/http/memory.zig"),
         .target = target,
@@ -2835,6 +2851,7 @@ fn wireAgentCore(
     app.addImport("app_execution_mode", app_execution_mode);
     app.addImport("app_execution_half", app_execution_half);
     app.addImport("app_execution_link", app_execution_link);
+    app.addImport("app_execution_events", app_execution_events);
     app.addImport("event_pump", event_pump);
     app.addImport("metawork_product_update", product_update);
     app.addImport("app_output_file", output_file);
@@ -2931,6 +2948,7 @@ fn wireAgentCore(
         .app_execution_mode = app_execution_mode,
         .app_execution_half = app_execution_half,
         .app_execution_link = app_execution_link,
+        .app_execution_events = app_execution_events,
         .agent_file_delivery = agent_file_delivery,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,

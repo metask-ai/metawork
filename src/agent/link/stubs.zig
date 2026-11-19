@@ -674,32 +674,40 @@ fn goneTerminal(context: ?*anyopaque) control.TerminalResult {
 // locally -- which means these four are answered from frames already in
 // hand, by a pump that is its own piece of work.
 //
-// They panic rather than answering, because an answer would be a lie with a
-// shape: a null event reads as "nothing to deliver", a zero count reads as
-// "fully drained", and `unreachability.zig`'s pending entry is about exactly
-// that -- Product commits a truncated conversation as a complete one. A
-// vtable installed without a pump is a wiring mistake in MetaWork, not a
+// A composition that installed no source still panics, and the reason it is
+// a panic rather than an answer has not changed: an answer would be a lie
+// with a shape. A null event reads as "nothing to deliver", a zero count
+// reads as "fully drained", and `unreachability.pending`'s one entry is about
+// exactly that -- Product commits a truncated conversation as a complete one.
+// A vtable installed without a source is a wiring mistake in MetaWork, not a
 // runtime condition, so it says so where it happens.
 
-fn pumpOwns(comptime name: []const u8) noreturn {
-    @panic("agent link: " ++ name ++ " is answered by the caller-side event pump, " ++
-        "which this build has not installed");
+fn eventsOf(context: ?*anyopaque, comptime name: []const u8) client.EventSource {
+    const half: *client.Client = @ptrCast(@alignCast(context.?));
+    return half.events orelse @panic(
+        "agent link: " ++ name ++ " is answered from the caller-side event buffer, " ++
+            "which this composition did not install",
+    );
 }
 
-fn runtimeTakeEvent(_: ?*anyopaque) ?event_pump.OwnedCoreEvent {
-    pumpOwns("take_event");
+fn runtimeTakeEvent(context: ?*anyopaque) ?event_pump.OwnedCoreEvent {
+    const source = eventsOf(context, "take_event");
+    return source.take_fn(source.context);
 }
 
-fn runtimeHasPendingEvents(_: ?*anyopaque) bool {
-    pumpOwns("has_pending_events");
+fn runtimeHasPendingEvents(context: ?*anyopaque) bool {
+    const source = eventsOf(context, "has_pending_events");
+    return source.has_pending_fn(source.context);
 }
 
-fn runtimePendingEventCount(_: ?*anyopaque, _: u64) usize {
-    pumpOwns("pending_event_count");
+fn runtimePendingEventCount(context: ?*anyopaque, session_id: u64) usize {
+    const source = eventsOf(context, "pending_event_count");
+    return source.pending_count_fn(source.context, session_id);
 }
 
-fn runtimeNotifyEventConsumer(_: ?*anyopaque) session_control.EventReadyNotification {
-    pumpOwns("notify_event_consumer");
+fn runtimeNotifyEventConsumer(context: ?*anyopaque) session_control.EventReadyNotification {
+    const source = eventsOf(context, "notify_event_consumer");
+    return source.notify_fn(source.context);
 }
 
 // -------------------------------------------------------------------------

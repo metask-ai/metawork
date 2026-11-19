@@ -46,6 +46,23 @@ fn fixturePath() ![]u8 {
     return std.process.Environ.getAlloc(std.testing.environ, allocator, fixture_variable);
 }
 
+/// Stands in for the Application's event-ready coordinator. Counting the
+/// wakes is the point: a wake is how the UI half learns there is something to
+/// drain, so a test that reads events has to show one arrived.
+const Wake = struct {
+    count: std.atomic.Value(usize) = .init(0),
+
+    fn notifier(self: *Wake) agent.EventReadyNotifier {
+        return .{ .context = self, .notify_fn = notify };
+    }
+
+    fn notify(context: ?*anyopaque) agent.EventReadyNotification {
+        const self: *Wake = @ptrCast(@alignCast(context.?));
+        _ = self.count.fetchAdd(1, .monotonic);
+        return .scheduled;
+    }
+};
+
 test "the execution half starts, agrees on identity and exits on end of stream" {
     const fixture = try fixturePath();
     defer allocator.free(fixture);
@@ -150,11 +167,13 @@ test "a port call crosses the process, and the execution half's Runtime answers 
     const fixture = try fixturePath();
     defer allocator.free(fixture);
 
+    var wake: Wake = .{};
     var supervisor: execution_link.Supervisor = undefined;
     const failure = try supervisor.start(io, allocator, .{
         .identity = matching_identity,
         .message_limits = fixture_message_limits,
         .spawn = .{ .explicit = &.{ fixture, execution_link_fixture.runtime_flag } },
+        .wake = wake.notifier(),
     });
     if (failure) |value| {
         std.debug.print("start failed: {any}\n", .{value});
