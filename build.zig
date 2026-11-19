@@ -716,6 +716,7 @@ pub fn build(b: *std.Build) void {
     execution_link_fixture_module.addImport("app_execution_half", test_modules.app_execution_half);
     execution_link_fixture_module.addImport("metawork_agent_link", test_modules.agent_link);
     execution_link_fixture_module.addImport("metawork_agent", test_modules.agent);
+    execution_link_fixture_module.addImport("lifecycle_fixture", lifecycle_fixture);
     const execution_link_fixture = b.addExecutable(.{
         .name = "metawork-execution-link-fixture",
         .root_module = execution_link_fixture_module,

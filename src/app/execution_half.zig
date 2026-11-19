@@ -111,6 +111,16 @@ pub const Options = struct {
     workers: usize = 4,
     /// Requests the reader may queue for those threads before it blocks.
     queue_depth: usize = 16,
+    /// Whether events also flow on a thread of their own.
+    ///
+    /// True everywhere but one test. The flush before every response is what
+    /// *orders* events against the terminal that follows them; the drain
+    /// thread is what makes them flow while a Run is still going. With both
+    /// running, the drain thread wins the race in practice and the ordering
+    /// rule is held by luck as far as any test can see -- so one test turns
+    /// the thread off, and then only the flush can deliver anything. That is
+    /// the only way the rule is observable rather than asserted.
+    drain_events: bool = true,
     /// Blocking requests that can be in flight at once -- a thread each.
     ///
     /// The real bound is the caller's: a `.worker` request blocks the thread
@@ -221,6 +231,7 @@ const Answering = struct {
     /// another drain and arrive out of order.
     drain_mutex: std.Io.Mutex = .init,
     drain: ?std.Thread = null,
+    drain_events: bool = true,
 
     const InitError = std.mem.Allocator.Error || error{RuntimeUnavailable};
 
@@ -252,6 +263,7 @@ const Answering = struct {
             .queue = queue,
             .workers = workers,
             .blocking = blocking,
+            .drain_events = options.drain_events,
         };
         try self.tables.init(allocator, options.tables);
         errdefer self.tables.deinit();
@@ -376,12 +388,13 @@ const Answering = struct {
         // Its own thread, because events have to flow while a Run is running
         // rather than only when something else is answered. A response flushes
         // too, for ordering; this is what makes the stream live.
-        self.drain = std.Thread.spawn(.{}, drainMain, .{self}) catch null;
+        if (self.drain_events)
+            self.drain = std.Thread.spawn(.{}, drainMain, .{self}) catch null;
         // A half that cannot answer must not pretend to: refusing here is
         // what makes the process exit with `resource_unavailable` instead of
         // serving a link that drops everything. `end` is what stops whatever
         // did start, and `deinit` calls it on every path.
-        if (self.started == 0 or self.drain == null) return null;
+        if (self.started == 0 or (self.drain_events and self.drain == null)) return null;
         return .{ .context = self, .deliver_fn = deliver };
     }
 

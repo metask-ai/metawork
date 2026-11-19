@@ -20,16 +20,24 @@
 //! a half that composes nothing, and they must not pay for a Runtime to find
 //! out that the peer is not this build.
 //!
-//! The AgentCore is the real one rather than a stand-in. The lifecycle
-//! fixture's stand-in is written against `std.testing`, which does not compile
-//! into an executable, and the archive is statically linked here anyway -- so
-//! the real one is both available and the more faithful half.
+//! `--fake-core` builds that Runtime over the lifecycle fixture's AgentCore
+//! stand-in instead of the real archive, which is what lets a Run cross the
+//! process at all: the real AgentCore refuses synthetic Session options, and a
+//! test cannot supply real ones. The stand-in used to be impossible to link
+//! here -- it reached for `std.testing` directly -- and is now parameterised
+//! on an allocator and an `Io`, which is one fake used in two places rather
+//! than a second one written for this side.
+//!
+//! Without the flag the Runtime is the real archive. Both are worth having:
+//! the real one is what shows a refusal coming back as the method's own error,
+//! and the stand-in is what shows a Run.
 
 const std = @import("std");
 
 const agent = @import("metawork_agent");
 const execution_half = @import("app_execution_half");
 const agent_link = @import("metawork_agent_link");
+const fake = @import("lifecycle_fixture");
 
 pub const runtime_flag = "--with-runtime";
 
@@ -44,9 +52,19 @@ pub const wedge_flag = "--wedge-on-stop";
 /// for this child would be a hang rather than a slow test.
 const wedge_ms: u64 = 120_000;
 
+pub const fake_core_flag = "--fake-core";
+
+/// Serves events only through the flush that precedes every response, which
+/// is what *orders* them against the terminal that follows. With the drain
+/// thread also running it wins the race in practice, so the ordering rule is
+/// not observable; without it, an event that arrives at all arrived because
+/// of the flush.
+pub const no_drain_flag = "--no-event-drain";
+
 const Composer = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
+    fake_core: bool,
 
     fn factory(self: *Composer) execution_half.RuntimeFactory {
         return .{ .context = self, .create_fn = create, .destroy_fn = destroy };
@@ -54,10 +72,22 @@ const Composer = struct {
 
     fn create(context: ?*anyopaque, notifier: agent.EventReadyNotifier) ?*agent.Runtime {
         const self: *Composer = @ptrCast(@alignCast(context.?));
-        return agent.Runtime.init(
+        const limits: agent.Limits = .{ .max_sessions = 2, .event_ready_notifier = notifier };
+        if (!self.fake_core)
+            return agent.Runtime.init(self.io, self.allocator, limits) catch null;
+
+        // The stand-in's own allocations and waits, before anything reaches
+        // it. A test build gets these from `std.testing`; this one has to say.
+        fake.use(self.allocator, self.io);
+        // One event before the terminal, which is what makes the ordering
+        // rule observable from the other side: a terminal that arrived first
+        // would read as a complete conversation with nothing in it.
+        fake.fake_core.setNextPlan(.event_callback);
+        return agent.Runtime.initWithApi(
             self.io,
             self.allocator,
-            .{ .max_sessions = 2, .event_ready_notifier = notifier },
+            &fake.fake_api,
+            limits,
         ) catch null;
     }
 
@@ -83,7 +113,11 @@ pub fn main(init: std.process.Init) !void {
     var digest: [32]u8 = @splat(0);
     @memset(&digest, digest_text[0]);
 
-    var composer: Composer = .{ .io = init.io, .allocator = init.gpa };
+    var composer: Composer = .{
+        .io = init.io,
+        .allocator = init.gpa,
+        .fake_core = requested(init.minimal.args, init.gpa, fake_core_flag),
+    };
     const exit = execution_half.run(init.io, init.gpa, .{
         .identity = .{
             .version = version,
@@ -112,6 +146,7 @@ pub fn main(init: std.process.Init) !void {
         else
             null,
         .tables = .{ .sessions = 2, .runs = 2 },
+        .drain_events = !requested(init.minimal.args, init.gpa, no_drain_flag),
     });
     if (requested(init.minimal.args, init.gpa, wedge_flag)) {
         // The same wait `Host.stop` uses for its own grace period, for the

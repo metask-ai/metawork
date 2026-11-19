@@ -282,6 +282,152 @@ test "a Session the far side's Runtime refuses answers in that method's own word
     _ = supervisor.stop();
 }
 
+test "a Run executes in the other process, and its event arrives before its terminal" {
+    // The vertical slice. A Session created in the execution process, a Run
+    // prepared, begun and executed there, the event it produced carried back,
+    // and the terminal arriving *after* that event -- which is the ordering
+    // rule `method.zig` pins and the execution half keeps by flushing its
+    // pump before every response. A terminal that overtook its events would
+    // read, on this side, as a complete conversation with nothing in it.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var workspace = std.testing.tmpDir(.{});
+    defer workspace.cleanup();
+    const root = try workspace.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+
+    var wake: Wake = .{};
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        // No drain thread, so the only thing that can carry an event is the
+        // flush the execution half performs before every response. With the
+        // thread running it wins the race on every machine I can test, and
+        // the ordering rule would be held by luck as far as this test could
+        // tell -- removing the race is what makes the rule observable.
+        .spawn = .{ .explicit = &.{
+            fixture,
+            execution_link_fixture.runtime_flag,
+            execution_link_fixture.fake_core_flag,
+            execution_link_fixture.no_drain_flag,
+        } },
+        .wake = wake.notifier(),
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer supervisor.deinit();
+
+    const runtime = supervisor.runtimePort();
+    const route = runtime.createSessionRoute(.{
+        .task_id = 41,
+        .binding_epoch = 2,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "provider",
+                .protocol = .anthropic_messages,
+                .base_url = "https://example.invalid",
+                .model = "model",
+            },
+            .credential = "secret",
+        },
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{ .canonical_root = root, .trust = .{ .temporary = root } },
+        .canonical_user_home = root,
+        .workspace_epoch = "epoch",
+    }) catch |err| {
+        std.debug.print("create across the link: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    const session = route.session;
+
+    // Nothing has been delivered yet, so a buffer that already held something
+    // would mean this half invented it.
+    try std.testing.expect(!runtime.hasPendingEvents());
+
+    const run_id = session.prepareRun(.{ .text = "hello" }) catch |err| {
+        std.debug.print("prepare across the link: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    try std.testing.expect(run_id != 0);
+
+    var begun = switch (session.beginRunOutcome(run_id)) {
+        .run => |value| value,
+        .failure => |value| {
+            std.debug.print("begin across the link: {any}\n", .{value.err});
+            return error.BeginRefused;
+        },
+    };
+    try std.testing.expectEqual(run_id, begun.run_id);
+
+    // Blocks in the other process until the Run reaches a terminal, on a
+    // thread of its own there -- which is what keeps a Stop able to arrive
+    // while this is outstanding.
+    const terminal = begun.execute();
+    begun.deinit();
+
+    // The ordering assertion. By the time the terminal is back, the event is
+    // already here: both travelled the same ordered queue, and the execution
+    // half flushes its pump before it answers.
+    try std.testing.expect(runtime.hasPendingEvents());
+    const pending_before = runtime.pendingEventCount(route.id);
+    try std.testing.expect(pending_before > 0);
+
+    // Drained the way Product drains, and counted: what the buffer said it
+    // held is what it hands over, so the per-Session count is a fact about
+    // this buffer rather than a guess.
+    var drained: usize = 0;
+    var saw_text = false;
+    while (runtime.takeEvent()) |taken| {
+        var event = taken;
+        defer event.deinit();
+        drained += 1;
+        try std.testing.expectEqual(run_id, event.run_id);
+        // The bytes are this side's copy of what the Agent produced over
+        // there, parsed here with the Agent's own decoder.
+        if (std.mem.indexOf(u8, event.json, "text_chunk") != null) saw_text = true;
+    }
+    try std.testing.expectEqual(pending_before, drained);
+    try std.testing.expect(saw_text);
+    try std.testing.expect(!runtime.hasPendingEvents());
+
+    // And the wake came with it, which is how Product's consumer would have
+    // been told there was something to drain.
+    try std.testing.expect(wake.count.load(.acquire) > 0);
+
+    // The terminal is the far side's, not a value this half could have made:
+    // Core was invoked over there and reported a stop reason, and the Session
+    // it ran in is still usable afterwards.
+    try std.testing.expect(terminal.coreWasInvoked());
+    try std.testing.expect(terminal.failure == null);
+    try std.testing.expect(terminal.stop_reason != null);
+    try std.testing.expectEqual(
+        agent.SessionDisposition.reusable,
+        terminal.session_disposition_at_completion,
+    );
+    // And nothing was lost on the way: the two flags that would say a
+    // conversation is short are the ones a dropped event would set.
+    try std.testing.expect(!terminal.event_delivery_lost);
+    try std.testing.expect(!terminal.file_changes_lost);
+
+    // Close it the way Product does, and the caller's names come back.
+    switch (session.closeOutcome(.session_close)) {
+        .closed => {},
+        .failure => |value| {
+            std.debug.print("close across the link: {any}\n", .{value.err});
+            return error.CloseFailed;
+        },
+    }
+    try runtime.releaseClosedSession(session);
+    try std.testing.expectEqual(@as(usize, 0), supervisor.half.boxes.liveCount());
+    try std.testing.expectEqual(agent_link.client.LinkFault.none, supervisor.fault());
+
+    _ = supervisor.stop();
+}
+
 test "a start that refuses leaves no child running and nothing allocated" {
     // `StartFailure` is a return value and not an error, so `errdefer` never
     // fired for it: two of these paths left the child process running and
