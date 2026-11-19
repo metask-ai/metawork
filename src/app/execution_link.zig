@@ -25,6 +25,7 @@
 //! method's own restricting answer.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const agent = @import("metawork_agent");
 const agent_link = @import("metawork_agent_link");
@@ -37,6 +38,20 @@ const pending = agent_link.pending;
 
 pub const StartFailure = execution_host.StartFailure;
 pub const Stopped = execution_host.Stopped;
+
+/// `execution_host.TestSupport`, reached through the object a test holds.
+pub const TestSupport = if (builtin.is_test) struct {
+    /// Loses the link without telling the child, the way a UI process that
+    /// died loses it.
+    ///
+    /// Only the pipe. A caller waiting on a correlation is answered by the
+    /// reader thread, which sees end-of-stream and closes the table -- the
+    /// same path a link that died on its own takes, and closing the table
+    /// from here instead would be this test support standing in for it.
+    pub fn abandonLink(self: *Supervisor) void {
+        execution_host.TestSupport.abandonLink(&self.host);
+    }
+} else struct {};
 
 pub const Options = struct {
     identity: agent_link.Identity,

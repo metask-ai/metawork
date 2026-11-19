@@ -18,6 +18,13 @@
 const std = @import("std");
 
 const agent_link = @import("metawork_agent_link");
+const exit_deadline = @import("exit_deadline.zig");
+
+/// `exit_deadline.default_ms`, re-stated here because this is the module
+/// that owns the file: a caller composing these options -- the half above,
+/// or a fixture standing in for it -- cannot import a file that belongs to
+/// this module, and should not have to name the number itself.
+pub const exit_deadline_default_ms = exit_deadline.default_ms;
 
 /// Exit codes. They are read by a human looking at a stopped child, and by the
 /// UI half's reaper, so they stay small and stable.
@@ -56,6 +63,13 @@ pub const Options = struct {
     /// caller with no Runtime composed can honestly do, and the identity
     /// tests are exactly that caller.
     answering: ?Answering = null,
+    /// How long everything after the link ends gets, in milliseconds.
+    ///
+    /// The bound is on the exit as a whole rather than on any wait inside it,
+    /// for the reason `exit_deadline` is written to hold: the waits that hang
+    /// a teardown are the ones nobody listed. Zero disarms it, which is only
+    /// ever what a test asking to see the unbounded behaviour passes.
+    exit_deadline_ms: u64 = exit_deadline.default_ms,
 };
 
 /// Serves the link until it ends, and returns the exit code to use.
@@ -110,11 +124,22 @@ pub fn run(
     ) catch return .resource_unavailable;
     defer inbound.deinit();
 
-    return switch (inbound.run()) {
+    const exit: Exit = switch (inbound.run()) {
         .peer_closed, .consumer_stopped => .link_closed,
         .read_failed => .transport_failed,
         .violation => .protocol_violation,
     };
+    // The link is over. Every `defer` below it, and the caller's own teardown
+    // after this returns, is this process tidying up after a caller that is
+    // not listening -- including the join in `end_fn`, which waits for a
+    // worker inside `execute` that only its own Run can release. One bound
+    // over all of it, armed here because this is the first line that knows
+    // the link has ended and the last one before the waiting starts.
+    //
+    // The returns above are startup and not exit: nothing has been composed
+    // yet, so there is nothing for a deadline to cut short.
+    exit_deadline.arm(io, options.exit_deadline_ms, @intFromEnum(exit));
+    return exit;
 }
 
 /// For a caller that composed nothing to answer with. Dropping a message is

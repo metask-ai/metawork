@@ -89,6 +89,10 @@ pub const RuntimeFactory = struct {
     destroy_fn: *const fn (?*anyopaque, *agent.Runtime) void,
 };
 
+/// The default deadline on this half's exit, for a caller composing its
+/// options that wants to say "the usual one" beside a case that does not.
+pub const default_exit_deadline_ms = execution_mode.exit_deadline_default_ms;
+
 pub const Options = struct {
     identity: agent_link.Identity,
     message_limits: agent_link.MessageLimits,
@@ -128,6 +132,9 @@ pub const Options = struct {
     /// outstanding than it has threads. This is the ceiling above that, and
     /// hitting it means the caller is not the half this was built for.
     blocking_slots: usize = 64,
+    /// Passed through to `execution_mode.Options.exit_deadline_ms`, which is
+    /// where the bound on this half's whole exit path lives.
+    exit_deadline_ms: u64 = execution_mode.exit_deadline_default_ms,
 };
 
 /// Composes this half and serves the link until it ends.
@@ -148,6 +155,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, options: Options) Exit {
         .identity = options.identity,
         .message_limits = options.message_limits,
         .queue_limits = options.queue_limits,
+        .exit_deadline_ms = options.exit_deadline_ms,
     });
 
     var answering: Answering = undefined;
@@ -161,6 +169,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, options: Options) Exit {
         .identity = options.identity,
         .message_limits = options.message_limits,
         .queue_limits = options.queue_limits,
+        .exit_deadline_ms = options.exit_deadline_ms,
         .answering = .{
             .context = &answering,
             .begin_fn = Answering.begin,
@@ -199,6 +208,13 @@ const Releaser = struct {
             return;
         }
         if (Held == agent_link.run_tools.HeldSession) {
+            // Every reference the caller took on this Session through the
+            // link and can no longer give back. `Session.close` waits these
+            // out, so one left outstanding is a close that waits for a half
+            // that is gone -- which is exactly how the first Product Run
+            // over a real link ended: the process stayed alive after the
+            // link died, holding the pipe it had inherited.
+            _ = value.releaseReferences();
             value.retireAll();
             self.half.allocator.destroy(value);
             return;
@@ -440,10 +456,16 @@ const Answering = struct {
 
     /// Stops accepting and waits for the answers already in flight.
     ///
-    /// Waiting is the right bound even though a worker inside `execute` cannot
-    /// be interrupted: the UI half's stop closes the pipe, gives this process a
-    /// grace period and then kills it, so the unbounded case is already
-    /// bounded from the other side.
+    /// The waiting is unbounded here on purpose, and bounded from one place
+    /// outside: `execution_mode.run` arms `exit_deadline` the moment the link
+    /// ends, which is before this is called. So this is free to wait for a
+    /// worker inside `execute` -- which only its own Run can release -- and a
+    /// Run that never reaches a terminal costs the process its deadline
+    /// rather than its exit.
+    ///
+    /// It used to say the bound was the UI half's kill. That bound exists
+    /// only while the UI is alive to use it, and the case this half is *for*
+    /// is a UI that is not.
     fn end(context: ?*anyopaque) void {
         const self: *Answering = @ptrCast(@alignCast(context.?));
         self.stopping.store(true, .release);
@@ -461,9 +483,8 @@ const Answering = struct {
         }
         // A blocking request cannot be interrupted -- a worker inside
         // `execute` returns when its Run reaches a terminal and not before.
-        // Waiting is still the right bound here: the UI half closes the pipe,
-        // waits out a grace period and then kills this process, so the
-        // unbounded case is bounded from the other side.
+        // This waits for it anyway, inside the deadline the link's end armed;
+        // see this function's own note on where that bound lives now.
         for (self.blocking) |*slot| if (slot.thread) |thread| {
             thread.join();
             slot.thread = null;

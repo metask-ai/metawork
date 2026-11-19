@@ -129,6 +129,15 @@ pub const HeldSession = struct {
     identity: SessionIdentity = .{},
     tools: [2]RunTools = .{ .{}, .{} },
     live: u1 = 0,
+    /// References the calling half holds on this Session through the link.
+    ///
+    /// Counted here because the Session's own count names no holder:
+    /// `retain_reference` moves a number, so a Session asked to close has no
+    /// way to tell which of the references it is waiting out belonged to a
+    /// caller that is gone. Every other crossing is a name in a table, which
+    /// is why `adapters.drainEverything` can give those back and could not
+    /// give these.
+    references: usize = 0,
 
     pub fn init(value: port.SessionPort) HeldSession {
         return .{ .port = value };
@@ -148,6 +157,33 @@ pub const HeldSession = struct {
     /// it before the call, and committing moves no memory.
     pub fn staged(self: *HeldSession) *RunTools {
         return &self.tools[self.live ^ 1];
+    }
+
+    /// Counts a reference the port has just granted the calling half.
+    pub fn retained(self: *HeldSession) void {
+        self.references += 1;
+    }
+
+    /// Takes one back off the count, or says there was none.
+    ///
+    /// `false` is the caller releasing what it never took. The Session
+    /// asserts its own count is positive, so this half refuses the frame
+    /// rather than passing it on and panicking inside the assertion: a
+    /// miscount on the other side is something the boundary has to be able
+    /// to say, not something to crash on.
+    pub fn releasedOne(self: *HeldSession) bool {
+        if (self.references == 0) return false;
+        self.references -= 1;
+        return true;
+    }
+
+    /// Gives back every reference the calling half took and can no longer
+    /// give back itself, and reports how many that was.
+    pub fn releaseReferences(self: *HeldSession) usize {
+        const held = self.references;
+        self.references = 0;
+        for (0..held) |_| self.port.releaseReference();
+        return held;
     }
 
     /// Everything, for the closure that releases what the other half can no

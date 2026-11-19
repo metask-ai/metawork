@@ -64,6 +64,42 @@ const Wake = struct {
     }
 };
 
+/// How long a test waits for the far side to say something, in ticks of
+/// `event_tick_ms`.
+///
+/// Generous: what is being waited for is a process starting a Run, not
+/// anything whose timing a test controls. The point of the bound is not the
+/// number -- it is that a far side which stopped answering fails here with a
+/// sentence instead of running out the CI job's clock.
+const event_wait_ticks: usize = 1_000;
+const event_tick_ms: u64 = 10;
+
+/// Waits until the execution half has reported an event.
+///
+/// The held Run announces itself with a `run_state` the moment it begins, so
+/// this is the observable form of "the far side is inside `execute`" -- which
+/// is a different fact from "the request was sent", and the only one worth
+/// waiting for.
+fn waitForEvent(runtime: agent.RuntimePort, what: []const u8) !void {
+    var ticks: usize = 0;
+    while (!runtime.hasPendingEvents()) : (ticks += 1) {
+        if (ticks >= event_wait_ticks) {
+            std.debug.print("no event from the execution half: {s}\n", .{what});
+            return error.ExecutionHalfReportedNothing;
+        }
+        var tick: std.Io.Event = .unset;
+        tick.waitTimeout(io, .{ .duration = .{
+            .raw = .fromMilliseconds(event_tick_ms),
+            .clock = .awake,
+        } }) catch {};
+    }
+}
+
+/// The exit a child that saw its link end and tidied up reports.
+const exited_on_link_close: execution_host.Stopped = .{
+    .exited = @intFromEnum(execution_mode.Exit.link_closed),
+};
+
 test "the execution half starts, agrees on identity and exits on end of stream" {
     const fixture = try fixturePath();
     defer allocator.free(fixture);
@@ -526,7 +562,7 @@ test "a Stop is answered while a Run is still executing in the other process" {
     // by a free thread whatever the design. The held Run announces itself
     // with a `run_state` event, and that event arriving is the proof that the
     // far side is inside `execute` with the call outstanding.
-    while (!runtime.hasPendingEvents()) {}
+    try waitForEvent(runtime, "the held Run never started");
 
     // The Stop travels on the control transport, which is what lets it
     // overtake queued fragments -- and it has to be *answered*, which is what
@@ -563,10 +599,209 @@ test "a Stop is answered while a Run is still executing in the other process" {
     // rather than trip an assertion on the way out. Its status is the whole
     // assertion: a panicking child is how this test passed while proving
     // nothing, before the status was checked.
-    try std.testing.expectEqual(
-        execution_host.Stopped{ .exited = @intFromEnum(execution_mode.Exit.link_closed) },
-        supervisor.stop(),
-    );
+    try std.testing.expectEqual(exited_on_link_close, supervisor.stop());
+}
+
+test "a reference the caller never gave back does not keep this half alive" {
+    // The leak the first Product Run over a real link died of, and the only
+    // crossing that could leak this way. Every other thing the link hands
+    // out is a name in a table, so a link that ends can give it back;
+    // `retain_reference` moves a number on a Session and names no holder, so
+    // a caller that took one and then died left `Session.close` waiting out
+    // a reference nobody would ever return. The process stayed alive after
+    // its link died -- holding the pipe it had inherited, which is how it
+    // took a build runner down with it.
+    //
+    // The deadline is pushed past the UI half's grace period on purpose: with
+    // it inside, a close that waits for good still ends as `.exited` and
+    // this test would pass on the backstop rather than on the fix.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var workspace = std.testing.tmpDir(.{});
+    defer workspace.cleanup();
+    const root = try workspace.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+
+    var wake: Wake = .{};
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .spawn = .{ .explicit = &.{
+            fixture,
+            execution_link_fixture.runtime_flag,
+            execution_link_fixture.fake_core_flag,
+            execution_link_fixture.slow_exit_flag,
+        } },
+        .tables = execution_link_fixture.fixture_tables,
+        .wake = wake.notifier(),
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer supervisor.deinit();
+
+    const runtime = supervisor.runtimePort();
+    const route = try runtime.createSessionRoute(.{
+        .task_id = 42,
+        .binding_epoch = 1,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "provider",
+                .protocol = .anthropic_messages,
+                .base_url = "https://example.invalid",
+                .model = "model",
+            },
+            .credential = "secret",
+        },
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{ .canonical_root = root, .trust = .{ .temporary = root } },
+        .canonical_user_home = root,
+        .workspace_epoch = "epoch",
+    });
+
+    // What Product's own Session access does before every call it makes, and
+    // the reason this is reachable at all: `acquireAccess` retains, the
+    // `defer` releases, and a process that aborts between them runs no
+    // `defer` at all.
+    try std.testing.expect(route.session.retainReference());
+
+    // No goodbye and no release: the caller is simply gone, holding a
+    // reference the far side is counting.
+    execution_link.TestSupport.abandonLink(&supervisor);
+
+    // Exits by itself, which it can only do if this half gave the reference
+    // back on the way out. Without that it waits in `Session.close` for the
+    // rest of the grace period and comes back `.killed`.
+    try std.testing.expectEqual(exited_on_link_close, supervisor.stop());
+}
+
+test "cleanup that does not finish costs this half its deadline, not its exit" {
+    // The bound itself, with the leak taken out of it. The fixture's Runtime
+    // refuses to be destroyed, which is the shape of the hang without being
+    // the one instance of it -- a bound that only survives the leak it was
+    // found through is not a bound, and the wait that hung this half was four
+    // frames below the only join anybody would have thought to put a timeout
+    // on.
+    //
+    // The deadline here is the ordinary one, so it falls well inside the UI
+    // half's grace period: the child decides to go before the UI gives up on
+    // it, and the stop sees a process that exited rather than one it killed.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+
+    var wake: Wake = .{};
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .spawn = .{ .explicit = &.{
+            fixture,
+            execution_link_fixture.runtime_flag,
+            execution_link_fixture.fake_core_flag,
+            execution_link_fixture.hang_cleanup_flag,
+        } },
+        .tables = execution_link_fixture.fixture_tables,
+        .wake = wake.notifier(),
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer supervisor.deinit();
+
+    execution_link.TestSupport.abandonLink(&supervisor);
+    try std.testing.expectEqual(exited_on_link_close, supervisor.stop());
+}
+
+test "a Run still executing does not keep this half alive either" {
+    // The other shape, and the one the isolation is actually for: a worker
+    // inside `execute`, which returns when its Run reaches a terminal and
+    // never otherwise. The held Run has nothing left to end it once the link
+    // is gone, so the join that waits for that thread waits for good -- and
+    // the exit deadline is the whole of what gets the process out of it.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var workspace = std.testing.tmpDir(.{});
+    defer workspace.cleanup();
+    const root = try workspace.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+
+    var wake: Wake = .{};
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .spawn = .{ .explicit = &.{
+            fixture,
+            execution_link_fixture.runtime_flag,
+            execution_link_fixture.fake_core_flag,
+            execution_link_fixture.hold_runs_flag,
+        } },
+        .tables = execution_link_fixture.fixture_tables,
+        .wake = wake.notifier(),
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer supervisor.deinit();
+
+    const runtime = supervisor.runtimePort();
+    const route = try runtime.createSessionRoute(.{
+        .task_id = 42,
+        .binding_epoch = 1,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "provider",
+                .protocol = .anthropic_messages,
+                .base_url = "https://example.invalid",
+                .model = "model",
+            },
+            .credential = "secret",
+        },
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{ .canonical_root = root, .trust = .{ .temporary = root } },
+        .canonical_user_home = root,
+        .workspace_epoch = "epoch",
+    });
+    const session = route.session;
+
+    const run_id = try session.prepareRun(.{ .text = "hold" });
+    var begun = switch (session.beginRunOutcome(run_id)) {
+        .run => |value| value,
+        .failure => |value| {
+            std.debug.print("begin across the link: {any}\n", .{value.err});
+            return error.BeginRefused;
+        },
+    };
+
+    var executing: Executing = .{ .run = &begun };
+    var thread = try std.Thread.spawn(.{}, Executing.main, .{&executing});
+    try waitForEvent(runtime, "the held Run never started");
+
+    execution_link.TestSupport.abandonLink(&supervisor);
+
+    // The stop before the join, and the order is the test's shape rather
+    // than a convenience. Abandoning the link closes our write end and
+    // nothing else, so the child is still alive with its output open and the
+    // reader sees no end-of-stream -- which leaves our own caller waiting on
+    // a correlation that will never be answered. `stop` is what answers it:
+    // it closes the table first, for this case. Joining before stopping
+    // makes a regression here a test that hangs instead of one that fails,
+    // and a hang on CI is a job timeout with nothing in it to read.
+    const stopped = supervisor.stop();
+
+    executing.done.wait(io) catch |err| return err;
+    thread.join();
+    begun.deinit();
+
+    // With a worker still inside `execute` over there, the child went on its
+    // deadline rather than waiting for a Run nobody can end any more.
+    try std.testing.expectEqual(exited_on_link_close, stopped);
 }
 
 test "a start that refuses leaves no child running and nothing allocated" {
@@ -636,6 +871,12 @@ test "a child that will not stop is killed, and the stop returns" {
     // killed rather than having exited on its own. The fixture outlives the
     // grace period by two orders of magnitude, so a stop that waited for it
     // would not reach this line within any timeout the suite has.
+    //
+    // The fixture runs with its exit deadline disarmed, because with the
+    // deadline on there is no such child: it exits on the deadline and the
+    // stop sees `.exited`. That is the point of the deadline and not a gap
+    // in this test -- what this one still covers is the kill, which has to
+    // keep working for the children the deadline cannot reach.
     const stopped = supervisor.stop();
     try std.testing.expectEqual(execution_host.Stopped.killed, stopped);
 }

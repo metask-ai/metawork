@@ -102,11 +102,21 @@ pub fn Table(comptime T: type) type {
         /// both callers -- the stale-id confusion the generation exists to
         /// prevent, arriving by another door.
         ///
-        /// Every critical section here is a scan of the slots and a few
+        /// Every critical section *here* is a scan of the slots and a few
         /// field writes. None of them calls out, waits, or allocates, so the
         /// lock is never held across anything that could block. That is the
         /// property which makes locking the whole table, rather than asking
         /// every caller to do it, safe to do.
+        ///
+        /// `lock` and `unlock` hand that same lock to a caller building one
+        /// decision out of several operations, and one of those --
+        /// `adapters.retainSession` -- moves a reference count on the
+        /// receiver under it. That is deliberate, and it is the limit: the
+        /// Session's mutex guards a counter and nothing else, so the nesting
+        /// is table and then Session, always that way round, and neither
+        /// side can reach the link while holding either. A call that can
+        /// block, and a reverse call above all, must not be made under this
+        /// lock.
         mutex: std.Io.Mutex = .init,
         /// Stored rather than taken per call: `Io.Mutex` needs one to park a
         /// contended waiter, and a table whose callers each passed their own

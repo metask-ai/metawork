@@ -1299,6 +1299,38 @@ pub fn releaseRun(bindings: Bindings, id: handle_table.Id) ?void {
     bindings.allocator.destroy(entry);
 }
 
+/// Retains a Session for the calling half and counts what it took.
+///
+/// One decision for `retainRun`'s reason: the two halves of it are one fact.
+/// A reference the port granted that this half did not count is a reference
+/// nobody can give back -- the Session waits it out at close and the caller
+/// that would release it no longer exists. The count is what
+/// `drainEverything` hands back when the link ends.
+///
+/// `null` is an id that names nothing; `false` is a Session that refused,
+/// which is what a Session already closing answers.
+pub fn retainSession(bindings: Bindings, id: handle_table.Id) ?bool {
+    bindings.sessions.lock();
+    defer bindings.sessions.unlock();
+    const held = bindings.sessions.resolveLocked(id) orelse return null;
+    if (!held.port.retainReference()) return false;
+    held.retained();
+    return true;
+}
+
+/// Gives one of them back, and refuses a release with nothing behind it.
+///
+/// Under the same lock for the same reason: a count read under one lock and
+/// moved under another is a count moved on whatever the id named in between.
+pub fn releaseSession(bindings: Bindings, id: handle_table.Id) ?bool {
+    bindings.sessions.lock();
+    defer bindings.sessions.unlock();
+    const held = bindings.sessions.resolveLocked(id) orelse return null;
+    if (!held.releasedOne()) return false;
+    held.port.releaseReference();
+    return true;
+}
+
 pub const TableCount = struct {
     field: []const u8,
     live: usize,
@@ -1899,7 +1931,20 @@ test "retains and releases racing on one Run retire its entry exactly once" {
         // The slot has to come back before the next cycle can have it, and
         // waiting for it is also the assertion that somebody retired the
         // entry: nothing else ever will.
-        while (tables.runs.liveCount() != 0) {}
+        //
+        // Bounded, because a wait for something that is not coming is a test
+        // that never returns, and a test that never returns is a CI job that
+        // times out with nothing to read. The bound is what turns the broken
+        // case back into a failure with a sentence on it.
+        spins = 0;
+        while (tables.runs.liveCount() != 0 and spins < 1 << 24) : (spins += 1) {}
+        if (tables.runs.liveCount() != 0) {
+            std.debug.print(
+                "the Run entry was never retired: a release reached zero and left it\n",
+                .{},
+            );
+            return error.RunEntryOutlivedItsReferences;
+        }
         current.store(0, .release);
     }
     stop.store(true, .release);

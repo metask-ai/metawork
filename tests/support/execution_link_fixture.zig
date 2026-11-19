@@ -55,6 +55,15 @@ pub const fixture_tables: agent_link.adapters.Tables.Capacity = .{ .sessions = 2
 /// real shape of it is a worker inside `run.execute`, which returns only when
 /// its Run reaches a terminal; this reproduces the *observable* part of that
 /// without needing a Run, so the stop path can be driven at all.
+///
+/// It also disarms the exit deadline, and has to. With the deadline armed
+/// this state is no longer reachable in this build -- the deadline is what a
+/// worker inside `execute` now costs, and the process goes on its own well
+/// inside the grace period. The kill is still there for the cases the
+/// deadline cannot cover: a child wedged before the link was ever
+/// established, one whose deadline thread could not be spawned, and a peer
+/// from an older build. Producing one of those from here means saying "no
+/// deadline" out loud.
 pub const wedge_flag = "--wedge-on-stop";
 
 /// Longer than the UI half's grace period by enough that a stop which waited
@@ -79,11 +88,32 @@ pub const no_drain_flag = "--no-event-drain";
 /// the blocking request is on a thread of its own and the pool is free.
 pub const hold_runs_flag = "--hold-runs";
 
+/// Never returns from the Runtime's destroy.
+///
+/// The shape of the hang that actually happened -- AgentCore's shutdown
+/// waiting out a reference a dead caller had taken -- reproduced with a plain
+/// wait instead of that reference. On purpose: a bound that only survives the
+/// one leak it was found through is not a bound, and that leak has a test of
+/// its own.
+pub const hang_cleanup_flag = "--hang-on-cleanup";
+
+/// Puts the exit deadline past the UI half's grace period.
+///
+/// Which is what lets a test tell the two outcomes apart: with the deadline
+/// inside the grace, a teardown that never finishes still ends as `.exited`,
+/// and "cleanup completed" and "the deadline ended it" look the same from
+/// out here. Past the grace, a teardown that does not finish is a child that
+/// had to be killed.
+pub const slow_exit_flag = "--slow-exit-deadline";
+
+const slow_exit_ms: u64 = 60_000;
+
 const Composer = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     fake_core: bool,
     hold_runs: bool,
+    hang_cleanup: bool,
 
     fn factory(self: *Composer) execution_half.RuntimeFactory {
         return .{ .context = self, .create_fn = create, .destroy_fn = destroy };
@@ -115,7 +145,17 @@ const Composer = struct {
         ) catch null;
     }
 
-    fn destroy(_: ?*anyopaque, runtime: *agent.Runtime) void {
+    fn destroy(context: ?*anyopaque, runtime: *agent.Runtime) void {
+        const self: *Composer = @ptrCast(@alignCast(context.?));
+        if (self.hang_cleanup) {
+            // Before the shutdown rather than inside it, so the wait is this
+            // fixture's and not a Runtime left half torn down.
+            var never: std.Io.Event = .unset;
+            never.waitTimeout(self.io, .{ .duration = .{
+                .raw = .fromMilliseconds(wedge_ms),
+                .clock = .awake,
+            } }) catch {};
+        }
         runtime.shutdown() catch {};
         runtime.deinit();
     }
@@ -132,6 +172,9 @@ fn requested(args: std.process.Args, gpa: std.mem.Allocator, flag: []const u8) b
 }
 
 pub fn main(init: std.process.Init) !void {
+    // Read before the half runs, because it decides the deadline the half is
+    // composed with and not only what happens afterwards.
+    const wedge = requested(init.minimal.args, init.gpa, wedge_flag);
     const version = init.environ_map.get("METAWORK_EXEC_LINK_VERSION") orelse "fixture-0";
     const digest_text = init.environ_map.get("METAWORK_EXEC_LINK_DIGEST") orelse "11";
     var digest: [32]u8 = @splat(0);
@@ -142,6 +185,7 @@ pub fn main(init: std.process.Init) !void {
         .allocator = init.gpa,
         .fake_core = requested(init.minimal.args, init.gpa, fake_core_flag),
         .hold_runs = requested(init.minimal.args, init.gpa, hold_runs_flag),
+        .hang_cleanup = requested(init.minimal.args, init.gpa, hang_cleanup_flag),
     };
     const exit = execution_half.run(init.io, init.gpa, .{
         .identity = .{
@@ -172,9 +216,15 @@ pub fn main(init: std.process.Init) !void {
             null,
         .tables = fixture_tables,
         .drain_events = !requested(init.minimal.args, init.gpa, no_drain_flag),
+        .exit_deadline_ms = if (wedge)
+            0
+        else if (requested(init.minimal.args, init.gpa, slow_exit_flag))
+            slow_exit_ms
+        else
+            execution_half.default_exit_deadline_ms,
         .workers = if (requested(init.minimal.args, init.gpa, hold_runs_flag)) 1 else 4,
     });
-    if (requested(init.minimal.args, init.gpa, wedge_flag)) {
+    if (wedge) {
         // The same wait `Host.stop` uses for its own grace period, for the
         // same reason: an event nobody sets is a sleep with no busy loop.
         var never: std.Io.Event = .unset;

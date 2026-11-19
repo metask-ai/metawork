@@ -220,6 +220,10 @@ fn invokeOne(
         return tryRetainRun(arena, bindings, request);
     if (comptime entry.owner == .run_control and std.mem.eql(u8, entry.name, "release"))
         return releaseRun(arena, bindings, request);
+    if (comptime entry.owner == .session and std.mem.eql(u8, entry.name, "retain_reference"))
+        return retainSession(arena, bindings, request);
+    if (comptime entry.owner == .session and std.mem.eql(u8, entry.name, "release_reference"))
+        return releaseSession(arena, bindings, request);
     if (comptime !dispatchable(entry.owner, entry.name)) return error.NotDispatchable;
 
     const VTable = comptime entry.owner.VTable();
@@ -466,6 +470,49 @@ fn releaseRun(
     // under a second lock would be racing whatever resolved the id in
     // between.
     adapters.releaseRun(bindings, request.receiver) orelse return error.UnknownHandle;
+    return successResponse(arena, void, {});
+}
+
+/// `session.retain_reference`, which counts what the caller took.
+///
+/// Not the generic path: it would call the port with the receiver resolved
+/// under one lock and leave the count to nobody. A reference granted and not
+/// counted is one `drainEverything` cannot give back when the link ends, and
+/// the Session waits for it at close -- which is how an execution process
+/// outlived a dead caller, holding the pipes it had inherited.
+fn retainSession(
+    arena: std.mem.Allocator,
+    bindings: adapters.Bindings,
+    request: Request,
+) InvokeError![]u8 {
+    const Fn = comptime @typeInfo(
+        @FieldType(port.SessionPort.VTable, "retain_reference"),
+    ).pointer.child;
+    _ = try payload.decodeExact(comptime wire_types.Request(Fn), arena, request.arguments);
+    const retained = adapters.retainSession(bindings, request.receiver) orelse
+        return error.UnknownHandle;
+    return successResponse(arena, bool, retained);
+}
+
+/// `session.release_reference`, which gives one back.
+///
+/// A release the count cannot account for is refused rather than performed.
+/// The Session asserts that its count is positive, so performing one would
+/// turn a frame the other side got wrong into a panic in this half, and
+/// `UnknownHandle` is already what this boundary says about an id whose
+/// state does not match what the frame claims.
+fn releaseSession(
+    arena: std.mem.Allocator,
+    bindings: adapters.Bindings,
+    request: Request,
+) InvokeError![]u8 {
+    const Fn = comptime @typeInfo(
+        @FieldType(port.SessionPort.VTable, "release_reference"),
+    ).pointer.child;
+    _ = try payload.decodeExact(comptime wire_types.Request(Fn), arena, request.arguments);
+    const released = adapters.releaseSession(bindings, request.receiver) orelse
+        return error.UnknownHandle;
+    if (!released) return error.UnknownHandle;
     return successResponse(arena, void, {});
 }
 

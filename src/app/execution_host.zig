@@ -78,6 +78,10 @@ pub const Host = struct {
     reaped: std.Io.Event = .unset,
     term: ?std.process.Child.Term = null,
     stopped: bool = false,
+    /// The write end is already closed, and was closed without a goodbye.
+    /// Only `TestSupport.abandonLink` sets it; `stop` reads it so that the
+    /// close is not attempted twice on one handle.
+    link_abandoned: bool = false,
 
     pub const StartError = std.mem.Allocator.Error;
 
@@ -230,9 +234,16 @@ pub const Host = struct {
         self.stopped = true;
         // Best effort: a child that has already gone makes this fail, and that
         // is not a reason to skip the reap below.
-        _ = self.outbound.trySubmit(.goodbye, 0, &.{}) catch {};
-        self.outbound.stop();
-        self.to_child.close(self.io);
+        //
+        // An abandoned link has had all three of these done to it already,
+        // minus the goodbye it deliberately never sent. Repeating the close
+        // would be a second close of one handle; what is left for this to do
+        // is the reap.
+        if (!self.link_abandoned) {
+            _ = self.outbound.trySubmit(.goodbye, 0, &.{}) catch {};
+            self.outbound.stop();
+            self.to_child.close(self.io);
+        }
 
         const graceful = if (self.reaper == null) false else blk: {
             self.reaped.waitTimeout(self.io, .{ .duration = .{
@@ -260,6 +271,27 @@ pub const Host = struct {
         self.* = undefined;
     }
 };
+
+/// Ending a link the way a dead UI ends it.
+///
+/// Not in a release build: nothing in the product closes a link without a
+/// goodbye on purpose, and a stop that skipped its own goodbye would be a
+/// child killed for no reason.
+pub const TestSupport = if (builtin.is_test) struct {
+    /// Closes the write end with no goodbye and leaves the child running.
+    ///
+    /// That is the state this half's isolation exists for, and the only way
+    /// to reach it from a test: the execution process sees end-of-stream
+    /// with no warning, while still holding every Session, Run and reference
+    /// the link gave it, and nobody is left to take any of them back. What
+    /// the test then asks is whether it exits on its own.
+    pub fn abandonLink(host: *Host) void {
+        if (host.link_abandoned) return;
+        host.link_abandoned = true;
+        host.outbound.stop();
+        host.to_child.close(host.io);
+    }
+} else struct {};
 
 /// Whether this process was started as the execution half. Read from the real
 /// argument vector: the mode is never inferred from an environment variable,
