@@ -157,13 +157,6 @@ pub const CloseOutcome = union(enum) {
     /// `closed` would tell the caller its Session is gone when it may still
     /// be running.
     pub const link_unreachable: std.meta.Tag(@This()) = .failure;
-
-    /// So is a close that could not be sent for want of room. It rides the
-    /// same arm as the gone answer, and what tells the caller them apart is
-    /// the `err` inside it: `DependencyUnreachable` or `LinkBusy`. Naming
-    /// the arm here is therefore not naming the value, which is why a stub
-    /// has to pass both.
-    pub const link_busy: std.meta.Tag(@This()) = .failure;
 };
 
 pub const WorkspaceTrust = union(enum) {
@@ -314,29 +307,6 @@ pub const Error = error{
     /// execution link numbers this in `error_code.zig`; in process nothing
     /// produces it, because in process there is no other half to lose.
     DependencyUnreachable,
-    /// This call was not performed, and asking again is worth something.
-    ///
-    /// Nothing is claimed about the far side, deliberately. The producer is
-    /// the link's own send path -- a full outbound queue, a full handle-box
-    /// table -- and at that point the request has not left this half, so
-    /// whether the peer is there, idle or busy is not a fact anyone has. What
-    /// the caller can rely on is the pair that matters to it: the far side's
-    /// state is unchanged, and a later attempt may get through.
-    ///
-    /// The sibling of `DependencyUnreachable`, and separate from it for one
-    /// reason: the two call for opposite behaviour. Gone means stop asking,
-    /// this means ask again. `runtime.zig` maps a compact cancellation's
-    /// `DependencyUnreachable` onto `.session_closing` and stops following
-    /// that compact, so a cancellation refused for queue capacity reported as
-    /// unreachable would abandon a compact that is still running.
-    ///
-    /// Not `QueueFull`: in process that is the *Session's* input queue --
-    /// `src/product/control/executor.zig` raises it when that executor is
-    /// full -- so it would tell Product the Session cannot take more input,
-    /// which is false when the Session is idle and the link's own outbound
-    /// queue is what filled. Produced only by the execution link; in process
-    /// there is no queue between the halves.
-    LinkBusy,
     QueueFull,
     SessionNotIdle,
     SessionPoisoned,

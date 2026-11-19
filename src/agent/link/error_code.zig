@@ -104,7 +104,6 @@ pub const entries = [_]Entry{
     .{ .name = "LogicalSessionConflict", .code = 71 },
     .{ .name = "RewindFailed", .code = 72 },
     .{ .name = "DependencyUnreachable", .code = 73 },
-    .{ .name = "LinkBusy", .code = 74 },
 };
 
 /// The error set every link call can produce: the contract set plus the

@@ -63,6 +63,33 @@ pub const Vtables = struct {
     runtime: *const port.RuntimePort.VTable,
 };
 
+/// Why this half considers the link no longer usable.
+///
+/// Every one of these produces the same answer to Product -- the link did not
+/// carry the call, so the method's restricting value is what it gets. What
+/// differs is what the *supervisor* should do, and it cannot read a return
+/// value, so the condition is recorded here where it happens.
+///
+/// A single failure model is what makes this an enum rather than a boolean:
+/// the action is always to end the execution process, but the reason belongs
+/// in the fault record that explains why a user's Run stopped.
+pub const LinkFault = enum(u8) {
+    none = 0,
+    /// The outbound queue refused the send, or the correlation table was full
+    /// of calls someone is still waiting on. The peer is answering; this half
+    /// could not hand it anything more.
+    send_refused = 1,
+    /// The correlation table was full of calls the peer owes answers for.
+    /// Waiting does not help: what is missing is the peer's answers.
+    peer_unsettled = 2,
+    /// Correlations ran out. Not wrapped, by `pending.zig`'s own rule, so the
+    /// link ends rather than matching a stale answer to a live call.
+    correlations_exhausted = 3,
+    /// A frame arrived that this build cannot decode, which means the peer is
+    /// not this build.
+    unreadable = 4,
+};
+
 /// The caller's half of one link.
 pub const Client = struct {
     /// Owns what comes back, per the rule above.
@@ -71,6 +98,13 @@ pub const Client = struct {
     pending: *pending.Table,
     boxes: Boxes,
     vtables: Vtables,
+    /// First writer wins, because the first fault is the one that explains
+    /// the rest: a peer that stopped answering fills the table, and every
+    /// later call then reports a refused send. Plain atomics rather than a
+    /// callback: this is read by a supervisor on another thread, and calling
+    /// into one from inside a stub would re-enter the link from a thread that
+    /// may be holding the Session.
+    fault: std.atomic.Value(u8) = .init(@intFromEnum(LinkFault.none)),
 
     /// Two-phase, because the boxes carry the way back to the link they
     /// belong to and that is this value's own address.
@@ -94,6 +128,26 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         self.boxes.deinit();
+    }
+
+    /// Records a fault, keeping the first one. Never `.none`: clearing a
+    /// fault would be a second kind of event, and nothing in a single
+    /// failure model recovers a link in place.
+    pub fn recordFault(self: *Client, reason: LinkFault) void {
+        std.debug.assert(reason != .none);
+        _ = self.fault.cmpxchgStrong(
+            @intFromEnum(LinkFault.none),
+            @intFromEnum(reason),
+            .release,
+            .acquire,
+        );
+    }
+
+    /// What this half has concluded about the link, for the supervisor.
+    /// `.none` means no call has been stopped by the link yet -- not that the
+    /// peer is alive, which only the peer's own exit can tell anyone.
+    pub fn faulted(self: *const Client) LinkFault {
+        return @enumFromInt(self.fault.load(.acquire));
     }
 
     /// The link a port value belongs to, from the context it carries.
@@ -257,7 +311,20 @@ pub fn call(
     envelope.encodeRequestHeader(framed[0..header], entry, receiver);
     _ = payload.encode(@TypeOf(arguments), arguments, framed[header..]);
 
-    const correlation = client.pending.open() catch return error.Busy;
+    const correlation = client.pending.open() catch |err| {
+        // The stub answers the same thing for all three, so the distinction
+        // the pending table went to the trouble of making has to be kept
+        // here or lost. `TooManyUnsettled` is the one the supervisor acts on
+        // differently: the table is full of correlations the peer owes
+        // answers for, so waiting cannot help and the execution process is
+        // what has to end.
+        client.recordFault(switch (err) {
+            error.TooManyUnsettled => .peer_unsettled,
+            error.TooManyInFlight => .send_refused,
+            error.CorrelationExhausted => .correlations_exhausted,
+        });
+        return error.Busy;
+    };
     // An allocation failure inside the submit is also "nothing was sent", and
     // it was the one way out of here that kept the slot: the `.busy` and
     // `.closed` arms below give it back, and `try` walked past them.
@@ -273,6 +340,7 @@ pub fn call(
         // than being held for an answer that cannot come.
         .busy => {
             client.pending.discardUnsent(correlation);
+            client.recordFault(.send_refused);
             return error.Busy;
         },
         .closed => {
@@ -302,13 +370,19 @@ fn collect(
         .response => |bytes| {
             defer client.pending.allocator.free(bytes);
             const held = arena.dupe(u8, bytes) catch return error.AnswerLost;
-            const outcome = envelope.decodeResponse(held) catch return error.Unreadable;
+            const outcome = envelope.decodeResponse(held) catch {
+                client.recordFault(.unreadable);
+                return error.Unreadable;
+            };
             return switch (outcome) {
                 .failure => |err| .{ .failed = err },
                 .value => |value| blk: {
                     const Wired = comptime wire_types.Response(Signature(owner, name));
                     if (comptime Wired == void) {
-                        if (value.len != 0) return error.Unreadable;
+                        if (value.len != 0) {
+                            client.recordFault(.unreadable);
+                            return error.Unreadable;
+                        }
                         break :blk .{ .returned = {} };
                     }
                     // `decodeExact` allocates, and its allocation failure
@@ -319,8 +393,10 @@ fn collect(
                     // today; it is named here because the two facts being one
                     // value is worth finding deliberately rather than by
                     // accident.
-                    const decoded = payload.decodeExact(Wired, arena, value) catch
+                    const decoded = payload.decodeExact(Wired, arena, value) catch {
+                        client.recordFault(.unreadable);
                         return error.Unreadable;
+                    };
                     break :blk .{ .returned = decoded };
                 },
             };

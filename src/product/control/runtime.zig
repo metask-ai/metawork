@@ -4326,13 +4326,6 @@ pub const Runtime = struct {
                 .available => {},
                 .capacity_reached => return self.sessionPressureError(task_id),
                 .mcp_busy => return error.McpRestoreBusy,
-                // Reached, and no room on the link. Not `sessionPressureError`
-                // beside it: that one releases an idle Task session to free
-                // *runtime* capacity, which is the wrong remedy and a claim
-                // about sessions that nothing established. The error says what
-                // happened and the caller can ask again; nothing in process
-                // produces it.
-                .dependency_busy => return error.LinkBusy,
                 .unavailable => return error.RecoveryUnavailable,
             }
         }
@@ -7631,13 +7624,6 @@ pub const Runtime = struct {
                 switch (self.agent_runtime.restoreAdmission(releasing_route_id)) {
                     .available => break :admission .available,
                     .mcp_busy => break :admission .busy,
-                    // Projected as busy too, which this enum already has for
-                    // the MCP case and which means exactly "not now" without
-                    // claiming the runtime is at its restore capacity. Falling
-                    // through to the idle-release search below would be the
-                    // wrong remedy: that frees runtime capacity, and the
-                    // link's queue is what filled.
-                    .dependency_busy => break :admission .busy,
                     .unavailable => break :admission .unavailable,
                     .capacity_reached => {},
                 }

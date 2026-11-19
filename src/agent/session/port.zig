@@ -75,11 +75,6 @@ pub const BeginRunOutcome = union(enum) {
     /// A Run that could not be begun because the link is gone is a failure.
     /// Handing back a `run` would give the caller a Run nothing is executing.
     pub const link_unreachable: std.meta.Tag(@This()) = .failure;
-
-    /// A Run that could not be begun for want of room is a failure too, and
-    /// in the same arm: the `err` inside it is what says whether asking
-    /// again is worth anything.
-    pub const link_busy: std.meta.Tag(@This()) = .failure;
 };
 
 /// A Run handed to its executor. `execute` blocks until the Run reaches a
@@ -254,25 +249,25 @@ pub const RunControlLease = struct {
 };
 /// What cancelling a compact can refuse with.
 ///
-/// The two Session-side members are the implementation's own. The last two
-/// are the link's, and they are here rather than reused from `surface.Error`
-/// because this method's set is deliberately narrow:
-/// `src/product/task/runtime.zig` switches on it exhaustively, which is the
-/// whole value of a narrow set, and a method that can be called across a
-/// process boundary has to be able to say that the boundary is gone -- and,
-/// separately, that the call was not performed and can be made again. Neither
-/// member means either one -- `NoSuchCompact` would claim the compact was
-/// already over, `SessionClosing` that the Session is winding down -- and the
-/// exhaustive switch is what makes the caller say which side it chooses
-/// instead of inheriting one. The two link members must stay apart here most
-/// of all: this is the method whose `DependencyUnreachable` makes Product
-/// stop following the compact, so answering it for a full queue would
-/// abandon a compact that is still running.
+/// The first two members are the implementation's own. The last is the
+/// link's, and it is here rather than reused from `surface.Error` because
+/// this method's set is deliberately narrow: `src/product/task/runtime.zig`
+/// switches on it exhaustively, which is the whole value of a narrow set, and
+/// a method that can be called across a process boundary has to be able to
+/// say that the boundary is gone. Neither other member means it --
+/// `NoSuchCompact` would claim the compact was already over, `SessionClosing`
+/// that the Session is winding down -- and the exhaustive switch is what
+/// makes the caller say which side it chooses instead of inheriting one.
+///
+/// It is one link member rather than two because there is one answer to
+/// give: any way the link fails to carry this call ends the execution
+/// process, so "refused, ask again" would name a peer that is already going
+/// away. `src/agent/link/client.zig`'s `LinkFault` is where the distinction
+/// the supervisor needs survives.
 pub const CompactCancellation = error{
     NoSuchCompact,
     SessionClosing,
     DependencyUnreachable,
-    LinkBusy,
 };
 
 pub const SessionPort = struct {
@@ -504,22 +499,10 @@ pub const RuntimePort = struct {
         capacity_reached,
         mcp_busy,
         unavailable,
-        /// The question was not put to the runtime, and asking again is worth
-        /// something.
-        ///
-        /// Not `capacity_reached`: that one is this runtime's own restore
-        /// capacity, and Product turns it into `error.SessionCapacity` --
-        /// a claim about the runtime that is false when the runtime is idle
-        /// and the link's outbound queue is what filled.
-        dependency_busy,
 
         /// Admitting a restore we cannot reach would hand the caller a
         /// Session that is not there, so the existing refusal is the answer.
         pub const link_unreachable: @This() = .unavailable;
-
-        /// And a restore we could not even ask about is not admitted either,
-        /// with the difference that this one is worth asking about again.
-        pub const link_busy: @This() = .dependency_busy;
     };
 
     pub const VTable = struct {

@@ -386,13 +386,6 @@ pub const RunTerminationDispatch = enum {
     /// `TerminationRequestResult.dependency_contract`; every reader groups it
     /// with the answers that mean the request did not take.
     dependency_contract,
-    /// The request found no room on the way to the Session, so it did not
-    /// take either -- and unlike the value above, it would be worth making
-    /// again. Mapped one-to-one from `TerminationRequestResult.dependency_busy`
-    /// and grouped by both readers exactly where `dependency_contract` is:
-    /// nothing is stopping, and a request that never arrived is not a stale
-    /// control. Nothing in process produces it.
-    dependency_busy,
 };
 
 pub const PendingInterruption = enum(u8) {

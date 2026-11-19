@@ -3231,24 +3231,6 @@ pub const Runtime = struct {
                 };
                 result.run_id = null;
             },
-            .dependency_busy => {
-                // The submission never left this half, so nothing is queued on
-                // the far side and nothing is in flight to wait for: the slot
-                // goes back exactly as a rejection gives it back. The reason is
-                // the one Product already produces for `error.QueueFull` and
-                // `error.OutOfMemory` -- a capacity that ran out, which is what
-                // happened -- so the text comes back for a resend instead of
-                // being recorded against a Run it never reached. Not
-                // `.task_busy`: nothing established that this Task is busy, and
-                // the Task may well be idle behind a full link.
-                if (queued_index == null) {
-                    effects.text.discardCandidate(projected.value);
-                    effects.text.releaseBytes(task_state.additional_input_projection_bytes);
-                }
-                run.additional_inputs[index] = null;
-                result.reason = .capacity_reached;
-                result.run_id = null;
-            },
         }
     }
 
@@ -10611,7 +10593,6 @@ fn dispatchStops(
         .stale_run,
         .session_closing,
         .dependency_contract,
-        .dependency_busy,
         => false,
     };
 }
@@ -10642,7 +10623,6 @@ fn requestRunTermination(
         .stale_run => .stale_run,
         .session_closing => .session_closing,
         .dependency_contract => .dependency_contract,
-        .dependency_busy => .dependency_busy,
     };
 }
 
@@ -10665,7 +10645,6 @@ fn requestPermissionTermination(
         .stale_run => .stale_run,
         .session_closing => .session_closing,
         .dependency_contract => .dependency_contract,
-        .dependency_busy => .dependency_busy,
     };
 }
 
@@ -11019,15 +10998,6 @@ fn cancelCompactRecord(
         // is over -- a claim about the Session's state that nobody
         // established.
         error.DependencyUnreachable => return .session_closing,
-        // The cancellation was not performed -- the link refused the send -- and
-        // the correct next move is to ask again, which is the one thing
-        // `.session_closing` above would prevent: it is the answer for a
-        // Session nobody can reach, and nobody established that. There is no
-        // dispatch value for "ask again", so the fact leaves as the error it
-        // arrived as -- `ControlError` carries it already, being `agent.Error`
-        // plus allocation. In process nothing produces it, because in process
-        // there is no queue between the halves.
-        error.LinkBusy => return error.LinkBusy,
     };
     task.durable.recent_order = self.takeRecentOrder();
     return if (prior == null) .requested else .already_requested;

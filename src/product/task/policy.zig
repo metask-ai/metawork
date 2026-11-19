@@ -223,7 +223,6 @@ pub fn publishedControlStale(result: agent.TerminationRequestResult) bool {
         .already_terminal,
         .session_closing,
         .dependency_contract,
-        .dependency_busy,
         => false,
     };
 }
@@ -242,7 +241,6 @@ pub fn dispatchedControlStale(dispatch: task_state.RunTerminationDispatch) bool 
         .already_terminal,
         .session_closing,
         .dependency_contract,
-        .dependency_busy,
         => false,
     };
 }
