@@ -524,7 +524,15 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     },
   );
 
-  const actualEntries = (await listBundleEntries(root)).sort();
+  // An npm platform package is the bundle with npm's own two files beside it.
+  // Only those two names are let through, and only for a caller that says the
+  // directory is such a package; the staged preflight never says so.
+  const actualEntries = (await listBundleEntries(root))
+    .filter(
+      (entry) =>
+        !options.npmPackage || !["LICENSE", "package.json"].includes(entry),
+    )
+    .sort();
   requireValue(
     isDeepStrictEqual(actualEntries, expectedBundleEntries(declaredFiles)),
     "AgentCore bundle filesystem contains missing or unknown entries",

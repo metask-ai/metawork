@@ -576,6 +576,41 @@ test("rejects development, prerelease and noncanonical release versions", async 
   }
 });
 
+test("lets npm's package.json and LICENSE through for a platform package only", async (t) => {
+  const { root: source, manifest } = await fixture(t);
+  await writeFile(path.join(source, "package.json"), "{}");
+  await writeFile(path.join(source, "LICENSE"), "license");
+  await assert.rejects(
+    validateAgentCoreBundle(source, injectedChecks),
+    /filesystem contains missing or unknown entries/,
+  );
+  const npmChecks = { ...injectedChecks, npmPackage: true };
+  await validateAgentCoreBundle(source, npmChecks);
+
+  // What gets staged is still the manifest's own file list.
+  const repositoryRoot = await repository(t, manifest);
+  const staged = await stageAgentCoreBundle({
+    repositoryRoot,
+    source,
+    validationOptions: npmChecks,
+  });
+  assert.deepEqual((await readdir(staged.target)).sort(), [
+    "README.md",
+    "bin",
+    "bindings",
+    "include",
+    "lib",
+    "manifest.json",
+  ]);
+  await verifyStagedAgentCoreBundle(repositoryRoot, injectedVerification);
+
+  await writeFile(path.join(source, "index.js"), "");
+  await assert.rejects(
+    validateAgentCoreBundle(source, npmChecks),
+    /filesystem contains missing or unknown entries/,
+  );
+});
+
 test("rejects the revision 2 manifest layout", async (t) => {
   const oldSource = await fixture(t, (manifest) => {
     manifest.source.dirty_source_sha256 = "";
