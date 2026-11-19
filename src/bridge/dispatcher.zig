@@ -385,7 +385,7 @@ pub const Dispatcher = struct {
             .platform = platform,
             .automation = automation,
             .bootstrap_window_id = bootstrap_window_id,
-            .delivery = try product_delivery.Delivery.init(allocator),
+            .delivery = .init(),
         };
     }
 
