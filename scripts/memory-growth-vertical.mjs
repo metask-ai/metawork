@@ -56,10 +56,22 @@ function asArray(value) {
   return Array.isArray(value) ? value : [value];
 }
 
+// Counters of the listed processes that still exist. Get-Process reports an id
+// that has exited as an error, and PowerShell then exits 1 with the surviving
+// rows already written; collecting them into one array keeps that absence out
+// of the exit code, and the caller decides which absence is fatal.
+export async function processCounters(ids) {
+  return asArray(
+    await powershell(
+      `ConvertTo-Json -Compress -Depth 2 -InputObject @(Get-Process -Id ${ids.join(",")} -ErrorAction SilentlyContinue | Select-Object Id,PrivateMemorySize64,WorkingSet64,@{n='ThreadCount';e={$_.Threads.Count}})`,
+    ),
+  );
+}
+
 // Host counters come from Get-Process: PrivateMemorySize64 is the commit
 // charge, WorkingSet64 the resident set. The whole tree is sampled because a
 // Session's cost can land in a child process instead of the Host.
-async function measure(pid) {
+export async function measure(pid) {
   const tree = asArray(
     await powershell(
       "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress -Depth 2",
@@ -80,11 +92,7 @@ async function measure(pid) {
     }
   }
   const ids = [pid, ...descendants.map((entry) => entry.ProcessId)];
-  const counters = asArray(
-    await powershell(
-      `Get-Process -Id ${ids.join(",")} | Select-Object Id,PrivateMemorySize64,WorkingSet64,@{n='ThreadCount';e={$_.Threads.Count}} | ConvertTo-Json -Compress -Depth 2`,
-    ),
-  );
+  const counters = await processCounters(ids);
   const byId = new Map(counters.map((entry) => [entry.Id, entry]));
   const host = byId.get(pid);
   if (!host) throw new Error(`host process ${pid} disappeared while sampling`);
