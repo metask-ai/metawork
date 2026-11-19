@@ -15,6 +15,7 @@ const targetPolicies = [
   {
     supportedHosts: [{ platform: "win32", architectures: ["x64", "arm64"] }],
     id: "aarch64-windows-msvc",
+    npmPackage: "@zogien/agentcore-win32-arm64",
     architecture: "aarch64",
     os: "windows",
     abi: "msvc",
@@ -35,6 +36,7 @@ const targetPolicies = [
   {
     supportedHosts: [{ platform: "win32", architectures: ["x64"] }],
     id: "x86_64-windows-msvc",
+    npmPackage: "@zogien/agentcore-win32-x64",
     architecture: "x86_64",
     os: "windows",
     abi: "msvc",
@@ -55,6 +57,7 @@ const targetPolicies = [
   {
     supportedHosts: [{ platform: "darwin", architectures: ["arm64"] }],
     id: "aarch64-macos",
+    npmPackage: "@zogien/agentcore-darwin-arm64",
     architecture: "aarch64",
     os: "macos",
     abi: "none",
@@ -75,6 +78,7 @@ const targetPolicies = [
   {
     supportedHosts: [{ platform: "darwin", architectures: ["arm64", "x64"] }],
     id: "x86_64-macos",
+    npmPackage: "@zogien/agentcore-darwin-x64",
     architecture: "x86_64",
     os: "macos",
     abi: "none",

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   copyFile,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -19,7 +20,10 @@ import {
   defaultAgentCoreTargetId,
   validateAgentCoreBundle,
 } from "./agentcore-bundle.mjs";
-import { stageAgentCoreBundle } from "./stage-agentcore-bundle.mjs";
+import {
+  stageAgentCoreBundle,
+  stageAgentCorePackage,
+} from "./stage-agentcore-bundle.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 import {
   stageAgentCoreRuntimeAssets,
@@ -609,6 +613,82 @@ test("lets npm's package.json and LICENSE through for a platform package only", 
     validateAgentCoreBundle(source, npmChecks),
     /filesystem contains missing or unknown entries/,
   );
+});
+
+async function installPlatformPackage(repositoryRoot, bundle) {
+  const installed = path.join(
+    repositoryRoot,
+    "node_modules",
+    "@zogien",
+    "agentcore-win32-x64",
+  );
+  await cp(bundle, installed, { recursive: true });
+  await writeFile(path.join(installed, "package.json"), "{}");
+  await writeFile(path.join(installed, "LICENSE"), "license");
+}
+
+test("stages a target's platform package from node_modules", async (t) => {
+  const { root: bundle, manifest } = await fixture(t);
+  const repositoryRoot = await repository(t, manifest);
+  await installPlatformPackage(repositoryRoot, bundle);
+  const options = {
+    repositoryRoot,
+    install: () => assert.fail("an installed package was installed again"),
+    validationOptions: injectedChecks,
+  };
+
+  const staged = await stageAgentCorePackage({
+    ...options,
+    targetId: "x86_64-windows-msvc",
+  });
+  assert.equal(
+    staged.target,
+    path.join(repositoryRoot, ".agentcore", "bundles", "x86_64-windows-msvc"),
+  );
+  await verifyStagedAgentCoreBundle(repositoryRoot, injectedVerification);
+
+  await assert.rejects(
+    stageAgentCorePackage({ ...options, targetId: "x86_64-windows-gnu" }),
+    /unsupported AgentCore bundle target/,
+  );
+});
+
+test("installs a missing platform package at the version package.json pins", async (t) => {
+  const { root: bundle, manifest } = await fixture(t);
+  const repositoryRoot = await repository(t, manifest);
+  const requests = [];
+  const options = {
+    repositoryRoot,
+    targetId: "x86_64-windows-msvc",
+    install: async (root, spec) => {
+      requests.push([root, spec]);
+      await installPlatformPackage(root, bundle);
+    },
+    validationOptions: injectedChecks,
+  };
+  const pin = (version) =>
+    writeFile(
+      path.join(repositoryRoot, "package.json"),
+      JSON.stringify({ devDependencies: { "@zogien/agentcore": version } }),
+    );
+
+  // Anything but the exact pinned release is refused before npm is run.
+  for (const version of [undefined, "^0.1.0-fork.1", "0.1.0", "latest"]) {
+    await pin(version);
+    await assert.rejects(
+      stageAgentCorePackage(options),
+      /must pin @zogien\/agentcore to an exact fork release/,
+      String(version),
+    );
+  }
+  assert.deepEqual(requests, []);
+
+  await pin("0.1.0-fork.1");
+  await stageAgentCorePackage(options);
+  assert.deepEqual(requests, [
+    [repositoryRoot, "@zogien/agentcore-win32-x64@0.1.0-fork.1"],
+  ]);
+  await verifyStagedAgentCoreBundle(repositoryRoot, injectedVerification);
 });
 
 test("rejects the revision 2 manifest layout", async (t) => {
