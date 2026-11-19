@@ -851,8 +851,7 @@ export const zhCN: Record<MessageId, string> = {
   "input.unexecuted": "未执行",
   "input.edit": "编辑",
   "input.edit_notice":
-    "对话会回退到这条消息；已经生成的文件和已经发生的改动都会保留。",
-  "input.edit_confirm": "从这里重跑",
+    "发送后，对话会从这条消息重新生成回复。已生成的文件和已做的改动都会保留。",
   "input.edit_cancel": "取消",
   "input.retry_original": "重发原消息",
   "input.discard_retry": "放弃重发",

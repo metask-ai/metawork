@@ -1,4 +1,6 @@
+import { Button } from "../../components/ui/button.tsx";
 import { CopyButton } from "../../components/ui/CopyButton.tsx";
+import { Icon } from "../../components/ui/Icon.tsx";
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import type { RunTimestamp } from "./run-presentation.ts";
@@ -20,6 +22,7 @@ export function MessageInfoBar({
   onEdit?: () => void;
 }) {
   const { t } = useI18n();
+  const editLabel = t("input.edit");
   const copy = (
     <>
       <CopyButton
@@ -30,13 +33,27 @@ export function MessageInfoBar({
         onCopy={onCopy}
       />
       {onEdit && (
-        <button
-          type="button"
-          className="message-info-edit focus-ring"
-          onClick={onEdit}
-        >
-          {t("input.edit")}
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger
+            render={
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="message-info-edit"
+                aria-label={editLabel}
+                onClick={onEdit}
+              />
+            }
+          >
+            <Icon name="edit" />
+          </Tooltip.Trigger>
+          <Tooltip.Portal>
+            <Tooltip.Positioner side="top">
+              <Tooltip.Popup>{editLabel}</Tooltip.Popup>
+            </Tooltip.Positioner>
+          </Tooltip.Portal>
+        </Tooltip.Root>
       )}
     </>
   );

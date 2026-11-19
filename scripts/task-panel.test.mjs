@@ -2689,13 +2689,25 @@ test("reply metadata keeps each Run's actual model when the next-run model chang
   assertModels();
 });
 
-test("input metadata places the nullable submitted time before copy", async (context) => {
+test("input metadata puts the timestamp before accessible message action icons", async (context) => {
   const user = userEvent.setup({ document: dom.window.document });
   const submittedAt = new Date(2026, 8, 11, 10, 25).getTime();
   context.mock.method(Date, "now", () => submittedAt + 4 * 24 * 60 * 60 * 1000);
+  const onEditInput = context.mock.fn();
+  const text = "Original editable text";
   const view = render(
     taskContentElement(
-      task({ runs: [run({ submittedAtUnixMs: String(submittedAt) })] }),
+      task({
+        runs: [
+          run({
+            submittedAtUnixMs: String(submittedAt),
+            input: { kind: "text", text, redacted: false },
+            editAdmitted: true,
+          }),
+        ],
+      }),
+      "1",
+      { onEditInput },
     ),
   );
   const metadata = view.container.querySelector(
@@ -2705,6 +2717,10 @@ test("input metadata places the nullable submitted time before copy", async (con
   assert.equal(metadata.children[1].tagName, "BUTTON");
   assert.equal(metadata.querySelector("time").textContent, "4 days ago");
   assert.ok(screen.getByRole("button", { name: "Copy input" }));
+  const edit = within(metadata).getByRole("button", { name: "Edit" });
+  assert.equal(metadata.children[2], edit);
+  assert.equal(edit.textContent, "");
+  assert.ok(edit.querySelector('svg[aria-hidden="true"]'));
 
   const time = metadata.querySelector("time");
   await user.hover(time);
@@ -2714,6 +2730,41 @@ test("input metadata places the nullable submitted time before copy", async (con
       time.getAttribute("aria-label"),
     ),
   );
+  await user.unhover(time);
+  await user.hover(edit);
+  await waitFor(() =>
+    assert.ok(
+      Array.from(document.querySelectorAll("[data-base-ui-portal]")).some(
+        (portal) => portal.textContent === "Edit",
+      ),
+    ),
+  );
+  edit.focus();
+  await user.keyboard("{Enter}");
+  const editor = screen.getByRole("textbox", { name: "Edit" });
+  assert.equal(editor.value, text);
+  assert.equal(editor.rows, 1);
+  assert.equal(document.activeElement, editor);
+  assert.equal(editor.selectionStart, text.length);
+  assert.equal(editor.selectionEnd, text.length);
+  editor.setSelectionRange(1, 1);
+  await user.keyboard("X");
+  assert.equal(editor.value, `OX${text.slice(1)}`);
+  assert.equal(editor.selectionStart, 2);
+  const notice = document.getElementById(
+    editor.getAttribute("aria-describedby"),
+  );
+  const surface = editor.closest(".ai-composer");
+  assert.equal(surface.nextElementSibling, notice);
+  assert.match(
+    notice.textContent,
+    /Files already created and changes already made are kept/,
+  );
+  assert.ok(within(surface).getByRole("button", { name: "Send" }));
+  await user.click(within(surface).getByRole("button", { name: "Cancel" }));
+  assert.equal(screen.queryByRole("textbox", { name: "Edit" }), null);
+  assert.ok(screen.getByText(text));
+  assert.equal(onEditInput.mock.callCount(), 0);
 });
 
 test("message action hover and focus stay within one message, including interjections in the same Run", async () => {
