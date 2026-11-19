@@ -20,6 +20,46 @@ pub const event_pump = @import("event_pump");
 pub const product_control_executor = @import("product_control_executor");
 pub const sdk = @import("metask_agentcore");
 pub const wire = sdk.types;
+const builtin = @import("builtin");
+
+// ---------------------------------------------------------------------------
+// Where this fixture's allocations and waits come from
+// ---------------------------------------------------------------------------
+//
+// It used to reach for `std.testing.allocator` and `std.testing.io` directly,
+// in eighty-one places. Both are `@compileError` outside a test binary, so the
+// whole fixture -- the fake AgentCore included -- could only be linked into
+// one. That is what kept a real two-process test from driving a Run: the
+// execution half is an executable, and the real AgentCore refuses synthetic
+// Session options, so there was no controllable Core on either side of the
+// choice.
+//
+// So the two facts are parameters now, with the test ones as the default. A
+// test build keeps exactly what it had: the same allocator instance, so
+// per-test leak detection is unchanged, and the same `Io`. An executable calls
+// `use` before anything else and gets the same fake.
+
+var override_allocator: ?std.mem.Allocator = null;
+var override_io: ?std.Io = null;
+
+/// Points the fixture at an allocator and an `Io`. For a binary that is not a
+/// test; a test needs no call and must not make one.
+pub fn use(allocator_value: std.mem.Allocator, io_value: std.Io) void {
+    override_allocator = allocator_value;
+    override_io = io_value;
+}
+
+pub fn alloc() std.mem.Allocator {
+    if (override_allocator) |value| return value;
+    if (comptime builtin.is_test) return std.testing.allocator;
+    @panic("lifecycle fixture: call `use` before anything that allocates");
+}
+
+pub fn fixtureIo() std.Io {
+    if (override_io) |value| return value;
+    if (comptime builtin.is_test) return std.testing.io;
+    @panic("lifecycle fixture: call `use` before anything that waits");
+}
 
 // tasks.run is synchronous: a fresh catalog wait returns no Run identity.
 // Only successful direct-admission fixtures wait and retry that public command;
@@ -29,7 +69,7 @@ pub fn runPreparedTask(workbench: *product_control.Runtime, task_id: u64, input:
         return workbench.runTask(task_id, input) catch |err| switch (err) {
             error.CatalogLoading => {
                 try workbench.drainAgentEvents();
-                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                try std.Io.sleep(fixtureIo(), .fromMilliseconds(1), .awake);
                 continue;
             },
             else => return err,
@@ -48,32 +88,32 @@ pub const TypedHistory = struct {
     fn restoreFixture(context: ?*anyopaque) anyerror!?product_task.history.RecoveredState {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         const bytes = self.fixture_restore orelse return null;
-        return try product_task.history.decodeRecovering(std.testing.allocator, bytes, product_control.persistenceLimits(.{}, 16));
+        return try product_task.history.decodeRecovering(alloc(), bytes, product_control.persistenceLimits(.{}, 16));
     }
 
     pub fn capability(self: *@This()) product_task.history.Capability {
         return .{ .context = self, .enabled = true, .restore_fn = restoreFixture, .commit_fn = commit, .confirmed_commit_fn = commit, .resolve_commit_fn = resolve };
     }
     pub fn deinit(self: *@This()) void {
-        if (self.pending) |bytes| std.testing.allocator.free(bytes);
+        if (self.pending) |bytes| alloc().free(bytes);
     }
     fn commit(context: ?*anyopaque, candidate: *product_task.history.Candidate) product_task.history.Commit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         if (self.pending != null) return .outcome_unknown;
-        std.Io.randomSecure(std.testing.io, &self.token) catch return .failed;
+        std.Io.randomSecure(fixtureIo(), &self.token) catch return .failed;
         candidate.token = self.token;
-        const bytes = product_task.history.encodeAlloc(std.testing.allocator, candidate.value, candidate.preserved, product_control.persistenceLimits(.{}, 16)) catch return .failed;
-        const result = self.file_store.commitConfirmed(std.testing.allocator, bytes);
-        if (result == .outcome_unknown) self.pending = bytes else std.testing.allocator.free(bytes);
+        const bytes = product_task.history.encodeAlloc(alloc(), candidate.value, candidate.preserved, product_control.persistenceLimits(.{}, 16)) catch return .failed;
+        const result = self.file_store.commitConfirmed(alloc(), bytes);
+        if (result == .outcome_unknown) self.pending = bytes else alloc().free(bytes);
         return result;
     }
     fn resolve(context: ?*anyopaque, token: product_task.history.CommitToken) product_task.history.Commit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         if (!std.mem.eql(u8, &token, &self.token)) return .outcome_unknown;
         const bytes = self.pending orelse return .outcome_unknown;
-        const result = self.file_store.resolveCommit(std.testing.allocator, bytes);
+        const result = self.file_store.resolveCommit(alloc(), bytes);
         if (result != .outcome_unknown) {
-            std.testing.allocator.free(bytes);
+            alloc().free(bytes);
             self.pending = null;
         }
         return result;
@@ -87,15 +127,15 @@ pub fn credentialDigest(bytes: []const u8) [32]u8 {
 }
 
 pub fn pumpEnvelope(session_id: u64, run_id: u64, json: []const u8) !event_pump.OwnedCoreEvent {
-    const owned_json = try std.testing.allocator.dupe(u8, json);
-    errdefer std.testing.allocator.free(owned_json);
+    const owned_json = try alloc().dupe(u8, json);
+    errdefer alloc().free(owned_json);
     return .{
         .session_id = session_id,
         .run_id = run_id,
         .encoded_bytes = json.len,
         .json = owned_json,
-        .event = try sdk.decodeCoreEvent(std.testing.allocator, json),
-        .allocator = std.testing.allocator,
+        .event = try sdk.decodeCoreEvent(alloc(), json),
+        .allocator = alloc(),
     };
 }
 
@@ -222,44 +262,44 @@ pub const CallbackSignal = struct {
     pub fn notify(context: ?*anyopaque) lifecycle.EventReadyNotification {
         const self: *CallbackSignal = @ptrCast(@alignCast(context orelse
             return .unavailable));
-        self.mutex.lockUncancelable(std.testing.io);
+        self.mutex.lockUncancelable(fixtureIo());
         if (!self.armed) {
-            self.mutex.unlock(std.testing.io);
+            self.mutex.unlock(fixtureIo());
             return .already_pending;
         }
         self.entered = true;
-        self.condition.broadcast(std.testing.io);
-        self.mutex.unlock(std.testing.io);
+        self.condition.broadcast(fixtureIo());
+        self.mutex.unlock(fixtureIo());
         return .scheduled;
     }
 
     pub fn arm(self: *CallbackSignal) void {
-        self.mutex.lockUncancelable(std.testing.io);
+        self.mutex.lockUncancelable(fixtureIo());
         self.armed = true;
         self.entered = false;
         self.finished = false;
-        self.mutex.unlock(std.testing.io);
+        self.mutex.unlock(fixtureIo());
     }
 
     pub fn waitUntilEntered(self: *CallbackSignal) void {
-        self.mutex.lockUncancelable(std.testing.io);
-        defer self.mutex.unlock(std.testing.io);
+        self.mutex.lockUncancelable(fixtureIo());
+        defer self.mutex.unlock(fixtureIo());
         while (!self.entered)
-            self.condition.waitUncancelable(std.testing.io, &self.mutex);
+            self.condition.waitUncancelable(fixtureIo(), &self.mutex);
     }
 
     pub fn markFinished(self: *CallbackSignal) void {
-        self.mutex.lockUncancelable(std.testing.io);
+        self.mutex.lockUncancelable(fixtureIo());
         self.finished = true;
-        self.condition.broadcast(std.testing.io);
-        self.mutex.unlock(std.testing.io);
+        self.condition.broadcast(fixtureIo());
+        self.mutex.unlock(fixtureIo());
     }
 
     pub fn waitUntilFinished(self: *CallbackSignal) void {
-        self.mutex.lockUncancelable(std.testing.io);
-        defer self.mutex.unlock(std.testing.io);
+        self.mutex.lockUncancelable(fixtureIo());
+        defer self.mutex.unlock(fixtureIo());
         while (!self.finished)
-            self.condition.waitUncancelable(std.testing.io, &self.mutex);
+            self.condition.waitUncancelable(fixtureIo(), &self.mutex);
     }
 };
 
@@ -365,19 +405,19 @@ pub const FakeSession = struct {
     compact_boundary: usize = 0,
 
     pub fn lock(self: *FakeSession) void {
-        self.mutex.lockUncancelable(std.testing.io);
+        self.mutex.lockUncancelable(fixtureIo());
     }
 
     pub fn unlock(self: *FakeSession) void {
-        self.mutex.unlock(std.testing.io);
+        self.mutex.unlock(fixtureIo());
     }
 
     pub fn wait(self: *FakeSession) void {
-        self.condition.waitUncancelable(std.testing.io, &self.mutex);
+        self.condition.waitUncancelable(fixtureIo(), &self.mutex);
     }
 
     pub fn broadcast(self: *FakeSession) void {
-        self.condition.broadcast(std.testing.io);
+        self.condition.broadcast(fixtureIo());
     }
 
     /// Records one admitted turn. The caller holds the Session lock.
@@ -563,11 +603,11 @@ pub const FakeCore = struct {
     allow_completion: bool = false,
 
     pub fn lock(self: *FakeCore) void {
-        self.mutex.lockUncancelable(std.testing.io);
+        self.mutex.lockUncancelable(fixtureIo());
     }
 
     pub fn unlock(self: *FakeCore) void {
-        self.mutex.unlock(std.testing.io);
+        self.mutex.unlock(fixtureIo());
     }
 
     pub fn reset(self: *FakeCore) void {
@@ -613,7 +653,7 @@ pub const FakeCore = struct {
         defer self.unlock();
         while (!self.completion_entered)
             self.completion_condition.waitUncancelable(
-                std.testing.io,
+                fixtureIo(),
                 &self.mutex,
             );
     }
@@ -621,7 +661,7 @@ pub const FakeCore = struct {
     pub fn releaseCompletion(self: *FakeCore) void {
         self.lock();
         self.allow_completion = true;
-        self.completion_condition.broadcast(std.testing.io);
+        self.completion_condition.broadcast(fixtureIo());
         self.unlock();
     }
 
@@ -644,7 +684,7 @@ pub const FakeCore = struct {
         defer self.unlock();
         while (!self.catalog_query_entered)
             self.catalog_condition.waitUncancelable(
-                std.testing.io,
+                fixtureIo(),
                 &self.mutex,
             );
     }
@@ -652,7 +692,7 @@ pub const FakeCore = struct {
     pub fn releaseCatalogQuery(self: *FakeCore) void {
         self.lock();
         self.allow_catalog_query = true;
-        self.catalog_condition.broadcast(std.testing.io);
+        self.catalog_condition.broadcast(fixtureIo());
         self.unlock();
     }
 
@@ -863,14 +903,14 @@ pub const FakeCore = struct {
         self.lock();
         defer self.unlock();
         while (!self.prompt_entered)
-            self.checkpoint_condition.waitUncancelable(std.testing.io, &self.mutex);
+            self.checkpoint_condition.waitUncancelable(fixtureIo(), &self.mutex);
     }
 
     pub fn releaseControlledPrompt(self: *FakeCore) void {
         self.lock();
         defer self.unlock();
         self.allow_prompt = true;
-        self.checkpoint_condition.broadcast(std.testing.io);
+        self.checkpoint_condition.broadcast(fixtureIo());
     }
 
     pub fn armControlledRestore(self: *FakeCore) void {
@@ -895,14 +935,14 @@ pub const FakeCore = struct {
         self.lock();
         defer self.unlock();
         while (!self.restore_entered)
-            self.checkpoint_condition.waitUncancelable(std.testing.io, &self.mutex);
+            self.checkpoint_condition.waitUncancelable(fixtureIo(), &self.mutex);
     }
 
     pub fn releaseControlledRestore(self: *FakeCore) void {
         self.lock();
         defer self.unlock();
         self.allow_restore = true;
-        self.checkpoint_condition.broadcast(std.testing.io);
+        self.checkpoint_condition.broadcast(fixtureIo());
     }
 
     pub fn controlNextCheckpointExport(self: *FakeCore) void {
@@ -917,13 +957,13 @@ pub const FakeCore = struct {
         self.lock();
         defer self.unlock();
         while (!self.checkpoint_export_entered)
-            self.checkpoint_condition.waitUncancelable(std.testing.io, &self.mutex);
+            self.checkpoint_condition.waitUncancelable(fixtureIo(), &self.mutex);
     }
 
     pub fn releaseCheckpointExport(self: *FakeCore) void {
         self.lock();
         self.allow_checkpoint_export = true;
-        self.checkpoint_condition.broadcast(std.testing.io);
+        self.checkpoint_condition.broadcast(fixtureIo());
         self.unlock();
     }
 
@@ -1307,10 +1347,10 @@ pub fn runtimeQuerySkillCatalog(
     fake_core.workspace_epoch_seen = epoch.len != 0;
     if (fake_core.catalog_plan == .controlled) {
         fake_core.catalog_query_entered = true;
-        fake_core.catalog_condition.broadcast(std.testing.io);
+        fake_core.catalog_condition.broadcast(fixtureIo());
         while (!fake_core.allow_catalog_query)
             fake_core.catalog_condition.waitUncancelable(
-                std.testing.io,
+                fixtureIo(),
                 &fake_core.mutex,
             );
     }
@@ -1651,9 +1691,9 @@ pub fn sessionRestore(
     if (fake_core.restore_controlled and !fake_core.restore_after_create) {
         fake_core.restore_controlled = false;
         fake_core.restore_entered = true;
-        fake_core.checkpoint_condition.broadcast(std.testing.io);
+        fake_core.checkpoint_condition.broadcast(fixtureIo());
         while (!fake_core.allow_restore)
-            fake_core.checkpoint_condition.waitUncancelable(std.testing.io, &fake_core.mutex);
+            fake_core.checkpoint_condition.waitUncancelable(fixtureIo(), &fake_core.mutex);
     }
     const generation = fake_core.checkpoint_generation;
     const last_run_id = fake_core.restore_last_run_id;
@@ -1747,9 +1787,9 @@ pub fn sessionRestore(
         if (fake_core.restore_controlled and fake_core.restore_after_create) {
             fake_core.restore_controlled = false;
             fake_core.restore_entered = true;
-            fake_core.checkpoint_condition.broadcast(std.testing.io);
+            fake_core.checkpoint_condition.broadcast(fixtureIo());
             while (!fake_core.allow_restore)
-                fake_core.checkpoint_condition.waitUncancelable(std.testing.io, &fake_core.mutex);
+                fake_core.checkpoint_condition.waitUncancelable(fixtureIo(), &fake_core.mutex);
         }
         return wire.STATUS_OK;
     }
@@ -1801,15 +1841,15 @@ pub fn sessionDescribe(
         .order = 0,
         .interpolate = false,
     };
-    const profile_json = std.json.Stringify.valueAlloc(std.testing.allocator, entries[0..session.prompt_profile.count], .{}) catch
+    const profile_json = std.json.Stringify.valueAlloc(alloc(), entries[0..session.prompt_profile.count], .{}) catch
         return wire.STATUS_OUT_OF_MEMORY;
-    defer std.testing.allocator.free(profile_json);
+    defer alloc().free(profile_json);
     const described_session_id: []const u8 = if (session_id_mismatch)
         "ffffffffffffffffffffffff"
     else
         session.session_id[0..session.session_id_len];
-    const model_json = std.json.Stringify.valueAlloc(std.testing.allocator, if (session.model_len != 0) session.model[0..session.model_len] else "fixture-model", .{}) catch return wire.STATUS_OUT_OF_MEMORY;
-    defer std.testing.allocator.free(model_json);
+    const model_json = std.json.Stringify.valueAlloc(alloc(), if (session.model_len != 0) session.model[0..session.model_len] else "fixture-model", .{}) catch return wire.STATUS_OUT_OF_MEMORY;
+    defer alloc().free(model_json);
     const encoded = if (malformed)
         std.fmt.bufPrint(&session.description_buffer, "{{}}", .{}) catch {
             diagnostic(out_error);
@@ -1959,10 +1999,10 @@ pub fn sessionExportCheckpoint(
     if (fake_core.checkpoint_export_controlled) {
         fake_core.checkpoint_export_controlled = false;
         fake_core.checkpoint_export_entered = true;
-        fake_core.checkpoint_condition.broadcast(std.testing.io);
+        fake_core.checkpoint_condition.broadcast(fixtureIo());
         while (!fake_core.allow_checkpoint_export)
             fake_core.checkpoint_condition.waitUncancelable(
-                std.testing.io,
+                fixtureIo(),
                 &fake_core.mutex,
             );
     }
@@ -2436,7 +2476,7 @@ pub fn sessionRunInput(
                 };
                 const encoded_response = response_ptr[0..response_len];
                 var decoded_response = sdk.protocol.decodeUiResponse(
-                    std.testing.allocator,
+                    alloc(),
                     encoded_response,
                 ) catch {
                     diagnostic(out_error);
@@ -2740,10 +2780,10 @@ fn fakeCompletionPerform(
     if (core.completion_controlled) {
         core.completion_controlled = false;
         core.completion_entered = true;
-        core.completion_condition.broadcast(std.testing.io);
+        core.completion_condition.broadcast(fixtureIo());
         while (!core.allow_completion)
             core.completion_condition.waitUncancelable(
-                std.testing.io,
+                fixtureIo(),
                 &core.mutex,
             );
         if (cancellation.isRequested()) return error.Cancelled;
@@ -2790,9 +2830,9 @@ fn sessionUpdateCredential(handle: ?*wire.SessionHandle, value: wire.BytesViewV1
     fake_core.lock();
     fake_core.credential_updates += 1;
     fake_core.credential_update_entered = true;
-    fake_core.credential_update_condition.broadcast(std.testing.io);
+    fake_core.credential_update_condition.broadcast(fixtureIo());
     while (fake_core.hold_credential_update and !fake_core.allow_credential_update)
-        fake_core.credential_update_condition.waitUncancelable(std.testing.io, &fake_core.mutex);
+        fake_core.credential_update_condition.waitUncancelable(fixtureIo(), &fake_core.mutex);
     const forced = fake_core.forced_update_credential_status;
     fake_core.forced_update_credential_status = null;
     fake_core.unlock();
@@ -2887,9 +2927,9 @@ fn sessionSetPromptProfile(handle: ?*wire.SessionHandle, profile: ?*const wire.P
     if (fake_core.prompt_controlled) {
         fake_core.prompt_controlled = false;
         fake_core.prompt_entered = true;
-        fake_core.checkpoint_condition.broadcast(std.testing.io);
+        fake_core.checkpoint_condition.broadcast(fixtureIo());
         while (!fake_core.allow_prompt)
-            fake_core.checkpoint_condition.waitUncancelable(std.testing.io, &fake_core.mutex);
+            fake_core.checkpoint_condition.waitUncancelable(fixtureIo(), &fake_core.mutex);
     }
     const forced = fake_core.forced_prompt_status;
     fake_core.forced_prompt_status = null;
@@ -3160,7 +3200,7 @@ fn emitPermissionProvenance(
     request_json: []const u8,
     response: sdk.protocol.PermissionResponse,
 ) bool {
-    var parsed = sdk.protocol.decodeUiRequest(std.testing.allocator, request_json) catch return false;
+    var parsed = sdk.protocol.decodeUiRequest(alloc(), request_json) catch return false;
     defer parsed.deinit();
     const request = switch (parsed.value) {
         .permission => |value| value,
@@ -3229,8 +3269,8 @@ const ConcurrentEventInvocation = struct {
     result: u32 = wire.EVENT_FATAL,
 
     fn invoke(self: *ConcurrentEventInvocation) void {
-        self.ready.post(std.testing.io);
-        self.start.waitUncancelable(std.testing.io);
+        self.ready.post(fixtureIo());
+        self.start.waitUncancelable(fixtureIo());
         self.result = self.callback(
             self.callback_context,
             &self.run,
@@ -3263,14 +3303,14 @@ fn invokeConcurrentIdentityCallbacks(
         ConcurrentEventInvocation.invoke,
         .{&second},
     ) catch |err| {
-        start.post(std.testing.io);
+        start.post(fixtureIo());
         first_thread.join();
         return err;
     };
-    ready.waitUncancelable(std.testing.io);
-    ready.waitUncancelable(std.testing.io);
-    start.post(std.testing.io);
-    start.post(std.testing.io);
+    ready.waitUncancelable(fixtureIo());
+    ready.waitUncancelable(fixtureIo());
+    start.post(fixtureIo());
+    start.post(fixtureIo());
     first_thread.join();
     second_thread.join();
     return if (first.result == wire.EVENT_CONTINUE and second.result == wire.EVENT_CONTINUE)
@@ -3440,12 +3480,12 @@ pub fn storeTestTerminal(
     result: lifecycle.TerminalResult,
 ) void {
     const entry = testCompositionEntry(session.agent_runtime);
-    entry.terminal_mutex.lockUncancelable(std.testing.io);
-    defer entry.terminal_mutex.unlock(std.testing.io);
+    entry.terminal_mutex.lockUncancelable(fixtureIo());
+    defer entry.terminal_mutex.unlock(fixtureIo());
     for (&entry.terminal_results) |*slot| {
         if (slot.* == null) {
             slot.* = .{ .session_id = session.id, .run_id = run_id, .result = result };
-            entry.terminal_condition.broadcast(std.testing.io);
+            entry.terminal_condition.broadcast(fixtureIo());
             return;
         }
     }
@@ -3454,8 +3494,8 @@ pub fn storeTestTerminal(
 
 pub fn takeTestTerminal(session: *lifecycle.Session, run_id: u64) lifecycle.TerminalResult {
     const entry = testCompositionEntry(session.agent_runtime);
-    entry.terminal_mutex.lockUncancelable(std.testing.io);
-    defer entry.terminal_mutex.unlock(std.testing.io);
+    entry.terminal_mutex.lockUncancelable(fixtureIo());
+    defer entry.terminal_mutex.unlock(fixtureIo());
     while (true) {
         for (&entry.terminal_results) |*slot| {
             const stored = slot.* orelse continue;
@@ -3463,7 +3503,7 @@ pub fn takeTestTerminal(session: *lifecycle.Session, run_id: u64) lifecycle.Term
             slot.* = null;
             return stored.result;
         }
-        entry.terminal_condition.waitUncancelable(std.testing.io, &entry.terminal_mutex);
+        entry.terminal_condition.waitUncancelable(fixtureIo(), &entry.terminal_mutex);
     }
 }
 
@@ -3492,8 +3532,8 @@ pub fn deinitTestComposition(runtime: *lifecycle.Runtime) void {
 
 pub fn createTestComposition(limits: TestCompositionLimits) !*lifecycle.Runtime {
     const executor = try product_control_executor.Executor.create(
-        std.testing.io,
-        std.testing.allocator,
+        fixtureIo(),
+        alloc(),
         .{ .worker_count = limits.worker_count, .queue_capacity = limits.queue_capacity },
     );
     var executor_registered = false;
@@ -3510,8 +3550,8 @@ pub fn createTestComposition(limits: TestCompositionLimits) !*lifecycle.Runtime 
 
 pub fn createTestRuntime(limits: lifecycle.Limits) !*lifecycle.Runtime {
     return lifecycle.Runtime.initWithApi(
-        std.testing.io,
-        std.testing.allocator,
+        fixtureIo(),
+        alloc(),
         &fake_api,
         limits,
     );
