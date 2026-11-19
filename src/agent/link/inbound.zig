@@ -443,10 +443,15 @@ pub fn invoke(
     arguments: client.Arguments(owner, name),
 ) InvokeError!Outcome(owner, name) {
     const Returned = comptime @FieldType(Outcome(owner, name), "returned");
-    const read = comptime adapter(Returned) orelse @compileError(
-        "nothing reads " ++ @typeName(Returned) ++ " back, so " ++ name ++
-            " cannot be forwarded yet; it is in `owedInbound`",
-    );
+    // The adapter itself is `received`'s, taken from the same lookup; what
+    // has to be refused *here* is a method whose answer nothing reads back,
+    // because that is a method this build cannot forward at all.
+    comptime {
+        _ = adapter(Returned) orelse @compileError(
+            "nothing reads " ++ @typeName(Returned) ++ " back, so " ++ name ++
+                " cannot be forwarded yet; it is in `owedInbound`",
+        );
+    }
     const needed = comptime boxesNeeded(wire_types.Wire(Returned));
 
     var reserved: [needed]*client.Box = undefined;
@@ -469,24 +474,80 @@ pub fn invoke(
         receiver,
         arguments,
     );
+    var wanted: [needed]handle_table.Id = undefined;
+    var taken: Reservations = .{
+        .taken = reserved[0..opened],
+        .wanted = wanted[0..],
+    };
     return switch (answer) {
         .failed => |err| .{ .failed = err },
-        .returned => |wired| blk: {
-            var wanted: [needed]handle_table.Id = undefined;
-            var taken: Reservations = .{
-                .taken = reserved[0..opened],
-                .wanted = wanted[0..],
-            };
-            // The conversion claims boxes but fills none, so a failure here
-            // leaves every box unfilled and the defer above gives all of them
-            // back. Settling after it has succeeded is what makes "a filled
-            // box is a box Product owns" true without each adapter having to
-            // order its own work.
-            const value = try read.apply(half, &taken, wired);
-            taken.settle(half);
-            break :blk .{ .returned = value };
+        .returned => |wired| .{
+            .returned = try received(owner, name, half, &taken, wired),
         },
     };
+}
+
+/// What converting an answer may fail with.
+///
+/// `Error` without `OutOfMemory`, and the subtraction is the mechanism rather
+/// than a remark. By the time a conversion runs, the peer has done the work
+/// and sent its answer: an allocation that fails here has lost that answer,
+/// not refused the call. A declared set without `OutOfMemory` means the
+/// compiler demands the mapping instead of letting a `try` walk past it, the
+/// same way `client.AfterHandover` carries the rule for the half of the path
+/// above this one.
+pub const AfterAnswer = error{
+    Unreadable,
+    AnswerLost,
+    UnknownBox,
+};
+
+comptime {
+    // Checked against `client.not_performed`, which is the classification
+    // `stubs.stoppedBy` makes, rather than against a list written here. The
+    // first version of this guard named `OutOfMemory` alone and let
+    // `BoxCapacity` through -- a member that means "no room in this half's
+    // box table", which is true before the request is sent and says the wrong
+    // thing entirely once the peer has answered.
+    client.refuseNotPerformed(AfterAnswer, "inbound.AfterAnswer");
+}
+
+/// An answer-phase failure, named for what it is.
+///
+/// Two mappings, and both are the same statement: a resource this half ran
+/// out of while reading an answer has lost that answer, and has not refused
+/// the call -- the peer already performed it. `UnknownBox` passes through
+/// because it is permanent and lands on the gone answer either way. The
+/// switch is exhaustive over `Error`, so a new member has to be placed here
+/// rather than inheriting whatever the previous one meant.
+fn afterAnswer(err: Error) AfterAnswer {
+    return switch (err) {
+        error.OutOfMemory, error.BoxCapacity => error.AnswerLost,
+        error.Unreadable => error.Unreadable,
+        error.UnknownBox => error.UnknownBox,
+    };
+}
+
+/// Reads one answer the peer has already sent into the port's own types.
+///
+/// Its error set is the point: `AfterAnswer` cannot say that nothing
+/// happened, so neither can anything written in here.
+fn received(
+    comptime owner: method.Owner,
+    comptime name: []const u8,
+    half: *client.Client,
+    taken: *Reservations,
+    wired: @FieldType(client.Answer(owner, name), "returned"),
+) AfterAnswer!@FieldType(Outcome(owner, name), "returned") {
+    const Returned = comptime @FieldType(Outcome(owner, name), "returned");
+    const read = comptime adapter(Returned).?;
+    // The conversion claims boxes but fills none, so a failure here leaves
+    // every box unfilled and `invoke`'s defer gives all of them back.
+    // Settling after it has succeeded is what makes "a filled box is a box
+    // Product owns" true without each adapter having to order its own work.
+    const value = read.apply(half, taken, wired) catch |err| return afterAnswer(err);
+    taken.settle(half);
+    return value;
 }
 
 // ---------------------------------------------------------------------------

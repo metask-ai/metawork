@@ -162,12 +162,32 @@ pub const InputSubmission = union(enum) {
     rejected: InputRejection,
     /// A dependency contract failure cannot be reported as a refusal.
     unknown,
+    /// This input was not submitted, and submitting it again is worth
+    /// something.
+    ///
+    /// Says nothing about the Session, which is the point: the link refused
+    /// the send before it left this half, so nobody established whether the
+    /// Session is busy, idle or there at all. Separate from `unknown` because
+    /// the two ask for opposite things -- this one says submit it again,
+    /// `unknown` says stop, because under `unknown` it may already have been
+    /// taken. No member of `InputRejection` means it either:
+    /// `resource_limit` is the Session's own input ledger and `not_ready` is
+    /// a statement about the Session's state, and both would be false of a
+    /// Session sitting idle behind a full link.
+    dependency_busy,
 
     /// The answer when the dependency cannot be reached at all. Named here
     /// rather than left to the caller so that the port guard in
     /// `src/agent/link/unreachability.zig` checks a property instead of a
     /// spelling, and so a forwarding stub has one place to read it from.
     pub const link_unreachable: std.meta.Tag(@This()) = .unknown;
+
+    /// The answer when the input was not submitted and can be submitted
+    /// again. Named here for the same reason as the one above, and kept apart
+    /// from it because a caller told the wrong one either stops asking about
+    /// input that was never taken, or submits a second time input the Session
+    /// may already hold.
+    pub const link_busy: std.meta.Tag(@This()) = .dependency_busy;
 };
 
 /// Correlation facts only. No text is retained or scheduled by this ledger.
@@ -386,9 +406,21 @@ pub const TerminationRequestResult = enum {
     /// Reporting one of them instead would be a wrong answer shaped exactly
     /// like a right one.
     dependency_contract,
+    /// The request could not be put to the Session right now.
+    ///
+    /// Asserts as little about the Run as the value above, and differs from
+    /// it in the one way that matters to the caller: this request can be made
+    /// again, and that one cannot.
+    dependency_busy,
 
-    /// An unreachable dependency is what the value above is for.
+    /// An unreachable dependency is what `dependency_contract` is for.
     pub const link_unreachable: @This() = .dependency_contract;
+
+    /// A dependency with no room is what `dependency_busy` is for. Kept
+    /// apart from the one above because a caller told the wrong one either
+    /// stops asking about a Run it could still stop, or keeps asking about
+    /// one it never can.
+    pub const link_busy: @This() = .dependency_busy;
 };
 
 pub const EventReadyNotification = enum {
