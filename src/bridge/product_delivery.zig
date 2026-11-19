@@ -88,8 +88,8 @@ pub const Delivery = struct {
     emitted_security_epoch: u64 = 0,
     snapshot_cancellation: ?SnapshotCancellation = null,
 
-    pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Delivery {
-        return .{ .snapshot = try snapshot_impl.State.initOwned(allocator) };
+    pub fn init() Delivery {
+        return .{ .snapshot = .initOwned() };
     }
 
     pub fn deinitOwnedBuffers(self: *Delivery) void {
@@ -202,9 +202,10 @@ pub const Delivery = struct {
         const generation = try self.requireWindow(window_id);
         if (security_epoch == 0) return error.StaleSnapshot;
         self.invalidateSnapshot();
+        try self.snapshot.acquire();
         self.snapshot_cancellation = writer.cancellation;
         errdefer {
-            std.crypto.secureZero(u8, self.snapshot.storage);
+            self.snapshot.invalidateUnreported();
             self.invalidateSnapshot();
         }
         const prepared = try writer.write(self.snapshot.storage);
@@ -227,7 +228,7 @@ pub const Delivery = struct {
         if (snapshot_id == 0 or snapshot_id != self.snapshot.id or generation != self.snapshot.generation or window_id != self.snapshot.window_id) return error.StaleSnapshot;
         if (self.snapshot.len != 0) return .{ .id = snapshot_id, .bytes = self.snapshot.len };
         errdefer {
-            std.crypto.secureZero(u8, self.snapshot.storage);
+            self.snapshot.invalidateUnreported();
             self.invalidateSnapshot();
         }
         const prepared = try preparer.prepare_fn(preparer.context, self.snapshot_product_read_id, self.snapshot.storage);
@@ -318,7 +319,7 @@ test "product delivery owns connection retry and snapshot identity" {
         .start_timer_fn = Harness.startTimer,
         .cancel_timer_fn = Harness.cancelTimer,
     };
-    var delivery = try Delivery.init(std.testing.allocator);
+    var delivery = Delivery.init();
     defer delivery.deinitOwnedBuffers();
     const generation = try delivery.connect(7, transport);
     try std.testing.expectEqual(@as(u64, 1), generation);
@@ -353,7 +354,7 @@ test "product revision retry exhausts a bounded transport budget" {
         .start_timer_fn = Harness.startTimer,
         .cancel_timer_fn = Harness.cancelTimer,
     };
-    var delivery = try Delivery.init(std.testing.allocator);
+    var delivery = Delivery.init();
     defer delivery.deinitOwnedBuffers();
     _ = try delivery.connect(3, transport);
 
@@ -390,7 +391,7 @@ test "Renderer reconnect invalidates snapshots from the previous generation" {
         .start_timer_fn = Harness.startTimer,
         .cancel_timer_fn = Harness.cancelTimer,
     };
-    var delivery = try Delivery.init(std.testing.allocator);
+    var delivery = Delivery.init();
     defer delivery.deinitOwnedBuffers();
     const first_generation = try delivery.connect(9, transport);
     const snapshot = try delivery.publishSnapshot(9, 1, .{ .write_fn = Harness.write });
@@ -442,7 +443,7 @@ test "Product view security notification revokes a descriptor before Renderer re
     };
     var harness: Harness = .{};
     const transport: Transport = .{ .context = &harness, .emit_fn = Harness.emit, .start_timer_fn = Harness.timer, .cancel_timer_fn = Harness.cancel };
-    var delivery = try Delivery.init(std.testing.allocator);
+    var delivery = Delivery.init();
     defer delivery.deinitOwnedBuffers();
     _ = try delivery.connect(7, transport);
     defer delivery.breakConnection(transport);
@@ -553,7 +554,7 @@ test "snapshot revocation cancels the corresponding Product plan exactly once" {
         fn cancelTimer(_: ?*anyopaque, _: u64) !void {}
     };
     var host: Host = .{};
-    var delivery = try Delivery.init(std.testing.allocator);
+    var delivery = Delivery.init();
     defer delivery.deinitOwnedBuffers();
     const transport: Transport = .{ .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancelTimer };
     _ = try delivery.connect(7, transport);
@@ -573,5 +574,111 @@ test "snapshot revocation cancels the corresponding Product plan exactly once" {
     host.bytes = delivery.snapshot.storage.len + 1;
     try std.testing.expectError(error.InvalidStorage, delivery.publishSnapshot(7, 2, writer));
     try std.testing.expectEqual(@as(usize, 4), host.cancelled);
+    delivery.breakConnection(transport);
+}
+
+test "Product view failed write gives owned transport storage back instead of clearing its capacity" {
+    const Host = struct {
+        fn emit(_: ?*anyopaque, _: WindowId, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        // A failure reports no extent, so it may have written anywhere.
+        fn fail(_: ?*anyopaque, output: []u8) !SnapshotStart {
+            output[0] = 'x';
+            output[output.len - 1] = 'x';
+            return error.InjectedCaptureFailure;
+        }
+        fn begin(_: ?*anyopaque, output: []u8) !SnapshotStart {
+            // Storage mapped after a failure carries none of its bytes.
+            try std.testing.expectEqual(@as(u8, 0), output[0]);
+            try std.testing.expectEqual(@as(u8, 0), output[output.len - 1]);
+            @memset(output[0..12], 'x');
+            return .{ .read_id = 42, .bytes = 0, .scratch_bytes = 12 };
+        }
+        fn failPreparation(_: ?*anyopaque, _: u64, output: []u8) !SnapshotStart {
+            output[output.len - 1] = 'y';
+            return error.InjectedPreparationFailure;
+        }
+    };
+    const transport: Transport = .{ .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel };
+    const preparer: SnapshotPreparer = .{ .prepare_fn = Host.failPreparation };
+    var delivery = Delivery.init();
+    defer delivery.deinitOwnedBuffers();
+    _ = try delivery.connect(7, transport);
+    defer delivery.breakConnection(transport);
+    try std.testing.expectEqual(@as(usize, 0), delivery.snapshot.storage.len);
+
+    try std.testing.expectError(error.InjectedCaptureFailure, delivery.publishSnapshot(7, 1, .{ .write_fn = Host.fail }));
+    try std.testing.expectEqual(@as(usize, 0), delivery.snapshot.storage.len);
+
+    const pending = try delivery.publishSnapshot(7, 1, .{ .write_fn = Host.begin });
+    try std.testing.expectEqual(snapshot_max_bytes, delivery.snapshot.storage.len);
+    try std.testing.expectError(error.InjectedPreparationFailure, delivery.prepareSnapshot(7, 1, pending.id, preparer));
+    try std.testing.expectEqual(@as(usize, 0), delivery.snapshot.storage.len);
+    try std.testing.expectError(error.StaleSnapshot, delivery.prepareSnapshot(7, 1, pending.id, preparer));
+
+    _ = try delivery.publishSnapshot(7, 1, .{ .write_fn = Host.begin });
+}
+
+test "Product view read is bound to the storage it began in, so the next snapshot may use other storage" {
+    const control = @import("metawork_product_control");
+    const Read = struct {
+        fn emit(_: ?*anyopaque, _: WindowId, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn begin(context: ?*anyopaque, output: []u8) !SnapshotStart {
+            const runtime: *control.Runtime = @ptrCast(@alignCast(context.?));
+            const read = try runtime.writeSnapshot(output, .{});
+            return .{ .read_id = read.id, .bytes = read.bytes, .scratch_bytes = read.scratch_bytes };
+        }
+        fn prepare(context: ?*anyopaque, id: u64, output: []u8) !SnapshotStart {
+            const runtime: *control.Runtime = @ptrCast(@alignCast(context.?));
+            const read = try runtime.continueSnapshot(id, output);
+            return .{ .read_id = read.id, .bytes = read.bytes, .scratch_bytes = read.scratch_bytes };
+        }
+        fn range(context: ?*anyopaque, id: u64, output: []u8, offset: usize, length: usize) !void {
+            const runtime: *control.Runtime = @ptrCast(@alignCast(context.?));
+            try runtime.writeSnapshotRange(id, output, offset, length);
+        }
+        fn ready(delivery: *Delivery, runtime: *control.Runtime) !SnapshotDescriptor {
+            const epoch = runtime.projectionSecurityEpoch();
+            var view = try delivery.publishSnapshot(7, epoch, .{ .context = runtime, .write_fn = begin });
+            while (view.bytes == 0) view = try delivery.prepareSnapshot(7, epoch, view.id, .{ .context = runtime, .prepare_fn = prepare });
+            return view;
+        }
+        fn complete(delivery: *Delivery, runtime: *control.Runtime) ![]const u8 {
+            const view = try ready(delivery, runtime);
+            var offset: usize = 0;
+            while (offset < view.bytes) : (offset += snapshot_chunk_bytes)
+                _ = try delivery.snapshotChunk(7, runtime.projectionSecurityEpoch(), view.id, offset, .{ .context = runtime, .write_fn = range });
+            return delivery.snapshot.storage[0..view.bytes];
+        }
+    };
+    const runtime = try std.testing.allocator.create(control.Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    try control.TestSupport.maximumFixture(runtime);
+    defer runtime.deinit();
+    const blocks = try std.testing.allocator.alloc(u8, 2 * 1024 * 1024);
+    defer std.testing.allocator.free(blocks);
+    const first = blocks[0 .. blocks.len / 2];
+    const second = blocks[blocks.len / 2 ..];
+    const transport: Transport = .{ .emit_fn = Read.emit, .start_timer_fn = Read.timer, .cancel_timer_fn = Read.cancel };
+
+    var delivery: Delivery = .{ .snapshot = .{ .storage = first } };
+    _ = try delivery.connect(7, transport);
+    const original = try std.testing.allocator.dupe(u8, try Read.complete(&delivery, runtime));
+    defer std.testing.allocator.free(original);
+    try std.testing.expect(original.len > snapshot_chunk_bytes);
+
+    // Between snapshots the transport bytes may move: the next read binds anew.
+    delivery.breakConnection(transport);
+    delivery.snapshot.storage = second;
+    _ = try delivery.connect(7, transport);
+    try std.testing.expectEqualStrings(original, try Read.complete(&delivery, runtime));
+
+    // Within one read they may not: Product refuses the read it began elsewhere.
+    const view = try Read.ready(&delivery, runtime);
+    delivery.snapshot.storage = first;
+    try std.testing.expectError(error.StaleSnapshot, delivery.snapshotChunk(7, runtime.projectionSecurityEpoch(), view.id, 0, .{ .context = runtime, .write_fn = Read.range }));
     delivery.breakConnection(transport);
 }

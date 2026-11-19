@@ -100,7 +100,7 @@ fn measureFixture(comptime fixture: Fixture) !void {
         // Automatic Workspaces. All text allocations share the real 1.5 MiB budget.
         try std.testing.expectEqual(@as(usize, if (sparse) 1 else 50), runtime.testTaskSlots().len);
         try std.testing.expectEqual(runtime.limits.max_projection_bytes, runtime.projection_bytes);
-        var delivery = try bridge.ProductDelivery.init(std.testing.allocator);
+        var delivery = bridge.ProductDelivery.init();
         defer delivery.deinitOwnedBuffers();
         _ = try delivery.connect(1, delivery_transport);
         defer delivery.breakConnection(delivery_transport);
