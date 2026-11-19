@@ -550,13 +550,9 @@ const server = createServer((request, response) => {
       }
       if (hostMode && requestCount >= 6) {
         const originalUsers = userParts(activeProvider, payload);
-        const users =
-          requestCount < 8 ? verifyCoreTime(originalUsers) : originalUsers;
-        if (requestCount >= 8)
-          assert.ok(
-            !JSON.stringify(users).includes("# currentDate"),
-            "Skill Run must not carry date context blocks",
-          );
+        // Requests 8 and later are the Skill Run, which carries the Core date
+        // block like every other Run.
+        const users = verifyCoreTime(originalUsers);
         const latest = JSON.stringify(users.at(-1));
         assert.ok(
           latest.includes(
