@@ -6,6 +6,7 @@ const wire = agentcore.types;
 const base_url = __BASE_URL__;
 const workspace = __WORKSPACE__;
 const checkpoint_capacity = 4 * 1024 * 1024;
+const spelling_target = workspace ++ std.fs.path.sep_str ++ "argument-spelling-target.txt";
 
 const UiBehavior = enum {
     allow_once,
@@ -39,6 +40,9 @@ const Probe = struct {
     mode_fallback: u32 = 0,
     unavailable_outcomes: u32 = 0,
     last_source: ?agentcore.protocol.PermissionDecisionSource = null,
+    /// The `path` a permission request must name, when the scenario checks it.
+    asked_path: ?[]const u8 = null,
+    asked_path_matched: bool = false,
 
     fn sourceCount(self: Probe, source: agentcore.protocol.PermissionDecisionSource) u32 {
         return switch (source) {
@@ -107,6 +111,17 @@ const Probe = struct {
             .permission => |value| value,
             else => return wire.UI_FATAL,
         };
+        if (self.asked_path) |asked_path| {
+            std.debug.print("permission_request tool={s} arguments_json={s}\n", .{ request.tool.name, request.arguments_json });
+            const arguments = std.json.parseFromSlice(
+                struct { path: []const u8 },
+                std.heap.c_allocator,
+                request.arguments_json,
+                .{ .ignore_unknown_fields = true },
+            ) catch return wire.UI_FATAL;
+            defer arguments.deinit();
+            self.asked_path_matched = std.mem.eql(u8, arguments.value.path, asked_path);
+        }
         if (self.behavior == .unavailable) {
             if (out_response) |output| output.* = emptyOwned();
             return wire.UI_UNAVAILABLE;
@@ -270,7 +285,7 @@ fn makeHost(
     permission_mode: u32,
     shell_policy: u32,
     rules: ?*const wire.PermissionRuleSetV1,
-    allowed_tools: *const [4]wire.BytesViewV1,
+    allowed_tools: []const wire.BytesViewV1,
 ) wire.SessionHostConfigV1 {
     var host = std.mem.zeroes(wire.SessionHostConfigV1);
     host.struct_size = @sizeOf(wire.SessionHostConfigV1);
@@ -281,7 +296,7 @@ fn makeHost(
     host.base_url = agentcore.bytesView(base_url);
     host.workspace_root = agentcore.bytesView(workspace);
     host.workspace_home = agentcore.bytesView(workspace);
-    host.allowed_tools = allowed_tools;
+    host.allowed_tools = allowed_tools.ptr;
     host.allowed_tool_count = allowed_tools.len;
     host.permission_rules = rules;
     return host;
@@ -396,6 +411,50 @@ fn runFresh(
         },
     );
     try expectProbe(&probe, behavior, expected_ui_calls, expected_provenance, expected_source);
+}
+
+/// Issue #77: argument spellings a model really emits. The Session asks the
+/// Host before `tool`, so an admitted call reaches the permission callback.
+/// A call that names a key twice must not reach it (`asked_path == null`);
+/// a call that spaces its colon must ask once and name `asked_path`.
+fn runArgumentSpelling(
+    api: agentcore.Api,
+    runtime: *wire.RuntimeHandle,
+    scenario: []const u8,
+    permission_mode: u32,
+    tool: []const u8,
+    asked_path: ?[]const u8,
+) !void {
+    const allowed_tools = [_]wire.BytesViewV1{ agentcore.bytesView("Read"), agentcore.bytesView("Grep") };
+    const ask = [_]wire.BytesViewV1{agentcore.bytesView(tool)};
+    var rules = std.mem.zeroes(wire.PermissionRuleSetV1);
+    rules.struct_size = @sizeOf(wire.PermissionRuleSetV1);
+    rules.ask = &ask;
+    rules.ask_count = ask.len;
+    const host = makeHost(permission_mode, wire.SHELL_UNRESTRICTED, &rules, &allowed_tools);
+    var probe = Probe{ .behavior = .allow_once, .asked_path = asked_path };
+    const callbacks = makeCallbacks(&probe);
+    var diagnostic = emptyOwned();
+    defer releaseOwned(api, &diagnostic);
+    const session = try createSession(api, runtime, &host, &callbacks, &diagnostic);
+    defer _ = api.session().destroy()(session, null);
+    const stop = try run(api, session, 1, scenario, &diagnostic);
+    if (stop != .end_turn and stop != .tool_error) return error.UnexpectedStopReason;
+    std.debug.print(
+        "scenario={s} stop={s} ui={d} provenance={d} source={s}\n",
+        .{
+            scenario,
+            @tagName(stop),
+            probe.ui_calls,
+            probe.provenance,
+            if (probe.last_source) |source| @tagName(source) else "none",
+        },
+    );
+    const expected_ui_calls: u32 = if (asked_path == null) 0 else 1;
+    if (probe.ui_calls != expected_ui_calls or probe.ui_releases != expected_ui_calls)
+        return error.UnexpectedUiCount;
+    if (asked_path != null and !probe.asked_path_matched)
+        return error.PermissionRequestNamedAnotherPath;
 }
 
 fn expectProbe(
@@ -744,8 +803,10 @@ pub fn main() !void {
     };
     var runtime_config = std.mem.zeroes(wire.RuntimeConfigV1);
     runtime_config.struct_size = @sizeOf(wire.RuntimeConfigV1);
-    runtime_config.builtin_tools = &builtin_tools;
-    runtime_config.builtin_tool_count = builtin_tools.len;
+    // Only the argument-spelling Sessions select Grep.
+    const runtime_tools = builtin_tools ++ [_]wire.BytesViewV1{agentcore.bytesView("Grep")};
+    runtime_config.builtin_tools = &runtime_tools;
+    runtime_config.builtin_tool_count = runtime_tools.len;
     var runtime: ?*wire.RuntimeHandle = null;
     var diagnostic = emptyOwned();
     defer releaseOwned(api, &diagnostic);
@@ -795,4 +856,9 @@ pub fn main() !void {
     try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_FULL_ACCESS, wire.PERMISSION_FULL_ACCESS, "restore_full_seed", "restore_full_after", .unavailable, 0, 0, .unavailable, 0, .builtin_classification, .builtin_classification);
     try runModeChangeRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_FULL_ACCESS, wire.PERMISSION_ACCEPT_EDITS, "restore_full_to_accept_seed", "restore_full_to_accept_after", .unavailable, 0, .builtin_classification);
     try runModeChangeRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_FULL_ACCESS, "restore_accept_to_full_seed", "restore_accept_to_full_after", .unavailable, 0, .builtin_classification);
+    try runArgumentSpelling(api, core_runtime, "duplicate_key_grep_full", wire.PERMISSION_FULL_ACCESS, "Grep", null);
+    try runArgumentSpelling(api, core_runtime, "duplicate_key_grep_accept", wire.PERMISSION_ACCEPT_EDITS, "Grep", null);
+    try runArgumentSpelling(api, core_runtime, "duplicate_key_read_full", wire.PERMISSION_FULL_ACCESS, "Read", null);
+    try runArgumentSpelling(api, core_runtime, "duplicate_key_read_accept", wire.PERMISSION_ACCEPT_EDITS, "Read", null);
+    try runArgumentSpelling(api, core_runtime, "spaced_colon_grep", wire.PERMISSION_ACCEPT_EDITS, "Grep", spelling_target);
 }
