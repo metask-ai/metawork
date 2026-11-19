@@ -292,9 +292,18 @@ async function renderSubmissionApp(
     },
     created: async (createdTask = task, index = 0) =>
       act(async () => {
+        const workspace = createRequests[index]?.[0];
         createdTask.projectId = createRequests[index]?.[5] ?? null;
-        if (createRequests[index]?.[0].kind === "manual")
-          createdTask.workspaceId = createRequests[index][0].workspaceId;
+        if (workspace?.kind === "manual") {
+          createdTask.workspaceId = workspace.workspaceId;
+          if (workspace.ensureProjectEntry) {
+            const directory = snapshot.workspaces.find(
+              (candidate) => candidate.id === workspace.workspaceId,
+            );
+            directory.projectEntry = true;
+            createdTask.projectId = workspace.workspaceId;
+          }
+        }
         createResolvers[index]({
           accepted: true,
           taskId: createdTask.id,
@@ -907,6 +916,7 @@ test("App creation retry captures another source and the newly selected Workspac
       kind: "manual",
       workspaceId: fixture.snapshot.workspaces[0].id,
       expectedWorkspaceEpoch: "2",
+      ensureProjectEntry: true,
     },
     {
       targetModelRef: {
@@ -2206,6 +2216,7 @@ test("App creates a separate Task when the same Workspace is used for another ne
     kind: "manual",
     workspaceId: workspace.id,
     expectedWorkspaceEpoch: workspace.epoch,
+    ensureProjectEntry: true,
   });
   assert.equal(fixture.inputs.length, 1);
 
@@ -2255,6 +2266,7 @@ test("changing the inherited working directory before sending creates the Task i
     kind: "manual",
     workspaceId: workspace.id,
     expectedWorkspaceEpoch: workspace.epoch,
+    ensureProjectEntry: true,
   });
 });
 
@@ -2881,7 +2893,7 @@ test("creation rejection after security refresh releases its session for an expl
   await fixture.settle();
 });
 
-test("project draft keeps its content and membership when choosing an entry-free directory", async (ctx) => {
+test("an entry-free working directory becomes the project only on successful first creation", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx);
   const user = userEvent.setup({ document });
   const project = fixture.snapshot.workspaces[0];
@@ -2905,25 +2917,43 @@ test("project draft keeps its content and membership when choosing an entry-free
     await screen.findByRole("option", { name: "Directory C", exact: true }),
   );
   assert.equal(fixture.textarea.value, "Work for P in C");
-  assert.ok(
-    screen
-      .getByRole("combobox", { name: "Project" })
-      .textContent.includes(project.displayName),
-  );
+  assert.equal(screen.queryByRole("combobox", { name: "Project" }), null);
+  assert.equal(screen.queryByText("No project", { exact: true }), null);
+  assert.equal(fixture.creations(), 0);
   assert.equal(document.querySelector('[data-workspace-id="2"]'), null);
   fireEvent.keyDown(fixture.textarea, { key: "Enter" });
   await waitFor(() => assert.equal(fixture.creations(), 1));
-  assert.equal(fixture.createRequests[0][0].workspaceId, "2");
-  assert.equal(fixture.createRequests[0][5], project.id);
-  assert.equal(
-    screen.getByRole("combobox", { name: "Project" }).disabled,
-    true,
-  );
+  assert.deepEqual(fixture.createRequests[0][0], {
+    kind: "manual",
+    workspaceId: "2",
+    expectedWorkspaceEpoch: directory.epoch,
+    ensureProjectEntry: true,
+  });
+  assert.equal(fixture.createRequests[0][5], null);
   assert.equal(
     screen.getByRole("combobox", { name: "Choose working directory" }).disabled,
     true,
   );
-  await fixture.rejectCreation("execution_unavailable");
+  await fixture.rejectCreation("project_capacity");
+  await screen.findByText(
+    "The project limit has been reached. Remove a project entry to add another.",
+  );
+  assert.equal(document.querySelector('[data-workspace-id="2"]'), null);
+  await user.click(screen.getByRole("button", { name: "Copy to input box" }));
+  await user.type(fixture.textarea, "{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 2));
+  const created = { ...structuredClone(fixture.task), id: "9" };
+  fixture.snapshot.tasks.push(created);
+  await fixture.created(created, 1);
+  await fixture.publish();
+  await waitFor(() =>
+    assert.ok(
+      document.querySelector('[data-workspace-id="2"] [data-task-id="9"]'),
+    ),
+  );
+  assert.equal(created.workspaceId, "2");
+  assert.equal(created.projectId, "2");
+  await fixture.settle();
 });
 
 test("returning to a project draft consumes the original pending creation", async (ctx) => {
@@ -2942,7 +2972,7 @@ test("returning to a project draft consumes the original pending creation", asyn
     screen.getByRole("button", { name: "New task", exact: true }),
   );
   assert.equal(
-    screen.getByRole("combobox", { name: "Project" }).disabled,
+    screen.getByRole("combobox", { name: "Choose working directory" }).disabled,
     true,
   );
   await user.type(fixture.textarea, "After returning{Enter}");
@@ -2991,7 +3021,7 @@ test("a created Task deleted while away cannot keep its project draft locked", a
     screen.getByRole("button", { name: "New task", exact: true }),
   );
   assert.equal(
-    screen.getByRole("combobox", { name: "Project" }).disabled,
+    screen.getByRole("combobox", { name: "Choose working directory" }).disabled,
     false,
   );
   fireEvent.change(fixture.textarea, {
@@ -3003,8 +3033,8 @@ test("a created Task deleted while away cannot keep its project draft locked", a
   await fixture.settle();
 });
 
-test("project switching preserves both drafts when the destination has an explicit empty directory choice", async (ctx) => {
-  const fixture = await renderSubmissionApp(ctx);
+test("opening a project preserves the unscoped draft when the project draft already has an explicit directory choice", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
   const user = userEvent.setup({ document });
   fixture.snapshot.workspaces.push({
     ...structuredClone(fixture.snapshot.workspaces[0]),
@@ -3020,24 +3050,16 @@ test("project switching preserves both drafts when the destination has an explic
     directory: { kind: "explicit", workspaceId: null },
     content: { kind: "text", text: "" },
   });
+  await user.type(fixture.textarea, "Keep the unscoped draft");
   await user.click(
-    screen.getByRole("button", { name: "New task", exact: true }),
-  );
-  await user.type(fixture.textarea, "Keep the P draft");
-  await user.click(screen.getByRole("combobox", { name: "Project" }));
-  await user.click(
-    await screen.findByRole("option", { name: "Project Q", exact: true }),
+    screen.getByRole("button", { name: "New conversation in “Project Q”" }),
   );
   assert.equal(fixture.textarea.value, "");
   await screen.findByText(
     "Your original draft was kept. You are viewing the destination project’s draft.",
   );
-  await user.click(screen.getByRole("combobox", { name: "Project" }));
   await user.click(
-    await screen.findByRole("option", {
-      name: fixture.snapshot.workspaces[0].displayName,
-      exact: true,
-    }),
+    screen.getByRole("button", { name: "New task", exact: true }),
   );
-  assert.equal(fixture.textarea.value, "Keep the P draft");
+  assert.equal(fixture.textarea.value, "Keep the unscoped draft");
 });

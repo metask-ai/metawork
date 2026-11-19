@@ -45,7 +45,7 @@ MetaWork 当前不定义为：
 
 ### 项目
 
-项目组织围绕同一项工作的 Task，并关联一个供新 Task 默认使用的 Manual Workspace。项目复用该目录的稳定身份，由独立入口状态控制是否显示；一个项目可以为空，一条 Task 最多归属一个项目，也可以没有项目。Task 的项目归属与实际工作目录独立：在 P 中新建可改选 C 或 Automatic，移入、换项目或移出只改变组织关系，文件、执行、Skill 和授权继续使用 Task 自己的 Workspace。
+项目组织围绕同一项工作的 Task，并关联一个供新 Task 默认使用的 Manual Workspace。项目复用该目录的稳定身份，由独立入口状态控制是否显示；一个项目可以为空，一条 Task 最多归属一个项目，也可以没有项目。Task 创建后可独立整理项目归属；移入、换项目或移出只改变组织关系，文件、执行、Skill 和授权继续使用 Task 自己的 Workspace。
 
 ### Task 与内部 Agent Session
 
@@ -109,7 +109,7 @@ Scheduled Task 是持久自动化定义，独立描述“做什么、何时触�
 - Product 投影 必须把 Workspace 作为独立对象发布，至少包含稳定 identity、kind、显示名称、规范路径、当前授权状态和可汇总的 Task 信号；每个被 Task 引用的 Automatic Workspace 必须出现在同一 canonical snapshot；
 - New task 工作目录候选来自全部已登记的 Manual Workspace，与是否有项目入口无关；最近使用与重新授权不能依赖 Renderer 从 Task 列表猜测。Automatic Workspace 不进入普通目录候选，但其 owning Task 仍可导航；
 - New task 工作目录控件负责选择、登记和重新授权 Manual Workspace，保持其现有项目入口状态。设置中的“工作目录”提供已登记 Manual 目录列表、重新授权与撤销授权；Automatic Workspace 上级目录仍由独立全局存储策略设置。设置覆盖主界面内容区，保留窗口壳层和底层内容的挂载，关闭后恢复原 Task、草稿、滚动和焦点；Renderer 不维护全局 active Workspace 镜像；
-- 侧栏“添加项目”经 Host 原生 picker 登记或恢复目录并显式建立项目入口，零项目时仍可用。入口跨重启保存，移除只隐藏分组并释放项目入口名额，保留目录登记、Task 归属、授权、Run 和 Session；再次显式添加同一 canonical 目录恢复分组。选择工作目录不会新建或恢复入口。项目入口与已登记 Manual 目录分别限额，项目目录也消耗目录名额；目录额度满时可在设置撤销不再使用的授权。固定不变式为有项目入口就有目录登记：撤销目录授权成功时一并移除其入口、释放目录名额，Task 的项目归属仍保留。撤销只收口实际使用该目录的 Task，同项目但工作在其他有效目录的 Task 继续从“最近”访问；失败保留登记与当时入口状态。Automatic Workspace 仍随 owning Task 管理；
+- 侧栏“添加项目”经 Host 原生 picker 登记或恢复目录并显式建立项目入口，零项目时仍可用。入口跨重启保存，移除只隐藏分组并释放项目入口名额，保留目录登记、Task 归属、授权、Run 和 Session；再次添加同一 canonical 目录或首次发送使用该目录的新 Task 时恢复分组。仅选择工作目录不建立或恢复入口。项目入口与已登记 Manual 目录分别限额，项目目录也消耗目录名额；目录额度满时可在设置撤销不再使用的授权。固定不变式为有项目入口就有目录登记：撤销目录授权成功时一并移除其入口、释放目录名额，Task 的项目归属仍保留。撤销只收口实际使用该目录的 Task，同项目但工作在其他有效目录的 Task 继续从“最近”访问；失败保留登记与当时入口状态。Automatic Workspace 仍随 owning Task 管理；
 - 用户可以从项目菜单打开其默认目录，从 Task 信息打开该 Task 的实际 Manual 工作目录。系统文件管理器直接进入目录，不切换 Task、不改变授权或历史；只允许打开当前可用且未脱敏的已授权 Manual Workspace，目录缺失、身份变化或系统打开失败须明确反馈，不自动重试；
 - 后台创建 Automatic Workspace 不修改 Manual Workspace recent order 或 Renderer New task draft scope；manual 与 automatic record 使用独立容量，后台 Task 不得耗尽用户打开 Workspace 的能力；
 - automatic root 配置缺失时初始化为 system default；读取失败、损坏或未知 schema、配置提交结果不确定、以及已保存路径不可用时必须保留原事实并 fail closed，不得静默回退到 system default。这些故障只关闭 `automaticWorkspaces` capability 并对 automatic admission 返回 typed unavailable；Account、显式 Manual Workspace 和其他可用功能仍可使用；
@@ -275,7 +275,7 @@ New task Composer 汇总 Metask 与所有 Custom Provider 的 ready 模型，以
 
 - Account 未登录只使 Metask provider 无法建立新的目录或解析；是否允许创建和发送新 Task仍只取决于 Product Control 的 ready execution admission。主界面持续展示 Workspace、durable Task 与执行历史，并允许查看和停止真实 live Run；
 - 主界面左栏承担稳定 New task、已接通的全局能力入口、全局 Task 列表、项目导航与左下角账号入口；`新建任务`、`技能`、`连接器` 与 `定时任务` 使用同一紧凑一级菜单的相同行高、缩进和 active 语义，只有接通的 capability 才显示。全局列表保留所有符合实际 Workspace 导航资格的 Task，项目额外按独立归属展示同一 Task，包括使用其他 Manual 或 Automatic 目录的 Task；纯整理保留排序和完成提醒。项目复用 Manual Workspace identity，不从路径推断归属。菜单和本窗口内部拖放共用整理动作，支持无项目，运行、等待和归档 Task 也可整理；只读历史与关闭、删除生命周期拒绝修改。连续合法选择以后接纳的意图生效，旧回执不覆盖最新 canonical 分组；具体呈现与排序以 [UI 设计规范](ui-design.md#56-task-列表项目与排序) 为准；
-- New task 中央区域始终以 Composer 为主，当前项目、实际工作目录和模型在发送前分别可见；草稿按可空项目身份分槽，目录是本槽位的属性。改目录保留内容，改项目沿草稿迁移与保留两份规则处理，明确的空文本目录选择也须保留。首次创建一次提交归属与目录；来源槽位的项目、目录选择器在创建未结算时锁定，仍可编辑、发送或切换其他槽位，返回来源继续消费同一次创建。默认目录不可用不阻止进入项目草稿，用户可明确选择其他目录。API 管理不进入 Composer；
+- New task 中央区域始终以 Composer 为主，实际工作目录和模型在发送前可见。草稿按入口项目分槽，改目录保留内容和明确选择。首次发送使用 Manual Workspace 时，任务创建同时复用或建立所选目录的项目入口并归入该项目；使用 Automatic Workspace 时无初始归属。创建失败保留草稿和原有项目入口状态。来源槽位的目录选择器在创建未结算时锁定，仍可编辑、发送或切换其他槽位，返回来源继续消费同一次创建。默认目录不可用不阻止进入项目草稿，用户可明确选择其他目录。API 管理不进入 Composer；
 - Task 启动后中央区域显示该 Task 的 Run exchanges，Composer 固定在底部。叙事、唯一 live status、审批和必要结果提示留在主阅读流；Work process 默认折叠，展开后可以在所属 Tool 行下方独立展开精确 Tool 详情。存在 Tool 的 terminal Run 保留折叠的 Work process 作为历史检查入口；完整详情使用有界代码面，不打开或替换右栏内容。Run 用量不进入对话或右栏展示。Composer 附近只按 Host pressure 显示当前 Conversation 的上下文提醒，pressure 消失后隐藏，历史自动压缩记录不单独展示。pendingUi 只派生“需要处理”定位入口，不自动开面板、滚动或抢焦点；用户点击时定位主区唯一原始请求，覆盖式右栏先关闭；
 - 应用采用左侧栏、中央工作区、右侧栏的布局；栏的入口、显隐和尺寸属于应用布局，不属于 Task 或具体内容功能。左栏保存 240–480 px 范围内的绝对宽度；停靠时中央工作区与右栏以 Flex 按保存比例分配扣除左栏后的剩余宽度，两者都只设置 360 px 最小宽度，不设置固定最大宽度或固定比例范围。约束无法同时满足时右栏改为非模态 overlay，不压缩中央工作区；右栏只在停靠态允许调整，用户调整的实际像素换算为剩余宽度中的比例保存，窗口或左栏变化只按该比例重新分配。右侧栏开关在主工作界面常驻，无 Task 或无可展示内容时仍可打开真实空态。用户打开具体详情可显式展开右栏；切换或删除 Task、切换主页面、目标失效与普通 Run/审批变化只更新或清理内容，不自动改变右栏显隐或保存比例。显隐保持本窗口会话中的用户选择，不记录每 Task 显隐。设置覆盖层及窄窗左右栏互斥规则由 UI 规范定义。右栏不提供概览；文件预览以对话中的有效文件引用为主要入口，修改审查保留所属 Run 的入口，Tool 详情只在所属 Work process 内原位展开。右栏在当前 Task 内使用对象标签：可同时保留多个精确文件预览和一个 File Changes Review，Review 仍直接呈现同 Run 的连续差异文档，不建立列表页、详情页或返回层级。隐藏右栏保留当前 Task 的标签和已读取正文，关闭标签才释放对应资源；切换 Task 清空全部对象但不改变右栏显隐。身份失效必须在渲染前只移除受影响对象并阻止旧内容出现。右栏内部提供可独立收起的工作区文件树区域，布局和空态以 [UI 设计规范](ui-design.md#11-按需详情与信息归属) 为准；文件树只读浏览当前 Task 已授权 Workspace 的目录，子目录按需加载，点击文件在右栏打开独立文件标签；不要求文件先出现在对话引用中，不递归扫描或扩大到工作区以外。面板不提供加号、任意路径读取、编辑器、Git 操作或跨 Task 标签恢复；
 - Task 停止入口位于 Composer，动作显隐与键盘确认遵守 [UI 规范](ui-design.md#8-composer-与执行控制)。停止取消当时已有等待消息与当前 operation，之后的新消息等待停止完成；ack 不伪造 Stopped。标题栏不重复提供 Task Stop；
