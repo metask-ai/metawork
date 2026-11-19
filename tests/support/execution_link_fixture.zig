@@ -96,6 +96,19 @@ pub const hold_runs_flag = "--hold-runs";
 /// wait instead of that reference. On purpose: a bound that only survives the
 /// one leak it was found through is not a bound, and that leak has a test of
 /// its own.
+/// Gives the stand-in a non-zero checkpoint generation.
+///
+/// A restore's expectation has to name one -- `session/runtime.zig` refuses a
+/// generation of zero, because a checkpoint that was never exported has no
+/// generation to expect -- and the stand-in starts at zero. Setting it is the
+/// one thing a caller cannot do from its own side of the link, so it is a
+/// flag rather than something the test arranges.
+pub const checkpoint_generation_flag = "--checkpoint-generation";
+
+/// What that flag sets it to. Any non-zero value does; this one is small and
+/// not 1, so a test that matched on a default would not match on it.
+pub const checkpoint_generation: u64 = 7;
+
 pub const hang_cleanup_flag = "--hang-on-cleanup";
 
 /// Registers a C `atexit` handler that never returns.
@@ -132,6 +145,7 @@ const Composer = struct {
     fake_core: bool,
     hold_runs: bool,
     hang_cleanup: bool,
+    checkpoint_generation: bool,
 
     fn factory(self: *Composer) execution_half.RuntimeFactory {
         return .{ .context = self, .create_fn = create, .destroy_fn = destroy };
@@ -155,6 +169,7 @@ const Composer = struct {
         // and only the second one is the condition a Stop has to survive.
         // This makes the fake emit a `run_state` the moment the Run begins.
         if (self.hold_runs) fake.fake_core.input_enabled = true;
+        if (self.checkpoint_generation) fake.fake_core.setCheckpointGeneration(checkpoint_generation);
         return agent.Runtime.initWithApi(
             self.io,
             self.allocator,
@@ -210,6 +225,11 @@ pub fn main(init: std.process.Init) !void {
         .fake_core = requested(init.minimal.args, init.gpa, fake_core_flag),
         .hold_runs = requested(init.minimal.args, init.gpa, hold_runs_flag),
         .hang_cleanup = requested(init.minimal.args, init.gpa, hang_cleanup_flag),
+        .checkpoint_generation = requested(
+            init.minimal.args,
+            init.gpa,
+            checkpoint_generation_flag,
+        ),
     };
     const exit = execution_half.run(init.io, init.gpa, .{
         .identity = .{

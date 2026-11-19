@@ -733,23 +733,33 @@ pub const SessionOpenOptions = struct {
 
 const model_binding_type = @FieldType(surface.SessionOpenOptions, "model_binding");
 
-/// Where a restore reads its checkpoint from. The source is a byte callback
-/// and does not cross; the execution half opens the blob itself, which is the
-/// same division the export already uses -- only the identity of the blob
-/// travels, never its bytes.
-pub const CheckpointSourceDescriptor = struct {
-    task_id: u64,
-    generation: u64,
-    digest: [32]u8,
-    byte_size: u64,
-};
-
-/// `surface.SessionRestoreOptions` with the session options above, a source
-/// descriptor in place of the read callback, and the expectation as data.
+/// `surface.SessionRestoreOptions` with the session options above, the
+/// checkpoint's own bytes in place of the read callback, and the expectation
+/// as data.
+///
+/// The bytes, not a descriptor naming a blob. A descriptor was right while the
+/// execution half had a blob area of its own to read from; it has none now --
+/// an export's bytes go to the caller's sink and nothing is kept over there --
+/// so the only half that can produce a checkpoint is the one that stored it.
+///
+/// Carrying them in the request costs no memory that was not already
+/// committed: `channel.Inbound` allocates one assembly buffer of
+/// `MessageLimits.max()` for the life of the process, which on the execution
+/// half is the request bound, and these bytes land in it. Their lifetime is
+/// the call's, which is what `call_frame.BlobSource` is for.
+///
+/// Why not a stream, when the export is one: the directions are not alike. An
+/// export is produced by the execution half and consumed by the caller, so it
+/// streams naturally. A restore is produced by the caller and read
+/// *synchronously, on demand* by the Session -- so streaming it would mean the
+/// execution half asking for the next piece, which is a reverse call per
+/// piece, and `reverse.zig` rules that out. A restore has no version that does
+/// not buffer, so the question is only where the buffer is, and the answer is
+/// the one that already exists.
 pub const SessionRestoreOptions = struct {
     session: SessionOpenOptions,
     checkpoint_limits: contract.CheckpointLimits,
-    source: CheckpointSourceDescriptor,
+    source: []const u8,
     expectation: checkpoint_restore.Expectation,
 };
 
@@ -850,7 +860,6 @@ comptime {
     payload.requireStructural(ImageGenerationBinding);
     payload.requireStructural(VideoGenerationBinding);
     payload.requireStructural(SessionOpenOptions);
-    payload.requireStructural(CheckpointSourceDescriptor);
     payload.requireStructural(SessionRestoreOptions);
     payload.requireStructural(CatalogAcquisition);
     payload.requireStructural(McpActivationProjection);

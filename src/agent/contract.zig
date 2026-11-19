@@ -77,6 +77,7 @@ pub const CheckpointOutcome = checkpoint.Outcome;
 pub const CheckpointRestoreReport = checkpoint_restore.Report;
 pub const CheckpointSink = checkpoint.Sink;
 pub const CheckpointSinkWriteResult = checkpoint.SinkWriteResult;
+pub const CheckpointSource = checkpoint_restore.Source;
 pub const CheckpointSourceReadResult = checkpoint_restore.SourceReadResult;
 pub const CheckpointSuccess = checkpoint.Success;
 pub const CloseOutcome = surface.CloseOutcome;

@@ -36,6 +36,7 @@ const shapes = @import("shapes.zig");
 const catalog = @import("agent_catalog");
 const mcp_catalog = @import("agent_mcp_catalog");
 const checkpoint = @import("agent_checkpoint");
+const checkpoint_restore = @import("agent_checkpoint_restore");
 
 /// What the execution half keeps for one begun Run.
 ///
@@ -205,6 +206,12 @@ pub const ResolveError = error{
     /// an earlier occupant of its slot. A protocol violation rather than a
     /// call on whatever is there now.
     UnknownHandle,
+    /// A parameter whose rebuild needs memory could not get it. One does: a
+    /// restore's source is a capability over bytes that arrived with the
+    /// call, and the object standing behind it is allocated from the
+    /// request's arena. Refusing is the whole answer -- nothing has been
+    /// called yet, so nothing has to be undone.
+    OutOfMemory,
 };
 
 /// One parameter type's rebuild, with its signature nailed to the type.
@@ -300,6 +307,24 @@ pub fn parameterAdapter(comptime T: type) ?Adapter(T) {
     // options struct is resolved by the entry above rather than by a second
     // copy of it.
     if (T == surface.SessionOpenOptions) return mirrorAdapter(T, shapes.SessionOpenOptions);
+
+    // A restore's source, over the checkpoint that arrived with the call.
+    //
+    // The caller's source is a read callback and stayed in its process; the
+    // bytes crossed instead, and this is what the Session reads them through.
+    // The object behind the capability is allocated from the request's arena,
+    // so it lives exactly as long as the call -- and it is a `call_frame`
+    // frame, so a Session that kept the capability is refused rather than
+    // reading an arena that has been reused.
+    if (T == checkpoint_restore.Source) return .{ .apply = struct {
+        fn apply(bindings: Bindings, value: []const u8) ResolveError!T {
+            const backing = try bindings.allocator.create(call_frame.BlobSource.Backing);
+            backing.* = call_frame.BlobSource.Backing.init(.{ .bytes = value });
+            return call_frame.BlobSource.source(backing);
+        }
+    }.apply };
+    if (T == surface.SessionRestoreOptions)
+        return mirrorAdapter(T, shapes.SessionRestoreOptions);
     if (T == catalog.Query) return mirrorAdapter(T, shapes.CatalogQuery);
 
     // Everything else is owed. The list of what that is comes from
@@ -447,10 +472,6 @@ pub const Disposition = enum {
 /// must leave. A list that outlives its reason teaches the wrong rule.
 const dispositions = [_]struct { name: []const u8, disposition: Disposition }{
     .{ .name = @typeName(checkpoint.Sink), .disposition = .call_scoped_effect },
-    .{
-        .name = @typeName(surface.SessionRestoreOptions),
-        .disposition = .call_scoped_effect,
-    },
     .{
         .name = @typeName(?surface.ImageGenerationRunInput),
         .disposition = .run_scoped_capability,
@@ -652,9 +673,9 @@ test "the worklist is what the step still owes, counted by the compiler" {
     // rather than only in a build that happened to succeed. They are a
     // worklist, not an invariant: the end state is `owed.len == 0`.
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 45), rebuildable);
-    try testing.expectEqual(@as(usize, 5), blocked);
-    try testing.expectEqual(@as(usize, 9), owed.len);
+    try testing.expectEqual(@as(usize, 46), rebuildable);
+    try testing.expectEqual(@as(usize, 4), blocked);
+    try testing.expectEqual(@as(usize, 8), owed.len);
 
     // Named one by one, because this is the work and a count is not a
     // worklist. Two belong to the MCP step and three rebuild a capability
@@ -662,7 +683,6 @@ test "the worklist is what the step still owes, counted by the compiler" {
     // options carry a checkpoint source, which makes it a capability case
     // rather than the mirror case it looked like from the method list.
     const expected = [_][]const u8{
-        "restore_session_route",
         "create_mcp_admission_selection",
         "prepare_mcp_restore_selection",
         "prepare_mcp_restore_selection",
@@ -697,11 +717,17 @@ test "the worklist is what the step still owes, counted by the compiler" {
         .mcp_step => mcp += 1,
     };
     // The delivery inspection and the MCP installation are the caller's. Of
-    // this half's own, the two checkpoint effects are used during their call
-    // and the image and video bindings are kept for the Run -- which is the
+    // this half's own, one checkpoint effect is used during its call and the
+    // image and video bindings are kept for the Run -- which is the
     // distinction a single "execution side effect" was hiding.
+    //
+    // One, not two: a restore's source used to be here beside the export's
+    // sink. The bytes cross with the call now, so there is something to
+    // rebuild the source from, and what is left in this group is the sink --
+    // which cannot be rebuilt, because what it writes into is in the other
+    // process.
     try testing.expectEqual(@as(usize, 2), reverse);
-    try testing.expectEqual(@as(usize, 2), call_scoped);
+    try testing.expectEqual(@as(usize, 1), call_scoped);
     try testing.expectEqual(@as(usize, 2), run_scoped);
     try testing.expectEqual(@as(usize, 3), mcp);
 }
@@ -711,7 +737,12 @@ test "a type absent from the chain is owed, not assumed trivial" {
     // identity would hand a method a borrowed pointer rebuilt from nothing,
     // which is the one outcome worse than not compiling.
     try testing.expect(parameterAdapter(checkpoint.Sink) == null);
-    try testing.expect(parameterAdapter(surface.SessionRestoreOptions) == null);
+    // It had none while a restore's source was a descriptor naming a blob
+    // this half would open. The bytes cross now, so there is something to
+    // rebuild it from, and the frame behind it is what keeps the capability
+    // from outliving the call.
+    try testing.expect(parameterAdapter(surface.SessionRestoreOptions) != null);
+    try testing.expect(parameterAdapter(checkpoint_restore.Source) != null);
     // And the sentinel this file would otherwise never prove: the count moved
     // when an adapter was written. `port.SessionPort` has one, so the Session
     // release that takes one is rebuildable; the restore-inputs releases, which
@@ -719,9 +750,12 @@ test "a type absent from the chain is owed, not assumed trivial" {
     try testing.expect(comptime argumentsRebuildable(.runtime, "release_closed_session"));
     try testing.expect(comptime argumentsRebuildable(.runtime, "release_restore_inputs"));
     try testing.expect(comptime argumentsRebuildable(.runtime, "create_session_route"));
-    // Still owed, and not for want of a table: a checkpoint source is a
-    // capability the execution half has to perform, not a value it can hold.
-    try testing.expect(comptime !argumentsRebuildable(.runtime, "restore_session_route"));
+    // Rebuildable now, and the reason is worth keeping beside the two above
+    // it: a checkpoint source *is* a capability the execution half has to
+    // perform, which is why it has no wire form of its own -- what crosses is
+    // the bytes it would have read, and the capability is composed over them
+    // on arrival.
+    try testing.expect(comptime argumentsRebuildable(.runtime, "restore_session_route"));
 }
 
 fn testBindings() Bindings {
@@ -1007,7 +1041,11 @@ fn resultMirror(comptime T: type, comptime Mirror: type) ResultAdapter(T) {
 /// owed is the thing this file keeps refusing to produce. It needs no guard:
 /// a name that no longer has a prong falls through to the generic path, whose
 /// `resultAdapter(...).?` fails the build.
-pub const reserved_prongs = [_][]const u8{ "create_session_route", "begin_run_outcome" };
+pub const reserved_prongs = [_][]const u8{
+    "create_session_route",
+    "restore_session_route",
+    "begin_run_outcome",
+};
 
 /// No `comptime { ... }` body: a `return` inside one breaks at runtime call
 /// sites, and this is read both by `dispatchable` at compile time and by a
@@ -1068,13 +1106,12 @@ test "the return direction is counted on its own, because it is not the mirror i
     // Most returns are plain data and need nothing, which is the same reason
     // most arguments needed nothing.
     try testing.expectEqual(@as(usize, 50), callable);
-    // Nine, down from eleven: the two route methods are answered by a
-    // dispatcher prong beside the reservation their result depends on, and
-    // counting an answered method as owed would be a number claiming
-    // something the build does not do -- the same fault in the other
-    // direction.
-    try testing.expectEqual(@as(usize, 9), owed.len);
-    try testing.expectEqual(@as(usize, 2), reserved_prongs.len);
+    // Eight, down from eleven: three methods are answered by a dispatcher
+    // prong beside the reservation their result depends on, and counting an
+    // answered method as owed would be a number claiming something the build
+    // does not do -- the same fault in the other direction.
+    try testing.expectEqual(@as(usize, 8), owed.len);
+    try testing.expectEqual(@as(usize, 3), reserved_prongs.len);
 
     for (owed) |entry| {
         try testing.expect(entry.name.len > 0);

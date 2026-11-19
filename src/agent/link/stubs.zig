@@ -213,15 +213,6 @@ const not_forwarded = [_]NotForwarded{
         .why = "its `*McpActivation` needs a stand-in object on this side holding the " ++
             "projected reads, not a box; see `inbound.owedInbound` and the MCP step",
     },
-    .{
-        .owner = .runtime,
-        .name = "restore_session_route",
-        .why = "its options carry a byte callback for the checkpoint source, whose wire " ++
-            "form is a descriptor the caller has to state: a restore names a blob that " ++
-            "already exists, by facts only the caller has. `export_checkpoint` was here " ++
-            "for what looked like the same reason and is not, because an export names a " ++
-            "blob that does not exist yet",
-    },
 
     // The entries below are the execution half's side, and they are here
     // because `forwardable` spans both halves. Each one's result puts a
@@ -430,6 +421,14 @@ fn stoppedBy(err: Stopped) Reason {
         // the two it was, and whether the peer had simply stopped answering,
         // is recorded by `client.call` as a `client.LinkFault`.
         error.Busy, error.BoxCapacity => .gone,
+        // A checkpoint whose bytes could not be read, so nothing was sent.
+        // The gone answer overstates the cause -- the far side is answering
+        // fine, and what failed is this half's own source -- and gets the
+        // consequence right: the restore did not happen and will not. Saying
+        // it precisely would mean this method leaving the generic path to
+        // answer in its own vocabulary, which is the same trade
+        // `prepare_run_with_tools` records.
+        error.SourceUnreadable => .gone,
         // The peer has the request and may have carried it out; what was
         // lost is the answer. Nothing here may say it did not happen, so it
         // lands where `Unreadable` lands -- the same fact with a different
@@ -490,6 +489,10 @@ fn body(
 
     const arguments = send(owner, name, half, parameters) catch |err|
         return linkAnswer(owner, name, gone, err);
+    // One wire form owns memory -- a checkpoint read out of the caller's own
+    // source -- and this is the end of the window it is needed for.
+    // `outbound.owns` is the list that keeps the two in step.
+    defer outbound.release(owner, name, arguments, half.allocator);
     const outcome = inbound.invoke(owner, name, half, receiver, arguments, chunks) catch |err|
         return linkAnswer(owner, name, gone, err);
     return switch (outcome) {
@@ -1865,12 +1868,12 @@ test "a call through the port Product already uses reaches a real Session" {
 }
 
 test "every way a call stops is classified, and only a local allocation is told apart" {
-    // Seven of the eight are the link not carrying the call to an answer,
-    // and they share one answer because the process they were sent to is
-    // ending in every one of them. Named one by one anyway: the classification
-    // is what a later direction would have to revisit to reintroduce a
-    // retryable answer, and it should be visible in the suite rather than only
-    // in a switch.
+    // Eight of the nine are the link not carrying the call to an answer, and
+    // they share one answer because the process they were sent to is ending
+    // in every one of them. Named one by one anyway: the classification is
+    // what a later direction would have to revisit to reintroduce a retryable
+    // answer, and it should be visible in the suite rather than only in a
+    // switch.
     try testing.expectEqual(Reason.gone, stoppedBy(error.Unreachable));
     try testing.expectEqual(Reason.gone, stoppedBy(error.Unreadable));
     try testing.expectEqual(Reason.gone, stoppedBy(error.UnknownHandle));
@@ -1878,8 +1881,12 @@ test "every way a call stops is classified, and only a local allocation is told 
     try testing.expectEqual(Reason.gone, stoppedBy(error.Busy));
     try testing.expectEqual(Reason.gone, stoppedBy(error.BoxCapacity));
     try testing.expectEqual(Reason.gone, stoppedBy(error.AnswerLost));
+    // The one that is not about the link at all: a checkpoint this half could
+    // not read, so nothing was sent. It lands on the gone answer because the
+    // generic path has no other, and `stoppedBy` says what that costs.
+    try testing.expectEqual(Reason.gone, stoppedBy(error.SourceUnreadable));
 
-    // The eighth is this half's own allocator, which decided nothing about
+    // The ninth is this half's own allocator, which decided nothing about
     // the link. A method whose set carries `OutOfMemory` says so itself;
     // `set_model`'s cannot, so it falls back to the gone answer.
     try testing.expectEqual(Reason.out_of_memory, stoppedBy(error.OutOfMemory));
@@ -1890,7 +1897,7 @@ test "every way a call stops is classified, and only a local allocation is told 
     // exhaustive, so this is about the *list here* staying complete: a new
     // way for a call to stop would otherwise be classified in code and
     // unexamined in the suite.
-    try testing.expectEqual(@as(usize, 8), @typeInfo(Stopped).error_set.?.len);
+    try testing.expectEqual(@as(usize, 9), @typeInfo(Stopped).error_set.?.len);
 }
 
 test "a Stop travels on the transport it is registered with" {
@@ -2121,13 +2128,18 @@ test "a lost answer is not a call that did not happen" {
 
     // And the list those sets are checked against is this file's own
     // classification, asserted in the direction the guards cannot see: the
-    // three members that can only be raised before the handover are named in
+    // four members that can only be raised before the handover are named in
     // it, and no other member is. The sets no longer change any *answer* --
     // every way the link stops a call gives the same one -- so what they hold
     // on to is the classification itself, for a later direction that wants a
     // retryable answer back.
-    try testing.expectEqual(@as(usize, 3), client.not_performed.len);
-    inline for (.{ error.Busy, error.BoxCapacity, error.OutOfMemory }) |err| {
+    try testing.expectEqual(@as(usize, 4), client.not_performed.len);
+    inline for (.{
+        error.Busy,
+        error.BoxCapacity,
+        error.OutOfMemory,
+        error.SourceUnreadable,
+    }) |err| {
         try testing.expect(client.meansNotPerformed(@errorName(err)));
     }
     inline for (.{
@@ -2139,9 +2151,9 @@ test "a lost answer is not a call that did not happen" {
     }) |err| {
         try testing.expect(!client.meansNotPerformed(@errorName(err)));
     }
-    // Three plus five is every way a call can stop, so neither group above is
+    // Four plus five is every way a call can stop, so neither group above is
     // a sample of the set.
-    try testing.expectEqual(@as(usize, 8), @typeInfo(Stopped).error_set.?.len);
+    try testing.expectEqual(@as(usize, 9), @typeInfo(Stopped).error_set.?.len);
 
     // `close_outcome` is where the mistake would have been invisible: the
     // answer rides the `failure` arm either way, so what Product reads is the
@@ -2280,7 +2292,7 @@ test "how much of the surface this build answers end to end, counted across both
     // measurement and not the prose. So the count stays in the assertions and
     // the prose stops repeating it.
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 41), end_to_end);
+    try testing.expectEqual(@as(usize, 42), end_to_end);
     try testing.expectEqual(not_forwarded.len, callable - end_to_end);
 
     // And the execution half is the binding constraint: every method the
@@ -2290,7 +2302,7 @@ test "how much of the surface this build answers end to end, counted across both
     // have diverged and the shorter one would start looking like the answer.
     try testing.expectEqual(exec_gap, callable - end_to_end);
     try testing.expect(caller_gap <= exec_gap);
-    try testing.expectEqual(@as(usize, 41), comptime dispatch.dispatchableCount());
+    try testing.expectEqual(@as(usize, 42), comptime dispatch.dispatchableCount());
 }
 
 test "the list says how many of its entries belong to which half" {
@@ -2304,11 +2316,13 @@ test "the list says how many of its entries belong to which half" {
 
     // The rest are ones this half cannot send or read either, which is the
     // only other way to be on the list.
-    try testing.expectEqual(@as(usize, 9), not_forwarded.len);
+    try testing.expectEqual(@as(usize, 8), not_forwarded.len);
     try testing.expectEqual(@as(usize, 7), exec_only);
-    // Two, down from three: `prepare_run_with_tools` is answered now. Its
-    // four capabilities are still owed and still on the parameter worklist --
-    // what changed is that a Run without any of them crosses, and a Run with
-    // one is refused where it is made rather than panicking where it is sent.
-    try testing.expectEqual(@as(usize, 2), not_forwarded.len - exec_only);
+    // One, down from three. `prepare_run_with_tools` went first: a Run
+    // without any of its four capabilities crosses, and a Run with one is
+    // refused where it is made rather than panicking where it is sent.
+    // `restore_session_route` followed, once a checkpoint's bytes could
+    // travel with the call. What is left is `activate_mcp`, which belongs to
+    // the MCP step with the rest of that surface.
+    try testing.expectEqual(@as(usize, 1), not_forwarded.len - exec_only);
 }

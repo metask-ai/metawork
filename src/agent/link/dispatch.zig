@@ -224,6 +224,8 @@ fn invokeOne(
         return prepareRunWithTools(arena, bindings, request);
     if (comptime std.mem.eql(u8, entry.name, "create_session_route"))
         return createSessionRoute(arena, bindings, request);
+    if (comptime std.mem.eql(u8, entry.name, "restore_session_route"))
+        return restoreSessionRoute(arena, bindings, request);
     if (comptime std.mem.eql(u8, entry.name, "begin_run_outcome"))
         return beginRunOutcome(arena, bindings, request);
     if (comptime std.mem.eql(u8, entry.name, "release_closed_session"))
@@ -334,6 +336,54 @@ fn createSessionRoute(
     return fillResponse(out, shapes.SessionRoute, .{
         .route_id = route.id,
         .session = reservation.id,
+    });
+}
+
+/// `restore_session_route`, which is `create_session_route` with a checkpoint
+/// to read first.
+///
+/// Same ordering and the same reason -- `named_handles` calls it irreversible
+/// "as create_session_route, and it has read a checkpoint besides" -- so the
+/// slot, the entry and the response buffer are all in hand before the call.
+///
+/// What the options carry in place of the caller's read callback is the
+/// checkpoint itself, decoded into this call's arena.
+/// `adapters.parameterAdapter` is what turns those bytes back into the source
+/// the Session reads, over a `call_frame` frame that dies with the call.
+fn restoreSessionRoute(
+    arena: std.mem.Allocator,
+    bindings: adapters.Bindings,
+    request: Request,
+) InvokeError![]u8 {
+    const Fn = comptime @typeInfo(
+        @FieldType(port.RuntimePort.VTable, "restore_session_route"),
+    ).pointer.child;
+    const Arguments = comptime wire_types.Request(Fn);
+    const wired = try payload.decodeExact(Arguments, arena, request.arguments);
+    const options = try (comptime adapters.parameterAdapter(
+        contract.surface.SessionRestoreOptions,
+    ).?).apply(bindings, wired[0]);
+
+    const out = try reservedResponse(arena, shapes.SessionRestoreRoute);
+    var kept = false;
+    const held = try bindings.allocator.create(run_tools.HeldSession);
+    defer if (!kept) bindings.allocator.destroy(held);
+    const reservation = try bindings.sessions.reserve();
+    defer if (!kept) std.debug.assert(bindings.sessions.releaseReservation(reservation));
+
+    const route = bindings.runtime.restoreSessionRoute(options) catch |err|
+        return failureResponse(arena, err);
+
+    held.* = run_tools.HeldSession.initFor(route.session, .{
+        .task_id = options.session.task_id,
+        .binding_epoch = options.session.binding_epoch,
+    });
+    std.debug.assert(bindings.sessions.fill(reservation, held) != null);
+    kept = true;
+    return fillResponse(out, shapes.SessionRestoreRoute, .{
+        .route_id = route.id,
+        .session = reservation.id,
+        .report = route.report,
     });
 }
 
@@ -1414,7 +1464,7 @@ test "how much of the surface this build answers is counted, not claimed" {
     // number kept here: arguments still owed, results still owed.
     try testing.expect(answered < callable);
     try testing.expectEqual(@as(usize, 50), callable);
-    try testing.expectEqual(@as(usize, 41), answered);
+    try testing.expectEqual(@as(usize, 42), answered);
 
     // Three of those are answered by a prong rather than by the generic
     // chain, for two different reasons, and `dispatchable` has to know both.

@@ -301,6 +301,40 @@ test "a frame is retired on the failing path too, which is the path that matters
 // A call's byte stream
 // ---------------------------------------------------------------------------
 
+/// The source a restore reads from, over bytes that arrived with the call.
+///
+/// The caller's source is a read callback and stayed in its own process; what
+/// crossed is the checkpoint itself, in the request. This reads it out the way
+/// the Session expects -- as much as the destination holds, then end of file
+/// -- and it is a frame for the same reason everything else here is: the
+/// Session is handed a capability, and a capability it kept after the call has
+/// to answer rather than read memory the request's arena has reused.
+pub const BlobSource = struct {
+    bytes: []const u8,
+    read: usize = 0,
+
+    pub const Backing = Frame(BlobSource);
+
+    pub fn source(backing: *Backing) checkpoint_restore.Source {
+        return .{ .context = backing.context(), .read_fn = readBytes };
+    }
+
+    fn readBytes(
+        context: ?*anyopaque,
+        destination: []u8,
+    ) checkpoint_restore.SourceReadResult {
+        const backing = Backing.fromContext(context) orelse return .contract_failed;
+        const self = backing.borrow() orelse return .contract_failed;
+        const remaining = self.bytes.len - self.read;
+        if (remaining == 0) return .eof;
+        const take = @min(remaining, destination.len);
+        if (take == 0) return .contract_failed;
+        @memcpy(destination[0..take], self.bytes[self.read..][0..take]);
+        self.read += take;
+        return .{ .bytes = take };
+    }
+};
+
 /// Where a call's byte stream goes on its way to the caller.
 ///
 /// Two pointers and a correlation, rather than the transport itself: this
@@ -376,6 +410,51 @@ pub const ChunkSink = struct {
         return .ok;
     }
 };
+
+test "a blob source reads out in pieces, ends, and dies with its call" {
+    // The restore's side of the same division. The caller's source stayed in
+    // its process; these are the bytes that arrived instead, and this is what
+    // the Session reads them through -- a sequence of reads whose sizes are
+    // the Session's choice, then end of file.
+    var backing = BlobSource.Backing.init(.{ .bytes = "fixture-checkpoint" });
+    const source = BlobSource.source(&backing);
+
+    // Five at a time, which is what the lifecycle fixture's own restore does.
+    var piece: [5]u8 = undefined;
+    var seen: [32]u8 = undefined;
+    var filled: usize = 0;
+    var reads: usize = 0;
+    while (true) {
+        switch (source.read_fn(source.context, &piece)) {
+            .bytes => |count| {
+                @memcpy(seen[filled..][0..count], piece[0..count]);
+                filled += count;
+                reads += 1;
+            },
+            .eof => break,
+            else => return error.UnexpectedRead,
+        }
+    }
+    try testing.expectEqualStrings("fixture-checkpoint", seen[0..filled]);
+    // Four reads for eighteen bytes: three full and a short one. The short
+    // one matters -- a source that only answered whole buffers would lose the
+    // tail of every checkpoint whose length is not a multiple of the reader's
+    // buffer.
+    try testing.expectEqual(@as(usize, 4), reads);
+    // And it keeps saying end of file rather than starting again.
+    try testing.expectEqual(
+        checkpoint_restore.SourceReadResult.eof,
+        source.read_fn(source.context, &piece),
+    );
+
+    // The call returns, and the capability the Session may have kept answers
+    // rather than reading bytes the request's arena has reused.
+    backing.retire();
+    try testing.expectEqual(
+        checkpoint_restore.SourceReadResult.contract_failed,
+        source.read_fn(source.context, &piece),
+    );
+}
 
 test "a chunk sink carries each write and stops at the caller's bound" {
     // The sink the export is handed when the caller's own sink is in the

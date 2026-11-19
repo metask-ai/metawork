@@ -32,13 +32,18 @@ const port = contract.port;
 const surface = contract.surface;
 const control = contract.control;
 const catalog = @import("agent_catalog");
+const checkpoint_restore = @import("agent_checkpoint_restore");
 const mcp_catalog = @import("agent_mcp_catalog");
 
 pub const Error = error{
     /// A handle this half did not issue, or one already released. The caller
     /// asked a question about an object it no longer names.
     UnknownHandle,
-} || client.Boxes.Error;
+    /// A checkpoint could not be put on the wire: its source refused, stopped
+    /// making progress, or ran past the caller's own bound. Nothing is sent,
+    /// because a prefix of a checkpoint is not a checkpoint.
+    SourceUnreadable,
+} || client.Boxes.Error || std.mem.Allocator.Error;
 
 pub fn Adapter(comptime T: type) type {
     return struct {
@@ -120,6 +125,31 @@ pub fn adapter(comptime T: type) ?Adapter(T) {
         }
     }.apply };
 
+    // A restore, whose checkpoint has to travel because the half that will
+    // read it has nowhere to read it from.
+    //
+    // Written out rather than mirrored field by field, because the bound on
+    // the read is a sibling field: `checkpoint_limits.hard_bytes` is the
+    // caller's own ceiling on a checkpoint, so it is the right one and there
+    // is no new constant to choose. A source that keeps producing past it is
+    // refused here, before anything is sent.
+    //
+    // This is the one wire form that owns memory. `release` frees it, and
+    // `owns` is the list that keeps the two in step.
+    if (T == surface.SessionRestoreOptions) return .{ .apply = struct {
+        fn apply(half: *client.Client, value: T) Error!shapes.SessionRestoreOptions {
+            const session = try (comptime adapter(surface.SessionOpenOptions).?)
+                .apply(half, value.session);
+            const bytes = try drain(half, value.source, value.checkpoint_limits.hard_bytes);
+            return .{
+                .session = session,
+                .checkpoint_limits = value.checkpoint_limits,
+                .source = bytes,
+                .expectation = value.expectation,
+            };
+        }
+    }.apply };
+
     // A capability whose whole content is its presence. The inspection is a
     // reverse call answered by the half that holds the delivery root, so
     // nothing about the root travels and there is nothing here to carry.
@@ -143,6 +173,88 @@ pub fn adapter(comptime T: type) ?Adapter(T) {
     }
 
     return null;
+}
+
+/// Reads a checkpoint source to its end, or refuses.
+///
+/// Bounded by the caller's own `hard_bytes`, which is what makes this
+/// transfer safe to put in a request: the request's own limit is larger, and
+/// the assembly buffer on the far side is allocated for the life of the
+/// process either way.
+///
+/// A source that fails part way leaves nothing: the caller gets a refusal and
+/// no call is made, which is the only honest answer when what would cross is
+/// a prefix of a checkpoint.
+fn drain(half: *client.Client, source: checkpoint_restore.Source, hard_bytes: u64) Error![]const u8 {
+    const bound: usize = @intCast(@min(hard_bytes, @as(u64, std.math.maxInt(usize))));
+    if (bound == 0) return error.SourceUnreadable;
+    var buffer = try half.allocator.alloc(u8, bound);
+    var filled: usize = 0;
+    while (filled < buffer.len) {
+        switch (source.read_fn(source.context, buffer[filled..])) {
+            .bytes => |count| {
+                // Zero bytes without end of file is a source that is not
+                // making progress, and waiting on it would be waiting for
+                // nothing.
+                if (count == 0) {
+                    half.allocator.free(buffer);
+                    return error.SourceUnreadable;
+                }
+                filled += count;
+            },
+            .eof => break,
+            .cancelled, .io_failed, .contract_failed => {
+                half.allocator.free(buffer);
+                return error.SourceUnreadable;
+            },
+        }
+    }
+    if (filled == buffer.len) {
+        // It filled the bound exactly, so whether there is more is unknown --
+        // and a checkpoint cut off at the ceiling is not a checkpoint. One
+        // more read says which it is.
+        var probe: [1]u8 = undefined;
+        switch (source.read_fn(source.context, &probe)) {
+            .eof => {},
+            else => {
+                half.allocator.free(buffer);
+                return error.SourceUnreadable;
+            },
+        }
+    }
+    if (filled != buffer.len) buffer = half.allocator.realloc(buffer, filled) catch buffer[0..filled];
+    return buffer[0..filled];
+}
+
+/// Whether this type's wire form owns memory that `release` has to free.
+///
+/// One type does, and closing the list both ways is what keeps a wire form
+/// that starts allocating from leaking: `release` walks the same parameters
+/// `send` encoded, and anything not named here is borrowed from the value it
+/// came from.
+fn owns(comptime T: type) bool {
+    return T == surface.SessionRestoreOptions;
+}
+
+/// Frees what `send`'s adapters allocated for one call.
+///
+/// Called after the call has been encoded and answered, which is the whole
+/// window the bytes are needed for.
+pub fn release(
+    comptime owner: method.Owner,
+    comptime name: []const u8,
+    arguments: client.Arguments(owner, name),
+    allocator: std.mem.Allocator,
+) void {
+    const Fn = @typeInfo(@FieldType(owner.VTable(), name)).pointer.child;
+    comptime var field: usize = 0;
+    inline for (@typeInfo(Fn).@"fn".params, 0..) |param, position| {
+        if (position == 0) continue;
+        const Parameter = param.type.?;
+        if (comptime wire_types.Wire(Parameter) == void) continue;
+        if (comptime owns(Parameter)) allocator.free(arguments[field].source);
+        field += 1;
+    }
 }
 
 /// A handle, resolved to the id the far side knows it by.
@@ -426,7 +538,7 @@ test "the argument direction is counted on its own" {
     // capability from that field, and that is a different list:
     // `adapters.owedParameters`, where all four of this method's tool
     // capabilities remain.
-    try testing.expectEqual(@as(usize, 1), owed.len);
+    try testing.expectEqual(@as(usize, 0), owed.len);
 
     // What that leaves: the callable methods that can put every argument
     // they are given on the wire. Counted rather than claimed, same as the

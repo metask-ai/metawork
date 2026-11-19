@@ -41,6 +41,7 @@ const port = contract.port;
 const catalog = @import("agent_catalog");
 const mcp_catalog = @import("agent_mcp_catalog");
 const checkpoint = @import("agent_checkpoint");
+const checkpoint_restore = @import("agent_checkpoint_restore");
 
 /// A parameter that is not sent, and why.
 pub const Dropped = struct {
@@ -86,6 +87,9 @@ pub fn Wire(comptime T: type) type {
         // `call_frame.BlobDestination` is therefore composed over there from
         // the Session it was called on, not decoded from the wire.
         if (T == checkpoint.Sink) return void;
+        // A restore's source is the checkpoint itself. The callback stayed in
+        // the caller's process; what crosses is what it would have read.
+        if (T == checkpoint_restore.Source) return []const u8;
         if (T == contract.McpInstallationInput) return shapes.McpInstallationTarget;
         if (T == ?contract.McpInstallationInput) return ?shapes.McpInstallationTarget;
         if (T == contract.FileDeliveryInput) return shapes.FileDeliveryEnabled;

@@ -1081,6 +1081,7 @@ const CheckpointBytes = struct {
     buffer: [256]u8 = undefined,
     written: usize = 0,
     writes: usize = 0,
+    handed: usize = 0,
 
     fn sink(self: *CheckpointBytes) contract.CheckpointSink {
         return .{ .context = self, .write_fn = write };
@@ -1097,6 +1098,25 @@ const CheckpointBytes = struct {
 
     fn recorded(self: *const CheckpointBytes) []const u8 {
         return self.buffer[0..self.written];
+    }
+
+    /// The same bytes, read back the way a restore reads them: Product opens
+    /// the blob it committed and hands a reader over it.
+    fn source(self: *CheckpointBytes) contract.CheckpointSource {
+        return .{ .context = self, .read_fn = read };
+    }
+
+    fn read(
+        context: ?*anyopaque,
+        destination: []u8,
+    ) contract.CheckpointSourceReadResult {
+        const self: *CheckpointBytes = @ptrCast(@alignCast(context.?));
+        const remaining = self.written - self.handed;
+        if (remaining == 0) return .eof;
+        const take = @min(remaining, destination.len);
+        @memcpy(destination[0..take], self.buffer[self.handed..][0..take]);
+        self.handed += take;
+        return .{ .bytes = take };
     }
 };
 
@@ -1122,11 +1142,17 @@ test "a checkpoint's bytes cross the process into the caller's own sink" {
     const failure = try supervisor.start(io, allocator, .{
         .identity = matching_identity,
         .message_limits = fixture_message_limits,
-        .spawn = .{ .explicit = &.{
-            fixture,
-            execution_link_fixture.runtime_flag,
-            execution_link_fixture.fake_core_flag,
-        } },
+        .spawn = .{
+            .explicit = &.{
+                fixture,
+                execution_link_fixture.runtime_flag,
+                execution_link_fixture.fake_core_flag,
+                // So the export reports a generation a restore is allowed to
+                // name; the stand-in's own default is zero, which a restore
+                // refuses.
+                execution_link_fixture.checkpoint_generation_flag,
+            },
+        },
         .tables = execution_link_fixture.fixture_tables,
         .wake = wake.notifier(),
     });
@@ -1188,6 +1214,90 @@ test "a checkpoint's bytes cross the process into the caller's own sink" {
         @as(u64, recorder.written),
         outcome.success.checkpoint.total_bytes,
     );
+
+    // And the round trip: a Session restored on the far side from the bytes
+    // that just came back from it.
+    //
+    // This is the other direction and it is not the mirror image. An export
+    // is produced over there and consumed here, so it streams; a restore is
+    // produced here and read *synchronously, on demand* by the Session over
+    // there, so it cannot stream without the far side asking for each piece,
+    // which is a reverse call per piece. So the checkpoint travels with the
+    // call instead -- in the request, whose assembly buffer on the far side
+    // is allocated for the life of the process either way.
+    //
+    // The far side reads it in five-byte pieces, which is the part worth
+    // crossing a process for: `call_frame.BlobSource` has to answer a
+    // sequence of reads and then end of file, over bytes it does not own.
+    const restored = runtime.restoreSessionRoute(.{
+        .session = .{
+            .task_id = 43,
+            .binding_epoch = 1,
+            .model_binding = .{
+                .target = .{
+                    .provider_id = "provider",
+                    .protocol = .anthropic_messages,
+                    .base_url = "https://example.invalid",
+                    .model = "model",
+                },
+                .credential = "secret",
+            },
+            .permission_mode = .default,
+            .shell_policy = .disabled,
+            .workspace = .{ .canonical_root = root, .trust = .{ .temporary = root } },
+            .canonical_user_home = root,
+            .workspace_epoch = "epoch",
+            // A restored Session may not hand out ids below the ones the
+            // checkpoint already used, so the floor has to be at least what
+            // the expectation names.
+            .operation_id_floor = .{
+                .last_run_id = outcome.success.description.last_run_id,
+                .last_compact_id = outcome.success.description.last_compact_id,
+            },
+        },
+        .checkpoint_limits = .{
+            .hard_bytes = 1 << 20,
+            .max_section_bytes = 1 << 16,
+            .max_string_bytes = 1 << 12,
+            .max_messages = 64,
+            .max_blocks_per_message = 16,
+            .chunk_bytes = 1 << 12,
+        },
+        .source = recorder.source(),
+        .expectation = .{
+            .logical_session_id = outcome.success.description.session_id,
+            .checkpoint_generation = outcome.success.checkpoint.generation,
+            .last_run_id = outcome.success.description.last_run_id,
+            .last_compact_id = outcome.success.description.last_compact_id,
+            .model = "model",
+        },
+    });
+
+    // What this proves is the *travelling*: the caller read its own source to
+    // the end to build the request, and the far side decoded that request and
+    // called its Session with it.
+    //
+    // It does not prove the far side read the bytes, and it cannot -- those
+    // reads happen in the other process and leave no mark here. The first
+    // version of this asserted `handed == written` as if it did, which is the
+    // caller draining its own source and would hold just as well if the far
+    // side had thrown the bytes away; breaking `BlobSource` left it green.
+    // What covers that is `call_frame`'s own test, where the reads are
+    // visible.
+    try std.testing.expectEqual(recorder.written, recorder.handed);
+
+    // No link fault, so the request this half built was one the far side
+    // could decode: a blob encoded wrongly would be a protocol answer, not a
+    // method's. And the restore does not complete against the stand-in --
+    // it fails in its prompt-profile step, which is the stand-in's limit and
+    // not the link's -- so what is asserted is the kind of answer: the far
+    // side judged what it was given, rather than never receiving it.
+    try std.testing.expectEqual(agent_link.client.LinkFault.none, supervisor.fault());
+    if (restored) |restored_route| {
+        try std.testing.expect(restored_route.id != 0);
+    } else |err| {
+        try std.testing.expect(err != error.DependencyUnreachable);
+    }
 
     try std.testing.expectEqual(agent_link.client.LinkFault.none, supervisor.fault());
     try std.testing.expectEqual(exited_on_link_close, supervisor.stop());

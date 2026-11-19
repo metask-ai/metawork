@@ -289,7 +289,15 @@ pub const CallError = BeforeHandover || AfterHandover;
 /// version of the guard below named `OutOfMemory` and `Busy`, which is the
 /// same hand-written list the rest of this work keeps replacing -- and it let
 /// `BoxCapacity` through for exactly as long as nobody looked.
-pub const not_performed = [_][]const u8{ "Busy", "BoxCapacity", "OutOfMemory" };
+pub const not_performed = [_][]const u8{
+    "Busy",
+    "BoxCapacity",
+    "OutOfMemory",
+    // A checkpoint whose bytes could not be read. It is raised while building
+    // the request, so the far side was never asked -- the clearest "not
+    // performed" of the four.
+    "SourceUnreadable",
+};
 
 pub fn meansNotPerformed(name: []const u8) bool {
     for (not_performed) |member| {
