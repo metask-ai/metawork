@@ -1075,6 +1075,124 @@ test "an execution process that dies under a live Task does not take Product wit
     _ = supervisor.stop();
 }
 
+/// Records what a checkpoint export wrote into it, the way Product's own
+/// blob writer does.
+const CheckpointBytes = struct {
+    buffer: [256]u8 = undefined,
+    written: usize = 0,
+    writes: usize = 0,
+
+    fn sink(self: *CheckpointBytes) contract.CheckpointSink {
+        return .{ .context = self, .write_fn = write };
+    }
+
+    fn write(context: ?*anyopaque, bytes: []const u8) contract.CheckpointSinkWriteResult {
+        const self: *CheckpointBytes = @ptrCast(@alignCast(context.?));
+        if (self.written + bytes.len > self.buffer.len) return .contract_failed;
+        @memcpy(self.buffer[self.written..][0..bytes.len], bytes);
+        self.written += bytes.len;
+        self.writes += 1;
+        return .ok;
+    }
+
+    fn recorded(self: *const CheckpointBytes) []const u8 {
+        return self.buffer[0..self.written];
+    }
+};
+
+test "a checkpoint's bytes cross the process into the caller's own sink" {
+    // The export path end to end. The sink is the caller's -- here a buffer,
+    // in the application a blob writer opened before the call -- and it stays
+    // on this side: what crosses is the bytes, as chunks on the export call's
+    // own correlation, arriving in that sink as the far side produces them.
+    //
+    // Two writes, not one, because the far side's export writes its payload
+    // in two pieces. That is the part worth crossing a real process for: a
+    // stream of writes has to arrive as a stream of writes, in order, before
+    // the response that describes it.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var workspace = std.testing.tmpDir(.{});
+    defer workspace.cleanup();
+    const root = try workspace.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+
+    var wake: Wake = .{};
+    var supervisor: execution_link.Supervisor = undefined;
+    const failure = try supervisor.start(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .spawn = .{ .explicit = &.{
+            fixture,
+            execution_link_fixture.runtime_flag,
+            execution_link_fixture.fake_core_flag,
+        } },
+        .tables = execution_link_fixture.fixture_tables,
+        .wake = wake.notifier(),
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer supervisor.deinit();
+
+    const runtime = supervisor.runtimePort();
+    const route = try runtime.createSessionRoute(.{
+        .task_id = 42,
+        .binding_epoch = 1,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "provider",
+                .protocol = .anthropic_messages,
+                .base_url = "https://example.invalid",
+                .model = "model",
+            },
+            .credential = "secret",
+        },
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{ .canonical_root = root, .trust = .{ .temporary = root } },
+        .canonical_user_home = root,
+        .workspace_epoch = "epoch",
+    });
+
+    var recorder: CheckpointBytes = .{};
+    var outcome = try route.session.exportCheckpoint(
+        .{
+            .hard_bytes = 1 << 20,
+            .max_section_bytes = 1 << 16,
+            .max_string_bytes = 1 << 12,
+            .max_messages = 64,
+            .max_blocks_per_message = 16,
+            .chunk_bytes = 1 << 12,
+        },
+        recorder.sink(),
+        0,
+        0,
+        "model",
+    );
+    defer outcome.deinit();
+
+    if (outcome == .failure) {
+        std.debug.print("export across the link: {any}\n", .{outcome.failure});
+        return error.ExportRefused;
+    }
+
+    // The bytes themselves, in the caller's own sink.
+    try std.testing.expectEqualStrings("fixture-checkpoint", recorder.recorded());
+    // And as two separate writes, which is what the far side did.
+    try std.testing.expectEqual(@as(usize, 2), recorder.writes);
+    // What the export says it produced agrees with what arrived, which is the
+    // check Product's own commit makes and the reason nothing else needs to.
+    try std.testing.expectEqual(
+        @as(u64, recorder.written),
+        outcome.success.checkpoint.total_bytes,
+    );
+
+    try std.testing.expectEqual(agent_link.client.LinkFault.none, supervisor.fault());
+    try std.testing.expectEqual(exited_on_link_close, supervisor.stop());
+}
+
 test "a start that refuses leaves no child running and nothing allocated" {
     // `StartFailure` is a return value and not an error, so `errdefer` never
     // fired for it: two of these paths left the child process running and

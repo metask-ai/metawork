@@ -174,9 +174,11 @@ pub const Bindings = struct {
     /// The one Runtime. A `runtime` method names no receiver because there is
     /// nothing to choose between, so this is where its calls land.
     runtime: port.RuntimePort,
-    /// Where checkpoint blob bytes go and come from. The link holds no store;
-    /// `call_frame.BlobStore` says why this half carries the bytes at all.
-    store: call_frame.BlobStore,
+    /// Where a call's byte stream goes on its way to the caller. The only
+    /// thing that produces one is a checkpoint export, whose sink lives in
+    /// the other process -- `call_frame.ChunkSink` says what stands in for it
+    /// and why nothing is kept on this side.
+    chunks: call_frame.ChunkWriter,
     /// Sessions this half holds for the other half to name, each with the
     /// tool capabilities of its current prepared Run. Those are not
     /// call-scoped, and `run_tools.zig` says why they live here.
@@ -611,7 +613,7 @@ test "a stale handle resolves to a refusal, never to the slot's next occupant" {
     const bindings: Bindings = .{
         .allocator = testing.allocator,
         .runtime = port.RuntimePort.quiet,
-        .store = call_frame.BlobStore.empty,
+        .chunks = call_frame.ChunkWriter.unavailable(),
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -726,7 +728,7 @@ fn testBindings() Bindings {
     return .{
         .allocator = testing.allocator,
         .runtime = port.RuntimePort.quiet,
-        .store = call_frame.BlobStore.empty,
+        .chunks = call_frame.ChunkWriter.unavailable(),
         .sessions = undefined,
         .runs = undefined,
         .leases = undefined,
@@ -752,7 +754,7 @@ test "an options mirror is read back with its handle resolved and its absence ke
     const bindings: Bindings = .{
         .allocator = testing.allocator,
         .runtime = port.RuntimePort.quiet,
-        .store = call_frame.BlobStore.empty,
+        .chunks = call_frame.ChunkWriter.unavailable(),
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -916,7 +918,6 @@ pub fn resultAdapter(comptime T: type) ?ResultAdapter(T) {
                             // is what replaces `caller_sink` with its own area,
                             // because it is the half that opened the blob -- this
                             // encoder only carries what it was given.
-                            .placement = success.placement,
                             .description = try (comptime resultAdapter(checkpoint.Description).?)
                                 .apply(bindings, success.description),
                         },
@@ -1396,7 +1397,7 @@ test "a capacity refusal can name the table it came from" {
     const bindings: Bindings = .{
         .allocator = testing.allocator,
         .runtime = port.RuntimePort.quiet,
-        .store = call_frame.BlobStore.empty,
+        .chunks = call_frame.ChunkWriter.unavailable(),
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -1521,7 +1522,7 @@ const ReleaseLog = struct {
 /// A table set over the quiet Runtime and an empty store, for tests that
 /// drive reclamation rather than the Runtime behind it.
 fn quietBindings(tables: *Tables) Bindings {
-    return tables.bindings(testing.allocator, port.RuntimePort.quiet, call_frame.BlobStore.empty);
+    return tables.bindings(testing.allocator, port.RuntimePort.quiet, call_frame.ChunkWriter.unavailable());
 }
 
 pub const Tables = struct {
@@ -1599,12 +1600,12 @@ pub const Tables = struct {
         self: *Tables,
         allocator: std.mem.Allocator,
         runtime: port.RuntimePort,
-        store: call_frame.BlobStore,
+        chunks: call_frame.ChunkWriter,
     ) Bindings {
         return .{
             .allocator = allocator,
             .runtime = runtime,
-            .store = store,
+            .chunks = chunks,
             .sessions = &self.sessions,
             .runs = &self.runs,
             .leases = &self.leases,

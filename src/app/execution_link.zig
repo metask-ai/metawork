@@ -288,6 +288,32 @@ pub const Supervisor = struct {
             // the events is not this half's to see -- and harmless when the
             // pushes above have already woken: the notifier coalesces.
             .event_ready => _ = self.pump.wake.notify(),
+            // Bytes a call is still producing, written straight into the
+            // destination that call registered. A checkpoint export is the
+            // one method like this: its sink is the caller's, so the bytes
+            // have to arrive here rather than being kept over there.
+            //
+            // Written on this thread, which is what makes it backpressure:
+            // the sink is a file, and a peer producing faster than this half
+            // writes fills the pipe and slows the exporter down. The cost is
+            // that nothing else arrives during an export's transfer, which
+            // for a median checkpoint is a few kilobytes.
+            //
+            // A chunk with no destination is the peer streaming on a
+            // correlation that asked for no stream, which no build of this
+            // does -- so it is read as a peer that is not this build rather
+            // than as something to drop.
+            .chunk => {
+                const destination = self.slots.chunksFor(correlation) orelse {
+                    std.log.err("execution link has nowhere to put a chunk", .{});
+                    self.half.recordFault(.unreadable);
+                    return .stop;
+                };
+                // A refusal is the caller's sink declining the bytes, which
+                // is the caller's business and not the link's: the export
+                // answers with that refusal, and the link carries on.
+                _ = destination.write_fn(destination.context, payload);
+            },
             // A reverse call with nobody composed to answer it. Ending the
             // link is the restrictive answer: the alternative is an execution
             // half parked on a request this build will never answer, holding

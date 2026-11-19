@@ -32,6 +32,7 @@ const contract = @import("agent_contract");
 const client = @import("client.zig");
 const handle_repr = @import("handle_repr.zig");
 const handle_table = @import("handle_table.zig");
+const pending = @import("pending.zig");
 const method = @import("method.zig");
 const shapes = @import("shapes.zig");
 const error_code = @import("error_code.zig");
@@ -441,6 +442,7 @@ pub fn invoke(
     half: *client.Client,
     receiver: handle_table.Id,
     arguments: client.Arguments(owner, name),
+    chunks: ?pending.Chunks,
 ) InvokeError!Outcome(owner, name) {
     const Returned = comptime @FieldType(Outcome(owner, name), "returned");
     // The adapter itself is `received`'s, taken from the same lookup; what
@@ -473,6 +475,7 @@ pub fn invoke(
         arena_state.allocator(),
         receiver,
         arguments,
+        chunks,
     );
     var wanted: [needed]handle_table.Id = undefined;
     var taken: Reservations = .{

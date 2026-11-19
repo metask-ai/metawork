@@ -339,6 +339,10 @@ pub fn call(
     arena: std.mem.Allocator,
     receiver: handle_table.Id,
     arguments: Arguments(owner, name),
+    /// Where this call's byte stream goes, for the one method whose result is
+    /// one. `null` everywhere else, which is every other method: the wire
+    /// form of a result is a value, and a value arrives in the response.
+    chunks: ?pending.Chunks,
 ) CallError!Answer(owner, name) {
     // A link this half has already concluded is unusable carries nothing
     // further. Checked before anything is encoded, because the point is that
@@ -384,6 +388,10 @@ pub fn call(
         });
         return error.Busy;
     };
+    // Before the submit, because the first chunk can be in the pipe while
+    // this thread is still inside it. `pending` releases it with the slot, so
+    // there is nothing to undo on the paths below.
+    if (chunks) |destination| client.pending.attachChunks(correlation, destination);
     // An allocation failure inside the submit is also "nothing was sent", and
     // it was the one way out of here that kept the slot: the `.busy` and
     // `.closed` arms below give it back, and `try` walked past them.
@@ -640,6 +648,7 @@ test "a submit that cannot allocate gives the slot back" {
         arena_state.allocator(),
         .{ .slot = 1, .generation = 1 },
         .{"a-model"},
+        null,
     ));
     queue.allocator = testing.allocator;
 
@@ -661,6 +670,7 @@ test "a submit that cannot allocate gives the slot back" {
             arena_state.allocator(),
             .{ .slot = 1, .generation = 1 },
             .{"a-model"},
+            null,
         ));
         queue.allocator = testing.allocator;
     }

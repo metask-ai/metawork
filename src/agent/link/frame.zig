@@ -39,19 +39,34 @@ pub const Kind = enum(u8) {
     control = 8,
     /// The sender has nothing further to send. No payload.
     goodbye = 9,
+    /// Bytes a call is still producing, exec to UI, on that call's own
+    /// correlation.
+    ///
+    /// For a result that is a byte stream rather than a value: a checkpoint
+    /// export writes through a sink the caller handed in, and over the link
+    /// the caller's sink is in the other process. Each frame is one write,
+    /// carried on the correlation of the call that produced it, and the
+    /// call's response is what says the stream is complete and what it should
+    /// have contained.
+    ///
+    /// Not fragmented, because a chunk is not a message with a length of its
+    /// own: it is as much as one write had, bounded by what a frame can hold.
+    /// Several of them on one correlation are a sequence, not fragments of
+    /// one thing, which is why `final` is set on each.
+    chunk = 10,
 
     /// Whether a message of this kind may span several frames.
     pub fn fragments(self: Kind) bool {
         return switch (self) {
             .event, .request, .response, .ui_request, .ui_response => true,
-            .hello, .event_ready, .control, .goodbye => false,
+            .hello, .event_ready, .control, .goodbye, .chunk => false,
         };
     }
 
     /// Whether a frame of this kind carries a call identity.
     pub fn correlates(self: Kind) Correlation {
         return switch (self) {
-            .request, .response, .ui_request, .ui_response => .required,
+            .request, .response, .ui_request, .ui_response, .chunk => .required,
             .control => .optional,
             .hello, .event, .event_ready, .goodbye => .forbidden,
         };
@@ -61,7 +76,7 @@ pub const Kind = enum(u8) {
     pub fn empty(self: Kind) bool {
         return switch (self) {
             .event_ready, .goodbye => true,
-            .hello, .event, .request, .response, .ui_request, .ui_response, .control => false,
+            .hello, .event, .request, .response, .ui_request, .ui_response, .control, .chunk => false,
         };
     }
 };

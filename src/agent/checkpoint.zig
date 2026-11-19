@@ -132,62 +132,8 @@ pub const Expectation = struct {
     model: []const u8,
 };
 
-/// A checkpoint blob written into the exporting half's own area.
-///
-/// Named by the store that wrote the bytes, and returned from the commit
-/// that finished them -- not derived by the half that reads this, and not
-/// formatted by the dispatcher either. Both of those would state the naming
-/// scheme somewhere other than where the bytes are, and a scheme stated
-/// twice is one that will disagree in one of its places; once the execution
-/// half is split out, those places are in different processes.
-pub const StagedBlob = struct {
-    pub const max_name_bytes = 128;
-
-    name_storage: [max_name_bytes]u8 = undefined,
-    name_len: usize = 0,
-
-    pub fn name(self: *const StagedBlob) []const u8 {
-        return self.name_storage[0..self.name_len];
-    }
-
-    pub fn from(value: []const u8) error{NameTooLong}!StagedBlob {
-        if (value.len > max_name_bytes) return error.NameTooLong;
-        var result: StagedBlob = .{ .name_len = value.len };
-        @memcpy(result.name_storage[0..value.len], value);
-        return result;
-    }
-};
-
-/// Where the bytes went, and therefore what the caller still has to do.
-///
-/// Both arms say only what their producer knows. The Session knows it wrote
-/// through the sink it was handed and nothing about what that sink was, so
-/// `caller_sink` carries no identity -- the committed one does not exist
-/// until the caller's own `commit` runs, and a value that asserted it here
-/// would be asserting something its producer cannot see. That is how
-/// `generation` got into the checkpoint destination and had to come back out.
-///
-/// A split-out execution half composes its own sink against its own stage
-/// area, so it is the one that can say the second thing, and it says it where
-/// it knows it: the dispatcher that opened the blob replaces the arm.
-pub const Placement = union(enum) {
-    /// The bytes went into the sink the caller handed in. Whatever happens to
-    /// them next is the caller's, as it is today.
-    caller_sink,
-    /// The bytes went into the exporting half's own area, outside the store
-    /// the caller reads records from. Not a checkpoint of record until the
-    /// caller accepts it.
-    own_area: StagedBlob,
-};
-
 pub const Success = struct {
     checkpoint: Export,
-    /// Where `checkpoint`'s bytes are. A caller that ignores this and
-    /// commits its own writer anyway is caught by `Writer.commit`'s
-    /// `expected_bytes != bytes_written` check, because nothing was written
-    /// into that writer -- but being caught by an unrelated check is not the
-    /// same as having said which case it is.
-    placement: Placement,
     description: Description,
 
     pub fn deinit(self: *Success) void {
@@ -256,10 +202,6 @@ pub fn create(
         .success => |value| .{
             .success = .{
                 .checkpoint = export_result,
-                // All this half can say: the bytes went through the sink it was
-                // handed. Whether that sink was the caller's writer or a stage
-                // area belongs to whoever composed it, and is replaced there.
-                .placement = .caller_sink,
                 .description = value,
             },
         },

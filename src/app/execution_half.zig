@@ -105,10 +105,6 @@ pub const Options = struct {
     /// honestly do, and it is what the identity tests need.
     runtime: ?RuntimeFactory = null,
     tables: adapters.Tables.Capacity = .{},
-    /// Where checkpoint bytes go and come from. The empty store refuses to
-    /// open anything, which is the fail-closed answer rather than accepting
-    /// bytes nobody will find again.
-    store: call_frame.BlobStore = call_frame.BlobStore.empty,
     /// Threads for the methods that cannot block. Small on purpose: what they
     /// answer is short, and the only requirement is that one is always free
     /// so a Stop or a UI answer is never behind a Run.
@@ -249,7 +245,6 @@ const Answering = struct {
     factory: RuntimeFactory,
     runtime: *agent.Runtime,
     tables: adapters.Tables,
-    store: call_frame.BlobStore,
     outbound: ?*channel.Outbound = null,
 
     mutex: std.Io.Mutex = .init,
@@ -306,7 +301,6 @@ const Answering = struct {
             .factory = factory,
             .runtime = undefined,
             .tables = undefined,
-            .store = options.store,
             .queue = queue,
             .workers = workers,
             .blocking = blocking,
@@ -425,8 +419,27 @@ const Answering = struct {
         return self.tables.bindings(
             self.allocator,
             self.runtime.runtimePort(),
-            self.store,
+            self.chunkWriter(),
         );
+    }
+
+    /// How a call's byte stream leaves this half.
+    ///
+    /// Over the outbound queue, waiting rather than refusing when it is full:
+    /// the thread doing the writing is the one inside the export, and slowing
+    /// it down is the backpressure. A checkpoint that cannot be carried is an
+    /// export that must not report success, so a queue that has closed
+    /// answers false and `call_frame.ChunkSink` turns that into a failure.
+    fn chunkWriter(self: *Answering) call_frame.ChunkWriter {
+        return .{ .context = self, .write_fn = writeChunk };
+    }
+
+    fn writeChunk(context: ?*anyopaque, correlation: u64, bytes: []const u8) bool {
+        const self: *Answering = @ptrCast(@alignCast(context.?));
+        const outbound = self.outbound orelse return false;
+        const submission = outbound.submitWaiting(.chunk, correlation, bytes) catch
+            return false;
+        return submission == .queued;
     }
 
     fn begin(
@@ -506,7 +519,7 @@ const Answering = struct {
             .request, .control, .ui_response => {},
             // Everything else is this half's own output arriving back at it,
             // which means the peer is not the other half of this link.
-            .hello, .event, .event_ready, .response, .ui_request, .goodbye => {
+            .hello, .event, .event_ready, .response, .ui_request, .goodbye, .chunk => {
                 std.log.err("execution half received {s}, which only it sends", .{@tagName(kind)});
                 return .stop;
             },
@@ -613,7 +626,11 @@ const Answering = struct {
     fn answer(self: *Answering, queued: Queued) void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        const bytes = self.perform(arena.allocator(), queued.payload) catch |failure| {
+        const bytes = self.perform(
+            arena.allocator(),
+            queued.payload,
+            queued.correlation,
+        ) catch |failure| {
             const code = responseCode(failure) orelse unanswerable(failure);
             var header: [envelope.header_bytes]u8 = undefined;
             envelope.encodeResponseHeader(&header, code);
@@ -627,8 +644,13 @@ const Answering = struct {
         self: *Answering,
         arena: std.mem.Allocator,
         request: []const u8,
+        correlation: u64,
     ) dispatch.InvokeError![]u8 {
-        return dispatch.invoke(arena, self.bindings(), try dispatch.classify(request));
+        var classified = try dispatch.classify(request);
+        // The frame's own identity, which `classify` cannot see and which a
+        // byte stream has to be carried on. Nothing else reads it.
+        classified.correlation = correlation;
+        return dispatch.invoke(arena, self.bindings(), classified);
     }
 
     fn submit(self: *Answering, correlation: u64, bytes: []const u8) void {

@@ -459,11 +459,6 @@ pub const CheckpointDescription = struct {
 pub const CheckpointOutcome = union(enum) {
     success: struct {
         checkpoint: checkpoint.Export,
-        /// Where the bytes are. Plain data already -- a tag and a bounded
-        /// name -- and it has to cross, because it is the one thing the
-        /// caller cannot work out for itself: the execution half wrote into
-        /// its own stage area, and nothing in the export's own facts says so.
-        placement: checkpoint.Placement,
         description: CheckpointDescription,
     },
     failure: checkpoint.Failure,
@@ -475,7 +470,6 @@ pub const CheckpointOutcome = union(enum) {
         return switch (self) {
             .success => |success| .{ .success = .{
                 .checkpoint = success.checkpoint,
-                .placement = success.placement,
                 .description = try success.description.into(allocator),
             } },
             .failure => |failure| .{ .failure = failure },

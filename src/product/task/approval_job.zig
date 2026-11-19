@@ -209,21 +209,12 @@ pub fn exportCheckpoint(allocator: std.mem.Allocator, cancelled: *const std.atom
         mutated or outcome.failure.disposition == .poisoned,
     );
     const success = &outcome.success;
-    // Where the bytes went decides whether this path applies at all. The
-    // writer below is this process's, and committing it is only right when
-    // the export wrote through it.
-    //
-    // `.own_area` means a split-out execution half wrote the blob into its
-    // own stage area, and turning that into a Task row is the acceptance path
-    // -- plan section 5, step 7, which does not exist yet. Until it does this
-    // is a failed export rather than a success nobody accepted: an
-    // unreachable here would crash on a real answer, and treating it as
-    // success would commit a record pointing at a blob this store does not
-    // have.
-    switch (success.placement) {
-        .caller_sink => {},
-        .own_area => return Job.fail(.checkpoint_failed, mutated),
-    }
+    // The bytes went through the writer opened above, and over the execution
+    // link they still do: the sink crosses as a stream of chunks that arrive
+    // in this writer. There used to be a second case here -- an execution
+    // half that wrote into an area of its own -- and it was always a failure,
+    // because accepting it would commit a record pointing at a blob this
+    // store does not have. Nothing produces it now.
     if (generation) |expected| if (success.description.policy_generation != expected)
         return Job.fail(.dependency_contract, true);
     if (!permissionModeMatches(success.description.permission_mode, if (work.mutate) work.target_mode else work.expected_mode))

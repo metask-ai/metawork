@@ -55,10 +55,28 @@ pub const Claimed = union(enum) {
     link_closed,
 };
 
+/// Where a call's byte stream goes while the call is still in flight.
+///
+/// Opaque on purpose: this file is the correlation table and knows nothing
+/// about what any call means. `false` says the bytes could not be taken, and
+/// what that costs is the caller's to decide.
+pub const Chunks = struct {
+    context: ?*anyopaque,
+    write_fn: *const fn (?*anyopaque, []const u8) bool,
+};
+
 pub const Table = struct {
     const Slot = struct {
         correlation: Correlation = 0,
         response: ?[]u8 = null,
+        /// Where bytes arriving on this correlation go before its response
+        /// does, for a call whose result is a byte stream.
+        ///
+        /// It needs no releasing of its own: every path that frees a slot
+        /// writes `slot.* = .{}`, so a destination cannot outlive the call it
+        /// belongs to. That is the property worth having, because what it
+        /// points at is a frame on the calling thread's stack.
+        chunks: ?Chunks = null,
         /// The caller stopped waiting. The reader still deposits, then
         /// releases, so a response is never dropped on the floor silently and
         /// never leaked.
@@ -135,6 +153,33 @@ pub const Table = struct {
         // guessed. A slot held by a caller that has gone is the peer owing an
         // answer; with none of those, the pressure really is concurrency.
         return if (abandoned != 0) error.TooManyUnsettled else error.TooManyInFlight;
+    }
+
+    /// Says where this call's byte stream goes, before the request is sent.
+    ///
+    /// Before, not after: the peer may answer the first chunk into the pipe
+    /// while the sender is still inside `trySubmit`, and a chunk that arrived
+    /// with nowhere to go is a lost prefix of a checkpoint.
+    pub fn attachChunks(self: *Table, correlation: Correlation, chunks: Chunks) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const index = self.indexOf(correlation) orelse return;
+        self.slots[index].chunks = chunks;
+    }
+
+    /// The reader's side, read out rather than used in place.
+    ///
+    /// Returned as a copy so the write happens with the lock released: what
+    /// it writes into is a file, and holding the correlation table across
+    /// that would stall every other call for the length of an export. Safe
+    /// because of the ordering the stream rests on -- the peer sends every
+    /// chunk before the response, and this is the thread that reads both, so
+    /// the slot cannot be freed between this and the write.
+    pub fn chunksFor(self: *Table, correlation: Correlation) ?Chunks {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const index = self.indexOf(correlation) orelse return null;
+        return self.slots[index].chunks;
     }
 
     /// Blocks until the response arrives or the link ends. The slot is

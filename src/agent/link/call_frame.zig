@@ -21,6 +21,7 @@
 //! records which kind each parameter is.
 
 const std = @import("std");
+const frames = @import("frame.zig");
 const handle_table = @import("handle_table.zig");
 const shapes = @import("shapes.zig");
 const checkpoint = @import("agent_checkpoint");
@@ -202,12 +203,13 @@ test "capacity is refused before the call that cannot be undone, not after" {
 const testing = std.testing;
 
 test "a frame answers while its call is running and refuses afterwards" {
-    var sink_state: Recorder = .{ .buffer = &sink_scratch };
-    var backing = ExportSink.Backing.init(.{
-        .inner = sink_state.sink(),
-        .destination = .{ .task_id = 7, .hard_bytes = 64 },
+    var recorder: ChunkRecorder = .{};
+    var backing = ChunkSink.Backing.init(.{
+        .writer = recorder.writer(),
+        .correlation = 3,
+        .hard_bytes = 64,
     });
-    const sink = ExportSink.sink(&backing);
+    const sink = ChunkSink.sink(&backing);
 
     try testing.expectEqual(checkpoint.SinkWriteResult.ok, sink.write_fn(sink.context, "hello"));
     try testing.expectEqual(@as(u64, 5), backing.borrow().?.written);
@@ -227,10 +229,11 @@ test "a frame answers while its call is running and refuses afterwards" {
 }
 
 test "a retired frame is not merely zeroed, because zero can look valid" {
-    var sink_state: Recorder = .{ .buffer = &sink_scratch };
-    var backing = ExportSink.Backing.init(.{
-        .inner = sink_state.sink(),
-        .destination = .{ .task_id = 1, .hard_bytes = 8 },
+    var recorder: ChunkRecorder = .{};
+    var backing = ChunkSink.Backing.init(.{
+        .writer = recorder.writer(),
+        .correlation = 1,
+        .hard_bytes = 8,
     });
     try testing.expect(backing.live());
     backing.retire();
@@ -242,20 +245,20 @@ test "a retired frame is not merely zeroed, because zero can look valid" {
 
     // Only the exact live word admits a borrow, so a reused allocation has to
     // reproduce it to be mistaken for a live frame.
-    backing.marker = ExportSink.Backing.live_marker;
+    backing.marker = ChunkSink.Backing.live_marker;
     try testing.expect(backing.borrow() != null);
 }
 
 test "a frame is retired on the failing path too, which is the path that matters" {
     const Work = struct {
-        fn succeed(_: void, frame: *ExportSink.Backing) anyerror!u64 {
-            const sink = ExportSink.sink(frame);
+        fn succeed(_: void, frame: *ChunkSink.Backing) anyerror!u64 {
+            const sink = ChunkSink.sink(frame);
             if (sink.write_fn(sink.context, "ok") != .ok) return error.Unexpected;
             return frame.borrow().?.written;
         }
 
-        fn fail(_: void, frame: *ExportSink.Backing) anyerror!u64 {
-            const sink = ExportSink.sink(frame);
+        fn fail(_: void, frame: *ChunkSink.Backing) anyerror!u64 {
+            const sink = ChunkSink.sink(frame);
             _ = sink.write_fn(sink.context, "partial");
             // An early return, which is what a dispatcher does on a bad
             // argument or an unknown handle.
@@ -263,19 +266,26 @@ test "a frame is retired on the failing path too, which is the path that matters
         }
     };
 
-    var sink_state: Recorder = .{ .buffer = &sink_scratch };
-    const destination: BlobDestination = .{ .task_id = 4, .hard_bytes = 64 };
+    var recorder: ChunkRecorder = .{};
 
-    var good = ExportSink.Backing.init(.{ .inner = sink_state.sink(), .destination = destination });
-    const written = try overFrame(ExportSink, anyerror!u64, &good, {}, Work.succeed);
+    var good = ChunkSink.Backing.init(.{
+        .writer = recorder.writer(),
+        .correlation = 4,
+        .hard_bytes = 64,
+    });
+    const written = try overFrame(ChunkSink, anyerror!u64, &good, {}, Work.succeed);
     try testing.expectEqual(@as(u64, 2), written);
     try testing.expect(!good.live());
 
-    var bad = ExportSink.Backing.init(.{ .inner = sink_state.sink(), .destination = destination });
-    const sink = ExportSink.sink(&bad);
+    var bad = ChunkSink.Backing.init(.{
+        .writer = recorder.writer(),
+        .correlation = 5,
+        .hard_bytes = 64,
+    });
+    const sink = ChunkSink.sink(&bad);
     try testing.expectError(
         error.Unexpected,
-        overFrame(ExportSink, anyerror!u64, &bad, {}, Work.fail),
+        overFrame(ChunkSink, anyerror!u64, &bad, {}, Work.fail),
     );
     // The point: the call left through an error and the frame is still
     // retired, so the capability the far side may have kept is dead either
@@ -288,149 +298,62 @@ test "a frame is retired on the failing path too, which is the path that matters
 }
 
 // ---------------------------------------------------------------------------
-// Checkpoint blob bytes
+// A call's byte stream
 // ---------------------------------------------------------------------------
 
-/// How this half carries checkpoint blob bytes.
+/// Where a call's byte stream goes on its way to the caller.
 ///
-/// `architecture.md` section 5 settles which half: the blob and the record
-/// pointing at it are separate carriers, the record's commit authority is
-/// Product's, and the execution half performing an export does not thereby
-/// gain persistence authority. So the bytes are this half's to write and
-/// read, the record stays the caller's to commit, and what crosses is the
-/// descriptor and the outcome.
+/// Two pointers and a correlation, rather than the transport itself: this
+/// file is about what one call owns, and a queue is not that. The execution
+/// half composes one over its outbound queue; a test composes one over a
+/// buffer, which is what lets the export path be driven without a pipe.
 ///
-/// Supplied by the composition root, because the link holds no store. It
-/// hands out the shapes the port already speaks -- a `checkpoint.Sink` and a
-/// `checkpoint_restore.Source` -- so nothing here reshapes bytes, and takes
-/// them back when the call that used one has returned.
-/// Which blob to open, and the bound on it.
-///
-/// Not a wire shape, and it used to be one. Every field of it is either on
-/// the Session the call was made on or in the call's own `limits`, so the
-/// descriptor is composed here rather than sent -- and the field that *was*
-/// sent, `generation`, had to come out: it is assigned by the export, so a
-/// caller filling it in was asserting something it could not know.
-///
-/// `shapes.CheckpointSourceDescriptor` is still a wire shape, and the
-/// asymmetry is real: a restore names a blob that already exists, by facts
-/// only the caller has (which generation, which digest, how many bytes),
-/// while an export names one that does not exist yet.
-pub const BlobDestination = struct {
-    task_id: u64,
-    hard_bytes: u64,
-};
-
-/// What the export produced, handed to the store so it can finish the blob.
-///
-/// Both byte counts are here on purpose. `exported.total_bytes` is what the
-/// Session says it wrote; `observed_bytes` is what actually passed through
-/// this call's wrapper. The store is the only party that also knows what
-/// reached its own storage, so it is the one that can tell all three apart --
-/// and a record pointing at bytes nobody wrote is the failure this
-/// comparison exists to stop. Product's `Writer.commit` makes the same
-/// comparison on its side, for the same reason.
-pub const BlobCommit = struct {
-    destination: BlobDestination,
-    exported: checkpoint.Export,
-    observed_bytes: u64,
-};
-
-/// Why a blob could not be finished.
-pub const CommitError = error{
-    /// The bytes could not be made durable, or could not be named: a rename,
-    /// a sync, a name longer than `checkpoint.StagedBlob` allows. Nothing is
-    /// kept.
-    CommitFailed,
-    /// What the export said it produced and what arrived disagree. Nothing is
-    /// kept. Not an I/O fault, and worth telling apart from one: an I/O
-    /// fault is the machine, this is the contract.
-    ExportMismatch,
-};
-
-pub const BlobStore = struct {
+/// `write` answers false for "the stream cannot be carried", and the only
+/// honest thing to do with that is end the export: the caller is receiving a
+/// prefix of a checkpoint, and a prefix is not a checkpoint.
+pub const ChunkWriter = struct {
     context: ?*anyopaque,
-    /// A sink for the blob this destination names, or `null` when one cannot
-    /// be opened. The export path has an answer for that already.
-    open_sink_fn: *const fn (?*anyopaque, BlobDestination) ?checkpoint.Sink,
-    /// A source for the blob this descriptor names, or `null` when it is not
-    /// there -- which the restore path also already answers.
-    open_source_fn: *const fn (?*anyopaque, shapes.CheckpointSourceDescriptor) ?Source,
-    /// Finishes the blob the sink was writing and says what the store calls
-    /// it.
-    ///
-    /// Fallible, and that is the whole of why it exists. A `void` close on a
-    /// defer could not report a commit failure, could not tell the success
-    /// path from the failure path -- it ran on both -- and could not name the
-    /// blob, so the name was being invented by the half that did *not* write
-    /// the bytes. One naming rule in two places is a rule that will disagree
-    /// in one of them.
-    commit_sink_fn: *const fn (
-        ?*anyopaque,
-        checkpoint.Sink,
-        BlobCommit,
-    ) CommitError!checkpoint.StagedBlob,
-    /// Gives the sink back and keeps nothing. For every path that is not a
-    /// committed export: a refusal from the Session, a failure in between, a
-    /// commit that itself failed.
-    abandon_sink_fn: *const fn (?*anyopaque, checkpoint.Sink) void,
-    close_source_fn: *const fn (?*anyopaque, Source) void,
+    write_fn: *const fn (?*anyopaque, u64, []const u8) bool,
 
-    pub const Source = checkpoint_restore.Source;
+    pub fn write(self: ChunkWriter, correlation: u64, bytes: []const u8) bool {
+        return self.write_fn(self.context, correlation, bytes);
+    }
 
-    /// A store with nothing in it, for a composition that has no blobs yet
-    /// and for tests that drive other things. Opening always refuses, which
-    /// is the fail-closed answer rather than a store that silently accepts
-    /// bytes nobody will find again.
-    pub const empty: BlobStore = .{
-        .context = null,
-        .open_sink_fn = struct {
-            fn call(_: ?*anyopaque, _: BlobDestination) ?checkpoint.Sink {
-                return null;
-            }
-        }.call,
-        .open_source_fn = struct {
-            fn call(_: ?*anyopaque, _: shapes.CheckpointSourceDescriptor) ?Source {
-                return null;
-            }
-        }.call,
-        // Unreachable through `empty`, because nothing opens. Refusing rather
-        // than returning a name keeps that true if something ever does: a
-        // store with nowhere to put bytes must not hand back a name for
-        // them.
-        .commit_sink_fn = struct {
-            fn call(
-                _: ?*anyopaque,
-                _: checkpoint.Sink,
-                _: BlobCommit,
-            ) CommitError!checkpoint.StagedBlob {
-                return error.CommitFailed;
-            }
-        }.call,
-        .abandon_sink_fn = struct {
-            fn call(_: ?*anyopaque, _: checkpoint.Sink) void {}
-        }.call,
-        .close_source_fn = struct {
-            fn call(_: ?*anyopaque, _: Source) void {}
-        }.call,
-    };
+    /// For a half composed without a transport, which is what the identity
+    /// tests are. Refusing is the restrictive answer: an export that cannot
+    /// carry its bytes must not report success.
+    pub fn unavailable() ChunkWriter {
+        return .{ .context = null, .write_fn = refuse };
+    }
+
+    fn refuse(_: ?*anyopaque, _: u64, _: []const u8) bool {
+        return false;
+    }
 };
 
-/// The sink a method is called with, over the store's own sink.
+/// The sink a checkpoint export is handed when the caller's sink is in the
+/// other process.
 ///
-/// The indirection is not ceremony. The store's sink belongs to the
-/// composition root; the one handed to the method belongs to this call, and
-/// wrapping it is what makes "nothing kept it past the call" a property this
-/// side can check: the frame is retired when the call returns, so a sink the
-/// callee stored answers `contract_failed` instead of writing into a blob
-/// this half has already closed.
-pub const ExportSink = struct {
-    /// Where the bytes really go.
-    inner: checkpoint.Sink,
-    destination: BlobDestination,
+/// The caller passed a sink to a port call; over the link that sink stayed
+/// where it was, so this stands in for it and carries each write across as a
+/// chunk on the call's own correlation. Nothing is buffered: a write becomes
+/// frames and the queue's own backpressure is what slows the exporter down,
+/// which is why the cost of a large checkpoint is time here rather than
+/// memory on the half that must stay small.
+///
+/// It still enforces the caller's hard bound, because the bound crossed as a
+/// number and the first place that can apply it is the first place the bytes
+/// exist. What it does *not* do is count chunks for comparison: one write
+/// larger than a frame leaves as several, so the frames this sends and the
+/// `chunk_count` the export reports are different numbers about different
+/// things. The bytes and the digest are what the two halves compare.
+pub const ChunkSink = struct {
+    writer: ChunkWriter,
+    correlation: u64,
+    hard_bytes: u64,
     written: u64 = 0,
 
-    pub const Backing = Frame(ExportSink);
+    pub const Backing = Frame(ChunkSink);
 
     pub fn sink(backing: *Backing) checkpoint.Sink {
         return .{ .context = backing.context(), .write_fn = write };
@@ -440,103 +363,102 @@ pub const ExportSink = struct {
         const backing = Backing.fromContext(context) orelse return .contract_failed;
         const self = backing.borrow() orelse return .contract_failed;
         if (bytes.len == 0) return .contract_failed;
-        // The bound crossed as a number and is enforced where the bytes are.
-        const hard = self.destination.hard_bytes;
+        const hard = self.hard_bytes;
         if (self.written > hard - @min(hard, bytes.len)) return .contract_failed;
-        const result = self.inner.write_fn(self.inner.context, bytes);
-        if (result != .ok) return result;
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const take = @min(bytes.len - offset, frames.max_fragment_payload_bytes);
+            if (!self.writer.write(self.correlation, bytes[offset..][0..take]))
+                return .io_failed;
+            offset += take;
+        }
         self.written += bytes.len;
         return .ok;
     }
 };
 
-/// The source a restore is called with, over the store's own source. Same
-/// reason as `ExportSink`.
-pub const RestoreSource = struct {
-    inner: BlobStore.Source,
-    read: u64 = 0,
-
-    pub const Backing = Frame(RestoreSource);
-
-    pub fn source(backing: *Backing) BlobStore.Source {
-        return .{ .context = backing.context(), .read_fn = readBytes };
-    }
-
-    fn readBytes(
-        context: ?*anyopaque,
-        destination: []u8,
-    ) checkpoint_restore.SourceReadResult {
-        const backing = Backing.fromContext(context) orelse return .contract_failed;
-        const self = backing.borrow() orelse return .contract_failed;
-        const result = self.inner.read_fn(self.inner.context, destination);
-        switch (result) {
-            .bytes => |count| self.read += count,
-            else => {},
-        }
-        return result;
-    }
-};
-
-test "an export sink writes through to the store and stops at the bound" {
-    var recorded: [64]u8 = undefined;
-    var sink_state: Recorder = .{ .buffer = &recorded };
-    var backing = ExportSink.Backing.init(.{
-        .inner = sink_state.sink(),
-        .destination = .{ .task_id = 1, .hard_bytes = 8 },
+test "a chunk sink carries each write and stops at the caller's bound" {
+    // The sink the export is handed when the caller's own sink is in the
+    // other process. What it has to do is carry the bytes and refuse past the
+    // bound the caller sent -- the bound crossed as a number, and this is the
+    // first place the bytes exist.
+    var recorder: ChunkRecorder = .{};
+    var backing = ChunkSink.Backing.init(.{
+        .writer = recorder.writer(),
+        .correlation = 9,
+        .hard_bytes = 8,
     });
-    const handed = ExportSink.sink(&backing);
+    const sink = ChunkSink.sink(&backing);
 
-    try testing.expectEqual(checkpoint.SinkWriteResult.ok, handed.write_fn(handed.context, "abcd"));
-    try testing.expectEqual(@as(usize, 4), sink_state.written);
-    // One byte past the bound is a contract failure, and it never reaches the
-    // store: the bound is enforced before the write-through.
+    try testing.expectEqual(checkpoint.SinkWriteResult.ok, sink.write_fn(sink.context, "abcd"));
+    try testing.expectEqual(checkpoint.SinkWriteResult.ok, sink.write_fn(sink.context, "efgh"));
+    try testing.expectEqualStrings("abcdefgh", recorder.recorded());
+    try testing.expectEqual(@as(u64, 9), recorder.correlation);
+
+    // One byte past the bound, refused without being carried.
     try testing.expectEqual(
         checkpoint.SinkWriteResult.contract_failed,
-        handed.write_fn(handed.context, "efghi"),
+        sink.write_fn(sink.context, "i"),
     );
-    try testing.expectEqual(@as(usize, 4), sink_state.written);
+    try testing.expectEqualStrings("abcdefgh", recorder.recorded());
 
-    // The call returns. A sink the callee kept writes nowhere.
+    // An empty write is not a write, which is the same answer the sink this
+    // replaces gave: it would be a frame carrying nothing.
+    try testing.expectEqual(
+        checkpoint.SinkWriteResult.contract_failed,
+        sink.write_fn(sink.context, ""),
+    );
+
+    // And a retired frame answers rather than reading memory the call has
+    // moved on from, which is the whole reason the backing exists.
     backing.retire();
     try testing.expectEqual(
         checkpoint.SinkWriteResult.contract_failed,
-        handed.write_fn(handed.context, "x"),
+        sink.write_fn(sink.context, "jk"),
     );
-    try testing.expectEqual(@as(usize, 4), sink_state.written);
 }
 
-test "a store refusal is an answer the export path already has" {
-    // `empty` refuses to open, which is the fail-closed answer: a store that
-    // accepted bytes nobody could find again would report a successful export
-    // of a blob that is not there.
-    const store = BlobStore.empty;
-    try testing.expect(store.open_sink_fn(store.context, .{
-        .task_id = 1,
-        .hard_bytes = 16,
-    }) == null);
-    try testing.expect(store.open_source_fn(store.context, .{
-        .task_id = 1,
-        .generation = 1,
-        .digest = @splat(0),
-        .byte_size = 16,
-    }) == null);
+test "a writer that cannot carry a chunk fails the write" {
+    // The restrictive answer, and the only one available: a caller receiving
+    // a prefix of a checkpoint is receiving something that is not one.
+    var recorder: ChunkRecorder = .{ .refuse = true };
+    var backing = ChunkSink.Backing.init(.{
+        .writer = recorder.writer(),
+        .correlation = 1,
+        .hard_bytes = 64,
+    });
+    const sink = ChunkSink.sink(&backing);
+    defer backing.retire();
+
+    try testing.expectEqual(
+        checkpoint.SinkWriteResult.io_failed,
+        sink.write_fn(sink.context, "abcd"),
+    );
+    try testing.expectEqual(@as(usize, 0), recorder.written);
 }
 
-const Recorder = struct {
-    buffer: []u8,
+/// Records what a chunk writer was asked to carry, and can refuse.
+const ChunkRecorder = struct {
+    buffer: [64]u8 = undefined,
     written: usize = 0,
+    correlation: u64 = 0,
+    refuse: bool = false,
 
-    fn sink(self: *Recorder) checkpoint.Sink {
+    fn writer(self: *ChunkRecorder) ChunkWriter {
         return .{ .context = self, .write_fn = write };
     }
 
-    fn write(context: ?*anyopaque, bytes: []const u8) checkpoint.SinkWriteResult {
-        const self: *Recorder = @ptrCast(@alignCast(context.?));
-        if (self.written + bytes.len > self.buffer.len) return .io_failed;
+    fn write(context: ?*anyopaque, correlation: u64, bytes: []const u8) bool {
+        const self: *ChunkRecorder = @ptrCast(@alignCast(context.?));
+        if (self.refuse) return false;
+        if (self.written + bytes.len > self.buffer.len) return false;
         @memcpy(self.buffer[self.written..][0..bytes.len], bytes);
         self.written += bytes.len;
-        return .ok;
+        self.correlation = correlation;
+        return true;
+    }
+
+    fn recorded(self: *const ChunkRecorder) []const u8 {
+        return self.buffer[0..self.written];
     }
 };
-
-var sink_scratch: [256]u8 = undefined;

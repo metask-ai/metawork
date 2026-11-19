@@ -47,6 +47,15 @@ pub const Request = struct {
     entry: method.Entry,
     receiver: handle_table.Id,
     arguments: []const u8,
+    /// Which call this is, for a method whose answer includes a byte stream:
+    /// a chunk has to say which call produced it. Zero for a request that
+    /// was never carried on a frame, which is every test that builds one by
+    /// hand -- and harmless there, because only the export prong reads it.
+    ///
+    /// `classify` cannot fill this in: it reads the request bytes, and the
+    /// correlation is on the frame around them. The half that read the frame
+    /// is the one that knows, so it is the one that says.
+    correlation: u64 = 0,
 };
 
 /// Reads a request far enough to know what it is for, and refuses anything
@@ -602,19 +611,31 @@ fn fillResponse(out: []u8, comptime T: type, value: T) []u8 {
     return out[0 .. envelope.header_bytes + written];
 }
 
-/// `export_checkpoint`, whose sink this half opens from the store.
+/// `export_checkpoint`, whose sink is in the other process.
 ///
-/// Written out rather than folded into the generic loop, because what it does
-/// is not decoding: it opens a blob, wraps it so the sink handed over belongs
-/// to this call, retires that wrapper when the call returns and gives the
-/// store's sink back -- in that order, on defers, so a refusal anywhere in
-/// between leaves neither behind.
+/// Written out rather than folded into the generic loop because the sink has
+/// no wire form: the caller handed one to a port call, and over the link it
+/// stayed where it was. What goes in its place carries every write across as
+/// a chunk on this call's own correlation, so the bytes reach the caller's
+/// own sink as the export produces them -- which is what the in-process path
+/// does, and the reason this half neither opens a blob nor keeps one.
+///
+/// The response is the Session's own outcome, unchanged. Nothing in it
+/// describes where the bytes went any more, because there is only one place
+/// they can go: the sink the caller passed. `checkpoint.Placement` and the
+/// arm that said otherwise went with this change.
+///
+/// Ordering is what makes the stream safe to read, and it is free: chunks and
+/// the response are one ordered queue, so every chunk is written before the
+/// response that describes them. The caller compares the bytes it received
+/// against the `total_bytes` and the digest the response carries, which is a
+/// stronger check than the two halves counting agreeing numbers -- and a
+/// check the in-process path gets by construction and so never needed.
 fn exportCheckpoint(
     arena: std.mem.Allocator,
     bindings: adapters.Bindings,
     request: Request,
 ) InvokeError![]u8 {
-    const entry = comptime try method.find(method.codeOf(.session, "export_checkpoint"));
     const Fn = comptime @typeInfo(
         @FieldType(port.SessionPort.VTable, "export_checkpoint"),
     ).pointer.child;
@@ -624,117 +645,32 @@ fn exportCheckpoint(
     const receiver = (try resolveReceiver(bindings, request)) orelse return error.UnknownHandle;
     const session = receiver.session.port;
 
-    // Composed here, not decoded: the sink has no wire form. The Task comes
-    // from the Session this call names and the bound from the call's own
-    // limits, which is the whole of what opening a blob needs.
-    //
-    // An identity that was never filled in refuses the export rather than
-    // opening a blob under Task 0, and it is filled in by the route creation
-    // that puts a Session in this table -- which `not_forwarded` records as
-    // still owed, so today this path refuses and says why.
-    // Not an export failure and not `CheckpointIncompatible`, which would say
-    // something about the checkpoint: the checkpoint is fine and this build
-    // cannot name the Task. `NotDispatchable` is what "this build cannot
-    // answer this" already means, and the gap itself is recorded where it
-    // belongs -- `create_session_route` is the route creation that would fill
-    // the identity in, and it is in `not_forwarded`.
-    const identity = receiver.session.identity;
-    if (!identity.valid()) return error.NotDispatchable;
-    const destination: call_frame.BlobDestination = .{
-        .task_id = identity.task_id,
+    // The caller's bound, applied where the bytes first exist. It crossed as
+    // a number in the call's own limits, which is the only place it could
+    // have come from now that nothing here opens a destination.
+    var backing = call_frame.ChunkSink.Backing.init(.{
+        .writer = bindings.chunks,
+        .correlation = request.correlation,
         .hard_bytes = wired[0].hard_bytes,
-    };
-    const inner = bindings.store.open_sink_fn(bindings.store.context, destination) orelse {
-        // The export path's own vocabulary says this, so it is an outcome
-        // rather than a transport error: nothing was written, the Session is
-        // untouched and reusable, and `io_failed` at the export stage is what
-        // "the blob could not be opened" is. Reporting it as a link failure
-        // would make the caller treat a Session it can still use as suspect.
-        const refused: shapes.CheckpointOutcome = .{ .failure = .{
-            .stage = .checkpoint_export,
-            .reason = .io_failed,
-            .disposition = .reusable,
-        } };
-        return successResponse(arena, @TypeOf(refused), refused);
-    };
-    // Given back on every path that does not end in a commit. A commit is
-    // the one way the bytes are kept, so "not committed" is the default and
-    // has to be undone deliberately.
-    var committed = false;
-    defer if (!committed) bindings.store.abandon_sink_fn(bindings.store.context, inner);
-
-    var backing = call_frame.ExportSink.Backing.init(.{
-        .inner = inner,
-        .destination = destination,
     });
-    var retired = false;
-    // Retired before the store's sink is given back, so the wrapper can never
-    // outlive what it writes through.
-    defer if (!retired) backing.retire();
+    // Retired on every path, so a sink the callee kept cannot write a chunk
+    // onto a correlation whose call has already been answered.
+    defer backing.retire();
 
     // The sink dropped out of the request, so what used to be fields 2..4 are
     // fields 1..3: limits, then the two ids and the model.
     var outcome = session.vtable.export_checkpoint(
         session.context,
         wired[0],
-        call_frame.ExportSink.sink(&backing),
+        call_frame.ChunkSink.sink(&backing),
         wired[1],
         wired[2],
         wired[3],
     ) catch |err| return failureResponse(arena, err);
     defer outcome.deinit();
 
-    if (outcome == .success) {
-        // Read before the frame dies, because this is the number the store
-        // compares against what the export claims and against what reached
-        // its own storage. A frame that is somehow already retired cannot
-        // say how many bytes passed through it, and a commit that guessed
-        // zero would be a record pointing at nothing.
-        const observed = if (backing.borrow()) |frame| frame.written else {
-            return successResponse(arena, shapes.CheckpointOutcome, .{ .failure = .{
-                .stage = .checkpoint_export,
-                .reason = .dependency_contract,
-                .disposition = .reusable,
-            } });
-        };
-
-        // The wrapper dies first: a sink the callee kept must not be able to
-        // write into a blob that is already named and finished.
-        backing.retire();
-        retired = true;
-
-        // The Session answered `caller_sink`, which is all it can see. This
-        // half opened the blob, and the *store* wrote it -- so the store is
-        // what names it. Replacing the arm here, with a name that came back
-        // from the commit, is what keeps each answer with the half that can
-        // establish it.
-        const staged = bindings.store.commit_sink_fn(bindings.store.context, inner, .{
-            .destination = destination,
-            .exported = outcome.success.checkpoint,
-            .observed_bytes = observed,
-        }) catch |err| {
-            // The export itself ran: the Session did the work and is still
-            // usable. What failed is keeping the bytes, so the answer is a
-            // failure in the export's own vocabulary rather than a link
-            // error, and the two reasons stay apart -- `io_failed` is the
-            // machine, `dependency_contract` is the byte counts disagreeing.
-            const refused: shapes.CheckpointOutcome = .{ .failure = .{
-                .stage = .checkpoint_export,
-                .reason = switch (err) {
-                    error.CommitFailed => .io_failed,
-                    error.ExportMismatch => .dependency_contract,
-                },
-                .disposition = .reusable,
-            } };
-            return successResponse(arena, @TypeOf(refused), refused);
-        };
-        committed = true;
-        outcome.success.placement = .{ .own_area = staged };
-    }
-
     const encoded = try (comptime adapters.resultAdapter(contract.CheckpointOutcome).?)
         .apply(bindings, outcome);
-    _ = entry;
     return successResponse(arena, @TypeOf(encoded), encoded);
 }
 
@@ -846,7 +782,7 @@ test "a receiver is resolved through its table, and a stale id is refused" {
     const bindings: adapters.Bindings = .{
         .allocator = testing.allocator,
         .runtime = port.RuntimePort.quiet,
-        .store = call_frame.BlobStore.empty,
+        .chunks = call_frame.ChunkWriter.unavailable(),
         .sessions = &sessions,
         .runs = &runs,
         .leases = &leases,
@@ -952,7 +888,7 @@ const Harness = struct {
         return .{
             .allocator = testing.allocator,
             .runtime = self.runtime,
-            .store = call_frame.BlobStore.empty,
+            .chunks = call_frame.ChunkWriter.unavailable(),
             .sessions = &self.sessions,
             .runs = &self.runs,
             .leases = &self.leases,
@@ -1125,95 +1061,37 @@ test "each refusal leaves nothing behind" {
     _ = harness.sessions.take(id);
 }
 
-/// A store that records what was written and can refuse to open.
+/// A chunk writer that records what the export sent, and can refuse.
 ///
-/// It also names the blobs it commits, which is the point of the shape: the
-/// name is a store's to choose, and the dispatcher used to format one here.
-const Blobs = struct {
-    buffer: [64]u8 = undefined,
+/// What the execution half does with an export's bytes now is hand them to
+/// the link, so this stands in for the link: the correlation each chunk came
+/// on is recorded too, because a chunk that named the wrong call would reach
+/// the wrong caller's sink.
+const ChunkRecorder = struct {
+    buffer: [1024]u8 = undefined,
     written: usize = 0,
-    opened: usize = 0,
-    committed: usize = 0,
-    abandoned: usize = 0,
-    /// Set to make a commit fail the way a rename or a sync would.
-    refuse_commit: bool = false,
+    frames: usize = 0,
+    correlation: u64 = 0,
+    /// Set to make carrying the bytes fail the way a closed queue would.
+    refuse: bool = false,
 
-    fn store(self: *Blobs) call_frame.BlobStore {
-        var value = call_frame.BlobStore.empty;
-        value.context = self;
-        value.open_sink_fn = openSink;
-        value.commit_sink_fn = commitSink;
-        value.abandon_sink_fn = abandonSink;
-        return value;
-    }
-
-    fn openSink(context: ?*anyopaque, _: call_frame.BlobDestination) ?checkpoint.Sink {
-        const self: *Blobs = @ptrCast(@alignCast(context.?));
-        self.opened += 1;
+    fn writer(self: *ChunkRecorder) call_frame.ChunkWriter {
         return .{ .context = self, .write_fn = write };
     }
 
-    fn commitSink(
-        context: ?*anyopaque,
-        _: checkpoint.Sink,
-        record: call_frame.BlobCommit,
-    ) call_frame.CommitError!checkpoint.StagedBlob {
-        const self: *Blobs = @ptrCast(@alignCast(context.?));
-        if (self.refuse_commit) return error.CommitFailed;
-        // The net: three numbers that must agree -- what the export claims,
-        // what passed through the call's wrapper, and what reached storage.
-        if (record.exported.total_bytes != record.observed_bytes) return error.ExportMismatch;
-        if (record.observed_bytes != self.written) return error.ExportMismatch;
-        self.committed += 1;
-        var storage: [checkpoint.StagedBlob.max_name_bytes]u8 = undefined;
-        const text = std.fmt.bufPrint(&storage, "{d}/{d}.ckpt", .{
-            record.destination.task_id,
-            record.exported.generation,
-        }) catch return error.CommitFailed;
-        return checkpoint.StagedBlob.from(text) catch error.CommitFailed;
-    }
-
-    fn abandonSink(context: ?*anyopaque, _: checkpoint.Sink) void {
-        const self: *Blobs = @ptrCast(@alignCast(context.?));
-        self.abandoned += 1;
-    }
-
-    fn write(context: ?*anyopaque, bytes: []const u8) checkpoint.SinkWriteResult {
-        const self: *Blobs = @ptrCast(@alignCast(context.?));
-        if (self.written + bytes.len > self.buffer.len) return .io_failed;
+    fn write(context: ?*anyopaque, correlation: u64, bytes: []const u8) bool {
+        const self: *ChunkRecorder = @ptrCast(@alignCast(context.?));
+        if (self.refuse) return false;
+        if (self.written + bytes.len > self.buffer.len) return false;
         @memcpy(self.buffer[self.written..][0..bytes.len], bytes);
         self.written += bytes.len;
-        return .ok;
-    }
-};
-
-/// A Session that writes through the sink it was handed and then refuses.
-const Exporter = struct {
-    bytes: []const u8,
-
-    fn exportCheckpointImpl(
-        context: ?*anyopaque,
-        _: contract.CheckpointLimits,
-        sink: checkpoint.Sink,
-        _: u64,
-        _: u64,
-        _: []const u8,
-    ) contract.surface.Error!checkpoint.Outcome {
-        const self: *Exporter = @ptrCast(@alignCast(context.?));
-        _ = sink.write_fn(sink.context, self.bytes);
-        // The failure arm, so the test needs no twenty-field description to
-        // build. The success arm's encoding is the generic mirror, which is
-        // instantiated at comptime by the outcome adapter.
-        return .{ .failure = .{
-            .stage = .checkpoint_export,
-            .reason = .core_error,
-            .disposition = .reusable,
-        } };
+        self.frames += 1;
+        self.correlation = correlation;
+        return true;
     }
 
-    fn port(self: *Exporter, vtable: *port_namespace.SessionPort.VTable) port_namespace.SessionPort {
-        vtable.export_checkpoint = exportCheckpointImpl;
-        return .{ .context = self, .vtable = vtable };
+    fn recorded(self: *const ChunkRecorder) []const u8 {
+        return self.buffer[0..self.written];
     }
 };
 
@@ -1248,7 +1126,6 @@ const SucceedingExporter = struct {
                 },
                 // What the Session can see, and no more: it wrote through the
                 // sink it was handed and knows nothing about what that sink was.
-                .placement = .caller_sink,
                 .description = .{
                     .allocator = allocator,
                     .session_id = allocator.dupe(u8, "session") catch return error.CoreCallFailed,
@@ -1288,101 +1165,6 @@ const SucceedingExporter = struct {
     }
 };
 
-/// Drives one successful export against `blobs` and returns the decoded
-/// outcome. Written once because three tests differ only in what they set on
-/// the two doubles.
-fn exportThrough(
-    arena: std.mem.Allocator,
-    harness: *Harness,
-    blobs: *Blobs,
-    exporter: *SucceedingExporter,
-) !shapes.CheckpointOutcome {
-    var vtable: port_namespace.SessionPort.VTable = undefined;
-    var held = run_tools.HeldSession.initFor(
-        exporter.port(&vtable),
-        .{ .task_id = 3, .binding_epoch = 1 },
-    );
-    const id = try harness.sessions.insert(&held);
-    defer _ = harness.sessions.take(id);
-
-    var bindings = harness.bindings();
-    bindings.store = blobs.store();
-    const response = try invoke(arena, bindings, try classify(try exportRequest(arena, id)));
-    return switch (try envelope.decodeResponse(response)) {
-        .failure => error.ExpectedValue,
-        .value => |bytes| try payload.decodeExact(shapes.CheckpointOutcome, arena, bytes),
-    };
-}
-
-test "a committed export is named by the store that wrote it" {
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var harness = try Harness.init();
-    defer harness.deinit();
-    var blobs: Blobs = .{};
-    var exporter: SucceedingExporter = .{ .bytes = "sixteen-bytes-ok" };
-
-    const decoded = try exportThrough(arena, &harness, &blobs, &exporter);
-
-    try testing.expectEqual(@as(usize, 1), blobs.committed);
-    try testing.expectEqual(@as(usize, 0), blobs.abandoned);
-    // The name came back from the commit. The dispatcher formatted this
-    // itself until now, which put one naming rule in two places -- and the
-    // half that holds the bytes was not one of them.
-    try testing.expectEqualStrings("3/12.ckpt", decoded.success.placement.own_area.name());
-}
-
-test "a commit that fails is an export failure and keeps nothing" {
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var harness = try Harness.init();
-    defer harness.deinit();
-    var blobs: Blobs = .{ .refuse_commit = true };
-    var exporter: SucceedingExporter = .{ .bytes = "sixteen-bytes-ok" };
-
-    const decoded = try exportThrough(arena, &harness, &blobs, &exporter);
-
-    // A `void` close could not report this at all: the export succeeded and
-    // the bytes were lost, and the caller would have been told it has a
-    // checkpoint.
-    try testing.expectEqual(@as(usize, 0), blobs.committed);
-    try testing.expectEqual(@as(usize, 1), blobs.abandoned);
-    try testing.expectEqual(checkpoint.FailureReason.io_failed, decoded.failure.reason);
-    try testing.expectEqual(
-        checkpoint.OperationDisposition.reusable,
-        decoded.failure.disposition,
-    );
-}
-
-test "an export whose byte count disagrees with what arrived is refused" {
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var harness = try Harness.init();
-    defer harness.deinit();
-    var blobs: Blobs = .{};
-    // Claims more than it wrote. This is the net Product's `Writer.commit`
-    // has on its side and the execution half had nothing of -- although
-    // `ExportSink` was counting the bytes the whole time.
-    var exporter: SucceedingExporter = .{ .bytes = "sixteen-bytes-ok", .claimed_bytes = 99 };
-
-    const decoded = try exportThrough(arena, &harness, &blobs, &exporter);
-
-    try testing.expectEqual(@as(usize, 0), blobs.committed);
-    try testing.expectEqual(@as(usize, 1), blobs.abandoned);
-    // Told apart from an I/O fault: this one is the contract, not the
-    // machine.
-    try testing.expectEqual(
-        checkpoint.FailureReason.dependency_contract,
-        decoded.failure.reason,
-    );
-}
-
 fn exportRequest(arena: std.mem.Allocator, receiver: handle_table.Id) ![]u8 {
     const entry = try method.find(method.codeOf(.session, "export_checkpoint"));
     const Fn = @typeInfo(@FieldType(port.SessionPort.VTable, "export_checkpoint")).pointer.child;
@@ -1408,85 +1190,97 @@ fn exportRequest(arena: std.mem.Allocator, receiver: handle_table.Id) ![]u8 {
     return out;
 }
 
-test "an export writes its bytes into the store and answers in its own vocabulary" {
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var harness = try Harness.init();
-    defer harness.deinit();
-    var blobs: Blobs = .{};
-    var exporter: Exporter = .{ .bytes = "checkpoint-bytes" };
-    var vtable: port.SessionPort.VTable = undefined;
+/// Drives one export against `chunks` and returns the decoded outcome.
+fn exportThrough(
+    arena: std.mem.Allocator,
+    harness: *Harness,
+    chunks: *ChunkRecorder,
+    exporter: *SucceedingExporter,
+) !shapes.CheckpointOutcome {
+    var vtable: port_namespace.SessionPort.VTable = undefined;
     var held = run_tools.HeldSession.initFor(
         exporter.port(&vtable),
         .{ .task_id = 3, .binding_epoch = 1 },
     );
     const id = try harness.sessions.insert(&held);
+    defer _ = harness.sessions.take(id);
 
     var bindings = harness.bindings();
-    bindings.store = blobs.store();
-
-    const response = try invoke(arena, bindings, try classify(try exportRequest(arena, id)));
-
-    // The bytes went through this call's sink into the store, and because the
-    // Session refused, nothing was committed: the blob was abandoned. The
-    // single `void` close this replaces could not have told those apart.
-    try testing.expectEqual(@as(usize, 1), blobs.opened);
-    try testing.expectEqual(@as(usize, 0), blobs.committed);
-    try testing.expectEqual(@as(usize, 1), blobs.abandoned);
-    try testing.expectEqualStrings("checkpoint-bytes", blobs.buffer[0..blobs.written]);
-
-    // The answer is the method's outcome, not a transport failure.
-    switch (try envelope.decodeResponse(response)) {
-        .failure => return error.ExpectedValue,
-        .value => |bytes| {
-            const decoded = try payload.decodeExact(shapes.CheckpointOutcome, arena, bytes);
-            try testing.expectEqual(checkpoint.FailureReason.core_error, decoded.failure.reason);
-            try testing.expectEqual(
-                checkpoint.OperationDisposition.reusable,
-                decoded.failure.disposition,
-            );
-        },
-    }
-    _ = harness.sessions.take(id);
+    bindings.chunks = chunks.writer();
+    var request = try classify(try exportRequest(arena, id));
+    request.correlation = 77;
+    const response = try invoke(arena, bindings, request);
+    return switch (try envelope.decodeResponse(response)) {
+        .failure => error.ExpectedValue,
+        .value => |bytes| try payload.decodeExact(shapes.CheckpointOutcome, arena, bytes),
+    };
 }
 
-test "a store that cannot open the blob is an export failure, not a link failure" {
+test "an export's bytes leave as chunks on the call's own correlation" {
+    // The whole of what this half does with a checkpoint now. The sink the
+    // Session writes through is not a destination here any more: it carries
+    // each write to the caller, whose own sink is where the bytes were always
+    // going. Nothing is opened, nothing is committed and nothing is kept, so
+    // there is no name for this half to choose and no second copy to lose.
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
     var harness = try Harness.init();
     defer harness.deinit();
-    var exporter: Exporter = .{ .bytes = "unreached" };
-    var vtable: port.SessionPort.VTable = undefined;
+    var chunks: ChunkRecorder = .{};
+    var exporter: SucceedingExporter = .{ .bytes = "sixteen-bytes-ok" };
+
+    const outcome = try exportThrough(arena, &harness, &chunks, &exporter);
+
+    try testing.expectEqualStrings("sixteen-bytes-ok", chunks.recorded());
+    // The call's own correlation, which is what lets the caller put these
+    // bytes into the sink that asked for them rather than another export's.
+    try testing.expectEqual(@as(u64, 77), chunks.correlation);
+
+    // And the answer is the Session's, unchanged. There is nothing left for
+    // this half to replace in it: `placement` said where the bytes were, and
+    // it existed only while this half could have put them somewhere of its
+    // own.
+    try testing.expect(outcome == .success);
+    try testing.expectEqual(@as(u64, 16), outcome.success.checkpoint.total_bytes);
+}
+
+test "an export whose bytes cannot be carried is a failure, not a success" {
+    // The restrictive half of the same path: a caller that received no bytes
+    // and a success would commit a record pointing at nothing.
+    //
+    // What the caller gets is whatever the Session makes of a sink that
+    // refused, and that is the Session's to decide rather than this half's --
+    // this double answers `CoreCallFailed`, which the dispatcher carries as
+    // the method's own failure. The claim worth asserting is the pair: no
+    // bytes left, and the answer is not a success.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var chunks: ChunkRecorder = .{ .refuse = true };
+    var exporter: SucceedingExporter = .{ .bytes = "sixteen-bytes-ok" };
+
+    var vtable: port_namespace.SessionPort.VTable = undefined;
     var held = run_tools.HeldSession.initFor(
         exporter.port(&vtable),
         .{ .task_id = 3, .binding_epoch = 1 },
     );
     const id = try harness.sessions.insert(&held);
+    defer _ = harness.sessions.take(id);
 
-    // `empty` refuses to open. The Session is untouched and still usable, so
-    // the answer says `reusable` -- reporting a link failure would make the
-    // caller treat a Session it can still use as suspect.
-    const response = try invoke(
-        arena,
-        harness.bindings(),
-        try classify(try exportRequest(arena, id)),
-    );
+    var bindings = harness.bindings();
+    bindings.chunks = chunks.writer();
+    const response = try invoke(arena, bindings, try classify(try exportRequest(arena, id)));
+
+    try testing.expectEqual(@as(usize, 0), chunks.written);
     switch (try envelope.decodeResponse(response)) {
-        .failure => return error.ExpectedValue,
-        .value => |bytes| {
-            const decoded = try payload.decodeExact(shapes.CheckpointOutcome, arena, bytes);
-            try testing.expectEqual(checkpoint.FailureReason.io_failed, decoded.failure.reason);
-            try testing.expectEqual(
-                checkpoint.OperationDisposition.reusable,
-                decoded.failure.disposition,
-            );
-        },
+        .failure => {},
+        .value => return error.ExpectedFailure,
     }
-    _ = harness.sessions.take(id);
 }
 
 /// A Runtime that opens Sessions, for the one prong that creates something.

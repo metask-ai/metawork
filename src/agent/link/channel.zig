@@ -333,7 +333,9 @@ pub const MessageLimits = struct {
             .response => self.response,
             .ui_request => self.ui_request,
             .ui_response => self.ui_response,
-            .control => frame.max_fragment_payload_bytes,
+            // A chunk is one write, not a message with a length of its
+            // own, so what bounds it is what a frame can hold.
+            .control, .chunk => frame.max_fragment_payload_bytes,
             .hello, .event_ready, .goodbye => 0,
         };
     }

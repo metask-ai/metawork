@@ -147,7 +147,26 @@ fn forward(
             "return type alone, so its answer is a decision: use `forwardAnswering` and " ++
             "pass the value, which is what `unreachability.exemptions` is about",
     );
-    return body(owner, name, gone, context, parameters);
+    return body(owner, name, gone, context, parameters, null);
+}
+
+/// Sends one call whose result is a byte stream as well as a value.
+///
+/// The destination is attached to the call before the request goes out, so a
+/// chunk cannot arrive with nowhere to go. Only one method is like this, and
+/// it is the one whose parameter list contains a sink.
+fn forwardStreaming(
+    comptime owner: method.Owner,
+    comptime name: []const u8,
+    context: ?*anyopaque,
+    parameters: Parameters(owner, name),
+    chunks: pending.Chunks,
+) Returns(owner, name) {
+    const gone = comptime derivedAnswer(owner, name) orelse @compileError(
+        @tagName(owner) ++ "." ++ name ++ " does not say what a gone link is from its " ++
+            "return type alone",
+    );
+    return body(owner, name, gone, context, parameters, chunks);
 }
 
 /// Sends one call, for a method whose answer is a value someone chose.
@@ -162,7 +181,7 @@ fn forwardAnswering(
         @tagName(owner) ++ "." ++ name ++ "'s return type already says what a gone link " ++
             "is; use `forward` rather than choosing a second answer beside it",
     );
-    return body(owner, name, gone, context, parameters);
+    return body(owner, name, gone, context, parameters, null);
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +472,7 @@ fn body(
     gone: Returns(owner, name),
     context: ?*anyopaque,
     parameters: Parameters(owner, name),
+    chunks: ?pending.Chunks,
 ) Returns(owner, name) {
     if (comptime !forwardable(owner, name)) notForwarded(owner, name);
     // A Runtime method names no receiver, because there is nothing to choose
@@ -470,7 +490,7 @@ fn body(
 
     const arguments = send(owner, name, half, parameters) catch |err|
         return linkAnswer(owner, name, gone, err);
-    const outcome = inbound.invoke(owner, name, half, receiver, arguments) catch |err|
+    const outcome = inbound.invoke(owner, name, half, receiver, arguments, chunks) catch |err|
         return linkAnswer(owner, name, gone, err);
     return switch (outcome) {
         .returned => |value| value,
@@ -1017,6 +1037,43 @@ fn sessionCopyPendingUiRequest(
     return forward(.session, "copy_pending_ui_request", context, .{allocator});
 }
 
+/// One export's view of the caller's sink, for the chunks that arrive on
+/// its correlation.
+///
+/// The sink is the caller's own and does not travel: Product opened a blob
+/// writer before it called, which is where these bytes belong, and across the
+/// link they arrive as chunks instead of as calls into a pointer. Whether all
+/// of them arrived is checked where it was always checked --
+/// `checkpoint_store.Writer.commit` refuses a byte count that does not match
+/// the export's own -- so nothing here verifies anything. It delivers.
+///
+/// What it does keep is a refusal. A sink that answered `cancelled` cannot
+/// tell the exporting half, because the stream is one way; the delivery
+/// inspection's cancel flag has the same shape and `run_tools.zig` says the
+/// same thing about it. The exporting half therefore finishes and answers
+/// success, and this is what turns that back into the answer the caller's own
+/// sink gave.
+const ExportStream = struct {
+    sink: checkpoint.Sink,
+    refused: ?checkpoint.SinkWriteResult = null,
+
+    fn chunks(self: *ExportStream) pending.Chunks {
+        return .{ .context = self, .write_fn = write };
+    }
+
+    fn write(context: ?*anyopaque, bytes: []const u8) bool {
+        const self: *ExportStream = @ptrCast(@alignCast(context.?));
+        // Once refused, nothing further is written: the caller's sink has
+        // said it is not taking these bytes, and asking again per chunk would
+        // be asking a question that was already answered.
+        if (self.refused != null) return false;
+        const result = self.sink.write_fn(self.sink.context, bytes);
+        if (result == .ok) return true;
+        self.refused = result;
+        return false;
+    }
+};
+
 fn sessionExportCheckpoint(
     context: ?*anyopaque,
     limits: checkpoint.Limits,
@@ -1025,7 +1082,32 @@ fn sessionExportCheckpoint(
     last_compact_id: u64,
     model: []const u8,
 ) Error!checkpoint.Outcome {
-    return forward(.session, "export_checkpoint", context, .{ limits, sink, last_run_id, last_compact_id, model });
+    var stream: ExportStream = .{ .sink = sink };
+    var outcome = try forwardStreaming(
+        .session,
+        "export_checkpoint",
+        context,
+        .{ limits, sink, last_run_id, last_compact_id, model },
+        stream.chunks(),
+    );
+    const result = stream.refused orelse return outcome;
+    // The caller's sink stopped taking the bytes, so the export did not go
+    // where the caller asked it to. Handing back the exporting half's success
+    // would be handing back a description of bytes that are not there.
+    outcome.deinit();
+    return .{
+        .failure = .{
+            .stage = .checkpoint_export,
+            .reason = switch (result) {
+                .cancelled => .cancelled,
+                .io_failed => .io_failed,
+                // `ok` cannot reach here -- it is the arm that did not refuse --
+                // and a contract failure is this build's two halves disagreeing.
+                .ok, .contract_failed => .dependency_contract,
+            },
+            .disposition = .reusable,
+        },
+    };
 }
 
 // -------------------------------------------------------------------------
@@ -1385,7 +1467,7 @@ const Peer = struct {
         return .{
             .allocator = testing.allocator,
             .runtime = self.runtime,
-            .store = call_frame.BlobStore.empty,
+            .chunks = call_frame.ChunkWriter.unavailable(),
             .sessions = self.sessions,
             .runs = undefined,
             .leases = undefined,
