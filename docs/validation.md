@@ -208,7 +208,7 @@ npm test
 
 无签名打包作业执行发布使用的同一组打包脚本：Windows x64 先安装固定版本的 Inno Setup 7，再执行 `npm run package:windows -- x64 --signing none`；macOS arm64 在 `macos-26` 镜像上执行 `npm run package:macos -- arm64 --signing none`，该镜像由 Icon Composer 的 actool 构建号允许列表决定，与测试作业故意落后一档的 `macos-15` 不构成漂移。两个平台共同覆盖 staged AgentCore bundle 校验、ReleaseSafe 构建、AgentCore 运行资源 staging 与复核；Windows 另外覆盖 automation isolation、主包禁入内容、用固定编译器产出安装器并度量其摘要与字节，macOS 另外覆盖 Icon Composer 编译与 actool 版本闸门、最低系统版本、托盘图标身份、单架构检查、Mach-O section 比对与 .app 结构验证。安装器字节数只上报到 run summary，不作断言。该作业只证明打包路径在当次提交上可以执行到无签名产物为止，不证明签名、公证、DMG、交互安装、安装后启动或更新；Windows arm64 与 macOS x64 仍只在发布 tag 上由 [Release](../.github/workflows/release.yml) 的打包作业覆盖，macOS 13.0 最低系统与完整分发矩阵的缺口不因此关闭。
 
-Node、Native 与打包作业按目标 lock 恢复原始[官方发布清单](agentcore-abi-v1.md#11-官方发布来源与手动更新)与压缩包的下载缓存，每次校验后经现有 stager 安装 bundle。缓存未命中时从官方地址下载，暂时性网络错误、HTTP 429 与 5xx 共用一次重试额度。校验或安装失败使对应作业失败。缓存未命中且安装成功时立即保存下载缓存。
+Node、Native 与打包作业从 `node_modules` 取目标的 [npm 平台包](agentcore-abi-v1.md#11-官方发布来源与手动更新)，每次校验后经现有 stager 安装 bundle。校验或安装失败使对应作业失败。
 
 Node、Native 与打包作业共用 Zig 依赖包缓存。Native 编译缓存按平台、工具链和依赖区分，由 `main` 上通过的 Native 作业填充，PR 的 Native 作业只读恢复；打包作业没有自己的编译缓存，每次从零编译。缓存未命中时由正常验证入口准备依赖并编译。四个作业还共用按平台与 lock 区分的 node_modules 缓存：命中时跳过 `npm ci`（该命令会先删除已安装目录再安装，跳过才能用上恢复结果），未命中或没有该缓存步骤时照常安装。
 

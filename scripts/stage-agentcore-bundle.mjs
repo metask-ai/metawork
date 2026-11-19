@@ -3,6 +3,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readFile,
   readdir,
   rename,
   rm,
@@ -11,11 +12,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import process from "node:process";
 import {
+  defaultAgentCoreTargetId,
   loadLockedAgentCoreManifest,
+  policyForTargetId,
   readAgentCoreBundleTargetId,
   stagedAgentCoreBundleRoot,
   validateAgentCoreBundle,
 } from "./agentcore-bundle.mjs";
+import { runChild } from "./run-child-process.mjs";
 
 async function exists(filePath) {
   try {
@@ -191,21 +195,79 @@ export async function stageAgentCoreBundle({
   return { target, manifest: lock.manifest };
 }
 
+// `npm ci` installs only this host's platform package, so a cross-compiled
+// target's is not in node_modules yet. Installing it by name puts it beside
+// the host's and changes nothing else there: --force lets a package for
+// another os/cpu in, and --no-save leaves package.json and the lockfile alone.
+async function installWithNpm(repositoryRoot, spec) {
+  const npmArguments = ["install", "--no-save", "--force", spec];
+  console.log(`npm ${npmArguments.join(" ")}`);
+  // npm is a .cmd shim on Windows, which cannot be started without cmd.exe.
+  const [command, arguments_] =
+    process.platform === "win32"
+      ? [
+          path.join(process.env.SystemRoot, "System32", "cmd.exe"),
+          ["/d", "/s", "/c", "npm", ...npmArguments],
+        ]
+      : ["npm", npmArguments];
+  await runChild(command, arguments_, {
+    cwd: repositoryRoot,
+    label: `Install ${spec}`,
+  });
+}
+
+// node_modules is the one place a bundle comes from. npm holds a by-name
+// install to no lockfile integrity, so what makes the content the locked one
+// is the same thing as for any candidate: the target lock checked on staging.
+export async function stageAgentCorePackage({
+  repositoryRoot,
+  targetId,
+  install = installWithNpm,
+  validationOptions = {},
+}) {
+  const name = policyForTargetId(targetId).npmPackage;
+  const source = path.join(repositoryRoot, "node_modules", name);
+  if (!(await exists(source))) {
+    const version = JSON.parse(
+      await readFile(path.join(repositoryRoot, "package.json"), "utf8"),
+    ).devDependencies?.["@zogien/agentcore"];
+    // The version goes on a command line, so only the exact pinned form does.
+    if (
+      typeof version !== "string" ||
+      !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-fork\.[1-9]\d*$/.test(version)
+    )
+      throw new Error(
+        "package.json must pin @zogien/agentcore to an exact fork release",
+      );
+    await install(repositoryRoot, `${name}@${version}`);
+  }
+  return stageAgentCoreBundle({
+    repositoryRoot,
+    source,
+    validationOptions: { ...validationOptions, npmPackage: true },
+  });
+}
+
 const isMain =
   process.argv[1] !== undefined &&
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (isMain) {
-  const [source] = process.argv.slice(2);
-  if (!source || process.argv.length !== 3 || !path.isAbsolute(source)) {
+  const arguments_ = process.argv.slice(2);
+  if (arguments_.length > 1) {
     throw new Error(
-      "usage: node scripts/stage-agentcore-bundle.mjs /absolute/path/to/validated/bundle",
+      "usage: node scripts/stage-agentcore-bundle.mjs [target-id | /absolute/path/to/validated/bundle]",
     );
   }
   const repositoryRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     "..",
   );
-  const result = await stageAgentCoreBundle({ repositoryRoot, source });
+  // No argument means this machine's own target; a cross-compiled build names
+  // the target it is building for.
+  const [argument = defaultAgentCoreTargetId()] = arguments_;
+  const result = path.isAbsolute(argument)
+    ? await stageAgentCoreBundle({ repositoryRoot, source: argument })
+    : await stageAgentCorePackage({ repositoryRoot, targetId: argument });
   console.log(
     `staged ${result.manifest.version} (${result.manifest.source.commit}) at ${result.target}`,
   );

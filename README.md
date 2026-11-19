@@ -25,7 +25,7 @@ MetaWork 是一款面向本地工作区的桌面 Agent 应用。用户可以围�
 ```bash
 npm ci
 node scripts/setup-macos-local-signing.mjs setup
-node scripts/stage-agentcore-bundle.mjs /absolute/path/to/aarch64-macos-bundle
+node scripts/stage-agentcore-bundle.mjs
 npm run dev
 ```
 
@@ -35,7 +35,7 @@ npm run dev
 
 ```powershell
 npm ci
-node scripts/stage-agentcore-bundle.mjs C:\absolute\path\to\x86_64-windows.win10...win11_dt-msvc
+node scripts/stage-agentcore-bundle.mjs
 npm run dev
 ```
 
@@ -76,7 +76,7 @@ npm run package:windows
 
 ## AgentCore bundle
 
-按[官方发布来源与手动更新流程](docs/agentcore-abi-v1.md#11-官方发布来源与手动更新)下载、校验并解压与当前 target lock 匹配的包，将包含包内 `manifest.json` 的 bundle 根目录传给上述 `stage-agentcore-bundle.mjs` 命令。
+`npm ci` 已把本机 target 的 AgentCore 平台包装入 `node_modules`；上述 `stage-agentcore-bundle.mjs` 命令按[官方发布来源与手动更新流程](docs/agentcore-abi-v1.md#11-官方发布来源与手动更新)校验后把它安装到 `.agentcore/bundles/<target-id>`。省略参数时取本机 target，交叉构建时传入 target id。
 
 需要验证尚未 stage 的 candidate 时运行：
 

@@ -15,6 +15,7 @@ const targetPolicies = [
   {
     supportedHosts: [{ platform: "win32", architectures: ["x64", "arm64"] }],
     id: "aarch64-windows-msvc",
+    npmPackage: "@zogien/agentcore-win32-arm64",
     architecture: "aarch64",
     os: "windows",
     abi: "msvc",
@@ -35,6 +36,7 @@ const targetPolicies = [
   {
     supportedHosts: [{ platform: "win32", architectures: ["x64"] }],
     id: "x86_64-windows-msvc",
+    npmPackage: "@zogien/agentcore-win32-x64",
     architecture: "x86_64",
     os: "windows",
     abi: "msvc",
@@ -55,6 +57,7 @@ const targetPolicies = [
   {
     supportedHosts: [{ platform: "darwin", architectures: ["arm64"] }],
     id: "aarch64-macos",
+    npmPackage: "@zogien/agentcore-darwin-arm64",
     architecture: "aarch64",
     os: "macos",
     abi: "none",
@@ -75,6 +78,7 @@ const targetPolicies = [
   {
     supportedHosts: [{ platform: "darwin", architectures: ["arm64", "x64"] }],
     id: "x86_64-macos",
+    npmPackage: "@zogien/agentcore-darwin-x64",
     architecture: "x86_64",
     os: "macos",
     abi: "none",
@@ -364,8 +368,8 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
   );
   requireValue(
     version === version.trim() &&
-      /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version),
-    "AgentCore version must be a stable release (major.minor.patch)",
+      /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-fork\.[1-9]\d*$/.test(version),
+    "AgentCore version must be a fork release (major.minor.patch-fork.N)",
   );
 
   const zigVersion = requireString(
@@ -524,7 +528,15 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     },
   );
 
-  const actualEntries = (await listBundleEntries(root)).sort();
+  // An npm platform package is the bundle with npm's own two files beside it.
+  // Only those two names are let through, and only for a caller that says the
+  // directory is such a package; the staged preflight never says so.
+  const actualEntries = (await listBundleEntries(root))
+    .filter(
+      (entry) =>
+        !options.npmPackage || !["LICENSE", "package.json"].includes(entry),
+    )
+    .sort();
   requireValue(
     isDeepStrictEqual(actualEntries, expectedBundleEntries(declaredFiles)),
     "AgentCore bundle filesystem contains missing or unknown entries",

@@ -257,7 +257,7 @@ Models 声明的图片输入能力必须随执行配置冻结，并在 Session c
 
 日期采样、系统时区解析、日期文本和注入均由 AgentCore 拥有。Agent 只选择官方系统时间策略，不向 Runtime 注入时钟 callback，不通过 Application 或 Native SDK 取得日期与时区，不提供 Host context blocks。普通文本与多模态 Run 在 Core 开始执行时取得本轮日期；排队和恢复后的新 Run 同样重新采样，一个 Run 内的工具循环使用本轮快照。Run 显式选择官方 `TIME_CONTEXT_SYSTEM`，`utc_offset_minutes` 为零，Host `context_blocks` 为 null、count 为零。
 
-Core 将日期写入本轮用户记录的 `currentDate` system-reminder，系统提示保持稳定；历史和 checkpoint 中旧 Run 的日期继续由 Core 消费，不由 Host 删除、重写或重放。Skill Run 按官方语义不携带日期 block，独立 Completion 和 manual compact 不建立 Host 日期注入。系统日期的产品范围见 [产品需求](requirements.md#54-agent-交互)，验证责任与已知缺口见 [验证规范](validation.md)。
+Core 将日期写入本轮用户记录的 `currentDate` system-reminder，系统提示保持稳定；历史和 checkpoint 中旧 Run 的日期继续由 Core 消费，不由 Host 删除、重写或重放。Skill Run 按官方语义同样携带日期 block，独立 Completion 和 manual compact 不建立 Host 日期注入。系统日期的产品范围见 [产品需求](requirements.md#54-agent-交互)，验证责任与已知缺口见 [验证规范](validation.md)。
 
 ### 每 Session 规则
 

@@ -93,6 +93,8 @@ pub fn main(init: std.process.Init) !void {
         runtime.deinit();
     }
     const options = agent.SessionOpenOptions{
+        .task_id = 1,
+        .binding_epoch = 1,
         .model_binding = .{
             .target = .{
                 .provider_id = "local-multimodal-acceptance",

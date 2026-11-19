@@ -270,7 +270,6 @@ jobs:
       contents: read
     env:
       TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
-      METAWORK_AGENTCORE_DOWNLOAD_CACHE: .agentcore/download-cache
     strategy:
       fail-fast: false
       matrix:
@@ -322,26 +321,12 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Restore AgentCore release download
-        id: agentcore-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
-          key: agentcore-download-v1-${{ matrix.target }}-${{ hashFiles(matrix.lock) }}
-
       # An explicit target, including the one that is not the runner's own
-      # architecture. The downloader accepts any target present in a lock
-      # without consulting the host, which is what makes ARM64 packaging
-      # possible here at all.
+      # architecture. `npm ci` installed only this runner's platform package;
+      # the stage entry installs the named target's by name when it is missing,
+      # which is what makes ARM64 packaging possible here at all.
       - name: Stage locked AgentCore bundle
-        run: node scripts/download-agentcore-bundle.mjs ${{ matrix.target }}
-
-      - name: Save verified AgentCore release download
-        if: steps.agentcore-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
-          key: ${{ steps.agentcore-cache.outputs.cache-primary-key }}
+        run: node scripts/stage-agentcore-bundle.mjs ${{ matrix.target }}
 
       - name: Install the pinned Inno Setup compiler
         shell: pwsh
@@ -431,7 +416,6 @@ jobs:
       contents: read
     env:
       TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
-      METAWORK_AGENTCORE_DOWNLOAD_CACHE: .agentcore/download-cache
     strategy:
       fail-fast: false
       # Both targets on arm64 hardware, which is what the release machine is:
@@ -491,22 +475,8 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Restore AgentCore release download
-        id: agentcore-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
-          key: agentcore-download-v1-${{ matrix.target }}-${{ hashFiles(matrix.lock) }}
-
       - name: Stage locked AgentCore bundle
-        run: node scripts/download-agentcore-bundle.mjs ${{ matrix.target }}
-
-      - name: Save verified AgentCore release download
-        if: steps.agentcore-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ${{ env.METAWORK_AGENTCORE_DOWNLOAD_CACHE }}
-          key: ${{ steps.agentcore-cache.outputs.cache-primary-key }}
+        run: node scripts/stage-agentcore-bundle.mjs ${{ matrix.target }}
 
       # Unlike Windows, macOS packaging defaults to --signing required, so the
       # unsigned mode is asked for explicitly. Everything up to the disk image

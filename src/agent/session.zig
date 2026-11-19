@@ -2126,7 +2126,7 @@ pub const Session = struct {
         options.struct_size = @sizeOf(wire.RunOptionsV1);
         options.max_turns = wire.MAX_TURNS_V1;
         // Core samples the process date and timezone at Run admission.
-        // Skill Runs carry no date block under the same SYSTEM policy.
+        // Skill Runs carry the date block under the same SYSTEM policy.
         options.time_context_code = wire.TIME_CONTEXT_SYSTEM;
         options.stream_retry_budget = stream_retry_budget;
         self.core_call_in_progress = true;
