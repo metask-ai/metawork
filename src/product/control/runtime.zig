@@ -4597,14 +4597,8 @@ pub const Runtime = struct {
         return result;
     }
 
-    /// Accepts an edited earlier message and reruns the conversation from it.
-    ///
-    /// The message is admitted through the same path as any other, so a Run
-    /// still in flight only has to be stopped: the edited message waits in
-    /// the queue, and the Task reaching idle is what starts its Run, with the
-    /// rewind in front of it. Stopping goes through the ordinary Run
-    /// cancellation rather than `stopTask`, which would retire the message
-    /// that was just accepted along with the rest of the batch.
+    /// Accepts an edited earlier message when the Task is idle and reruns
+    /// the conversation from it.
     pub fn editTaskInput(
         self: *Runtime,
         operation_id: []const u8,
@@ -4623,11 +4617,6 @@ pub const Runtime = struct {
             return result;
         };
         result.outcome = .accepted;
-        // Only a Run is in the way. A compaction or a restore the user asked
-        // for finishes on its own, and the edited message waits behind it.
-        if (self.task_runtime.activeRunId(task_id)) |run| {
-            _ = self.task_runtime.cancelRun(task_id, run, .edit_and_rerun, self.taskRuntimeOperationEffects()) catch false;
-        }
         self.reapTaskInputResources();
         self.advanceTaskInputs();
         self.commitTaskStateNoFail();

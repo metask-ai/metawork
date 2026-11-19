@@ -10833,45 +10833,58 @@ test "an edited message rewinds the Conversation and reruns in its place" {
     );
 }
 
-test "editing during a Run stops it under its own cause and reruns once idle" {
+test "editing a running Task is rejected until the current reply completes" {
     const scenario = try ReviewScenario.initForInput(.controlled);
     defer scenario.deinit();
     defer fake_core.releaseControlled();
     const task = scenario.control.testTask(scenario.task_id).?;
     const running = task.runtime.active_run_id;
-    try std.testing.expectEqual(@as(?u64, 1), task_state.findRun(task.durable.runs, running).?.conversation_position);
+    const original = task_state.findRun(task.durable.runs, running).?;
+    try std.testing.expectEqual(@as(?u64, 1), original.conversation_position);
 
-    // The Run is held at the fixture, so this edit has to stop it first. The
-    // edited message waits in the ordinary queue until the Task is idle.
-    const accepted = try scenario.control.editTaskInput(
+    const rejected = try scenario.control.editTaskInput(
         "edit-the-running-turn",
         scenario.task_id,
         running,
         .{ .text = "edited while running" },
     );
-    try std.testing.expectEqual(.accepted, accepted.outcome);
+    try std.testing.expectEqual(.rejected, rejected.outcome);
+    try std.testing.expectEqual(.task_busy, rejected.reason.?);
+    var response: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&response);
+    try scenario.control.writeSendInputResult(&writer, rejected);
+    try std.testing.expectEqualStrings(
+        std.mem.trimEnd(u8, @embedFile("edit_input_busy.fixture"), "\r\n"),
+        writer.buffered(),
+    );
+    try std.testing.expect(findSubmission(task, "edit-the-running-turn") == null);
+    try std.testing.expectEqual(.none, original.pending_termination.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), fake_core.rewind_calls);
+    try std.testing.expectEqual(running, task.runtime.active_run_id);
 
     fake_core.setNextPlan(.immediate);
     fake_core.releaseControlled();
     try settleInputScenario(scenario);
+    const completed = task_state.findRun(task.durable.runs, running).?;
+    try std.testing.expectEqual(.completed, task_state.productTerminalFacts(completed).?.outcome);
 
-    // A Stop the user did not press. History says which of the two happened.
-    const stopped = task_state.findRun(task.durable.runs, running).?;
-    try std.testing.expectEqual(
-        task_state.RunCause.edit_and_rerun,
-        task_state.productTerminalFacts(stopped).?.cause.?,
+    const accepted = try scenario.control.editTaskInput(
+        "edit-after-reply",
+        scenario.task_id,
+        running,
+        .{ .text = "edited after completion" },
     );
+    try std.testing.expectEqual(.accepted, accepted.outcome);
+    try settleInputScenario(scenario);
+
     const rerun = for (task.durable.runs) |entry| {
         const run = entry orelse continue;
         if (run.id != running) break run.id;
     } else return error.TestUnexpectedResult;
-    // Core had already taken the interrupted turn, so this was a real rewind
-    // and the rerun takes that turn's own position.
     try std.testing.expectEqual(@as(u64, 1), fake_core.rewind_calls);
     try std.testing.expectEqual(@as(?u64, 1), task_state.findRun(task.durable.runs, rerun).?.conversation_position);
-    try std.testing.expect(task_policy.runSuperseded(task, stopped));
-    try std.testing.expect(!task_policy.runProjected(task, stopped));
+    try std.testing.expect(task_policy.runSuperseded(task, completed));
+    try std.testing.expect(!task_policy.runProjected(task, completed));
     try std.testing.expect(task_policy.runProjected(task, task_state.findRun(task.durable.runs, rerun).?));
     // The Conversation is the context before the edited message plus the
     // rerun's own turn.
@@ -10884,37 +10897,30 @@ test "an edit drops the messages still waiting for a Run of their own" {
     defer fake_core.releaseControlled();
     const task = scenario.control.testTask(scenario.task_id).?;
     const running = task.runtime.active_run_id;
-
-    // A message that cannot join the Run in flight waits for a Run of its
-    // own: an attachment, a resend, or -- as here -- an edited message, held
-    // in the queue while the stop it asked for is still in flight. Whatever
-    // put it there, its text was written for a Conversation the next rewind
-    // changes.
-    const first_edit = try scenario.control.editTaskInput(
-        "edit-once",
-        scenario.task_id,
-        running,
-        .{ .text = "first edit" },
-    );
-    try std.testing.expectEqual(.accepted, first_edit.outcome);
-    try std.testing.expect(findSubmission(task, "edit-once").?.state == .waiting);
-
-    // The user changes their mind before any of it has run.
-    const second_edit = try scenario.control.editTaskInput(
-        "edit-again",
-        scenario.task_id,
-        running,
-        .{ .text = "second edit" },
-    );
-    try std.testing.expectEqual(.accepted, second_edit.outcome);
-    // The first message left the record outright. Nothing retired stands in a
-    // conversation it no longer belongs to, and the Renderer puts its text
-    // back in the composer instead.
-    try std.testing.expect(findSubmission(task, "edit-once") == null);
-    try std.testing.expect(findSubmission(task, "edit-again").?.state == .waiting);
-
-    fake_core.setNextPlan(.immediate);
     fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+
+    {
+        // A worker can still be cleaning up (for example, generating a
+        // title) after the operation has completed. Its lease holds pending
+        // inputs even though the Task has no active operation.
+        var cleanup = try task.runtime.worker_leases.acquire();
+        defer cleanup.deinit();
+        const waiting = try scenario.control.sendInput("waiting", scenario.task_id, .{ .text = "queued follow-up" });
+        try std.testing.expectEqual(.accepted, waiting.outcome);
+        try std.testing.expectEqual(.waiting, findSubmission(task, "waiting").?.state);
+
+        const edited = try scenario.control.editTaskInput(
+            "edit-previous",
+            scenario.task_id,
+            running,
+            .{ .text = "edited earlier turn" },
+        );
+        try std.testing.expectEqual(.accepted, edited.outcome);
+        try std.testing.expect(findSubmission(task, "waiting") == null);
+        try std.testing.expectEqual(.waiting, findSubmission(task, "edit-previous").?.state);
+        try std.testing.expectEqual(@as(u64, 0), fake_core.rewind_calls);
+    }
     try settleInputScenario(scenario);
 
     // One rewind, one rerun, and it is the message that survived.
@@ -10924,7 +10930,7 @@ test "an edit drops the messages still waiting for a Run of their own" {
         if (run.id != running) break run.id;
     } else return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(
-        "second edit",
+        "edited earlier turn",
         task_state.findRun(task.durable.runs, rerun).?.input.text.value,
     );
     try expectFakeConversation(0, 2);

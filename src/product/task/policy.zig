@@ -266,7 +266,7 @@ pub fn pendingTerminationSignal(
             .none => unreachable,
             // Core has no Product stop reason of its own; every one of these
             // reaches it as a cancellation.
-            .user_cancel, .approval_mode_change, .edit_and_rerun => .user_cancel,
+            .user_cancel, .approval_mode_change => .user_cancel,
             .timeout => .timeout,
             .session_close => .session_close,
             .app_shutdown => .app_shutdown,
@@ -278,10 +278,8 @@ pub fn pendingExternalInterruption(
     compact: *const task_state.CompactRecord,
 ) agent.ExternalInterruption {
     return switch (compact.pending_interruption.load(.acquire)) {
-        // Neither an approval change nor an edit interrupts a Compact: an
-        // edited message waits behind it, and neither mutation is admitted
-        // while the other is running.
-        .none, .approval_mode_change, .edit_and_rerun => unreachable,
+        // A change in approval mode cannot interrupt a Compact.
+        .none, .approval_mode_change => unreachable,
         .user_cancel => .user_cancel,
         .timeout => .timeout,
         .session_close => .session_close,
@@ -328,7 +326,6 @@ pub fn productCancelCause(
     if (cause != .user_cancel) return cause;
     return switch (run.pending_termination.load(.acquire)) {
         .approval_mode_change => .approval_mode_change,
-        .edit_and_rerun => .edit_and_rerun,
         else => cause,
     };
 }

@@ -1092,6 +1092,34 @@ test("sendInput addresses Task acceptance and validates its exact operation", as
   }
 });
 
+test("editInput decodes a busy Task refusal without sending Stop", async () => {
+  const result = JSON.parse(
+    readFileSync(
+      new URL("../tests/product/edit_input_busy.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return result;
+    }),
+  });
+  const input = { kind: "text", text: "edited message" };
+  const { operationId, taskId } = result;
+  assert.deepEqual(
+    await client.editInput(operationId, taskId, "2", input),
+    result,
+  );
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.tasks.editInput",
+      payload: { operationId, taskId, runId: "2", input },
+    },
+  ]);
+});
+
 test("input timeout and late response never resend or retarget", async () => {
   let resolve,
     calls = 0;

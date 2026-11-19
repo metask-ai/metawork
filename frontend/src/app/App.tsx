@@ -3492,7 +3492,7 @@ export default function App() {
 
   async function editRunInput(taskId: string, runId: string, text: string) {
     const key = `input-edit:${taskId}:${runId}`;
-    if (bridgeUnavailable || inputRetryActions.current.has(key)) return;
+    if (bridgeUnavailable || inputRetryActions.current.has(key)) return false;
     inputRetryActions.current.add(key);
     const audience = { scope: "task" as const, taskId };
     const feedback = beginOperationFeedback(key, audience);
@@ -3510,11 +3510,13 @@ export default function App() {
           ? null
           : attentionStatus(mutationReasonMessageId(result.reason), audience),
       );
+      return result.outcome === "accepted";
     } catch {
       settleOperationFeedback(
         feedback,
         attentionStatus("feedback.unconfirmed", audience),
       );
+      return false;
     } finally {
       inputRetryActions.current.delete(key);
       await refreshSnapshot().catch(() => undefined);
@@ -6247,9 +6249,7 @@ export default function App() {
                 onDiscardInputRetry={(taskId, operationId) =>
                   void actOnFailedInput(taskId, operationId, true)
                 }
-                onEditInput={(taskId, runId, text) =>
-                  void editRunInput(taskId, runId, text)
-                }
+                onEditInput={editRunInput}
                 onOpenSettings={openSettings}
                 recharge={{
                   available: snapshot.account.state === "authenticated",

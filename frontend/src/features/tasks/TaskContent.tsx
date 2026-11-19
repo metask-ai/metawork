@@ -278,9 +278,10 @@ function RunInputEditor({
   disabled: boolean;
   onChange: (text: string) => void;
   onCancel: () => void;
-  onSend: (text: string) => void;
+  onSend: (text: string) => Promise<void>;
 }) {
   const { t } = useI18n();
+  const [sending, setSending] = useState(false);
   const editInput = useRef<HTMLTextAreaElement>(null);
   const focusEditInput = useCallback((input: HTMLTextAreaElement | null) => {
     editInput.current = input;
@@ -293,19 +294,27 @@ function RunInputEditor({
   const noticeId = useId();
   useAutosizeTextarea(editInput, text);
   const trimmed = text.trim();
+  const locked = disabled || sending;
   return (
     <form
       className="run-input-edit"
       data-reading-id={readingId}
-      onSubmit={(event) => {
+      onSubmit={async (event) => {
         event.preventDefault();
-        if (!disabled && trimmed) onSend(trimmed);
+        if (locked || !trimmed) return;
+        setSending(true);
+        try {
+          await onSend(trimmed);
+        } finally {
+          setSending(false);
+        }
       }}
     >
       <Composer>
         <textarea
           ref={focusEditInput}
           value={text}
+          readOnly={locked}
           rows={1}
           aria-label={t("input.edit")}
           aria-describedby={noticeId}
@@ -320,7 +329,7 @@ function RunInputEditor({
             size="sm"
             variant="primary"
             className="run-input-edit-send"
-            disabled={disabled || !trimmed}
+            disabled={locked || !trimmed}
           >
             {t("run.submit")}
           </Button>
@@ -521,7 +530,11 @@ export function TaskContent({
    * text is this run's own recorded input as the user edited it; nothing here
    * reads the conversation back from Core.
    */
-  onEditInput?: (taskId: string, runId: string, text: string) => void;
+  onEditInput?: (
+    taskId: string,
+    runId: string,
+    text: string,
+  ) => Promise<boolean>;
   onOpenSettings?: (target: "account" | "models") => void;
   /** Current Account recharge eligibility; never inherited from Run history. */
   recharge?: { available: boolean; busy: boolean; onOpen: () => void };
@@ -736,6 +749,8 @@ export function TaskContent({
       onEditInput &&
       run.editAdmitted &&
       synchronized &&
+      task.activeOperation === null &&
+      task.approvalChange === null &&
       task.lifecycle !== "closing" &&
       !task.sessionCloseRetryAvailable
         ? editableRunText(run.input)
@@ -746,12 +761,13 @@ export function TaskContent({
         <RunInputEditor
           readingId={readingId}
           text={editing.text}
-          disabled={!synchronized}
+          disabled={editText === null}
           onChange={(text) => setEditing({ ...editing, text })}
           onCancel={() => setEditing(null)}
-          onSend={(text) => {
-            setEditing(null);
-            onEditInput?.(task.id, run.id, text);
+          onSend={async (text) => {
+            if (await onEditInput?.(task.id, run.id, text)) {
+              setEditing((current) => (current === editing ? null : current));
+            }
           }}
         />
       );

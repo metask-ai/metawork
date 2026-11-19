@@ -500,6 +500,7 @@ pub const EditError = error{
     NoSuchRun,
     RunChanged,
     TaskClosing,
+    TaskBusy,
     /// There is no recorded position for this Run, so nothing can name it.
     RewindUnavailable,
     /// The position was summarized away: the turn is gone from the
@@ -2583,6 +2584,7 @@ pub const Runtime = struct {
     pub fn editablePosition(self: *const Runtime, task_id: u64, run_id: u64) EditError!u64 {
         const task = self.findConst(task_id) orelse return error.UnknownTask;
         if (!acceptsOrdinaryInput(task)) return error.TaskClosing;
+        if (task.runtime.active_operation != .none or task.approval_change != null) return error.TaskBusy;
         const run = task_state.findRunConst(task.durable.runs, run_id) orelse return error.NoSuchRun;
         return switch (task_policy.editablePosition(task, run)) {
             .position => |position| position,
@@ -2596,10 +2598,8 @@ pub const Runtime = struct {
         };
     }
 
-    /// Accepts an edited earlier message. The message is admitted through the
-    /// ordinary input path and carries the position to rewind to, so the
-    /// existing queue drives it: it waits while a Run is still in flight and
-    /// starts its own Run once the Task is idle, rewinding first.
+    /// Accepts an edited earlier message while the Task has no active
+    /// operation. The queue still waits for Core quiescence before rewinding.
     ///
     /// This is deliberately not the resend of #115/#149. That one is a new
     /// submission appended to the Conversation; this one replaces a turn

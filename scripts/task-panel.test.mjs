@@ -698,6 +698,8 @@ function task(overrides = {}) {
     deletionStatus: "idle",
     continuationAvailable: true,
     archived: false,
+    activeOperation: null,
+    approvalChange: null,
     currentRunId: "0",
     currentRunPhase: null,
     context: { pressure: null, lastAutoCompact: null },
@@ -2693,7 +2695,7 @@ test("input metadata puts the timestamp before accessible message action icons",
   const user = userEvent.setup({ document: dom.window.document });
   const submittedAt = new Date(2026, 8, 11, 10, 25).getTime();
   context.mock.method(Date, "now", () => submittedAt + 4 * 24 * 60 * 60 * 1000);
-  const onEditInput = context.mock.fn();
+  const onEditInput = context.mock.fn(async () => true);
   const text = "Original editable text";
   const view = render(
     taskContentElement(
