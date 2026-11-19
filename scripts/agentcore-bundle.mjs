@@ -368,8 +368,8 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
   );
   requireValue(
     version === version.trim() &&
-      /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version),
-    "AgentCore version must be a stable release (major.minor.patch)",
+      /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-fork\.[1-9]\d*$/.test(version),
+    "AgentCore version must be a fork release (major.minor.patch-fork.N)",
   );
 
   const zigVersion = requireString(

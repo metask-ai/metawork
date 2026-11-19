@@ -2,9 +2,9 @@
   "schema_version": 1,
   "vendor": "metask",
   "name": "agentcore",
-  "version": "0.15.0",
+  "version": "0.15.0-fork.1",
   "source": {
-    "commit": "3f568b103a4d784765d4a547dfe6046c70fe10f6",
+    "commit": "0300c892c26ffe24fe1ceb88494bae9bbf212d55",
     "dirty": false
   },
   "toolchain": {
@@ -55,15 +55,19 @@
   "files": [
     {
       "path": "lib/libmetask_agentcore.a",
-      "sha256": "ff9a0617d6579d26e08dc4486ac4f960cb65d30ddc2865eda489196c7e900c2e"
+      "sha256": "60470bf01406f3b263cbded4343eb99947c83f7fd97705ec81dba7c5c0587a17"
     },
     {
       "path": "lib/libmetask_agentcore.dylib",
-      "sha256": "46e70c5594c7da6c2ab24810f50b632cf7e23f3c4d1e5b1b9eb980351708faf3"
+      "sha256": "145abf435f6594f2f28da27c171ef409621059fbc62b3fb847b77c634244545a"
     },
     {
       "path": "bin/rg",
       "sha256": "0c9a0066db0d26b640777db88045b0ccdd58509a746700e43e1c4ff8707a5ed0"
+    },
+    {
+      "path": "bin/metacodes-fs-helper",
+      "sha256": "8202b2c0d87775e2c9ab8ba2be59bf06f7af2d283ca85cb77cc97ecde3366d3e"
     },
     {
       "path": "bin/ripgrep-LICENSE-MIT",
@@ -71,7 +75,7 @@
     },
     {
       "path": "include/metask/agentcore.h",
-      "sha256": "21e3b6af05f19fa22134da3f89ac11bec1146be842cf62bf3004cf6256bb372f"
+      "sha256": "cce8e5a37112a5e705dad84cc252274b13e3873facc131962a5a4423dfb6ba11"
     },
     {
       "path": "bindings/zig/build.zig",
@@ -79,7 +83,7 @@
     },
     {
       "path": "bindings/zig/build.zig.zon",
-      "sha256": "fa9ba1da831547e1e7d9bff80f6d2a1a6e32be96177573ba2481ae382b789dc5"
+      "sha256": "128b8518137d93943613184f6abeeca8d69914683e7ec33cf209a64486079592"
     },
     {
       "path": "bindings/zig/src/root.zig",
@@ -91,15 +95,15 @@
     },
     {
       "path": "bindings/zig/src/types.zig",
-      "sha256": "95c4b26cce8f3a10196ebac60751223eefd04c92335d7ab0654d0ac58b5b0228"
+      "sha256": "7c1457ebea66f774bd6beb2523e96d2661750416d0bcc4e523e5320ca396c998"
     },
     {
       "path": "bindings/rust/Cargo.toml",
-      "sha256": "aa3560da828e8beb84dd8a720f42b5b27dda127310f9bc95139d3b8023dd1516"
+      "sha256": "dc10083d9628148636ef97696a30e3ae8261bf5785007d8025d0f9013e5d8748"
     },
     {
       "path": "bindings/rust/Cargo.lock",
-      "sha256": "0f82116ce403a89fe19f2c20bb91334155e4f3928e6d0301042d7b773afaa90c"
+      "sha256": "bf9a6da325a29fd6a122da8658e11c3386ff897ba75be31ae9726aa47b5e339d"
     },
     {
       "path": "bindings/rust/link.cfg",
@@ -123,7 +127,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "4d97d07a5fab78ec75e98409f68487a396d8e100cfa3a9b4e9421b98ec299912"
+      "sha256": "430ca9a225b57aacab8bda0d89dbe5cda92e4710acce5a852bce223ae60b81d0"
     }
   ]
 }

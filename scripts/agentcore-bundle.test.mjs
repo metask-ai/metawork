@@ -71,7 +71,7 @@ async function fixture(t, mutateManifest = () => {}) {
     schema_version: 1,
     vendor: "metask",
     name: "agentcore",
-    version: "0.1.0",
+    version: "0.1.0-fork.1",
     source: {
       commit: "0123456789abcdef0123456789abcdef01234567",
       dirty: false,
@@ -559,22 +559,26 @@ test("rejects dirty provenance for a release bundle", async (t) => {
 
 test("rejects development, prerelease and noncanonical release versions", async (t) => {
   for (const version of [
+    "0.1.0",
     "0.1.0-dev+0123456789ab",
     "0.1.0-rc.1",
     "0.1.0+0123456789ab",
-    "v0.1.0",
-    "00.1.0",
-    "0.01.0",
-    "0.1.00",
-    "0.1",
-    "0.1.0\n",
+    "0.1.0-fork.0",
+    "0.1.0-fork.01",
+    "0.1.0-fork.1+0123456789ab",
+    "v0.1.0-fork.1",
+    "00.1.0-fork.1",
+    "0.01.0-fork.1",
+    "0.1.00-fork.1",
+    "0.1-fork.1",
+    "0.1.0-fork.1\n",
   ]) {
     const candidate = await fixture(t, (manifest) => {
       manifest.version = version;
     });
     await assert.rejects(
       validateAgentCoreBundle(candidate.root, injectedChecks),
-      /must be a stable release/,
+      /must be a fork release/,
       version,
     );
   }

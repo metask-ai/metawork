@@ -100,12 +100,12 @@ xcrun notarytool store-credentials "metawork-notary" \
 profile 验证成功后执行：
 
 ```bash
-node scripts/stage-agentcore-bundle.mjs /absolute/path/to/aarch64-macos-bundle
-node scripts/stage-agentcore-bundle.mjs /absolute/path/to/x86_64-macos-bundle
+node scripts/stage-agentcore-bundle.mjs aarch64-macos
+node scripts/stage-agentcore-bundle.mjs x86_64-macos
 npm run package:macos
 ```
 
-stage 入口按 manifest target 将两份 bundle 分别安装到 `.agentcore/bundles/aarch64-macos` 与 `.agentcore/bundles/x86_64-macos`；后一次 stage 不覆盖前一 target。构建从 resolved target 对应 bundle 直接消费其官方 `bindings/zig` package。AgentCore 发布物为压缩包时，先将其完整解压到仓库外的绝对目录，再把该目录交给 stage 入口。
+stage 入口按 manifest target 将两份 bundle 分别安装到 `.agentcore/bundles/aarch64-macos` 与 `.agentcore/bundles/x86_64-macos`；后一次 stage 不覆盖前一 target。构建从 resolved target 对应 bundle 直接消费其官方 `bindings/zig` package。
 
 不带参数的 `package:macos` 等价于 `all`，按 arm64、x64 的固定顺序分别完成完整签名与公证，并输出两个 DMG。只构建一个架构时显式执行：
 

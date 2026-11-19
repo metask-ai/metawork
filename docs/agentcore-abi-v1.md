@@ -15,11 +15,11 @@ Host、SDK 和 bundle 必须使用相同 architecture、OS 与 ABI；Windows 使
 
 ### 1.1 官方发布来源与手动更新
 
-正式发布清单位于 `https://downloads.metask-ai.com/agentcore/v<version>/manifest.json`。更新由用户明确发起并确定版本；开发环境准备沿用当前 lock。正式版本采用不带预发布或 build metadata 的 SemVer `major.minor.patch`，源码身份由独立的 `source.commit` 固定。
+AgentCore 取自 npm 包 `@zogien/agentcore`，由 `package.json` 精确指定版本，`npm ci` 把本机 target 的平台包装入 `node_modules`。更新由用户明确发起并确定版本；开发环境准备沿用当前 lock。版本只接受 `major.minor.patch-fork.N`，不接受其他预发布标识或 build metadata，源码身份由独立的 `source.commit` 固定。
 
-按清单 `targets` 条目的 `custom.target` 选择平台，文件路径相对该版本目录解析，压缩包必须匹配 `length` 与 `hashes.sha256`。解压后的 bundle manifest 必须与发布清单的版本、source commit、target 和 ABI 声明一致；下载清单不替代包内 manifest、repository lock 或 verifier。
+`stage-agentcore-bundle.mjs [target-id]` 按 target 从 `node_modules` 取平台包；交叉 target 的平台包不在其中时，先用 `npm install --no-save --force` 按 `package.json` 的版本装入同一个 `node_modules`。平台包根目录在 bundle 之外只容许 `package.json` 与 `LICENSE`；npm 的安装不替代包内 manifest、repository lock 或 verifier。
 
-升级在同一变更中收口所需 target 的 lock、必要的集成适配与[恢复验收](#3-调用与恢复验收)。ABI revision、required surface、symbol 或稳定外部格式的变化仍须用户显式批准。回退须整体回退 MetaWork 变更与对应产物，运行时不保留旧 ABI 分流或 fallback。
+升级在同一变更中收口 `package.json` 的版本、`package-lock.json`、所需 target 的 lock、必要的集成适配与[恢复验收](#3-调用与恢复验收)。ABI revision、required surface、symbol 或稳定外部格式的变化仍须用户显式批准。回退须整体回退 MetaWork 变更与对应产物，运行时不保留旧 ABI 分流或 fallback。
 
 ## 2. 安装与构建
 
