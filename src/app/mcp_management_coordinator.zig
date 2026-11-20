@@ -218,6 +218,9 @@ const ExchangeInput = struct {
     verifier: []u8,
     redirect_uri: []u8,
     resource: []u8,
+    /// The MCP endpoint itself, which the new token is checked against. It
+    /// can differ from `resource` when the server declares a parent path.
+    endpoint: []u8,
     now_unix_ms: u64,
 };
 
@@ -295,12 +298,10 @@ const Job = struct {
             if (input.private_resource) std.crypto.secureZero(u8, @constCast(resource.resource));
             resource.deinit();
         };
-        const issuer = resource.authorization_servers[0];
-        const authorization = mcp_oauth.discoverAuthorizationServer(
+        const authorization = mcp_oauth.discoverListedAuthorizationServer(
             self.allocator,
             self.transport(&http),
             &resource,
-            issuer,
             &self.diagnostic,
         ) catch {
             self.publish(.{ .failed = .definitive });
@@ -382,7 +383,7 @@ const Job = struct {
         // A token the MCP server refuses is never committed as a grant.
         switch (mcp_oauth.verifyAccessTokenEffect(
             self.transport(&http),
-            input.resource,
+            input.endpoint,
             tokens.access_token.view(),
             &self.diagnostic,
         )) {
@@ -442,6 +443,7 @@ fn deinitJobInput(allocator: std.mem.Allocator, input: *JobInput) void {
             secureFree(allocator, value.verifier);
             allocator.free(value.redirect_uri);
             secureFree(allocator, value.resource);
+            secureFree(allocator, value.endpoint);
         },
     }
     input.* = undefined;
@@ -570,7 +572,7 @@ const ConnectionTestJob = struct {
         const transport = http.transport();
         var resource = mcp_oauth.discoverResourceWithChallengeEffect(self.allocator, transport, self.target.draft.endpoint, self.draft_http_observation.header(), null) catch return fallback;
         defer resource.deinit();
-        var authorization = mcp_oauth.discoverAuthorizationServer(self.allocator, transport, &resource, resource.authorization_servers[0], null) catch return fallback;
+        var authorization = mcp_oauth.discoverListedAuthorizationServer(self.allocator, transport, &resource, null) catch return fallback;
         defer authorization.deinit();
         return if (authorization.registration_endpoint != null) .oauth_automatic else .oauth_existing;
     }
@@ -1954,8 +1956,16 @@ pub const Coordinator = struct {
         var displayed_resource = discovery.resource;
         if (flow.start.private_endpoint != null)
             displayed_resource.resource = mcp_configuration.endpointOrigin(discovery.resource.resource, mcp_startup.configuration_limits.max_oauth_uri_bytes) orelse return error.InvalidState;
+        // A private endpoint shows only its origin, which then says nothing
+        // more than the resource line.
+        const server_endpoint: ?[]const u8 = if (flow.start.private_endpoint == null and
+            !std.mem.eql(u8, flow.start.endpoint, discovery.resource.resource))
+            flow.start.endpoint
+        else
+            null;
         const details = try writeConsentDetails(
             details_storage,
+            server_endpoint,
             &displayed_resource,
             &discovery.authorization,
             attempt.redirectUri(),
@@ -2197,11 +2207,15 @@ pub const Coordinator = struct {
             try self.allocator.dupe(u8, binding.resource);
         var resource_owned = true;
         errdefer if (resource_owned) secureFree(self.allocator, resource);
+        const endpoint = try self.allocator.dupe(u8, flow.start.endpoint);
+        var endpoint_owned = true;
+        errdefer if (endpoint_owned) secureFree(self.allocator, endpoint);
         const now_unix_ms = self.host.nowUnixMs() orelse return error.ClockUnavailable;
         client_id_owned = false;
         verifier_owned = false;
         redirect_owned = false;
         resource_owned = false;
+        endpoint_owned = false;
         code_owned = false;
         secret_owned = false;
         try self.installJob(flow, .{ .exchange = .{
@@ -2213,6 +2227,7 @@ pub const Coordinator = struct {
             .verifier = verifier,
             .redirect_uri = redirect_uri,
             .resource = resource,
+            .endpoint = endpoint,
             .now_unix_ms = now_unix_ms,
         } });
         flow.durable_request_started = true;
@@ -2393,6 +2408,7 @@ pub const Coordinator = struct {
 
 fn writeConsentDetails(
     output: []u8,
+    server_endpoint: ?[]const u8,
     resource: *const mcp_oauth.ResourceDiscovery,
     authorization: *const mcp_oauth.AuthorizationServer,
     redirect_uri: []const u8,
@@ -2403,6 +2419,7 @@ fn writeConsentDetails(
 ) ![]const u8 {
     var writer = std.Io.Writer.fixed(output);
     try writer.writeAll("Confirming replaces any saved authorization. If you cancel after confirmation or the browser cannot finish, you must sign in again.\n\n");
+    if (server_endpoint) |endpoint| try writeQuotedDetailField(&writer, "MCP server", endpoint);
     try writeQuotedDetailField(&writer, "Resource", resource.resource);
     try writeQuotedDetailField(&writer, "Authorization server", authorization.issuer);
     try writeQuotedDetailField(&writer, "Redirect", redirect_uri);
@@ -3313,6 +3330,214 @@ test "MCP Application coordinator asks a Suno-like server for every scope and ne
         try std.testing.expect(oauth.get("grant").? != .null);
         try std.testing.expectEqualStrings("ready", oauth.get("status").?.string);
     }
+}
+
+test "MCP Application coordinator signs in to an AceDataCloud-like server that names its origin as the resource" {
+    const IdentityGenerator = struct {
+        next: u8 = 0x6a,
+
+        fn fill(context: ?*anyopaque, output: *[16]u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            @memset(output, self.next);
+            self.next +%= 1;
+            return true;
+        }
+    };
+    const Effects = struct {
+        fn commit(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
+            return .committed;
+        }
+        fn clear(_: ?*anyopaque) mcp_configuration.PersistenceEffect {
+            return .committed;
+        }
+    };
+    // Shaped like suno.mcp.acedata.cloud (2026-11-20): the protected resource
+    // names the origin, registration insists on both grants and issues a
+    // confidential client, and the token request must name that origin.
+    const AceDataLike = struct {
+        const endpoint = "https://suno.acedata.test/mcp";
+        const origin = "https://suno.acedata.test/";
+        verifications: std.atomic.Value(usize) = .init(0),
+        token_resource_ok: std.atomic.Value(bool) = .init(false),
+
+        fn fetch(context: ?*anyopaque, request: mcp_oauth.Request, _: []u8, _: []u8) mcp_oauth.FetchError!mcp_oauth.Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const authorization = for (request.headers) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) break header.value;
+            } else null;
+            if (std.mem.eql(u8, request.url, endpoint)) {
+                if (authorization) |value| {
+                    if (!std.mem.eql(u8, value, "Bearer acedata-token")) return .{ .status = 401 };
+                    _ = self.verifications.fetchAdd(1, .acq_rel);
+                    return .{ .status = 200, .content_type = "text/event-stream" };
+                }
+                return .{ .status = 401, .www_authenticate = "Bearer error=\"invalid_token\", error_description=\"Authentication required\", resource_metadata=\"https://suno.acedata.test/.well-known/oauth-protected-resource\"" };
+            }
+            if (std.mem.eql(u8, request.url, "https://suno.acedata.test/.well-known/oauth-protected-resource")) return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = "{\"resource\":\"" ++ origin ++ "\",\"authorization_servers\":[\"" ++ origin ++ "\"],\"scopes_supported\":[\"mcp:access\"],\"bearer_methods_supported\":[\"header\"]}",
+            };
+            if (std.mem.eql(u8, request.url, "https://suno.acedata.test/.well-known/oauth-authorization-server")) return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = "{\"issuer\":\"" ++ origin ++ "\",\"authorization_endpoint\":\"https://suno.acedata.test/authorize\",\"token_endpoint\":\"https://suno.acedata.test/token\",\"registration_endpoint\":\"https://suno.acedata.test/register\",\"scopes_supported\":[\"mcp:access\"],\"response_types_supported\":[\"code\"],\"grant_types_supported\":[\"authorization_code\",\"refresh_token\"],\"token_endpoint_auth_methods_supported\":[\"client_secret_post\",\"client_secret_basic\"],\"code_challenge_methods_supported\":[\"S256\"]}",
+            };
+            if (std.mem.eql(u8, request.url, "https://suno.acedata.test/register")) {
+                if (std.mem.indexOf(u8, request.body, "\"grant_types\":[\"authorization_code\",\"refresh_token\"]") == null)
+                    return .{ .status = 400, .content_type = "application/json", .body = "{\"error\":\"invalid_client_metadata\",\"error_description\":\"grant_types must be authorization_code and refresh_token\"}" };
+                return .{ .status = 201, .content_type = "application/json", .body = "{\"client_id\":\"acedata-client\",\"client_secret\":\"acedata-secret\",\"client_secret_expires_at\":0,\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"token_endpoint_auth_method\":\"client_secret_basic\"}" };
+            }
+            if (std.mem.eql(u8, request.url, "https://suno.acedata.test/token")) {
+                if (authorization == null) return .{ .status = 401, .content_type = "application/json", .body = "{\"error\":\"invalid_client\"}" };
+                self.token_resource_ok.store(std.mem.indexOf(u8, request.body, "resource=https%3A%2F%2Fsuno.acedata.test%2F&") != null or
+                    std.mem.endsWith(u8, request.body, "resource=https%3A%2F%2Fsuno.acedata.test%2F"), .release);
+                return .{ .status = 200, .content_type = "application/json", .body = "{\"access_token\":\"acedata-token\",\"token_type\":\"bearer\",\"expires_in\":3600,\"refresh_token\":\"acedata-refresh\"}" };
+            }
+            return .{ .status = 404 };
+        }
+    };
+    const FakeHost = struct {
+        completion: ?*const Dialog.Completion = null,
+        token: u64 = 0,
+        consent: [4096]u8 = undefined,
+        consent_len: usize = 0,
+        fn request(context: *anyopaque, token: u64, message: Dialog.Message, completion: *const Dialog.Completion) !u64 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const copy = @min(message.message.len, self.consent.len - self.consent_len);
+            @memcpy(self.consent[self.consent_len..][0..copy], message.message[0..copy]);
+            self.consent_len += copy;
+            self.completion = completion;
+            self.token = token;
+            return token;
+        }
+        fn finish(self: *@This()) void {
+            while (self.completion) |completion| {
+                self.completion = null;
+                completion.result_fn(completion.context, self.token, .{ .button = .primary });
+            }
+        }
+        fn open(_: *anyopaque, _: []const u8) bool {
+            return true;
+        }
+        fn now(_: *anyopaque) ?u64 {
+            return 1_000;
+        }
+        fn notify(_: *anyopaque) void {}
+    };
+    const limits: mcp_configuration.Limits = .{
+        .max_servers = 8,
+        .max_tools_per_server = 32,
+        .max_namespace_bytes = 128,
+        .max_credential_locators = 64,
+        .max_runtime_secrets_per_server = 128,
+        .max_runtime_secret_bytes_per_server = 16 * 1024,
+    };
+    // The issued client secret is read back for the token request, so the
+    // Product credential effects and the Application store are one store.
+    const harness = try @import("native_sdk").TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var credential_store: mcp_platform.CredentialStore = .{ .io = std.testing.io, .runtime = &harness.runtime, .main_thread_id = std.Thread.getCurrentId() };
+    var preparation = try mcp_configuration.prepare(std.testing.allocator, null, true, false, .{}, limits);
+    var preparation_owned = true;
+    defer if (preparation_owned) preparation.deinit();
+    var manifest = (try mcp_configuration.RuntimeManifest.candidate(std.testing.allocator, &preparation)).?;
+    var manifest_owned = true;
+    defer if (manifest_owned) manifest.deinit();
+    const agent_runtime = try test_fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        agent_runtime.shutdown() catch {};
+        agent_runtime.deinit();
+    }
+    var identity_generator: IdentityGenerator = .{};
+    var workbench_owner = try test_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        agent_runtime.runtimePort(),
+        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        .{ .mcp = .{
+            .preparation = &preparation,
+            .management = .{
+                .persistence = .{ .available = true, .commit_journal_fn = Effects.commit, .commit_registry_fn = Effects.commit, .clear_journal_fn = Effects.clear },
+                .credentials = credential_store.effects(),
+                .locator_generator = credential_store.locatorGenerator(),
+                .identity_generator = .{ .context = &identity_generator, .available = true, .fill_fn = IdentityGenerator.fill },
+                .limits = limits,
+                .runtime_manifest = &manifest,
+            },
+        } },
+    );
+    preparation_owned = false;
+    manifest_owned = false;
+    defer workbench_owner.deinit();
+    try std.testing.expectEqual(
+        mcp_configuration.ManagementOutcome.saved,
+        (try workbench_owner.createMcpOauthHttpServer(0, .{
+            .display_name = "Suno by AceDataCloud",
+            .url = AceDataLike.endpoint,
+            .client = .dynamic_registration,
+        })).outcome,
+    );
+    const server_id = "mcp-6a6a6a6a6a6a6a6a6a6a";
+    var active_authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = std.testing.allocator };
+    defer active_authorizations.deinit();
+    var host_context: FakeHost = .{};
+    var acedata: AceDataLike = .{};
+    var coordinator = Coordinator.init(
+        std.testing.allocator,
+        std.testing.io,
+        workbench_owner.mcpManagementPort(),
+        agent_runtime,
+        &credential_store,
+        &active_authorizations,
+        .{
+            .context = &host_context,
+            .confirmation_available = true,
+            .oauth_available = true,
+            .request_dialog_fn = FakeHost.request,
+            .open_url_fn = FakeHost.open,
+            .now_unix_ms_fn = FakeHost.now,
+            .notify_fn = FakeHost.notify,
+        },
+        .{},
+    );
+    coordinator.transport_override = .{ .context = &acedata, .fetch_fn = AceDataLike.fetch };
+    defer coordinator.deinit();
+
+    try std.testing.expect(try coordinator.authorizeOauth(coordinator.control.inspectMcpDesiredConfiguration().?.desired_generation.?, server_id) == .started);
+    waitForCoordinatorJob(&coordinator);
+    try std.testing.expect(coordinator.drain());
+    // The consent names both the server and the resource being authorized.
+    const consent = host_context.consent[0..host_context.consent_len];
+    try std.testing.expect(std.mem.indexOf(u8, consent, "MCP server: \"" ++ AceDataLike.endpoint ++ "\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, consent, "Resource: \"" ++ AceDataLike.origin ++ "\"") != null);
+    host_context.finish();
+    waitForCoordinatorJob(&coordinator);
+    try std.testing.expect(coordinator.drain());
+    try std.testing.expect(std.mem.indexOf(u8, coordinator.flow.?.attempt.?.authorizationUrl(), "&resource=https%3A%2F%2Fsuno.acedata.test%2F") != null);
+    {
+        var stream = try sendTestCallback(&coordinator);
+        defer stream.close(std.testing.io);
+        waitForCoordinatorJob(&coordinator);
+        try std.testing.expect(coordinator.drain());
+    }
+    waitForCoordinatorJob(&coordinator);
+    try std.testing.expect(coordinator.drain());
+    try std.testing.expect(coordinator.flow == null);
+    try std.testing.expect(acedata.token_resource_ok.load(.acquire));
+    // The new token was checked against the MCP endpoint, not the origin.
+    try std.testing.expectEqual(@as(usize, 1), acedata.verifications.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), workbench_owner.mcp.?.state.authorization_failures.items.len);
+    const registry_storage = try std.testing.allocator.alloc(u8, mcp_configuration.max_store_bytes);
+    defer std.testing.allocator.free(registry_storage);
+    const generation = coordinator.control.inspectMcpDesiredConfiguration().?.desired_generation.?;
+    const registry = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try coordinator.control.writeMcpDesiredConfiguration(generation, registry_storage), .{});
+    defer registry.deinit();
+    const oauth = registry.value.object.get("servers").?.array.items[0].object.get("auth").?.object.get("oauth").?.object;
+    try std.testing.expectEqualStrings("ready", oauth.get("status").?.string);
+    try std.testing.expect(oauth.get("grant").? != .null);
+    try std.testing.expectEqualStrings(AceDataLike.origin, oauth.get("consent").?.object.get("resource").?.string);
+    try std.testing.expectEqualStrings("client_secret_basic", oauth.get("registration").?.object.get("token_endpoint_auth_method").?.string);
 }
 
 test "MCP asynchronous confirmation owns paging cancellation and failure terminals" {

@@ -858,7 +858,7 @@ pub const AuthorizationAttempt = struct {
     ) (Error || StateError)!void {
         if (!self.active or self.authorization_url_len != 0)
             return error.InvalidAuthorizationRequest;
-        if (!containsText(resource.authorization_servers, server.issuer))
+        if (!containsIssuer(resource.authorization_servers, server.issuer))
             return error.InvalidAuthorizationRequest;
         const binding = try state.authorize(.{
             .attempt_id = self.attempt_id,
@@ -941,10 +941,12 @@ pub const AuthorizationAttempt = struct {
     }
 };
 
+// Optional members also accept an explicit JSON null, which servers publish
+// for members they do not use; each takes its RFC default.
 const ResourceMetadata = struct {
-    resource: []const u8,
-    authorization_servers: []const []const u8,
-    scopes_supported: []const []const u8 = &.{},
+    resource: ?[]const u8 = null,
+    authorization_servers: ?[]const []const u8 = null,
+    scopes_supported: ?[]const []const u8 = null,
 };
 
 const AuthorizationMetadata = struct {
@@ -952,22 +954,24 @@ const AuthorizationMetadata = struct {
     authorization_endpoint: []const u8,
     token_endpoint: []const u8,
     registration_endpoint: ?[]const u8 = null,
-    scopes_supported: []const []const u8 = &.{},
-    response_types_supported: []const []const u8 = &.{},
-    grant_types_supported: []const []const u8 = &.{"authorization_code"},
-    code_challenge_methods_supported: []const []const u8 = &.{},
-    token_endpoint_auth_methods_supported: []const []const u8 = &.{"client_secret_basic"},
-    authorization_response_iss_parameter_supported: bool = false,
-    client_id_metadata_document_supported: bool = false,
+    scopes_supported: ?[]const []const u8 = null,
+    /// Required by RFC 8414 yet sometimes omitted; absent means `code`.
+    response_types_supported: ?[]const []const u8 = null,
+    grant_types_supported: ?[]const []const u8 = null,
+    /// No default: without S256 listed, MCP forbids proceeding.
+    code_challenge_methods_supported: ?[]const []const u8 = null,
+    token_endpoint_auth_methods_supported: ?[]const []const u8 = null,
+    authorization_response_iss_parameter_supported: ?bool = null,
+    client_id_metadata_document_supported: ?bool = null,
 };
 
 const RegistrationResponse = struct {
     client_id: []const u8,
     client_secret: ?[]const u8 = null,
     client_secret_expires_at: ?u64 = null,
-    redirect_uris: []const []const u8 = &.{},
-    grant_types: []const []const u8 = &.{},
-    response_types: []const []const u8 = &.{},
+    redirect_uris: ?[]const []const u8 = null,
+    grant_types: ?[]const []const u8 = null,
+    response_types: ?[]const []const u8 = null,
     token_endpoint_auth_method: ?[]const u8 = null,
 };
 
@@ -978,8 +982,7 @@ const TokenResponse = oauth_mechanics.TokenResponse(.{
 const Challenge = struct {
     resource_metadata: ?[]const u8 = null,
     scope: ?[]const u8 = null,
-    /// RFC 6750 section 3 diagnostics; they carry no authority, so a repeated
-    /// parameter keeps its first value instead of rejecting the challenge.
+    /// RFC 6750 section 3 diagnostics.
     error_code: ?[]const u8 = null,
     error_description: ?[]const u8 = null,
 };
@@ -1011,19 +1014,30 @@ pub fn discoverResourceWithChallengeEffect(
     var header_buffer: [Limits.header_bytes]u8 = undefined;
     var challenge_storage: [Limits.header_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &challenge_storage);
+    // A challenge that cannot be parsed only loses its hints: discovery
+    // falls back to the well-known documents instead of stopping.
     var challenge: ?Challenge = null;
     if (observed_header) |header| {
         if (selectBearerChallenge(header) != null)
-            challenge = parseBearerChallenge(header, &challenge_storage) catch |err| {
-                Diagnostic.record(diagnostic, .invalid_response, 401);
-                return err;
-            };
-    } else {
+            challenge = parseBearerChallenge(header, &challenge_storage) catch null;
+    } else for ([_]Method{ .get, .post }) |method| {
+        // Some servers answer GET with 405 and challenge only the POST an
+        // MCP client sends first, so an unauthenticated `initialize` follows.
+        // Only the response head matters; a stream is never read.
         const probe = transport.fetch(
-            .{ .method = .get, .url = endpoint, .headers = &.{.{
-                .name = "Accept",
-                .value = "application/json",
-            }} },
+            .{
+                .method = method,
+                .url = endpoint,
+                .headers = if (method == .get) &.{.{
+                    .name = "Accept",
+                    .value = "application/json",
+                }} else &.{
+                    .{ .name = "Accept", .value = "application/json, text/event-stream" },
+                    .{ .name = "Content-Type", .value = "application/json" },
+                },
+                .body = if (method == .post) initialize_probe_body else "",
+                .read_body = false,
+            },
             &body_buffer,
             &header_buffer,
         ) catch |err| switch (err) {
@@ -1037,72 +1051,115 @@ pub fn discoverResourceWithChallengeEffect(
         };
         if (probe) |response| if (response.status == 401) {
             if (response.www_authenticate) |header|
-                challenge = parseBearerChallenge(header, &challenge_storage) catch {
-                    Diagnostic.record(diagnostic, .invalid_response, 401);
-                    return error.InvalidChallenge;
-                };
+                challenge = parseBearerChallenge(header, &challenge_storage) catch null;
         };
+        if (challenge != null) break;
     }
+    const challenge_scope = if (challenge) |value| value.scope else null;
 
-    if (challenge) |value| if (value.resource_metadata) |metadata_url| {
-        if (!validHttpsUrl(metadata_url)) {
-            Diagnostic.record(diagnostic, .invalid_response, 401);
-            return error.InvalidChallenge;
+    // Where the protected resource metadata may be, most trusted first: the
+    // server's own pointer, then RFC 9728 §3.1 path-specific, then the root.
+    // Every candidate is validated alone, so a failing one only moves on.
+    var storage: [2][Limits.url_bytes]u8 = undefined;
+    var candidates: [3][]const u8 = undefined;
+    var count: usize = 0;
+    if (challenge) |value| if (value.resource_metadata) |url| if (validHttpsUrl(url)) {
+        candidates[count] = url;
+        count += 1;
+    };
+    for ([_]bool{ true, false }, 0..) |include_path, index| {
+        const url = try protectedResourceMetadataUrl(&storage[index], endpoint, include_path);
+        if (containsText(candidates[0..count], url)) continue;
+        candidates[count] = url;
+        count += 1;
+    }
+    // The first informative failure wins over later "document absent" ones.
+    var reported: ?Diagnostic = null;
+    defer if (diagnostic) |target| if (reported) |value| {
+        target.* = value;
+    };
+    var last_error: Error = error.InvalidMetadata;
+    for (candidates[0..count]) |url| {
+        var attempt: Diagnostic = .{};
+        if (fetchResourceMetadata(allocator, transport, endpoint, url, challenge_scope, &attempt)) |result| {
+            reported = null;
+            return result;
+        } else |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.CancelledBeforeSend, error.Cancelled => return error.Cancelled,
+            error.DeadlineExceeded, error.DeadlineExceededBeforeSend => {
+                reported = attempt;
+                return error.DeadlineExceeded;
+            },
+            else => {
+                if (reported == null or missingDocument(reported.?)) reported = attempt;
+                last_error = @errorCast(err);
+            },
         }
-        return fetchResourceMetadata(
-            allocator,
-            transport,
-            endpoint,
-            metadata_url,
-            value.scope,
-            diagnostic,
-        );
-    };
-
-    var path_storage: [Limits.url_bytes]u8 = undefined;
-    const path_url = try protectedResourceMetadataUrl(&path_storage, endpoint, true);
-    var path_diagnostic: Diagnostic = .{};
-    if (fetchResourceMetadata(
-        allocator,
-        transport,
-        endpoint,
-        path_url,
-        if (challenge) |value| value.scope else null,
-        &path_diagnostic,
-    )) |result| return result else |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.CancelledBeforeSend => return error.Cancelled,
-        error.Cancelled => return error.Cancelled,
-        error.DeadlineExceeded, error.DeadlineExceededBeforeSend => {
-            if (diagnostic) |target| target.* = path_diagnostic;
-            return error.DeadlineExceeded;
-        },
-        else => {},
     }
-
-    var root_storage: [Limits.url_bytes]u8 = undefined;
-    const root_url = try protectedResourceMetadataUrl(&root_storage, endpoint, false);
-    var root_diagnostic: Diagnostic = .{};
-    defer if (diagnostic) |target| {
-        // Report the root attempt unless it only said the document is absent
-        // while the path-specific attempt said something more useful.
-        target.* = if (missingDocument(root_diagnostic) and !missingDocument(path_diagnostic))
-            path_diagnostic
-        else
-            root_diagnostic;
-    };
-    return fetchResourceMetadata(
-        allocator,
-        transport,
-        endpoint,
-        root_url,
-        if (challenge) |value| value.scope else null,
-        &root_diagnostic,
-    );
+    return last_error;
 }
 
 fn missingDocument(diagnostic: Diagnostic) bool {
     return diagnostic.reason == .http_status and diagnostic.http_status == 404;
+}
+
+/// RFC 9728 §3.3 asks for the identical URL, but servers in use publish
+/// their origin or a parent path (AceDataCloud's Suno server names
+/// `https://suno.mcp.acedata.cloud/` for `/mcp`). A declared resource covers
+/// the endpoint when scheme, host and port are the same and its path,
+/// without a terminating '/', is the endpoint's path or ends at one of its
+/// '/' boundaries. Another origin never covers, and neither does `/mc` for
+/// `/mcp`. A declared resource with a query covers only itself.
+pub fn resourceCovers(declared: []const u8, endpoint: []const u8) bool {
+    if (std.mem.eql(u8, declared, endpoint)) return true;
+    if (!validHttpsUrl(declared) or !validHttpsUrl(endpoint)) return false;
+    const declared_parts = urlParts(declared) orelse return false;
+    const endpoint_parts = urlParts(endpoint) orelse return false;
+    if (declared_parts.origin_end != declared.len and
+        declared[declared_parts.origin_end] != '/') return false;
+    if (std.mem.indexOfScalar(u8, declared, '?') != null) return false;
+    if (!sameOrigin(declared[0..declared_parts.origin_end], endpoint[0..endpoint_parts.origin_end]))
+        return false;
+    const advertised = std.mem.trimEnd(u8, declared_parts.path, "/");
+    const actual = endpoint_parts.path;
+    if (advertised.len == 0) return true;
+    if (!std.mem.startsWith(u8, actual, advertised)) return false;
+    return actual.len == advertised.len or actual[advertised.len] == '/';
+}
+
+/// Both values are validated `https://authority` prefixes. Scheme and host
+/// compare without case; an omitted port is 443.
+fn sameOrigin(left: []const u8, right: []const u8) bool {
+    const left_authority = left["https://".len..];
+    const right_authority = right["https://".len..];
+    const left_host, const left_port = splitAuthority(left_authority) orelse return false;
+    const right_host, const right_port = splitAuthority(right_authority) orelse return false;
+    return left_port == right_port and std.ascii.eqlIgnoreCase(left_host, right_host);
+}
+
+fn splitAuthority(authority: []const u8) ?struct { []const u8, u16 } {
+    const host_end = if (std.mem.startsWith(u8, authority, "["))
+        (std.mem.indexOfScalar(u8, authority, ']') orelse return null) + 1
+    else
+        std.mem.indexOfScalar(u8, authority, ':') orelse authority.len;
+    const host = authority[0..host_end];
+    if (host.len == 0) return null;
+    if (host_end == authority.len) return .{ host, 443 };
+    if (authority[host_end] != ':') return null;
+    const port = std.fmt.parseInt(u16, authority[host_end + 1 ..], 10) catch return null;
+    return .{ host, port };
+}
+
+/// RFC 8414 issuer identifiers that differ only in a terminating '/' name
+/// the same authorization server; every other difference is another one.
+fn sameIssuer(left: []const u8, right: []const u8) bool {
+    return std.mem.eql(u8, std.mem.trimEnd(u8, left, "/"), std.mem.trimEnd(u8, right, "/"));
+}
+
+fn containsIssuer(values: []const []const u8, candidate: []const u8) bool {
+    for (values) |value| if (sameIssuer(value, candidate)) return true;
+    return false;
 }
 
 fn fetchResourceMetadata(
@@ -1130,9 +1187,8 @@ fn fetchResourceMetadata(
         Diagnostic.record(diagnostic, .http_status, response.status);
         return error.InvalidMetadata;
     }
-    if (!jsonContentType(response.content_type) or
-        response.body.len == 0 or response.body.len > Limits.metadata_body_bytes)
-    {
+    // A document that parses is accepted whatever its Content-Type says.
+    if (response.body.len == 0 or response.body.len > Limits.metadata_body_bytes) {
         Diagnostic.record(diagnostic, .invalid_response, response.status);
         return error.InvalidMetadata;
     }
@@ -1146,45 +1202,49 @@ fn fetchResourceMetadata(
         return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidMetadata;
     };
     defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.resource, endpoint)) {
+    // The resource sent to the authorization server is the one the resource
+    // declares; one that does not declare it is taken to be the endpoint.
+    const declared = parsed.value.resource orelse endpoint;
+    if (!resourceCovers(declared, endpoint)) {
         Diagnostic.record(diagnostic, .resource_mismatch, response.status);
         return error.InvalidMetadata;
     }
     errdefer Diagnostic.record(diagnostic, .invalid_response, response.status);
-    if (parsed.value.authorization_servers.len == 0 or
-        parsed.value.authorization_servers.len > Limits.issuers)
-        return error.InvalidMetadata;
-    for (parsed.value.authorization_servers, 0..) |issuer, index| {
-        if (!validHttpsIssuer(issuer)) return error.InvalidMetadata;
-        for (parsed.value.authorization_servers[0..index]) |previous|
-            if (std.mem.eql(u8, previous, issuer)) return error.InvalidMetadata;
-    }
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const owned = arena.allocator();
-    const owned_resource = try owned.dupe(u8, endpoint);
-    const owned_issuers = try cloneStrings(
-        owned,
-        parsed.value.authorization_servers,
-        Limits.issuers,
-        Limits.url_bytes,
-    );
+    const owned_resource = try owned.dupe(u8, declared);
+    // Unusable or repeated issuers are skipped; at least one must remain.
+    const owned_issuers = try owned.alloc([]const u8, Limits.issuers);
+    var issuer_count: usize = 0;
+    for (parsed.value.authorization_servers orelse &.{}) |issuer| {
+        if (issuer_count == Limits.issuers) break;
+        if (!validHttpsIssuer(issuer) or containsIssuer(owned_issuers[0..issuer_count], issuer))
+            continue;
+        owned_issuers[issuer_count] = try owned.dupe(u8, issuer);
+        issuer_count += 1;
+    }
+    if (issuer_count == 0) return error.InvalidMetadata;
     const scopes_supported = try cloneSortedScopes(
         owned,
-        parsed.value.scopes_supported,
+        parsed.value.scopes_supported orelse &.{},
     );
-    const challenge_scopes = if (challenge_scope) |scope|
-        try parseScopeSet(owned, scope)
+    // A challenge scope that cannot be used is ignored like an absent one.
+    const challenge_scopes: ?[]const []const u8 = if (challenge_scope) |scope|
+        parseScopeSet(owned, scope) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => null,
+        }
     else
-        &.{};
+        null;
     return .{
         .arena = arena,
         .resource = owned_resource,
-        .authorization_servers = owned_issuers,
+        .authorization_servers = owned_issuers[0..issuer_count],
         .scopes_supported = scopes_supported,
-        .requested_scopes = if (challenge_scope != null) challenge_scopes else scopes_supported,
-        .challenge_scopes = challenge_scopes,
+        .requested_scopes = challenge_scopes orelse scopes_supported,
+        .challenge_scopes = challenge_scopes orelse &.{},
     };
 }
 
@@ -1195,7 +1255,7 @@ pub fn discoverAuthorizationServer(
     selected_issuer: []const u8,
     diagnostic: ?*Diagnostic,
 ) (Error || std.mem.Allocator.Error)!AuthorizationServer {
-    if (!containsText(resource.authorization_servers, selected_issuer)) {
+    if (!containsIssuer(resource.authorization_servers, selected_issuer)) {
         Diagnostic.record(diagnostic, .unsupported_server, 0);
         return error.UnsupportedAuthorizationServer;
     }
@@ -1239,6 +1299,41 @@ pub fn discoverAuthorizationServer(
     return last_error;
 }
 
+/// The first listed authorization server whose metadata is usable. A
+/// server that fails only moves on to the next; cancellation and the
+/// deadline stop. The report keeps the first informative failure.
+pub fn discoverListedAuthorizationServer(
+    allocator: std.mem.Allocator,
+    transport: Transport,
+    resource: *const ResourceDiscovery,
+    diagnostic: ?*Diagnostic,
+) (Error || std.mem.Allocator.Error)!AuthorizationServer {
+    var reported: ?Diagnostic = null;
+    defer if (diagnostic) |target| if (reported) |value| {
+        target.* = value;
+    };
+    var last_error: Error = error.InvalidMetadata;
+    for (resource.authorization_servers) |issuer| {
+        var attempt: Diagnostic = .{};
+        if (discoverAuthorizationServer(allocator, transport, resource, issuer, &attempt)) |server| {
+            reported = null;
+            return server;
+        } else |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Cancelled, error.CancelledBeforeSend => return error.Cancelled,
+            error.DeadlineExceeded, error.DeadlineExceededBeforeSend => {
+                reported = attempt;
+                return error.DeadlineExceeded;
+            },
+            else => {
+                if (reported == null or missingDocument(reported.?)) reported = attempt;
+                last_error = @errorCast(err);
+            },
+        }
+    }
+    return last_error;
+}
+
 fn fetchAuthorizationMetadata(
     allocator: std.mem.Allocator,
     transport: Transport,
@@ -1264,8 +1359,8 @@ fn fetchAuthorizationMetadata(
         return error.InvalidMetadata;
     }
     diagnostic.* = .init(.invalid_response, response.status);
-    if (!jsonContentType(response.content_type) or
-        response.body.len == 0 or response.body.len > Limits.metadata_body_bytes)
+    // A document that parses is accepted whatever its Content-Type says.
+    if (response.body.len == 0 or response.body.len > Limits.metadata_body_bytes)
         return error.InvalidMetadata;
     var parsed = std.json.parseFromSlice(
         AuthorizationMetadata,
@@ -1275,19 +1370,21 @@ fn fetchAuthorizationMetadata(
     ) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidMetadata;
     defer parsed.deinit();
     const metadata = parsed.value;
-    if (!std.mem.eql(u8, metadata.issuer, selected_issuer) or
+    // RFC 8414 §3.3 issuer identity; only a terminating '/' may differ.
+    if (!sameIssuer(metadata.issuer, selected_issuer) or
+        !validHttpsIssuer(metadata.issuer) or
         !validHttpsUrl(metadata.authorization_endpoint) or
-        !validHttpsUrl(metadata.token_endpoint) or
-        metadata.scopes_supported.len > Limits.scopes)
+        !validHttpsUrl(metadata.token_endpoint))
         return error.InvalidMetadata;
-    if (metadata.registration_endpoint) |url|
-        if (!validHttpsUrl(url)) return error.InvalidMetadata;
     diagnostic.* = .init(.unsupported_server, response.status);
-    if (!containsText(metadata.response_types_supported, "code") or
-        !containsText(metadata.grant_types_supported, "authorization_code") or
-        !containsText(metadata.code_challenge_methods_supported, "S256"))
+    if (!containsText(metadata.response_types_supported orelse &.{"code"}, "code") or
+        !containsText(metadata.grant_types_supported orelse &.{"authorization_code"}, "authorization_code") or
+        !containsText(metadata.code_challenge_methods_supported orelse &.{}, "S256"))
         return error.InvalidMetadata;
-    const methods = try parseAuthMethods(allocator, metadata.token_endpoint_auth_methods_supported);
+    const methods = try parseAuthMethods(
+        allocator,
+        metadata.token_endpoint_auth_methods_supported orelse &.{"client_secret_basic"},
+    );
     defer allocator.free(methods);
     if (methods.len == 0) return error.UnsupportedAuthorizationServer;
     diagnostic.* = .init(.invalid_response, response.status);
@@ -1298,11 +1395,13 @@ fn fetchAuthorizationMetadata(
     const issuer = try owned.dupe(u8, metadata.issuer);
     const authorization_endpoint = try owned.dupe(u8, metadata.authorization_endpoint);
     const token_endpoint = try owned.dupe(u8, metadata.token_endpoint);
+    // An unusable registration endpoint is treated as absent, so only a
+    // flow that needs it fails, and says so.
     const registration_endpoint = if (metadata.registration_endpoint) |url|
-        try owned.dupe(u8, url)
+        if (validHttpsUrl(url)) try owned.dupe(u8, url) else null
     else
         null;
-    const scopes_supported = try cloneSortedScopes(owned, metadata.scopes_supported);
+    const scopes_supported = try cloneSortedScopes(owned, metadata.scopes_supported orelse &.{});
     const token_endpoint_auth_methods = try owned.dupe(TokenEndpointAuthMethod, methods);
     return .{
         .arena = arena,
@@ -1313,11 +1412,11 @@ fn fetchAuthorizationMetadata(
         .scopes_supported = scopes_supported,
         .token_endpoint_auth_methods = token_endpoint_auth_methods,
         .refresh_token_supported = containsText(
-            metadata.grant_types_supported,
+            metadata.grant_types_supported orelse &.{},
             "refresh_token",
         ),
-        .authorization_response_issuer_required = metadata.authorization_response_iss_parameter_supported,
-        .client_id_metadata_document_supported = metadata.client_id_metadata_document_supported,
+        .authorization_response_issuer_required = metadata.authorization_response_iss_parameter_supported orelse false,
+        .client_id_metadata_document_supported = metadata.client_id_metadata_document_supported orelse false,
     };
 }
 
@@ -1551,7 +1650,7 @@ pub fn performDynamicRegistration(
 ) (Error || StateError || std.mem.Allocator.Error)!FlowOutcome {
     if (!std.mem.eql(u8, plan.resource, resource.resource) or
         !std.mem.eql(u8, plan.issuer, server.issuer) or
-        !containsText(resource.authorization_servers, plan.issuer) or
+        !containsIssuer(resource.authorization_servers, plan.issuer) or
         !stringSetsEqual(plan.scopes, resource.requested_scopes))
         return error.InvalidAuthorizationRequest;
     const operation = try state.beginDynamicRegistration(plan);
@@ -1697,7 +1796,7 @@ pub fn registerDynamicClientEffect(
     };
     if (response.status != 200 and response.status != 201) {
         Diagnostic.recordErrorResponse(diagnostic, response, Limits.registration_body_bytes, &.{});
-        if (response.status == 400 and jsonContentType(response.content_type) and
+        if (response.status == 400 and
             oauth_mechanics.errorCode(
                 .{ .body_bytes = Limits.registration_body_bytes },
                 response.body,
@@ -1712,22 +1811,27 @@ pub fn registerDynamicClientEffect(
         return error.RegistrationOutcomeUnknown;
     }
     Diagnostic.record(diagnostic, .invalid_response, response.status);
-    if (!jsonContentType(response.content_type) or response.body.len == 0 or
-        response.body.len > Limits.registration_body_bytes)
+    if (response.body.len == 0 or response.body.len > Limits.registration_body_bytes)
         return error.RegistrationOutcomeUnknown;
     return parseRegistrationResponse(
         allocator,
         response.body,
         redirect_uri,
         requested_method,
+        server.token_endpoint_auth_methods,
     ) catch return error.RegistrationOutcomeUnknown;
 }
 
+/// RFC 7591 §3.2.1 lets the server register other values than requested.
+/// Its token endpoint authentication is accepted when the authorization
+/// server supports it and the client secret agrees with it; a response
+/// that omits the method and the secret registered a public client.
 fn parseRegistrationResponse(
     allocator: std.mem.Allocator,
     body: []const u8,
     redirect_uri: []const u8,
     requested_method: TokenEndpointAuthMethod,
+    supported_methods: []const TokenEndpointAuthMethod,
 ) (Error || std.mem.Allocator.Error)!Registration {
     if (body.len == 0 or body.len > Limits.registration_body_bytes)
         return error.InvalidRegistrationResponse;
@@ -1747,18 +1851,17 @@ fn parseRegistrationResponse(
     if (!validClientId(value.client_id) or
         (value.client_secret_expires_at != null and
             value.client_secret_expires_at.? != 0) or
-        (value.redirect_uris.len != 0 and
-            !containsText(value.redirect_uris, redirect_uri)) or
-        (value.grant_types.len != 0 and
-            !containsText(value.grant_types, "authorization_code")) or
-        (value.response_types.len != 0 and
-            !containsText(value.response_types, "code")))
+        !nonEmptyContains(value.redirect_uris, redirect_uri) or
+        !nonEmptyContains(value.grant_types, "authorization_code") or
+        !nonEmptyContains(value.response_types, "code"))
         return error.InvalidRegistrationResponse;
     const method = if (value.token_endpoint_auth_method) |wire|
         parseAuthMethod(wire) orelse return error.InvalidRegistrationResponse
+    else if (value.client_secret == null and containsAuthMethod(supported_methods, .none))
+        TokenEndpointAuthMethod.none
     else
         requested_method;
-    if (method != requested_method or
+    if ((method != requested_method and !containsAuthMethod(supported_methods, method)) or
         ((method == .none) != (value.client_secret == null)))
         return error.InvalidRegistrationResponse;
     var result: Registration = .{
@@ -1863,8 +1966,7 @@ pub fn exchangeAuthorizationCodeEffect(
         return error.TokenOutcomeUnknown;
     }
     Diagnostic.record(diagnostic, .invalid_response, response.status);
-    if (!jsonContentType(response.content_type) or
-        response.body.len == 0 or response.body.len > Limits.token_body_bytes)
+    if (response.body.len == 0 or response.body.len > Limits.token_body_bytes)
         return error.TokenOutcomeUnknown;
     return parseTokenResponse(allocator, response.body, now_unix_ms) catch
         return error.TokenOutcomeUnknown;
@@ -2027,7 +2129,7 @@ pub fn refreshAccessTokenEffect(
         &.{"invalid_grant"},
     ) != null)
         return error.InvalidGrant;
-    if (response.status != 200 or !jsonContentType(response.content_type) or
+    if (response.status != 200 or
         response.body.len == 0 or response.body.len > Limits.token_body_bytes)
         return error.TokenOutcomeUnknown;
     return parseTokenResponse(allocator, response.body, now_unix_ms) catch
@@ -2099,12 +2201,12 @@ fn parseBearerChallenge(input: []const u8, storage: []u8) error{InvalidChallenge
             cursor = cursor[end..];
         }
         const value = writer.buffered()[start..];
+        // A repeated parameter keeps its first value (RFC 9110 §11.2 leaves
+        // repeats undefined; servers in use do send them).
         if (std.ascii.eqlIgnoreCase(name, "resource_metadata")) {
-            if (result.resource_metadata != null) return error.InvalidChallenge;
-            result.resource_metadata = value;
+            if (result.resource_metadata == null) result.resource_metadata = value;
         } else if (std.ascii.eqlIgnoreCase(name, "scope")) {
-            if (result.scope != null) return error.InvalidChallenge;
-            result.scope = value;
+            if (result.scope == null) result.scope = value;
         } else if (std.ascii.eqlIgnoreCase(name, "error")) {
             if (result.error_code == null) result.error_code = value;
         } else if (std.ascii.eqlIgnoreCase(name, "error_description")) {
@@ -2206,8 +2308,9 @@ fn protectedResourceMetadataUrl(
     writer.writeAll(resource[0..parts.origin_end]) catch return error.InvalidEndpoint;
     writer.writeAll("/.well-known/oauth-protected-resource") catch
         return error.InvalidEndpoint;
-    if (include_path and parts.path.len != 0 and !std.mem.eql(u8, parts.path, "/"))
-        writer.writeAll(parts.path) catch return error.InvalidEndpoint;
+    // RFC 9728 §3.1: a terminating '/' is removed before the path is joined.
+    if (include_path)
+        writer.writeAll(std.mem.trimEnd(u8, parts.path, "/")) catch return error.InvalidEndpoint;
     return writer.buffered();
 }
 
@@ -2218,21 +2321,23 @@ fn authorizationMetadataUrls(
 ) Error!usize {
     if (!validHttpsIssuer(issuer)) return error.InvalidEndpoint;
     const parts = urlParts(issuer) orelse return error.InvalidEndpoint;
-    const has_path = parts.path.len != 0 and !std.mem.eql(u8, parts.path, "/");
+    // RFC 8414 §3.1: a terminating '/' is removed before the path is joined.
+    const path = std.mem.trimEnd(u8, parts.path, "/");
     const origin = issuer[0..parts.origin_end];
     output[0] = buildUrl(&storage[0], &.{
         origin,
         "/.well-known/oauth-authorization-server",
-        if (has_path) parts.path else "",
+        path,
     }) catch return error.InvalidEndpoint;
     output[1] = buildUrl(&storage[1], &.{
         origin,
         "/.well-known/openid-configuration",
-        if (has_path) parts.path else "",
+        path,
     }) catch return error.InvalidEndpoint;
-    if (!has_path) return 2;
+    if (path.len == 0) return 2;
     output[2] = buildUrl(&storage[2], &.{
-        issuer,
+        origin,
+        path,
         "/.well-known/openid-configuration",
     }) catch return error.InvalidEndpoint;
     return 3;
@@ -2364,40 +2469,54 @@ fn cloneStrings(
     return result;
 }
 
+/// Advertised scopes as a sorted set: entries that cannot be sent as an
+/// OAuth scope are skipped and repeats collapse. More distinct usable
+/// scopes than the bound is still refused.
 fn cloneSortedScopes(
     allocator: std.mem.Allocator,
     scopes: []const []const u8,
 ) ![]const []const u8 {
-    const result = try cloneStrings(
-        allocator,
-        scopes,
-        Limits.scopes,
-        Limits.scope_bytes,
-    );
-    for (result) |scope| if (!validScope(scope)) return error.InvalidMetadata;
-    std.mem.sort([]const u8, @constCast(result), {}, lessText);
-    if (result.len > 1)
-        for (result[1..], result[0 .. result.len - 1]) |current, previous|
-            if (std.mem.eql(u8, current, previous)) return error.InvalidMetadata;
-    return result;
+    var kept: usize = 0;
+    for (scopes) |scope| kept += @intFromBool(validScope(scope));
+    const result = try allocator.alloc([]const u8, kept);
+    var count: usize = 0;
+    for (scopes) |scope| {
+        if (!validScope(scope)) continue;
+        result[count] = try allocator.dupe(u8, scope);
+        count += 1;
+    }
+    return sortedScopeSet(result, error.InvalidMetadata);
 }
 
+fn sortedScopeSet(values: [][]const u8, comptime bound_error: anytype) @TypeOf(bound_error)![]const []const u8 {
+    std.mem.sort([]const u8, values, {}, lessText);
+    var count: usize = 0;
+    for (values) |value| {
+        if (count != 0 and std.mem.eql(u8, values[count - 1], value)) continue;
+        values[count] = value;
+        count += 1;
+    }
+    if (count > Limits.scopes) return bound_error;
+    return values[0..count];
+}
+
+/// A space-delimited scope value as a sorted set. Runs of spaces and
+/// repeated scopes are tolerated; a token that is not a valid scope makes
+/// the whole value unusable, since dropping it would ask for less than the
+/// server demanded.
 fn parseScopeSet(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
     var count: usize = 0;
-    var iterator = std.mem.splitScalar(u8, value, ' ');
+    var iterator = std.mem.tokenizeScalar(u8, value, ' ');
     while (iterator.next()) |scope| {
         if (!validScope(scope)) return error.InvalidChallenge;
         count += 1;
-        if (count > Limits.scopes) return error.InvalidChallenge;
+        if (count > 4 * Limits.scopes) return error.InvalidChallenge;
     }
+    if (count == 0) return error.InvalidChallenge;
     const result = try allocator.alloc([]const u8, count);
-    iterator = std.mem.splitScalar(u8, value, ' ');
+    iterator = std.mem.tokenizeScalar(u8, value, ' ');
     for (result) |*scope| scope.* = try allocator.dupe(u8, iterator.next().?);
-    std.mem.sort([]const u8, result, {}, lessText);
-    if (result.len > 1)
-        for (result[1..], result[0 .. result.len - 1]) |current, previous|
-            if (std.mem.eql(u8, current, previous)) return error.InvalidChallenge;
-    return result;
+    return sortedScopeSet(result, error.InvalidChallenge);
 }
 
 fn validScope(value: []const u8) bool {
@@ -2414,6 +2533,12 @@ fn lessText(_: void, left: []const u8, right: []const u8) bool {
 fn containsText(values: []const []const u8, candidate: []const u8) bool {
     for (values) |value| if (std.mem.eql(u8, value, candidate)) return true;
     return false;
+}
+
+/// An absent or empty registered list leaves the requested value standing.
+fn nonEmptyContains(values: ?[]const []const u8, candidate: []const u8) bool {
+    const list = values orelse return true;
+    return list.len == 0 or containsText(list, candidate);
 }
 
 fn stringSetsEqual(left: []const []const u8, right: []const []const u8) bool {
@@ -3247,7 +3372,7 @@ test "MCP OAuth secret parsing owns unescaped results outside scrubbed scratch" 
     defer tokens.deinit();
     var registration = try parseRegistrationResponse(std.testing.allocator,
         \\{"client_id":"client","client_secret":"s\u0065cret","token_endpoint_auth_method":"client_secret_basic"}
-    , "http://127.0.0.1:8080/callback", .client_secret_basic);
+    , "http://127.0.0.1:8080/callback", .client_secret_basic, &.{.client_secret_basic});
     defer registration.deinit();
     try std.testing.expectEqualStrings("abc", tokens.access_token.view());
     try std.testing.expectEqualStrings("refresh", tokens.refresh_token.?.view());
@@ -3270,8 +3395,12 @@ test "MCP OAuth Bearer grammar preserves quoted commas escapes and token paramet
     var token = try parseRuntimeBearerChallenge(std.testing.allocator, "Bearer scope=files.read");
     defer token.deinit();
     try std.testing.expectEqualStrings("files.read", token.scopes[0]);
+    // A repeated parameter keeps its first value.
+    var repeated = try parseRuntimeBearerChallenge(std.testing.allocator, "Bearer scope=read, Scope=write");
+    defer repeated.deinit();
+    try std.testing.expectEqual(@as(usize, 1), repeated.scopes.len);
+    try std.testing.expectEqualStrings("read", repeated.scopes[0]);
     for ([_][]const u8{
-        "Bearer scope=read, Scope=write",
         "Bearer scope=\"read",
         "Bearer scope=read\r\nInjected: yes",
         "Bearer scope=read,",
@@ -3891,9 +4020,36 @@ test "MCP OAuth discovery names a protected resource that describes another reso
             return .{ .status = 404 };
         }
     };
+    // The origin-wide resource covers /mcp and is what gets sent.
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(error.InvalidMetadata, discoverResourceEffect(std.testing.allocator, .{ .fetch_fn = Fake.fetch }, "https://suno.mcp.example.test/mcp", &diagnostic));
-    try std.testing.expectEqual(FailureReason.resource_mismatch, diagnostic.reason);
+    var covered = try discoverResourceEffect(std.testing.allocator, .{ .fetch_fn = Fake.fetch }, "https://suno.mcp.example.test/mcp", &diagnostic);
+    defer covered.deinit();
+    try std.testing.expectEqualStrings("https://suno.mcp.example.test/", covered.resource);
+    try std.testing.expectEqualStrings("mcp:access", covered.requested_scopes[0]);
+
+    // Another origin, or a sibling path that only shares a prefix, does not.
+    const Elsewhere = struct {
+        resource: []const u8,
+        fn fetch(context: ?*anyopaque, request: Request, body: []u8, _: []u8) FetchError!Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.mem.eql(u8, request.url, "https://mcp.example.test/.well-known/oauth-protected-resource/mcp")) return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = std.fmt.bufPrint(body, "{{\"resource\":\"{s}\",\"authorization_servers\":[\"https://auth.example.test\"]}}", .{self.resource}) catch unreachable,
+            };
+            return .{ .status = 404 };
+        }
+    };
+    for ([_][]const u8{
+        "https://evil.example.test/mcp",
+        "https://mcp.example.test/mc",
+        "https://mcp.example.test:8443/mcp",
+        "https://mcp.example.test/mcp/v2",
+    }) |declared| {
+        var elsewhere: Elsewhere = .{ .resource = declared };
+        try std.testing.expectError(error.InvalidMetadata, discoverResourceEffect(std.testing.allocator, .{ .context = &elsewhere, .fetch_fn = Elsewhere.fetch }, "https://mcp.example.test/mcp", &diagnostic));
+        try std.testing.expectEqual(FailureReason.resource_mismatch, diagnostic.reason);
+    }
 
     // Without a challenge the absent path-specific document does not hide
     // the root document's answer.
@@ -3906,6 +4062,214 @@ test "MCP OAuth discovery names a protected resource that describes another reso
     try std.testing.expectError(error.InvalidMetadata, discoverResourceEffect(std.testing.allocator, .{ .fetch_fn = NoChallenge.fetch }, "https://mcp.example.test/mcp", &diagnostic));
     try std.testing.expectEqual(FailureReason.http_status, diagnostic.reason);
     try std.testing.expectEqual(@as(u16, 503), diagnostic.http_status);
+}
+
+test "MCP OAuth resource coverage is same origin and a whole path segment prefix" {
+    for ([_][2][]const u8{
+        .{ "https://a.example/mcp", "https://a.example/mcp" },
+        .{ "https://a.example", "https://a.example/mcp" },
+        .{ "https://a.example/", "https://a.example/mcp" },
+        .{ "https://a.example/team/", "https://a.example/team/mcp" },
+        .{ "https://A.Example:443/mcp", "https://a.example/mcp" },
+        .{ "https://a.example/mcp/", "https://a.example/mcp" },
+        .{ "https://a.example/mcp", "https://a.example/mcp?tenant=1" },
+        .{ "https://[::1]:8443/", "https://[::1]:8443/mcp" },
+    }) |case| try std.testing.expect(resourceCovers(case[0], case[1]));
+    for ([_][2][]const u8{
+        .{ "https://a.example/mc", "https://a.example/mcp" },
+        .{ "https://a.example/mcp/v2", "https://a.example/mcp" },
+        .{ "https://b.example/mcp", "https://a.example/mcp" },
+        .{ "https://a.example:8443/mcp", "https://a.example/mcp" },
+        .{ "https://a.example.evil/mcp", "https://a.example/mcp" },
+        .{ "https://a.example/MCP", "https://a.example/mcp" },
+        .{ "https://a.example/mcp?tenant=1", "https://a.example/mcp" },
+        .{ "http://a.example/mcp", "https://a.example/mcp" },
+        .{ "https://user@a.example/mcp", "https://a.example/mcp" },
+        .{ "https://a.example/mcp#x", "https://a.example/mcp" },
+    }) |case| try std.testing.expect(!resourceCovers(case[0], case[1]));
+}
+
+test "MCP OAuth discovery tolerates format deviations but keeps every security check" {
+    const Lenient = struct {
+        fn fetch(_: ?*anyopaque, request: Request, _: []u8, _: []u8) FetchError!Response {
+            // A malformed challenge only loses its hints.
+            if (std.mem.eql(u8, request.url, "https://mcp.example.test/mcp/")) return .{
+                .status = 401,
+                .www_authenticate = "Bearer resource_metadata=\"https://mcp.example.test/elsewhere",
+            };
+            // The terminating '/' is dropped before the well-known suffix.
+            if (std.mem.eql(u8, request.url, "https://mcp.example.test/.well-known/oauth-protected-resource/mcp")) return .{
+                .status = 200,
+                .content_type = "text/plain",
+                // No `resource`; unusable, repeated and slash-variant issuers;
+                // repeated and unusable scopes.
+                .body = "{\"authorization_servers\":[\"http://plain.example.test\",\"https://auth.example.test/tenant/\",\"https://auth.example.test/tenant\"],\"scopes_supported\":[\"read\",\"bad scope\",\"read\",\"write\"]}",
+            };
+            if (std.mem.eql(u8, request.url, "https://auth.example.test/.well-known/oauth-authorization-server/tenant")) return .{
+                .status = 200,
+                .content_type = null,
+                // Issuer without the '/', no response_types_supported, explicit
+                // nulls, and an unusable registration endpoint.
+                .body = "{\"issuer\":\"https://auth.example.test/tenant\",\"authorization_endpoint\":\"https://auth.example.test/authorize\",\"token_endpoint\":\"https://auth.example.test/token\",\"registration_endpoint\":\"http://auth.example.test/register\",\"grant_types_supported\":null,\"code_challenge_methods_supported\":[\"S256\"],\"token_endpoint_auth_methods_supported\":[\"none\"],\"scopes_supported\":null,\"authorization_response_iss_parameter_supported\":null}",
+            };
+            return .{ .status = 404 };
+        }
+    };
+    var resource = try discoverResourceEffect(std.testing.allocator, .{ .fetch_fn = Lenient.fetch }, "https://mcp.example.test/mcp/", null);
+    defer resource.deinit();
+    try std.testing.expectEqualStrings("https://mcp.example.test/mcp/", resource.resource);
+    try std.testing.expectEqual(@as(usize, 1), resource.authorization_servers.len);
+    try std.testing.expectEqual(@as(usize, 2), resource.requested_scopes.len);
+    var server = try discoverAuthorizationServer(std.testing.allocator, .{ .fetch_fn = Lenient.fetch }, &resource, resource.authorization_servers[0], null);
+    defer server.deinit();
+    try std.testing.expect(server.registration_endpoint == null);
+    try std.testing.expect(!server.authorization_response_issuer_required);
+    // The issuer the authorization server states is the one bound later.
+    try std.testing.expectEqualStrings("https://auth.example.test/tenant", server.issuer);
+
+    // PKCE S256 and issuer identity still decide.
+    const Strict = struct {
+        body: []const u8,
+        fn fetch(context: ?*anyopaque, request: Request, _: []u8, _: []u8) FetchError!Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.mem.eql(u8, request.url, "https://auth.example.test/.well-known/oauth-authorization-server"))
+                return .{ .status = 200, .content_type = "application/json", .body = self.body };
+            return .{ .status = 404 };
+        }
+    };
+    const arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var strict_resource: ResourceDiscovery = .{
+        .arena = arena,
+        .resource = "https://mcp.example.test/mcp",
+        .authorization_servers = &.{"https://auth.example.test"},
+        .scopes_supported = &.{},
+        .requested_scopes = &.{},
+    };
+    defer strict_resource.deinit();
+    for ([_]struct { []const u8, FailureReason }{
+        .{ "{\"issuer\":\"https://auth.example.test\",\"authorization_endpoint\":\"https://auth.example.test/a\",\"token_endpoint\":\"https://auth.example.test/t\"}", .unsupported_server },
+        .{ "{\"issuer\":\"https://auth.example.test\",\"authorization_endpoint\":\"https://auth.example.test/a\",\"token_endpoint\":\"https://auth.example.test/t\",\"code_challenge_methods_supported\":[\"plain\"]}", .unsupported_server },
+        .{ "{\"issuer\":\"https://other.example.test\",\"authorization_endpoint\":\"https://auth.example.test/a\",\"token_endpoint\":\"https://auth.example.test/t\",\"code_challenge_methods_supported\":[\"S256\"]}", .invalid_response },
+        .{ "{\"issuer\":\"https://auth.example.test\",\"authorization_endpoint\":\"http://auth.example.test/a\",\"token_endpoint\":\"https://auth.example.test/t\",\"code_challenge_methods_supported\":[\"S256\"]}", .invalid_response },
+    }) |case| {
+        var strict: Strict = .{ .body = case[0] };
+        var diagnostic: Diagnostic = .{};
+        try std.testing.expectError(error.InvalidMetadata, discoverAuthorizationServer(std.testing.allocator, .{ .context = &strict, .fetch_fn = Strict.fetch }, &strict_resource, "https://auth.example.test", &diagnostic));
+        try std.testing.expectEqual(case[1], diagnostic.reason);
+    }
+}
+
+test "MCP OAuth discovery moves past a failing pointed-to document" {
+    const Fallback = struct {
+        fn fetch(_: ?*anyopaque, request: Request, _: []u8, _: []u8) FetchError!Response {
+            if (std.mem.eql(u8, request.url, "https://mcp.example.test/mcp")) return .{
+                .status = 401,
+                .www_authenticate = "Bearer resource_metadata=\"https://mcp.example.test/broken\", scope=\"files.read\", scope=\"ignored\"",
+            };
+            if (std.mem.eql(u8, request.url, "https://mcp.example.test/broken")) return .{ .status = 500 };
+            if (std.mem.eql(u8, request.url, "https://mcp.example.test/.well-known/oauth-protected-resource")) return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = "{\"resource\":\"https://mcp.example.test/mcp\",\"authorization_servers\":[\"https://auth.example.test\"]}",
+            };
+            return .{ .status = 404 };
+        }
+    };
+    var resource = try discoverResourceEffect(std.testing.allocator, .{ .fetch_fn = Fallback.fetch }, "https://mcp.example.test/mcp", null);
+    defer resource.deinit();
+    // The challenge's scope still applies, whichever document answered.
+    try std.testing.expectEqual(@as(usize, 1), resource.requested_scopes.len);
+    try std.testing.expectEqualStrings("files.read", resource.requested_scopes[0]);
+}
+
+test "MCP OAuth finds a challenge only POST reveals and moves past an unusable listed server" {
+    const PostOnly = struct {
+        posts: usize = 0,
+        fn fetch(context: ?*anyopaque, request: Request, _: []u8, _: []u8) FetchError!Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.mem.eql(u8, request.url, "https://mcp.example.test/mcp")) {
+                if (request.read_body) return error.InvalidResponse;
+                if (request.method == .get) return .{ .status = 405 };
+                self.posts += 1;
+                if (std.mem.indexOf(u8, request.body, "\"method\":\"initialize\"") == null or
+                    testHeader(request.headers, "Authorization") != null)
+                    return error.InvalidResponse;
+                return .{ .status = 401, .www_authenticate = "Bearer resource_metadata=\"https://mcp.example.test/meta/prm.json\"" };
+            }
+            if (std.mem.eql(u8, request.url, "https://mcp.example.test/meta/prm.json")) return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = "{\"resource\":\"https://mcp.example.test/mcp\",\"authorization_servers\":[\"https://down.example.test\",\"https://auth.example.test\"]}",
+            };
+            if (std.mem.startsWith(u8, request.url, "https://down.example.test/")) return error.Network;
+            if (std.mem.eql(u8, request.url, "https://auth.example.test/.well-known/oauth-authorization-server")) return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = "{\"issuer\":\"https://auth.example.test\",\"authorization_endpoint\":\"https://auth.example.test/a\",\"token_endpoint\":\"https://auth.example.test/t\",\"code_challenge_methods_supported\":[\"S256\"],\"token_endpoint_auth_methods_supported\":[\"none\"]}",
+            };
+            return .{ .status = 404 };
+        }
+    };
+    var fake: PostOnly = .{};
+    const transport: Transport = .{ .context = &fake, .fetch_fn = PostOnly.fetch };
+    var resource = try discoverResourceEffect(std.testing.allocator, transport, "https://mcp.example.test/mcp", null);
+    defer resource.deinit();
+    try std.testing.expectEqual(@as(usize, 1), fake.posts);
+    var server = try discoverListedAuthorizationServer(std.testing.allocator, transport, &resource, null);
+    defer server.deinit();
+    try std.testing.expectEqualStrings("https://auth.example.test", server.issuer);
+
+    // When no listed server works, the report names the first real failure.
+    const arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var unreachable_only: ResourceDiscovery = .{
+        .arena = arena,
+        .resource = "https://mcp.example.test/mcp",
+        .authorization_servers = &.{"https://down.example.test"},
+        .scopes_supported = &.{},
+        .requested_scopes = &.{},
+    };
+    defer unreachable_only.deinit();
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(error.Network, discoverListedAuthorizationServer(std.testing.allocator, transport, &unreachable_only, &diagnostic));
+    try std.testing.expectEqual(FailureReason.network, diagnostic.reason);
+}
+
+test "MCP OAuth accepts a registered token authentication the server supports" {
+    var registration = try parseRegistrationResponse(std.testing.allocator,
+        \\{"client_id":"client","client_secret":"secret","token_endpoint_auth_method":"client_secret_post","redirect_uris":null}
+    , "http://127.0.0.1:8080/auth/callback", .client_secret_basic, &.{ .client_secret_basic, .client_secret_post });
+    defer registration.deinit();
+    try std.testing.expectEqual(TokenEndpointAuthMethod.client_secret_post, registration.token_endpoint_auth_method);
+    // Omitting method and secret registers a public client.
+    var public = try parseRegistrationResponse(std.testing.allocator,
+        \\{"client_id":"client"}
+    , "http://127.0.0.1:8080/auth/callback", .client_secret_basic, &.{ .none, .client_secret_basic });
+    defer public.deinit();
+    try std.testing.expectEqual(TokenEndpointAuthMethod.none, public.token_endpoint_auth_method);
+    // A method the server does not support, a contradiction, or another
+    // redirect URI is still refused.
+    for ([_][]const u8{
+        \\{"client_id":"client","client_secret":"secret","token_endpoint_auth_method":"client_secret_post"}
+        ,
+        \\{"client_id":"client","client_secret":"secret","token_endpoint_auth_method":"none"}
+        ,
+        \\{"client_id":"client","token_endpoint_auth_method":"client_secret_basic","redirect_uris":["http://127.0.0.1:9/auth/callback"]}
+        ,
+    }) |body| try std.testing.expectError(error.InvalidRegistrationResponse, parseRegistrationResponse(std.testing.allocator, body, "http://127.0.0.1:8080/auth/callback", .client_secret_basic, &.{.client_secret_basic}));
+}
+
+test "MCP OAuth well-known locations drop a terminating slash" {
+    var storage: [Limits.url_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
+        try protectedResourceMetadataUrl(&storage, "https://mcp.example.test/mcp/", true),
+    );
+    var urls_storage: [3][Limits.url_bytes]u8 = undefined;
+    var urls: [3][]const u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), try authorizationMetadataUrls(&urls_storage, &urls, "https://auth.example.test/tenant/"));
+    try std.testing.expectEqualStrings("https://auth.example.test/.well-known/oauth-authorization-server/tenant", urls[0]);
+    try std.testing.expectEqualStrings("https://auth.example.test/tenant/.well-known/openid-configuration", urls[2]);
+    try std.testing.expectEqual(@as(usize, 2), try authorizationMetadataUrls(&urls_storage, &urls, "https://auth.example.test/"));
 }
 
 test "MCP OAuth remote text is bounded for display" {
