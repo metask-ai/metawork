@@ -6,6 +6,8 @@ const product_attachment = @import("metawork_product_attachment");
 
 pub const Error = runtime_impl.Error;
 pub const Limits = runtime_impl.Limits;
+/// The one bound on a checkpoint's size, which the execution link also has to carry.
+pub const checkpoint_export_limits = runtime_impl.checkpoint_export_limits;
 pub const Protocol = runtime_impl.Protocol;
 pub const PermissionProfile = runtime_impl.PermissionProfile;
 pub const ApprovalMode = runtime_impl.ApprovalMode;

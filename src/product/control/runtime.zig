@@ -258,7 +258,7 @@ pub const Limits = struct {
 
 // Single Runtime-owned production source. Agent validates these product
 // limits against the official ABI ceilings at the dependency boundary.
-const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
+pub const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
     .hard_bytes = 64 * 1024 * 1024,
     .max_section_bytes = 16 * 1024 * 1024,
     // Core Read stores the complete image JSON as one checkpoint string.

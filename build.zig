@@ -2841,6 +2841,10 @@ fn wireAgentCore(
     app.addImport("metawork_agent_link", agent_link);
     app.addImport("app_execution_host", app_execution_host);
     app.addImport("app_execution_mode", app_execution_mode);
+    // Both halves of the development switch. `src/app.zig` references them
+    // only where the switch is compiled in, so other builds contain neither.
+    app.addImport("app_execution_client", app_execution_client);
+    app.addImport("app_execution_server", app_execution_server);
     app.addImport("event_pump", event_pump);
     app.addImport("metawork_product_update", product_update);
     app.addImport("app_output_file", output_file);
