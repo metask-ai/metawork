@@ -466,6 +466,96 @@ test "a process killed under a running Task leaves Product up and the cut Run in
     }
 }
 
+/// Counts the bytes the Owner holds, so a test can say what a dead process
+/// left behind.
+const CountingAllocator = struct {
+    child: std.mem.Allocator,
+    live: std.atomic.Value(isize) = .init(0),
+
+    fn allocator(self: *CountingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
+
+    fn of(context: *anyopaque) *CountingAllocator {
+        return @ptrCast(@alignCast(context));
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const self = of(context);
+        const memory = self.child.rawAlloc(len, alignment, ret) orelse return null;
+        _ = self.live.fetchAdd(@intCast(len), .monotonic);
+        return memory;
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
+        const self = of(context);
+        if (!self.child.rawResize(memory, alignment, new_len, ret)) return false;
+        _ = self.live.fetchAdd(@as(isize, @intCast(new_len)) - @as(isize, @intCast(memory.len)), .monotonic);
+        return true;
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
+        const self = of(context);
+        const moved = self.child.rawRemap(memory, alignment, new_len, ret) orelse return null;
+        _ = self.live.fetchAdd(@as(isize, @intCast(new_len)) - @as(isize, @intCast(memory.len)), .monotonic);
+        return moved;
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const self = of(context);
+        self.child.rawFree(memory, alignment, ret);
+        _ = self.live.fetchSub(@intCast(memory.len), .monotonic);
+    }
+};
+
+test "nothing of a dead execution process is left once its Session is released" {
+    // Each crash would otherwise cost the window whatever the dead process's
+    // bookkeeping held: its pipes' buffers, its correlation table, the
+    // Session objects Product named it by. Once Product has released the
+    // Session, the main loop's sweep has to give all of it back.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var wake: Wake = .{};
+    var counting: CountingAllocator = .{ .child = allocator };
+    var owner: execution_client.Owner = undefined;
+    try owner.init(io, counting.allocator(), .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .queue_limits = .{},
+        .spawn = .{ .explicit = &.{ fixture, "--with-runtime", "--hold-runs" } },
+        .wake = wake.notifier(),
+    });
+    defer owner.deinit();
+    // The event pump, which lives as long as the Owner.
+    const baseline = counting.live.load(.acquire);
+    {
+        var control = try product_control.Runtime.init(allocator, io, owner.runtimePort(), product_limits, lifecycle.productControlConfiguration());
+        defer control.deinit();
+        const task_id = try createRunningTask(&control, "Say something short");
+        try waitEvents(&owner, 1);
+        execution_client.TestSupport.killCurrent(&owner);
+        try waitDetached(&control, &owner, task_id);
+
+        // What may stay is the Owner's own list of processes: its buffer is
+        // allocated by the first start and reused, so it does not grow with
+        // each crash. Everything the dead process itself held is gone.
+        var waited: u64 = 0;
+        while (true) : (waited += wait_tick_ms) {
+            try turn(&control, &owner);
+            const list_bytes: isize = @intCast(owner.generations.capacity * @sizeOf(*anyopaque));
+            const retained = counting.live.load(.acquire) - baseline - list_bytes;
+            if (retained == 0 and owner.generations.items.len == 0) break;
+            if (waited >= wait_limit_ms) {
+                std.debug.print("a dead process still holds {d} bytes\n", .{retained});
+                return error.DeadProcessStillHeld;
+            }
+            try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+        }
+    }
+}
+
 test "a Task idle when its process dies is given up, and its next message starts a new process" {
     const fixture = try fixturePath();
     defer allocator.free(fixture);
