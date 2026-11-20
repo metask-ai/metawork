@@ -8,38 +8,13 @@ const skill_management = @import("metawork_product_skill").management;
 const product_task = @import("metawork_product_task");
 const history_store = @import("history_store.zig");
 const app_paths = @import("paths.zig");
-const agent_link = @import("metawork_agent_link");
 
-// The checkpoint blob a restore opens is named by exactly the fields the
-// store's own identity carries, and the execution half receives them as a
-// descriptor over the link. The two types sit on opposite sides of that
-// boundary: `agent` cannot import this store, so the check cannot live there.
-// It lives here because Application composes both, and because the dependency
-// direction -- not convenience -- decides where a cross-owner assertion goes.
-//
-// Without it, a field added to the identity (a format version, a key id) would
-// leave the descriptor silently short, and the execution half would open the
-// wrong blob or none at all.
-comptime {
-    const Identity = product_task.checkpoint_store.Identity;
-    const Descriptor = agent_link.shapes.CheckpointSourceDescriptor;
-    const identity_fields = @typeInfo(Identity).@"struct".fields;
-    const descriptor_fields = @typeInfo(Descriptor).@"struct".fields;
-    if (identity_fields.len != descriptor_fields.len) @compileError(
-        "the checkpoint store's identity and the link's source descriptor no longer " ++
-            "carry the same number of fields; a restore would open the wrong blob",
-    );
-    for (identity_fields) |field| {
-        if (!@hasField(Descriptor, field.name)) @compileError(
-            "the link's checkpoint source descriptor has no `" ++ field.name ++
-                "`, which the store's identity needs to open a blob",
-        );
-        if (@FieldType(Descriptor, field.name) != field.type) @compileError(
-            "the link's checkpoint source descriptor declares `" ++ field.name ++
-                "` with a different type than the store's identity",
-        );
-    }
-}
+// The assertion that used to be here kept the checkpoint store's identity and
+// the link's source descriptor carrying the same fields, because the execution
+// half opened the blob a restore named. It opens none now: a restore carries
+// the checkpoint itself, so nothing over there names a blob and there is
+// nothing for an identity field to fall out of step with. The check went with
+// the descriptor rather than being left to assert a shape nobody reads.
 
 pub const Stores = struct {
     allocator: std.mem.Allocator = undefined,
