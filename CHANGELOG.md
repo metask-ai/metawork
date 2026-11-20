@@ -6,6 +6,34 @@
 
 ## [Unreleased]
 
+## [0.2.14] - 2026-11-20
+
+### Added
+
+- Task 空闲时可编辑仍在可回退范围内的历史纯文本消息并重新运行；回退只影响对话，保留已生成的文件和已发生的修改。
+- 新增 Task 项目归属与工作目录管理：调整项目只改变分组，保留实际目录与授权；新 Task 首次发送时按所选工作目录确定项目归属。
+- 会话成果支持从已结束 Run 的 File Changes 登记已应用的新增或修改文件，并跟踪后续轮次的内容更新；Office 原文件可用默认应用打开，HTML 可在浏览器打开。
+- Markdown 新增 `$$…$$` 与 `math` 围栏的 MathML 公式渲染，统一处理流式未闭合内容、失败回退与富文本复制。
+- 新增 Host 致命故障记录与上次异常退出诊断，可关联构建身份、故障位置及受影响的 Run，供离线排查。
+
+### Changed
+
+- AgentCore 切换至固定的 `0.15.0-fork.1` npm 平台包，移除发布归档下载入口；Native SDK 升级至 `0.11.1-fork.3`。
+- Windows Session 新增下载命令指引，优先使用 `curl.exe`；使用 PowerShell Web cmdlet 时要求 `-UseBasicParsing`，以减少旧版解析路径造成的阻塞。
+- OAuth 公共编解码与 Storage 归入 Foundation，Account 和 MCP 复用同一套 OAuth 基础能力。
+- Product 改为通过类型化接口调用 Agent，并新增有界双向调用协议及失联处理基础；正式执行仍在 Host 进程内，尚未接入进程隔离。
+- 常规 CI 增加 Windows 安装器与 macOS `.app` 的无签名打包检查；Windows 打包移除体积基线维护，仅报告最终体积与摘要。
+- 采用 MIT 许可证，并将许可证随安装包分发。
+
+### Removed
+
+- 移除 Composer 的“引用工作区文件”选择器及其专用输入管线。
+
+### Fixed
+
+- 修复跨架构打包生成 Renderer wire 时丢失目标架构与 macOS 图标编译工具校验的问题；Apple 时间戳请求瞬时失败时增加有限重试。
+- Snapshot 传输缓冲区改为写入时按需映射，避免启动时触碰整块预留空间造成额外内存占用。
+
 ## [0.2.13] - 2026-11-16
 
 ### Added
@@ -587,7 +615,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.13...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.14...HEAD
+[0.2.14]: https://github.com/metask-ai/metawork/compare/v0.2.13...v0.2.14
 [0.2.13]: https://github.com/metask-ai/metawork/compare/v0.2.12...v0.2.13
 [0.2.12]: https://github.com/metask-ai/metawork/compare/v0.2.11...v0.2.12
 [0.2.11]: https://github.com/metask-ai/metawork/compare/v0.2.10...v0.2.11
