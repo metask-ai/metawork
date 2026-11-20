@@ -10795,7 +10795,7 @@ const SearchSource = struct {
         skip: usize,
         filled: usize = 0,
         total: usize = 0,
-        fn append(self: *@This(), value: []const u8) void {
+        pub fn append(self: *@This(), value: []const u8) void {
             self.total += value.len;
             if (self.skip >= value.len) {
                 self.skip -= value.len;
@@ -10816,32 +10816,7 @@ const SearchSource = struct {
         var copy: Copy = .{ .storage = storage, .skip = at };
         switch (self.content) {
             .plain => unreachable,
-            .input => |input| switch (input.*) {
-                .text => |value| copy.append(value.value),
-                .skill => |value| {
-                    copy.append("/");
-                    copy.append(value.invocation_name);
-                    if (value.argument_values.len > 1 or (value.argument_values.len == 1 and value.argument_values[0].len != 0)) {
-                        copy.append(" ");
-                        for (value.argument_values, 0..) |argument, index| {
-                            if (index != 0) copy.append(" ");
-                            copy.append(argument);
-                        }
-                    }
-                },
-                .multimodal => |value| {
-                    var present = false;
-                    if (value.text) |text| if (text.len != 0) {
-                        copy.append(text);
-                        present = true;
-                    };
-                    for (value.attachments) |attachment| if (attachment.display_name.len != 0) {
-                        if (present) copy.append(" ");
-                        copy.append(attachment.display_name);
-                        present = true;
-                    };
-                },
-            },
+            .input => |input| task_view.appendReadableInput(input, &copy),
             .output => |run| {
                 if (run.assistant.committed_len > run.assistant.list.items.len or run.commentary_count > run.commentary_ends.len) return error.SnapshotTooLarge;
                 const committed = run.assistant.list.items[0..run.assistant.committed_len];

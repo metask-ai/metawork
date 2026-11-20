@@ -1415,11 +1415,24 @@ export function cloneViewScope(scope: ViewScope): ViewScope {
     receipts: scope.receipts.map((query) => ({ ...query })),
   };
 }
+/** Upper bound of a Run manifest excerpt in UTF-8 bytes, shared with Product. */
+export const runExcerptMaxBytes = 180;
 export type RunManifest = Pick<
   RunView,
-  "id" | "phase" | "permissionProfile" | "permissionInteraction" | "terminal"
+  | "id"
+  | "phase"
+  | "permissionProfile"
+  | "permissionInteraction"
+  | "submittedAtUnixMs"
+  | "terminal"
 > & {
   contentVersion: string;
+  /**
+   * Start of the Run's own input in its readable form (text, `/skill args`,
+   * or text then attachment names), whitespace folded. Null when Product
+   * withholds it: a redacted input or one holding a known credential.
+   */
+  excerpt: string | null;
 };
 export type TaskSummary = Pick<
   TaskView,
