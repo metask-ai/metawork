@@ -1,4 +1,9 @@
-import { forwardRef, type TextareaHTMLAttributes } from "react";
+import {
+  forwardRef,
+  useEffect,
+  type RefObject,
+  type TextareaHTMLAttributes,
+} from "react";
 
 import { cn, controlBase, controlFocus } from "./utils.ts";
 
@@ -18,3 +23,37 @@ export const Textarea = forwardRef<
   />
 ));
 Textarea.displayName = "Textarea";
+
+function resizeTextarea(textarea: HTMLTextAreaElement) {
+  const maxHeight = Math.min(180, window.innerHeight * 0.28);
+  textarea.style.height = "auto";
+  const contentHeight = textarea.scrollHeight;
+  textarea.style.height = `${Math.min(contentHeight, maxHeight)}px`;
+  textarea.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
+}
+
+export function useAutosizeTextarea(
+  ref: RefObject<HTMLTextAreaElement | null>,
+  text: string | undefined,
+) {
+  const visible = text !== undefined;
+
+  useEffect(() => {
+    const textarea = ref.current;
+    if (textarea && text !== undefined) resizeTextarea(textarea);
+  }, [ref, text]);
+
+  useEffect(() => {
+    const textarea = ref.current;
+    if (!visible || !textarea) return;
+    const resize = () => resizeTextarea(textarea);
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(resize);
+    observer?.observe(textarea);
+    window.addEventListener("resize", resize);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", resize);
+    };
+  }, [ref, visible]);
+}

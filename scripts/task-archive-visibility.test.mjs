@@ -1516,12 +1516,7 @@ for (const emptyProject of [false, true])
       ),
     );
     assert.equal(screen.queryByRole("menu"), null);
-    assert.equal(
-      screen
-        .getByRole("combobox", { name: "Project" })
-        .textContent.includes("metawork-test"),
-      true,
-    );
+    assert.equal(screen.queryByRole("combobox", { name: "Project" }), null);
     await user.click(newTask);
     assert.equal(
       (await screen.findByPlaceholderText("Enter your instructions…")).value,

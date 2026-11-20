@@ -984,8 +984,7 @@ export const enUS = {
   "input.unexecuted": "Not executed",
   "input.edit": "Edit",
   "input.edit_notice":
-    "The conversation rewinds to this message; files and other changes already made stay as they are.",
-  "input.edit_confirm": "Rerun from here",
+    "Sending rewinds the conversation to this message and generates a new reply. Files already created and changes already made are kept.",
   "input.edit_cancel": "Cancel",
   "input.retry_original": "Resend original message",
   "input.discard_retry": "Discard saved input",

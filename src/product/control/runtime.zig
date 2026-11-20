@@ -94,6 +94,7 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     UiRequestIdentityCollision,
     WorkspaceCapacity,
     WorkspaceDirectoryCapacity,
+    ProjectCapacity,
     ProjectUnavailable,
     WorkspaceIdentityExhausted,
     WorkspaceIdentityUntrusted,
@@ -297,8 +298,14 @@ pub const TaskWorkspaceRequest = union(enum) {
     manual: struct {
         workspace_id: u64,
         expected_epoch: u64,
+        ensure_project_entry: bool = false,
     },
     automatic,
+};
+
+const TaskInitialProject = union(enum) {
+    existing: ?u64,
+    workspace,
 };
 
 pub const AttachmentFileStore = product_attachment.FileStore;
@@ -3837,7 +3844,7 @@ pub const Runtime = struct {
         try self.validateNewTaskModelAdmission(model_selection);
         if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
         const workspace = try self.openWorkspaceInternal(input);
-        return self.createTaskInWorkspaceInternal(workspace, (self.workspace.facts(workspace) orelse return error.UnknownWorkspace).epoch, model_selection, null, null, .{ .interactive = input.approval_mode }, false, workspace);
+        return self.createTaskInWorkspaceInternal(workspace, (self.workspace.facts(workspace) orelse return error.UnknownWorkspace).epoch, model_selection, null, null, .{ .interactive = input.approval_mode }, false, .{ .existing = workspace });
     }
 
     pub fn createTaskInWorkspace(
@@ -3851,7 +3858,7 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        return self.createTaskInWorkspaceInternal(workspace_id, expected_workspace_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, false, workspace_id);
+        return self.createTaskInWorkspaceInternal(workspace_id, expected_workspace_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, false, .{ .existing = workspace_id });
     }
 
     pub fn createTaskForWorkspace(
@@ -3867,7 +3874,7 @@ pub const Runtime = struct {
         self.syncLifecycle();
         try self.validateProject(project_id);
         return switch (request) {
-            .manual => |manual| self.createTaskInWorkspaceInternal(manual.workspace_id, manual.expected_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, false, project_id),
+            .manual => |manual| self.createTaskInWorkspaceInternal(manual.workspace_id, manual.expected_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, false, if (manual.ensure_project_entry) .workspace else .{ .existing = project_id }),
             .automatic => self.createAutomaticTask(model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, project_id),
         };
     }
@@ -3881,7 +3888,7 @@ pub const Runtime = struct {
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
         allow_unowned_automatic: bool,
-        project_id: ?u64,
+        project: TaskInitialProject,
     ) Error!u64 {
         const remembered_mode: ?ApprovalMode = switch (permission) {
             .interactive => |mode| mode orelse self.default_approval_mode,
@@ -3889,13 +3896,19 @@ pub const Runtime = struct {
         };
         const previous_default_mode = self.default_approval_mode;
         var prepared = try self.prepareTaskInWorkspaceInternal(workspace_id, expected_workspace_epoch, model_selection, expected_skill_catalog_revision, expected_skill_selection_revision, permission, allow_unowned_automatic);
+        errdefer prepared.rollback(self);
+        const created_project = project == .workspace and try self.workspace.ensureProjectEntry(workspace_id, expected_workspace_epoch);
+        errdefer if (created_project) {
+            _ = self.workspace.setProjectEntry(workspace_id, expected_workspace_epoch, false) catch unreachable;
+        };
+        const project_id = switch (project) {
+            .existing => |id| id,
+            .workspace => workspace_id,
+        };
         _ = self.task_runtime.setProject(prepared.id(), project_id) catch unreachable;
         if (remembered_mode) |mode| self.default_approval_mode = mode;
-        self.commitTaskStateBestEffort() catch |err| {
-            self.default_approval_mode = previous_default_mode;
-            prepared.rollback(self);
-            return err;
-        };
+        errdefer self.default_approval_mode = previous_default_mode;
+        try self.commitTaskStateBestEffort();
         const task_id = prepared.complete(self);
         if (permission == .interactive) self.rememberTaskModelPreference(task_id);
         self.bumpRevision();
@@ -4096,7 +4109,7 @@ pub const Runtime = struct {
         var automatic = try self.prepareAutomaticWorkspace();
         errdefer if (automatic.workspace.isActive()) automatic.rollback(self);
         const workspace = automatic.facts(self);
-        const task_id = try self.createTaskInWorkspaceInternal(workspace.id, workspace.epoch, model_selection, null, null, permission, true, project_id);
+        const task_id = try self.createTaskInWorkspaceInternal(workspace.id, workspace.epoch, model_selection, null, null, permission, true, .{ .existing = project_id });
         if (personal_revision) |revision|
             self.task_runtime.installInitialPersonalCatalog(task_id, revision, expected_skill_selection_revision.?);
         self.workspace.setAutomaticOwner(workspace.id, task_id);
@@ -4584,14 +4597,8 @@ pub const Runtime = struct {
         return result;
     }
 
-    /// Accepts an edited earlier message and reruns the conversation from it.
-    ///
-    /// The message is admitted through the same path as any other, so a Run
-    /// still in flight only has to be stopped: the edited message waits in
-    /// the queue, and the Task reaching idle is what starts its Run, with the
-    /// rewind in front of it. Stopping goes through the ordinary Run
-    /// cancellation rather than `stopTask`, which would retire the message
-    /// that was just accepted along with the rest of the batch.
+    /// Accepts an edited earlier message when the Task is idle and reruns
+    /// the conversation from it.
     pub fn editTaskInput(
         self: *Runtime,
         operation_id: []const u8,
@@ -4610,11 +4617,6 @@ pub const Runtime = struct {
             return result;
         };
         result.outcome = .accepted;
-        // Only a Run is in the way. A compaction or a restore the user asked
-        // for finishes on its own, and the edited message waits behind it.
-        if (self.task_runtime.activeRunId(task_id)) |run| {
-            _ = self.task_runtime.cancelRun(task_id, run, .edit_and_rerun, self.taskRuntimeOperationEffects()) catch false;
-        }
         self.reapTaskInputResources();
         self.advanceTaskInputs();
         self.commitTaskStateNoFail();
@@ -23599,13 +23601,23 @@ test "directory selection preserves entry intent and has independent capacity" {
     const root = try temporary.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     const directory = try control.openWorkspace(.{ .workspace_root = root, .intent = .directory, .trust = .explicitly_trusted });
+    const request: TaskWorkspaceRequest = .{ .manual = .{
+        .workspace_id = directory,
+        .expected_epoch = control.workspace.facts(directory).?.epoch,
+        .ensure_project_entry = true,
+    } };
     try std.testing.expect(!control.workspace.facts(directory).?.project_entry);
+    try std.testing.expectError(error.ProjectCapacity, control.workspace.ensureProjectEntry(directory, request.manual.expected_epoch));
     try std.testing.expectError(error.WorkspaceCapacity, control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
     try control.removeProjectAtEpoch(1, 1);
     try std.testing.expectEqual(directory, try control.openWorkspace(.{ .workspace_root = root, .intent = .directory, .trust = .explicitly_trusted }));
     try std.testing.expect(!control.workspace.facts(directory).?.project_entry);
+    const model = try TestSupport.fixtureModelSelection(&control);
+    try std.testing.expectError(error.SessionCapacity, control.createTaskForWorkspace(request, null, model, null, null, .{ .interactive = null }));
+    try std.testing.expect(!control.workspace.facts(directory).?.project_entry);
     try std.testing.expectEqual(directory, try control.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted }));
     try std.testing.expect(control.workspace.facts(directory).?.project_entry);
+    try std.testing.expect(!try control.workspace.ensureProjectEntry(directory, request.manual.expected_epoch));
 }
 
 test "Task project membership is last-writer-wins and keeps execution and hidden identity" {

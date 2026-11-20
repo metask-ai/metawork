@@ -277,6 +277,7 @@ type MutationReason =
   | SendInputReason
   | TaskModelSelectionReason;
 function mutationReasonMessageId(reason: MutationReason): MessageId {
+  if (reason === "project_capacity") return "workspace.selection_capacity";
   return `mutation.reason.${reason}`;
 }
 type FileChangeDiffUiState =
@@ -1873,13 +1874,9 @@ export default function App() {
     route,
     refreshSnapshot,
   ]);
-  const newTaskProjectReady =
-    workbench.draftProjectId === null ||
-    projects.some((project) => project.id === workbench.draftProjectId);
   const canCreateTask =
     snapshot.newTaskAdmission.available &&
     newTaskWorkspaceReady &&
-    newTaskProjectReady &&
     newTaskModelState.valid;
   const canSubmit =
     taskCanCompose &&
@@ -3122,43 +3119,6 @@ export default function App() {
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }
-  function setDraftProject(projectId: string | null) {
-    if (
-      !beginDraftContextChange() ||
-      (projectId !== null &&
-        !projects.some((project) => project.id === projectId))
-    )
-      return;
-    retireUnknownDraftSubmission();
-    const targetId = projectId ?? unscopedNewTaskDraftId;
-    const targetSession = submissionSessions.current.get(
-      `${bridgeGenerationRef.current}:new-task:${targetId}:${newTaskSubmissionInstances.current.get(targetId) ?? 0}`,
-    );
-    if (
-      targetId !== newTaskDraftId &&
-      targetSession &&
-      !targetSession.creationUnknown
-    ) {
-      if (
-        newTaskDraftId &&
-        (composerDraftHasContent(newTaskDrafts.getDraft(newTaskDraftId)) ||
-          newTaskDrafts.getDirectory(newTaskDraftId).kind === "explicit")
-      )
-        reportDraftPreserved(targetId);
-      openNewTaskDraft(projectId);
-      return;
-    }
-    if (targetSession?.creationUnknown)
-      releaseNewTaskSubmission(
-        `${bridgeGenerationRef.current}:new-task:${targetId}:${newTaskSubmissionInstances.current.get(targetId) ?? 0}`,
-      );
-    if (newTaskDraftId) {
-      const decision = newTaskDrafts.moveDraft(newTaskDraftId, targetId);
-      if (decision === "preserve_both") reportDraftPreserved(targetId);
-    }
-    dispatchWorkbench({ type: "task.draft.opened", projectId });
-    window.requestAnimationFrame(() => composer.current?.focus());
-  }
   async function registerWorkingDirectory(addProject: boolean) {
     if (workbenchMutationDisabled || workspaceBusyRef.current) return;
     workspaceBusyRef.current = true;
@@ -3302,13 +3262,14 @@ export default function App() {
                   kind: "manual",
                   workspaceId: composerWorkspace.id,
                   expectedWorkspaceEpoch: composerWorkspace.epoch,
+                  ensureProjectEntry: true,
                 }
               : { kind: "automatic" },
             newTaskModelState.intent!,
             input.kind === "skill" ? input.catalogRevision : null,
             input.kind === "skill" ? input.selectionRevision : null,
             newTaskApprovalMode,
-            workbench.draftProjectId,
+            null,
           ),
         onCreated: (id) => {
           pendingTaskDraftRetention.current.add(id);
@@ -3531,7 +3492,7 @@ export default function App() {
 
   async function editRunInput(taskId: string, runId: string, text: string) {
     const key = `input-edit:${taskId}:${runId}`;
-    if (bridgeUnavailable || inputRetryActions.current.has(key)) return;
+    if (bridgeUnavailable || inputRetryActions.current.has(key)) return false;
     inputRetryActions.current.add(key);
     const audience = { scope: "task" as const, taskId };
     const feedback = beginOperationFeedback(key, audience);
@@ -3549,11 +3510,13 @@ export default function App() {
           ? null
           : attentionStatus(mutationReasonMessageId(result.reason), audience),
       );
+      return result.outcome === "accepted";
     } catch {
       settleOperationFeedback(
         feedback,
         attentionStatus("feedback.unconfirmed", audience),
       );
+      return false;
     } finally {
       inputRetryActions.current.delete(key);
       await refreshSnapshot().catch(() => undefined);
@@ -5002,20 +4965,6 @@ export default function App() {
             </div>
           ) : undefined
         }
-        projectContext={
-          newTaskDraftActive ? (
-            <ProjectSelector
-              projectId={workbench.draftProjectId}
-              workspaces={snapshot.workspaces}
-              disabled={
-                workbenchMutationDisabled ||
-                taskIdentityPending ||
-                workspaceBusy
-              }
-              onSelect={setDraftProject}
-            />
-          ) : undefined
-        }
         workspaceOptions={[
           {
             id: automaticWorkspaceOptionId,
@@ -5265,13 +5214,6 @@ export default function App() {
             {pendingLocator}
             {activeTask && (
               <TaskInformation
-                projectName={
-                  activeTask?.projectId === null
-                    ? t("task.no_project")
-                    : (projects.find(
-                        (project) => project.id === activeTask?.projectId,
-                      )?.displayName ?? t("task.project_removed"))
-                }
                 key={activeTask.id}
                 task={activeTask}
                 models={snapshot.models}
@@ -6307,9 +6249,7 @@ export default function App() {
                 onDiscardInputRetry={(taskId, operationId) =>
                   void actOnFailedInput(taskId, operationId, true)
                 }
-                onEditInput={(taskId, runId, text) =>
-                  void editRunInput(taskId, runId, text)
-                }
+                onEditInput={editRunInput}
                 onOpenSettings={openSettings}
                 recharge={{
                   available: snapshot.account.state === "authenticated",

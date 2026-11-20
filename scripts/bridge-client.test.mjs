@@ -1092,6 +1092,34 @@ test("sendInput addresses Task acceptance and validates its exact operation", as
   }
 });
 
+test("editInput decodes a busy Task refusal without sending Stop", async () => {
+  const result = JSON.parse(
+    readFileSync(
+      new URL("../tests/product/edit_input_busy.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return result;
+    }),
+  });
+  const input = { kind: "text", text: "edited message" };
+  const { operationId, taskId } = result;
+  assert.deepEqual(
+    await client.editInput(operationId, taskId, "2", input),
+    result,
+  );
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.tasks.editInput",
+      payload: { operationId, taskId, runId: "2", input },
+    },
+  ]);
+});
+
 test("input timeout and late response never resend or retarget", async () => {
   let resolve,
     calls = 0;
@@ -1237,6 +1265,50 @@ test("Skill import commands bind targets and revisions without source authority 
       payload: { previewId: "9", preparationRevision: "4", target: null },
     },
   ]);
+});
+
+test("Task creation can request a project for the chosen directory with the shared Host payload", async () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL("../src/bridge/task_create_project.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  const accepted = {
+    accepted: true,
+    taskId: "1",
+    projectId: "1",
+    bindingEpoch: "1",
+    mcpAuthority: { kind: "unavailable", selection: null },
+    reason: null,
+  };
+  let result = accepted;
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      assert.equal(command, "metawork.tasks.create");
+      assert.deepEqual(payload, fixture);
+      return result;
+    }),
+  });
+  const create = () =>
+    client.createTask(
+      fixture.workspace,
+      fixture.modelSelection,
+      fixture.expectedSkillCatalogRevision,
+      fixture.expectedSkillSelectionRevision,
+      fixture.approvalMode,
+      fixture.projectId,
+    );
+  assert.deepEqual(await create(), accepted);
+  result = {
+    accepted: false,
+    taskId: null,
+    projectId: null,
+    bindingEpoch: null,
+    mcpAuthority: null,
+    reason: "project_capacity",
+  };
+  assert.deepEqual(await create(), result);
 });
 
 test("Workspace opening sends only identity and epoch and decodes shared Host results", async () => {

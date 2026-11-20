@@ -1,0 +1,1 @@
+{"projectId":null,"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"1","ensureProjectEntry":true},"modelSelection":{"targetModelRef":{"sourceId":"metask","modelId":"fixture-model"},"expectedSourceGeneration":"1","expectedCatalogGeneration":"4"},"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"approvalMode":"manual"}

@@ -412,6 +412,7 @@ const scheduledTaskFailureReasons = [
 ] as const;
 const taskCreateReasons = [
   "project_unavailable",
+  "project_capacity",
   "execution_unavailable",
   "schedule_persistence_unavailable",
   "schedule_persistence_failed",

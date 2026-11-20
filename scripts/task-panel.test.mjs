@@ -698,6 +698,8 @@ function task(overrides = {}) {
     deletionStatus: "idle",
     continuationAvailable: true,
     archived: false,
+    activeOperation: null,
+    approvalChange: null,
     currentRunId: "0",
     currentRunPhase: null,
     context: { pressure: null, lastAutoCompact: null },
@@ -2689,13 +2691,25 @@ test("reply metadata keeps each Run's actual model when the next-run model chang
   assertModels();
 });
 
-test("input metadata places the nullable submitted time before copy", async (context) => {
+test("input metadata puts the timestamp before accessible message action icons", async (context) => {
   const user = userEvent.setup({ document: dom.window.document });
   const submittedAt = new Date(2026, 8, 11, 10, 25).getTime();
   context.mock.method(Date, "now", () => submittedAt + 4 * 24 * 60 * 60 * 1000);
+  const onEditInput = context.mock.fn(async () => true);
+  const text = "Original editable text";
   const view = render(
     taskContentElement(
-      task({ runs: [run({ submittedAtUnixMs: String(submittedAt) })] }),
+      task({
+        runs: [
+          run({
+            submittedAtUnixMs: String(submittedAt),
+            input: { kind: "text", text, redacted: false },
+            editAdmitted: true,
+          }),
+        ],
+      }),
+      "1",
+      { onEditInput },
     ),
   );
   const metadata = view.container.querySelector(
@@ -2705,6 +2719,10 @@ test("input metadata places the nullable submitted time before copy", async (con
   assert.equal(metadata.children[1].tagName, "BUTTON");
   assert.equal(metadata.querySelector("time").textContent, "4 days ago");
   assert.ok(screen.getByRole("button", { name: "Copy input" }));
+  const edit = within(metadata).getByRole("button", { name: "Edit" });
+  assert.equal(metadata.children[2], edit);
+  assert.equal(edit.textContent, "");
+  assert.ok(edit.querySelector('svg[aria-hidden="true"]'));
 
   const time = metadata.querySelector("time");
   await user.hover(time);
@@ -2714,6 +2732,41 @@ test("input metadata places the nullable submitted time before copy", async (con
       time.getAttribute("aria-label"),
     ),
   );
+  await user.unhover(time);
+  await user.hover(edit);
+  await waitFor(() =>
+    assert.ok(
+      Array.from(document.querySelectorAll("[data-base-ui-portal]")).some(
+        (portal) => portal.textContent === "Edit",
+      ),
+    ),
+  );
+  edit.focus();
+  await user.keyboard("{Enter}");
+  const editor = screen.getByRole("textbox", { name: "Edit" });
+  assert.equal(editor.value, text);
+  assert.equal(editor.rows, 1);
+  assert.equal(document.activeElement, editor);
+  assert.equal(editor.selectionStart, text.length);
+  assert.equal(editor.selectionEnd, text.length);
+  editor.setSelectionRange(1, 1);
+  await user.keyboard("X");
+  assert.equal(editor.value, `OX${text.slice(1)}`);
+  assert.equal(editor.selectionStart, 2);
+  const notice = document.getElementById(
+    editor.getAttribute("aria-describedby"),
+  );
+  const surface = editor.closest(".ai-composer");
+  assert.equal(surface.nextElementSibling, notice);
+  assert.match(
+    notice.textContent,
+    /Files already created and changes already made are kept/,
+  );
+  assert.ok(within(surface).getByRole("button", { name: "Send" }));
+  await user.click(within(surface).getByRole("button", { name: "Cancel" }));
+  assert.equal(screen.queryByRole("textbox", { name: "Edit" }), null);
+  assert.ok(screen.getByText(text));
+  assert.equal(onEditInput.mock.callCount(), 0);
 });
 
 test("message action hover and focus stay within one message, including interjections in the same Run", async () => {
@@ -9932,11 +9985,14 @@ test("same Task history refill restores the visible Run anchor despite changed e
   }
 });
 
-test("previous execution details precede the next anchored Run instruction", () => {
-  const first = run({ tools: [technicalTool()] });
+test("anchored Run input stays editable after the previous execution details", async (context) => {
+  const user = userEvent.setup();
+  const onEditInput = context.mock.fn(async () => false);
+  const first = run({ tools: [technicalTool()], editAdmitted: true });
   const next = run({
     id: "10",
     input: { kind: "text", text: "CONTINUE", redacted: false },
+    editAdmitted: true,
     submission: {
       operationId: "continue",
       receivedAtUnixMs: null,
@@ -9955,9 +10011,13 @@ test("previous execution details precede the next anchored Run instruction", () 
       provisionalRedacted: false,
     },
   });
-  const view = render(
-    taskContentElement(task({ runs: [first, next], currentRunId: "10" })),
-  );
+  const busy = task({
+    runs: [first, next],
+    currentRunId: next.id,
+    currentRunPhase: "running",
+    activeOperation: { kind: "run", id: next.id },
+  });
+  const view = render(taskContentElement(busy, "1", { onEditInput }));
   const details = view.container.querySelector(
     '[data-run-id="9"] .run-process',
   );
@@ -9974,6 +10034,72 @@ test("previous execution details precede the next anchored Run instruction", () 
     null,
   );
   assert.equal(screen.getAllByText("CONTINUE").length, 1);
+  assert.equal(screen.queryByRole("button", { name: "Edit" }), null);
+
+  const completed = { ...next, phase: "completed", terminal: terminal() };
+  const idle = task({ runs: [first, completed] });
+  view.rerender(taskContentElement(idle, "2", { onEditInput }));
+  assert.equal(screen.getAllByRole("button", { name: "Edit" }).length, 2);
+
+  await user.click(within(message).getByRole("button", { name: "Edit" }));
+  const editor = screen.getByRole("textbox", { name: "Edit" });
+  const form = editor.closest("form");
+  assert.equal(form.dataset.readingId, "submission:continue");
+  assert.ok(
+    details.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.equal(document.activeElement, editor);
+  assert.equal(editor.selectionStart, "CONTINUE".length);
+  await user.type(editor, " with changes");
+  assert.equal(onEditInput.mock.callCount(), 0);
+
+  const later = { ...next, id: "11", submission: null };
+  const restarted = {
+    ...busy,
+    runs: [first, completed, later],
+    currentRunId: later.id,
+    activeOperation: { kind: "run", id: later.id },
+  };
+  view.rerender(taskContentElement(restarted, "3", { onEditInput }));
+  assert.equal(screen.queryByRole("button", { name: "Edit" }), null);
+  assert.equal(editor.readOnly, true);
+  const send = within(form).getByRole("button", { name: "Send" });
+  assert.equal(send.disabled, true);
+  fireEvent.submit(form);
+  assert.equal(onEditInput.mock.callCount(), 0);
+
+  view.rerender(taskContentElement(idle, "4", { onEditInput }));
+  assert.equal(screen.getByRole("textbox", { name: "Edit" }), editor);
+  assert.equal(editor.value, "CONTINUE with changes");
+  assert.equal(editor.readOnly, false);
+  await user.click(send);
+  assert.equal(editor.value, "CONTINUE with changes");
+  assert.equal(send.disabled, false);
+  onEditInput.mock.mockImplementation(async () => true);
+  await user.click(send);
+  assert.deepEqual(
+    onEditInput.mock.calls.map((call) => call.arguments),
+    [
+      [idle.id, next.id, "CONTINUE with changes"],
+      [idle.id, next.id, "CONTINUE with changes"],
+    ],
+  );
+
+  const completedMessage = view.container.querySelector(
+    '[data-operation-id="continue"]',
+  );
+  assert.ok(within(completedMessage).getByRole("button", { name: "Edit" }));
+  view.rerender(
+    taskContentElement(
+      { ...idle, runs: [first, { ...completed, editAdmitted: false }] },
+      "5",
+      { onEditInput },
+    ),
+  );
+  assert.equal(
+    within(completedMessage).queryByRole("button", { name: "Edit" }),
+    null,
+  );
 });
 
 test("history anchor refill keeps the visible operation offset when its bubble changes Run parent", () => {

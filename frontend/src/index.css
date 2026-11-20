@@ -2616,6 +2616,15 @@ summary::-webkit-details-marker {
   margin: 4px 0 0 auto;
 }
 
+.message-info-bar[data-role="user"]:has(> .message-info-edit) {
+  column-gap: 0;
+}
+
+.message-info-bar[data-role="user"]:has(> .message-info-edit)
+  > .message-info-metadata {
+  margin-inline-end: 4px;
+}
+
 .message-info-bar[data-role="assistant"] {
   margin-top: 4px;
 }
@@ -2643,7 +2652,8 @@ summary::-webkit-details-marker {
   overflow-wrap: anywhere;
 }
 
-.message-info-copy {
+.message-info-copy,
+.message-info-edit {
   width: 32px;
   height: 32px;
   padding: 0;
@@ -2651,7 +2661,8 @@ summary::-webkit-details-marker {
   color: var(--ui-content-muted);
 }
 
-.message-info-copy:focus-visible {
+.message-info-copy:focus-visible,
+.message-info-edit:focus-visible {
   outline: 2px solid var(--ui-focus-ring);
   outline-offset: 2px;
 }
@@ -2675,53 +2686,37 @@ summary::-webkit-details-marker {
   color: var(--ui-content-error);
 }
 
-.message-info-edit {
-  height: 32px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 8px;
-  color: var(--ui-content-muted);
-  background: none;
-  font-size: var(--text-micro);
-  cursor: pointer;
-}
-
-.message-info-edit:hover {
-  color: var(--ui-content-primary);
-  background: var(--ui-surface-panel-2);
-}
-
 .run-input-edit {
   display: flex;
-  width: min(78%, 660px);
-  margin-left: auto;
+  width: min(100%, 480px);
+  margin-inline-start: auto;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
-.run-input-edit-text {
-  width: 100%;
-  padding: 11px 14px;
-  border: 1px solid var(--ui-border);
-  border-radius: 14px;
-  outline: none;
-  color: var(--ui-content-primary);
-  background: var(--ui-surface-panel);
-  font-family: inherit;
-  font-size: 15px;
-  line-height: 1.6;
-  resize: vertical;
+.run-input-edit-notice {
+  margin: 0;
+  padding-inline: 12px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  line-height: 1.45;
 }
 
 .run-input-edit-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 6px;
 }
 
-.run-input-edit .projection-note {
-  margin: 0;
-  text-align: end;
+.run-input-edit-send {
+  --ui-action-primary: var(--metask-light-text);
+  --ui-action-primary-hover: color-mix(
+    in srgb,
+    var(--metask-light-text) 88%,
+    var(--metask-light-panel)
+  );
+  border: 1px solid var(--ui-border);
 }
 
 .ai-message {

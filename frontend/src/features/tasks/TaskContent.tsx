@@ -17,6 +17,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -38,6 +39,7 @@ import type {
 } from "../../bridge/contracts.ts";
 import {
   Activity,
+  Composer,
   Conversation,
   Markdown,
   type MarkdownLocalLinks,
@@ -46,6 +48,7 @@ import {
 } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
+import { useAutosizeTextarea } from "../../components/ui/textarea.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
 import { RunProcess } from "./RunProcess.tsx";
@@ -261,6 +264,84 @@ function sentAttachmentTarget(
 function editableRunText(input: RunInputView): string | null {
   return input.kind === "text" && !input.redacted ? input.text : null;
 }
+
+function RunInputEditor({
+  readingId,
+  text,
+  disabled,
+  onChange,
+  onCancel,
+  onSend,
+}: {
+  readingId: string;
+  text: string;
+  disabled: boolean;
+  onChange: (text: string) => void;
+  onCancel: () => void;
+  onSend: (text: string) => Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [sending, setSending] = useState(false);
+  const editInput = useRef<HTMLTextAreaElement>(null);
+  const focusEditInput = useCallback((input: HTMLTextAreaElement | null) => {
+    editInput.current = input;
+    if (!input) return;
+    const end = input.value.length;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(end, end);
+    input.scrollTop = input.scrollHeight;
+  }, []);
+  const noticeId = useId();
+  useAutosizeTextarea(editInput, text);
+  const trimmed = text.trim();
+  const locked = disabled || sending;
+  return (
+    <form
+      className="run-input-edit"
+      data-reading-id={readingId}
+      onSubmit={async (event) => {
+        event.preventDefault();
+        if (locked || !trimmed) return;
+        setSending(true);
+        try {
+          await onSend(trimmed);
+        } finally {
+          setSending(false);
+        }
+      }}
+    >
+      <Composer>
+        <textarea
+          ref={focusEditInput}
+          value={text}
+          readOnly={locked}
+          rows={1}
+          aria-label={t("input.edit")}
+          aria-describedby={noticeId}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <div className="run-input-edit-actions">
+          <Button type="button" size="sm" variant="ghost" onClick={onCancel}>
+            {t("input.edit_cancel")}
+          </Button>
+          <Button
+            type="submit"
+            size="sm"
+            variant="primary"
+            className="run-input-edit-send"
+            disabled={locked || !trimmed}
+          >
+            {t("run.submit")}
+          </Button>
+        </div>
+      </Composer>
+      <p id={noticeId} className="run-input-edit-notice">
+        {t("input.edit_notice")}
+      </p>
+    </form>
+  );
+}
+
 function TaskInput({
   input,
   media,
@@ -449,7 +530,11 @@ export function TaskContent({
    * text is this run's own recorded input as the user edited it; nothing here
    * reads the conversation back from Core.
    */
-  onEditInput?: (taskId: string, runId: string, text: string) => void;
+  onEditInput?: (
+    taskId: string,
+    runId: string,
+    text: string,
+  ) => Promise<boolean>;
   onOpenSettings?: (target: "account" | "models") => void;
   /** Current Account recharge eligibility; never inherited from Run history. */
   recharge?: { available: boolean; busy: boolean; onOpen: () => void };
@@ -514,6 +599,7 @@ export function TaskContent({
   } | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const [editing, setEditing] = useState<{
+    taskId: string;
     runId: string;
     text: string;
   } | null>(null);
@@ -541,13 +627,17 @@ export function TaskContent({
     ) : null;
   }
   function renderSubmission(record: WaitingInputView) {
+    // The reading plan places later Run inputs at their submission anchors.
+    const executed = task?.runs.find(
+      (run) => run.submission?.operationId === record.submission.operationId,
+    );
+    if (task && executed)
+      return renderRunInput(task, executed, record.submission.operationId);
+
     const time = formatRunTimestamp(
       locale,
       record.submission.receivedAtUnixMs,
       nowUnixMs,
-    );
-    const executed = task?.runs.some(
-      (run) => run.submission?.operationId === record.submission.operationId,
     );
     return (
       <UserInputMessage
@@ -562,17 +652,15 @@ export function TaskContent({
         }
         notice={
           <>
-            {!executed && (
-              <p className="projection-note">
-                {t(
-                  record.state === "waiting"
-                    ? "input.waiting"
-                    : record.state === "cancelled"
-                      ? "input.cancelled"
-                      : "input.unexecuted",
-                )}
-              </p>
-            )}
+            <p className="projection-note">
+              {t(
+                record.state === "waiting"
+                  ? "input.waiting"
+                  : record.state === "cancelled"
+                    ? "input.cancelled"
+                    : "input.unexecuted",
+              )}
+            </p>
             {record.reason && record.state === "failed" && (
               <p className="projection-note">
                 {t(`mutation.reason.${record.reason}` as MessageId, {
@@ -655,6 +743,96 @@ export function TaskContent({
           run.additionalInputs.length > 0 || !transferredRunIds.has(run.id),
       )
       .at(-1)?.id ?? null;
+  function renderRunInput(
+    task: TaskView,
+    run: RunView,
+    anchoredOperationId?: string,
+  ) {
+    const readingId = run.submission
+      ? `submission:${run.submission.operationId}`
+      : `${run.id}:root`;
+    const editText =
+      onEditInput &&
+      run.editAdmitted &&
+      synchronized &&
+      task.activeOperation === null &&
+      task.approvalChange === null &&
+      task.lifecycle !== "closing" &&
+      !task.sessionCloseRetryAvailable
+        ? editableRunText(run.input)
+        : null;
+
+    if (editing?.taskId === task.id && editing.runId === run.id) {
+      return (
+        <RunInputEditor
+          key={anchoredOperationId}
+          readingId={readingId}
+          text={editing.text}
+          disabled={editText === null}
+          onChange={(text) => setEditing({ ...editing, text })}
+          onCancel={() => setEditing(null)}
+          onSend={async (text) => {
+            if (await onEditInput?.(task.id, run.id, text)) {
+              setEditing((current) => (current === editing ? null : current));
+            }
+          }}
+        />
+      );
+    }
+
+    const footer = (
+      <MessageInfoBar
+        role="user"
+        time={formatRunTimestamp(
+          locale,
+          run.submission?.receivedAtUnixMs ?? run.submittedAtUnixMs,
+          nowUnixMs,
+        )}
+        latest={run.id === latestInputId && run.additionalInputs.length === 0}
+        onCopy={() => copyRunInput(run.input)}
+        onEdit={
+          editText === null
+            ? undefined
+            : () =>
+                setEditing({ taskId: task.id, runId: run.id, text: editText })
+        }
+      />
+    );
+    const input = (
+      <TaskInput
+        input={run.input}
+        media={
+          anchoredOperationId
+            ? { taskId: task.id, operationId: anchoredOperationId }
+            : { taskId: task.id, runId: run.id }
+        }
+        loadThumbnail={loadAttachmentThumbnail}
+        onOpenAttachment={onOpenSentAttachment}
+      />
+    );
+    return anchoredOperationId ? (
+      <UserInputMessage
+        key={anchoredOperationId}
+        operationId={anchoredOperationId}
+        footer={footer}
+      >
+        {input}
+      </UserInputMessage>
+    ) : (
+      <>
+        <Message
+          role="user"
+          tabIndex={-1}
+          className="focus-ring"
+          data-reading-id={readingId}
+        >
+          {input}
+        </Message>
+        {footer}
+      </>
+    );
+  }
+
   const hasExcludedCompactHistory =
     task?.compacts.some(
       (compact) => compact.conversationCoverage === "excluded",
@@ -962,11 +1140,6 @@ export function TaskContent({
                 })
               : terminalLabel;
           const responseCopyable = responseCopyEligible(run);
-          const submittedTime = formatRunTimestamp(
-            locale,
-            run.submission?.receivedAtUnixMs ?? run.submittedAtUnixMs,
-            nowUnixMs,
-          );
           const finishedTime = formatRunTimestamp(
             locale,
             run.finishedAtUnixMs,
@@ -1323,102 +1496,7 @@ export function TaskContent({
               data-run-id={run.id}
               key={`${task.id}:${run.id}`}
             >
-              {showRoot &&
-                (editing?.runId === run.id ? (
-                  <form
-                    className="run-input-edit"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      const text = editing.text.trim();
-                      if (!text || !onEditInput) return;
-                      setEditing(null);
-                      onEditInput(task.id, run.id, text);
-                    }}
-                  >
-                    <textarea
-                      className="run-input-edit-text focus-ring"
-                      value={editing.text}
-                      autoFocus
-                      rows={Math.min(
-                        12,
-                        Math.max(3, editing.text.split("\n").length + 1),
-                      )}
-                      aria-label={t("input.edit")}
-                      onChange={(event) =>
-                        setEditing({ runId: run.id, text: event.target.value })
-                      }
-                    />
-                    {/* The one place this feature can mislead: say plainly
-                        what a rewind does and does not undo. */}
-                    <p className="projection-note">{t("input.edit_notice")}</p>
-                    <div className="run-input-edit-actions">
-                      <Button
-                        type="submit"
-                        size="sm"
-                        variant="primary"
-                        disabled={
-                          !synchronized || editing.text.trim().length === 0
-                        }
-                      >
-                        {t("input.edit_confirm")}
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setEditing(null)}
-                      >
-                        {t("input.edit_cancel")}
-                      </Button>
-                    </div>
-                  </form>
-                ) : (
-                  <>
-                    <Message
-                      role="user"
-                      tabIndex={-1}
-                      className="focus-ring"
-                      data-reading-id={
-                        run.submission
-                          ? `submission:${run.submission.operationId}`
-                          : `${run.id}:root`
-                      }
-                    >
-                      <TaskInput
-                        input={run.input}
-                        media={{ taskId: task.id, runId: run.id }}
-                        loadThumbnail={loadAttachmentThumbnail}
-                        onOpenAttachment={onOpenSentAttachment}
-                      />
-                    </Message>
-                    <MessageInfoBar
-                      role="user"
-                      time={submittedTime}
-                      latest={
-                        run.id === latestInputId &&
-                        run.additionalInputs.length === 0
-                      }
-                      onCopy={() => copyRunInput(run.input)}
-                      onEdit={
-                        // Only this run's own recorded text can be edited, so
-                        // a message sent with attachments or as a Skill has no
-                        // entry: there is nothing here to reattach them from.
-                        onEditInput &&
-                        run.editAdmitted &&
-                        synchronized &&
-                        task.lifecycle !== "closing" &&
-                        !task.sessionCloseRetryAvailable &&
-                        editableRunText(run.input) !== null
-                          ? () =>
-                              setEditing({
-                                runId: run.id,
-                                text: editableRunText(run.input) ?? "",
-                              })
-                          : undefined
-                      }
-                    />
-                  </>
-                ))}
+              {showRoot && renderRunInput(task, run)}
               <div className="run-reading-flow">
                 {readingFlow.map((entry) =>
                   entry.kind === "submission" ? (

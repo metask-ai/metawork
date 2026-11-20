@@ -251,6 +251,5 @@ export function useNewTaskDrafts(activeDraftId: string | null) {
     setDirectory: (directory: NewTaskDirectory) => {
       if (activeDraftId) setDirectoryFor(activeDraftId, directory);
     },
-    getDirectory,
   };
 }

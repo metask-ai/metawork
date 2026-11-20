@@ -404,11 +404,6 @@ pub const PendingInterruption = enum(u8) {
     /// A Run stopped because an approval change crossed the Core profile
     /// boundary. Core still observes a user cancellation.
     approval_mode_change,
-    /// A Run stopped because the user edited an earlier message, which has to
-    /// rewind the Conversation and can only do so once the Task is idle. The
-    /// user did not press Stop, and history says which of the two happened.
-    /// Core still observes a user cancellation.
-    edit_and_rerun,
 };
 
 /// Owned safe observation, separate from the decision about the Run outcome.

@@ -19,7 +19,10 @@ import { maxPreviewImageBytes } from "../../bridge/contracts.ts";
 import { Composer } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { Textarea } from "../../components/ui/textarea.tsx";
+import {
+  Textarea,
+  useAutosizeTextarea,
+} from "../../components/ui/textarea.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { ComposerAddMenu } from "./ComposerAddMenu.tsx";
 import {
@@ -57,14 +60,6 @@ function canEnterInputHistory(draft: ComposerDraft) {
     draft.text === "" &&
     !draft.attachmentsReloadRequired
   );
-}
-
-function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
-  const maxHeight = Math.min(180, window.innerHeight * 0.28);
-  textarea.style.height = "auto";
-  textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
-  textarea.style.overflowY =
-    textarea.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
 function formatAttachmentSize(value: string) {
@@ -142,7 +137,6 @@ export function ComposerFooter({
   workspaceTitle,
   workspaceDiagnostic,
   workspaceNotice,
-  projectContext,
   workspaceOptions,
   selectedWorkspaceOptionId,
   workspaceEditable,
@@ -201,7 +195,6 @@ export function ComposerFooter({
   workspaceTitle: string;
   workspaceDiagnostic?: string;
   workspaceNotice?: ReactNode;
-  projectContext?: ReactNode;
   workspaceOptions: {
     id: string;
     label: string;
@@ -483,25 +476,7 @@ export function ComposerFooter({
     return () => window.cancelAnimationFrame(frame);
   }, [draft, draftScope, attachmentBusy]);
 
-  useEffect(() => {
-    const textarea = textareaRef.current;
-    if (!textarea || typeof window === "undefined") return;
-    resizeComposerTextarea(textarea);
-  }, [text, textareaRef]);
-
-  useEffect(() => {
-    const textarea = textareaRef.current;
-    if (!textarea || typeof window === "undefined") return;
-    const resize = () => resizeComposerTextarea(textarea);
-    const observer =
-      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(resize);
-    observer?.observe(textarea);
-    window.addEventListener("resize", resize);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener("resize", resize);
-    };
-  }, [textareaRef]);
+  useAutosizeTextarea(textareaRef, text);
 
   function moveActive(direction: 1 | -1) {
     const enabled = candidates.filter((candidate) => candidate.enabled);
@@ -956,7 +931,6 @@ export function ComposerFooter({
                   />
                 ))}
               {approvalModeControl}
-              {projectContext}
               {workspaceEditable && workspaceContext}
             </div>
             <div className="composer-model-actions">
