@@ -63,6 +63,35 @@ test "the execution half starts, agrees on identity and exits on end of stream" 
     );
 }
 
+test "a child that ignores end of stream is ended, and the stop returns" {
+    // The reaper waits on the child for its whole life, so ending the child
+    // must not wait on it a second time. On POSIX `std.process.Child.kill`
+    // did exactly that and the loser of the two `wait4` calls panicked with
+    // ECHILD in Debug; `terminate` only sends the signal and the reaper
+    // collects what it ends. Bounded by the grace period, so a regression
+    // that leaves the child running fails on the assertion below.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+
+    var host: execution_host.Host = undefined;
+    const failure = try host.start(
+        io,
+        allocator,
+        matching_identity,
+        .{},
+        .{ .explicit = &.{ fixture, "--ignore-eof" } },
+    );
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer host.deinit();
+
+    try std.testing.expectEqual(execution_host.Stopped.killed, host.stop());
+    // The reaper has collected it: the stop joined the thread that waits.
+    try std.testing.expect(host.term != null);
+}
+
 test "a peer built from other sources is refused, and does not keep running" {
     const fixture = try fixturePath();
     defer allocator.free(fixture);

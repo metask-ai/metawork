@@ -9,13 +9,27 @@
 //! `METAWORK_EXEC_LINK_VERSION` overrides the version this half states, which
 //! is how the test produces the skew that actually happens in the field: a
 //! peer built from different sources.
+//!
+//! `--ignore-eof` makes it a child that does not leave when its link ends --
+//! the wedged child a stop's grace period exists for.
 
 const std = @import("std");
 
 const execution_mode = @import("app_execution_mode");
 const agent_link = @import("metawork_agent_link");
 
+pub const ignore_eof_flag = "--ignore-eof";
+
+fn hasFlag(init: std.process.Init, flag: []const u8) bool {
+    var iterator = std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa) catch return false;
+    defer iterator.deinit();
+    _ = iterator.next();
+    while (iterator.next()) |argument| if (std.mem.eql(u8, argument, flag)) return true;
+    return false;
+}
+
 pub fn main(init: std.process.Init) !void {
+    const ignore_eof = hasFlag(init, ignore_eof_flag);
     const version = init.environ_map.get("METAWORK_EXEC_LINK_VERSION") orelse "fixture-0";
     const digest_text = init.environ_map.get("METAWORK_EXEC_LINK_DIGEST") orelse "11";
     var digest: [32]u8 = @splat(0);
@@ -36,6 +50,9 @@ pub fn main(init: std.process.Init) !void {
         },
         .queue_limits = .{},
     });
+    if (ignore_eof) while (true) {
+        std.Io.sleep(init.io, .fromSeconds(1), .awake) catch {};
+    };
     std.process.exit(@intFromEnum(exit));
 }
 
