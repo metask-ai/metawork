@@ -11,7 +11,12 @@ const std = @import("std");
 
 const execution_host = @import("app_execution_host");
 const execution_mode = @import("app_execution_mode");
+const execution_client = @import("app_execution_client");
 const agent_link = @import("metawork_agent_link");
+const lifecycle = @import("lifecycle_fixture");
+
+const agent = lifecycle.lifecycle;
+const product_control = lifecycle.product_control;
 
 const io = std.testing.io;
 const allocator = std.testing.allocator;
@@ -260,4 +265,348 @@ test "the child refuses us too, rather than serving a peer it cannot match" {
     try std.testing.expectEqual(std.process.Child.Term{
         .exited = @intFromEnum(execution_mode.Exit.identity_refused),
     }, term);
+}
+
+// ---------------------------------------------------------------------------
+// Product over the link
+// ---------------------------------------------------------------------------
+//
+// These drive Product Control against the caller's half of the link, with
+// the execution half running a real Agent Runtime over the lifecycle
+// fixture's fake Core in the other process. What fails here fails across
+// three owners -- Product, the link, the Agent Runtime -- which is why it is
+// an integration test.
+
+const Wake = struct {
+    calls: std.atomic.Value(u64) = .init(0),
+
+    fn notifier(self: *Wake) agent.EventReadyNotifier {
+        return .{ .context = self, .notify_fn = notify };
+    }
+
+    fn notify(context: ?*anyopaque) agent.EventReadyNotification {
+        const self: *Wake = @ptrCast(@alignCast(context.?));
+        _ = self.calls.fetchAdd(1, .monotonic);
+        return .scheduled;
+    }
+};
+
+/// The fixture's own limits, restated: importing the fixture executable's
+/// root here would compile a second `main`.
+const fixture_message_limits: agent_link.MessageLimits = .{
+    .event = 1 << 20,
+    .request = 1 << 20,
+    .response = 1 << 20,
+    .ui_request = 1 << 16,
+    .ui_response = 1 << 16,
+};
+
+const fixture_large_message_limits: agent_link.MessageLimits = .{
+    .event = 1 << 20,
+    .request = 4 << 20,
+    .response = 4 << 20,
+    .ui_request = 1 << 16,
+    .ui_response = 1 << 16,
+};
+
+fn startOwner(
+    owner: *execution_client.Owner,
+    wake: *Wake,
+    argv: []const []const u8,
+    limits: agent_link.MessageLimits,
+    credit_count_override: ?u64,
+) !void {
+    try owner.init(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = limits,
+        .queue_limits = .{},
+        .spawn = .{ .explicit = argv },
+        .wake = wake.notifier(),
+        .credit_count_override = credit_count_override,
+    });
+}
+
+const product_limits: product_control.Limits = .{
+    .worker_count = 1,
+    .queue_capacity = 1,
+    .max_tasks = 2,
+    .max_runs_per_task = 3,
+    .max_tools_per_run = 1,
+};
+
+/// One turn of what the application's main loop does with the link.
+fn turn(control: *product_control.Runtime, owner: *execution_client.Owner) !void {
+    try control.drainAgentEvents();
+    if (owner.takeLoss()) |range| control.abandonSessionsInRouteRange(range.first, range.end);
+    control.syncLifecycle();
+    owner.sweep();
+}
+
+const wait_limit_ms: u64 = 20_000;
+const wait_tick_ms: u64 = 10;
+
+fn printSnapshot(control: *product_control.Runtime) void {
+    const output = allocator.alloc(u8, 256 * 1024) catch return;
+    defer allocator.free(output);
+    const snapshot = control.writeAggregateFixture(output) catch return;
+    const start = std.mem.indexOf(u8, snapshot, "\"tasks\"") orelse 0;
+    std.debug.print("snapshot: {s}\n", .{snapshot[start..@min(snapshot.len, start + 6000)]});
+}
+
+/// Turns the loop until the aggregate snapshot contains `needle`, or fails on
+/// a line after `wait_limit_ms`.
+fn waitSnapshot(control: *product_control.Runtime, owner: *execution_client.Owner, needle: []const u8) !void {
+    const output = try allocator.alloc(u8, 256 * 1024);
+    defer allocator.free(output);
+    var waited: u64 = 0;
+    while (waited < wait_limit_ms) : (waited += wait_tick_ms) {
+        try turn(control, owner);
+        const snapshot = try control.writeAggregateFixture(output);
+        if (std.mem.indexOf(u8, snapshot, needle) != null) return;
+        try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+    }
+    std.debug.print("never saw {s}\n", .{needle});
+    printSnapshot(control);
+    return error.SnapshotNeverMatched;
+}
+
+fn waitDetached(control: *product_control.Runtime, owner: *execution_client.Owner, task_id: u64) !void {
+    var waited: u64 = 0;
+    while (waited < wait_limit_ms) : (waited += wait_tick_ms) {
+        try turn(control, owner);
+        const task = control.testTask(task_id) orelse return error.TaskGone;
+        if (task.runtime.attachment == .detached) return;
+        try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+    }
+    printSnapshot(control);
+    return error.TaskNeverDetached;
+}
+
+fn waitEvents(owner: *execution_client.Owner, count: u64) !void {
+    var waited: u64 = 0;
+    while (waited < wait_limit_ms) : (waited += wait_tick_ms) {
+        if (owner.events_received.load(.acquire) >= count) return;
+        try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+    }
+    return error.EventsNeverArrived;
+}
+
+fn createRunningTask(control: *product_control.Runtime, text: []const u8) !u64 {
+    try lifecycle.installProductControlExecution(control);
+    const task_id = try control.createTask(
+        lifecycle.productControlTaskInput(),
+        try product_control.TestSupport.fixtureModelSelection(control),
+    );
+    _ = try lifecycle.runPreparedTask(control, task_id, .{ .text = text });
+    return task_id;
+}
+
+test "a Run crosses into the execution process and its events arrive ahead of its terminal" {
+    // The execution half waits before sending each event, so a terminal that
+    // did not wait for its Session's events would reach Product first, and
+    // Product would seal the Run on a count of zero with its text missing.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try startOwner(&owner, &wake, &.{ fixture, "--with-runtime", "--text-events", "--slow-events" }, fixture_message_limits, null);
+    defer owner.deinit();
+    {
+        var control = try product_control.Runtime.init(allocator, io, owner.runtimePort(), product_limits, lifecycle.productControlConfiguration());
+        defer control.deinit();
+        const task_id = try createRunningTask(&control, "Say something short");
+        try waitSnapshot(&control, &owner, "\"terminal\":{\"outcome\":\"completed\"");
+        try std.testing.expect(owner.currentProcessId() != null);
+        const task = control.testTask(task_id).?;
+        const run = task.durable.runs[0].?;
+        try std.testing.expect(run.event_projection_failure == null);
+        const output = try allocator.alloc(u8, 256 * 1024);
+        defer allocator.free(output);
+        const snapshot = try control.writeAggregateFixture(output);
+        try std.testing.expect(std.mem.indexOf(u8, snapshot, "typed event") != null);
+        try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"recordingIncomplete\":true") == null);
+    }
+}
+
+test "a process killed under a running Task leaves Product up and the cut Run interrupted" {
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try startOwner(&owner, &wake, &.{ fixture, "--with-runtime", "--hold-runs" }, fixture_message_limits, null);
+    defer owner.deinit();
+    {
+        var control = try product_control.Runtime.init(allocator, io, owner.runtimePort(), product_limits, lifecycle.productControlConfiguration());
+        defer control.deinit();
+        const task_id = try createRunningTask(&control, "Say something short");
+        // The held Run reports that it is executing tools: a worker is now
+        // inside `execute` over there.
+        try waitEvents(&owner, 1);
+        execution_client.TestSupport.killCurrent(&owner);
+
+        // Interrupted, not failed, and not sealed as complete.
+        try waitSnapshot(&control, &owner, "\"outcome\":\"interrupted\"");
+        try waitDetached(&control, &owner, task_id);
+        const task = control.testTask(task_id).?;
+        const cut = task.durable.runs[0].?;
+        try std.testing.expect(cut.event_projection_failure != null);
+        try std.testing.expect(cut.coverage == .excluded);
+        try std.testing.expect(owner.currentProcessId() == null);
+
+        // The next Task's Session lives in a new process, numbered above
+        // every id the dead one handed out.
+        const second = try control.createTask(
+            lifecycle.productControlTaskInput(),
+            try product_control.TestSupport.fixtureModelSelection(&control),
+        );
+        _ = try lifecycle.runPreparedTask(&control, second, .{ .text = "Say something short" });
+        try waitSnapshot(&control, &owner, "\"terminal\":{\"outcome\":\"completed\"");
+        try std.testing.expect(owner.currentProcessId() != null);
+        try std.testing.expect(control.testTask(second).?.runtime.routeId() > execution_client.generation_span);
+    }
+}
+
+test "a Task idle when its process dies is given up, and its next message starts a new process" {
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try startOwner(&owner, &wake, &.{ fixture, "--with-runtime" }, fixture_message_limits, null);
+    defer owner.deinit();
+    // A checkpoint store and history, so the Run's checkpoint is exported
+    // across the link and committed, and the next message has something to
+    // restore from.
+    var home_dir = std.testing.tmpDir(.{});
+    defer home_dir.cleanup();
+    const home = try home_dir.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(home);
+    var checkpoints = try lifecycle.product_task.checkpoint_store.FileStore.init(io, home);
+    defer checkpoints.deinit();
+    var history_store = try lifecycle.product_task.history.FileStore.init(io, home);
+    defer history_store.deinit();
+    var history: lifecycle.TypedHistory = .{ .file_store = &history_store };
+    defer history.deinit();
+    {
+        var configuration = lifecycle.productControlConfiguration();
+        configuration.checkpoint_store = .{ .file_store = &checkpoints };
+        configuration.task_persistence = history.capability();
+        configuration.directories.canonical_user_home = home;
+        var control = try product_control.Runtime.init(allocator, io, owner.runtimePort(), product_limits, configuration);
+        defer control.deinit();
+        const task_id = try createRunningTask(&control, "Say something short");
+        try waitSnapshot(&control, &owner, "\"terminal\":{\"outcome\":\"completed\"");
+        var waited_for_checkpoint: u64 = 0;
+        while (control.testTask(task_id).?.durable.checkpoint == null) : (waited_for_checkpoint += wait_tick_ms) {
+            if (waited_for_checkpoint >= wait_limit_ms) return error.CheckpointNeverCommitted;
+            try turn(&control, &owner);
+            try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+        }
+        const first = owner.currentProcessId().?;
+        execution_client.TestSupport.killCurrent(&owner);
+        // Nothing of this Task's was running, so only the loss the main loop
+        // reports can hand it to the close that detaches it.
+        try waitDetached(&control, &owner, task_id);
+
+        // What the Renderer sends, which brings a detached Task's Session back
+        // before running anything.
+        _ = control.sendInput("after-the-crash", task_id, .{ .text = "Say something else" }) catch |err|
+            std.debug.print("next message: {s}\n", .{@errorName(err)});
+        var waited: u64 = 0;
+        while (waited < wait_limit_ms) : (waited += wait_tick_ms) {
+            try turn(&control, &owner);
+            if (owner.currentProcessId()) |id| if (id != first) break;
+            try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+        } else {
+            const task = control.testTask(task_id).?;
+            std.debug.print("attachment={s} restore_job={} last_restore_failure={any}\n", .{
+                @tagName(task.runtime.attachment),
+                task.runtime.restore_job != null,
+                task.runtime.last_restore_failure,
+            });
+            printSnapshot(&control);
+            return error.NoNewProcess;
+        }
+    }
+}
+
+const CallerSink = struct {
+    thread: std.Thread.Id,
+    bytes: std.ArrayList(u8) = .empty,
+    largest_chunk: usize = 0,
+    off_thread: bool = false,
+
+    fn sink(self: *CallerSink) agent.CheckpointSink {
+        return .{ .context = self, .write_fn = write };
+    }
+
+    fn write(context: ?*anyopaque, chunk: []const u8) agent.CheckpointSinkWriteResult {
+        const self: *CallerSink = @ptrCast(@alignCast(context.?));
+        if (std.Thread.getCurrentId() != self.thread) self.off_thread = true;
+        self.largest_chunk = @max(self.largest_chunk, chunk.len);
+        self.bytes.appendSlice(allocator, chunk) catch return .io_failed;
+        return .ok;
+    }
+};
+
+test "an export's bytes reach the caller's sink on the caller's own thread" {
+    // The reader thread never touches a caller's sink: the bytes come back in
+    // the export's answer, and the thread that asked writes them.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    const payload_bytes: usize = 2 * 1024 * 1024;
+    var argument_storage: [64]u8 = undefined;
+    const checkpoint_argument = try std.fmt.bufPrint(&argument_storage, "--checkpoint-bytes={d}", .{payload_bytes});
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try startOwner(&owner, &wake, &.{ fixture, "--with-runtime", "--large-messages", checkpoint_argument }, fixture_large_message_limits, null);
+    defer owner.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const port = owner.runtimePort();
+    const route = try port.createSessionRoute(.{
+        .task_id = 1,
+        .binding_epoch = 1,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = .anthropic_messages,
+                .base_url = "",
+                .model = "fixture-model",
+            },
+            .credential = "fixture-secret",
+        },
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .canonical_user_home = root,
+        .workspace_epoch = "",
+    });
+    try std.testing.expect(route.id != 0);
+
+    var sink: CallerSink = .{ .thread = std.Thread.getCurrentId() };
+    defer sink.bytes.deinit(allocator);
+    const limits: agent.CheckpointLimits = .{
+        .hard_bytes = 64 * 1024 * 1024,
+        .max_section_bytes = 16 * 1024 * 1024,
+        .max_string_bytes = 5 * 1024 * 1024,
+        .max_messages = 4096,
+        .max_blocks_per_message = 256,
+        .chunk_bytes = 1024 * 1024,
+    };
+    var outcome = try route.session.exportCheckpoint(limits, sink.sink(), 0, 0, "fixture-model");
+    defer outcome.deinit();
+    try std.testing.expect(outcome == .success);
+    try std.testing.expectEqual(@as(u64, payload_bytes), outcome.success.checkpoint.total_bytes);
+    try std.testing.expectEqual(payload_bytes, sink.bytes.items.len);
+    for (sink.bytes.items, 0..) |byte, index| {
+        if (byte != @as(u8, @truncate(index % 251))) return error.CheckpointBytesDiffer;
+    }
+    try std.testing.expect(!sink.off_thread);
+    try std.testing.expect(sink.largest_chunk <= limits.chunk_bytes);
+
+    try std.testing.expect(route.session.closeOutcome(.session_close) == .closed);
+    try port.releaseClosedSession(route.session);
 }

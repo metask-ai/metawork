@@ -209,6 +209,17 @@ pub const Outcome = union(enum) {
     }
 };
 
+/// What an export reports when the caller's sink refused a chunk. One rule
+/// for both places a sink is written: by Core during an export in process,
+/// and by the caller's half replaying an export that crossed the link.
+pub fn sinkWriteFailure(result: SinkWriteResult) Failure {
+    return switch (result) {
+        .cancelled => reusableFailure(.checkpoint_export, .cancelled),
+        .io_failed => reusableFailure(.checkpoint_export, .io_failed),
+        .ok, .contract_failed => dependencyFailure(.checkpoint_export),
+    };
+}
+
 pub fn validateLimits(limits: Limits) error{InvalidLimits}!void {
     if (limits.hard_bytes == 0 or
         limits.max_section_bytes == 0 or
@@ -405,11 +416,11 @@ fn exportCheckpoint(
         .out_of_memory => poisonedFailure(.checkpoint_export, .out_of_memory),
         .core_error => poisonedFailure(.checkpoint_export, .core_error),
         .invalid_state => poisonedFailure(.checkpoint_export, .invalid_state),
-        .checkpoint_io => switch (adapter.failure) {
-            .cancelled => reusableFailure(.checkpoint_export, .cancelled),
-            .io_failed => reusableFailure(.checkpoint_export, .io_failed),
-            .none, .contract_failed => dependencyFailure(.checkpoint_export),
-        },
+        .checkpoint_io => sinkWriteFailure(switch (adapter.failure) {
+            .cancelled => .cancelled,
+            .io_failed => .io_failed,
+            .none, .contract_failed => .contract_failed,
+        }),
         .checkpoint_budget_required,
         .checkpoint_corrupt,
         .checkpoint_unsupported,

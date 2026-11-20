@@ -7573,6 +7573,14 @@ pub const Runtime = struct {
     /// Records the Application-owned Runtime shutdown fact and permanently
     /// invalidates every remaining Task Session Binding. Application calls
     /// this only after Runtime.shutdown succeeds and the final lifecycle sync.
+    /// The Sessions with route ids in `[first, end)` lived in an execution
+    /// process that is gone. Gives them up through the ordinary close, so
+    /// their Tasks restore on the next message. See
+    /// `task_runtime.abandonSessionsInRouteRange`.
+    pub fn abandonSessionsInRouteRange(self: *Runtime, first: u64, end: u64) void {
+        if (self.task_runtime.abandonSessionsInRouteRange(first, end)) self.syncLifecycle();
+    }
+
     pub fn relinquishAgentSessionsAfterRuntimeShutdown(self: *Runtime) void {
         std.debug.assert(self.executor_shutdown);
         self.task_runtime.relinquishSessionsAfterRuntimeShutdown();

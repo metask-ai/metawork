@@ -76,6 +76,9 @@ pub const Factory = struct {
 pub const Options = struct {
     factory: Factory,
     exit_deadline_ms: u64 = default_exit_deadline_ms,
+    /// Tests only: wait this long before sending each event, so that a
+    /// terminal not held behind its events would observably overtake them.
+    event_delay_ms: u64 = 0,
 };
 
 /// Ends this process now, running nothing on the way out.
@@ -111,6 +114,7 @@ fn serve(context: ?*anyopaque, link: execution_mode.Link) Exit {
         .outbound = undefined,
         .registry = .{ .allocator = link.allocator, .io = link.io },
         .runtime = undefined,
+        .event_delay_ms = options.event_delay_ms,
     };
     self.outbound.start(link.io, link.allocator, link.output, link.queue_limits) catch
         return .resource_unavailable;
@@ -165,6 +169,7 @@ const Server = struct {
     registry: Registry,
     runtime: Runtime,
     violated: std.atomic.Value(bool) = .init(false),
+    event_delay_ms: u64 = 0,
 
     forward_mutex: std.Io.Mutex = .init,
     forward_condition: std.Io.Condition = .init,
@@ -619,10 +624,7 @@ const MemorySource = struct {
             self.offset += count;
             return .{ .bytes = count };
         }
-        return switch (self.end) {
-            .bytes => .eof,
-            else => self.end,
-        };
+        return self.end;
     }
 };
 
@@ -636,46 +638,56 @@ fn notifyEvents(context: ?*anyopaque) contract.control.EventReadyNotification {
     return .scheduled;
 }
 
+/// What only the forwarder thread touches.
+const Forwarding = struct {
+    sent: rpc.Credit = .{ .count = 0, .bytes = 0 },
+    held: ?contract.OwnedCoreEvent = null,
+};
+
 fn forwarderMain(self: *Server) void {
-    var sent: rpc.Credit = .{ .count = 0, .bytes = 0 };
-    var held: ?contract.OwnedCoreEvent = null;
+    var forwarding: Forwarding = .{};
     while (true) {
         self.forward_mutex.lockUncancelable(self.io);
         while (!self.forward_signal)
             self.forward_condition.waitUncancelable(self.io, &self.forward_mutex);
         self.forward_signal = false;
-        var granted = self.granted;
+        self.forward_mutex.unlock(self.io);
+        forward(self, &forwarding);
+    }
+}
+
+/// Sends as far as the credit and the Runtime allow. Nothing here holds the
+/// forwarder's lock while it calls the Runtime or sends, so a Core callback
+/// raising the notifier never waits on this thread.
+fn forward(self: *Server, forwarding: *Forwarding) void {
+    while (true) {
+        self.forward_mutex.lockUncancelable(self.io);
+        const granted = self.granted;
         self.forward_mutex.unlock(self.io);
 
-        // As far as the credit and the Runtime allow. Nothing here holds the
-        // forwarder's lock while it calls the Runtime or sends, so a Core
-        // callback raising the notifier never waits on this thread.
-        while (true) {
-            var progressed = false;
-            if (held == null and sent.count < granted.count) {
-                held = self.runtime.port.takeEvent();
-                if (held != null) progressed = true;
-            }
-            if (held) |*event| {
-                const size: u64 = event.encoded_bytes;
-                if (sent.count < granted.count and sent.bytes + size <= granted.bytes) {
-                    sendEvent(self, event);
-                    held = null;
-                    sent.count += 1;
-                    sent.bytes += size;
-                    progressed = true;
-                }
-            }
-            if (flushTerminals(self, held)) progressed = true;
-            if (!progressed) break;
-            self.forward_mutex.lockUncancelable(self.io);
-            granted = self.granted;
-            self.forward_mutex.unlock(self.io);
+        var progressed = false;
+        if (forwarding.held == null and forwarding.sent.count < granted.count) {
+            forwarding.held = self.runtime.port.takeEvent();
+            if (forwarding.held != null) progressed = true;
         }
+        if (forwarding.held) |*event| {
+            const size: u64 = event.encoded_bytes;
+            if (forwarding.sent.count < granted.count and forwarding.sent.bytes + size <= granted.bytes) {
+                sendEvent(self, event);
+                forwarding.held = null;
+                forwarding.sent.count += 1;
+                forwarding.sent.bytes += size;
+                progressed = true;
+            }
+        }
+        if (flushTerminals(self, forwarding.held)) progressed = true;
+        if (!progressed) return;
     }
 }
 
 fn sendEvent(self: *Server, event: *contract.OwnedCoreEvent) void {
+    if (self.event_delay_ms != 0)
+        std.Io.sleep(self.io, .fromMilliseconds(@intCast(self.event_delay_ms)), .awake) catch {};
     // Only plain conversation crosses in this step: the tools whose events
     // carry a path or a receipt are not composed here.
     if (event.generated_image_path != null or event.generated_video_path != null or event.delivered_file != null)
@@ -759,6 +771,147 @@ test "handles are issued once and never reused" {
     const second = try registry.add(2, session);
     try std.testing.expect(second != first);
     registry.remove(second);
+}
+
+/// A Runtime whose only content is a queue of ready events, for the
+/// forwarder's tests.
+const FakeEvents = struct {
+    events: std.ArrayList(contract.OwnedCoreEvent) = .empty,
+
+    const vtable: contract.port.RuntimePort.VTable = vtable: {
+        var copy = contract.port.RuntimePort.quiet.vtable.*;
+        copy.take_event = take;
+        copy.pending_event_count = pending;
+        break :vtable copy;
+    };
+
+    fn take(context: ?*anyopaque) ?contract.OwnedCoreEvent {
+        const self: *FakeEvents = @ptrCast(@alignCast(context.?));
+        if (self.events.items.len == 0) return null;
+        return self.events.orderedRemove(0);
+    }
+
+    fn pending(context: ?*anyopaque, session_id: u64) usize {
+        const self: *FakeEvents = @ptrCast(@alignCast(context.?));
+        var count: usize = 0;
+        for (self.events.items) |event| {
+            if (event.session_id == session_id) count += 1;
+        }
+        return count;
+    }
+
+    fn add(self: *FakeEvents, session_id: u64) !void {
+        const allocator = std.testing.allocator;
+        const json = try allocator.dupe(u8, "{\"text_chunk\":\"x\"}");
+        errdefer allocator.free(json);
+        try self.events.append(allocator, .{
+            .session_id = session_id,
+            .run_id = 1,
+            .encoded_bytes = json.len,
+            .json = json,
+            .event = try contract.wire.decodeCoreEvent(allocator, json),
+            .allocator = allocator,
+        });
+    }
+
+    fn deinit(self: *FakeEvents) void {
+        for (self.events.items) |*event| event.deinit();
+        self.events.deinit(std.testing.allocator);
+    }
+};
+
+fn noShutdown(_: ?*anyopaque) void {}
+
+fn testServer(self: *Server, fake: *FakeEvents, file: std.Io.File) !void {
+    self.* = .{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .outbound = undefined,
+        .registry = .{ .allocator = std.testing.allocator, .io = std.testing.io },
+        .runtime = .{
+            .port = .{ .context = fake, .vtable = &FakeEvents.vtable },
+            .context = null,
+            .shutdown_fn = noShutdown,
+        },
+    };
+    try self.outbound.start(std.testing.io, std.testing.allocator, file, .{});
+}
+
+/// The kinds of the frames written to `file`, in order.
+fn writtenKinds(file: std.Io.File, out: []agent_link.Kind) ![]agent_link.Kind {
+    const io = std.testing.io;
+    var buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    var count: usize = 0;
+    while (true) {
+        var header_bytes: [agent_link.frame.header_bytes]u8 = undefined;
+        reader.interface.readSliceAll(&header_bytes) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        const header = try agent_link.frame.decode(&header_bytes);
+        try reader.interface.discardAll(header.payload_len);
+        out[count] = header.kind;
+        count += 1;
+    }
+    return out[0..count];
+}
+
+test "an event goes out only into room the caller has granted" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "link", .{ .read = true, .truncate = true });
+    defer file.close(std.testing.io);
+    var fake: FakeEvents = .{};
+    defer fake.deinit();
+    for (0..3) |_| try fake.add(5);
+
+    var under_test: Server = undefined;
+    try testServer(&under_test, &fake, file);
+    defer under_test.deferred.deinit(std.testing.allocator);
+    var forwarding: Forwarding = .{};
+
+    under_test.granted = .{ .count = 1, .bytes = 1 << 20 };
+    forward(&under_test, &forwarding);
+    // One out; the other two still in the Runtime, which is where the
+    // backpressure belongs.
+    try std.testing.expectEqual(@as(usize, 2), fake.events.items.len);
+
+    under_test.granted = .{ .count = 3, .bytes = 1 << 20 };
+    forward(&under_test, &forwarding);
+    try std.testing.expectEqual(@as(usize, 0), fake.events.items.len);
+    under_test.outbound.stop();
+    try std.testing.expectEqual(@as(?contract.OwnedCoreEvent, null), forwarding.held);
+}
+
+test "a terminal goes out only after every event of its Session" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "link", .{ .read = true, .truncate = true });
+    defer file.close(std.testing.io);
+    var fake: FakeEvents = .{};
+    defer fake.deinit();
+    try fake.add(5);
+    try fake.add(5);
+
+    var under_test: Server = undefined;
+    try testServer(&under_test, &fake, file);
+    defer under_test.deferred.deinit(std.testing.allocator);
+    var forwarding: Forwarding = .{};
+
+    // No room yet, so the events stay put -- and so must the terminal.
+    deferTerminal(&under_test, 5, 9, try std.testing.allocator.dupe(u8, "terminal"));
+    forward(&under_test, &forwarding);
+    try std.testing.expectEqual(@as(usize, 1), under_test.deferred.items.len);
+
+    under_test.granted = .{ .count = 2, .bytes = 1 << 20 };
+    forward(&under_test, &forwarding);
+    try std.testing.expectEqual(@as(usize, 0), under_test.deferred.items.len);
+    under_test.outbound.stop();
+
+    var kinds: [8]agent_link.Kind = undefined;
+    const written = try writtenKinds(file, &kinds);
+    try std.testing.expectEqualSlices(agent_link.Kind, &.{ .event, .event, .response }, written);
 }
 
 test "a restore source replays its bytes and then its last result" {

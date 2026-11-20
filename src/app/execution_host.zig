@@ -130,6 +130,7 @@ pub const Host = struct {
     reaped: std.Io.Event = .unset,
     term: ?std.process.Child.Term = null,
     stopped: bool = false,
+    settle: ?Settle = null,
 
     pub const StartError = std.mem.Allocator.Error;
 
@@ -139,7 +140,24 @@ pub const Host = struct {
     /// bundle and a fixture does not.
     pub const Spawn = union(enum) {
         self,
+        /// This executable, with arguments after the mode flag. The only one
+        /// production passes is `session_floor_flag`.
+        self_with: []const []const u8,
         explicit: []const []const u8,
+    };
+
+    pub const max_extra_arguments = 2;
+
+    /// Run once the child has been reaped and before the read end closes.
+    ///
+    /// A thread reading the child's output ends when that output closes,
+    /// which is when the child exits -- so joining it before the reap would
+    /// wait for a child the grace period may still have to end, and closing
+    /// the handle under a read that has not returned is a race. Between the
+    /// two, neither can happen.
+    pub const Settle = struct {
+        context: ?*anyopaque,
+        settle_fn: *const fn (?*anyopaque) void,
     };
 
     /// Starts the execution process and completes the identity exchange.
@@ -154,13 +172,20 @@ pub const Host = struct {
         spawn: Spawn,
     ) StartError!?StartFailure {
         var path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        var self_argv: [2][]const u8 = undefined;
+        var self_argv: [2 + max_extra_arguments][]const u8 = undefined;
         const argv: []const []const u8 = switch (spawn) {
-            .self => blk: {
+            .self, .self_with => blk: {
+                const extra: []const []const u8 = switch (spawn) {
+                    .self_with => |values| values,
+                    else => &.{},
+                };
+                std.debug.assert(extra.len <= max_extra_arguments);
                 const path_len = std.process.executablePath(io, &path_storage) catch
                     return .executable_unknown;
-                self_argv = .{ path_storage[0..path_len], mode_flag };
-                break :blk &self_argv;
+                self_argv[0] = path_storage[0..path_len];
+                self_argv[1] = mode_flag;
+                @memcpy(self_argv[2..][0..extra.len], extra);
+                break :blk self_argv[0 .. 2 + extra.len];
             },
             .explicit => |values| values,
         };
@@ -328,6 +353,7 @@ pub const Host = struct {
         if (!graceful) self.terminate();
         if (self.reaper) |thread| thread.join();
         self.reaper = null;
+        if (self.settle) |settle| settle.settle_fn(settle.context);
         self.from_child.close(self.io);
         if (!graceful) return .killed;
         const term = self.term orelse return .gone;
@@ -364,6 +390,23 @@ pub fn requested(args: std.process.Args, gpa: std.mem.Allocator) bool {
         if (std.mem.eql(u8, argument, mode_flag)) return true;
     }
     return false;
+}
+
+/// The Session id floor a later execution process is started with, as
+/// `--session-id-floor=<decimal>`. A number, so it cannot redirect anything.
+pub const session_floor_flag = "--session-id-floor=";
+
+/// The floor this process was started with; zero when there is none or the
+/// argument does not parse.
+pub fn sessionFloor(args: std.process.Args, gpa: std.mem.Allocator) u64 {
+    var iterator = std.process.Args.Iterator.initAllocator(args, gpa) catch return 0;
+    defer iterator.deinit();
+    _ = iterator.next(); // argv[0]
+    while (iterator.next()) |argument| {
+        if (!std.mem.startsWith(u8, argument, session_floor_flag)) continue;
+        return std.fmt.parseInt(u64, argument[session_floor_flag.len..], 10) catch 0;
+    }
+    return 0;
 }
 
 test "the mode flag is the only thing that selects the execution half" {
