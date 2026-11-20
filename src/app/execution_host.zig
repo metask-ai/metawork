@@ -62,10 +62,62 @@ pub const Stopped = union(enum) {
     gone,
 };
 
+/// What ends the child, held apart from the `Child` the reaper owns.
+///
+/// The reaper's `wait` cleans up after the child: it closes the process
+/// handle on Windows and clears `child.id` everywhere. So the thread that
+/// ends a child must not read `child.id` -- it may already be gone -- and on
+/// Windows must not use the reaper's handle either, because a closed handle
+/// value can name another object by the time it is used. A duplicate is an
+/// independent reference, and while it is open the process object cannot be
+/// reused.
+///
+/// On POSIX the pid is the only name there is. It is reusable once the child
+/// has been reaped, so one window remains: a reap that lands between the
+/// grace period expiring and the signal going out. Closing it would take a
+/// pidfd, which macOS does not have.
+const Termination = switch (builtin.os.tag) {
+    .windows => std.os.windows.HANDLE,
+    else => std.posix.pid_t,
+};
+
+extern "kernel32" fn DuplicateHandle(
+    source_process: std.os.windows.HANDLE,
+    source: std.os.windows.HANDLE,
+    target_process: std.os.windows.HANDLE,
+    target: *std.os.windows.HANDLE,
+    desired_access: std.os.windows.DWORD,
+    inherit: std.os.windows.BOOL,
+    options: std.os.windows.DWORD,
+) callconv(.winapi) std.os.windows.BOOL;
+
+fn takeTermination(child: *const std.process.Child) ?Termination {
+    const id = child.id orelse return null;
+    if (builtin.os.tag != .windows) return id;
+    var duplicate: std.os.windows.HANDLE = undefined;
+    if (DuplicateHandle(
+        std.os.windows.GetCurrentProcess(),
+        id,
+        std.os.windows.GetCurrentProcess(),
+        &duplicate,
+        0,
+        .FALSE,
+        std.os.windows.DUPLICATE_SAME_ACCESS,
+    ) == .FALSE) return null;
+    return duplicate;
+}
+
+fn releaseTermination(value: Termination) void {
+    if (builtin.os.tag == .windows) std.os.windows.CloseHandle(value);
+}
+
 pub const Host = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     child: std.process.Child,
+    /// Taken at spawn, released once on the way out, so it outlives the reap.
+    termination: Termination,
+    termination_released: bool = false,
     /// Our write end of the child's stdin.
     to_child: std.Io.File,
     /// Our read end of the child's stdout.
@@ -78,6 +130,7 @@ pub const Host = struct {
     reaped: std.Io.Event = .unset,
     term: ?std.process.Child.Term = null,
     stopped: bool = false,
+    settle: ?Settle = null,
 
     pub const StartError = std.mem.Allocator.Error;
 
@@ -87,7 +140,24 @@ pub const Host = struct {
     /// bundle and a fixture does not.
     pub const Spawn = union(enum) {
         self,
+        /// This executable, with arguments after the mode flag. The only one
+        /// production passes is `session_floor_flag`.
+        self_with: []const []const u8,
         explicit: []const []const u8,
+    };
+
+    pub const max_extra_arguments = 2;
+
+    /// Run once the child has been reaped and before the read end closes.
+    ///
+    /// A thread reading the child's output ends when that output closes,
+    /// which is when the child exits -- so joining it before the reap would
+    /// wait for a child the grace period may still have to end, and closing
+    /// the handle under a read that has not returned is a race. Between the
+    /// two, neither can happen.
+    pub const Settle = struct {
+        context: ?*anyopaque,
+        settle_fn: *const fn (?*anyopaque) void,
     };
 
     /// Starts the execution process and completes the identity exchange.
@@ -102,13 +172,20 @@ pub const Host = struct {
         spawn: Spawn,
     ) StartError!?StartFailure {
         var path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        var self_argv: [2][]const u8 = undefined;
+        var self_argv: [2 + max_extra_arguments][]const u8 = undefined;
         const argv: []const []const u8 = switch (spawn) {
-            .self => blk: {
+            .self, .self_with => blk: {
+                const extra: []const []const u8 = switch (spawn) {
+                    .self_with => |values| values,
+                    else => &.{},
+                };
+                std.debug.assert(extra.len <= max_extra_arguments);
                 const path_len = std.process.executablePath(io, &path_storage) catch
                     return .executable_unknown;
-                self_argv = .{ path_storage[0..path_len], mode_flag };
-                break :blk &self_argv;
+                self_argv[0] = path_storage[0..path_len];
+                self_argv[1] = mode_flag;
+                @memcpy(self_argv[2..][0..extra.len], extra);
+                break :blk self_argv[0 .. 2 + extra.len];
             },
             .explicit => |values| values,
         };
@@ -127,8 +204,25 @@ pub const Host = struct {
         if (builtin.os.tag == .windows) windows_spawn_mutex.unlock(io);
         errdefer child.kill(io);
 
-        const to_child = child.stdin orelse return .link_unavailable;
-        const from_child = child.stdout orelse return .link_unavailable;
+        // A host that could not end its child is not handed out: its stop
+        // could not promise the child is gone. On Windows the only way to
+        // fail here is to be out of handles.
+        const termination = takeTermination(&child) orelse {
+            child.kill(io);
+            return .resource_unavailable;
+        };
+        errdefer releaseTermination(termination);
+
+        const to_child = child.stdin orelse {
+            releaseTermination(termination);
+            child.kill(io);
+            return .link_unavailable;
+        };
+        const from_child = child.stdout orelse {
+            releaseTermination(termination);
+            child.kill(io);
+            return .link_unavailable;
+        };
         child.stdin = null;
         child.stdout = null;
 
@@ -143,6 +237,7 @@ pub const Host = struct {
             .io = io,
             .allocator = allocator,
             .child = child,
+            .termination = termination,
             .to_child = to_child,
             .from_child = from_child,
             .read_buffer = read_buffer,
@@ -174,7 +269,11 @@ pub const Host = struct {
             self.abandon();
             return .resource_unavailable;
         };
-        self.reaper = std.Thread.spawn(.{}, reaperMain, .{self}) catch {
+        self.reaper = std.Thread.spawn(
+            .{ .stack_size = agent_link.channel.io_thread_stack_bytes },
+            reaperMain,
+            .{self},
+        ) catch {
             self.outbound.stop();
             self.abandon();
             return .resource_unavailable;
@@ -187,12 +286,39 @@ pub const Host = struct {
     /// is left unusable on purpose, so a caller that ignores the failure
     /// trips an assertion rather than driving a dead link.
     fn abandon(self: *Host) void {
+        // The one place `Child.kill` belongs once a child exists: it kills,
+        // waits and cleans up, which is only safe while this thread is the
+        // child's sole owner -- before any reaper is waiting on it.
+        std.debug.assert(self.reaper == null);
         self.child.kill(self.io);
+        self.releaseTerminationOnce();
         self.to_child.close(self.io);
         self.from_child.close(self.io);
         self.allocator.free(self.read_buffer);
         self.read_buffer = &.{};
         self.stopped = true;
+    }
+
+    /// Asks the operating system to end the child, and does nothing else.
+    ///
+    /// Not `std.process.Child.kill`: that terminates, then waits for the
+    /// child, then closes its handles -- and the reaper is inside `wait` for
+    /// the whole life of the child. Two waits on one POSIX child make the
+    /// loser's `wait4` fail with `ECHILD`, which `std.Io.Threaded` treats as a
+    /// programmer bug and panics on in Debug; two cleanups on Windows close
+    /// one handle twice. So waiting and cleaning up are the reaper's alone,
+    /// and this only sends the signal. `SIGKILL` rather than `SIGTERM`,
+    /// because a child that gets here is one that is not cooperating.
+    ///
+    /// Safe from any thread and any number of times while the host lives.
+    pub fn terminate(self: *Host) void {
+        switch (builtin.os.tag) {
+            .windows => _ = std.os.windows.ntdll.NtTerminateProcess(
+                self.termination,
+                @enumFromInt(@as(u32, 1)),
+            ),
+            else => std.posix.kill(self.termination, .KILL) catch {},
+        }
     }
 
     fn reaperMain(self: *Host) void {
@@ -201,7 +327,7 @@ pub const Host = struct {
     }
 
     /// Stops accepting, lets the child see end-of-stream, and waits out the
-    /// grace period before killing it. Killing is the bound, not the plan: a
+    /// grace period before ending it. Ending it is the bound, not the plan: a
     /// forced exit is what the design reserves for a wedged child.
     pub fn stop(self: *Host) Stopped {
         if (self.stopped) return .gone;
@@ -212,16 +338,22 @@ pub const Host = struct {
         self.outbound.stop();
         self.to_child.close(self.io);
 
-        const graceful = if (self.reaper == null) false else blk: {
+        // A started host always has a reaper: a start that could not spawn
+        // one abandoned the child and set `stopped`, which returned above.
+        std.debug.assert(self.reaper != null);
+        const graceful = graceful: {
             self.reaped.waitTimeout(self.io, .{ .duration = .{
                 .raw = .fromMilliseconds(@intCast(stop_grace_ms)),
                 .clock = .awake,
-            } }) catch break :blk false;
-            break :blk true;
+            } }) catch break :graceful false;
+            break :graceful true;
         };
-        if (!graceful) self.child.kill(self.io);
+        // The signal only. The join below is what waits for the child to be
+        // gone, because the reaper is the one holding the wait.
+        if (!graceful) self.terminate();
         if (self.reaper) |thread| thread.join();
         self.reaper = null;
+        if (self.settle) |settle| settle.settle_fn(settle.context);
         self.from_child.close(self.io);
         if (!graceful) return .killed;
         const term = self.term orelse return .gone;
@@ -231,8 +363,17 @@ pub const Host = struct {
         };
     }
 
+    fn releaseTerminationOnce(self: *Host) void {
+        if (self.termination_released) return;
+        self.termination_released = true;
+        releaseTermination(self.termination);
+    }
+
     pub fn deinit(self: *Host) void {
         if (!self.stopped) _ = self.stop();
+        // After the stop, which joined the reaper: the reference has to stay
+        // valid for as long as anything could still need to end the child.
+        self.releaseTerminationOnce();
         self.allocator.free(self.read_buffer);
         self.* = undefined;
     }
@@ -249,6 +390,23 @@ pub fn requested(args: std.process.Args, gpa: std.mem.Allocator) bool {
         if (std.mem.eql(u8, argument, mode_flag)) return true;
     }
     return false;
+}
+
+/// The Session id floor a later execution process is started with, as
+/// `--session-id-floor=<decimal>`. A number, so it cannot redirect anything.
+pub const session_floor_flag = "--session-id-floor=";
+
+/// The floor this process was started with; zero when there is none or the
+/// argument does not parse.
+pub fn sessionFloor(args: std.process.Args, gpa: std.mem.Allocator) u64 {
+    var iterator = std.process.Args.Iterator.initAllocator(args, gpa) catch return 0;
+    defer iterator.deinit();
+    _ = iterator.next(); // argv[0]
+    while (iterator.next()) |argument| {
+        if (!std.mem.startsWith(u8, argument, session_floor_flag)) continue;
+        return std.fmt.parseInt(u64, argument[session_floor_flag.len..], 10) catch 0;
+    }
+    return 0;
 }
 
 test "the mode flag is the only thing that selects the execution half" {

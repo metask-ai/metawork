@@ -44,6 +44,7 @@ pub const stubs = @import("link/stubs.zig");
 pub const call_frame = @import("link/call_frame.zig");
 pub const run_tools = @import("link/run_tools.zig");
 pub const dispatch = @import("link/dispatch.zig");
+pub const rpc = @import("link/rpc.zig");
 
 pub const revision = handshake.revision;
 pub const Role = handshake.Role;
@@ -194,6 +195,7 @@ test {
     _ = call_frame;
     _ = run_tools;
     _ = dispatch;
+    _ = rpc;
 }
 
 test "the two halves of one build accept each other" {

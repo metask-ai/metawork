@@ -6542,6 +6542,31 @@ pub const Runtime = struct {
         }
     }
 
+    /// Gives up every attached Session whose route id is in `[first, end)`,
+    /// because the process that held them is gone.
+    ///
+    /// A Task with a Run in flight finds out by itself: its Run ends, the
+    /// terminal poisons the Session, and the ordinary close follows. A Task
+    /// that was idle has nothing that would tell it, and its next message
+    /// would be refused for as long as the window stays open. Poisoning hands
+    /// it to the same close, after which the next message restores.
+    ///
+    /// Only the development switch's execution link calls this; in process a
+    /// Session's Runtime cannot be gone while the window is up.
+    pub fn abandonSessionsInRouteRange(self: *Runtime, first: u64, end: u64) bool {
+        var changed = false;
+        for (self.tasks) |*entry| {
+            const task = entry.* orelse continue;
+            const attached = task.runtime.attached() orelse continue;
+            const route = task.runtime.routeId();
+            if (route < first or route >= end) continue;
+            if (attached.health == .session_poisoned) continue;
+            attached.health = .session_poisoned;
+            changed = true;
+        }
+        return changed;
+    }
+
     pub fn relinquishSessionsAfterRuntimeShutdown(self: *Runtime) void {
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
@@ -12215,6 +12240,56 @@ test "permission review intent includes only bounded explicit Skill and multimod
     defer decoded.deinit();
     try std.testing.expect(decoded.value.object.get("text").? == .null);
     try std.testing.expectEqualStrings("instructions.txt", decoded.value.object.get("attachments").?.array.items[0].object.get("display_name").?.string);
+}
+
+test "a lost execution process gives up only the Sessions it held" {
+    var runtime = try Runtime.init(std.testing.allocator, 2);
+    defer runtime.deinitStorage();
+    const durable: task_state.DurableTaskRecord = .{
+        .id = 1,
+        .recent_order = 1,
+        .execution_generation = 1,
+        .execution_protocol = .openai_responses,
+        .execution_model = @constCast("m"),
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
+        .workspace_id = 1,
+        .workspace_root = @constCast("root"),
+        .title = @constCast("title"),
+        .runs = &.{},
+        .compacts = &.{},
+        .ui_history = &.{},
+    };
+    const span: u64 = 1 << 32;
+    var lost: task_state.Task = .{
+        .durable = durable,
+        .runtime = .{ .attachment = .{ .attached = .{
+            .binding = task_agent_session.Binding.testFixture(7),
+            .execution = undefined,
+            .pinned_catalog = null,
+        } } },
+    };
+    var kept: task_state.Task = .{
+        .durable = durable,
+        .runtime = .{ .attachment = .{ .attached = .{
+            .binding = task_agent_session.Binding.testFixture(span + 3),
+            .execution = undefined,
+            .pinned_catalog = null,
+        } } },
+    };
+    kept.durable.id = 2;
+    runtime.tasks[0] = &lost;
+    runtime.tasks[1] = &kept;
+    defer {
+        runtime.tasks[0] = null;
+        runtime.tasks[1] = null;
+    }
+
+    try std.testing.expect(runtime.abandonSessionsInRouteRange(0, span));
+    try std.testing.expectEqual(.session_poisoned, lost.runtime.attached().?.health);
+    try std.testing.expectEqual(.available, kept.runtime.attached().?.health);
+    // Already given up: nothing more changes.
+    try std.testing.expect(!runtime.abandonSessionsInRouteRange(0, span));
 }
 
 test "pending model rebind never hides poisoned or closing attachment truth" {

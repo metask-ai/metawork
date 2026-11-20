@@ -43,6 +43,7 @@ import {
   runSkillAutoRefreshVertical,
 } from "./skill-auto-refresh-vertical.mjs";
 import { runMemoryGrowthVertical } from "./memory-growth-vertical.mjs";
+import { runExecutionLinkVertical } from "./execution-link-vertical.mjs";
 import { runTaskProjectMembershipVertical } from "./task-project-membership-vertical.mjs";
 import { runTaskArchiveVertical } from "./task-archive-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
@@ -494,6 +495,7 @@ const projectMembershipOnly =
   process.env.METAWORK_PROJECT_MEMBERSHIP_ONLY === "1";
 const taskArchiveOnly = process.env.METAWORK_TASK_ARCHIVE_ONLY === "1";
 const memoryGrowthOnly = process.env.METAWORK_MEMORY_GROWTH_ONLY === "1";
+const executionLinkOnly = process.env.METAWORK_EXECUTION_LINK_ONLY === "1";
 const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
 const outputOnly = process.env.METAWORK_OUTPUT_VERTICAL_ONLY === "1";
 const boundaryOnly = process.env.METAWORK_AGENT_BOUNDARY_ONLY === "1";
@@ -584,6 +586,30 @@ if (
   ].some(Boolean)
 )
   throw new Error("Task memory growth measurement requires its own scope");
+if (executionLinkOnly && process.platform !== "win32")
+  throw new Error("The execution link acceptance requires Windows");
+if (
+  executionLinkOnly &&
+  [
+    memoryGrowthOnly,
+    attachmentCapacityOnly,
+    taskArchiveOnly,
+    skillAutoRefreshOnly,
+    activeInputOnly,
+    outputOnly,
+    builtinOfficeOnly,
+    approvalOnly,
+    boundaryOnly,
+    nativeDialogsOnly,
+    notificationOnly,
+    projectMembershipOnly,
+    process.env.METAWORK_SCHEDULE_ONLY === "1",
+    process.env.METAWORK_MCP_ONLY === "1",
+    process.env.METAWORK_MODEL_SWITCH_ONLY === "1",
+    process.env.METAWORK_MODEL_ERROR_ONLY === "1",
+  ].some(Boolean)
+)
+  throw new Error("The execution link acceptance requires its own scope");
 startApplication();
 
 desktopVertical: try {
@@ -736,6 +762,35 @@ desktopVertical: try {
       `Workspace choice was not committed to the product snapshot: ${JSON.stringify(afterChoose.workspaces)}`,
     );
   const expectedWorkspaceEpoch = selectedWorkspace.epoch;
+  if (executionLinkOnly) {
+    const evidencePath =
+      process.env.METAWORK_EXECUTION_LINK_EVIDENCE ??
+      join(
+        root,
+        ".zig-cache/execution-link-desktop",
+        process.env.METAWORK_DEV_EXECUTION_LINK === "1"
+          ? "evidence-on.json"
+          : "evidence-off.json",
+      );
+    await runExecutionLinkVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      sse,
+      app,
+      workspaceId,
+      workspaceEpoch: expectedWorkspaceEpoch,
+      stopApplication,
+      readCheckpoint: readCheckpointHealth,
+      evidencePath,
+    });
+    process.stdout.write(
+      `Execution link desktop vertical passed (${process.env.METAWORK_DEV_EXECUTION_LINK === "1" ? "switch on" : "switch off"}); evidence in ${evidencePath}\n`,
+    );
+    break desktopVertical;
+  }
   if (projectMembershipOnly) {
     const verifyRestart = await runTaskProjectMembershipVertical({
       invoke: invokeBridge,

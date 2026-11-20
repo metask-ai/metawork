@@ -26,6 +26,23 @@
 const std = @import("std");
 const frame = @import("frame.zig");
 
+/// Stack for a thread that only moves bytes: the writer, a reader, a reaper.
+///
+/// On Windows `std.Thread.spawn` commits its `stack_size` up front, and the
+/// default is 16 MiB per thread. None of these threads calls into the Agent
+/// Runtime, Product or AgentCore; each one encodes, copies and waits.
+pub const io_thread_stack_bytes: usize = 256 * 1024;
+
+/// Where a reassembly buffer starts, and what it returns to after carrying a
+/// large message. Growing on demand matters because `Allocator.alloc` writes
+/// `0xaa` over every byte in Debug and ReleaseSafe -- the shipped mode -- so a
+/// buffer sized to the largest legal message is that many bytes resident for
+/// the life of the link.
+pub const initial_assembly_bytes: usize = 64 * 1024;
+
+/// A buffer above this is given back once the message it held is delivered.
+pub const retained_assembly_bytes: usize = 1024 * 1024;
+
 pub const Limits = struct {
     /// Queued data messages, excluding the control reservation.
     data_count: usize = 256,
@@ -126,7 +143,7 @@ pub const Outbound = struct {
             .data = .{ .slots = data_slots },
             .control = .{ .slots = control_slots },
         };
-        self.writer = try std.Thread.spawn(.{}, writerMain, .{self});
+        self.writer = try std.Thread.spawn(.{ .stack_size = io_thread_stack_bytes }, writerMain, .{self});
     }
 
     /// Wakes every waiter, stops accepting, and joins the writer. Queued
@@ -369,6 +386,9 @@ pub const Stopped = union(enum) {
     consumer_stopped,
     /// Reading failed.
     read_failed,
+    /// A message legal for its kind could not be given room. The link ends:
+    /// a message dropped mid-stream cannot be answered for.
+    out_of_memory,
     /// The peer broke the protocol. The link ends; nothing is repaired.
     violation: Violation,
 };
@@ -395,7 +415,7 @@ pub const Inbound = struct {
         sink: Sink,
     ) InitError!void {
         if (!limits.valid()) return error.InvalidLimits;
-        const assembly = try allocator.alloc(u8, limits.max());
+        const assembly = try allocator.alloc(u8, @min(initial_assembly_bytes, limits.max()));
         self.* = .{
             .io = io,
             .allocator = allocator,
@@ -410,6 +430,30 @@ pub const Inbound = struct {
         std.crypto.secureZero(u8, self.assembly);
         self.allocator.free(self.assembly);
         self.* = undefined;
+    }
+
+    /// Makes room for `needed` bytes, doubling up to the largest message any
+    /// kind may form. The old block is cleared before it is freed, because a
+    /// payload can carry a credential.
+    fn reserve(self: *Inbound, needed: usize) error{OutOfMemory}!void {
+        if (needed <= self.assembly.len) return;
+        const target = @min(@max(needed, self.assembly.len * 2), self.limits.max());
+        std.debug.assert(target >= needed);
+        const grown = try self.allocator.alloc(u8, target);
+        @memcpy(grown[0..self.assembled], self.assembly[0..self.assembled]);
+        std.crypto.secureZero(u8, self.assembly);
+        self.allocator.free(self.assembly);
+        self.assembly = grown;
+    }
+
+    /// Gives a large buffer back once its message is delivered. Keeping the
+    /// large one when the small allocation fails is correct, only wasteful.
+    fn settle(self: *Inbound) void {
+        if (self.assembly.len <= retained_assembly_bytes) return;
+        const small = self.allocator.alloc(u8, @min(initial_assembly_bytes, self.limits.max())) catch return;
+        std.crypto.secureZero(u8, self.assembly);
+        self.allocator.free(self.assembly);
+        self.assembly = small;
     }
 
     /// Reads until the link ends. Returns why.
@@ -433,6 +477,7 @@ pub const Inbound = struct {
             }
             if (self.assembled + header.payload_len > limit)
                 return .{ .violation = .message_too_large };
+            self.reserve(self.assembled + header.payload_len) catch return .out_of_memory;
             if (header.payload_len != 0) {
                 self.reader.readSliceAll(
                     self.assembly[self.assembled..][0..header.payload_len],
@@ -449,6 +494,7 @@ pub const Inbound = struct {
             std.crypto.secureZero(u8, payload);
             self.assembled = 0;
             self.in_progress = null;
+            self.settle();
             if (flow == .stop) return .consumer_stopped;
         }
     }
@@ -554,6 +600,73 @@ test "a message above one fragment is reassembled whole" {
     try testing.expectEqual(@as(usize, 1), collector.records.items.len);
     try testing.expectEqual(size, collector.records.items[0].len);
     try testing.expectEqual(@as(u8, 0x5A), collector.records.items[0].first);
+}
+
+test "the reassembly buffer starts small, grows to the message, and is given back" {
+    // Sized to the largest legal message, the buffer is that many bytes
+    // resident for the life of the link: `alloc` fills it in Debug and in
+    // ReleaseSafe, which is what ships.
+    const io = testing.io;
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "link", .{ .read = true, .truncate = true });
+    defer file.close(io);
+
+    const large = try allocator.alloc(u8, 2 * retained_assembly_bytes + 3);
+    defer allocator.free(large);
+    @memset(large, 0x33);
+    var small = [_]u8{7};
+    var outbound: Outbound = undefined;
+    try outbound.start(io, allocator, file, .{ .data_bytes = 8 * 1024 * 1024 });
+    try testing.expectEqual(Submission.queued, try outbound.submitWaiting(.request, 1, large));
+    try testing.expectEqual(Submission.queued, try outbound.submitWaiting(.request, 2, &small));
+    outbound.stop();
+
+    const read_buffer = try allocator.alloc(u8, 4096);
+    defer allocator.free(read_buffer);
+    const replay = try tmp.dir.openFile(io, "link", .{});
+    defer replay.close(io);
+    var reader = replay.readerStreaming(io, read_buffer);
+
+    const Observer = struct {
+        inbound: *Inbound = undefined,
+        capacities: [2]usize = .{ 0, 0 },
+        lengths: [2]usize = .{ 0, 0 },
+        seen: usize = 0,
+
+        fn sink(self: *@This()) Sink {
+            return .{ .context = self, .deliver_fn = deliver };
+        }
+
+        fn deliver(context: ?*anyopaque, _: frame.Kind, _: u64, bytes: []const u8) Flow {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.capacities[self.seen] = self.inbound.assembly.len;
+            self.lengths[self.seen] = bytes.len;
+            self.seen += 1;
+            return .ok;
+        }
+    };
+    var observer: Observer = .{};
+    var inbound: Inbound = undefined;
+    try inbound.init(io, allocator, &reader.interface, .{
+        .event = 1 << 16,
+        .request = 4 * 1024 * 1024,
+        .response = 1 << 16,
+        .ui_request = 1 << 16,
+        .ui_response = 1 << 16,
+    }, observer.sink());
+    defer inbound.deinit();
+    observer.inbound = &inbound;
+
+    try testing.expectEqual(initial_assembly_bytes, inbound.assembly.len);
+    try testing.expectEqual(Stopped.peer_closed, inbound.run());
+    try testing.expectEqual(@as(usize, 2), observer.seen);
+    try testing.expectEqual(large.len, observer.lengths[0]);
+    try testing.expect(observer.capacities[0] >= large.len);
+    // The small message after it found the buffer already given back.
+    try testing.expectEqual(initial_assembly_bytes, observer.capacities[1]);
+    try testing.expectEqual(initial_assembly_bytes, inbound.assembly.len);
 }
 
 test "an empty-payload kind still arrives as its own message" {
