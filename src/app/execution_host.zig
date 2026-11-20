@@ -244,7 +244,11 @@ pub const Host = struct {
             self.abandon();
             return .resource_unavailable;
         };
-        self.reaper = std.Thread.spawn(.{}, reaperMain, .{self}) catch {
+        self.reaper = std.Thread.spawn(
+            .{ .stack_size = agent_link.channel.io_thread_stack_bytes },
+            reaperMain,
+            .{self},
+        ) catch {
             self.outbound.stop();
             self.abandon();
             return .resource_unavailable;

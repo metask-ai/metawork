@@ -120,6 +120,38 @@ pub const Table = struct {
     pub fn open(self: *Table) SendError!Correlation {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        return self.openLocked();
+    }
+
+    pub const WaitError = error{
+        CorrelationExhausted,
+        /// The table closed while this caller waited for a slot: the link is
+        /// gone, and no slot will free.
+        Closed,
+    };
+
+    /// `open`, for a caller that waits for a slot instead of being refused.
+    ///
+    /// For a link whose callers are bounded by the threads that call it --
+    /// each one waits for its own answer -- running out of slots is a moment,
+    /// not a fault. A slot frees whenever a claim, a discard or an abandoned
+    /// answer settles, and every one of those wakes this.
+    pub fn openWaiting(self: *Table) WaitError!Correlation {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (true) {
+            if (self.closed) return error.Closed;
+            return self.openLocked() catch |err| switch (err) {
+                error.CorrelationExhausted => return error.CorrelationExhausted,
+                error.TooManyInFlight, error.TooManyUnsettled => {
+                    self.condition.waitUncancelable(self.io, &self.mutex);
+                    continue;
+                },
+            };
+        }
+    }
+
+    fn openLocked(self: *Table) SendError!Correlation {
         if (self.next == std.math.maxInt(Correlation)) return error.CorrelationExhausted;
         var abandoned: usize = 0;
         for (self.slots) |*slot| {
@@ -148,11 +180,13 @@ pub const Table = struct {
             if (slot.response) |bytes| {
                 slot.* = .{};
                 self.live -= 1;
+                self.condition.broadcast(self.io);
                 return .{ .response = bytes };
             }
             if (self.closed) {
                 slot.* = .{};
                 self.live -= 1;
+                self.condition.broadcast(self.io);
                 return .link_closed;
             }
             self.condition.waitUncancelable(self.io, &self.mutex);
@@ -172,6 +206,7 @@ pub const Table = struct {
             self.allocator.free(bytes);
             slot.* = .{};
             self.live -= 1;
+            self.condition.broadcast(self.io);
             return;
         }
         slot.abandoned = true;
@@ -199,6 +234,7 @@ pub const Table = struct {
         if (slot.response) |bytes| self.allocator.free(bytes);
         slot.* = .{};
         self.live -= 1;
+        self.condition.broadcast(self.io);
     }
 
     /// The reader's side. Takes ownership of `bytes` on success; on an
@@ -216,6 +252,7 @@ pub const Table = struct {
             self.allocator.free(bytes);
             slot.* = .{};
             self.live -= 1;
+            self.condition.broadcast(self.io);
             return;
         }
         if (slot.response != null) {
@@ -350,6 +387,69 @@ test "abandoning keeps the slot until the peer answers, and never reuses the cor
     table.deposit(first, owned("answer to the call that is gone"));
     try testing.expectEqual(@as(usize, 1), table.liveCount());
     table.abandon(second);
+}
+
+const Opener = struct {
+    table: *Table,
+    result: Table.WaitError!Correlation = error.Closed,
+    done: std.Io.Event = .unset,
+
+    fn run(self: *Opener) void {
+        self.result = self.table.openWaiting();
+        self.done.set(self.table.io);
+    }
+
+    /// Bounded: a waiter nobody wakes fails the test on this line instead of
+    /// hanging it. Closing the table then releases the thread for the join.
+    fn finished(self: *Opener, milliseconds: i64) bool {
+        self.done.waitTimeout(self.table.io, .{ .duration = .{
+            .raw = .fromMilliseconds(milliseconds),
+            .clock = .awake,
+        } }) catch return false;
+        return true;
+    }
+};
+
+test "a caller that finds every slot taken waits for one, and a claim frees it" {
+    var table: Table = undefined;
+    try table.init(testing.io, testing.allocator, 1);
+    defer table.deinit();
+
+    // Answered before anyone waits, so the claim below is the only thing that
+    // can wake the waiter: the slot stays live until it is claimed.
+    const held = try table.open();
+    table.deposit(held, owned("answer"));
+    var opener: Opener = .{ .table = &table };
+    const thread = try std.Thread.spawn(.{}, Opener.run, .{&opener});
+    // Still waiting: the only slot is held.
+    try testing.expect(!opener.finished(50));
+
+    const claimed = table.claim(held);
+    testing.allocator.free(claimed.response);
+
+    const woken = opener.finished(5_000);
+    if (!woken) table.close();
+    thread.join();
+    try testing.expect(woken);
+    const next = try opener.result;
+    try testing.expect(next != held);
+    table.abandon(next);
+}
+
+test "a caller waiting for a slot is released when the link closes" {
+    var table: Table = undefined;
+    try table.init(testing.io, testing.allocator, 1);
+    defer table.deinit();
+
+    _ = try table.open();
+    var opener: Opener = .{ .table = &table };
+    const thread = try std.Thread.spawn(.{}, Opener.run, .{&opener});
+    try testing.expect(!opener.finished(50));
+    table.close();
+    const woken = opener.finished(5_000);
+    thread.join();
+    try testing.expect(woken);
+    try testing.expectError(error.Closed, opener.result);
 }
 
 test "a peer that answers twice does not overwrite the first answer" {

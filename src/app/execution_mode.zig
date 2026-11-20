@@ -88,6 +88,7 @@ pub fn run(
     return switch (inbound.run()) {
         .peer_closed, .consumer_stopped => .link_closed,
         .read_failed => .transport_failed,
+        .out_of_memory => .resource_unavailable,
         .violation => .protocol_violation,
     };
 }
