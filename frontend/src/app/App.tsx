@@ -1017,6 +1017,14 @@ export default function App() {
   const [historyRequests, setHistoryRequests] = useState<
     Record<string, HistoryGoal>
   >({});
+  /** Ends an open-ended history request: keep what reaches `runId`, no more. */
+  function releaseTaskHistory(taskId: string, runId: string) {
+    setHistoryRequests((goals) =>
+      goals[taskId] && BigInt(goals[taskId].oldestRunId) < BigInt(runId)
+        ? { ...goals, [taskId]: { taskId, oldestRunId: runId } }
+        : goals,
+    );
+  }
   const history = historyProgress(
     snapshot,
     workbench.activeTaskId,
@@ -6216,7 +6224,17 @@ export default function App() {
                         }));
                     }
                   },
+                  onRequest: (runId) => {
+                    if (workbench.activeTaskId)
+                      retainTaskHistory(workbench.activeTaskId, runId);
+                  },
+                  onRelease: releaseTaskHistory,
                 }}
+                runManifest={
+                  snapshot.taskPage?.task.id === workbench.activeTaskId
+                    ? snapshot.taskPage.runManifest
+                    : undefined
+                }
                 localSubmissions={localReadingInputs}
                 webLink={markdownWebLink}
                 snapshotReceivedAt={workbench.snapshotReceivedAt}

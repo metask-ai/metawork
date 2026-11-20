@@ -2547,6 +2547,7 @@ summary::-webkit-details-marker {
   display: flex;
   min-height: 0;
   flex: 1;
+  container: conversation / inline-size;
 }
 
 .ai-conversation-viewport {
@@ -7881,6 +7882,146 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .ai-conversation-jump svg {
   stroke-width: 1.5;
+}
+
+/* Conversation rail: one fixed-height row per Run in a bounded column on the
+   conversation's left edge, scrolling on its own when the Runs outgrow it. */
+.conversation-rail {
+  position: absolute;
+  z-index: 11;
+  top: 50%;
+  /* The left column resize handle reaches 5px into the conversation. */
+  left: 8px;
+  width: 36px;
+  max-height: min(70vh, 40rem, calc(100% - 32px));
+  padding-block: 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  transform: translateY(-50%);
+  border-radius: 6px;
+  outline: none;
+  animation: conversation-rail-in 160ms ease-out;
+}
+
+.conversation-rail::-webkit-scrollbar {
+  display: none;
+}
+
+.conversation-rail[data-fade-top="true"] {
+  mask-image: linear-gradient(to bottom, transparent, #000 16px);
+}
+
+.conversation-rail[data-fade-bottom="true"] {
+  mask-image: linear-gradient(to top, transparent, #000 16px);
+}
+
+.conversation-rail[data-fade-top="true"][data-fade-bottom="true"] {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 16px,
+    #000 calc(100% - 16px),
+    transparent
+  );
+}
+
+.conversation-rail:focus-visible {
+  outline: 2px solid var(--ui-content-muted);
+  outline-offset: -2px;
+}
+
+.conversation-rail-row {
+  display: flex;
+  height: 10px;
+  align-items: center;
+  padding-inline-start: 8px;
+  cursor: pointer;
+}
+
+.conversation-rail-row[aria-disabled="true"] {
+  cursor: default;
+}
+
+.conversation-rail-tick {
+  display: block;
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--ui-content-primary) 18%, transparent);
+  transition:
+    width 100ms ease-out,
+    background-color 100ms ease-out;
+}
+
+.conversation-rail:is(:hover, :focus-visible) .conversation-rail-tick {
+  background: color-mix(in srgb, var(--ui-content-primary) 30%, transparent);
+}
+
+.conversation-rail-row:is([data-active], [data-pending])
+  .conversation-rail-tick {
+  width: 14px;
+  background: color-mix(in srgb, var(--ui-content-primary) 55%, transparent);
+}
+
+.conversation-rail-row[data-current] .conversation-rail-tick {
+  width: 16px;
+  background: color-mix(in srgb, var(--ui-content-primary) 70%, transparent);
+}
+
+.conversation-rail-tip {
+  display: grid;
+  max-width: 280px;
+  gap: 2px;
+  line-height: 1.5;
+}
+
+.conversation-rail-tip-excerpt {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow-wrap: anywhere;
+}
+
+.conversation-rail-tip-excerpt[data-withheld],
+.conversation-rail-tip-meta {
+  color: color-mix(in srgb, var(--ui-surface-panel) 72%, transparent);
+}
+
+/* A content column that fills the conversation keeps only its 32px inset. */
+@container conversation (max-width: 871px) {
+  .conversation-rail {
+    left: 6px;
+    width: 24px;
+  }
+
+  .conversation-rail-row {
+    padding-inline-start: 4px;
+  }
+}
+
+/* Below this the content inset drops to 16px and the left column floats. */
+@media (max-width: 819px) {
+  .conversation-rail {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conversation-rail {
+    animation: none;
+  }
+
+  .conversation-rail-tick {
+    transition: none;
+  }
+}
+
+@keyframes conversation-rail-in {
+  from {
+    opacity: 0;
+  }
 }
 
 .ai-composer textarea {

@@ -19,17 +19,29 @@ import {
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
 import { maxPreviewImageBytes } from "../../bridge/contracts.ts";
+import { ConversationRail } from "./ConversationRail.tsx";
+import {
+  createRailPosition,
+  pendingRailJumpValid,
+  railCurrentRun,
+  railEntries,
+  railScrollBehavior,
+  railVisible,
+  runMessageReadingId,
+} from "./conversation-rail.ts";
 import type {
   FileReferenceView,
   MediaTarget,
   OutputActionHandler,
   PendingUi,
   RunInputView,
+  RunManifest,
   RunOutcome,
   RunView,
   TaskView,
@@ -177,6 +189,25 @@ export function createTaskReadingMemory() {
 }
 export type TaskReadingMemory = ReturnType<typeof createTaskReadingMemory>;
 const emptyToolDisclosure: ReadonlySet<string> = new Set();
+const emptyManifest: readonly RunManifest[] = [];
+/** Space left above a message a rail jump lands on. */
+const railJumpOffset = 16;
+/** A rail jump that waits for its Run to join the loaded interval. */
+type PendingJump = {
+  taskId: string;
+  runId: string;
+  /** Oldest loaded Run when the jump started; cancelling keeps history here. */
+  keepFrom: string;
+};
+const viewportScrollKeys = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "PageUp",
+  "PageDown",
+  "Home",
+  "End",
+  " ",
+]);
 function formatAttachmentSize(value: string) {
   const bytes = Number(value);
   if (!Number.isSafeInteger(bytes) || bytes <= 0) return value;
@@ -494,9 +525,12 @@ export function TaskContent({
   renderPendingUi,
   localSubmissions,
   history,
+  runManifest = emptyManifest,
   memory,
 }: {
   task: TaskView | null;
+  /** Every projected Run of `task`, loaded or not, in Run order. */
+  runManifest?: readonly RunManifest[];
   renderRunSupplement?: (props: {
     taskId: string;
     runId: string;
@@ -507,6 +541,10 @@ export function TaskContent({
     available: boolean;
     loading: boolean;
     onLoad: () => void;
+    /** Keeps loading contiguous history until this Run is included. */
+    onRequest?: (runId: string) => void;
+    /** Stops a request: history is kept down to `runId` and no further. */
+    onRelease?: (taskId: string, runId: string) => void;
   };
   localSubmissions?: readonly (LocalReadingInput & { content: ReactNode })[];
   snapshotReceivedAt: number | null;
@@ -598,6 +636,10 @@ export function TaskContent({
     height: number;
   } | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
+  const [railPosition] = useState(createRailPosition);
+  const [pendingJump, setPendingJump] = useState<PendingJump | null>(null);
+  const [scrollable, setScrollable] = useState(false);
+  const rail = useMemo(() => railEntries(runManifest), [runManifest]);
   const [editing, setEditing] = useState<{
     taskId: string;
     runId: string;
@@ -915,6 +957,43 @@ export function TaskContent({
   useLayoutEffect(() => {
     historyRequestPending.current = history?.loading ?? false;
   }, [task?.id, task?.runs[0]?.id, history?.loading, synchronized]);
+  // Runs after the reading position above is restored for this commit: a
+  // waiting jump lands once its Run is in the loaded interval, and ends when
+  // its Task or its Run is gone.
+  useLayoutEffect(() => {
+    if (!pendingJump) return;
+    if (!pendingRailJumpValid(pendingJump, task?.id ?? null, runManifest)) {
+      setPendingJump(null);
+      history?.onRelease?.(pendingJump.taskId, pendingJump.keepFrom);
+      return;
+    }
+    if (restoringTask.current !== null) return;
+    if (scrollToRun(pendingJump.runId)) setPendingJump(null);
+  });
+  // The rail follows the reading position without re-rendering the
+  // conversation; only a change of overflow re-renders this component.
+  useLayoutEffect(() => {
+    const node = viewport.current;
+    if (!task || !node) {
+      railPosition.set(null);
+      return;
+    }
+    const saved = reading.get(task.id);
+    const following = saved?.followingLatest ?? true;
+    // The saved anchor is the reading position this commit restored; only a
+    // position saved without one is measured again.
+    railPosition.set(
+      railCurrentRun(
+        rail,
+        following
+          ? null
+          : (saved?.anchor?.runId ?? readingAnchor(node)?.runId ?? null),
+        following,
+      ),
+    );
+    const overflow = node.scrollHeight > node.clientHeight + 1;
+    if (overflow !== scrollable) setScrollable(overflow);
+  });
   function updateReadingState() {
     const node = viewport.current;
     if (!node || !task || restoringTask.current !== null) return;
@@ -922,11 +1001,15 @@ export function TaskContent({
       node.scrollTop < (reading.get(task.id)?.scrollTop ?? node.scrollTop);
     const followingLatest =
       node.scrollHeight - node.scrollTop - node.clientHeight <= 48;
+    const anchor = followingLatest ? undefined : readingAnchor(node);
     reading.set(task.id, {
       scrollTop: node.scrollTop,
       followingLatest,
-      anchor: followingLatest ? undefined : readingAnchor(node),
+      anchor,
     });
+    railPosition.set(
+      railCurrentRun(rail, anchor?.runId ?? null, followingLatest),
+    );
     setShowJumpLatest(!followingLatest);
     if (
       scrollingUp &&
@@ -975,13 +1058,111 @@ export function TaskContent({
   function jumpToLatest() {
     const node = viewport.current;
     if (!node || !task) return;
+    cancelPendingJump();
     reading.set(task.id, {
       scrollTop: node.scrollHeight,
       followingLatest: true,
     });
+    railPosition.set(railCurrentRun(rail, null, true));
     node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
     setShowJumpLatest(false);
   }
+  /** Ends a waiting rail jump and stops the history it asked for. */
+  function cancelPendingJump() {
+    if (!pendingJump) return;
+    setPendingJump(null);
+    history?.onRelease?.(pendingJump.taskId, pendingJump.keepFrom);
+  }
+  /**
+   * Scrolls a loaded Run's own message to the top of the viewport and saves
+   * that as the reading position, so a re-render or resize during a smooth
+   * scroll restores the destination instead of the place it started from.
+   */
+  function scrollToRun(runId: string) {
+    const node = viewport.current;
+    const run = task?.runs.find((candidate) => candidate.id === runId);
+    if (!node || !task || !run) return false;
+    const readingId = runMessageReadingId(run);
+    const target =
+      node.querySelector<HTMLElement>(
+        `[data-reading-id="${CSS.escape(readingId)}"]`,
+      ) ??
+      node.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(runId)}"]`);
+    if (!target) return false;
+    const distance =
+      target.getBoundingClientRect().top -
+      node.getBoundingClientRect().top -
+      railJumpOffset;
+    const top = Math.max(
+      0,
+      Math.min(
+        node.scrollTop + distance,
+        node.scrollHeight - node.clientHeight,
+      ),
+    );
+    const followingLatest = node.scrollHeight - top - node.clientHeight <= 48;
+    reading.set(task.id, {
+      scrollTop: top,
+      followingLatest,
+      anchor: followingLatest
+        ? undefined
+        : {
+            runId,
+            entryId: target.dataset.readingId,
+            offset: railJumpOffset,
+          },
+    });
+    railPosition.set(railCurrentRun(rail, runId, followingLatest));
+    setShowJumpLatest(!followingLatest);
+    node.scrollTo({
+      top,
+      behavior: railScrollBehavior(
+        distance,
+        node.clientHeight,
+        window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ??
+          false,
+      ),
+    });
+    // The landing message takes focus so assistive technology reads where
+    // the jump went; it is already a programmatic focus target.
+    const message = target.matches("[tabindex]")
+      ? target
+      : target.querySelector<HTMLElement>("[tabindex='-1']");
+    message?.focus({ preventScroll: true });
+    return true;
+  }
+  function jumpToRun(runId: string) {
+    const node = viewport.current;
+    if (!task || !node) return;
+    if (scrollToRun(runId)) {
+      // A loaded choice replaces any jump still waiting for history.
+      cancelPendingJump();
+      return;
+    }
+    const keepFrom = task.runs[0]?.id;
+    if (!synchronized || !history?.onRequest || !keepFrom) return;
+    const earlier = pendingJump?.taskId === task.id ? pendingJump : null;
+    // A new target replaces the waiting one: release its request first so a
+    // later target does not keep loading toward the earlier one.
+    if (earlier) history.onRelease?.(task.id, earlier.keepFrom);
+    // Loading prepends pages above the reader; hold the current place until
+    // the target arrives instead of following the latest output.
+    reading.set(task.id, {
+      scrollTop: node.scrollTop,
+      followingLatest: false,
+      anchor: readingAnchor(node),
+    });
+    setShowJumpLatest(true);
+    setPendingJump({
+      taskId: task.id,
+      runId,
+      keepFrom: earlier ? earlier.keepFrom : keepFrom,
+    });
+    history.onRequest(runId);
+  }
+  const jumpRef = useRef(jumpToRun);
+  jumpRef.current = jumpToRun;
+  const onRailJump = useCallback((runId: string) => jumpRef.current(runId), []);
   const followDeferredOutput = useCallback(() => {
     const node = viewport.current;
     const taskId = task?.id;
@@ -1018,6 +1199,8 @@ export function TaskContent({
       viewportRef={viewport}
       onViewportScroll={updateReadingState}
       onViewportWheel={(event) => {
+        // Scrolling by hand ends a rail jump that is still waiting.
+        if (event.deltaY !== 0) cancelPendingJump();
         if (
           !event.defaultPrevented &&
           event.deltaY < 0 &&
@@ -1025,20 +1208,47 @@ export function TaskContent({
         )
           loadEarlierHistory();
       }}
+      onViewportPointerDown={(event) => {
+        // A press on the viewport itself is its scrollbar.
+        if (event.target === event.currentTarget) cancelPendingJump();
+      }}
       onViewportKeyDown={(event) => {
+        const editable =
+          event.target instanceof Element &&
+          event.target.closest(
+            "input, textarea, select, [contenteditable=true]",
+          );
+        if (!editable && viewportScrollKeys.has(event.key)) cancelPendingJump();
         if (
           !event.defaultPrevented &&
           ["ArrowUp", "PageUp", "Home"].includes(event.key) &&
-          !(
-            event.target instanceof Element &&
-            event.target.closest(
-              "input, textarea, select, [contenteditable=true]",
-            )
-          ) &&
+          !editable &&
           canScrollHistoryAtTop(event.target)
         )
           loadEarlierHistory();
       }}
+      rail={
+        task &&
+        railVisible({
+          runCount: rail.length,
+          olderHistory: Boolean(history?.available),
+          scrollable,
+        }) ? (
+          <ConversationRail
+            entries={rail}
+            position={railPosition}
+            loadedFrom={Math.max(
+              0,
+              rail.findIndex((entry) => entry.runId === task.runs[0]?.id),
+            )}
+            canLoad={synchronized && Boolean(history?.onRequest)}
+            pendingRunId={
+              pendingJump?.taskId === task.id ? pendingJump.runId : null
+            }
+            onJump={onRailJump}
+          />
+        ) : undefined
+      }
       jumpToLatest={
         showJumpLatest
           ? { label: t("task.jump_latest"), onClick: jumpToLatest }

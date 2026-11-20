@@ -11,19 +11,24 @@ export function Conversation({
   onViewportScroll,
   onViewportWheel,
   onViewportKeyDown,
+  onViewportPointerDown,
   children,
   jumpToLatest,
+  rail,
   ...props
 }: HTMLAttributes<HTMLElement> & {
   viewportRef?: RefObject<HTMLDivElement | null>;
   onViewportScroll?: () => void;
   onViewportWheel?: HTMLAttributes<HTMLDivElement>["onWheel"];
   onViewportKeyDown?: HTMLAttributes<HTMLDivElement>["onKeyDown"];
+  onViewportPointerDown?: HTMLAttributes<HTMLDivElement>["onPointerDown"];
   children: ReactNode;
   jumpToLatest?: {
     label: string;
     onClick: () => void;
   };
+  /** Navigation overlaid on the left edge, outside the scrolling content. */
+  rail?: ReactNode;
 }) {
   return (
     <section className={cn("ai-conversation", className)} {...props}>
@@ -33,10 +38,12 @@ export function Conversation({
         onScroll={onViewportScroll}
         onWheel={onViewportWheel}
         onKeyDown={onViewportKeyDown}
+        onPointerDown={onViewportPointerDown}
         tabIndex={0}
       >
         <div className="ai-conversation-content">{children}</div>
       </div>
+      {rail}
       {jumpToLatest && (
         <Tooltip.Root>
           <Tooltip.Trigger
