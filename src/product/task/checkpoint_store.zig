@@ -679,17 +679,10 @@ test "checkpoint store is immutable, exclusive, and cleans only unreferenced blo
 }
 
 test "committing a writer nothing was written into is refused, which is the net under Placement" {
-    // `checkpoint.Placement` is what tells a caller whether the bytes went
-    // into the writer it opened. This is what happens if a caller ignores it:
     // `expected_bytes` comes from the export's own report and
-    // `bytes_written` from this writer, so a blob written somewhere else
-    // leaves them unequal and the commit refuses.
-    //
-    // Named here because it is a real net and it was not put there for this.
-    // Being caught by an unrelated invariant is not the same as having said
-    // which case you are in -- the switch at the call site is that -- but it
-    // does mean the failure is a refusal rather than a record pointing at a
-    // blob this store does not have.
+    // `bytes_written` from this writer, so an export whose bytes did not all
+    // reach this writer leaves them unequal and the commit refuses, rather
+    // than leaving a record pointing at a blob this store does not have.
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

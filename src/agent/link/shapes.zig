@@ -435,14 +435,11 @@ pub const CheckpointDescription = struct {
 };
 
 /// `checkpoint.Outcome`: the export's identity and the description, or the
-/// typed failure. The bytes stayed on the far side's disk.
+/// typed failure.
 pub const CheckpointOutcome = union(enum) {
     success: struct {
         checkpoint: checkpoint.Export,
-        /// Where the bytes are. Plain data already -- a tag and a bounded
-        /// name -- and it has to cross, because it is the one thing the
-        /// caller cannot work out for itself: the execution half wrote into
-        /// its own stage area, and nothing in the export's own facts says so.
+        /// Where the bytes are. Plain data already, so it crosses as it is.
         placement: checkpoint.Placement,
         description: CheckpointDescription,
     },
