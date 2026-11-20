@@ -123,6 +123,9 @@ import {
   mcpNewTaskAccessValues,
   mcpAuthorizationStatusValues,
   mcpAuthorizationPhaseValues,
+  mcpAuthorizationFailureSteps,
+  mcpAuthorizationFailureReasons,
+  type McpAuthorizationFailure,
   type SkillImportPreview,
   type SkillImportScope,
   type SkillImportOperation,
@@ -4960,6 +4963,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
         "newTaskAccess",
         "safeDiagnostic",
         "connectionTest",
+        "authorizationFailure",
         "tools",
         "taskReferenceCount",
         "applyStatus",
@@ -5253,6 +5257,10 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
           `${serverPath}.safeDiagnostic`,
         ),
         connectionTest,
+        authorizationFailure: decodeMcpAuthorizationFailure(
+          server.authorizationFailure,
+          `${serverPath}.authorizationFailure`,
+        ),
         tools,
       };
     },
@@ -6911,6 +6919,50 @@ export function decodeMcpMutationResult(value: unknown): McpMutationResult {
     fail("$.desiredGeneration", "known mutation outcome requires generation");
   return { outcome, desiredGeneration };
 }
+function decodeMcpAuthorizationFailure(
+  value: unknown,
+  path: string,
+): McpAuthorizationFailure | null {
+  if (value === null) return null;
+  const item = object(value, path, [
+    "step",
+    "reason",
+    "httpStatus",
+    "error",
+    "errorDescription",
+  ]);
+  const httpStatus =
+    item.httpStatus === null
+      ? null
+      : numberValue(item.httpStatus, `${path}.httpStatus`);
+  if (httpStatus !== null && (httpStatus < 100 || httpStatus > 599))
+    fail(`${path}.httpStatus`, "expected HTTP status");
+  const remoteText = (field: unknown, fieldPath: string, maxBytes: number) => {
+    if (field === null) return null;
+    const text = nonEmptyString(field, fieldPath);
+    if (new TextEncoder().encode(text).length > maxBytes)
+      fail(fieldPath, "remote text exceeds its bound");
+    // Remote text is display-only; the Host has already removed controls.
+    if (/[\u0000-\u001f\u007f]/.test(text))
+      fail(fieldPath, "remote text contains control characters");
+    return text;
+  };
+  return {
+    step: enumValue(item.step, `${path}.step`, mcpAuthorizationFailureSteps),
+    reason: enumValue(
+      item.reason,
+      `${path}.reason`,
+      mcpAuthorizationFailureReasons,
+    ),
+    httpStatus,
+    error: remoteText(item.error, `${path}.error`, 64),
+    errorDescription: remoteText(
+      item.errorDescription,
+      `${path}.errorDescription`,
+      256,
+    ),
+  };
+}
 export function decodeMcpInstallation(
   value: unknown,
   path = "$",
@@ -6931,6 +6983,7 @@ export function decodeMcpInstallation(
       "displayName",
       "phase",
       "failure",
+      "authorizationFailure",
       "sourceOrigin",
       "targetOrigin",
       "canCancel",
@@ -6943,6 +6996,12 @@ export function decodeMcpInstallation(
         : enumValue(op.failure, `${p}.failure`, mcpInstallationFailures);
     if (failure !== null && phase !== "failed")
       fail(p, "unexpected installation failure");
+    const authorizationFailure = decodeMcpAuthorizationFailure(
+      op.authorizationFailure,
+      `${p}.authorizationFailure`,
+    );
+    if (authorizationFailure !== null && failure !== "authorization_failed")
+      fail(p, "authorization detail without authorization failure");
     return {
       serverId: nonEmptyString(op.serverId, `${p}.serverId`),
       taskId: positiveU64WireId(op.taskId, `${p}.taskId`),
@@ -6955,6 +7014,7 @@ export function decodeMcpInstallation(
       displayName: stringValue(op.displayName, `${p}.displayName`),
       phase,
       failure,
+      authorizationFailure,
       sourceOrigin: stringValue(op.sourceOrigin, `${p}.sourceOrigin`),
       targetOrigin:
         op.targetOrigin === null

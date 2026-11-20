@@ -40,6 +40,7 @@ import { Input } from "../../components/ui/input.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
 import { Switch } from "../../components/ui/switch.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import { McpAuthorizationFailureDetail } from "./McpAuthorizationFailure.tsx";
 import {
   commandLineToken,
   parseMcpCommandLine,
@@ -1495,6 +1496,7 @@ export function McpPage({
     titleText: string,
     bodyText: string,
     action?: ReactNode,
+    detail?: ReactNode,
   ) {
     return (
       <section className="mcp-next-action" aria-labelledby="mcp-next-action">
@@ -1503,6 +1505,7 @@ export function McpPage({
           <span>
             <strong id="mcp-next-action">{titleText}</strong>
             <p>{bodyText}</p>
+            {detail}
           </span>
         </div>
         {action}
@@ -1616,6 +1619,11 @@ export function McpPage({
             >
               {t("mcp.next.configure_credentials")}
             </Button>
+          ) : undefined,
+          operation.kind === "idle" && server.authorizationFailure ? (
+            <McpAuthorizationFailureDetail
+              failure={server.authorizationFailure}
+            />
           ) : undefined,
         );
       }

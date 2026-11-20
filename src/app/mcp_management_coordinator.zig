@@ -130,7 +130,35 @@ const JobFailure = enum {
     cancelled_before_send,
     rejected,
     invalid_grant,
+    /// The token endpoint issued tokens that the MCP server then refused.
+    token_rejected,
     outcome_unknown,
+};
+
+const FailureStep = @FieldType(mcp_types.McpAuthorizationFailure, "step");
+const FailureReason = @FieldType(mcp_types.McpAuthorizationFailure, "reason");
+
+/// Why an authorization flow ended without a grant. Only a terminal failure
+/// reaches Product; user cancellation does not.
+const FlowFailure = struct {
+    step: FailureStep,
+    diagnostic: mcp_oauth.Diagnostic,
+
+    fn local(step: FailureStep, reason: mcp_oauth.FailureReason) FlowFailure {
+        return .{ .step = step, .diagnostic = .init(reason, 0) };
+    }
+
+    fn view(self: *const FlowFailure) mcp_types.McpAuthorizationFailure {
+        return .{
+            .step = self.step,
+            .reason = switch (self.diagnostic.reason) {
+                inline else => |reason| @field(FailureReason, @tagName(reason)),
+            },
+            .http_status = if (self.diagnostic.http_status == 0) null else self.diagnostic.http_status,
+            .error_code = self.diagnostic.errorCode(),
+            .description = self.diagnostic.description(),
+        };
+    }
 };
 
 const DiscoveryResult = struct {
@@ -211,11 +239,24 @@ const Job = struct {
     cancellation: mcp_oauth.Cancellation,
     deadline: std.Io.Clock.Timestamp,
     result: JobResult = .pending,
+    /// Filled by the effect that failed; read only after `finished`.
+    diagnostic: mcp_oauth.Diagnostic = .{},
+    /// Set when the failure belongs to a later step than the input's own.
+    failure_step: ?FailureStep = null,
     finished: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
 
     fn start(self: *Job) std.Thread.SpawnError!void {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn step(self: *const Job) FailureStep {
+        return self.failure_step orelse switch (self.input) {
+            .discovery => .discovery,
+            .registration => .registration,
+            .callback => .authorization,
+            .exchange => .token_exchange,
+        };
     }
 
     fn run(self: *Job) void {
@@ -244,6 +285,7 @@ const Job = struct {
             self.allocator,
             self.transport(&http),
             input.endpoint,
+            &self.diagnostic,
         ) catch {
             self.publish(.{ .failed = .definitive });
             return;
@@ -259,6 +301,7 @@ const Job = struct {
             self.transport(&http),
             &resource,
             issuer,
+            &self.diagnostic,
         ) catch {
             self.publish(.{ .failed = .definitive });
             return;
@@ -279,6 +322,7 @@ const Job = struct {
             self.transport(&http),
             input.authorization,
             input.redirect_uri,
+            &self.diagnostic,
         ) catch |err| {
             self.publish(.{ .failed = switch (err) {
                 error.RegistrationRejected => .rejected,
@@ -297,7 +341,12 @@ const Job = struct {
         const callback = input.attempt.wait(
             self.allocator,
             self.deadline,
-        ) catch {
+        ) catch |err| {
+            self.diagnostic = .init(switch (err) {
+                error.DeadlineExceeded => .timed_out,
+                error.RequestInvalid, error.TooManyInvalidRequests => .invalid_callback,
+                error.Cancelled, error.BindFailed, error.PortUnavailable, error.IoFailed => .internal,
+            }, 0);
             self.publish(.{ .failed = .definitive });
             return;
         };
@@ -307,7 +356,7 @@ const Job = struct {
 
     fn runExchange(self: *Job, input: *ExchangeInput) void {
         var http: mcp_oauth.StdHttpTransport = undefined;
-        const tokens = mcp_oauth.exchangeAuthorizationCodeEffect(
+        var tokens = mcp_oauth.exchangeAuthorizationCodeEffect(
             self.allocator,
             self.transport(&http),
             input.authorization,
@@ -319,6 +368,7 @@ const Job = struct {
             input.redirect_uri,
             input.resource,
             input.now_unix_ms,
+            &self.diagnostic,
         ) catch |err| {
             self.publish(.{ .failed = switch (err) {
                 error.InvalidGrant => .invalid_grant,
@@ -329,6 +379,21 @@ const Job = struct {
             } });
             return;
         };
+        // A token the MCP server refuses is never committed as a grant.
+        switch (mcp_oauth.verifyAccessTokenEffect(
+            self.transport(&http),
+            input.resource,
+            tokens.access_token.view(),
+            &self.diagnostic,
+        )) {
+            .accepted, .unverified => {},
+            .rejected => {
+                tokens.deinit();
+                self.failure_step = .verification;
+                self.publish(.{ .failed = .token_rejected });
+                return;
+            },
+        }
         self.result = .{ .tokens = tokens };
         self.finish();
     }
@@ -385,6 +450,10 @@ fn deinitJobInput(allocator: std.mem.Allocator, input: *JobInput) void {
 const Flow = struct {
     start: mcp_types.McpAuthorizationStart,
     deadline: std.Io.Clock.Timestamp,
+    /// The step in progress, used when a local failure names no other.
+    step: FailureStep = .discovery,
+    failure: ?FlowFailure = null,
+    succeeded: bool = false,
     discovery: ?DiscoveryResult = null,
     attempt: ?*mcp_oauth.AuthorizationAttempt = null,
     job: ?*Job = null,
@@ -499,9 +568,9 @@ const ConnectionTestJob = struct {
             .deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = .fromSeconds(5), .clock = .awake }),
         };
         const transport = http.transport();
-        var resource = mcp_oauth.discoverResourceWithChallengeEffect(self.allocator, transport, self.target.draft.endpoint, self.draft_http_observation.header()) catch return fallback;
+        var resource = mcp_oauth.discoverResourceWithChallengeEffect(self.allocator, transport, self.target.draft.endpoint, self.draft_http_observation.header(), null) catch return fallback;
         defer resource.deinit();
-        var authorization = mcp_oauth.discoverAuthorizationServer(self.allocator, transport, &resource, resource.authorization_servers[0]) catch return fallback;
+        var authorization = mcp_oauth.discoverAuthorizationServer(self.allocator, transport, &resource, resource.authorization_servers[0], null) catch return fallback;
         defer authorization.deinit();
         return if (authorization.registration_endpoint != null) .oauth_automatic else .oauth_existing;
     }
@@ -815,7 +884,7 @@ pub const Coordinator = struct {
         var start_owned = true;
         defer if (start_owned) start.deinit();
         errdefer if (start_owned) {
-            _ = self.control.finishMcpAuthorization(start.operation_id);
+            _ = self.control.finishMcpAuthorization(start.operation_id, null);
         };
         if (start.private_endpoint) |endpoint|
             start.endpoint = try mcp_configuration.resolvePrivateEndpoint(start.arena.allocator(), endpoint, self.credential_store.resolver(), mcp_startup.configuration_limits);
@@ -826,7 +895,7 @@ pub const Coordinator = struct {
         };
         start_owned = false;
         errdefer {
-            _ = self.control.finishMcpAuthorization(flow.start.operation_id);
+            _ = self.control.finishMcpAuthorization(flow.start.operation_id, null);
             if (self.flow == flow) self.flow = null;
             flow.deinit(self.allocator);
             self.allocator.destroy(flow);
@@ -1517,6 +1586,8 @@ pub const Coordinator = struct {
         const job = flow.job orelse return changed;
         if (!job.finished.load(.acquire)) return changed;
         job.join();
+        if (job.result == .failed and !flow.cancelling)
+            flow.failure = .{ .step = job.step(), .diagnostic = job.diagnostic };
         switch (job.input) {
             .discovery => self.completeDiscovery(flow, job),
             .registration => self.completeRegistration(flow, job),
@@ -1803,6 +1874,7 @@ pub const Coordinator = struct {
         }
         try job.start();
         flow.job = job;
+        flow.step = job.step();
     }
 
     fn destroyJob(self: *Coordinator, flow: *Flow, job: *Job) void {
@@ -1829,6 +1901,7 @@ pub const Coordinator = struct {
                     flow.start.additional_scopes,
                 ) catch {
                     discovery.deinit();
+                    flow.failure = .local(.discovery, .internal);
                     self.finishFlow(flow);
                     return;
                 };
@@ -1841,6 +1914,7 @@ pub const Coordinator = struct {
 
     fn presentConsent(self: *Coordinator, flow: *Flow) !void {
         const discovery = if (flow.discovery) |*value| value else return error.InvalidState;
+        flow.step = .authorization;
         if (flow.start.client_id != null) {
             const configured_method = mcp_oauth.TokenEndpointAuthMethod.fromWire(
                 flow.start.token_endpoint_auth_method orelse return error.InvalidState,
@@ -1848,8 +1922,12 @@ pub const Coordinator = struct {
             if (!containsAuthMethod(
                 discovery.authorization.token_endpoint_auth_methods,
                 configured_method,
-            )) return error.InvalidState;
+            )) {
+                flow.failure = .local(.discovery, .unsupported_server);
+                return error.InvalidState;
+            }
         } else if (discovery.authorization.registration_endpoint == null) {
+            flow.failure = .local(.registration, .unsupported_server);
             return error.DynamicRegistrationUnavailable;
         }
         if (!self.control.advanceMcpAuthorization(
@@ -1912,6 +1990,7 @@ pub const Coordinator = struct {
         if (flow.start.client_id == null) {
             if (!std.mem.eql(u8, flow.start.registration_kind, "dynamic_registration"))
                 return error.InvalidState;
+            flow.step = .registration;
             const begin = try self.control.beginMcpOauthDynamicRegistration(.{
                 .server_id = flow.start.server_id,
                 .resource = discovery.resource.resource,
@@ -1946,14 +2025,17 @@ pub const Coordinator = struct {
     fn bindAndOpen(self: *Coordinator, flow: *Flow) !void {
         const discovery = if (flow.discovery) |*value| value else return error.InvalidState;
         const attempt = flow.attempt orelse return error.InvalidState;
+        flow.step = .authorization;
         try attempt.bind(
             self.authorizationPort(),
             flow.start.server_id,
             &discovery.resource,
             &discovery.authorization,
         );
-        if (!self.host.openUrl(attempt.authorizationUrl()))
+        if (!self.host.openUrl(attempt.authorizationUrl())) {
+            flow.failure = .local(.authorization, .browser_unavailable);
             return error.BrowserUnavailable;
+        }
         if (!self.control.advanceMcpAuthorization(
             flow.start.operation_id,
             .awaiting_browser,
@@ -2038,7 +2120,17 @@ pub const Coordinator = struct {
                     return;
                 }
                 switch (authorization_callback.callback) {
-                    .rejected => self.finishFlow(flow),
+                    .rejected => |*rejection| {
+                        var failure: FlowFailure = .local(.authorization, .oauth_error);
+                        failure.diagnostic.setRemote(
+                            rejection.errorCode(),
+                            rejection.description(),
+                            rejection.description_truncated,
+                            &.{},
+                        );
+                        flow.failure = failure;
+                        self.finishFlow(flow);
+                    },
                     .code => |*code| self.beginExchange(
                         flow,
                         code.take(),
@@ -2158,6 +2250,7 @@ pub const Coordinator = struct {
                 };
                 const apply_after_finish = outcome == .saved or
                     outcome == .saved_recovery_required;
+                flow.succeeded = apply_after_finish;
                 switch (outcome) {
                     .saved, .saved_recovery_required, .indeterminate => self.releaseDurableId(flow),
                     .unchanged, .stale_generation, .rejected => _ = self.recoverDurable(flow),
@@ -2274,7 +2367,14 @@ pub const Coordinator = struct {
             else
                 _ = self.clearDurable(flow);
         }
-        _ = self.control.finishMcpAuthorization(flow.start.operation_id);
+        const failure: ?FlowFailure = if (flow.cancelling or flow.succeeded)
+            null
+        else
+            flow.failure orelse .local(flow.step, .internal);
+        _ = self.control.finishMcpAuthorization(
+            flow.start.operation_id,
+            if (failure) |*value| value.view() else null,
+        );
         if (self.flow == flow) self.flow = null;
         if (!self.stopping) if (self.installation_server) |id| if (std.mem.eql(u8, &id, flow.start.server_id)) {
             if (self.control.installation(&id)) |observed| {
@@ -2358,7 +2458,7 @@ fn containsAuthMethod(
 
 fn durableFailureRequiresRecovery(failure: JobFailure) bool {
     return switch (failure) {
-        .invalid_grant, .outcome_unknown => true,
+        .invalid_grant, .token_rejected, .outcome_unknown => true,
         .definitive, .not_sent, .cancelled_before_send, .rejected => false,
     };
 }
@@ -2393,6 +2493,7 @@ test "MCP durable request cleanup distinguishes pre-send cancellation" {
     try std.testing.expect(!durableFailureRequiresRecovery(.rejected));
     try std.testing.expect(!durableFailureRequiresRecovery(.definitive));
     try std.testing.expect(durableFailureRequiresRecovery(.invalid_grant));
+    try std.testing.expect(durableFailureRequiresRecovery(.token_rejected));
     try std.testing.expect(durableFailureRequiresRecovery(.outcome_unknown));
 }
 
@@ -2584,11 +2685,16 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
         ) mcp_oauth.FetchError!mcp_oauth.Response {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             _ = self.calls.fetchAdd(1, .acq_rel);
-            if (std.mem.eql(u8, request.url, "https://mcp.example.test/mcp"))
+            if (std.mem.eql(u8, request.url, "https://mcp.example.test/mcp")) {
+                for (request.headers) |header|
+                    if (std.ascii.eqlIgnoreCase(header.name, "Authorization") and
+                        std.mem.eql(u8, header.value, "Bearer access-1") and request.method == .post)
+                        return .{ .status = 200, .content_type = "text/event-stream" };
                 return .{
                     .status = 401,
                     .www_authenticate = "Bearer resource_metadata=\"https://mcp.example.test/oauth-resource\", scope=\"files.read\"",
                 };
+            }
             if (std.mem.eql(u8, request.url, "https://mcp.example.test/oauth-resource"))
                 return .{
                     .status = 200,
@@ -2825,7 +2931,8 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     try std.testing.expect(coordinator.drain());
     host_context.finish();
     try std.testing.expect(coordinator.flow == null);
-    try std.testing.expectEqual(@as(usize, 5), fake_http.calls.load(.acquire));
+    // Discovery 3, registration, token, and the token's acceptance check.
+    try std.testing.expectEqual(@as(usize, 6), fake_http.calls.load(.acquire));
     try std.testing.expect(workbench_owner.mcpAuthorizationOperation() == null);
     try std.testing.expectEqual(@as(usize, 1), host_context.confirmations.load(.acquire));
     try std.testing.expect(host_context.saw_replacement_notice);
@@ -2918,6 +3025,294 @@ fn queryValue(url: []const u8, name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, part[0..equal], name)) return part[equal + 1 ..];
     }
     return null;
+}
+
+/// Plays the browser returning to the loopback listener with a code. The
+/// caller closes the stream once the callback job has finished, so the
+/// listener's reply never races a closed socket.
+fn sendTestCallback(coordinator: *Coordinator) !std.Io.net.Stream {
+    const attempt = coordinator.flow.?.attempt.?;
+    const state = queryValue(attempt.authorizationUrl(), "state") orelse
+        return error.TestUnexpectedResult;
+    const redirect = attempt.redirectUri();
+    const port_text = redirect["http://127.0.0.1:".len..std.mem.indexOfPos(u8, redirect, "http://127.0.0.1:".len, "/").?];
+    const port = try std.fmt.parseInt(u16, port_text, 10);
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    var stream = try address.connect(std.testing.io, .{ .mode = .stream, .protocol = .tcp });
+    errdefer stream.close(std.testing.io);
+    var write_storage: [2048]u8 = undefined;
+    var writer = stream.writer(std.testing.io, &write_storage);
+    try writer.interface.print(
+        "GET /auth/callback?code=authorization-code&state={s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nConnection: close\r\n\r\n",
+        .{ state, port },
+    );
+    try writer.interface.flush();
+    return stream;
+}
+
+test "MCP Application coordinator asks a Suno-like server for every scope and never saves a refused token" {
+    // Each credential needs its own locator, so this generator counts.
+    const LocatorGenerator = struct {
+        next: u8 = 0x10,
+
+        fn fill(context: ?*anyopaque, output: *[16]u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            @memset(output, self.next);
+            self.next +%= 1;
+            return true;
+        }
+    };
+    const IdentityGenerator = struct {
+        next: u8 = 0x5a,
+
+        fn fill(context: ?*anyopaque, output: *[16]u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            @memset(output, self.next);
+            self.next +%= 1;
+            return true;
+        }
+    };
+    const Effects = struct {
+        fn commit(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
+            return .committed;
+        }
+        fn clear(_: ?*anyopaque) mcp_configuration.PersistenceEffect {
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) mcp_configuration.CredentialPresence {
+            return .missing;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    // Shaped like api.suno.com/mcp (2026-11-20): an unscoped challenge, eight
+    // listed scopes, and an MCP endpoint that refuses a token short of one.
+    const SunoLike = struct {
+        const endpoint = "https://api.suno.test/mcp";
+        const metadata = "https://api.suno.test/.well-known/oauth-protected-resource/mcp";
+        const issuer = "https://studio.suno.test/api/v2/external/oauth";
+        grant_all: std.atomic.Value(bool) = .init(false),
+        registrations: std.atomic.Value(usize) = .init(0),
+        verifications: std.atomic.Value(usize) = .init(0),
+
+        fn fetch(context: ?*anyopaque, request: mcp_oauth.Request, _: []u8, _: []u8) mcp_oauth.FetchError!mcp_oauth.Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.mem.eql(u8, request.url, endpoint)) {
+                const authorization = for (request.headers) |header| {
+                    if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) break header.value;
+                } else return .{ .status = 401, .www_authenticate = "Bearer resource_metadata=\"" ++ metadata ++ "\"" };
+                _ = self.verifications.fetchAdd(1, .acq_rel);
+                if (std.mem.eql(u8, authorization, "Bearer token-with-every-scope"))
+                    return .{ .status = 200, .content_type = "application/json" };
+                return .{ .status = 403, .www_authenticate = "Bearer error=\"insufficient_scope\", error_description=\"Token is missing library:write\", scope=\"library:write\"" };
+            }
+            if (std.mem.eql(u8, request.url, metadata)) return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = "{\"authorization_servers\":[\"" ++ issuer ++ "\"],\"resource\":\"" ++ endpoint ++ "\",\"scopes_supported\":[\"api:v0\",\"credits:spend\",\"download\",\"library:read\",\"library:search\",\"library:write\",\"offline_access\",\"profile:read\"]}",
+            };
+            if (std.mem.eql(u8, request.url, "https://studio.suno.test/.well-known/oauth-authorization-server/api/v2/external/oauth")) return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = "{\"issuer\":\"" ++ issuer ++ "\",\"authorization_endpoint\":\"" ++ issuer ++ "/authorize/\",\"token_endpoint\":\"" ++ issuer ++ "/token/\",\"registration_endpoint\":\"" ++ issuer ++ "/register/\",\"response_types_supported\":[\"code\"],\"grant_types_supported\":[\"authorization_code\",\"refresh_token\"],\"code_challenge_methods_supported\":[\"S256\"],\"token_endpoint_auth_methods_supported\":[\"none\"]}",
+            };
+            if (std.mem.eql(u8, request.url, issuer ++ "/register/")) {
+                _ = self.registrations.fetchAdd(1, .acq_rel);
+                return .{ .status = 201, .content_type = "application/json", .body = "{\"client_id\":\"dcr-client\",\"token_endpoint_auth_method\":\"none\"}" };
+            }
+            if (std.mem.eql(u8, request.url, issuer ++ "/token/")) return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = if (self.grant_all.load(.acquire))
+                    "{\"access_token\":\"token-with-every-scope\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"refresh_token\":\"refresh-1\"}"
+                else
+                    "{\"access_token\":\"token-without-library-write\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"refresh_token\":\"refresh-1\"}",
+            };
+            return .{ .status = 404 };
+        }
+    };
+    const FakeHost = struct {
+        completion: ?*const Dialog.Completion = null,
+        token: u64 = 0,
+        consent_lists_every_scope: bool = false,
+        fn request(context: *anyopaque, token: u64, message: Dialog.Message, completion: *const Dialog.Completion) !u64 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.consent_lists_every_scope = self.consent_lists_every_scope or
+                (std.mem.indexOf(u8, message.message, "\"api:v0\"") != null and
+                    std.mem.indexOf(u8, message.message, "\"library:write\"") != null and
+                    std.mem.indexOf(u8, message.message, "\"profile:read\"") != null);
+            self.completion = completion;
+            self.token = token;
+            return token;
+        }
+        fn finish(self: *@This()) void {
+            while (self.completion) |completion| {
+                self.completion = null;
+                completion.result_fn(completion.context, self.token, .{ .button = .primary });
+            }
+        }
+        fn open(_: *anyopaque, _: []const u8) bool {
+            return true;
+        }
+        fn now(_: *anyopaque) ?u64 {
+            return 1_000;
+        }
+        fn notify(_: *anyopaque) void {}
+    };
+    const limits: mcp_configuration.Limits = .{
+        .max_servers = 8,
+        .max_tools_per_server = 32,
+        .max_namespace_bytes = 128,
+        .max_credential_locators = 64,
+        .max_runtime_secrets_per_server = 128,
+        .max_runtime_secret_bytes_per_server = 16 * 1024,
+    };
+    var preparation = try mcp_configuration.prepare(std.testing.allocator, null, true, false, .{}, limits);
+    var preparation_owned = true;
+    defer if (preparation_owned) preparation.deinit();
+    var manifest = (try mcp_configuration.RuntimeManifest.candidate(std.testing.allocator, &preparation)).?;
+    var manifest_owned = true;
+    defer if (manifest_owned) manifest.deinit();
+    const agent_runtime = try test_fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        agent_runtime.shutdown() catch {};
+        agent_runtime.deinit();
+    }
+    var identity_generator: IdentityGenerator = .{};
+    var locator_generator: LocatorGenerator = .{};
+    var workbench_owner = try test_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        agent_runtime.runtimePort(),
+        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        .{ .mcp = .{
+            .preparation = &preparation,
+            .management = .{
+                .persistence = .{ .available = true, .commit_journal_fn = Effects.commit, .commit_registry_fn = Effects.commit, .clear_journal_fn = Effects.clear },
+                .credentials = .{ .available = true, .probe_fn = Effects.probe, .create_fn = Effects.create, .delete_fn = Effects.delete },
+                .locator_generator = .{ .context = &locator_generator, .available = true, .fill_fn = LocatorGenerator.fill },
+                .identity_generator = .{ .context = &identity_generator, .available = true, .fill_fn = IdentityGenerator.fill },
+                .limits = limits,
+                .runtime_manifest = &manifest,
+            },
+        } },
+    );
+    preparation_owned = false;
+    manifest_owned = false;
+    defer workbench_owner.deinit();
+    try std.testing.expectEqual(
+        mcp_configuration.ManagementOutcome.saved,
+        (try workbench_owner.createMcpOauthHttpServer(0, .{
+            .display_name = "Suno",
+            .url = SunoLike.endpoint,
+            .client = .dynamic_registration,
+        })).outcome,
+    );
+    const server_id = "mcp-5a5a5a5a5a5a5a5a5a5a";
+    // A saved grant starts a configuration apply, which reads credentials.
+    const harness = try @import("native_sdk").TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var credential_store: mcp_platform.CredentialStore = .{ .io = std.testing.io, .runtime = &harness.runtime, .main_thread_id = std.Thread.getCurrentId() };
+    var active_authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = std.testing.allocator };
+    defer active_authorizations.deinit();
+    var host_context: FakeHost = .{};
+    var suno: SunoLike = .{};
+    var coordinator = Coordinator.init(
+        std.testing.allocator,
+        std.testing.io,
+        workbench_owner.mcpManagementPort(),
+        agent_runtime,
+        &credential_store,
+        &active_authorizations,
+        .{
+            .context = &host_context,
+            .confirmation_available = true,
+            .oauth_available = true,
+            .request_dialog_fn = FakeHost.request,
+            .open_url_fn = FakeHost.open,
+            .now_unix_ms_fn = FakeHost.now,
+            .notify_fn = FakeHost.notify,
+        },
+        .{},
+    );
+    coordinator.transport_override = .{ .context = &suno, .fetch_fn = SunoLike.fetch };
+    defer coordinator.deinit();
+    const registry_storage = try std.testing.allocator.alloc(u8, mcp_configuration.max_store_bytes);
+    defer std.testing.allocator.free(registry_storage);
+    const all_scopes = "scope=api%3Av0%20credits%3Aspend%20download%20library%3Aread%20library%3Asearch%20library%3Awrite%20offline_access%20profile%3Aread&";
+
+    // First sign-in: the authorization server grants less than requested.
+    try std.testing.expect(try coordinator.authorizeOauth(coordinator.control.inspectMcpDesiredConfiguration().?.desired_generation.?, server_id) == .started);
+    waitForCoordinatorJob(&coordinator);
+    try std.testing.expect(coordinator.drain());
+    host_context.finish();
+    try std.testing.expect(host_context.consent_lists_every_scope);
+    waitForCoordinatorJob(&coordinator);
+    try std.testing.expect(coordinator.drain());
+    try std.testing.expect(std.mem.indexOf(u8, coordinator.flow.?.attempt.?.authorizationUrl(), all_scopes) != null);
+    {
+        var stream = try sendTestCallback(&coordinator);
+        defer stream.close(std.testing.io);
+        waitForCoordinatorJob(&coordinator);
+        try std.testing.expect(coordinator.drain());
+    }
+    waitForCoordinatorJob(&coordinator);
+    try std.testing.expect(coordinator.drain());
+    try std.testing.expect(coordinator.flow == null);
+    try std.testing.expectEqual(@as(usize, 1), suno.verifications.load(.acquire));
+    {
+        const generation = coordinator.control.inspectMcpDesiredConfiguration().?.desired_generation.?;
+        const registry = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try coordinator.control.writeMcpDesiredConfiguration(generation, registry_storage), .{});
+        defer registry.deinit();
+        const oauth = registry.value.object.get("servers").?.array.items[0].object.get("auth").?.object.get("oauth").?.object;
+        // The refused token is not saved; the server asks to sign in again.
+        try std.testing.expect(oauth.get("grant").? == .null);
+        try std.testing.expectEqualStrings("reauth_required", oauth.get("status").?.string);
+        try std.testing.expect(registry.value.object.get("oauth_operation").? == .null);
+        try std.testing.expectEqual(@as(usize, 8), oauth.get("consent").?.object.get("scopes").?.array.items.len);
+    }
+    {
+        const failures = workbench_owner.mcp.?.state.authorization_failures.items;
+        try std.testing.expectEqual(@as(usize, 1), failures.len);
+        try std.testing.expectEqual(.verification, failures[0].step);
+        try std.testing.expectEqual(.access_denied, failures[0].reason);
+        try std.testing.expectEqual(@as(?u16, 403), failures[0].http_status);
+        try std.testing.expectEqualStrings("insufficient_scope", failures[0].error_code.?);
+        try std.testing.expectEqualStrings("Token is missing library:write", failures[0].description.?);
+    }
+
+    // Signing in again with every scope granted saves the grant and clears
+    // the earlier failure. The registered client is reused.
+    suno.grant_all.store(true, .release);
+    try std.testing.expect(try coordinator.authorizeOauth(coordinator.control.inspectMcpDesiredConfiguration().?.desired_generation.?, server_id) == .started);
+    try std.testing.expectEqual(@as(usize, 0), workbench_owner.mcp.?.state.authorization_failures.items.len);
+    waitForCoordinatorJob(&coordinator);
+    try std.testing.expect(coordinator.drain());
+    host_context.finish();
+    {
+        var stream = try sendTestCallback(&coordinator);
+        defer stream.close(std.testing.io);
+        waitForCoordinatorJob(&coordinator);
+        try std.testing.expect(coordinator.drain());
+    }
+    waitForCoordinatorJob(&coordinator);
+    try std.testing.expect(coordinator.drain());
+    try std.testing.expect(coordinator.flow == null);
+    try std.testing.expectEqual(@as(usize, 1), suno.registrations.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), suno.verifications.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), workbench_owner.mcp.?.state.authorization_failures.items.len);
+    {
+        const generation = coordinator.control.inspectMcpDesiredConfiguration().?.desired_generation.?;
+        const registry = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try coordinator.control.writeMcpDesiredConfiguration(generation, registry_storage), .{});
+        defer registry.deinit();
+        const oauth = registry.value.object.get("servers").?.array.items[0].object.get("auth").?.object.get("oauth").?.object;
+        try std.testing.expect(oauth.get("grant").? != .null);
+        try std.testing.expectEqualStrings("ready", oauth.get("status").?.string);
+    }
 }
 
 test "MCP asynchronous confirmation owns paging cancellation and failure terminals" {

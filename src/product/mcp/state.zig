@@ -188,6 +188,109 @@ pub const McpAuthorizationPhase = enum {
     cancelling,
 };
 
+/// The OAuth step that ended an authorization operation without a grant.
+pub const McpAuthorizationFailureStep = enum {
+    discovery,
+    registration,
+    authorization,
+    token_exchange,
+    verification,
+};
+
+pub const McpAuthorizationFailureReason = enum {
+    network,
+    timed_out,
+    http_status,
+    oauth_error,
+    invalid_response,
+    resource_mismatch,
+    unsupported_server,
+    browser_unavailable,
+    invalid_callback,
+    access_denied,
+    internal,
+};
+
+/// Terminal failure of one authorization operation, delivered with its
+/// finish. Slices are borrowed for the call; Product keeps only an owned,
+/// validated copy and never persists it. `error_code` and `description` are
+/// remote OAuth text from which Application already removed any value that
+/// echoes a secret the failed step sent.
+pub const McpAuthorizationFailure = struct {
+    pub const error_bytes: usize = 64;
+    pub const description_bytes: usize = 256;
+
+    step: McpAuthorizationFailureStep,
+    reason: McpAuthorizationFailureReason,
+    http_status: ?u16 = null,
+    error_code: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+};
+
+/// Process-local record of the latest failed authorization of one server.
+/// The next failure replaces it; starting authorization of that server
+/// again clears it.
+pub const McpAuthorizationFailureRecord = struct {
+    server_id: []u8,
+    step: McpAuthorizationFailureStep,
+    reason: McpAuthorizationFailureReason,
+    http_status: ?u16,
+    error_code: ?[]u8,
+    description: ?[]u8,
+
+    /// Fields outside the projected bounds are dropped, not cut.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        server_id: []const u8,
+        failure: McpAuthorizationFailure,
+    ) std.mem.Allocator.Error!McpAuthorizationFailureRecord {
+        const owned_server_id = try allocator.dupe(u8, server_id);
+        errdefer allocator.free(owned_server_id);
+        const error_code = if (failure.error_code) |value|
+            if (validFailureErrorCode(value)) try allocator.dupe(u8, value) else null
+        else
+            null;
+        errdefer if (error_code) |value| allocator.free(value);
+        const description = if (failure.description) |value|
+            if (validFailureDescription(value)) try allocator.dupe(u8, value) else null
+        else
+            null;
+        return .{
+            .server_id = owned_server_id,
+            .step = failure.step,
+            .reason = failure.reason,
+            .http_status = if (failure.http_status) |status|
+                if (status >= 100 and status <= 599) status else null
+            else
+                null,
+            .error_code = error_code,
+            .description = description,
+        };
+    }
+
+    pub fn deinit(self: *McpAuthorizationFailureRecord, allocator: std.mem.Allocator) void {
+        allocator.free(self.server_id);
+        if (self.error_code) |value| allocator.free(value);
+        if (self.description) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+/// RFC 6749 section 5.2 `error` characters within the projected bound.
+pub fn validFailureErrorCode(value: []const u8) bool {
+    if (value.len == 0 or value.len > McpAuthorizationFailure.error_bytes) return false;
+    for (value) |byte| if (byte < 0x20 or byte == '"' or byte == '\\' or byte > 0x7e) return false;
+    return true;
+}
+
+/// Display text: bounded UTF-8 without control bytes.
+pub fn validFailureDescription(value: []const u8) bool {
+    if (value.len == 0 or value.len > McpAuthorizationFailure.description_bytes or
+        !std.unicode.utf8ValidateSlice(value)) return false;
+    for (value) |byte| if (byte < 0x20 or byte == 0x7f) return false;
+    return true;
+}
+
 pub const McpConnectionTestOutcome = enum {
     connected,
     failed,
@@ -407,6 +510,7 @@ pub const McpProductState = struct {
     runtime_uncertain: bool = false,
     task_references: std.ArrayList(McpTaskReference) = .empty,
     authorization_operation: ?McpAuthorizationOperation = null,
+    authorization_failures: std.ArrayList(McpAuthorizationFailureRecord) = .empty,
     pending_reauthorizations: std.ArrayList(McpPendingReauthorization) = .empty,
     host_capabilities: McpHostCapabilities,
     committed: bool = false,
@@ -440,6 +544,8 @@ pub const McpProductState = struct {
         self.task_references.deinit(self.preparation.allocator);
         if (self.authorization_operation) |*operation|
             operation.deinit(self.preparation.allocator);
+        for (self.authorization_failures.items) |*failure| failure.deinit(self.preparation.allocator);
+        self.authorization_failures.deinit(self.preparation.allocator);
         for (self.pending_reauthorizations.items) |*pending| pending.deinit();
         self.pending_reauthorizations.deinit(self.preparation.allocator);
         self.admission.deinit();

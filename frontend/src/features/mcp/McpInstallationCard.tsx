@@ -6,6 +6,7 @@ import type {
 import { Button } from "../../components/ui/button.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
+import { McpAuthorizationFailureDetail } from "./McpAuthorizationFailure.tsx";
 
 export type McpInstallationActions = {
   onCancelInstallation?: (
@@ -86,6 +87,11 @@ export function McpInstallationCard({
       <strong>{operation.displayName}</strong>
       <p>{t(phaseLabel)}</p>
       {failureLabel && <p>{t(failureLabel)}</p>}
+      {operation.authorizationFailure && (
+        <McpAuthorizationFailureDetail
+          failure={operation.authorizationFailure}
+        />
+      )}
       <p>
         <code>{operation.sourceOrigin}</code>
         {operation.targetOrigin && (

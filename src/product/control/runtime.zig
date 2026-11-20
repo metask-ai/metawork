@@ -523,6 +523,7 @@ pub const McpOauthExpiry = mcp_runtime.McpOauthExpiry;
 pub const McpRuntimeAuthorizationFailure = mcp_runtime.McpRuntimeAuthorizationFailure;
 pub const McpRuntimeAuthorizationFailureOutcome = mcp_runtime.McpRuntimeAuthorizationFailureOutcome;
 pub const McpAuthorizationPhase = mcp_runtime.McpAuthorizationPhase;
+pub const McpAuthorizationFailure = mcp_runtime.McpAuthorizationFailure;
 pub const McpConnectionTestOutcome = mcp_runtime.McpConnectionTestOutcome;
 pub const McpConfigurationApplyState = mcp_runtime.McpConfigurationApplyState;
 pub const McpAuthorizationOperationView = mcp_runtime.McpAuthorizationOperationView;
@@ -6436,10 +6437,11 @@ pub const Runtime = struct {
     pub fn finishMcpAuthorization(
         self: *Runtime,
         operation_id: []const u8,
+        failure: ?McpAuthorizationFailure,
     ) bool {
         const runtime = if (self.mcp) |*value| value else return false;
         defer self.publishMcpRuntimeChanges();
-        return runtime.finishAuthorization(operation_id);
+        return runtime.finishAuthorization(operation_id, failure);
     }
     /// Host-only rendering delegates canonical validation and formatting to the
     /// Product MCP aggregate; bytes never enter the Renderer snapshot path.
@@ -10589,8 +10591,8 @@ fn controlMcpBeginAuthorization(context: *anyopaque, generation: u64, server_id:
 fn controlMcpAdvanceAuthorization(context: *anyopaque, operation_id: []const u8, phase: McpAuthorizationPhase) bool {
     return controlOwner(context).advanceMcpAuthorization(operation_id, phase);
 }
-fn controlMcpFinishAuthorization(context: *anyopaque, operation_id: []const u8) bool {
-    return controlOwner(context).finishMcpAuthorization(operation_id);
+fn controlMcpFinishAuthorization(context: *anyopaque, operation_id: []const u8, failure: ?McpAuthorizationFailure) bool {
+    return controlOwner(context).finishMcpAuthorization(operation_id, failure);
 }
 fn controlMcpWriteApproval(context: *anyopaque, generation: u64, server_id: []const u8, output: []u8) anyerror![]const u8 {
     return controlOwner(context).writeMcpConnectionApprovalDetails(generation, server_id, output);
@@ -20960,7 +20962,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     try std.testing.expectEqual(@as(usize, 2), start.additional_scopes.len);
     try std.testing.expectEqualStrings("files.read", start.additional_scopes[0]);
     try std.testing.expectEqualStrings("files.write", start.additional_scopes[1]);
-    try std.testing.expect(control.finishMcpAuthorization(start.operation_id));
+    try std.testing.expect(control.finishMcpAuthorization(start.operation_id, null));
 
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
@@ -21414,7 +21416,7 @@ test "MCP authorization operation owns product phase and durable token boundary"
     const exchange = try control.beginMcpOauthCodeExchange(server_id);
     try std.testing.expect(exchange == .started);
     const durable_id = exchange.started.operation.id;
-    try std.testing.expect(control.finishMcpAuthorization(start.operation_id));
+    try std.testing.expect(control.finishMcpAuthorization(start.operation_id, null));
     try std.testing.expect(control.mcpAuthorizationOperation() == null);
     try std.testing.expect(!control.mcp.?.hasRefreshJob());
     try std.testing.expectEqual(

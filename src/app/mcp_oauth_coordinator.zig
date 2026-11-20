@@ -119,6 +119,7 @@ const RefreshJob = struct {
             self.allocator,
             http.transport(),
             self.binding.endpoint,
+            null,
         ) catch {
             self.publish(.clear_marker);
             return;
@@ -127,11 +128,7 @@ const RefreshJob = struct {
             if (self.binding.private_resource != null or self.binding.private_endpoint != null) std.crypto.secureZero(u8, @constCast(resource.resource));
             resource.deinit();
         }
-        if (!refreshDiscoveryCoveredByConsent(
-            &self.binding,
-            resource.resource,
-            resource.requested_scopes,
-        )) {
+        if (!refreshDiscoveryCoveredByConsent(&self.binding, &resource)) {
             self.publish(.recover);
             return;
         }
@@ -140,6 +137,7 @@ const RefreshJob = struct {
             http.transport(),
             &resource,
             self.binding.issuer,
+            null,
         ) catch |err| {
             self.publish(if (err == error.UnsupportedAuthorizationServer)
                 .recover
@@ -697,15 +695,17 @@ test "MCP auth failure delivery survives allocation failure without waiting for 
     try std.testing.expectEqual(@as(usize, 0), remaining.values.len);
 }
 
+/// Refresh needs consent only for what the server demands now. Scopes the
+/// resource merely advertises are what a new sign-in would ask for, and a
+/// grant consented before they were listed must keep refreshing.
 fn refreshDiscoveryCoveredByConsent(
     binding: *const mcp_types.McpOauthRefreshBinding,
-    resource: []const u8,
-    requested_scopes: []const []const u8,
+    discovery: *const mcp_oauth.ResourceDiscovery,
 ) bool {
-    if (!std.mem.eql(u8, binding.resource, resource)) return false;
-    for (requested_scopes) |requested| {
+    if (!std.mem.eql(u8, binding.resource, discovery.resource)) return false;
+    for (discovery.challenge_scopes) |required| {
         for (binding.scopes) |approved|
-            if (std.mem.eql(u8, requested, approved)) break else return false;
+            if (std.mem.eql(u8, required, approved)) break else return false;
     }
     return true;
 }
@@ -927,21 +927,25 @@ test "MCP OAuth refresh reuses consent only for the same resource and covered sc
         .token_revision = 2,
         .runtime_binding = .matching_descriptor,
     };
-    try std.testing.expect(refreshDiscoveryCoveredByConsent(
-        &binding,
-        binding.resource,
-        &.{"files.read"},
-    ));
-    try std.testing.expect(!refreshDiscoveryCoveredByConsent(
-        &binding,
-        "https://other.example.test/mcp",
-        &.{"files.read"},
-    ));
-    try std.testing.expect(!refreshDiscoveryCoveredByConsent(
-        &binding,
-        binding.resource,
-        &.{ "files.read", "files.delete" },
-    ));
+    const Discovery = struct {
+        fn of(resource: []const u8, challenge_scopes: []const []const u8) mcp_oauth.ResourceDiscovery {
+            return .{
+                .arena = .init(std.testing.allocator),
+                .resource = resource,
+                .authorization_servers = &.{"https://issuer.example.test"},
+                .scopes_supported = &.{ "files.delete", "files.read", "files.write" },
+                // A new sign-in would ask for every advertised scope.
+                .requested_scopes = &.{ "files.delete", "files.read", "files.write" },
+                .challenge_scopes = challenge_scopes,
+            };
+        }
+    };
+    // Advertised scopes beyond consent do not retire a working grant.
+    try std.testing.expect(refreshDiscoveryCoveredByConsent(&binding, &Discovery.of(binding.resource, &.{})));
+    try std.testing.expect(refreshDiscoveryCoveredByConsent(&binding, &Discovery.of(binding.resource, &.{"files.read"})));
+    try std.testing.expect(!refreshDiscoveryCoveredByConsent(&binding, &Discovery.of("https://other.example.test/mcp", &.{"files.read"})));
+    // A demanded scope outside consent does.
+    try std.testing.expect(!refreshDiscoveryCoveredByConsent(&binding, &Discovery.of(binding.resource, &.{ "files.read", "files.delete" })));
 }
 
 test "MCP OAuth token commit distinguishes matching and retained descriptors with strict revision checks" {

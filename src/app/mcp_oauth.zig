@@ -53,6 +53,9 @@ pub const Request = struct {
     url: []const u8,
     headers: []const Header = &.{},
     body: []const u8 = "",
+    /// False completes at the response head: the body is neither read nor
+    /// returned and the connection is not reused.
+    read_body: bool = true,
 };
 
 pub const Response = struct {
@@ -314,7 +317,10 @@ pub const StdHttpTransport = struct {
                         return error.ResponseTooLarge;
             }
         }
-        const body = http_request.readAll(&response, body_buffer) catch |err| return mapError(err);
+        const body = if (request.read_body)
+            http_request.readAll(&response, body_buffer) catch |err| return mapError(err)
+        else
+            "";
         return .{
             .status = @intFromEnum(response.head.status),
             .content_type = content_type,
@@ -339,12 +345,174 @@ pub const Error = FetchError || error{
     ExpiryOverflow,
 };
 
+/// Why one OAuth step failed, in terms a person can act on.
+pub const FailureReason = enum {
+    /// The request did not complete (connection, DNS, TLS or a broken stream).
+    network,
+    timed_out,
+    /// An unexpected HTTP status without a usable OAuth error body.
+    http_status,
+    /// The server answered with an RFC 6749 `error`.
+    oauth_error,
+    /// A response arrived but could not be accepted.
+    invalid_response,
+    /// Protected resource metadata names a different resource (RFC 9728 §3.3).
+    resource_mismatch,
+    /// The authorization server lacks something MCP requires.
+    unsupported_server,
+    browser_unavailable,
+    invalid_callback,
+    /// The MCP server rejected the newly issued token.
+    access_denied,
+    /// A local precondition or durable state step failed.
+    internal,
+};
+
+/// Bounded, display-safe facts about one failed OAuth step. Remote text is
+/// kept only after control bytes are replaced, and only when it does not
+/// contain any secret the step sent, so it never carries credentials.
+pub const Diagnostic = struct {
+    pub const error_bytes: usize = 64;
+    pub const description_bytes: usize = 256;
+
+    reason: FailureReason = .internal,
+    http_status: u16 = 0,
+    error_storage: [error_bytes]u8 = undefined,
+    error_len: usize = 0,
+    description_storage: [description_bytes]u8 = undefined,
+    description_len: usize = 0,
+
+    pub fn errorCode(self: *const Diagnostic) ?[]const u8 {
+        return if (self.error_len == 0) null else self.error_storage[0..self.error_len];
+    }
+
+    pub fn description(self: *const Diagnostic) ?[]const u8 {
+        return if (self.description_len == 0) null else self.description_storage[0..self.description_len];
+    }
+
+    pub fn init(reason: FailureReason, http_status: u16) Diagnostic {
+        return .{ .reason = reason, .http_status = http_status };
+    }
+
+    fn record(target: ?*Diagnostic, reason: FailureReason, http_status: u16) void {
+        const self = target orelse return;
+        self.* = .init(reason, http_status);
+    }
+
+    fn recordFetch(target: ?*Diagnostic, err: FetchError) void {
+        record(target, switch (err) {
+            error.DeadlineExceeded, error.DeadlineExceededBeforeSend => .timed_out,
+            error.ResponseTooLarge, error.InvalidResponse, error.InvalidResponseBeforeSend => .invalid_response,
+            error.Network, error.NetworkBeforeSend, error.Cancelled, error.CancelledBeforeSend => .network,
+        }, 0);
+    }
+
+    /// Replaces the remote text. A value that contains any of `secrets` is
+    /// dropped whole; an `error` outside the RFC 6749 character set or bound
+    /// is dropped; a description is cut at a code point boundary.
+    pub fn setRemote(
+        self: *Diagnostic,
+        code: ?[]const u8,
+        text: ?[]const u8,
+        description_truncated: bool,
+        secrets: []const []const u8,
+    ) void {
+        std.crypto.secureZero(u8, &self.error_storage);
+        std.crypto.secureZero(u8, &self.description_storage);
+        self.error_len = 0;
+        self.description_len = 0;
+        if (code) |value| if (validErrorCode(value) and !echoesSecret(value, secrets)) {
+            @memcpy(self.error_storage[0..value.len], value);
+            self.error_len = value.len;
+        };
+        // A description cut before it arrived may hide a partial echo, so
+        // only complete text is checked and shown.
+        if (text) |value| if (!description_truncated and value.len != 0 and
+            std.unicode.utf8ValidateSlice(value) and !echoesSecret(value, secrets))
+        {
+            self.description_len = copyDisplayText(&self.description_storage, value);
+        };
+    }
+
+    fn recordRemote(
+        target: ?*Diagnostic,
+        reason: FailureReason,
+        http_status: u16,
+        code: ?[]const u8,
+        text: ?[]const u8,
+        secrets: []const []const u8,
+    ) void {
+        const self = target orelse return;
+        self.* = .init(reason, http_status);
+        self.setRemote(code, text, false, secrets);
+    }
+
+    /// Records an RFC 6749 section 5.2 error body when the response carries
+    /// one, otherwise the bare status.
+    fn recordErrorResponse(
+        target: ?*Diagnostic,
+        response: Response,
+        comptime body_bytes: usize,
+        secrets: []const []const u8,
+    ) void {
+        var scratch: [body_bytes * 2]u8 = undefined;
+        defer std.crypto.secureZero(u8, &scratch);
+        var fixed = std.heap.FixedBufferAllocator.init(&scratch);
+        if (response.body.len != 0 and response.body.len <= body_bytes) {
+            if (std.json.parseFromSlice(
+                struct { @"error": []const u8, error_description: ?[]const u8 = null },
+                fixed.allocator(),
+                response.body,
+                .{ .ignore_unknown_fields = true },
+            )) |parsed| {
+                defer parsed.deinit();
+                if (parsed.value.@"error".len != 0) {
+                    recordRemote(target, .oauth_error, response.status, parsed.value.@"error", parsed.value.error_description, secrets);
+                    return;
+                }
+            } else |_| {}
+        }
+        record(target, if (response.status >= 200 and response.status < 300) .invalid_response else .http_status, response.status);
+    }
+};
+
+fn validErrorCode(value: []const u8) bool {
+    if (value.len == 0 or value.len > Diagnostic.error_bytes) return false;
+    // RFC 6749 section 5.2: %x20-21 / %x23-5B / %x5D-7E.
+    for (value) |byte| if (byte < 0x20 or byte == '"' or byte == '\\' or byte > 0x7e) return false;
+    return true;
+}
+
+fn echoesSecret(value: []const u8, secrets: []const []const u8) bool {
+    for (secrets) |secret|
+        if (secret.len != 0 and std.mem.indexOf(u8, value, secret) != null) return true;
+    return false;
+}
+
+/// Copies valid UTF-8 for display: control bytes become spaces and an
+/// over-long value ends in an ellipsis at a code point boundary.
+fn copyDisplayText(output: []u8, value: []const u8) usize {
+    const ellipsis = "\u{2026}";
+    const fits = value.len <= output.len;
+    const len = if (fits) value.len else oauth_mechanics.utf8Prefix(value, output.len - ellipsis.len);
+    for (value[0..len], output[0..len]) |byte, *target|
+        target.* = if (byte < 0x20 or byte == 0x7f) ' ' else byte;
+    if (fits) return len;
+    @memcpy(output[len..][0..ellipsis.len], ellipsis);
+    return len + ellipsis.len;
+}
+
 pub const ResourceDiscovery = struct {
     arena: std.heap.ArenaAllocator,
     resource: []const u8,
     authorization_servers: []const []const u8,
     scopes_supported: []const []const u8,
+    /// What a new authorization asks for (MCP scope selection order).
     requested_scopes: []const []const u8,
+    /// Only what the server's challenge demanded. Refresh compares this, not
+    /// `requested_scopes`, against consent: advertising another supported
+    /// scope is not a reason to retire a working grant.
+    challenge_scopes: []const []const u8 = &.{},
 
     pub fn deinit(self: *ResourceDiscovery) void {
         self.arena.deinit();
@@ -810,23 +978,35 @@ const TokenResponse = oauth_mechanics.TokenResponse(.{
 const Challenge = struct {
     resource_metadata: ?[]const u8 = null,
     scope: ?[]const u8 = null,
+    /// RFC 6750 section 3 diagnostics; they carry no authority, so a repeated
+    /// parameter keeps its first value instead of rejecting the challenge.
+    error_code: ?[]const u8 = null,
+    error_description: ?[]const u8 = null,
 };
 
 pub fn discoverResourceEffect(
     allocator: std.mem.Allocator,
     transport: Transport,
     endpoint: []const u8,
+    diagnostic: ?*Diagnostic,
 ) (Error || std.mem.Allocator.Error)!ResourceDiscovery {
-    return discoverResourceWithChallengeEffect(allocator, transport, endpoint, null);
+    return discoverResourceWithChallengeEffect(allocator, transport, endpoint, null, diagnostic);
 }
 
+/// Requested scopes follow the MCP scope selection order: the challenge's
+/// `scope`, otherwise every protected resource `scopes_supported` value,
+/// otherwise none (the authorization request then omits `scope`).
 pub fn discoverResourceWithChallengeEffect(
     allocator: std.mem.Allocator,
     transport: Transport,
     endpoint: []const u8,
     observed_header: ?[]const u8,
+    diagnostic: ?*Diagnostic,
 ) (Error || std.mem.Allocator.Error)!ResourceDiscovery {
-    if (!validHttpsUrl(endpoint)) return error.InvalidEndpoint;
+    if (!validHttpsUrl(endpoint)) {
+        Diagnostic.record(diagnostic, .internal, 0);
+        return error.InvalidEndpoint;
+    }
     var body_buffer: [Limits.metadata_body_bytes]u8 = undefined;
     var header_buffer: [Limits.header_bytes]u8 = undefined;
     var challenge_storage: [Limits.header_bytes]u8 = undefined;
@@ -834,7 +1014,10 @@ pub fn discoverResourceWithChallengeEffect(
     var challenge: ?Challenge = null;
     if (observed_header) |header| {
         if (selectBearerChallenge(header) != null)
-            challenge = try parseBearerChallenge(header, &challenge_storage);
+            challenge = parseBearerChallenge(header, &challenge_storage) catch |err| {
+                Diagnostic.record(diagnostic, .invalid_response, 401);
+                return err;
+            };
     } else {
         const probe = transport.fetch(
             .{ .method = .get, .url = endpoint, .headers = &.{.{
@@ -846,52 +1029,80 @@ pub fn discoverResourceWithChallengeEffect(
         ) catch |err| switch (err) {
             error.CancelledBeforeSend => return error.Cancelled,
             error.Cancelled => return error.Cancelled,
-            error.DeadlineExceeded, error.DeadlineExceededBeforeSend => return error.DeadlineExceeded,
+            error.DeadlineExceeded, error.DeadlineExceededBeforeSend => {
+                Diagnostic.recordFetch(diagnostic, err);
+                return error.DeadlineExceeded;
+            },
             error.Network, error.NetworkBeforeSend, error.ResponseTooLarge, error.InvalidResponse, error.InvalidResponseBeforeSend => null,
         };
         if (probe) |response| if (response.status == 401) {
             if (response.www_authenticate) |header|
-                challenge = parseBearerChallenge(header, &challenge_storage) catch
+                challenge = parseBearerChallenge(header, &challenge_storage) catch {
+                    Diagnostic.record(diagnostic, .invalid_response, 401);
                     return error.InvalidChallenge;
+                };
         };
     }
 
     if (challenge) |value| if (value.resource_metadata) |metadata_url| {
-        if (!validHttpsUrl(metadata_url)) return error.InvalidChallenge;
+        if (!validHttpsUrl(metadata_url)) {
+            Diagnostic.record(diagnostic, .invalid_response, 401);
+            return error.InvalidChallenge;
+        }
         return fetchResourceMetadata(
             allocator,
             transport,
             endpoint,
             metadata_url,
             value.scope,
+            diagnostic,
         );
     };
 
     var path_storage: [Limits.url_bytes]u8 = undefined;
     const path_url = try protectedResourceMetadataUrl(&path_storage, endpoint, true);
+    var path_diagnostic: Diagnostic = .{};
     if (fetchResourceMetadata(
         allocator,
         transport,
         endpoint,
         path_url,
         if (challenge) |value| value.scope else null,
+        &path_diagnostic,
     )) |result| return result else |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.CancelledBeforeSend => return error.Cancelled,
         error.Cancelled => return error.Cancelled,
-        error.DeadlineExceeded, error.DeadlineExceededBeforeSend => return error.DeadlineExceeded,
+        error.DeadlineExceeded, error.DeadlineExceededBeforeSend => {
+            if (diagnostic) |target| target.* = path_diagnostic;
+            return error.DeadlineExceeded;
+        },
         else => {},
     }
 
     var root_storage: [Limits.url_bytes]u8 = undefined;
     const root_url = try protectedResourceMetadataUrl(&root_storage, endpoint, false);
+    var root_diagnostic: Diagnostic = .{};
+    defer if (diagnostic) |target| {
+        // Report the root attempt unless it only said the document is absent
+        // while the path-specific attempt said something more useful.
+        target.* = if (missingDocument(root_diagnostic) and !missingDocument(path_diagnostic))
+            path_diagnostic
+        else
+            root_diagnostic;
+    };
     return fetchResourceMetadata(
         allocator,
         transport,
         endpoint,
         root_url,
         if (challenge) |value| value.scope else null,
+        &root_diagnostic,
     );
+}
+
+fn missingDocument(diagnostic: Diagnostic) bool {
+    return diagnostic.reason == .http_status and diagnostic.http_status == 404;
 }
 
 fn fetchResourceMetadata(
@@ -900,29 +1111,47 @@ fn fetchResourceMetadata(
     endpoint: []const u8,
     metadata_url: []const u8,
     challenge_scope: ?[]const u8,
+    diagnostic: ?*Diagnostic,
 ) (Error || std.mem.Allocator.Error)!ResourceDiscovery {
     var body_buffer: [Limits.metadata_body_bytes]u8 = undefined;
     var header_buffer: [Limits.header_bytes]u8 = undefined;
-    const response = try transport.fetch(
+    const response = transport.fetch(
         .{ .method = .get, .url = metadata_url, .headers = &.{.{
             .name = "Accept",
             .value = "application/json",
         }} },
         &body_buffer,
         &header_buffer,
-    );
-    if (response.status != 200 or !jsonContentType(response.content_type) or
-        response.body.len == 0 or response.body.len > Limits.metadata_body_bytes)
+    ) catch |err| {
+        Diagnostic.recordFetch(diagnostic, err);
+        return err;
+    };
+    if (response.status != 200) {
+        Diagnostic.record(diagnostic, .http_status, response.status);
         return error.InvalidMetadata;
+    }
+    if (!jsonContentType(response.content_type) or
+        response.body.len == 0 or response.body.len > Limits.metadata_body_bytes)
+    {
+        Diagnostic.record(diagnostic, .invalid_response, response.status);
+        return error.InvalidMetadata;
+    }
     var parsed = std.json.parseFromSlice(
         ResourceMetadata,
         allocator,
         response.body,
         .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-    ) catch return error.InvalidMetadata;
+    ) catch |err| {
+        Diagnostic.record(diagnostic, .invalid_response, response.status);
+        return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidMetadata;
+    };
     defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.resource, endpoint) or
-        parsed.value.authorization_servers.len == 0 or
+    if (!std.mem.eql(u8, parsed.value.resource, endpoint)) {
+        Diagnostic.record(diagnostic, .resource_mismatch, response.status);
+        return error.InvalidMetadata;
+    }
+    errdefer Diagnostic.record(diagnostic, .invalid_response, response.status);
+    if (parsed.value.authorization_servers.len == 0 or
         parsed.value.authorization_servers.len > Limits.issuers)
         return error.InvalidMetadata;
     for (parsed.value.authorization_servers, 0..) |issuer, index| {
@@ -945,7 +1174,7 @@ fn fetchResourceMetadata(
         owned,
         parsed.value.scopes_supported,
     );
-    const requested_scopes = if (challenge_scope) |scope|
+    const challenge_scopes = if (challenge_scope) |scope|
         try parseScopeSet(owned, scope)
     else
         &.{};
@@ -954,7 +1183,8 @@ fn fetchResourceMetadata(
         .resource = owned_resource,
         .authorization_servers = owned_issuers,
         .scopes_supported = scopes_supported,
-        .requested_scopes = requested_scopes,
+        .requested_scopes = if (challenge_scope != null) challenge_scopes else scopes_supported,
+        .challenge_scopes = challenge_scopes,
     };
 }
 
@@ -963,29 +1193,47 @@ pub fn discoverAuthorizationServer(
     transport: Transport,
     resource: *const ResourceDiscovery,
     selected_issuer: []const u8,
+    diagnostic: ?*Diagnostic,
 ) (Error || std.mem.Allocator.Error)!AuthorizationServer {
-    if (!containsText(resource.authorization_servers, selected_issuer))
+    if (!containsText(resource.authorization_servers, selected_issuer)) {
+        Diagnostic.record(diagnostic, .unsupported_server, 0);
         return error.UnsupportedAuthorizationServer;
+    }
     var storage: [3][Limits.url_bytes]u8 = undefined;
     var candidates: [3][]const u8 = undefined;
-    const count = try authorizationMetadataUrls(&storage, &candidates, selected_issuer);
+    const count = authorizationMetadataUrls(&storage, &candidates, selected_issuer) catch |err| {
+        Diagnostic.record(diagnostic, .invalid_response, 0);
+        return err;
+    };
     var last_error: Error = error.InvalidMetadata;
+    // The first informative failure wins over later "document absent" ones.
+    var reported: ?Diagnostic = null;
+    defer if (diagnostic) |target| if (reported) |value| {
+        target.* = value;
+    };
     for (candidates[0..count]) |url| {
+        var attempt: Diagnostic = .{};
         const result = fetchAuthorizationMetadata(
             allocator,
             transport,
             selected_issuer,
             url,
+            &attempt,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.CancelledBeforeSend => return error.Cancelled,
             error.Cancelled => return error.Cancelled,
-            error.DeadlineExceeded, error.DeadlineExceededBeforeSend => return error.DeadlineExceeded,
+            error.DeadlineExceeded, error.DeadlineExceededBeforeSend => {
+                reported = attempt;
+                return error.DeadlineExceeded;
+            },
             else => {
+                if (reported == null or missingDocument(reported.?)) reported = attempt;
                 last_error = @errorCast(err);
                 continue;
             },
         };
+        reported = null;
         return result;
     }
     return last_error;
@@ -996,18 +1244,27 @@ fn fetchAuthorizationMetadata(
     transport: Transport,
     selected_issuer: []const u8,
     metadata_url: []const u8,
+    diagnostic: *Diagnostic,
 ) (Error || std.mem.Allocator.Error)!AuthorizationServer {
     var body_buffer: [Limits.metadata_body_bytes]u8 = undefined;
     var header_buffer: [Limits.header_bytes]u8 = undefined;
-    const response = try transport.fetch(
+    const response = transport.fetch(
         .{ .method = .get, .url = metadata_url, .headers = &.{.{
             .name = "Accept",
             .value = "application/json",
         }} },
         &body_buffer,
         &header_buffer,
-    );
-    if (response.status != 200 or !jsonContentType(response.content_type) or
+    ) catch |err| {
+        Diagnostic.recordFetch(diagnostic, err);
+        return err;
+    };
+    if (response.status != 200) {
+        diagnostic.* = .init(.http_status, response.status);
+        return error.InvalidMetadata;
+    }
+    diagnostic.* = .init(.invalid_response, response.status);
+    if (!jsonContentType(response.content_type) or
         response.body.len == 0 or response.body.len > Limits.metadata_body_bytes)
         return error.InvalidMetadata;
     var parsed = std.json.parseFromSlice(
@@ -1015,22 +1272,25 @@ fn fetchAuthorizationMetadata(
         allocator,
         response.body,
         .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-    ) catch return error.InvalidMetadata;
+    ) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidMetadata;
     defer parsed.deinit();
     const metadata = parsed.value;
     if (!std.mem.eql(u8, metadata.issuer, selected_issuer) or
         !validHttpsUrl(metadata.authorization_endpoint) or
         !validHttpsUrl(metadata.token_endpoint) or
-        !containsText(metadata.response_types_supported, "code") or
-        !containsText(metadata.grant_types_supported, "authorization_code") or
-        !containsText(metadata.code_challenge_methods_supported, "S256") or
         metadata.scopes_supported.len > Limits.scopes)
         return error.InvalidMetadata;
     if (metadata.registration_endpoint) |url|
         if (!validHttpsUrl(url)) return error.InvalidMetadata;
+    diagnostic.* = .init(.unsupported_server, response.status);
+    if (!containsText(metadata.response_types_supported, "code") or
+        !containsText(metadata.grant_types_supported, "authorization_code") or
+        !containsText(metadata.code_challenge_methods_supported, "S256"))
+        return error.InvalidMetadata;
     const methods = try parseAuthMethods(allocator, metadata.token_endpoint_auth_methods_supported);
     defer allocator.free(methods);
     if (methods.len == 0) return error.UnsupportedAuthorizationServer;
+    diagnostic.* = .init(.invalid_response, response.status);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
@@ -1270,7 +1530,7 @@ pub fn discoverApprovedResource(
     if (!std.mem.eql(u8, approved.server_id, server_id) or
         !validHttpsUrl(approved.url))
         return error.InvalidEndpoint;
-    return discoverResourceEffect(allocator, transport, approved.url);
+    return discoverResourceEffect(allocator, transport, approved.url, null);
 }
 
 pub const FlowOutcome = enum {
@@ -1300,6 +1560,7 @@ pub fn performDynamicRegistration(
         transport,
         server,
         plan.redirect_uri,
+        null,
     ) catch |err| switch (err) {
         error.RegistrationRejected => {
             try state.clear(operation);
@@ -1356,6 +1617,7 @@ pub fn performCodeExchange(
         binding.redirect_uri,
         binding.resource,
         now_unix_ms,
+        null,
     ) catch |err| switch (err) {
         error.InvalidGrant => {
             try state.uncertain(binding.operation);
@@ -1382,12 +1644,22 @@ pub fn performCodeExchange(
     return .completed;
 }
 
+/// The registration always asks for both `authorization_code` and
+/// `refresh_token`, as MCP clients conventionally do: some registration
+/// endpoints reject a public client that omits `refresh_token` even when
+/// their metadata does not advertise it. A server may still register fewer
+/// grants (RFC 7591 section 3.2.1); only `authorization_code` is required.
 pub fn registerDynamicClientEffect(
     allocator: std.mem.Allocator,
     transport: Transport,
     server: *const AuthorizationServer,
     redirect_uri: []const u8,
+    diagnostic: ?*Diagnostic,
 ) (Error || std.mem.Allocator.Error)!Registration {
+    errdefer |err| if (err == error.UnsupportedAuthorizationServer)
+        Diagnostic.record(diagnostic, .unsupported_server, 0)
+    else if (err == error.InvalidAuthorizationRequest)
+        Diagnostic.record(diagnostic, .internal, 0);
     const endpoint = server.registration_endpoint orelse
         return error.UnsupportedAuthorizationServer;
     if (!validLoopbackRedirect(redirect_uri)) return error.InvalidAuthorizationRequest;
@@ -1396,14 +1668,10 @@ pub fn registerDynamicClientEffect(
     var request_storage: [Limits.request_body_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &request_storage);
     var writer = std.Io.Writer.fixed(&request_storage);
-    const grant_types: []const []const u8 = if (server.refresh_token_supported)
-        &.{ "authorization_code", "refresh_token" }
-    else
-        &.{"authorization_code"};
     std.json.Stringify.value(.{
         .client_name = "MetaWork",
         .redirect_uris = &.{redirect_uri},
-        .grant_types = grant_types,
+        .grant_types = &.{ "authorization_code", "refresh_token" },
         .response_types = &.{"code"},
         .token_endpoint_auth_method = requested_method.wire(),
         .application_type = "native",
@@ -1420,24 +1688,30 @@ pub fn registerDynamicClientEffect(
             .{ .name = "Content-Type", .value = "application/json" },
         },
         .body = writer.buffered(),
-    }, &body_buffer, &header_buffer) catch |err| switch (err) {
-        error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => return err,
-        else => return error.RegistrationOutcomeUnknown,
+    }, &body_buffer, &header_buffer) catch |err| {
+        Diagnostic.recordFetch(diagnostic, err);
+        return switch (err) {
+            error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => err,
+            else => error.RegistrationOutcomeUnknown,
+        };
     };
-    if (response.status == 400 and jsonContentType(response.content_type) and
-        oauth_mechanics.errorCode(
-            .{ .body_bytes = Limits.registration_body_bytes },
-            response.body,
-            &.{
-                "invalid_redirect_uri",
-                "invalid_client_metadata",
-                "invalid_software_statement",
-                "unapproved_software_statement",
-            },
-        ) != null)
-        return error.RegistrationRejected;
-    if (response.status != 200 and response.status != 201)
+    if (response.status != 200 and response.status != 201) {
+        Diagnostic.recordErrorResponse(diagnostic, response, Limits.registration_body_bytes, &.{});
+        if (response.status == 400 and jsonContentType(response.content_type) and
+            oauth_mechanics.errorCode(
+                .{ .body_bytes = Limits.registration_body_bytes },
+                response.body,
+                &.{
+                    "invalid_redirect_uri",
+                    "invalid_client_metadata",
+                    "invalid_software_statement",
+                    "unapproved_software_statement",
+                },
+            ) != null)
+            return error.RegistrationRejected;
         return error.RegistrationOutcomeUnknown;
+    }
+    Diagnostic.record(diagnostic, .invalid_response, response.status);
     if (!jsonContentType(response.content_type) or response.body.len == 0 or
         response.body.len > Limits.registration_body_bytes)
         return error.RegistrationOutcomeUnknown;
@@ -1446,7 +1720,6 @@ pub fn registerDynamicClientEffect(
         response.body,
         redirect_uri,
         requested_method,
-        server.refresh_token_supported,
     ) catch return error.RegistrationOutcomeUnknown;
 }
 
@@ -1455,7 +1728,6 @@ fn parseRegistrationResponse(
     body: []const u8,
     redirect_uri: []const u8,
     requested_method: TokenEndpointAuthMethod,
-    refresh_token_requested: bool,
 ) (Error || std.mem.Allocator.Error)!Registration {
     if (body.len == 0 or body.len > Limits.registration_body_bytes)
         return error.InvalidRegistrationResponse;
@@ -1479,8 +1751,6 @@ fn parseRegistrationResponse(
             !containsText(value.redirect_uris, redirect_uri)) or
         (value.grant_types.len != 0 and
             !containsText(value.grant_types, "authorization_code")) or
-        (refresh_token_requested and value.grant_types.len != 0 and
-            !containsText(value.grant_types, "refresh_token")) or
         (value.response_types.len != 0 and
             !containsText(value.response_types, "code")))
         return error.InvalidRegistrationResponse;
@@ -1521,12 +1791,18 @@ pub fn exchangeAuthorizationCodeEffect(
     redirect_uri: []const u8,
     resource: []const u8,
     now_unix_ms: u64,
+    diagnostic: ?*Diagnostic,
 ) (Error || std.mem.Allocator.Error)!TokenSet {
     if (!validClientId(client_id) or !validLoopbackRedirect(redirect_uri) or
         !validHttpsUrl(resource) or verifier.len != oauth_mechanics.pkce_encoded_bytes or
         ((auth_method == .none) != (client_secret == null)) or
         !containsAuthMethod(server.token_endpoint_auth_methods, auth_method))
+    {
+        Diagnostic.record(diagnostic, .internal, 0);
         return error.InvalidAuthorizationRequest;
+    }
+    // Remote error text is shown only when it echoes none of what was sent.
+    const sent_secrets = [_][]const u8{ code.view(), verifier, client_secret orelse "" };
     var request_storage: [Limits.request_body_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &request_storage);
     var writer = std.Io.Writer.fixed(&request_storage);
@@ -1569,22 +1845,107 @@ pub fn exchangeAuthorizationCodeEffect(
         .url = server.token_endpoint,
         .headers = headers[0..header_count],
         .body = writer.buffered(),
-    }, &body_buffer, &header_buffer) catch |err| switch (err) {
-        error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => return err,
-        else => return error.TokenOutcomeUnknown,
+    }, &body_buffer, &header_buffer) catch |err| {
+        Diagnostic.recordFetch(diagnostic, err);
+        return switch (err) {
+            error.CancelledBeforeSend, error.NetworkBeforeSend, error.DeadlineExceededBeforeSend, error.InvalidResponseBeforeSend => err,
+            else => error.TokenOutcomeUnknown,
+        };
     };
-    if (response.status == 400 and oauth_mechanics.errorCode(
-        .{ .body_bytes = Limits.token_body_bytes },
-        response.body,
-        &.{"invalid_grant"},
-    ) != null)
-        return error.InvalidGrant;
-    if (response.status != 200 or !jsonContentType(response.content_type) or
+    if (response.status != 200) {
+        Diagnostic.recordErrorResponse(diagnostic, response, Limits.token_body_bytes, &sent_secrets);
+        if (response.status == 400 and oauth_mechanics.errorCode(
+            .{ .body_bytes = Limits.token_body_bytes },
+            response.body,
+            &.{"invalid_grant"},
+        ) != null)
+            return error.InvalidGrant;
+        return error.TokenOutcomeUnknown;
+    }
+    Diagnostic.record(diagnostic, .invalid_response, response.status);
+    if (!jsonContentType(response.content_type) or
         response.body.len == 0 or response.body.len > Limits.token_body_bytes)
         return error.TokenOutcomeUnknown;
     return parseTokenResponse(allocator, response.body, now_unix_ms) catch
         return error.TokenOutcomeUnknown;
 }
+
+pub const TokenVerification = enum {
+    /// The MCP server answered the authenticated request with 2xx.
+    accepted,
+    /// 401 or 403: the server refused this token.
+    rejected,
+    /// No authentication verdict (another status, or no response); the
+    /// connection step that follows reports whatever is wrong.
+    unverified,
+};
+
+/// Sends one MCP `initialize` request carrying the new access token before
+/// the token is committed. Only the response head is read: a 2xx proves
+/// the server accepts the token, a 401/403 proves it does not, and anything
+/// else leaves the decision to the regular connection. The MCP response
+/// itself is never interpreted; the Agent connection performs the real
+/// handshake once the grant is saved.
+pub fn verifyAccessTokenEffect(
+    transport: Transport,
+    resource: []const u8,
+    access_token: []const u8,
+    diagnostic: ?*Diagnostic,
+) TokenVerification {
+    if (!validHttpsUrl(resource) or access_token.len == 0 or
+        access_token.len > Limits.secret_bytes or !validSecretValue(access_token))
+    {
+        Diagnostic.record(diagnostic, .internal, 0);
+        return .unverified;
+    }
+    var authorization_storage: ["Bearer ".len + Limits.secret_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &authorization_storage);
+    const authorization = std.fmt.bufPrint(&authorization_storage, "Bearer {s}", .{access_token}) catch {
+        Diagnostic.record(diagnostic, .internal, 0);
+        return .unverified;
+    };
+    var body_buffer: [1]u8 = undefined;
+    var header_buffer: [Limits.header_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &header_buffer);
+    const response = transport.fetch(.{
+        .method = .post,
+        .url = resource,
+        .headers = &.{
+            .{ .name = "Accept", .value = "application/json, text/event-stream" },
+            .{ .name = "Content-Type", .value = "application/json" },
+            .{ .name = "Authorization", .value = authorization },
+        },
+        .body = initialize_probe_body,
+        .read_body = false,
+    }, &body_buffer, &header_buffer) catch |err| {
+        Diagnostic.recordFetch(diagnostic, err);
+        return .unverified;
+    };
+    if (response.status >= 200 and response.status < 300) return .accepted;
+    if (response.status != 401 and response.status != 403) {
+        Diagnostic.record(diagnostic, .http_status, response.status);
+        return .unverified;
+    }
+    var challenge_storage: [Limits.header_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &challenge_storage);
+    const challenge: Challenge = if (response.www_authenticate) |header|
+        parseBearerChallenge(header, &challenge_storage) catch .{}
+    else
+        .{};
+    Diagnostic.recordRemote(
+        diagnostic,
+        .access_denied,
+        response.status,
+        challenge.error_code,
+        challenge.error_description,
+        &.{access_token},
+    );
+    return .rejected;
+}
+
+const initialize_probe_body =
+    \\{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"MetaWork","version":"0"}}}
+;
 
 pub const DurableRefreshRequest = struct {
     issuer: []const u8,
@@ -1744,6 +2105,10 @@ fn parseBearerChallenge(input: []const u8, storage: []u8) error{InvalidChallenge
         } else if (std.ascii.eqlIgnoreCase(name, "scope")) {
             if (result.scope != null) return error.InvalidChallenge;
             result.scope = value;
+        } else if (std.ascii.eqlIgnoreCase(name, "error")) {
+            if (result.error_code == null) result.error_code = value;
+        } else if (std.ascii.eqlIgnoreCase(name, "error_description")) {
+            if (result.error_description == null) result.error_description = value;
         }
         cursor = std.mem.trimStart(u8, cursor, " \t");
         if (cursor.len == 0) break;
@@ -2156,6 +2521,7 @@ test "MCP OAuth discovery validates resource issuer PKCE and exact metadata" {
         std.testing.allocator,
         transport,
         "https://mcp.example.test/mcp",
+        null,
     );
     defer resource.deinit();
     try std.testing.expectEqualStrings("files.read", resource.requested_scopes[0]);
@@ -2165,6 +2531,7 @@ test "MCP OAuth discovery validates resource issuer PKCE and exact metadata" {
         transport,
         "https://mcp.example.test/mcp",
         "Bearer resource_metadata=\"https://mcp.example.test/oauth-resource\", scope=\"files.write files.read\"",
+        null,
     );
     defer observed.deinit();
     try std.testing.expectEqual(discovery_calls + 1, fake.calls);
@@ -2176,6 +2543,7 @@ test "MCP OAuth discovery validates resource issuer PKCE and exact metadata" {
         transport,
         &resource,
         resource.authorization_servers[0],
+        null,
     );
     defer server.deinit();
     try std.testing.expect(server.authorization_response_issuer_required);
@@ -2225,14 +2593,17 @@ test "MCP OAuth discovery validates resource issuer PKCE and exact metadata" {
     try std.testing.expectEqual(@as(usize, 4), fake.calls);
 }
 
-test "MCP OAuth does not request every advertised supported scope" {
+test "MCP OAuth requests every protected resource scope only when no challenge names scopes" {
     const Fake = struct {
+        scopes: []const u8,
+
         fn fetch(
-            _: ?*anyopaque,
+            context: ?*anyopaque,
             request: Request,
-            _: []u8,
+            body: []u8,
             _: []u8,
         ) FetchError!Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
             if (std.mem.eql(
                 u8,
                 request.url,
@@ -2240,19 +2611,34 @@ test "MCP OAuth does not request every advertised supported scope" {
             )) return .{
                 .status = 200,
                 .content_type = "application/json",
-                .body = "{\"resource\":\"https://mcp.example.test/mcp\",\"authorization_servers\":[\"https://auth.example.test\"],\"scopes_supported\":[\"admin\",\"read\"]}",
+                .body = std.fmt.bufPrint(body, "{{\"resource\":\"https://mcp.example.test/mcp\",\"authorization_servers\":[\"https://auth.example.test\"]{s}}}", .{self.scopes}) catch unreachable,
             };
             return .{ .status = 404 };
         }
     };
+    var advertised: Fake = .{ .scopes = ",\"scopes_supported\":[\"read\",\"admin\"]" };
     var resource = try discoverResourceEffect(
         std.testing.allocator,
-        .{ .fetch_fn = Fake.fetch },
+        .{ .context = &advertised, .fetch_fn = Fake.fetch },
         "https://mcp.example.test/mcp",
+        null,
     );
     defer resource.deinit();
-    try std.testing.expectEqual(@as(usize, 0), resource.requested_scopes.len);
-    try std.testing.expectEqual(@as(usize, 2), resource.scopes_supported.len);
+    try std.testing.expectEqual(@as(usize, 2), resource.requested_scopes.len);
+    try std.testing.expectEqualStrings("admin", resource.requested_scopes[0]);
+    try std.testing.expectEqualStrings("read", resource.requested_scopes[1]);
+    // Nothing was demanded, so refresh has nothing new to cover.
+    try std.testing.expectEqual(@as(usize, 0), resource.challenge_scopes.len);
+
+    var silent: Fake = .{ .scopes = "" };
+    var unscoped = try discoverResourceEffect(
+        std.testing.allocator,
+        .{ .context = &silent, .fetch_fn = Fake.fetch },
+        "https://mcp.example.test/mcp",
+        null,
+    );
+    defer unscoped.deinit();
+    try std.testing.expectEqual(@as(usize, 0), unscoped.requested_scopes.len);
 }
 
 test "MCP OAuth DCR and code exchange are bounded and secret owned" {
@@ -2308,6 +2694,7 @@ test "MCP OAuth DCR and code exchange are bounded and secret owned" {
         transport,
         &server,
         "http://127.0.0.1:49152/auth/callback",
+        null,
     );
     defer registration.deinit();
     try std.testing.expectEqualStrings("issued-client", registration.client_id);
@@ -2326,6 +2713,7 @@ test "MCP OAuth DCR and code exchange are bounded and secret owned" {
         "http://127.0.0.1:49152/auth/callback",
         "https://mcp.example.test/mcp",
         1000,
+        null,
     );
     defer tokens.deinit();
     try std.testing.expectEqualStrings("access-secret", tokens.access_token.view());
@@ -2423,6 +2811,7 @@ test "MCP OAuth binds confidential DCR results to token authentication" {
             transport,
             &server,
             "http://127.0.0.1:49152/auth/callback",
+            null,
         );
         defer registration.deinit();
         try std.testing.expectEqual(case.method, registration.token_endpoint_auth_method);
@@ -2444,6 +2833,7 @@ test "MCP OAuth binds confidential DCR results to token authentication" {
             "http://127.0.0.1:49152/auth/callback",
             "https://mcp.example.test/mcp",
             1000,
+            null,
         );
         defer tokens.deinit();
         try std.testing.expectEqualStrings("access-secret", tokens.access_token.view());
@@ -2479,6 +2869,7 @@ test "MCP OAuth binds confidential DCR results to token authentication" {
             .{ .context = &expiring, .fetch_fn = Fake.fetch },
             &server,
             "http://127.0.0.1:49152/auth/callback",
+            null,
         ),
     );
 }
@@ -2824,6 +3215,7 @@ test "MCP OAuth never treats malformed success as a replayable failure" {
             transport,
             &server,
             "http://127.0.0.1:49152/auth/callback",
+            null,
         ),
     );
     fake.mode = .token;
@@ -2843,6 +3235,7 @@ test "MCP OAuth never treats malformed success as a replayable failure" {
             "http://127.0.0.1:49152/auth/callback",
             "https://mcp.example.test/mcp",
             1000,
+            null,
         ),
     );
 }
@@ -2854,7 +3247,7 @@ test "MCP OAuth secret parsing owns unescaped results outside scrubbed scratch" 
     defer tokens.deinit();
     var registration = try parseRegistrationResponse(std.testing.allocator,
         \\{"client_id":"client","client_secret":"s\u0065cret","token_endpoint_auth_method":"client_secret_basic"}
-    , "http://127.0.0.1:8080/callback", .client_secret_basic, false);
+    , "http://127.0.0.1:8080/callback", .client_secret_basic);
     defer registration.deinit();
     try std.testing.expectEqualStrings("abc", tokens.access_token.view());
     try std.testing.expectEqualStrings("refresh", tokens.refresh_token.?.view());
@@ -2944,6 +3337,7 @@ test "MCP OAuth cancellation stops discovery fallback and POST is outcome unknow
             std.testing.allocator,
             transport,
             "https://mcp.example.test/mcp",
+            null,
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
@@ -2973,6 +3367,7 @@ test "MCP OAuth cancellation stops discovery fallback and POST is outcome unknow
             transport,
             &server,
             "http://127.0.0.1:49152/auth/callback",
+            null,
         ),
     );
     try std.testing.expectEqual(@as(usize, 2), fake.calls);
@@ -2994,6 +3389,7 @@ test "MCP OAuth cancellation stops discovery fallback and POST is outcome unknow
             .{ .fetch_fn = BeforeSend.fetch },
             &server,
             "http://127.0.0.1:49152/auth/callback",
+            null,
         ),
     );
 }
@@ -3251,6 +3647,278 @@ test "MCP installation JSON Pointer supports root escaped keys and bounded nesti
     @memcpy(deep[65..68], "\"x\"");
     @memset(deep[68..], ']');
     try std.testing.expectError(error.InvalidCredentialResponse, parseInstallationCredential(std.testing.allocator, &deep, "/0", 2560));
+}
+
+fn testHeader(headers: []const Header, name: []const u8) ?[]const u8 {
+    for (headers) |header| if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
+    return null;
+}
+
+/// Shaped like api.suno.com/mcp (2026-11-20): the 401 names only
+/// `resource_metadata`, the protected resource lists the scopes it needs,
+/// registration insists on both grants, and the MCP endpoint refuses a token
+/// that lacks a listed scope with an RFC 6750 `insufficient_scope` challenge.
+const SunoLikeServer = struct {
+    const endpoint = "https://api.suno.test/mcp";
+    const metadata_url = "https://api.suno.test/.well-known/oauth-protected-resource/mcp";
+    const issuer = "https://studio.suno.test/api/v2/external/oauth";
+    const redirect = "http://127.0.0.1:49152/auth/callback";
+    const all_scopes = "api%3Av0%20credits%3Aspend%20download%20library%3Aread%20library%3Asearch%20library%3Awrite%20offline_access%20profile%3Aread";
+
+    /// Whether the authorization server grants every requested scope.
+    grant_all: bool = true,
+    verifications: usize = 0,
+
+    fn transport(self: *SunoLikeServer) Transport {
+        return .{ .context = self, .fetch_fn = fetch };
+    }
+
+    fn fetch(context: ?*anyopaque, request: Request, _: []u8, _: []u8) FetchError!Response {
+        const self: *SunoLikeServer = @ptrCast(@alignCast(context.?));
+        if (std.mem.eql(u8, request.url, endpoint)) {
+            const authorization = testHeader(request.headers, "Authorization") orelse
+                return .{ .status = 401, .www_authenticate = "Bearer resource_metadata=\"" ++ metadata_url ++ "\"" };
+            self.verifications += 1;
+            if (request.method != .post or request.read_body or
+                std.mem.indexOf(u8, request.body, "\"method\":\"initialize\"") == null or
+                std.mem.indexOf(u8, testHeader(request.headers, "Accept") orelse "", "text/event-stream") == null)
+                return error.InvalidResponse;
+            if (std.mem.eql(u8, authorization, "Bearer token-with-every-scope"))
+                return .{ .status = 200, .content_type = "text/event-stream" };
+            return .{
+                .status = 403,
+                .www_authenticate = "Bearer error=\"insufficient_scope\", error_description=\"Token is missing library:write\", scope=\"library:write\", resource_metadata=\"" ++ metadata_url ++ "\"",
+            };
+        }
+        if (std.mem.eql(u8, request.url, metadata_url)) return .{
+            .status = 200,
+            .content_type = "application/json",
+            .body = "{\"authorization_servers\":[\"" ++ issuer ++ "\"],\"bearer_methods_supported\":[\"header\"],\"resource\":\"" ++ endpoint ++ "\",\"scopes_supported\":[\"api:v0\",\"credits:spend\",\"download\",\"library:read\",\"library:search\",\"library:write\",\"offline_access\",\"profile:read\"]}",
+        };
+        if (std.mem.eql(u8, request.url, "https://studio.suno.test/.well-known/oauth-authorization-server/api/v2/external/oauth")) return .{
+            .status = 200,
+            .content_type = "application/json",
+            .body = "{\"issuer\":\"" ++ issuer ++ "\",\"authorization_endpoint\":\"" ++ issuer ++ "/authorize/\",\"token_endpoint\":\"" ++ issuer ++ "/token/\",\"registration_endpoint\":\"" ++ issuer ++ "/register/\",\"response_types_supported\":[\"code\"],\"grant_types_supported\":[\"authorization_code\",\"refresh_token\"],\"code_challenge_methods_supported\":[\"S256\"],\"token_endpoint_auth_methods_supported\":[\"none\",\"client_secret_basic\",\"client_secret_post\"],\"client_id_metadata_document_supported\":true}",
+        };
+        if (std.mem.eql(u8, request.url, issuer ++ "/register/")) {
+            if (std.mem.indexOf(u8, request.body, "\"grant_types\":[\"authorization_code\",\"refresh_token\"]") == null)
+                return .{ .status = 400, .content_type = "application/json", .body = "{\"error\":\"invalid_client_metadata\",\"error_description\":\"grant_types must be authorization_code and refresh_token\"}" };
+            return .{ .status = 201, .content_type = "application/json", .body = "{\"client_id\":\"dcr-client\",\"redirect_uris\":[\"" ++ redirect ++ "\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"token_endpoint_auth_method\":\"none\"}" };
+        }
+        if (std.mem.eql(u8, request.url, issuer ++ "/token/")) return .{
+            .status = 200,
+            .content_type = "application/json",
+            .body = if (self.grant_all)
+                "{\"access_token\":\"token-with-every-scope\",\"token_type\":\"Bearer\",\"refresh_token\":\"refresh\",\"expires_in\":3600}"
+            else
+                "{\"access_token\":\"token-without-library-write\",\"token_type\":\"Bearer\",\"refresh_token\":\"refresh\",\"expires_in\":3600}",
+        };
+        return .{ .status = 404 };
+    }
+};
+
+test "MCP OAuth asks a Suno-like server for every listed scope and checks the issued token" {
+    var suno: SunoLikeServer = .{};
+    const transport = suno.transport();
+    var diagnostic: Diagnostic = .{};
+    var resource = try discoverResourceEffect(std.testing.allocator, transport, SunoLikeServer.endpoint, &diagnostic);
+    defer resource.deinit();
+    // The challenge named no scope, so the request covers the resource's list.
+    try std.testing.expectEqual(@as(usize, 8), resource.requested_scopes.len);
+    try std.testing.expectEqual(@as(usize, 0), resource.challenge_scopes.len);
+    var server = try discoverAuthorizationServer(std.testing.allocator, transport, &resource, SunoLikeServer.issuer, &diagnostic);
+    defer server.deinit();
+    var material = oauth_mechanics.AttemptMaterial.fromSeeds(@splat(0x11), @splat(0x22));
+    defer material.deinit();
+    var url_storage: [Limits.url_bytes]u8 = undefined;
+    const url = try buildAuthorizationUrl(&url_storage, &server, "dcr-client", SunoLikeServer.redirect, resource.resource, resource.requested_scopes, &material);
+    try std.testing.expect(std.mem.indexOf(u8, url, "&scope=" ++ SunoLikeServer.all_scopes ++ "&") != null);
+
+    var registration = try registerDynamicClientEffect(std.testing.allocator, transport, &server, SunoLikeServer.redirect, &diagnostic);
+    defer registration.deinit();
+    var code = try AuthorizationCode.init(std.testing.allocator, "authorization-code");
+    defer code.deinit();
+    const verifier = "0123456789012345678901234567890123456789012";
+    {
+        var tokens = try exchangeAuthorizationCodeEffect(std.testing.allocator, transport, &server, registration.client_id, null, .none, &code, verifier, SunoLikeServer.redirect, resource.resource, 1000, &diagnostic);
+        defer tokens.deinit();
+        try std.testing.expectEqual(TokenVerification.accepted, verifyAccessTokenEffect(transport, resource.resource, tokens.access_token.view(), &diagnostic));
+    }
+
+    // A token short of a required scope is refused, and the refusal says why.
+    suno.grant_all = false;
+    var tokens = try exchangeAuthorizationCodeEffect(std.testing.allocator, transport, &server, registration.client_id, null, .none, &code, verifier, SunoLikeServer.redirect, resource.resource, 1000, &diagnostic);
+    defer tokens.deinit();
+    var refusal: Diagnostic = .{};
+    try std.testing.expectEqual(TokenVerification.rejected, verifyAccessTokenEffect(transport, resource.resource, tokens.access_token.view(), &refusal));
+    try std.testing.expectEqual(FailureReason.access_denied, refusal.reason);
+    try std.testing.expectEqual(@as(u16, 403), refusal.http_status);
+    try std.testing.expectEqualStrings("insufficient_scope", refusal.errorCode().?);
+    try std.testing.expectEqualStrings("Token is missing library:write", refusal.description().?);
+    try std.testing.expectEqual(@as(usize, 2), suno.verifications);
+}
+
+test "MCP OAuth token check withholds echoed tokens and leaves other answers undecided" {
+    const Fake = struct {
+        response: Response,
+        failure: ?FetchError = null,
+        fn fetch(context: ?*anyopaque, _: Request, _: []u8, _: []u8) FetchError!Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.failure) |err| return err;
+            return self.response;
+        }
+    };
+    var fake: Fake = .{ .response = .{
+        .status = 401,
+        .www_authenticate = "Bearer error=\"invalid_token\", error_description=\"bad token secret-access-token\"",
+    } };
+    const transport: Transport = .{ .context = &fake, .fetch_fn = Fake.fetch };
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectEqual(TokenVerification.rejected, verifyAccessTokenEffect(transport, "https://mcp.example.test/mcp", "secret-access-token", &diagnostic));
+    try std.testing.expectEqualStrings("invalid_token", diagnostic.errorCode().?);
+    try std.testing.expect(diagnostic.description() == null);
+
+    // Without a Bearer challenge the refusal still stands on its status.
+    fake.response = .{ .status = 401 };
+    try std.testing.expectEqual(TokenVerification.rejected, verifyAccessTokenEffect(transport, "https://mcp.example.test/mcp", "token", &diagnostic));
+    try std.testing.expect(diagnostic.errorCode() == null);
+
+    fake.response = .{ .status = 500 };
+    try std.testing.expectEqual(TokenVerification.unverified, verifyAccessTokenEffect(transport, "https://mcp.example.test/mcp", "token", &diagnostic));
+    try std.testing.expectEqual(FailureReason.http_status, diagnostic.reason);
+    fake.failure = error.DeadlineExceeded;
+    try std.testing.expectEqual(TokenVerification.unverified, verifyAccessTokenEffect(transport, "https://mcp.example.test/mcp", "token", &diagnostic));
+    try std.testing.expectEqual(FailureReason.timed_out, diagnostic.reason);
+}
+
+test "MCP OAuth DCR asks for refresh_token without metadata saying so and reports rejection text" {
+    const Strict = struct {
+        rejection: bool = false,
+        fn fetch(context: ?*anyopaque, request: Request, _: []u8, _: []u8) FetchError!Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            // AceDataCloud's registration endpoint (2026-11-20) answers an
+            // `authorization_code`-only request this way.
+            if (std.mem.indexOf(u8, request.body, "\"grant_types\":[\"authorization_code\",\"refresh_token\"]") == null)
+                return .{ .status = 400, .content_type = "application/json", .body = "{\"error\":\"invalid_client_metadata\",\"error_description\":\"grant_types must be authorization_code and refresh_token\"}" };
+            if (self.rejection)
+                return .{ .status = 400, .content_type = "application/json", .body = "{\"error\":\"invalid_redirect_uri\",\"error_description\":\"Loopback redirect\\nnot allowed\"}" };
+            // A server may register fewer grants than requested.
+            return .{ .status = 201, .content_type = "application/json", .body = "{\"client_id\":\"issued\",\"client_secret\":\"issued-secret\",\"grant_types\":[\"authorization_code\"],\"token_endpoint_auth_method\":\"client_secret_basic\"}" };
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const methods = try arena.allocator().dupe(TokenEndpointAuthMethod, &.{ .client_secret_post, .client_secret_basic });
+    var server: AuthorizationServer = .{
+        .arena = arena,
+        .issuer = "https://auth.example.test/",
+        .authorization_endpoint = "https://auth.example.test/authorize",
+        .token_endpoint = "https://auth.example.test/token",
+        .registration_endpoint = "https://auth.example.test/register",
+        .scopes_supported = &.{},
+        .token_endpoint_auth_methods = methods,
+        .refresh_token_supported = false,
+        .authorization_response_issuer_required = false,
+        .client_id_metadata_document_supported = false,
+    };
+    defer server.deinit();
+    var strict: Strict = .{};
+    const transport: Transport = .{ .context = &strict, .fetch_fn = Strict.fetch };
+    var registration = try registerDynamicClientEffect(std.testing.allocator, transport, &server, "http://127.0.0.1:49152/auth/callback", null);
+    defer registration.deinit();
+    try std.testing.expectEqualStrings("issued", registration.client_id);
+
+    strict.rejection = true;
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(error.RegistrationRejected, registerDynamicClientEffect(std.testing.allocator, transport, &server, "http://127.0.0.1:49152/auth/callback", &diagnostic));
+    try std.testing.expectEqual(FailureReason.oauth_error, diagnostic.reason);
+    try std.testing.expectEqual(@as(u16, 400), diagnostic.http_status);
+    try std.testing.expectEqualStrings("invalid_redirect_uri", diagnostic.errorCode().?);
+    // Control bytes in remote text never reach the display.
+    try std.testing.expectEqualStrings("Loopback redirect not allowed", diagnostic.description().?);
+}
+
+test "MCP OAuth token errors keep their code but drop text that echoes what was sent" {
+    const Fake = struct {
+        body: []const u8,
+        fn fetch(context: ?*anyopaque, _: Request, _: []u8, _: []u8) FetchError!Response {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return .{ .status = 400, .content_type = "application/json", .body = self.body };
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const methods = try arena.allocator().dupe(TokenEndpointAuthMethod, &.{.none});
+    var server: AuthorizationServer = .{
+        .arena = arena,
+        .issuer = "https://auth.example.test",
+        .authorization_endpoint = "https://auth.example.test/authorize",
+        .token_endpoint = "https://auth.example.test/token",
+        .registration_endpoint = null,
+        .scopes_supported = &.{},
+        .token_endpoint_auth_methods = methods,
+        .refresh_token_supported = true,
+        .authorization_response_issuer_required = false,
+        .client_id_metadata_document_supported = false,
+    };
+    defer server.deinit();
+    var code = try AuthorizationCode.init(std.testing.allocator, "authorization-code-42");
+    defer code.deinit();
+    const verifier = "0123456789012345678901234567890123456789012";
+    var fake: Fake = .{ .body = "{\"error\":\"invalid_request\",\"error_description\":\"code authorization-code-42 is malformed\"}" };
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(error.TokenOutcomeUnknown, exchangeAuthorizationCodeEffect(std.testing.allocator, .{ .context = &fake, .fetch_fn = Fake.fetch }, &server, "client", null, .none, &code, verifier, "http://127.0.0.1:49152/auth/callback", "https://mcp.example.test/mcp", 1000, &diagnostic));
+    try std.testing.expectEqualStrings("invalid_request", diagnostic.errorCode().?);
+    try std.testing.expect(diagnostic.description() == null);
+
+    fake.body = "{\"error\":\"invalid_grant\",\"error_description\":\"Authorization code expired\"}";
+    try std.testing.expectError(error.InvalidGrant, exchangeAuthorizationCodeEffect(std.testing.allocator, .{ .context = &fake, .fetch_fn = Fake.fetch }, &server, "client", null, .none, &code, verifier, "http://127.0.0.1:49152/auth/callback", "https://mcp.example.test/mcp", 1000, &diagnostic));
+    try std.testing.expectEqual(FailureReason.oauth_error, diagnostic.reason);
+    try std.testing.expectEqualStrings("Authorization code expired", diagnostic.description().?);
+}
+
+test "MCP OAuth discovery names a protected resource that describes another resource" {
+    const Fake = struct {
+        fn fetch(_: ?*anyopaque, request: Request, _: []u8, _: []u8) FetchError!Response {
+            // AceDataCloud's Suno server (2026-11-20) serves this pair.
+            if (std.mem.eql(u8, request.url, "https://suno.mcp.example.test/mcp")) return .{
+                .status = 401,
+                .www_authenticate = "Bearer error=\"invalid_token\", error_description=\"Authentication required\", resource_metadata=\"https://suno.mcp.example.test/.well-known/oauth-protected-resource\"",
+            };
+            if (std.mem.eql(u8, request.url, "https://suno.mcp.example.test/.well-known/oauth-protected-resource")) return .{
+                .status = 200,
+                .content_type = "application/json",
+                .body = "{\"resource\":\"https://suno.mcp.example.test/\",\"authorization_servers\":[\"https://suno.mcp.example.test/\"],\"scopes_supported\":[\"mcp:access\"]}",
+            };
+            return .{ .status = 404 };
+        }
+    };
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(error.InvalidMetadata, discoverResourceEffect(std.testing.allocator, .{ .fetch_fn = Fake.fetch }, "https://suno.mcp.example.test/mcp", &diagnostic));
+    try std.testing.expectEqual(FailureReason.resource_mismatch, diagnostic.reason);
+
+    // Without a challenge the absent path-specific document does not hide
+    // the root document's answer.
+    const NoChallenge = struct {
+        fn fetch(_: ?*anyopaque, request: Request, _: []u8, _: []u8) FetchError!Response {
+            if (std.mem.eql(u8, request.url, "https://mcp.example.test/.well-known/oauth-protected-resource")) return .{ .status = 503 };
+            return .{ .status = 404 };
+        }
+    };
+    try std.testing.expectError(error.InvalidMetadata, discoverResourceEffect(std.testing.allocator, .{ .fetch_fn = NoChallenge.fetch }, "https://mcp.example.test/mcp", &diagnostic));
+    try std.testing.expectEqual(FailureReason.http_status, diagnostic.reason);
+    try std.testing.expectEqual(@as(u16, 503), diagnostic.http_status);
+}
+
+test "MCP OAuth remote text is bounded for display" {
+    var diagnostic: Diagnostic = .{};
+    diagnostic.setRemote("x" ** (Diagnostic.error_bytes + 1), "a" ** 300, false, &.{});
+    try std.testing.expect(diagnostic.errorCode() == null);
+    const shown = diagnostic.description().?;
+    try std.testing.expect(shown.len <= Diagnostic.description_bytes);
+    try std.testing.expect(std.mem.endsWith(u8, shown, "\u{2026}"));
+    diagnostic.setRemote("bad\"code", "cut", true, &.{});
+    try std.testing.expect(diagnostic.errorCode() == null);
+    // A description that was already cut may hide a partial echo.
+    try std.testing.expect(diagnostic.description() == null);
 }
 
 test {

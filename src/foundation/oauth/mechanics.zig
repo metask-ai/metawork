@@ -125,6 +125,58 @@ pub fn writeLoopbackRedirectUri(
     try writer.print("http://127.0.0.1:{d}{s}", .{ port, callback_path });
 }
 
+/// RFC 6749 section 4.1.2.1 error fields of a rejected callback, kept as
+/// bounded copies of the decoded UTF-8 values. An `error` longer than its
+/// bound is dropped rather than cut; a description is cut at a code point
+/// boundary. Display policy (control bytes, credential echoes) stays with
+/// each caller.
+pub const Rejection = struct {
+    pub const error_bytes: usize = 64;
+    pub const description_bytes: usize = 512;
+
+    error_storage: [error_bytes]u8 = undefined,
+    error_len: usize = 0,
+    description_storage: [description_bytes]u8 = undefined,
+    description_len: usize = 0,
+    description_truncated: bool = false,
+
+    pub fn errorCode(self: *const Rejection) ?[]const u8 {
+        return if (self.error_len == 0) null else self.error_storage[0..self.error_len];
+    }
+
+    pub fn description(self: *const Rejection) ?[]const u8 {
+        return if (self.description_len == 0) null else self.description_storage[0..self.description_len];
+    }
+
+    fn retainError(self: *Rejection, value: []const u8) void {
+        if (value.len > error_bytes) return;
+        @memcpy(self.error_storage[0..value.len], value);
+        self.error_len = value.len;
+    }
+
+    fn retainDescription(self: *Rejection, value: []const u8) void {
+        const len = utf8Prefix(value, description_bytes);
+        @memcpy(self.description_storage[0..len], value[0..len]);
+        self.description_len = len;
+        self.description_truncated = len < value.len;
+    }
+
+    pub fn deinit(self: *Rejection) void {
+        std.crypto.secureZero(u8, &self.error_storage);
+        std.crypto.secureZero(u8, &self.description_storage);
+        self.* = .{};
+    }
+};
+
+/// Longest prefix of valid UTF-8 `value` that fits `max` bytes without
+/// splitting a code point.
+pub fn utf8Prefix(value: []const u8, max: usize) usize {
+    if (value.len <= max) return value.len;
+    var len = max;
+    while (len > 0 and value[len] & 0xc0 == 0x80) len -= 1;
+    return len;
+}
+
 pub fn CallbackParser(comptime limits: struct {
     secret_bytes: usize,
     state_bytes: usize,
@@ -146,14 +198,14 @@ pub fn CallbackParser(comptime limits: struct {
 
         pub const Callback = union(enum) {
             code: CodeSecret,
-            rejected,
+            rejected: Rejection,
 
             pub fn deinit(self: *Callback) void {
                 switch (self.*) {
                     .code => |*value| value.deinit(),
-                    .rejected => {},
+                    .rejected => |*value| value.deinit(),
                 }
-                self.* = .rejected;
+                self.* = .{ .rejected = .{} };
             }
         };
 
@@ -208,6 +260,9 @@ pub fn CallbackParser(comptime limits: struct {
             var issuer_value: ?[]const u8 = null;
             var issuer_seen = false;
 
+            var rejection: Rejection = .{};
+            errdefer rejection.deinit();
+
             var key_storage: [limits.target_bytes]u8 = undefined;
             defer std.crypto.secureZero(u8, &key_storage);
             var pairs = std.mem.splitScalar(u8, query, '&');
@@ -238,12 +293,13 @@ pub fn CallbackParser(comptime limits: struct {
                     defer std.crypto.secureZero(u8, &error_storage);
                     const decoded = try percentDecode(value, &error_storage);
                     if (decoded.len == 0) return error.InvalidCallback;
+                    rejection.retainError(decoded);
                     error_seen = true;
                 } else if (std.mem.eql(u8, key, "error_description")) {
                     if (error_description_seen) return error.InvalidCallback;
                     var description_storage: [limits.error_description_bytes]u8 = undefined;
                     defer std.crypto.secureZero(u8, &description_storage);
-                    _ = try percentDecode(value, &description_storage);
+                    rejection.retainDescription(try percentDecode(value, &description_storage));
                     error_description_seen = true;
                 } else if (std.mem.eql(u8, key, "error_uri")) {
                     if (error_uri_seen) return error.InvalidCallback;
@@ -271,9 +327,10 @@ pub fn CallbackParser(comptime limits: struct {
             } else if (validation.issuer_required) return error.InvalidCallback;
             if (error_seen) {
                 if (code != null) return error.InvalidCallback;
-                return .rejected;
+                return .{ .rejected = rejection };
             }
             if (error_description_seen or error_uri_seen) return error.InvalidCallback;
+            rejection.deinit();
             return .{
                 .code = try CodeSecret.init(
                     allocator,
@@ -643,7 +700,33 @@ test "callback extensions cannot bypass recognized fields or state" {
         var rejection = try Parser.parse(std.testing.allocator, target, state, .{ .callback_path = "/callback" });
         defer rejection.deinit();
         try std.testing.expect(rejection == .rejected);
+        try std.testing.expectEqualStrings("access_denied", rejection.rejected.errorCode().?);
+        try std.testing.expectEqualStrings("Denied", rejection.rejected.description().?);
     }
+}
+
+test "callback rejection keeps bounded error fields without splitting code points" {
+    const Parser = CallbackParser(.{
+        .secret_bytes = 64,
+        .state_bytes = pkce_encoded_bytes,
+        .target_bytes = 4096,
+        .issuer_bytes = 128,
+        .error_bytes = 256,
+        .error_description_bytes = 2048,
+    });
+    const state = "0123456789012345678901234567890123456789012";
+    var storage: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try writer.writeAll("/callback?state=" ++ state ++ "&error=" ++ "e" ** (Rejection.error_bytes + 1) ++ "&error_description=a");
+    // 511 ASCII bytes then a two-byte code point straddling the 512-byte bound.
+    try writer.writeAll("b" ** (Rejection.description_bytes - 2) ++ "%C3%A9tail");
+    var rejection = try Parser.parse(std.testing.allocator, writer.buffered(), state, .{ .callback_path = "/callback" });
+    defer rejection.deinit();
+    try std.testing.expect(rejection.rejected.errorCode() == null);
+    const description = rejection.rejected.description().?;
+    try std.testing.expectEqual(Rejection.description_bytes - 1, description.len);
+    try std.testing.expect(rejection.rejected.description_truncated);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(description));
 }
 
 test "secret admission is length only and moves exactly one owned copy" {

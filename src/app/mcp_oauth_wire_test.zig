@@ -138,6 +138,7 @@ fn exchange(
         redirect,
         resource,
         now_ms,
+        null,
     );
 }
 
@@ -380,6 +381,7 @@ test "MCP dynamic registration error classification" {
             recorder.transport(),
             &server,
             redirect,
+            null,
         ));
     }
 }

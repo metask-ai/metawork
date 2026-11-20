@@ -211,7 +211,7 @@ pub const McpManagementPort = struct {
     authorization_operation_fn: *const fn (*anyopaque) ?mcp.McpAuthorizationOperationView,
     begin_authorization_fn: *const fn (*anyopaque, u64, []const u8) anyerror!?mcp.McpAuthorizationStart,
     advance_authorization_fn: *const fn (*anyopaque, []const u8, mcp.McpAuthorizationPhase) bool,
-    finish_authorization_fn: *const fn (*anyopaque, []const u8) bool,
+    finish_authorization_fn: *const fn (*anyopaque, []const u8, ?mcp.McpAuthorizationFailure) bool,
     write_approval_fn: *const fn (*anyopaque, u64, []const u8, []u8) anyerror![]const u8,
     approve_connection_fn: *const fn (*anyopaque, u64, mcp_contract.ApproveConnectionInput) anyerror!mcp_contract.ManagementOutcome,
     validate_secret_capture_fn: *const fn (*anyopaque, u64, []const u8, mcp.McpSecretCaptureTarget) anyerror!void,
@@ -293,8 +293,10 @@ pub const McpManagementPort = struct {
     pub fn advanceMcpAuthorization(self: McpManagementPort, operation_id: []const u8, phase: mcp.McpAuthorizationPhase) bool {
         return self.advance_authorization_fn(self.context, operation_id, phase);
     }
-    pub fn finishMcpAuthorization(self: McpManagementPort, operation_id: []const u8) bool {
-        return self.finish_authorization_fn(self.context, operation_id);
+    /// `failure` is null when the operation produced a grant or the user
+    /// cancelled it; otherwise it states the step and why it ended.
+    pub fn finishMcpAuthorization(self: McpManagementPort, operation_id: []const u8, failure: ?mcp.McpAuthorizationFailure) bool {
+        return self.finish_authorization_fn(self.context, operation_id, failure);
     }
     pub fn writeMcpConnectionApprovalDetails(self: McpManagementPort, generation: u64, server_id: []const u8, output: []u8) anyerror![]const u8 {
         return self.write_approval_fn(self.context, generation, server_id, output);
