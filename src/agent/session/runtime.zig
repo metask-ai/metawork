@@ -272,6 +272,7 @@ pub const Runtime = struct {
             .mcp_owner_id = mcp_owner_id,
             .mcp_registry_generation = mcp_registry_generation,
             .mcp_servers = mcp_servers,
+            .next_session_id = limits.session_id_floor,
         };
         return self;
     }

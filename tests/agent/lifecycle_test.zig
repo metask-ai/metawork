@@ -5168,6 +5168,31 @@ test "checkpoint restore installs one exact logical Session and continues identi
     }
 }
 
+test "a Runtime started above a floor issues its route ids above it" {
+    // An execution process started after another one died must not hand a
+    // new Session an id a Task still holds from the dead process: Product
+    // routes events by that id.
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(3);
+    fake_core.setRestoreHistory(7, 2);
+    const floor: u64 = 1 << 32;
+    const runtime = try createTestRuntime(.{ .max_sessions = 2, .session_id_floor = floor });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
+    const route = try runtime.restoreSessionRoute(restoreOptions(
+        source.source(),
+        "000000000000000000000001",
+        7,
+        2,
+    ));
+    try std.testing.expectEqual(floor + 1, route.id);
+    try closeSession(route.session, .session_close);
+    try runtime.releaseClosedSession(route.session);
+}
+
 test "checkpoint restore keeps expectation at checkpoint while allocating above Product history" {
     fake_core.reset();
     fake_core.setCheckpointGeneration(3);

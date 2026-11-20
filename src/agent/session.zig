@@ -487,6 +487,13 @@ pub const Limits = struct {
     max_ui_response_bytes: usize = 256 * 1024,
     max_terminal_diagnostic_bytes: usize = 512,
     event_ready_notifier: ?EventReadyNotifier = null,
+    /// Every Session and route id this Runtime issues is above this.
+    ///
+    /// Zero in process, which is what it has always been. A Runtime started
+    /// in a fresh execution process after another one died needs a range of
+    /// its own: Product routes events to a Task by route id, and Tasks it has
+    /// not touched since still hold the dead process's ids.
+    session_id_floor: u64 = 0,
 };
 
 const max_core_session_id_bytes: usize = @intCast(wire.MAX_SESSION_ID_BYTES_V1);
