@@ -177,9 +177,8 @@ pub const InputSubmission = union(enum) {
     dependency_busy,
 
     /// The answer when the dependency cannot be reached at all. Named here
-    /// rather than left to the caller so that the port guard in
-    /// `src/agent/link/unreachability.zig` checks a property instead of a
-    /// spelling, and so a forwarding stub has one place to read it from.
+    /// rather than left to the caller, so a forwarding stub has one place to
+    /// read it from.
     pub const link_unreachable: std.meta.Tag(@This()) = .unknown;
 
     /// The answer when the input was not submitted and can be submitted

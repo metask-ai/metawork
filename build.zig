@@ -1722,8 +1722,6 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     agent_link.addImport("agent_contract", agent_contract);
-    agent_link.addImport("agent_mcp_catalog", agent_mcp_catalog);
-    agent_link.addImport("agent_catalog", agent_catalog);
     agent_link.addImport("agent_checkpoint", agent_checkpoint);
     agent_link.addImport("agent_checkpoint_restore", agent_checkpoint_restore);
     // The two halves of the process seam. They live in their own modules so a

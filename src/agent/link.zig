@@ -8,11 +8,6 @@
 //! the ABI entry point, so a UI binary that links this module still links no
 //! AgentCore archive.
 //!
-//! What it deliberately does not contain: the vtables that forward port calls
-//! over it, the Runtime that answers them, and the closure that runs when one
-//! half finds the other gone. Those arrive with the steps that move the
-//! Runtime; the link exists first because every one of them needs it.
-//!
 //! Nothing here descends from the latency spike. The spike measured a pipe;
 //! the architecture says in as many words that a spike is not a product
 //! protocol, and its framing is not reused.
@@ -22,28 +17,11 @@ const std = @import("std");
 pub const frame = @import("link/frame.zig");
 pub const handshake = @import("link/handshake.zig");
 pub const error_code = @import("link/error_code.zig");
-pub const method = @import("link/method.zig");
 pub const payload = @import("link/payload.zig");
-pub const crossings = @import("link/crossings.zig");
-pub const surface_invariant = @import("link/surface_invariant.zig");
-pub const handles = @import("link/handles.zig");
 pub const handle_table = @import("link/handle_table.zig");
 pub const pending = @import("link/pending.zig");
 pub const shapes = @import("link/shapes.zig");
-pub const wire_types = @import("link/wire_types.zig");
-pub const envelope = @import("link/envelope.zig");
-pub const reverse = @import("link/reverse.zig");
 pub const channel = @import("link/channel.zig");
-pub const unreachability = @import("link/unreachability.zig");
-pub const adapters = @import("link/adapters.zig");
-pub const handle_repr = @import("link/handle_repr.zig");
-pub const client = @import("link/client.zig");
-pub const inbound = @import("link/inbound.zig");
-pub const outbound = @import("link/outbound.zig");
-pub const stubs = @import("link/stubs.zig");
-pub const call_frame = @import("link/call_frame.zig");
-pub const run_tools = @import("link/run_tools.zig");
-pub const dispatch = @import("link/dispatch.zig");
 pub const rpc = @import("link/rpc.zig");
 
 pub const revision = handshake.revision;
@@ -158,43 +136,15 @@ pub fn exchangeIdentityDetailed(
     return .{ .accepted = record };
 }
 
-/// Writes both registries, method lines first. The cross-process port review
-/// reads this instead of a table maintained by hand, which is why it is part
-/// of the module rather than a document.
-pub fn writeRegistry(writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    try writer.print("link revision {d}\n", .{revision});
-    try writer.writeAll("methods\n");
-    try method.writeTable(writer);
-    try writer.writeAll("errors\n");
-    try error_code.writeTable(writer);
-}
-
 test {
     _ = frame;
     _ = handshake;
     _ = error_code;
-    _ = method;
     _ = payload;
-    _ = crossings;
-    _ = surface_invariant;
-    _ = handles;
     _ = handle_table;
     _ = pending;
     _ = shapes;
-    _ = wire_types;
-    _ = envelope;
-    _ = reverse;
     _ = channel;
-    _ = unreachability;
-    _ = adapters;
-    _ = handle_repr;
-    _ = client;
-    _ = inbound;
-    _ = outbound;
-    _ = stubs;
-    _ = call_frame;
-    _ = run_tools;
-    _ = dispatch;
     _ = rpc;
 }
 
@@ -270,15 +220,4 @@ test "a peer that says nothing is not mistaken for a mismatch" {
         .core_abi_revision = 28,
     });
     try std.testing.expectEqual(Failure.peer_closed_during_handshake, outcome.failure);
-}
-
-test "the registry prints every method and every error" {
-    var storage: [16 * 1024]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&storage);
-    try writeRegistry(&writer);
-    const text = writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, text, "session.export_checkpoint call") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "run.execute call") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, " SessionPoisoned\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, " OutOfMemory\n") != null);
 }

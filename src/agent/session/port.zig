@@ -146,8 +146,8 @@ pub const RunControl = struct {
     ///
     /// Its answers are the declared ones rather than hand-picked: the
     /// termination result is `TerminationRequestResult.link_unreachable` and
-    /// the submission is `InputSubmission`'s, so this fixture and the port
-    /// guard in `src/agent/link/unreachability.zig` cannot drift apart.
+    /// the submission is `InputSubmission`'s, so this fixture cannot drift
+    /// apart from what the link answers.
     pub fn testUnreachable(run_id: u64, generation: u64) RunControl {
         std.debug.assert(@import("builtin").is_test);
         return .{

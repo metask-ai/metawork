@@ -191,15 +191,6 @@ pub fn decodeContract(code: u16) ?Error {
     return null;
 }
 
-/// Writes the registered mapping, one `code name` pair per line. The
-/// cross-process port review reads this instead of a table kept by hand.
-pub fn writeTable(writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    for (entries) |entry| try writer.print("{d} {s}" ++ newline, .{ entry.code, entry.name });
-    try writer.print("{d} OutOfMemory" ++ newline, .{out_of_memory_code});
-}
-
-const newline = "\n";
-
 test "every contract error round-trips through its wire number" {
     @setEvalBranchQuota(entries.len * 64);
     inline for (entries) |entry| {
@@ -215,17 +206,4 @@ test "an unregistered number fails closed instead of approximating" {
     try std.testing.expect(decode(0) == null);
     try std.testing.expect(decode(@intCast(entries.len + 1)) == null);
     try std.testing.expect(decode(std.math.maxInt(u16)) == null);
-}
-
-test "the registered mapping covers the whole contract set" {
-    @setEvalBranchQuota(entries.len * 64);
-    var storage: [8 * 1024]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&storage);
-    try writeTable(&writer);
-    const table = writer.buffered();
-    const set = @typeInfo(Error).error_set.?;
-    try std.testing.expectEqual(set.len + 1, std.mem.count(u8, table, newline));
-    inline for (set) |member| {
-        try std.testing.expect(std.mem.indexOf(u8, table, " " ++ member.name ++ newline) != null);
-    }
 }
