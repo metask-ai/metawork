@@ -711,7 +711,11 @@ pub fn build(b: *std.Build) void {
         .link_libc = bundle.link_libc,
     });
     execution_link_fixture_module.addImport("app_execution_mode", test_modules.app_execution_mode);
+    execution_link_fixture_module.addImport("app_execution_server", test_modules.app_execution_server);
     execution_link_fixture_module.addImport("metawork_agent_link", test_modules.agent_link);
+    // The fake Core the fixture serves a Runtime over, the same instance the
+    // in-process tests use.
+    execution_link_fixture_module.addImport("lifecycle_fixture", lifecycle_fixture);
     const execution_link_fixture = b.addExecutable(.{
         .name = "metawork-execution-link-fixture",
         .root_module = execution_link_fixture_module,
@@ -741,10 +745,18 @@ pub fn build(b: *std.Build) void {
     execution_link_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_VERSION", "fixture-0");
     execution_link_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_DIGEST", "1");
     artifacts.tests.step.dependOn(&execution_link_tests_run.step);
-    b.step(
+    test_modules.app_execution_server.link_libc = bundle.link_libc;
+    const execution_server_tests_run = b.addRunArtifact(b.addTest(.{
+        .name = "metawork-app-execution-server",
+        .root_module = test_modules.app_execution_server,
+    }));
+    artifacts.tests.step.dependOn(&execution_server_tests_run.step);
+    const execution_link_step = b.step(
         "test-execution-link",
         "Run the execution process fork, identity exchange and stop tests",
-    ).dependOn(&execution_link_tests_run.step);
+    );
+    execution_link_step.dependOn(&execution_link_tests_run.step);
+    execution_link_step.dependOn(&execution_server_tests_run.step);
     // Isolated, opt-in Stage A probes. Not part of the app or the default test graph.
     const sqlite_a_module = b.createModule(.{
         .root_source_file = b.path("tests/probes/sqlite_history_a_memory.zig"),
@@ -960,6 +972,7 @@ const WiredModules = struct {
     agent_link: *std.Build.Module,
     app_execution_host: *std.Build.Module,
     app_execution_mode: *std.Build.Module,
+    app_execution_server: *std.Build.Module,
     agent_file_delivery: *std.Build.Module,
     agent_catalog: *std.Build.Module,
     agent_checkpoint: *std.Build.Module,
@@ -1718,6 +1731,19 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     app_execution_host.addImport("metawork_agent_link", agent_link);
+    // The execution half's server. Only a build that carries the development
+    // switch imports it into the application; every other build's
+    // `--execution-host` keeps answering the handshake and dropping frames.
+    const app_execution_server = b.createModule(.{
+        .root_source_file = b.path("src/app/execution_server.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    app_execution_server.addImport("metawork_agent_link", agent_link);
+    app_execution_server.addImport("app_execution_mode", app_execution_mode);
+    app_execution_server.addImport("agent_contract", agent_contract);
+    app_execution_server.addImport("agent_checkpoint", agent_checkpoint);
+    app_execution_server.addImport("agent_checkpoint_restore", agent_checkpoint_restore);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
@@ -2885,6 +2911,7 @@ fn wireAgentCore(
         .agent_link = agent_link,
         .app_execution_host = app_execution_host,
         .app_execution_mode = app_execution_mode,
+        .app_execution_server = app_execution_server,
         .agent_file_delivery = agent_file_delivery,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,

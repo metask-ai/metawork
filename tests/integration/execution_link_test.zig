@@ -63,6 +63,81 @@ test "the execution half starts, agrees on identity and exits on end of stream" 
     );
 }
 
+/// Reads one whole frame the execution half sent. Only for the calls these
+/// tests send by hand, which fit in one fragment.
+fn readFrame(host: *execution_host.Host, buffer: []u8) !struct {
+    kind: agent_link.Kind,
+    correlation: u64,
+    payload: []u8,
+} {
+    var header_bytes: [agent_link.frame.header_bytes]u8 = undefined;
+    try host.reader.interface.readSliceAll(&header_bytes);
+    const header = try agent_link.frame.decode(&header_bytes);
+    if (!header.final or header.payload_len > buffer.len) return error.UnexpectedFrame;
+    try host.reader.interface.readSliceAll(buffer[0..header.payload_len]);
+    return .{ .kind = header.kind, .correlation = header.correlation, .payload = buffer[0..header.payload_len] };
+}
+
+test "the execution half answers a call from its own Runtime" {
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+
+    var host: execution_host.Host = undefined;
+    const failure = try host.start(io, allocator, matching_identity, .{}, .{
+        .explicit = &.{ fixture, "--with-runtime" },
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer host.deinit();
+
+    const request = try agent_link.rpc.encodeRequest(.restore_admission, allocator, 0, .{ .releasing_route_id = null });
+    defer allocator.free(request);
+    try std.testing.expectEqual(agent_link.channel.Submission.queued, try host.outbound.submitWaiting(.request, 7, request));
+
+    var buffer: [64]u8 = undefined;
+    const received = try readFrame(&host, &buffer);
+    try std.testing.expectEqual(agent_link.Kind.response, received.kind);
+    try std.testing.expectEqual(@as(u64, 7), received.correlation);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const answer = try agent_link.rpc.decodeResponse(.restore_admission, arena.allocator(), received.payload);
+    try std.testing.expectEqual(@TypeOf(answer.ok).available, answer.ok);
+
+    // An orderly end: the Runtime shuts down and the process leaves on its
+    // own, with the code that says so.
+    try std.testing.expectEqual(
+        execution_host.Stopped{ .exited = @intFromEnum(execution_mode.Exit.link_closed) },
+        host.stop(),
+    );
+}
+
+test "tidying up that does not finish costs the execution half its deadline, not its exit" {
+    // Nothing the UI half holds can keep this process alive once the link
+    // has ended: a Runtime whose shutdown never returns is the stand-in for
+    // every way that could happen. The deadline is shorter than the UI's
+    // grace period, so a process that left on its own reports the deadline's
+    // code; one that had to be ended reports `.killed`.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+
+    var host: execution_host.Host = undefined;
+    const failure = try host.start(io, allocator, matching_identity, .{}, .{
+        .explicit = &.{ fixture, "--with-runtime", "--hang-shutdown" },
+    });
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer host.deinit();
+
+    try std.testing.expectEqual(
+        execution_host.Stopped{ .exited = @intFromEnum(execution_mode.Exit.exit_deadline) },
+        host.stop(),
+    );
+}
+
 test "a child that ignores end of stream is ended, and the stop returns" {
     // The reaper waits on the child for its whole life, so ending the child
     // must not wait on it a second time. On POSIX `std.process.Child.kill`

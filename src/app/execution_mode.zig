@@ -6,10 +6,9 @@
 //! far as `runWithOptions` has a WebView, and the execution half must never
 //! have one.
 //!
-//! What it does today is the link and nothing else: state its identity, accept
-//! the peer's, then serve frames until the UI closes the pipe. The Runtime it
-//! will eventually host arrives with the step that moves it; until then this
-//! process answers the handshake, honours `goodbye`, and exits.
+//! It states its identity, accepts the peer's, and then hands the link to the
+//! `Server` its composition root passed. Without one it serves frames by
+//! dropping them until the UI closes the pipe, answers `goodbye`, and exits.
 //!
 //! It composes no Product owner, opens no database, reads no Workspace and
 //! creates no window. Everything it will own arrives explicitly.
@@ -31,6 +30,29 @@ pub const Exit = enum(u8) {
     transport_failed = 12,
     /// A resource this process needs at startup was unavailable.
     resource_unavailable = 13,
+    /// The link ended, and tidying up did not finish within its deadline.
+    exit_deadline = 14,
+};
+
+/// What serves the link once identity is agreed, if anything does.
+///
+/// Absent, this process answers the handshake and drops every frame, which
+/// is all a build without an execution half composed can honestly do. The
+/// composition root decides whether one exists; this module never reaches
+/// for it, so a build that does not pass one does not contain one.
+pub const Server = struct {
+    context: ?*anyopaque,
+    serve_fn: *const fn (?*anyopaque, Link) Exit,
+};
+
+/// The agreed link, handed to the server.
+pub const Link = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    output: std.Io.File,
+    message_limits: agent_link.MessageLimits,
+    queue_limits: agent_link.QueueLimits,
 };
 
 pub const Options = struct {
@@ -38,6 +60,7 @@ pub const Options = struct {
     message_limits: agent_link.MessageLimits,
     queue_limits: agent_link.QueueLimits = .{},
     read_buffer_bytes: usize = 64 * 1024,
+    server: ?Server = null,
 };
 
 /// Serves the link until it ends, and returns the exit code to use.
@@ -68,6 +91,15 @@ pub fn run(
         },
         .accepted => {},
     }
+
+    if (options.server) |server| return server.serve_fn(server.context, .{
+        .io = io,
+        .allocator = allocator,
+        .reader = &reader.interface,
+        .output = output,
+        .message_limits = options.message_limits,
+        .queue_limits = options.queue_limits,
+    });
 
     var outbound: agent_link.channel.Outbound = undefined;
     outbound.start(io, allocator, output, options.queue_limits) catch
@@ -129,6 +161,7 @@ test "every other outcome is distinguishable from the normal end" {
         .protocol_violation,
         .transport_failed,
         .resource_unavailable,
+        .exit_deadline,
     };
     for (values, 0..) |value, index| {
         try std.testing.expect(@intFromEnum(value) != 0);
