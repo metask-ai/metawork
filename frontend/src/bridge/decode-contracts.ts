@@ -7,6 +7,7 @@ import {
   maxPreviewVideoBytes,
   maxAttachmentThumbnailBytes,
   maxAttachmentThumbnailSide,
+  runExcerptMaxBytes,
   type AttachmentThumbnailResponse,
   modelErrorCategories,
   runGuidances,
@@ -2795,6 +2796,19 @@ function decodeRunOutput(value: unknown, path: string): RunView["output"] {
   };
   return output;
 }
+/** A Run's submission time, shared by the loaded Run and its manifest entry. */
+function decodeSubmittedAtUnixMs(value: unknown, path: string): string | null {
+  const submittedAtUnixMs = value === null ? null : wireId(value, path);
+  if (
+    submittedAtUnixMs !== null &&
+    (submittedAtUnixMs === "0" ||
+      submittedAtUnixMs.length > 16 ||
+      (submittedAtUnixMs.length === 16 &&
+        submittedAtUnixMs > "8640000000000000"))
+  )
+    fail(path, "expected a displayable non-zero Unix millisecond timestamp");
+  return submittedAtUnixMs;
+}
 function decodeRun(value: unknown, path: string): RunView {
   const item = object(value, path, [
     "elapsedMs",
@@ -2861,21 +2875,10 @@ function decodeRun(value: unknown, path: string): RunView {
       (elapsedMs.length === 20 && elapsedMs > "18446744073709551615"))
   )
     fail(`${path}.elapsedMs`, "expected u64 elapsed milliseconds");
-  const submittedAtUnixMs =
-    item.submittedAtUnixMs === null
-      ? null
-      : wireId(item.submittedAtUnixMs, `${path}.submittedAtUnixMs`);
-  if (
-    submittedAtUnixMs !== null &&
-    (submittedAtUnixMs === "0" ||
-      submittedAtUnixMs.length > 16 ||
-      (submittedAtUnixMs.length === 16 &&
-        submittedAtUnixMs > "8640000000000000"))
-  )
-    fail(
-      `${path}.submittedAtUnixMs`,
-      "expected a displayable non-zero Unix millisecond timestamp",
-    );
+  const submittedAtUnixMs = decodeSubmittedAtUnixMs(
+    item.submittedAtUnixMs,
+    `${path}.submittedAtUnixMs`,
+  );
   const finishedAtUnixMs =
     item.finishedAtUnixMs === null
       ? null
@@ -3874,6 +3877,7 @@ function decodeTask(
       fact.phase !== run.phase ||
       fact.permissionProfile !== run.permissionProfile ||
       fact.permissionInteraction !== run.permissionInteraction ||
+      fact.submittedAtUnixMs !== run.submittedAtUnixMs ||
       JSON.stringify(fact.terminal) !== JSON.stringify(run.terminal)
     )
       fail(path, "Run page disagrees with its manifest");
@@ -5477,11 +5481,23 @@ function decodeRunManifest(value: unknown, path: string): RunManifest {
     "phase",
     "permissionProfile",
     "permissionInteraction",
+    "submittedAtUnixMs",
+    "excerpt",
     "terminal",
   ]);
   const phase = enumValue(item.phase, `${path}.phase`, runPhases);
   const terminal = decodeRunTerminal(item.terminal, `${path}.terminal`);
   validateRunTerminalState(phase, terminal, path);
+  const excerpt =
+    item.excerpt === null ? null : stringValue(item.excerpt, `${path}.excerpt`);
+  // Product folds whitespace and cuts on a code point boundary; anything
+  // longer or still carrying line breaks is not an excerpt it produced.
+  if (
+    excerpt !== null &&
+    (new TextEncoder().encode(excerpt).length > runExcerptMaxBytes ||
+      /[\t\n\r]/.test(excerpt))
+  )
+    fail(`${path}.excerpt`, "expected a folded excerpt within its bound");
   return {
     contentVersion: positiveU64WireId(
       item.contentVersion,
@@ -5489,6 +5505,11 @@ function decodeRunManifest(value: unknown, path: string): RunManifest {
     ),
     id: positiveWireId(item.id, `${path}.id`),
     phase,
+    submittedAtUnixMs: decodeSubmittedAtUnixMs(
+      item.submittedAtUnixMs,
+      `${path}.submittedAtUnixMs`,
+    ),
+    excerpt,
     terminal,
     permissionProfile: enumValue(
       item.permissionProfile,
@@ -6230,6 +6251,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
           run.permissionProfile !== expected[index]!.permissionProfile ||
           run.permissionInteraction !==
             expected[index]!.permissionInteraction ||
+          run.submittedAtUnixMs !== expected[index]!.submittedAtUnixMs ||
           JSON.stringify(run.terminal) !==
             JSON.stringify(expected[index]!.terminal),
       )

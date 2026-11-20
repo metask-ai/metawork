@@ -68,6 +68,136 @@ test("Product view rejects mixed commits, wrong associations and malformed pages
   }
 });
 
+test("Run manifest carries the Run's own submission time and a bounded folded excerpt", () => {
+  const entry = decodeWorkbenchSnapshot(fixture).taskPage.runManifest[0];
+  assert.equal(entry.excerpt, "inspect");
+  assert.equal(entry.submittedAtUnixMs, null);
+  const accept = (mutate) => {
+    const view = structuredClone(fixture);
+    mutate(view);
+    return decodeWorkbenchSnapshot(view).taskPage.runManifest[0];
+  };
+  assert.equal(
+    accept((view) => {
+      view.taskPage.runManifest[0].excerpt = null;
+    }).excerpt,
+    null,
+  );
+  assert.equal(
+    accept((view) => {
+      view.taskPage.runManifest[0].excerpt = "汉".repeat(60);
+    }).excerpt,
+    "汉".repeat(60),
+  );
+  assert.equal(
+    accept((view) => {
+      view.taskPage.runManifest[0].submittedAtUnixMs = "1700000000000";
+      view.taskPage.task.runs[0].submittedAtUnixMs = "1700000000000";
+    }).submittedAtUnixMs,
+    "1700000000000",
+  );
+  for (const [mutate, reason] of [
+    [
+      (view) => {
+        view.taskPage.runManifest[0].excerpt = `${"汉".repeat(60)}a`;
+      },
+      /excerpt/,
+    ],
+    [
+      (view) => {
+        view.taskPage.runManifest[0].excerpt = "two\nlines";
+      },
+      /excerpt/,
+    ],
+    [
+      (view) => {
+        view.taskPage.runManifest[0].excerpt = 7;
+      },
+      /excerpt/,
+    ],
+    [
+      (view) => {
+        delete view.taskPage.runManifest[0].excerpt;
+      },
+      /runManifest/,
+    ],
+    [
+      (view) => {
+        view.taskPage.runManifest[0].preview = "inspect";
+      },
+      /runManifest/,
+    ],
+    [
+      (view) => {
+        delete view.taskPage.runManifest[0].submittedAtUnixMs;
+      },
+      /runManifest/,
+    ],
+    [
+      (view) => {
+        view.taskPage.runManifest[0].submittedAtUnixMs = "0";
+        view.taskPage.task.runs[0].submittedAtUnixMs = "0";
+      },
+      /submittedAtUnixMs/,
+    ],
+    [
+      (view) => {
+        view.taskPage.runManifest[0].submittedAtUnixMs = "1700000000000";
+      },
+      /disagrees with its manifest/,
+    ],
+  ]) {
+    const view = structuredClone(fixture);
+    mutate(view);
+    assert.throws(() => decodeWorkbenchSnapshot(view), reason);
+  }
+});
+
+test("a history page Run must carry its manifest submission time", () => {
+  const view = structuredClone(fixture);
+  const older = {
+    ...structuredClone(view.taskPage.task.runs[0]),
+    id: "6",
+    phase: "completed",
+    activity: null,
+    submittedAtUnixMs: "1700000000000",
+    terminal: {
+      outcome: "completed",
+      cause: null,
+      diagnosticDisposition: "absent",
+      recordingIncomplete: false,
+      feedback: {
+        guidance: "none",
+        reason: null,
+        offerInputPreparation: false,
+      },
+      modelError: null,
+    },
+  };
+  view.taskPage.runManifest.unshift({
+    ...structuredClone(view.taskPage.runManifest[0]),
+    id: "6",
+    phase: "completed",
+    submittedAtUnixMs: "1700000000000",
+    excerpt: "earlier",
+    terminal: structuredClone(older.terminal),
+  });
+  // One Run per page: the current page holds Run 7, the history page Run 6.
+  view.scope.runLimit = 1;
+  view.scope.beforeRunId = "7";
+  view.taskPage.nextBeforeRunId = "7";
+  view.historyPage = { beforeRunId: "7", nextBeforeRunId: null, runs: [older] };
+  assert.equal(
+    decodeWorkbenchSnapshot(view).historyPage.runs[0].submittedAtUnixMs,
+    "1700000000000",
+  );
+  view.taskPage.runManifest[0].submittedAtUnixMs = "1700000000009";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(view),
+    /history Run manifest mismatch/,
+  );
+});
+
 test("Product consumer scope is closed and bounded", () => {
   for (const scope of [
     {},

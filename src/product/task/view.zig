@@ -358,6 +358,108 @@ fn writeTerminal(writer: *std.Io.Writer, text: TextProjection, run: *const task_
     }) catch return error.SnapshotTooLarge;
 }
 
+/// The readable form of a Run's own input: text as written, a Skill as
+/// `/name arguments…`, a multimodal message as its text and then each
+/// attachment name. Search matches over it and the Run manifest excerpts its
+/// start, so both read this one definition. `sink` takes `append([]const u8)`.
+pub fn appendReadableInput(input: *const task_state.RunInputRecord, sink: anytype) void {
+    switch (input.*) {
+        .text => |value| sink.append(value.value),
+        .skill => |value| {
+            sink.append("/");
+            sink.append(value.invocation_name);
+            if (value.argument_values.len > 1 or (value.argument_values.len == 1 and value.argument_values[0].len != 0)) {
+                sink.append(" ");
+                for (value.argument_values, 0..) |argument, index| {
+                    if (index != 0) sink.append(" ");
+                    sink.append(argument);
+                }
+            }
+        },
+        .multimodal => |value| {
+            var present = false;
+            if (value.text) |text| if (text.len != 0) {
+                sink.append(text);
+                present = true;
+            };
+            for (value.attachments) |attachment| if (attachment.display_name.len != 0) {
+                if (present) sink.append(" ");
+                sink.append(attachment.display_name);
+                present = true;
+            };
+        },
+    }
+}
+
+/// Upper bound of a manifest excerpt in UTF-8 bytes; the Renderer decoder
+/// enforces the same number.
+pub const run_excerpt_max_bytes = 180;
+
+/// The start of a readable input with every run of ASCII whitespace folded
+/// to one space, cut to `run_excerpt_max_bytes` on a code point boundary.
+const ExcerptSink = struct {
+    bytes: [run_excerpt_max_bytes]u8 = undefined,
+    len: usize = 0,
+    space: bool = false,
+    full: bool = false,
+
+    fn append(self: *ExcerptSink, value: []const u8) void {
+        for (value) |byte| {
+            if (self.full) return;
+            switch (byte) {
+                // Folding happens here, before the bound: whitespace never
+                // spends excerpt bytes beyond the one space it collapses to.
+                ' ', '\t', '\r', '\n' => self.space = self.len != 0,
+                else => {
+                    if (self.space) {
+                        self.push(' ');
+                        self.space = false;
+                    }
+                    self.push(byte);
+                },
+            }
+        }
+    }
+
+    fn push(self: *ExcerptSink, byte: u8) void {
+        if (self.full) return;
+        if (self.len == self.bytes.len) {
+            self.full = true;
+            return;
+        }
+        self.bytes[self.len] = byte;
+        self.len += 1;
+    }
+
+    fn excerpt(self: *const ExcerptSink) []const u8 {
+        var end = self.len;
+        if (self.full and end != 0) {
+            // Input text is valid UTF-8, so only the cut can leave a partial
+            // sequence: drop it rather than emit half a character.
+            var lead = end - 1;
+            while (lead != 0 and self.bytes[lead] & 0xc0 == 0x80) lead -= 1;
+            const width = std.unicode.utf8ByteSequenceLength(self.bytes[lead]) catch 1;
+            if (lead + width > end) end = lead;
+        }
+        while (end != 0 and self.bytes[end - 1] == ' ') end -= 1;
+        return self.bytes[0..end];
+    }
+};
+
+/// Writes the manifest excerpt of a Run's own input, or null when the input
+/// may not be shown outside its full projection. The whole input is checked
+/// before anything is cut: a known credential straddling the cut would no
+/// longer match afterwards, so a cut must never precede the check.
+fn writeInputExcerpt(writer: *std.Io.Writer, text: TextProjection, input: *const task_state.RunInputRecord) Error!void {
+    if (!safeInputForPreparation(text, input.*)) {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    }
+    var sink: ExcerptSink = .{};
+    appendReadableInput(input, &sink);
+    try text.writeJson(writer, sink.excerpt());
+}
+
 pub fn writeRunManifest(writer: *std.Io.Writer, text: TextProjection, task: *const task_state.Task) Error!void {
     writer.writeByte('[') catch return error.SnapshotTooLarge;
     var count: usize = 0;
@@ -368,7 +470,14 @@ pub fn writeRunManifest(writer: *std.Io.Writer, text: TextProjection, task: *con
         count += 1;
         const facts = task_state.runProjectionFacts(run);
         if (run.projection_content_version == 0) return error.SnapshotTooLarge;
-        writer.print("{{\"id\":\"{d}\",\"contentVersion\":\"{d}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"terminal\":", .{ run.id, run.projection_content_version, @tagName(facts.phase), @tagName(run.permission_profile), @tagName(run.permission_interaction) }) catch return error.SnapshotTooLarge;
+        writer.print("{{\"id\":\"{d}\",\"contentVersion\":\"{d}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"submittedAtUnixMs\":", .{ run.id, run.projection_content_version, @tagName(facts.phase), @tagName(run.permission_profile), @tagName(run.permission_interaction) }) catch return error.SnapshotTooLarge;
+        if (run.submitted_at_unix_ms) |submitted_at|
+            writer.print("\"{d}\"", .{submitted_at}) catch return error.SnapshotTooLarge
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"excerpt\":") catch return error.SnapshotTooLarge;
+        try writeInputExcerpt(writer, text, &run.input);
+        writer.writeAll(",\"terminal\":") catch return error.SnapshotTooLarge;
         if (facts.terminal) |terminal| {
             try writeTerminal(writer, text, run, terminal);
         } else writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -1963,4 +2072,117 @@ test "a Run whose input readiness cannot be observed offers no input box" {
     task.runtime.active_operation = .{ .run = 4 };
 
     try std.testing.expect(!inputReady(&task));
+}
+
+const ExcerptTestText = struct {
+    secret: []const u8,
+
+    fn contains(context: *const anyopaque, value: []const u8) bool {
+        const self: *const ExcerptTestText = @ptrCast(@alignCast(context));
+        return std.mem.indexOf(u8, value, self.secret) != null;
+    }
+
+    fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) Error!void {
+        std.json.Stringify.encodeJsonString(value, .{}, writer) catch return error.SnapshotTooLarge;
+    }
+
+    fn writeOutput(_: *const anyopaque, _: *std.Io.Writer, _: []const u8, _: []const u64) Error!bool {
+        unreachable;
+    }
+
+    fn writeParts(_: *const anyopaque, _: *std.Io.Writer, _: []const u8, _: []const u8) Error!bool {
+        unreachable;
+    }
+
+    fn projection(self: *const ExcerptTestText) TextProjection {
+        return .{
+            .context = self,
+            .contains_sensitive_fn = contains,
+            .write_json_fn = write,
+            .write_json_output_fn = writeOutput,
+            .write_json_parts_fn = writeParts,
+        };
+    }
+
+    fn excerpt(self: *const ExcerptTestText, storage: []u8, input: task_state.RunInputRecord) ![]const u8 {
+        var writer = std.Io.Writer.fixed(storage);
+        try writeInputExcerpt(&writer, self.projection(), &input);
+        return writer.buffered();
+    }
+};
+
+test "a manifest excerpt is the readable input with whitespace folded" {
+    const text: ExcerptTestText = .{ .secret = "sk-known-secret" };
+    var storage: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "\"Fix the build \\\"now\\\"\"",
+        try text.excerpt(&storage, .{ .text = .{ .value = @constCast("  Fix\tthe\r\n\n build  \"now\"  ") } }),
+    );
+    var arguments = [_][]u8{ @constCast("a  b"), @constCast("") };
+    try std.testing.expectEqualStrings("\"/review a b\"", try text.excerpt(&storage, .{ .skill = .{
+        .skill_id = @constCast("skill"),
+        .catalog_revision = @constCast("1"),
+        .invocation_name = @constCast("review"),
+        .display_name = @constCast("Review"),
+        .argument_values = &arguments,
+    } }));
+    try std.testing.expectEqualStrings("\"/review\"", try text.excerpt(&storage, .{ .skill = .{
+        .skill_id = @constCast("skill"),
+        .catalog_revision = @constCast("1"),
+        .invocation_name = @constCast("review"),
+        .display_name = @constCast("Review"),
+        .argument_values = @constCast(&[_][]u8{}),
+    } }));
+    var attachments = [_]task_state.AttachmentRecord{
+        .{ .kind = .image, .format = .png, .display_name = @constCast("截图.png"), .size_bytes = 1 },
+        .{ .kind = .file, .format = null, .display_name = @constCast("报告.pdf"), .size_bytes = 1 },
+    };
+    try std.testing.expectEqualStrings("\"截图.png 报告.pdf\"", try text.excerpt(&storage, .{ .multimodal = .{ .text = null, .attachments = &attachments } }));
+    try std.testing.expectEqualStrings("\"看这两个 截图.png 报告.pdf\"", try text.excerpt(&storage, .{ .multimodal = .{ .text = @constCast("看这两个\n"), .attachments = &attachments } }));
+}
+
+test "a manifest excerpt is cut on a code point boundary within its byte bound" {
+    const text: ExcerptTestText = .{ .secret = "sk-known-secret" };
+    var storage: [512]u8 = undefined;
+    // One ASCII byte then three-byte characters: the 180th byte falls inside
+    // the 60th character, which must be dropped whole.
+    var source: [1 + 3 * 61]u8 = undefined;
+    source[0] = 'a';
+    for (0..61) |index| @memcpy(source[1 + 3 * index ..][0..3], "汉");
+    const cut = try text.excerpt(&storage, .{ .text = .{ .value = &source } });
+    try std.testing.expectEqual(@as(usize, 2 + 1 + 3 * 59), cut.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(cut[1 .. cut.len - 1]));
+    // Exactly the bound fits whole and is not treated as cut.
+    const exact = try text.excerpt(&storage, .{ .text = .{ .value = source[1 .. 1 + 3 * 60] } });
+    try std.testing.expectEqual(@as(usize, 2 + run_excerpt_max_bytes), exact.len);
+    // A folded space that lands on the bound is not left trailing.
+    var spaced: [run_excerpt_max_bytes + 4]u8 = undefined;
+    @memset(spaced[0 .. run_excerpt_max_bytes - 1], 'a');
+    @memcpy(spaced[run_excerpt_max_bytes - 1 ..], "   bc");
+    const trimmed = try text.excerpt(&storage, .{ .text = .{ .value = &spaced } });
+    try std.testing.expectEqual(@as(usize, 2 + run_excerpt_max_bytes - 1), trimmed.len);
+}
+
+test "a manifest excerpt is withheld for a redacted input or a known credential anywhere in it" {
+    const text: ExcerptTestText = .{ .secret = "sk-known-secret" };
+    var storage: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("null", try text.excerpt(&storage, .{ .text = .{ .value = @constCast("plain"), .redacted = true } }));
+    // The credential sits beyond the excerpt bound: the check covers the
+    // whole input, not just what would be shown.
+    var long: [run_excerpt_max_bytes + 32]u8 = undefined;
+    @memset(&long, 'x');
+    @memcpy(long[run_excerpt_max_bytes - 4 ..][0..15], "sk-known-secret");
+    try std.testing.expectEqualStrings("null", try text.excerpt(&storage, .{ .text = .{ .value = &long } }));
+    var attachments = [_]task_state.AttachmentRecord{
+        .{ .kind = .file, .format = null, .display_name = @constCast("sk-known-secret.txt"), .size_bytes = 1 },
+    };
+    try std.testing.expectEqualStrings("null", try text.excerpt(&storage, .{ .multimodal = .{ .text = @constCast("see"), .attachments = &attachments } }));
+    var arguments = [_][]u8{@constCast("sk-known-secret")};
+    try std.testing.expectEqualStrings("null", try text.excerpt(&storage, .{ .skill = .{
+        .skill_id = @constCast("skill"),
+        .catalog_revision = @constCast("1"),
+        .invocation_name = @constCast("review"),
+        .display_name = @constCast("Review"),
+        .argument_values = &arguments,
+    } }));
 }

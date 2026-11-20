@@ -1,6 +1,27 @@
 // Synthetic aggregate builders for domain/interaction tests. Production only
 // accepts the scoped wire; these builders are never imported by the Renderer.
 import { readFileSync } from "node:fs";
+import { runInputDisplay } from "../../frontend/src/workbench/run-input.ts";
+// Mirrors Product's manifest excerpt for synthetic Runs: the readable input,
+// whitespace folded, cut to 180 UTF-8 bytes on a code point boundary, and
+// withheld for a redacted input. Credential matching has no synthetic peer.
+function runExcerpt(input) {
+  if (
+    !input ||
+    input.redacted ||
+    (input.kind === "multimodal" &&
+      input.attachments.some((attachment) => attachment.redacted))
+  )
+    return null;
+  let excerpt = "";
+  for (const character of runInputDisplay(input)
+    .replace(/[ \t\r\n]+/g, " ")
+    .trim()) {
+    if (Buffer.byteLength(excerpt + character) > 180) break;
+    excerpt += character;
+  }
+  return excerpt.trimEnd();
+}
 const initialViewScope = {
   ...JSON.parse(
     readFileSync(
@@ -152,9 +173,11 @@ export function productViewFixture(
               "phase",
               "permissionProfile",
               "permissionInteraction",
+              "submittedAtUnixMs",
               "terminal",
             ].map((key) => [key, run[key]]),
           ),
+          excerpt: run.excerpt ?? runExcerpt(run.input),
         })),
         task: {
           ...selected,
