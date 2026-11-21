@@ -56,7 +56,8 @@
   text-align: start;
 }
 
-.inbox-list-row:hover {
+.inbox-list-row:hover,
+.inbox-task-card:hover {
   background: var(--ui-action-hover-surface);
 }
 
@@ -65,7 +66,8 @@
 }
 
 .inbox-avatar,
-.inbox-empty-icon {
+.inbox-empty-icon,
+.inbox-task-icon {
   display: grid;
   flex: none;
   place-items: center;
@@ -85,7 +87,8 @@
   background: var(--ui-surface-panel);
 }
 
-.inbox-row-copy {
+.inbox-row-copy,
+.inbox-task-caption {
   display: grid;
   min-width: 0;
   gap: 3px;
@@ -97,7 +100,8 @@
   white-space: nowrap;
 }
 
-.inbox-row-copy strong {
+.inbox-row-copy strong,
+.inbox-task-caption strong {
   font-size: var(--text-control);
   font-weight: 600;
 }
@@ -105,6 +109,7 @@
 .inbox-row-copy > span,
 .inbox-row-meta,
 .inbox-message-meta,
+.inbox-task-caption > span,
 .inbox-transcript-date {
   color: var(--ui-content-muted);
   font-size: var(--text-label);
@@ -232,8 +237,65 @@
   background: var(--ui-surface-panel-2);
 }
 
-.inbox-bubble p {
+.inbox-bubble p,
+.inbox-task-description {
   text-wrap: pretty;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.inbox-task-card {
+  display: grid;
+  width: 100%;
+  min-height: 52px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-surface-panel);
+  text-align: start;
+}
+
+.inbox-task-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  font-size: 16px;
+}
+
+.inbox-task-card > svg {
+  color: var(--ui-content-muted);
+}
+
+.inbox-task-dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  overflow-wrap: anywhere;
+}
+
+.inbox-task-dialog-header .icon-button {
+  flex: none;
+}
+
+.inbox-task-facts {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ui-border);
+  font-size: var(--text-control);
+}
+
+.inbox-task-facts > div {
+  display: grid;
+  grid-template-columns: minmax(64px, max-content) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.inbox-task-facts dt {
+  color: var(--ui-content-muted);
 }

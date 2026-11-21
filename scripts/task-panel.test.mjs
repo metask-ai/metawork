@@ -8526,6 +8526,21 @@ test("App reads a selected inbox conversation and keeps workbench navigation sta
   screen.getByText("I added the review notes to this task.");
   screen.getByText("Sample data");
 
+  const linkedTask = screen.getByRole("button", {
+    name: /Review workbench navigation/,
+  });
+  await user.click(linkedTask);
+  const dialog = screen.getByRole("dialog", {
+    name: "Review workbench navigation",
+  });
+  within(dialog).getByText("Assignee");
+  within(dialog).getByText("In progress");
+  await user.keyboard("{Escape}");
+  await waitFor(() => {
+    assert.equal(screen.queryByRole("dialog"), null);
+    assert.equal(document.activeElement, linkedTask);
+  });
+
   await user.click(workbench);
   assert.equal(workbench.getAttribute("aria-current"), "page");
   assert.match(
@@ -8563,6 +8578,7 @@ test("App shows conversations in the narrow navigation drawer and closes it on s
   fireEvent.click(xu);
   assert.equal(toggle.getAttribute("aria-expanded"), "false");
   screen.getByRole("heading", { name: "Yu Xu" });
+  screen.getByRole("button", { name: /Prepare the demo workspace/ });
   assert.equal(document.activeElement, toggle);
   fireEvent.click(toggle);
   assert.equal(xu.getAttribute("aria-current"), "true");

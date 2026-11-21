@@ -1,9 +1,14 @@
 import { useState } from "react";
 
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Dialog } from "../../components/ui/dialog.tsx";
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n } from "../../i18n/context.ts";
-import { sampleConversations, type InboxConversation } from "./sample-inbox.ts";
+import {
+  sampleConversations,
+  type InboxConversation,
+  type InboxTask,
+} from "./sample-inbox.ts";
 
 type InboxEntry = { conversation: InboxConversation; unread: number };
 
@@ -157,6 +162,54 @@ export function InboxConversationList({
   );
 }
 
+function LinkedInboxTask({ task }: { task: InboxTask }) {
+  const { t, locale } = useI18n();
+  const language = locale === "zh-CN" ? "zh-CN" : "en-US";
+  const status = t(`inbox.task_status.${task.status}`);
+
+  return (
+    <Dialog.Root>
+      <Dialog.Trigger className="inbox-task-card">
+        <span className="inbox-task-icon">
+          <Icon name="new-task" />
+        </span>
+        <span className="inbox-task-caption">
+          <span>{t("inbox.linked_task")}</span>
+          <strong>{task.title[language]}</strong>
+        </span>
+        <Icon name="chevron-right" />
+      </Dialog.Trigger>
+      <Dialog.Portal>
+        <Dialog.Backdrop />
+        <Dialog.Popup>
+          <div className="inbox-task-dialog-header">
+            <Dialog.Title>{task.title[language]}</Dialog.Title>
+            <Dialog.Close
+              className="icon-button"
+              aria-label={t("common.close")}
+            >
+              <Icon name="close" />
+            </Dialog.Close>
+          </div>
+          <Dialog.Description className="inbox-task-description">
+            {task.description[language]}
+          </Dialog.Description>
+          <dl className="inbox-task-facts">
+            <div>
+              <dt>{t("inbox.task_owner")}</dt>
+              <dd>{task.assignee[language]}</dd>
+            </div>
+            <div>
+              <dt>{t("inbox.task_status")}</dt>
+              <dd>{status}</dd>
+            </div>
+          </dl>
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 export function InboxConversationView({
   conversation,
 }: {
@@ -216,6 +269,7 @@ export function InboxConversationView({
               </div>
               <div className="inbox-bubble">
                 <p>{message.text[language]}</p>
+                {message.task && <LinkedInboxTask task={message.task} />}
               </div>
             </li>
           ))}

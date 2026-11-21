@@ -1,11 +1,19 @@
 type Copy = { "en-US": string; "zh-CN": string };
 
+export type InboxTask = {
+  title: Copy;
+  description: Copy;
+  assignee: Copy;
+  status: "doing" | "done";
+};
+
 export type InboxMessage = {
   id: string;
   sentAt: string;
   direction: "incoming" | "outgoing";
   text: Copy;
   unread?: true;
+  task?: InboxTask;
 };
 
 export type InboxConversation = {
@@ -52,6 +60,20 @@ export const sampleConversations: readonly InboxConversation[] = [
           "en-US": "I added the review notes to this task.",
           "zh-CN": "我把要看的几个点记到这条任务里了。",
         },
+        task: {
+          title: {
+            "en-US": "Review workbench navigation",
+            "zh-CN": "评审工作台导航",
+          },
+          description: {
+            "en-US":
+              "Check task selection, the collapsed sidebar, and keyboard navigation at desktop and narrow widths. Record any issues under this task.",
+            "zh-CN":
+              "在桌面宽度和窄窗下检查任务切换、左栏收起和键盘导航。发现的问题记到这条任务下。",
+          },
+          assignee: lin,
+          status: "doing",
+        },
       },
       {
         id: "lin-4",
@@ -77,6 +99,20 @@ export const sampleConversations: readonly InboxConversation[] = [
         text: {
           "en-US": "The sample workspace is ready for the demo.",
           "zh-CN": "演示用的示例工作区已经准备好了。",
+        },
+        task: {
+          title: {
+            "en-US": "Prepare the demo workspace",
+            "zh-CN": "准备演示工作区",
+          },
+          description: {
+            "en-US":
+              "Prepare a sample project with a recent task and a completed run so the workbench can be shown without using a real project.",
+            "zh-CN":
+              "准备一个含最近任务和已完成运行的示例项目，用于工作台演示。",
+          },
+          assignee: xu,
+          status: "done",
         },
       },
     ],
