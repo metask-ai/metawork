@@ -92,7 +92,7 @@ Account 与 Product Control 是 Product 的两个 named owner。Models、Workspa
 
 ### 3.4 Agent 与 AgentCore
 
-Agent 拥有 MetaWork 对 AgentCore Runtime、Session、Conversation、callback、event pump、typed terminal fact、built-in tool selection 和独立 Completion 的集成边界。Application 创建并关闭 Agent、注入窄 effect capability并安排主线程 wake；Product Control 调用 Agent 公共执行表面，但不管理 Agent Runtime、不读取 Session 内部字段，也不借 Agent 获取通用 I/O。
+Agent 拥有 MetaWork 对 AgentCore Runtime、Session、Conversation、callback、event pump、typed terminal fact、built-in tool selection 和独立 Completion 的集成边界。Agent Runtime 运行在窗口之外的执行进程里（§5）；Application 持有该进程的 owner，经它创建并关闭 Agent、注入窄 effect capability并安排主线程 wake；Product Control 调用 Agent 公共执行表面，但不管理 Agent Runtime、不读取 Session 内部字段，也不借 Agent 获取通用 I/O。
 
 Agent 还拥有 MetaWork 对模型行为的塑造边界：除固定产品身份外，它通过 Session prompt profile 的 `host:` 段注入行为约束，只新增、不改写 AgentCore 的内核段。该注入改变模型倾向而不构成保证，因此不替代 built-in tool 选择与 PermissionProfile 这类能力与权限控制；Product、Bridge 与 Renderer 不因此取得配置 profile 的接口。
 
@@ -222,22 +222,25 @@ MetaWork 自有的出站 HTTP 由 Foundation 的 HTTP 服务执行，Application
 
 Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通过 Snapshot 重建视图；Application restart 先恢复经过校验的 Product history，Conversation attachment 只能经用户显式恢复事务重建。Bridge transport、Product durable fact 与 Agent execution fact 不能相互覆盖，精确事务见[Product 架构](product-architecture.md)。
 
-| 模型                      | 故障隔离                     | 架构地位                       |
-| ------------------------- | ---------------------------- | ------------------------------ |
-| 同进程 + bounded Executor | 无进程级隔离                 | 当前实现拓扑                   |
-| 单 AgentCore Worker       | Host 与 AgentCore crash 隔离 | 已选择的正式方向，尚未实现     |
-| 每 active Session Worker  | Session 级隔离               | 只有单 Worker 证据不足时才评估 |
+| 模型                      | 故障隔离                       | 架构地位                           |
+| ------------------------- | ------------------------------ | ---------------------------------- |
+| 单 AgentCore 执行进程     | 窗口与 AgentCore crash 隔离    | 当前实现拓扑，所有构建默认         |
+| 同进程 + bounded Executor | 无进程级隔离                   | 只用于测试组装，产品不提供         |
+| 每 active Session Worker  | Session 级隔离                 | 只有单执行进程证据不足时才评估     |
 
-统一 Zig 和线程池不提供进程隔离；当前 AgentCore fatal 可以带走 Host 与全部进程内 Session。独立 fault-domain 证据支持单 AgentCore Worker 方向，但 spike IPC 不是产品协议，也不证明 Worker 已实现。正式 Worker 必须独立定义 versioned transport、capacity/backpressure、ownership、correlation、credential、disconnect、Run cause 与 shutdown；不得把当前 checkpoint recovery 误报为 in-flight Run 或 Worker crash recovery。证据状态见[验证规范](validation.md)。
-拆分后故障有两个方向，上表的隔离列只陈述 AgentCore 一侧。exec 侧 fatal 是该列要隔离的那一个；UI 侧 fatal 则留下一个仍在执行的 exec，而这是目前唯一有实测证据的形状。已选择的收口是保住对话而不保住 Run：exec 发现 UI 不可达后停止接纳新 Run、解除全部未决 UI 请求、终止在飞 Run、导出 checkpoint，再干净退出；该顺序不可重排；Task 仍然中断，但不丢上次 checkpoint 之后的增量。该收口只有在导出结果能被 Product owner 在下次启动按既有 admission 接纳时才成立——checkpoint 的 blob 与指向它的记录分属不同载体，记录的提交权属于 Product owner，exec 承担导出不使它取得持久化 authority，无人接纳的导出字节按 §3.7 只是待分类证据。保住 Run 的重新挂接，即 exec 不退、等待 UI 重启接管，是后续方向；它要求两样当前不存在的东西：exec 持有 UI 给出的 per-session/run 关联身份，以及 UI 启动时先向 exec 查活体清单再决定重新绑定，而不是按持久化中非终态即 interrupted 判定。今天 Product 的 Task 身份与 Agent Session 的 route 身份互相独立，route id 只在进程内分配且不持久化；唯一持久化的相关身份是 checkpoint 记录里由 AgentCore 指定的 logical session id，它只随 checkpoint 存在、不标识 Run，还会把 Task 身份反向绑到 AgentCore 指定的值上，因此不能充当该关联身份。两样要求都落在 Session 创建协议上，所以一期必须预留该关联身份字段，否则后续方向要重开协议。
+AgentCore 运行在窗口进程之外的单个执行进程里。执行进程是同一个可执行文件以 `--execution-host` 启动的实例，从不拥有窗口；Application 的执行进程 owner 在第一次有调用需要它时启动，应用退出时随链路结束。两侧经一条 versioned 链路交换：握手先核对产品 version、AgentCore manifest digest 与 ABI revision，任一不符即拒绝；消息按类别有上限、队列有字节上限，事件按 credit 背压，请求与回答按 correlation 配对。反方向的调用复用同一帧与 correlation 表：留在窗口一侧的能力——MCP 连接、OAuth 与凭据，Skill 来源 pin，文件交付登记，图像、视频生成的出站 HTTP、凭据读取与产物提交，MCP 安装——在执行进程里各有一个同接口的转发替身，由窗口在 worker 线程上执行原有实现。
+
+故障只有一种：执行进程不在了。崩溃、被结束，或超过 5 秒没有回应每秒一次的心跳，都按此处理：在飞 Run 记为 interrupted 且不进入 Conversation，空闲 Session 被放弃，下一条消息在新进程里从最新 checkpoint 恢复；窗口与其余 Task 不受影响。没有逐调用的局部失败语义，也没有逐调用超时。启动后很快退出的进程连续出现时，后续启动按退避推迟，不随每次调用重启。不得把 checkpoint 恢复误报为 in-flight Run 恢复。证据状态见[验证规范](validation.md)。
+
+拆分后故障有两个方向，上表的隔离列只陈述 AgentCore 一侧。执行进程一侧的 fatal 是该列要隔离的那一个；窗口一侧的 fatal 或退出使链路结束，而链路结束就是执行进程的关闭：它关闭所持的 Session 后退出，整条退出路径有一个总期限，到期直接结束进程。在飞 Run 随之中断，对话从下次启动时最新的 checkpoint 继续，上次 checkpoint 之后的增量随之丢失。曾选择的收口是保住对话而不保住 Run：执行进程发现窗口不可达后停止接纳新 Run、解除全部未决 UI 请求、终止在飞 Run、导出 checkpoint，再干净退出；该顺序不可重排；它尚未实现。该收口只有在导出结果能被 Product owner 在下次启动按既有 admission 接纳时才成立——checkpoint 的 blob 与指向它的记录分属不同载体，记录的提交权属于 Product owner，exec 承担导出不使它取得持久化 authority，无人接纳的导出字节按 §3.7 只是待分类证据。保住 Run 的重新挂接，即 exec 不退、等待 UI 重启接管，是后续方向；它要求两样当前不存在的东西：exec 持有 UI 给出的 per-session/run 关联身份，以及 UI 启动时先向 exec 查活体清单再决定重新绑定，而不是按持久化中非终态即 interrupted 判定。今天 Product 的 Task 身份与 Agent Session 的 route 身份互相独立，route id 只在进程内分配且不持久化；唯一持久化的相关身份是 checkpoint 记录里由 AgentCore 指定的 logical session id，它只随 checkpoint 存在、不标识 Run，还会把 Task 身份反向绑到 AgentCore 指定的值上，因此不能充当该关联身份。两样要求都落在 Session 创建协议上；链路不为它预留字段，走这个方向时随协议一起定义。
 
 未决的 UI 请求在拆分后不再与 UI 同生共死。单进程里对 UI 的 by-contract 无限等待随进程一同结束，因此无害；拆分后 UI 退出而 exec 存活时，同一个等待会永久占住一个 Core 回调线程连同其 Run。所以 UI 不可达时所有 parked 请求必须按 ABI 既有的 UI 不可用返回路径解除，该路径已经存在，不得为此给人类 decision wait 设置 deadline。解除必须先于终止在飞 Run：park 着的 Core 回调线程不解除，它持有的 Run 就到不了终态，上述导出也就无法进行，这正是该收口顺序不可重排的原因。
 
 跨界持有的引用计数属于同一类事实，方向相反而已。执行侧为一个 lease 持有的 pin 由调用方在请求过界之前取得、在该 lease 释放时放回；pin 的 retain/release 本身不过界，因为其合同要求「nonblocking 的引用计数」，而跨进程调用必然阻塞，且会让执行侧等在一个可能不可达的 UI 上。由此有两条与未决请求镜像的要求：执行侧不可达时，调用方必须释放它为那些 lease 所持的全部 pin，否则引用计数永不归零、被钉住的来源永久泄漏；调用方不可达时，执行侧必须把手中的 pin 视为已失效并终止对应 lease，不得穿过它继续读取被钉住的文件。重新挂接方向下则必须把这些请求重新投给新 UI，不得静默丢弃。
 
-进程级致命故障自身必须留下独立于 Product 持久化的事实，因为它发生时正常提交路径已经不再运行。该事实由故障所在进程在自己的故障处理路径上写出：一条预先分配的定长记录，带构建与 AgentCore artifact 身份、出事线程、故障地址及其所属模块区间和调用栈；一个标明进程内哪些 Run 正在执行的 breadcrumb 环，由持有 Run 的 worker 经 Application 定义的窄 capability 发布，使处理路径只复制内存而不读取 Product state；以及一对落在单实例租约上的启动/退出标记，使“上次退出不干净”成为事实而不是推断，并用 pid 与进程启动时间把记录配对回该次运行。处理路径只能使用异步信号安全的手段，不分配内存、不取锁、不走正常 I/O 与格式化，否则在真正的致命故障里写不出来；完整记录必须在走栈之前落盘，因为走栈本身在一个已经证明状态错误的进程里可能再次故障。记录只负责离线归因，即把故障地址归到 AgentCore 还是 MetaWork 自己的代码并保留当时在执行的 Run；它不解释产品语义，不代替 Product 对 Run 终态的判定，也不自带上报通道，面向用户的呈现属于产品级反馈机制。拆分后两半各自安装并写出自己的记录，记录标明由哪一半写出，因为被隔离的那一侧留下的记录正是要读的那一份。
+进程级致命故障自身必须留下独立于 Product 持久化的事实，因为它发生时正常提交路径已经不再运行。该事实由故障所在进程在自己的故障处理路径上写出：一条预先分配的定长记录，带构建与 AgentCore artifact 身份、出事线程、故障地址及其所属模块区间和调用栈；一个标明进程内哪些 Run 正在执行的 breadcrumb 环，由持有 Run 的 worker 经 Application 定义的窄 capability 发布，使处理路径只复制内存而不读取 Product state；以及一对落在单实例租约上的启动/退出标记，使“上次退出不干净”成为事实而不是推断，并用 pid 与进程启动时间把记录配对回该次运行。处理路径只能使用异步信号安全的手段，不分配内存、不取锁、不走正常 I/O 与格式化，否则在真正的致命故障里写不出来；完整记录必须在走栈之前落盘，因为走栈本身在一个已经证明状态错误的进程里可能再次故障。记录只负责离线归因，即把故障地址归到 AgentCore 还是 MetaWork 自己的代码并保留当时在执行的 Run；它不解释产品语义，不代替 Product 对 Run 终态的判定，也不自带上报通道，面向用户的呈现属于产品级反馈机制。两个进程各自安装并写出自己的记录，记录标明由哪一方写出，因为被隔离的那一侧留下的记录正是要读的那一份：窗口写 `faults/last-fault.bin`，执行进程写 `faults/last-execution-fault.bin`，由窗口把数据根传给它。窗口失去执行进程时按该进程的 pid 与启动时间读回它的记录，写出报告；被外部结束或没有派发故障的进程不留记录。
 
-模块归属上，为 Run 本身和 compaction 持有 Metask 凭据的执行侧同时拥有 Run 结束时的自动标题模型调用、自动审批的复核模型调用，以及图像、视频生成的出站 HTTP。这几项都已经持有执行所需凭据，移到 UI 侧只会让同一份凭据多出一个持有者——留在 UI 侧的那一项会使 UI 进程仅为一个用途而持有一份 Metask 凭据，并为它新增一个独立的续期点。复核还另有一条理由：它运行期间有一个 Core 回调线程处于未决等待，放在 UI 侧会使 UI 的存活成为 Run 继续推进的前提，而那正是本节要解除的耦合；自动审批的意义也正是不需要人，所以这些请求必须在 UI 根本不存在时也能被回答。复核的输入含工具参数与用户历史，脱敏必须在过界之前、由持有该数据的 Product 一侧完成；执行侧跑模型而 Product 提交复核结果，permission 仍是 §6 所定的 Product 与 Agent 协作的安全事实。进程级致命故障的事实来源是上述记录，不是 Run 行上新增的终止原因值；Run 行只需与记录中的 Task 与 Run 标识可关联。
+模块归属上，执行进程持有 Run 本身和 compaction 所需的模型凭据，随 Session 的打开与续期传入。Run 结束时的自动标题和自动审批的复核是 Product 的独立 Completion 调用，留在窗口进程；图像、视频生成的出站 HTTP、凭据读取与产物提交也留在窗口，执行进程经反向调用到达它们，所以媒体凭据只在窗口一侧续期。窗口一侧的 fatal 本来就结束执行进程，因此这些调用放在窗口不会让窗口的存活成为一个本可继续的 Run 的前提。复核的输入含工具参数与用户历史，脱敏由持有该数据的 Product 一侧完成；permission 仍是 §6 所定的 Product 与 Agent 协作的安全事实。进程级致命故障的事实来源是上述记录，不是 Run 行上新增的终止原因值；Run 行只需与记录中的 Task 与 Run 标识可关联。
 
 ## 6. 安全边界
 

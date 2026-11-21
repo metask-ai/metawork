@@ -257,7 +257,7 @@ New task Composer 汇总 Metask 与所有 Custom Provider 的 ready 模型，以
 - Host 或 AgentCore 进程退出时，当前同步 Run 标记 `interrupted`，不得伪装完成；
 - 崩溃后不得自动重放可能产生副作用的工具；
 - AgentCore checkpoint export/restore 已接入 Application 重启后的 Conversation 恢复；它不是 transcript 重放，不恢复 checkpoint 之后未完成的 Run，不自动重放工具、permission 或结果不确定的 mutation；
-- async pending、可恢复 suspend/resume、独立 AgentCore Worker crash recovery 和跨进程 in-flight Run 恢复仍属于后续 capability；
+- async pending、可恢复 suspend/resume 和执行进程崩溃后的 in-flight Run 恢复仍属于后续 capability；
 - 成本预算、轮数上限或工具循环熔断后，Task 进入等待用户状态，只有用户明确继续后才创建新 Run。
 
 ### 5.8 桌面能力
@@ -402,7 +402,7 @@ Automatic Workspace 或经原生 picker 授权的 Manual Workspace → Task（�
 → 工具结果 → 最终回复 → 取消/关闭 → Renderer reload 视图重建
 ```
 
-它不包含独立 AgentCore Worker crash recovery、in-flight Run 恢复、async suspend/resume、strict Workspace security 或用户自定义 Host tools。正常 Application 重启后的 finalized Conversation attachment 恢复按现有 checkpoint 合同独立提供，不扩大上述边界。
+它不包含执行进程崩溃后的 in-flight Run 恢复、async suspend/resume、strict Workspace security 或用户自定义 Host tools。正常 Application 重启后的 finalized Conversation attachment 恢复按现有 checkpoint 合同独立提供，不扩大上述边界。
 
 ### 7.2 Account 与 Custom Provider 集成 baseline
 
@@ -419,7 +419,7 @@ Metask C1 OAuth/login 的 authority、client、scope 与动态 loopback callback
 
 ### 7.3 Fault-domain 结论
 
-事件泵数据、生命周期压力测试和同进程/最小 Worker fault-domain spike 已完成。结论是选择单 AgentCore Worker 作为后续正式故障域；当前应用仍是同进程 prototype，正式 Worker、跨进程恢复和危险工具重放策略不属于当前交付。
+事件泵数据、生命周期压力测试和同进程/最小 Worker fault-domain spike 已完成。结论是选择单 AgentCore 执行进程作为正式故障域，它现在是所有构建的默认拓扑（见[高层架构](architecture.md#5-部署状态与故障域)）；跨进程 in-flight Run 恢复和危险工具重放策略不属于当前交付。
 
 ### 7.4 Windows baseline
 
@@ -427,7 +427,7 @@ Windows 支持 x86_64 与 arm64，统一使用 [AgentCore ABI 合同](agentcore-
 
 ### 7.5 后续产品能力
 
-`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查和明确成果交付记录的持久化、恢复与呈现已进入当前产品；成果文件检查、定位与另存按当前授权和实际字节校验开放；另存只在系统对话框选择目标，提交后按实际结果呈现。继续修改入口在检查后准备同 Task 普通草稿，由用户手动发送，不代表文档已修改；实际修改仍沿既有 Agent、权限与 Skill 路径验收。文档预览的完整安装与应用纵向及 XLSX 版面检查仍须完成其验收。async pending、更完整的跨重启 execution rebind、strict Workspace security、用户自定义 Host tools、plan progress/approval、custom UI、远程 artifact 发布、自动安装更新、独立 AgentCore Worker 和 Linux 接入均未进入当前产品，不能反向伪装成已具备。
+`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查和明确成果交付记录的持久化、恢复与呈现已进入当前产品；成果文件检查、定位与另存按当前授权和实际字节校验开放；另存只在系统对话框选择目标，提交后按实际结果呈现。继续修改入口在检查后准备同 Task 普通草稿，由用户手动发送，不代表文档已修改；实际修改仍沿既有 Agent、权限与 Skill 路径验收。文档预览的完整安装与应用纵向及 XLSX 版面检查仍须完成其验收。async pending、更完整的跨重启 execution rebind、strict Workspace security、用户自定义 Host tools、plan progress/approval、custom UI、远程 artifact 发布、自动安装更新和 Linux 接入均未进入当前产品，不能反向伪装成已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 

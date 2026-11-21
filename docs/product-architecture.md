@@ -438,7 +438,7 @@ Application 关闭 Product 路径时必须遵守以下顺序：
 1. 停止 Bridge ingress、新 Product admission、Schedule/MCP timer 与会产生新工作的 coordinator；
 2. 停止独立 execution lane，并在主线程 drain completion、重新授权、脱敏且 settle responder 恰好一次；
 3. 取消 queued/running Product jobs，join Executor，并等待 Task access、worker reference 与 aggregate completion quiescent；
-4. 停止 Product 对 Agent 的新调用，再由 Agent 执行其完整 Runtime shutdown；
+4. 停止 Product 对 Agent 的新调用，再结束与执行进程的链路：执行进程据此执行完整的 Agent Runtime shutdown 后退出，宿主的宽限期限界住不退出的进程；
 5. 完成最终 event drain 与 lifecycle sync，才释放残留 attachment、execution authority、aggregate 和 Product Control；
 6. Models 停止新管理命令，cancel/join Metask catalog与模型测试 worker并释放 credential vault port；Account committed shutdown effect取消自身 timer、join attempt worker并清空 Account 平台 port；随后 Application 才释放两个彼此独立的平台 binding。
 

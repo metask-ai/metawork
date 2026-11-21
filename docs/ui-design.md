@@ -512,7 +512,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 6.4 跨重启 Conversation 恢复与 execution rebind
 
-> Capability：**已接通**。Product 可以从最新 finalized checkpoint 恢复原 Conversation attachment；这只覆盖正常 Application 重启，不代表独立 AgentCore Worker crash、in-flight Run 或 suspend/resume 已可恢复。显式模型意图与执行 rebind 遵守 [Product 合同](product-architecture.md#22-workspace-与-task-admission)。
+> Capability：**已接通**。Product 可以从最新 finalized checkpoint 恢复原 Conversation attachment；这覆盖正常 Application 重启和执行进程丢失后的下一条消息，不代表 in-flight Run 或 suspend/resume 已可恢复。显式模型意图与执行 rebind 遵守 [Product 合同](product-architecture.md#22-workspace-与-task-admission)。
 
 当前恢复规则：
 
