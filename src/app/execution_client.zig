@@ -242,12 +242,17 @@ pub const Owner = struct {
         return loss;
     }
 
-    /// The process currently running, if there is one. For tests and logs.
-    pub fn currentProcessId(self: *Owner) ?std.process.Child.Id {
+    /// The process currently running, by the number of the start that made
+    /// it, if there is one. Unique for this Owner's lifetime, which an OS
+    /// process id or handle is not: Windows hands a new process the handle
+    /// value of one just closed, so two processes in a row can share one.
+    /// For tests and logs.
+    pub fn currentProcess(self: *Owner) ?u32 {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const generation = self.current orelse return null;
-        return generation.host.child.id;
+        if (generation.lost.load(.acquire)) return null;
+        return generation.number;
     }
 
     /// Frees every dead process's bookkeeping that nothing refers to any
@@ -2599,6 +2604,15 @@ const control_vtable: port.RunControl.VTable = .{
 pub const TestSupport = struct {
     /// Ends the running execution process the way a crash would: the UI
     /// half learns it from the end of the stream.
+    /// The current process's OS handle (Windows) or pid (POSIX), for a test
+    /// that acts on the process itself. Not an identity: see `currentProcess`.
+    pub fn currentChild(owner: *Owner) ?std.process.Child.Id {
+        owner.mutex.lockUncancelable(owner.io);
+        defer owner.mutex.unlock(owner.io);
+        const generation = owner.current orelse return null;
+        return generation.host.child.id;
+    }
+
     pub fn killCurrent(owner: *Owner) void {
         owner.mutex.lockUncancelable(owner.io);
         defer owner.mutex.unlock(owner.io);

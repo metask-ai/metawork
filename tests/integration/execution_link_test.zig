@@ -421,7 +421,7 @@ test "a Run crosses into the execution process and its events arrive ahead of it
         defer control.deinit();
         const task_id = try createRunningTask(&control, "Say something short");
         try waitSnapshot(&control, &owner, "\"terminal\":{\"outcome\":\"completed\"");
-        try std.testing.expect(owner.currentProcessId() != null);
+        try std.testing.expect(owner.currentProcess() != null);
         const task = control.testTask(task_id).?;
         const run = task.durable.runs[0].?;
         try std.testing.expect(run.event_projection_failure == null);
@@ -456,7 +456,7 @@ test "a process killed under a running Task leaves Product up and the cut Run in
         const cut = task.durable.runs[0].?;
         try std.testing.expect(cut.event_projection_failure != null);
         try std.testing.expect(cut.coverage == .excluded);
-        try std.testing.expect(owner.currentProcessId() == null);
+        try std.testing.expect(owner.currentProcess() == null);
 
         // The next Task's Session lives in a new process, numbered above
         // every id the dead one handed out.
@@ -466,7 +466,7 @@ test "a process killed under a running Task leaves Product up and the cut Run in
         );
         _ = try lifecycle.runPreparedTask(&control, second, .{ .text = "Say something short" });
         try waitSnapshot(&control, &owner, "\"terminal\":{\"outcome\":\"completed\"");
-        try std.testing.expect(owner.currentProcessId() != null);
+        try std.testing.expect(owner.currentProcess() != null);
         try std.testing.expect(control.testTask(second).?.runtime.routeId() > execution_client.generation_span);
     }
 }
@@ -596,7 +596,7 @@ test "a Task idle when its process dies is given up, and its next message starts
             try turn(&control, &owner);
             try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
         }
-        const first = owner.currentProcessId().?;
+        const first = owner.currentProcess().?;
         execution_client.TestSupport.killCurrent(&owner);
         // Nothing of this Task's was running, so only the loss the main loop
         // reports can hand it to the close that detaches it.
@@ -609,7 +609,9 @@ test "a Task idle when its process dies is given up, and its next message starts
         var waited: u64 = 0;
         while (waited < wait_limit_ms) : (waited += wait_tick_ms) {
             try turn(&control, &owner);
-            if (owner.currentProcessId()) |id| if (id != first) break;
+            // By start number: the new process's OS handle can be the very
+            // value the dead one's had, which made this wait run out.
+            if (owner.currentProcess()) |number| if (number != first) break;
             try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
         } else {
             const task = control.testTask(task_id).?;
@@ -742,15 +744,15 @@ test "a process that stops answering is given up within the deadline, and a call
         defer control.deinit();
         const task_id = try createRunningTask(&control, "Say something short");
         try waitSnapshot(&control, &owner, "\"terminal\":{\"outcome\":\"completed\"");
-        const first = owner.currentProcessId() orelse return error.NoProcess;
+        const first = owner.currentProcess() orelse return error.NoProcess;
 
         // Answers for as long as it answers pings: well past the deadline,
         // the process is still the same one.
         try std.Io.sleep(io, .fromMilliseconds(@intCast(deadline_ms * 3)), .awake);
-        try std.testing.expectEqual(first, owner.currentProcessId().?);
+        try std.testing.expectEqual(first, owner.currentProcess().?);
         try std.testing.expect(owner.takeLoss() == null);
 
-        try suspendProcess(first);
+        try suspendProcess(execution_client.TestSupport.currentChild(&owner) orelse return error.NoProcess);
         // A call on the UI's own thread, as Product's projection makes on every
         // Task read. With the process stopped, nothing but the liveness check
         // can end this wait.
@@ -766,7 +768,7 @@ test "a process that stops answering is given up within the deadline, and a call
         // Given up exactly as a crash is: the process is ended, and its Task
         // detached for the next message to restore.
         try waitDetached(&control, &owner, task_id);
-        try std.testing.expect(owner.currentProcessId() == null);
+        try std.testing.expect(owner.currentProcess() == null);
     }
 }
 
@@ -1082,7 +1084,7 @@ test "a skill catalog stays in the execution process, and a Session bound with i
         // same catalog.
         const kept_borrow = port.borrowSkillRestoreInputs(kept).?;
         const reopened = try port.createSessionRoute(skillSessionOptions(root, kept_borrow.catalog, kept_borrow.policy.granted_skill_ids));
-        try std.testing.expect(owner.currentProcessId() != null);
+        try std.testing.expect(owner.currentProcess() != null);
         try std.testing.expect(reopened.session.skillPolicyMatches(acquisition.lease, .{ .granted_skill_ids = &grants }));
         try std.testing.expect(reopened.session.closeOutcome(.session_close) == .closed);
         try port.releaseClosedSession(reopened.session);
