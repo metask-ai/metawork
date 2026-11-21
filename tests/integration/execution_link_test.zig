@@ -924,3 +924,53 @@ test "an MCP server's transport stays in the UI half, and the execution process 
     }
     try std.testing.expect(recorder.destroyed);
 }
+
+test "a process that dies on every start is not started again on every ask" {
+    // Whatever asks for a process -- a catalog refresh after a loss, a
+    // schedule, a message -- asks the owner, so the bound has to be there.
+    // The caller here asks again as soon as it hears of a loss, which is the
+    // worst any of them does.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try startOwner(&owner, &wake, &.{ fixture, "--with-runtime", "--no-runtime" }, fixture_message_limits, null);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const port = owner.runtimePort();
+
+    const window_ms: i64 = 4_000;
+    const began = std.Io.Timestamp.now(io, .awake);
+    var asks: u32 = 0;
+    while (began.durationTo(.now(io, .awake)).toMilliseconds() < window_ms) : (asks += 1) {
+        if (port.createSessionRoute(.{
+            .task_id = 1,
+            .binding_epoch = 1,
+            .model_binding = .{
+                .target = .{
+                    .provider_id = "fixture-provider",
+                    .protocol = .anthropic_messages,
+                    .base_url = "",
+                    .model = "fixture-model",
+                },
+                .credential = "fixture-secret",
+            },
+            .permission_mode = .default,
+            .shell_policy = .disabled,
+            .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+            .canonical_user_home = root,
+            .workspace_epoch = "",
+        })) |_| return error.ProcessServed else |_| {}
+        _ = owner.takeLoss();
+        owner.sweep();
+        try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    }
+    // Three quick deaths, then a two-second hold, one more, then a
+    // four-second hold. Unheld, a start follows every ask.
+    try std.testing.expect(owner.started >= 3);
+    try std.testing.expect(owner.started <= 5);
+    try std.testing.expect(asks > 50);
+}

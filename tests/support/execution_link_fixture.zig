@@ -28,6 +28,8 @@
 //!   * `--hang-shutdown` -- the Runtime's shutdown never returns, so only the
 //!     exit deadline can end the process.
 //!   * `--session-id-floor=<n>` -- as the application passes it.
+//!   * `--no-runtime` -- the Agent Runtime cannot be created, so the process
+//!     ends right after agreeing on identity, every time it is started.
 //!   * `--exercise-mcp` -- before applying an MCP configuration, drive each
 //!     member's transport the way AgentCore drives a connector: open, an
 //!     exchange whose answer is echoed back, one carrying a secret, one its
@@ -53,6 +55,7 @@ pub const large_messages_flag = "--large-messages";
 pub const hang_shutdown_flag = "--hang-shutdown";
 pub const session_floor_flag = "--session-id-floor=";
 pub const exercise_mcp_flag = "--exercise-mcp";
+pub const no_runtime_flag = "--no-runtime";
 
 const Flags = struct {
     ignore_eof: bool = false,
@@ -64,6 +67,7 @@ const Flags = struct {
     large_messages: bool = false,
     hang_shutdown: bool = false,
     exercise_mcp: bool = false,
+    no_runtime: bool = false,
     session_id_floor: u64 = 0,
 };
 
@@ -81,6 +85,7 @@ fn readFlags(init: std.process.Init) Flags {
         if (std.mem.eql(u8, argument, large_messages_flag)) flags.large_messages = true;
         if (std.mem.eql(u8, argument, hang_shutdown_flag)) flags.hang_shutdown = true;
         if (std.mem.eql(u8, argument, exercise_mcp_flag)) flags.exercise_mcp = true;
+        if (std.mem.eql(u8, argument, no_runtime_flag)) flags.no_runtime = true;
         if (std.mem.startsWith(u8, argument, checkpoint_bytes_flag))
             flags.checkpoint_bytes = std.fmt.parseInt(usize, argument[checkpoint_bytes_flag.len..], 10) catch null;
         if (std.mem.startsWith(u8, argument, session_floor_flag))
@@ -116,6 +121,7 @@ const FakeRuntime = struct {
 
     fn create(context: ?*anyopaque, notifier: agent.EventReadyNotifier) ?execution_server.Runtime {
         const self: *FakeRuntime = @ptrCast(@alignCast(context.?));
+        if (self.flags.no_runtime) return null;
         if (self.flags.hold_runs and self.flags.session_id_floor == 0)
             lifecycle_fixture.fake_core.setNextPlan(.controlled_executing_tools);
         if (self.flags.text_events) {

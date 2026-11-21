@@ -129,6 +129,16 @@ pub const default_heartbeat_interval_ms: u64 = 1_000;
 /// that a UI thread waiting on a stopped process is released.
 pub const default_heartbeat_deadline_ms: u64 = 5_000;
 
+/// A process that ends within this of starting counts towards holding the
+/// next start back.
+const quick_loss_ms: i64 = 10_000;
+/// Quick losses in a row before starts are held back.
+const quick_losses_allowed: u32 = 3;
+/// How long the first hold lasts; each further quick loss doubles it, up to
+/// the cap.
+const start_hold_first_ms: i64 = 2_000;
+const start_hold_cap_ms: i64 = 60_000;
+
 /// Stack for a thread that performs a callback: an MCP exchange over stdio
 /// or HTTP, as an AgentCore tool thread performs it in process.
 const callback_stack_bytes: usize = 4 * 1024 * 1024;
@@ -179,6 +189,13 @@ pub const Owner = struct {
     current: ?*Generation = null,
     generations: std.ArrayList(*Generation) = .empty,
     started: u32 = 0,
+    /// Processes that ended soon after they started, in a row, and the time
+    /// before which no new one is started because of them. Whatever asks for
+    /// a process -- a catalog refresh after a loss, a schedule, an apply, a
+    /// message -- asks here, so this is where a process that dies on every
+    /// start stops being started on every ask.
+    quick_losses: u32 = 0,
+    starts_held_until_ms: i64 = 0,
     loss: ?RouteRange = null,
     shutting_down: bool = false,
     /// Every event the reader has put in the pump, for tests.
@@ -293,11 +310,22 @@ pub const Owner = struct {
             self.mutex.unlock(self.io);
             return generation;
         }
+        // Held back: the answer is the one a process that died would give.
+        if (now(self.io) < self.starts_held_until_ms) {
+            self.mutex.unlock(self.io);
+            return null;
+        }
         self.started += 1;
         const number = self.started;
         self.mutex.unlock(self.io);
 
-        const generation = Generation.start(self, number) orelse return null;
+        const generation = Generation.start(self, number) orelse {
+            // A process that never started is lost as soon as it is asked for.
+            self.mutex.lockUncancelable(self.io);
+            self.noteLossLocked(0);
+            self.mutex.unlock(self.io);
+            return null;
+        };
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.generations.append(self.allocator, generation) catch {
@@ -367,6 +395,22 @@ pub const Owner = struct {
         return generation;
     }
 
+    /// Counts a process that lived `lived_ms`, and holds the next start back
+    /// once enough of them in a row ended soon after starting. One that lived
+    /// longer clears the count: it was not dying at start.
+    fn noteLossLocked(self: *Owner, lived_ms: i64) void {
+        if (lived_ms >= quick_loss_ms) {
+            self.quick_losses = 0;
+            return;
+        }
+        self.quick_losses +|= 1;
+        if (self.quick_losses < quick_losses_allowed) return;
+        const doublings: u6 = @intCast(@min(self.quick_losses - quick_losses_allowed, 5));
+        const hold_ms = @min(start_hold_first_ms << doublings, start_hold_cap_ms);
+        self.starts_held_until_ms = now(self.io) + hold_ms;
+        std.log.warn("execution process ended soon after starting {d} times in a row; the next start waits {d} ms", .{ self.quick_losses, hold_ms });
+    }
+
     fn sendCreditLocked(self: *Owner, generation: *Generation, force: bool) void {
         _ = self;
         if (generation.lost.load(.acquire)) return;
@@ -418,6 +462,8 @@ const Generation = struct {
     watch_stop: std.Io.Event = .unset,
     /// When the process last answered a ping, on the awake clock.
     answered_ns: std.atomic.Value(i64) = .init(0),
+    /// When it started, on the same clock.
+    started_ms: i64 = 0,
 
     fn start(owner: *Owner, number: u32) ?*Generation {
         const self = owner.allocator.create(Generation) catch return null;
@@ -466,6 +512,7 @@ const Generation = struct {
             return null;
         }
         self.host.settle = .{ .context = self, .settle_fn = settleReader };
+        self.started_ms = now(owner.io);
         self.reader = std.Thread.spawn(
             .{ .stack_size = channel.io_thread_stack_bytes },
             readerMain,
@@ -509,6 +556,7 @@ const Generation = struct {
         owner.mutex.lockUncancelable(owner.io);
         if (owner.current == self) owner.current = null;
         if (!stopping) {
+            owner.noteLossLocked(now(owner.io) - self.started_ms);
             const range: RouteRange = .{ .first = self.floor, .end = self.floor + generation_span };
             owner.loss = if (owner.loss) |earlier| .{
                 .first = @min(earlier.first, range.first),
