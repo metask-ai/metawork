@@ -337,7 +337,10 @@ const product_limits: product_control.Limits = .{
 /// One turn of what the application's main loop does with the link.
 fn turn(control: *product_control.Runtime, owner: *execution_client.Owner) !void {
     try control.drainAgentEvents();
-    if (owner.takeLoss()) |range| control.abandonSessionsInRouteRange(range.first, range.end);
+    if (owner.takeLoss()) |range| {
+        control.abandonSessionsInRouteRange(range.first, range.end);
+        control.expireMcpCatalog();
+    }
     control.syncLifecycle();
     owner.sweep();
 }
@@ -699,4 +702,160 @@ test "an export's bytes reach the caller's sink on the caller's own thread" {
 
     try std.testing.expect(route.session.closeOutcome(.session_close) == .closed);
     try port.releaseClosedSession(route.session);
+}
+
+// ---------------------------------------------------------------------------
+// MCP over the link
+// ---------------------------------------------------------------------------
+
+/// The transport the UI half keeps: it records what reaches it.
+const RecordingTransport = struct {
+    mutex: std.Io.Mutex = .init,
+    opens: u32 = 0,
+    closes: u32 = 0,
+    notified: u32 = 0,
+    saw_cancellation: bool = false,
+    destroyed: bool = false,
+    messages: std.ArrayList([]u8) = .empty,
+
+    fn owner(self: *RecordingTransport) agent.McpTransportOwner {
+        return .init(.{
+            .context = self,
+            .open_fn = open,
+            .request_fn = request,
+            .tool_request_fn = request,
+            .notify_fn = notify,
+            .close_fn = close,
+        }, destroy);
+    }
+
+    fn deinit(self: *RecordingTransport) void {
+        for (self.messages.items) |message| allocator.free(message);
+        self.messages.deinit(allocator);
+    }
+
+    fn open(context: *anyopaque, _: agent.McpPurpose, _: agent.McpEra, _: u32) agent.McpOpenOutcome {
+        const self: *RecordingTransport = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.opens += 1;
+        return .{ .connection = context };
+    }
+
+    fn request(context: *anyopaque, body_allocator: std.mem.Allocator, bytes: []const u8, _: u32, cancellation: agent.McpCancellation) agent.McpExchangeOutcome {
+        const self: *RecordingTransport = @ptrCast(@alignCast(context));
+        {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            self.messages.append(allocator, allocator.dupe(u8, bytes) catch return .{ .failure = .fatal }) catch
+                return .{ .failure = .fatal };
+        }
+        if (std.mem.eql(u8, bytes, "withdrawn")) {
+            // Answers only once its caller has withdrawn it.
+            var waited: u64 = 0;
+            while (!cancellation.isCancelled()) : (waited += wait_tick_ms) {
+                if (waited >= wait_limit_ms) return .{ .failure = .timeout };
+                std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake) catch {};
+            }
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            self.saw_cancellation = true;
+            return .{ .failure = .cancelled };
+        }
+        const body = if (std.mem.eql(u8, bytes, "first")) "reply" else "ok";
+        return .{ .response = .{
+            .http_status = 0,
+            .body = body_allocator.dupe(u8, body) catch return .{ .failure = .fatal },
+        } };
+    }
+
+    fn notify(context: *anyopaque, bytes: []const u8, _: u32, _: agent.McpCancellation) ?agent.McpTransportFailure {
+        const self: *RecordingTransport = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (std.mem.eql(u8, bytes, "notified")) self.notified += 1;
+        return null;
+    }
+
+    fn close(context: *anyopaque) void {
+        const self: *RecordingTransport = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.closes += 1;
+    }
+
+    fn destroy(context: *anyopaque) void {
+        const self: *RecordingTransport = @ptrCast(@alignCast(context));
+        self.destroyed = true;
+    }
+
+    fn expectMessages(self: *RecordingTransport, expected: []const []const u8) !void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        try std.testing.expectEqual(expected.len, self.messages.items.len);
+        for (expected, self.messages.items) |want, got| try std.testing.expectEqualStrings(want, got);
+    }
+};
+
+/// One exercise as the fixture's execution half performs it, as this half
+/// records it. The secret-bearing exchange is not here: it never left this
+/// half's scan.
+const exercised = [_][]const u8{ "first", "echo:0:reply", "secret:fatal", "withdrawn", "withdrawn:cancelled" };
+
+test "an MCP server's transport stays in the UI half, and the execution process reaches it by calling back" {
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var recorder: RecordingTransport = .{};
+    defer recorder.deinit();
+    {
+        var wake: Wake = .{};
+        var owner: execution_client.Owner = undefined;
+        try startOwner(&owner, &wake, &.{ fixture, "--with-runtime", "--exercise-mcp" }, fixture_message_limits, null);
+        defer owner.deinit();
+        const port = owner.runtimePort();
+
+        var transport_owner = recorder.owner();
+        var additions = try agent.McpRuntimeInput.init(allocator, 1, &.{.{
+            .id = "fixture-server",
+            .transport_owner = &transport_owner,
+            .secrets = &.{"hunter2"},
+            .transport = .stdio,
+            .namespace = "fixture",
+            .client_name = "MetaWork",
+            .client_version = "1",
+            .timeout_ms = 1_000,
+            .configuration_fingerprint = @splat(1),
+            .allowed_tools = &.{"echo"},
+        }});
+        defer additions.deinit();
+        var membership = try port.prepareMcpMembership(1, &additions, &.{"fixture-server"});
+        defer membership.deinit();
+        try std.testing.expectEqual(agent.McpConfigurationApplyOutcome.applied, try port.applyMcpConfiguration(&membership));
+
+        try recorder.expectMessages(&exercised);
+        try std.testing.expectEqual(@as(u32, 1), recorder.opens);
+        try std.testing.expectEqual(@as(u32, 1), recorder.closes);
+        try std.testing.expectEqual(@as(u32, 1), recorder.notified);
+        try std.testing.expect(recorder.saw_cancellation);
+
+        // A new process is given the same servers, through the same
+        // transport, before anything else uses it.
+        execution_client.TestSupport.killCurrent(&owner);
+        var waited: u64 = 0;
+        while (owner.takeLoss() == null) : (waited += wait_tick_ms) {
+            if (waited >= wait_limit_ms) return error.LossNeverReported;
+            try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+        }
+        owner.sweep();
+        switch (try port.activateMcp()) {
+            .activated => |activation| activation.deinit(),
+            .empty, .unavailable => {},
+        }
+        try recorder.expectMessages(&(exercised ++ exercised));
+        try std.testing.expectEqual(@as(u32, 2), recorder.opens);
+        try std.testing.expectEqual(@as(u32, 2), recorder.closes);
+        // Still applied, so still held.
+        try std.testing.expect(!recorder.destroyed);
+    }
+    try std.testing.expect(recorder.destroyed);
 }

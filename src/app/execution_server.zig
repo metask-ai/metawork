@@ -26,6 +26,15 @@
 //! sends a Run's or compact's terminal only once every event of that Session
 //! is out, so the UI half receives the terminal after the events before it.
 //!
+//! ## Calling back
+//!
+//! What stays with the UI half -- an MCP server's transport, with its
+//! connection and credentials -- is reached by a callback: the same request
+//! frame and correlation table, the other way. The thread that needs the
+//! effect waits for its answer, as it would have waited for the effect in
+//! process. When the link is gone so is every answer, and the stand-in reports
+//! the failure the in-process effect reports for a peer that went away.
+//!
 //! ## Lifetime
 //!
 //! Nothing here is ever freed. When the link ends, a watchdog is armed, the
@@ -46,6 +55,9 @@ const rpc = agent_link.rpc;
 const shapes = agent_link.shapes;
 const payload = agent_link.payload;
 const channel = agent_link.channel;
+const mcp_catalog = contract.mcp.catalog;
+const mcp_runtime = contract.mcp.runtime;
+const mcp_connector = contract.mcp.connector;
 
 const Exit = execution_mode.Exit;
 
@@ -55,6 +67,15 @@ pub const call_stack_bytes: usize = 4 * 1024 * 1024;
 
 /// How long tidying up may take once the link has ended.
 pub const default_exit_deadline_ms: u64 = 3_000;
+
+/// How often a callback whose caller can withdraw it looks at whether it
+/// has. The answer itself wakes it at once; this only bounds how late a Stop
+/// reaches an MCP exchange in flight.
+pub const cancellation_poll_ms: i64 = 50;
+
+/// Callbacks waiting at once. Each waits on the thread that needs its answer,
+/// so this bounds those threads' concurrency, never the link.
+const callback_slots: usize = 64;
 
 /// Written once when the server takes the link. The acceptance checks look
 /// for it in the executable to tell whether a build contains this file.
@@ -112,10 +133,12 @@ fn serve(context: ?*anyopaque, link: execution_mode.Link) Exit {
         .io = link.io,
         .allocator = link.allocator,
         .outbound = undefined,
+        .callbacks = undefined,
         .registry = .{ .allocator = link.allocator, .io = link.io },
         .runtime = undefined,
         .event_delay_ms = options.event_delay_ms,
     };
+    self.callbacks.init(link.io, link.allocator, callback_slots) catch return .resource_unavailable;
     self.outbound.start(link.io, link.allocator, link.output, link.queue_limits) catch
         return .resource_unavailable;
     self.runtime = options.factory.create_fn(options.factory.context, .{
@@ -139,8 +162,10 @@ fn serve(context: ?*anyopaque, link: execution_mode.Link) Exit {
     const ended = inbound.run();
 
     // The link is over. From here every path ends the process, and the
-    // watchdog is what bounds the one that does not end by itself.
+    // watchdog is what bounds the one that does not end by itself. Nothing
+    // will answer a callback now, so none waits for one.
     armWatchdog(link.io, options.exit_deadline_ms);
+    self.callbacks.close();
     self.runtime.shutdown_fn(self.runtime.context);
     return switch (ended) {
         .peer_closed, .consumer_stopped => if (self.violated.load(.acquire)) .protocol_violation else .link_closed,
@@ -166,10 +191,18 @@ const Server = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     outbound: channel.Outbound,
+    /// The calls this half makes of the UI half.
+    callbacks: agent_link.pending.Table,
     registry: Registry,
     runtime: Runtime,
     violated: std.atomic.Value(bool) = .init(false),
     event_delay_ms: u64 = 0,
+
+    /// The transport each MCP server in the Runtime's applied configuration
+    /// reaches its server through, by server id. A member whose server and
+    /// transport are both here is the Runtime's already; any other is new.
+    mcp_mutex: std.Io.Mutex = .init,
+    mcp_members: std.StringHashMapUnmanaged(u64) = .empty,
 
     forward_mutex: std.Io.Mutex = .init,
     forward_condition: std.Io.Condition = .init,
@@ -213,8 +246,60 @@ const Entry = struct {
     /// control is the Session's control block plus the Run's identity, so
     /// one value serves every Run of the Session.
     control: ?contract.port.RunControl = null,
+    /// What a Run of this Session hands the Host an MCP installation
+    /// through, by calling back. Lives as long as the Session.
+    installation: Installation = undefined,
     uses: u32 = 0,
     removed: bool = false,
+};
+
+/// The MCP installation capability a Run is given, standing in for the
+/// Host's: a request goes to the UI half, which owns the capability.
+const Installation = struct {
+    server: *Server,
+    handle: u64,
+
+    fn input(self: *Installation, task_id: u64) contract.McpInstallationInput {
+        return .{
+            .context = self,
+            .allocator = self.server.allocator,
+            .task_id = task_id,
+            .try_put_fn = tryPut,
+            .wake_fn = wake,
+        };
+    }
+
+    fn tryPut(
+        context: *anyopaque,
+        task_id: u64,
+        run_id: u64,
+        generation: u64,
+        draft: contract.McpInstallationRequest,
+    ) contract.McpInstallationResult {
+        const self: *Installation = @ptrCast(@alignCast(context));
+        var answer = callBack(self.server, .mcp_install_put, self.handle, .{
+            .task_id = task_id,
+            .run_id = run_id,
+            .generation = generation,
+            .json = draft.json,
+        }, null) orelse return .unavailable;
+        defer answer.deinit();
+        // Submitted, the request is the Host's now, as its own copy; this
+        // one is released here, since the caller no longer holds it.
+        if (answer.value == .submitted) {
+            var sent = draft;
+            sent.deinit();
+        }
+        return answer.value;
+    }
+
+    fn wake(context: *anyopaque) void {
+        const self: *Installation = @ptrCast(@alignCast(context));
+        if (callBack(self.server, .mcp_install_wake, self.handle, .{}, null)) |answer| {
+            var value = answer;
+            value.deinit();
+        }
+    }
 };
 
 /// Every Session this half has opened.
@@ -229,7 +314,7 @@ const Registry = struct {
     entries: std.AutoHashMapUnmanaged(u64, *Entry) = .empty,
     next: u64 = 0,
 
-    fn add(self: *Registry, route_id: u64, session: contract.port.SessionPort) std.mem.Allocator.Error!u64 {
+    fn add(self: *Registry, half: *Server, route_id: u64, session: contract.port.SessionPort) std.mem.Allocator.Error!u64 {
         const entry = try self.allocator.create(Entry);
         errdefer self.allocator.destroy(entry);
         entry.* = .{ .route_id = route_id, .session = session };
@@ -237,6 +322,7 @@ const Registry = struct {
         defer self.mutex.unlock(self.io);
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
         self.next += 1;
+        entry.installation = .{ .server = half, .handle = self.next };
         self.entries.putAssumeCapacity(self.next, entry);
         return self.next;
     }
@@ -321,20 +407,34 @@ fn deliver(context: ?*anyopaque, kind: agent_link.Kind, correlation: u64, bytes:
             thread.detach();
             return .ok;
         },
+        .response => {
+            const owned = self.allocator.dupe(u8, bytes) catch self.fail(.resource_unavailable);
+            self.callbacks.deposit(correlation, owned);
+            return .ok;
+        },
         .control => {
             var arena_storage: [64]u8 = undefined;
             var fixed = std.heap.FixedBufferAllocator.init(&arena_storage);
-            const credit = payload.decodeExact(rpc.Credit, fixed.allocator(), bytes) catch {
+            const value = payload.decodeExact(rpc.Control, fixed.allocator(), bytes) catch {
                 self.violated.store(true, .release);
                 return .stop;
             };
-            self.forward_mutex.lockUncancelable(self.io);
-            // Totals only grow; an older frame arriving late changes nothing.
-            self.granted.count = @max(self.granted.count, credit.count);
-            self.granted.bytes = @max(self.granted.bytes, credit.bytes);
-            self.forward_signal = true;
-            self.forward_condition.signal(self.io);
-            self.forward_mutex.unlock(self.io);
+            switch (value) {
+                .credit => |credit| {
+                    self.forward_mutex.lockUncancelable(self.io);
+                    // Totals only grow; an older frame arriving late changes
+                    // nothing.
+                    self.granted.count = @max(self.granted.count, credit.count);
+                    self.granted.bytes = @max(self.granted.bytes, credit.bytes);
+                    self.forward_signal = true;
+                    self.forward_condition.signal(self.io);
+                    self.forward_mutex.unlock(self.io);
+                },
+                .cancel => {
+                    self.violated.store(true, .release);
+                    return .stop;
+                },
+            }
             return .ok;
         },
         else => {
@@ -428,15 +528,24 @@ fn answerRuntime(self: *Server, comptime method: rpc.Method, request: rpc.Reques
     const runtime = self.runtime.port;
     switch (method) {
         .create_session => {
-            const options = rpc.openOptionsFromWire(request) catch self.fail(.protocol_violation);
-            const route = runtime.createSessionRoute(options) catch |err| return replyError(self, err);
-            const id = self.registry.add(route.id, route.session) catch self.fail(.resource_unavailable);
+            var opened = rpc.openOptionsFromWire(request, self.allocator) catch |err| switch (err) {
+                error.OutOfMemory => self.fail(.resource_unavailable),
+                else => self.fail(.protocol_violation),
+            };
+            defer opened.deinit();
+            const route = runtime.createSessionRoute(opened.options) catch |err| return replyError(self, err);
+            const id = self.registry.add(self, route.id, route.session) catch self.fail(.resource_unavailable);
             return reply(self, method, rpc.SessionRoute{ .route_id = route.id, .handle = id });
         },
         .restore_session => {
             var source: MemorySource = .{ .bytes = request.source.bytes, .end = request.source.end };
+            var opened = rpc.openOptionsFromWire(request.session, self.allocator) catch |err| switch (err) {
+                error.OutOfMemory => self.fail(.resource_unavailable),
+                else => self.fail(.protocol_violation),
+            };
+            defer opened.deinit();
             const options: contract.surface.SessionRestoreOptions = .{
-                .session = rpc.openOptionsFromWire(request.session) catch self.fail(.protocol_violation),
+                .session = opened.options,
                 .checkpoint_limits = request.checkpoint_limits,
                 .source = source.source(),
                 .expectation = .{
@@ -448,14 +557,122 @@ fn answerRuntime(self: *Server, comptime method: rpc.Method, request: rpc.Reques
                 },
             };
             const route = runtime.restoreSessionRoute(options) catch |err| return replyError(self, err);
-            const id = self.registry.add(route.id, route.session) catch self.fail(.resource_unavailable);
+            const id = self.registry.add(self, route.id, route.session) catch self.fail(.resource_unavailable);
             return reply(self, method, rpc.SessionRestoreRoute{ .route_id = route.id, .handle = id, .report = route.report });
         },
         .request_run_termination => return reply(self, method, runtime.requestRunTermination(request.session_id, request.run_id, request.signal)),
         .restore_admission => return reply(self, method, runtime.restoreAdmission(request.releasing_route_id)),
+        .activate_mcp => {
+            const outcome = runtime.activateMcp() catch |err| return replyError(self, err);
+            return replyActivation(self, method, outcome, arena);
+        },
+        .create_mcp_admission_selection => {
+            const activation = mcp_catalog.activationFromWire(self.allocator, self.io, request.activation) catch
+                self.fail(.resource_unavailable);
+            defer activation.deinit();
+            const selection = runtime.createMcpAdmissionSelection(activation, request.allowlists) catch |err|
+                return replyError(self, err);
+            defer if (selection) |value| value.deinit();
+            const wire_selection = if (selection) |value|
+                mcp_catalog.selectionToWire(value, arena) catch self.fail(.resource_unavailable)
+            else
+                null;
+            return reply(self, method, wire_selection);
+        },
+        .prepare_mcp_restore_selection => {
+            const original = mcp_catalog.restoreSelectionFromWire(self.allocator, request.original) catch
+                self.fail(.resource_unavailable);
+            defer original.deinit();
+            const activation = mcp_catalog.activationFromWire(self.allocator, self.io, request.activation) catch
+                self.fail(.resource_unavailable);
+            defer activation.deinit();
+            const selection = runtime.prepareMcpRestoreSelection(original, activation, request.ceiling) catch |err|
+                return replyError(self, err);
+            defer selection.deinit();
+            return reply(self, method, mcp_catalog.selectionToWire(selection, arena) catch self.fail(.resource_unavailable));
+        },
+        .apply_mcp_configuration => return applyMcp(self, request, arena),
+        .probe_mcp => {
+            var input = standInMembership(self, request, true) catch |err| switch (err) {
+                error.OutOfMemory => self.fail(.resource_unavailable),
+                error.InvalidConfig => return replyError(self, error.McpConfigurationApplyFailed),
+            };
+            defer input.deinit();
+            const outcome = runtime.probeMcp(&input) catch |err| return replyError(self, err);
+            return replyActivation(self, method, outcome, arena);
+        },
         else => comptime unreachable,
     }
-    _ = arena;
+}
+
+fn replyActivation(
+    self: *Server,
+    comptime method: rpc.Method,
+    outcome: contract.surface.McpActivationOutcome,
+    arena: std.mem.Allocator,
+) []u8 {
+    defer if (outcome == .activated) outcome.activated.deinit();
+    const value = rpc.activationOutcomeToWire(outcome, arena) catch self.fail(.resource_unavailable);
+    return reply(self, method, value);
+}
+
+/// An input whose members reach their servers through the UI half. With
+/// `all`, every member is new; otherwise only those the Runtime's applied
+/// configuration does not already hold with the same transport.
+fn standInMembership(self: *Server, request: rpc.McpMembership, all: bool) (std.mem.Allocator.Error || mcp_runtime.Error)!mcp_runtime.Input {
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var inputs: std.ArrayList(mcp_runtime.ServerInput) = .empty;
+    var owners: std.ArrayList(*mcp_connector.TransportOwner) = .empty;
+    errdefer for (owners.items) |owner| owner.deinit();
+    for (request.members) |member| {
+        if (!all) {
+            self.mcp_mutex.lockUncancelable(self.io);
+            const held = self.mcp_members.get(member.descriptor.id);
+            self.mcp_mutex.unlock(self.io);
+            if (held == member.transport) continue;
+        }
+        const owner = try arena.create(mcp_connector.TransportOwner);
+        owner.* = try RemoteTransport.create(self, member.transport);
+        try owners.append(arena, owner);
+        try inputs.append(arena, member.descriptor.input(owner));
+    }
+    // Input construction takes every owner or none.
+    const input = try mcp_runtime.Input.init(self.allocator, request.generation, inputs.items);
+    owners.clearRetainingCapacity();
+    return input;
+}
+
+fn applyMcp(self: *Server, request: rpc.McpMembership, arena: std.mem.Allocator) []u8 {
+    const runtime = self.runtime.port;
+    var additions = standInMembership(self, request, false) catch |err| switch (err) {
+        error.OutOfMemory => self.fail(.resource_unavailable),
+        error.InvalidConfig => return replyError(self, error.McpConfigurationApplyFailed),
+    };
+    defer additions.deinit();
+    const ids = arena.alloc([]const u8, request.members.len) catch self.fail(.resource_unavailable);
+    for (request.members, ids) |member, *id| id.* = member.descriptor.id;
+    var input = runtime.prepareMcpMembership(request.generation, &additions, ids) catch |err|
+        return replyError(self, err);
+    defer input.deinit();
+    const outcome = runtime.applyMcpConfiguration(&input) catch |err| return replyError(self, err);
+    if (outcome == .applied) {
+        // What the Runtime now holds, by server.
+        var next: std.StringHashMapUnmanaged(u64) = .empty;
+        for (request.members) |member| {
+            const id = self.allocator.dupe(u8, member.descriptor.id) catch self.fail(.resource_unavailable);
+            next.put(self.allocator, id, member.transport) catch self.fail(.resource_unavailable);
+        }
+        self.mcp_mutex.lockUncancelable(self.io);
+        var previous = self.mcp_members;
+        self.mcp_members = next;
+        self.mcp_mutex.unlock(self.io);
+        var keys = previous.keyIterator();
+        while (keys.next()) |key| self.allocator.free(key.*);
+        previous.deinit(self.allocator);
+    }
+    return reply(self, .apply_mcp_configuration, outcome);
 }
 
 fn answerSession(
@@ -487,7 +704,10 @@ fn answerSession(
         .rewind_to_user_message => reply(self, method, session.rewindToUserMessage(request.position)),
         .update_credential => reply(self, method, session.updateCredential(request.credential)),
         .request_termination => reply(self, method, session.requestTermination(request.run_id, request.signal)),
-        .prepare_run => reply(self, method, session.prepareRun(request.input)),
+        .prepare_run => reply(self, method, if (request.mcp_installation) |installation|
+            session.prepareRunWithTools(request.input, null, null, entry.installation.input(installation.task_id), null)
+        else
+            session.prepareRun(request.input)),
         .cancel_prepared_run => reply(self, method, session.cancelPreparedRun(request.run_id)),
         .prepare_compact => reply(self, method, session.prepareCompact()),
         .cancel_prepared_compact => reply(self, method, session.cancelPreparedCompact(request.operation_id)),
@@ -496,6 +716,18 @@ fn answerSession(
         .fail_ui_request_identity_contract => reply(self, method, session.failUiRequestIdentityContract(request.run_id)),
         .pending_ui_observation => reply(self, method, session.pendingUiObservation()),
         .permission_stop_request => reply(self, method, session.permissionStopRequest()),
+        .capture_restore_inputs => captured: {
+            var inputs = session.captureRestoreInputs() catch |err| break :captured replyError(self, err);
+            defer inputs.release() catch {};
+            // No skill catalog crosses, so no Session here has one to capture.
+            if (inputs.skill != null) self.fail(.protocol_violation);
+            break :captured reply(self, method, rpc.RestoreInputs{
+                .mcp = if (inputs.mcp) |value| mcp_catalog.restoreSelectionToWire(value) else null,
+                .permission_mode = inputs.permission_mode,
+                .shell_policy = inputs.shell_policy,
+                .permission_interaction = inputs.permission_interaction,
+            });
+        },
         .copy_pending_ui_request => copied: {
             const value = session.copyPendingUiRequest(arena) catch |err|
                 break :copied replyError(self, err);
@@ -576,7 +808,16 @@ fn answerSession(
                 request.signal,
             ));
         },
-        .create_session, .restore_session, .request_run_termination, .restore_admission => comptime unreachable,
+        .create_session,
+        .restore_session,
+        .request_run_termination,
+        .restore_admission,
+        .activate_mcp,
+        .create_mcp_admission_selection,
+        .prepare_mcp_restore_selection,
+        .apply_mcp_configuration,
+        .probe_mcp,
+        => comptime unreachable,
     };
 }
 
@@ -625,6 +866,211 @@ const MemorySource = struct {
             return .{ .bytes = count };
         }
         return self.end;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Calling back
+// ---------------------------------------------------------------------------
+
+/// Never waits: a control frame that does not fit now is one the UI half
+/// asks for again.
+fn sendControl(self: *Server, value: rpc.Control) void {
+    var bytes: [32]u8 = undefined;
+    const written = payload.encode(rpc.Control, value, &bytes);
+    _ = self.outbound.trySubmit(.control, 0, bytes[0..written]) catch {};
+}
+
+fn CallbackReply(comptime callback: rpc.Callback) type {
+    return struct {
+        arena: std.heap.ArenaAllocator,
+        bytes: []u8,
+        value: rpc.Response(callback),
+        allocator: std.mem.Allocator,
+
+        fn deinit(self: *@This()) void {
+            self.arena.deinit();
+            std.crypto.secureZero(u8, self.bytes);
+            self.allocator.free(self.bytes);
+        }
+    };
+}
+
+/// Tells the UI half once that the callback it is serving is no longer
+/// wanted, when the thread waiting for it is told so by its own caller.
+const Withdrawal = struct {
+    server: *Server,
+    correlation: u64,
+    cancellation: mcp_connector.Cancellation,
+
+    fn poll(context: ?*anyopaque) bool {
+        const self: *Withdrawal = @ptrCast(@alignCast(context.?));
+        if (!self.cancellation.isCancelled()) return false;
+        sendControl(self.server, .{ .cancel = self.correlation });
+        return true;
+    }
+};
+
+/// One callback, answered, or `null` when the link is gone.
+fn callBack(
+    self: *Server,
+    comptime callback: rpc.Callback,
+    handle: u64,
+    request: rpc.Request(callback),
+    cancellation: ?mcp_connector.Cancellation,
+) ?CallbackReply(callback) {
+    const bytes = rpc.encodeRequest(callback, self.allocator, handle, request) catch self.fail(.resource_unavailable);
+    defer {
+        std.crypto.secureZero(u8, bytes);
+        self.allocator.free(bytes);
+    }
+    const correlation = self.callbacks.openWaiting() catch return null;
+    const submitted = self.outbound.submitWaiting(.request, correlation, bytes) catch self.fail(.resource_unavailable);
+    if (submitted != .queued) {
+        self.callbacks.discardUnsent(correlation);
+        return null;
+    }
+    var withdrawal: Withdrawal = undefined;
+    const claimed = if (cancellation) |value| watched: {
+        withdrawal = .{ .server = self, .correlation = correlation, .cancellation = value };
+        break :watched self.callbacks.claimWatching(correlation, .fromMilliseconds(cancellation_poll_ms), .{
+            .context = &withdrawal,
+            .poll_fn = Withdrawal.poll,
+        });
+    } else self.callbacks.claim(correlation);
+    const response = switch (claimed) {
+        .link_closed => return null,
+        .response => |value| value,
+    };
+    var result: CallbackReply(callback) = .{
+        .arena = .init(self.allocator),
+        .bytes = response,
+        .value = undefined,
+        .allocator = self.allocator,
+    };
+    const answer = rpc.decodeResponse(callback, result.arena.allocator(), response) catch self.fail(.protocol_violation);
+    result.value = switch (answer) {
+        .ok => |value| value,
+        // The UI half answers callbacks with data, never with an error.
+        .err => self.fail(.protocol_violation),
+    };
+    return result;
+}
+
+/// An MCP transport whose exchanges the UI half performs, on the transport it
+/// kept. AgentCore's connector drives this exactly as it drives the concrete
+/// one; the UI half applies the secret scan, because that is where the
+/// secrets are.
+const RemoteTransport = struct {
+    server: *Server,
+    id: u64,
+
+    const Connection = struct {
+        transport: *RemoteTransport,
+        id: u64,
+    };
+
+    fn create(half: *Server, id: u64) std.mem.Allocator.Error!mcp_connector.TransportOwner {
+        const self = try half.allocator.create(RemoteTransport);
+        self.* = .{ .server = half, .id = id };
+        return .init(.{
+            .context = self,
+            .open_fn = open,
+            .request_fn = request,
+            .tool_request_fn = toolRequest,
+            .notify_fn = notify,
+            .close_fn = close,
+        }, deinit);
+    }
+
+    fn open(context: *anyopaque, purpose: mcp_connector.Purpose, era: mcp_connector.Era, timeout_ms: u32) mcp_connector.OpenOutcome {
+        const self: *RemoteTransport = @ptrCast(@alignCast(context));
+        var answer = callBack(self.server, .mcp_open, self.id, .{
+            .purpose = purpose,
+            .era = era,
+            .timeout_ms = timeout_ms,
+        }, null) orelse return .{ .failure = .child_exit };
+        defer answer.deinit();
+        return switch (answer.value) {
+            .failure => |failure| .{ .failure = failure },
+            .connection => |id| connection: {
+                const connection = self.server.allocator.create(Connection) catch {
+                    closeRemote(self.server, id);
+                    break :connection .{ .failure = .fatal };
+                };
+                connection.* = .{ .transport = self, .id = id };
+                break :connection .{ .connection = connection };
+            },
+        };
+    }
+
+    fn exchange(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+        timeout_ms: u32,
+        cancellation: mcp_connector.Cancellation,
+        tool: bool,
+    ) mcp_connector.ExchangeOutcome {
+        const connection: *Connection = @ptrCast(@alignCast(context));
+        var answer = callBack(connection.transport.server, .mcp_request, connection.id, .{
+            .bytes = bytes,
+            .timeout_ms = timeout_ms,
+            .tool = tool,
+        }, cancellation) orelse return .{ .failure = .child_exit };
+        defer answer.deinit();
+        return switch (answer.value) {
+            .failure => |failure| .{ .failure = failure },
+            .response => |response| .{ .response = .{
+                .http_status = response.http_status,
+                .body = if (response.body.len == 0)
+                    &.{}
+                else
+                    allocator.dupe(u8, response.body) catch return .{ .failure = .fatal },
+            } },
+        };
+    }
+
+    fn request(context: *anyopaque, allocator: std.mem.Allocator, bytes: []const u8, timeout_ms: u32, cancellation: mcp_connector.Cancellation) mcp_connector.ExchangeOutcome {
+        return exchange(context, allocator, bytes, timeout_ms, cancellation, false);
+    }
+
+    fn toolRequest(context: *anyopaque, allocator: std.mem.Allocator, bytes: []const u8, timeout_ms: u32, cancellation: mcp_connector.Cancellation) mcp_connector.ExchangeOutcome {
+        return exchange(context, allocator, bytes, timeout_ms, cancellation, true);
+    }
+
+    fn notify(context: *anyopaque, bytes: []const u8, timeout_ms: u32, cancellation: mcp_connector.Cancellation) ?mcp_connector.Failure {
+        const connection: *Connection = @ptrCast(@alignCast(context));
+        var answer = callBack(connection.transport.server, .mcp_notify, connection.id, .{
+            .bytes = bytes,
+            .timeout_ms = timeout_ms,
+        }, cancellation) orelse return .child_exit;
+        defer answer.deinit();
+        return answer.value;
+    }
+
+    fn close(context: *anyopaque) void {
+        const connection: *Connection = @ptrCast(@alignCast(context));
+        const half = connection.transport.server;
+        closeRemote(half, connection.id);
+        half.allocator.destroy(connection);
+    }
+
+    fn closeRemote(half: *Server, id: u64) void {
+        if (callBack(half, .mcp_close, id, .{}, null)) |answer| {
+            var value = answer;
+            value.deinit();
+        }
+    }
+
+    fn deinit(context: *anyopaque) void {
+        const self: *RemoteTransport = @ptrCast(@alignCast(context));
+        const half = self.server;
+        if (callBack(half, .mcp_release, self.id, .{}, null)) |answer| {
+            var value = answer;
+            value.deinit();
+        }
+        half.allocator.destroy(self);
     }
 };
 
@@ -750,7 +1196,7 @@ test "an entry removed while a call is inside it lives until that call is done" 
         registry.entries.deinit(allocator);
     }
     const session: contract.port.SessionPort = .{ .context = null, .vtable = undefined };
-    const handle = try registry.add(7, session);
+    const handle = try registry.add(undefined, 7, session);
     const entry = registry.acquire(handle).?;
     registry.remove(handle);
     // Gone from the map, so no new call can reach it ...
@@ -766,9 +1212,9 @@ test "handles are issued once and never reused" {
     var registry: Registry = .{ .allocator = allocator, .io = std.testing.io };
     defer registry.entries.deinit(allocator);
     const session: contract.port.SessionPort = .{ .context = null, .vtable = undefined };
-    const first = try registry.add(1, session);
+    const first = try registry.add(undefined, 1, session);
     registry.remove(first);
-    const second = try registry.add(2, session);
+    const second = try registry.add(undefined, 2, session);
     try std.testing.expect(second != first);
     registry.remove(second);
 }
@@ -827,6 +1273,7 @@ fn testServer(self: *Server, fake: *FakeEvents, file: std.Io.File) !void {
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .outbound = undefined,
+        .callbacks = undefined,
         .registry = .{ .allocator = std.testing.allocator, .io = std.testing.io },
         .runtime = .{
             .port = .{ .context = fake, .vtable = &FakeEvents.vtable },

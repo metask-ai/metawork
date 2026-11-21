@@ -99,6 +99,14 @@ pub const ImageGenerationReceipt = image_generation.Receipt;
 pub const ImageGenerationRunInput = surface.ImageGenerationRunInput;
 pub const InputCounts = control.InputCounts;
 pub const InputPart = multimodal.InputPart;
+/// The MCP owners the execution link stands in for across a process
+/// boundary, named here so the link, which imports only this module, reaches
+/// them without the AgentCore archive.
+pub const mcp = struct {
+    pub const catalog = mcp_catalog;
+    pub const runtime = mcp_runtime;
+    pub const connector = mcp_connector;
+};
 pub const McpActivation = mcp_catalog.Activation;
 pub const McpActivationOutcome = surface.McpActivationOutcome;
 pub const McpActivationTool = mcp_catalog.ActivationTool;

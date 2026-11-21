@@ -273,10 +273,16 @@ const App = struct {
             0,
         ) else null;
         self.agent_runtime = agent_runtime;
-        if (agent_runtime) |runtime| {
-            self.mcp_budget = try mcp_platform.CatalogBudget.init(std.heap.c_allocator, self.io, runtime.runtimePort());
-            mcp_host_environment.catalog_budget = self.mcp_budget;
-        }
+        // The one Runtime port everything below drives: this process's own
+        // Runtime, or the execution process's through the link.
+        const agent_port: agent.RuntimePort = if (agent_runtime) |runtime|
+            runtime.runtimePort()
+        else if (comptime execution_link_switch_compiled)
+            self.execution.?.runtimePort()
+        else
+            unreachable;
+        self.mcp_budget = try mcp_platform.CatalogBudget.init(std.heap.c_allocator, self.io, agent_port);
+        mcp_host_environment.catalog_budget = self.mcp_budget;
         self.mcp_authorizations = .{ .allocator = std.heap.c_allocator };
         // Startup preparation may transiently own resolved credential bytes.
         // The empty Runtime cannot consume them, and Product Control must never
@@ -294,10 +300,7 @@ const App = struct {
             .model_test = custom_provider_capability_available,
         };
         if (self.mcp_budget) |budget| configuration.mcp_catalog = budget.catalog();
-        // MCP is composed around an in-process Runtime and does not cross the
-        // link, so the development switch leaves it out; Product already runs
-        // without one.
-        if (agent_runtime != null) configuration.mcp = .{
+        configuration.mcp = .{
             .preparation = &preparation,
             .activation = null,
             .activation_failed = false,
@@ -320,12 +323,7 @@ const App = struct {
         control_storage.* = try product_control.Runtime.init(
             std.heap.c_allocator,
             self.io,
-            if (agent_runtime) |runtime|
-                runtime.runtimePort()
-            else if (comptime execution_link_switch_compiled)
-                self.execution.?.runtimePort()
-            else
-                unreachable,
+            agent_port,
             .{
                 .worker_count = host_worker_count,
                 .queue_capacity = 8,
@@ -337,8 +335,7 @@ const App = struct {
             },
             configuration,
         );
-        // Product took the preparation only if MCP was composed.
-        if (agent_runtime != null) preparation_owned = false;
+        preparation_owned = false;
         if (configuration.mcp.management != null) runtime_manifest_owned = false;
         self.control = control_storage;
         self.control_initialized = true;
@@ -347,25 +344,23 @@ const App = struct {
         self.history_restore_owner = null;
 
         try self.platform.installScheduleHost(control_storage.scheduleHost());
-        if (agent_runtime) |runtime| {
-            self.mcp_management = mcp_management_coordinator.Coordinator.init(
-                std.heap.c_allocator,
-                self.io,
-                control_storage.mcpManagementPort(),
-                runtime.runtimePort(),
-                &self.mcp_credential_store.?,
-                &self.mcp_authorizations.?,
-                mcp_management_host,
-                mcp_host_environment,
-            );
-            (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).attachMcpManagementHost(
-                mcp_bridge_adapter.host(&self.mcp_management.?),
-            );
-            // Initial MCP connection and catalog discovery use the same complete
-            // declarative apply transaction as later Desired mutations. No
-            // external MCP effect remains on the Application readiness path.
-            _ = self.mcp_management.?.applyConfiguration(.automatic) catch {};
-        }
+        self.mcp_management = mcp_management_coordinator.Coordinator.init(
+            std.heap.c_allocator,
+            self.io,
+            control_storage.mcpManagementPort(),
+            agent_port,
+            &self.mcp_credential_store.?,
+            &self.mcp_authorizations.?,
+            mcp_management_host,
+            mcp_host_environment,
+        );
+        (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).attachMcpManagementHost(
+            mcp_bridge_adapter.host(&self.mcp_management.?),
+        );
+        // Initial MCP connection and catalog discovery use the same complete
+        // declarative apply transaction as later Desired mutations. No
+        // external MCP effect remains on the Application readiness path.
+        _ = self.mcp_management.?.applyConfiguration(.automatic) catch {};
         self.mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(
             std.heap.c_allocator,
             self.io,
@@ -672,7 +667,10 @@ const App = struct {
         // After the drain, so whatever a dead process sent is applied before
         // its Sessions are given up.
         if (comptime execution_link_switch_compiled) if (self.execution) |owner| {
-            if (owner.takeLoss()) |range| control.abandonSessionsInRouteRange(range.first, range.end);
+            if (owner.takeLoss()) |range| {
+                control.abandonSessionsInRouteRange(range.first, range.end);
+                control.expireMcpCatalog();
+            }
             owner.sweep();
         };
     }
@@ -879,7 +877,7 @@ pub fn run(init: std.process.Init) !void {
         app.execution = owner;
         std.log.warn(
             "development switch " ++ execution_link_switch ++ ": AgentCore runs in a separate process; " ++
-                "skills, MCP, file delivery, MCP installation, image and video generation are not offered",
+                "skills, file delivery, MCP installation, image and video generation are not offered",
             .{},
         );
     };

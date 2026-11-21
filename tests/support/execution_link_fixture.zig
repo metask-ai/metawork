@@ -28,6 +28,11 @@
 //!   * `--hang-shutdown` -- the Runtime's shutdown never returns, so only the
 //!     exit deadline can end the process.
 //!   * `--session-id-floor=<n>` -- as the application passes it.
+//!   * `--exercise-mcp` -- before applying an MCP configuration, drive each
+//!     member's transport the way AgentCore drives a connector: open, an
+//!     exchange whose answer is echoed back, one carrying a secret, one its
+//!     caller withdraws, a notification, close. What this half saw is
+//!     reported in further exchanges, so the UI half can check both sides.
 
 const std = @import("std");
 
@@ -47,6 +52,7 @@ pub const checkpoint_bytes_flag = "--checkpoint-bytes=";
 pub const large_messages_flag = "--large-messages";
 pub const hang_shutdown_flag = "--hang-shutdown";
 pub const session_floor_flag = "--session-id-floor=";
+pub const exercise_mcp_flag = "--exercise-mcp";
 
 const Flags = struct {
     ignore_eof: bool = false,
@@ -57,6 +63,7 @@ const Flags = struct {
     checkpoint_bytes: ?usize = null,
     large_messages: bool = false,
     hang_shutdown: bool = false,
+    exercise_mcp: bool = false,
     session_id_floor: u64 = 0,
 };
 
@@ -73,6 +80,7 @@ fn readFlags(init: std.process.Init) Flags {
         if (std.mem.eql(u8, argument, slow_events_flag)) flags.slow_events = true;
         if (std.mem.eql(u8, argument, large_messages_flag)) flags.large_messages = true;
         if (std.mem.eql(u8, argument, hang_shutdown_flag)) flags.hang_shutdown = true;
+        if (std.mem.eql(u8, argument, exercise_mcp_flag)) flags.exercise_mcp = true;
         if (std.mem.startsWith(u8, argument, checkpoint_bytes_flag))
             flags.checkpoint_bytes = std.fmt.parseInt(usize, argument[checkpoint_bytes_flag.len..], 10) catch null;
         if (std.mem.startsWith(u8, argument, session_floor_flag))
@@ -130,7 +138,70 @@ const FakeRuntime = struct {
             .session_id_floor = self.flags.session_id_floor,
         }) catch return null;
         self.runtime = runtime;
-        return .{ .port = runtime.runtimePort(), .context = self, .shutdown_fn = shutdown };
+        var runtime_port = runtime.runtimePort();
+        if (self.flags.exercise_mcp) {
+            exercising_vtable = runtime_port.vtable.*;
+            exercising_vtable.apply_mcp_configuration = applyExercised;
+            runtime_port.vtable = &exercising_vtable;
+        }
+        return .{ .port = runtime_port, .context = self, .shutdown_fn = shutdown };
+    }
+
+    var exercising_vtable: agent.RuntimePort.VTable = undefined;
+
+    fn applyExercised(context: ?*anyopaque, input: *agent.McpRuntimeInput) (agent.Error || std.mem.Allocator.Error)!agent.McpConfigurationApplyOutcome {
+        const runtime: *agent.Runtime = @ptrCast(@alignCast(context.?));
+        for (input.members()) |member| exercise(member.transport());
+        return runtime.applyMcpConfiguration(input);
+    }
+
+    fn exercise(transport: agent.McpTransport) void {
+        const allocator = std.heap.c_allocator;
+        const connection = switch (transport.open_fn(transport.context, .actual, .modern_2026_07_28, 1_000)) {
+            .connection => |value| value,
+            .failure => return,
+        };
+        defer transport.close_fn(connection);
+        var echo_storage: [256]u8 = undefined;
+        const echo = switch (transport.request_fn(connection, allocator, "first", 1_000, .{})) {
+            .response => |response| echo: {
+                defer if (response.body.len != 0) allocator.free(response.body);
+                break :echo std.fmt.bufPrint(&echo_storage, "echo:{d}:{s}", .{ response.http_status, response.body }) catch "echo:overflow";
+            },
+            .failure => |failure| std.fmt.bufPrint(&echo_storage, "echo:failed:{s}", .{@tagName(failure)}) catch "echo:overflow",
+        };
+        report(transport, connection, echo);
+        // The UI half scans for the secrets it configured; this half never
+        // had them.
+        reportOutcome(transport, connection, "secret", transport.request_fn(connection, allocator, "leak hunter2", 1_000, .{}));
+        // Withdrawn by its caller from the start; the transport there sees it
+        // and gives up.
+        const withdrawn: agent.McpCancellation = .{ .is_cancelled_fn = always };
+        reportOutcome(transport, connection, "withdrawn", (transport.tool_request_fn orelse transport.request_fn)(connection, allocator, "withdrawn", 60_000, withdrawn));
+        _ = transport.notify_fn(connection, "notified", 1_000, .{});
+    }
+
+    fn always(_: ?*const anyopaque) bool {
+        return true;
+    }
+
+    fn reportOutcome(transport: agent.McpTransport, connection: *anyopaque, label: []const u8, outcome: agent.McpExchangeOutcome) void {
+        var storage: [128]u8 = undefined;
+        const text = switch (outcome) {
+            .response => |response| text: {
+                if (response.body.len != 0) std.heap.c_allocator.free(response.body);
+                break :text std.fmt.bufPrint(&storage, "{s}:answered", .{label}) catch return;
+            },
+            .failure => |failure| std.fmt.bufPrint(&storage, "{s}:{s}", .{ label, @tagName(failure) }) catch return,
+        };
+        report(transport, connection, text);
+    }
+
+    fn report(transport: agent.McpTransport, connection: *anyopaque, text: []const u8) void {
+        switch (transport.request_fn(connection, std.heap.c_allocator, text, 1_000, .{})) {
+            .response => |response| if (response.body.len != 0) std.heap.c_allocator.free(response.body),
+            .failure => {},
+        }
     }
 
     fn shutdown(context: ?*anyopaque) void {

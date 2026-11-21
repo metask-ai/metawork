@@ -28,6 +28,25 @@
 //! only ever resolved by the process that issued it, because each generation
 //! has its own pipe.
 //!
+//! ## Callbacks
+//!
+//! The execution half calls back for what stays here: an MCP server's
+//! transport, with its connection, OAuth state and credentials. A callback
+//! arrives as a request on the reader thread, is served on a thread of its
+//! own by the transport the MCP owners built, and its answer goes back the
+//! way a call's does. When the process is gone its callbacks are cancelled
+//! and the connections it opened are closed here, because nothing there will
+//! close them.
+//!
+//! ## MCP membership
+//!
+//! The UI half keeps its own copy of the membership the execution process's
+//! Runtime holds, in members that own the real transports. A membership is
+//! composed here, from that copy, exactly as the Runtime would compose it,
+//! and applied there with each member standing in for one here. A new process
+//! is given the applied membership before anything else uses it, so what it
+//! loses is its catalog, which Product already knows how to refresh.
+//!
 //! ## Events and credit
 //!
 //! Events arrive on the reader thread and go into a pump of the same type the
@@ -59,6 +78,9 @@ const error_code = agent_link.error_code;
 const port = contract.port;
 const surface = contract.surface;
 const control = contract.control;
+const mcp_catalog = contract.mcp.catalog;
+const mcp_runtime = contract.mcp.runtime;
+const mcp_connector = contract.mcp.connector;
 
 const Error = surface.Error;
 const Allocating = Error || std.mem.Allocator.Error;
@@ -91,6 +113,10 @@ pub const credit_bytes: u64 = credit: {
 /// last, or when the pump runs dry.
 const credit_batch_count: u64 = 64;
 const credit_batch_bytes: u64 = 4 * 1024 * 1024;
+
+/// Stack for a thread that performs a callback: an MCP exchange over stdio
+/// or HTTP, as an AgentCore tool thread performs it in process.
+const callback_stack_bytes: usize = 4 * 1024 * 1024;
 
 pub const RouteRange = struct {
     first: u64,
@@ -140,13 +166,25 @@ pub const Owner = struct {
     shutting_down: bool = false,
     /// Every event the reader has put in the pump, for tests.
     events_received: std.atomic.Value(u64) = .init(0),
+    /// Names for transports and connections, unique across processes.
+    next_name: std.atomic.Value(u64) = .init(0),
+
+    /// The applied MCP membership, in members that own the transports; held
+    /// under `mcp_mutex`, which also orders applies.
+    mcp_mutex: std.Io.Mutex = .init,
+    mcp_applied: mcp_runtime.Servers,
+    /// Its registry generation; zero until one is applied.
+    mcp_generation: u64 = 0,
 
     pub fn init(self: *Owner, io: std.Io, allocator: std.mem.Allocator, options: Options) !void {
+        var applied = try mcp_runtime.Servers.init(allocator, &.{});
+        errdefer applied.deinit();
         self.* = .{
             .io = io,
             .allocator = allocator,
             .options = options,
             .pump = try event_pump.EventPump.init(io, allocator, pumpLimits(options.session_slots)),
+            .mcp_applied = applied,
         };
     }
 
@@ -214,8 +252,13 @@ pub const Owner = struct {
             generation.destroy();
         }
         self.generations.deinit(self.allocator);
+        self.mcp_applied.deinit();
         self.pump.deinit();
         self.* = undefined;
+    }
+
+    fn nextName(self: *Owner) u64 {
+        return self.next_name.fetchAdd(1, .monotonic) + 1;
     }
 
     /// The running process, started if there is none. `null` when one could
@@ -257,7 +300,44 @@ pub const Owner = struct {
         };
         self.sendCreditLocked(generation, true);
         _ = generation.in_flight.fetchAdd(1, .acq_rel);
+        self.mutex.unlock(self.io);
+        // Still under the spawn lock, so whatever opens a Session in this
+        // process finds the membership already there.
+        self.replayMcp(generation);
+        self.mutex.lockUncancelable(self.io);
         return generation;
+    }
+
+    /// Gives a new process the MCP membership the last one held. A failure
+    /// leaves it without one, which the next apply repairs: it composes from
+    /// the same members and the process treats each one as new.
+    fn replayMcp(self: *Owner, generation: *Generation) void {
+        var members: std.ArrayList(*mcp_runtime.Member) = .empty;
+        defer {
+            for (members.items) |member| member.release();
+            members.deinit(self.allocator);
+        }
+        self.mcp_mutex.lockUncancelable(self.io);
+        const registry_generation = self.mcp_generation;
+        // Held for the call, which is made without the lock: an apply that
+        // replaces the membership meanwhile does not free these.
+        for (self.mcp_applied.memberList()) |member| {
+            members.append(self.allocator, member) catch break;
+            member.retain();
+        }
+        const complete = members.items.len == self.mcp_applied.memberList().len;
+        self.mcp_mutex.unlock(self.io);
+        if (registry_generation == 0 or members.items.len == 0) return;
+        if (!complete) {
+            std.log.warn("execution process started without its MCP servers: OutOfMemory", .{});
+            return;
+        }
+        const outcome = applyMembership(generation, registry_generation, members.items) catch |err| {
+            std.log.warn("execution process started without its MCP servers: {s}", .{@errorName(err)});
+            return;
+        };
+        if (outcome != .applied)
+            std.log.warn("execution process refused its MCP servers: {s}", .{@tagName(outcome)});
     }
 
     /// The running process, without starting one.
@@ -277,8 +357,8 @@ pub const Owner = struct {
         const owed_bytes = generation.granted.bytes - generation.announced.bytes;
         if (owed_count == 0 and owed_bytes == 0) return;
         if (!force and owed_count < credit_batch_count and owed_bytes < credit_batch_bytes) return;
-        var bytes: [16]u8 = undefined;
-        const written = payload.encode(rpc.Credit, generation.granted, &bytes);
+        var bytes: [32]u8 = undefined;
+        const written = payload.encode(rpc.Control, .{ .credit = generation.granted }, &bytes);
         // Never waits: this runs on the main thread. A frame that does not
         // fit now is made up by the next one, because it carries totals.
         const submitted = generation.host.outbound.trySubmit(.control, 0, bytes[0..written]) catch return;
@@ -308,6 +388,14 @@ const Generation = struct {
     /// Credit totals, under `owner.mutex`.
     granted: rpc.Credit = .{ .count = 0, .bytes = 0 },
     announced: rpc.Credit = .{ .count = 0, .bytes = 0 },
+
+    /// What this process reaches through callbacks, under `calls_mutex`.
+    calls_mutex: std.Io.Mutex = .init,
+    calls_idle: std.Io.Condition = .init,
+    transports: std.AutoHashMapUnmanaged(u64, *Transport) = .empty,
+    connections: std.AutoHashMapUnmanaged(u64, *Connection) = .empty,
+    callbacks: std.AutoHashMapUnmanaged(u64, *Callback) = .empty,
+    callback_threads: u32 = 0,
 
     fn start(owner: *Owner, number: u32) ?*Generation {
         const self = owner.allocator.create(Generation) catch return null;
@@ -379,6 +467,11 @@ const Generation = struct {
         // given for this process is true of a process that is ending.
         if (!stopping) self.host.terminate();
         self.pending.close();
+        // Whatever this process asked for is no longer wanted.
+        self.calls_mutex.lockUncancelable(self.owner.io);
+        var callbacks = self.callbacks.valueIterator();
+        while (callbacks.next()) |callback| callback.*.cancelled.store(true, .release);
+        self.calls_mutex.unlock(self.owner.io);
         const owner = self.owner;
         owner.mutex.lockUncancelable(owner.io);
         if (owner.current == self) owner.current = null;
@@ -404,22 +497,103 @@ const Generation = struct {
     }
 
     fn collectable(self: *Generation) bool {
-        return self.lost.load(.acquire) and
+        if (!(self.lost.load(.acquire) and
             self.reader_done.load(.acquire) and
             self.in_flight.load(.acquire) == 0 and
-            self.sessions.items.len == 0;
+            self.sessions.items.len == 0)) return false;
+        self.calls_mutex.lockUncancelable(self.owner.io);
+        defer self.calls_mutex.unlock(self.owner.io);
+        return self.callback_threads == 0;
     }
 
     fn destroy(self: *Generation) void {
         const allocator = self.owner.allocator;
+        const io = self.owner.io;
         if (!self.stopped) self.stop();
         if (self.reader) |thread| thread.join();
         self.reader = null;
+        // Callbacks were cancelled when the process went; each still finishes
+        // the exchange it is in and closes what it was the last user of.
+        self.calls_mutex.lockUncancelable(io);
+        while (self.callback_threads != 0) self.calls_idle.waitUncancelable(io, &self.calls_mutex);
+        self.calls_mutex.unlock(io);
+        self.releaseCallees();
+        std.debug.assert(self.connections.count() == 0 and self.transports.count() == 0);
+        self.connections.deinit(allocator);
+        self.transports.deinit(allocator);
+        self.callbacks.deinit(allocator);
         self.host.deinit();
         self.pending.deinit();
         for (self.sessions.items) |remote| remote.destroy(allocator);
         self.sessions.deinit(allocator);
         allocator.destroy(self);
+    }
+
+    /// Closes what the process opened and lets go of what it stood in for,
+    /// once it is gone: nothing there will. A connection still in an exchange
+    /// is closed by the exchange's own thread when it ends.
+    fn releaseCallees(self: *Generation) void {
+        const io = self.owner.io;
+        var closing: std.ArrayList(*Connection) = .empty;
+        defer closing.deinit(self.owner.allocator);
+        var releasing: std.ArrayList(*Transport) = .empty;
+        defer releasing.deinit(self.owner.allocator);
+        self.calls_mutex.lockUncancelable(io);
+        var connections = self.connections.iterator();
+        while (connections.next()) |entry| {
+            const connection = entry.value_ptr.*;
+            if (connection.closing) continue;
+            connection.closing = true;
+            if (connection.calls != 0) continue;
+            closing.append(self.owner.allocator, connection) catch {};
+        }
+        for (closing.items) |connection| _ = self.connections.remove(connection.id);
+        var transports = self.transports.iterator();
+        while (transports.next()) |entry| entry.value_ptr.*.released = true;
+        self.calls_mutex.unlock(io);
+        for (closing.items) |connection| self.closeConnection(connection);
+        self.calls_mutex.lockUncancelable(io);
+        transports = self.transports.iterator();
+        while (transports.next()) |entry| {
+            if (entry.value_ptr.*.connections == 0)
+                releasing.append(self.owner.allocator, entry.value_ptr.*) catch {};
+        }
+        for (releasing.items) |transport| _ = self.transports.remove(transport.id);
+        self.calls_mutex.unlock(io);
+        for (releasing.items) |transport| transport.destroy(self.owner.allocator);
+    }
+
+    /// Ends a connection taken out of the table, and the transport with it
+    /// if that was the transport's last connection and it is released.
+    fn closeConnection(self: *Generation, connection: *Connection) void {
+        const transport = connection.transport;
+        transport.member.transport().close_fn(connection.backend);
+        self.owner.allocator.destroy(connection);
+        self.calls_mutex.lockUncancelable(self.owner.io);
+        transport.connections -= 1;
+        const done = transport.released and transport.connections == 0;
+        if (done) _ = self.transports.remove(transport.id);
+        self.calls_mutex.unlock(self.owner.io);
+        if (done) transport.destroy(self.owner.allocator);
+    }
+
+    /// The name this process knows `member` by, registering it if it has
+    /// none yet. Callers hold the MCP lock, so one member is never named
+    /// twice.
+    fn nameMember(self: *Generation, member: *mcp_runtime.Member) std.mem.Allocator.Error!u64 {
+        const io = self.owner.io;
+        self.calls_mutex.lockUncancelable(io);
+        defer self.calls_mutex.unlock(io);
+        var existing = self.transports.valueIterator();
+        while (existing.next()) |transport| {
+            if (transport.*.member == member and !transport.*.released) return transport.*.id;
+        }
+        try self.transports.ensureUnusedCapacity(self.owner.allocator, 1);
+        const transport = try self.owner.allocator.create(Transport);
+        member.retain();
+        transport.* = .{ .id = self.owner.nextName(), .member = member };
+        self.transports.putAssumeCapacity(transport.id, transport);
+        return transport.id;
     }
 
     fn settleReader(context: ?*anyopaque) void {
@@ -449,6 +623,7 @@ fn readerMain(self: *Generation) void {
     _ = inbound.run();
     inbound.deinit();
     self.lose();
+    self.releaseCallees();
 }
 
 fn deliverFrame(context: ?*anyopaque, kind: agent_link.Kind, correlation: u64, bytes: []const u8) channel.Flow {
@@ -458,6 +633,44 @@ fn deliverFrame(context: ?*anyopaque, kind: agent_link.Kind, correlation: u64, b
         .response => {
             const owned = owner.allocator.dupe(u8, bytes) catch return .stop;
             self.pending.deposit(correlation, owned);
+            return .ok;
+        },
+        .request => {
+            const header = rpc.decodeHeader(rpc.Callback, bytes) catch return .stop;
+            _ = header;
+            const callback = owner.allocator.create(Callback) catch return .stop;
+            callback.* = .{ .generation = self, .correlation = correlation, .bytes = undefined };
+            callback.bytes = owner.allocator.dupe(u8, bytes) catch {
+                owner.allocator.destroy(callback);
+                return .stop;
+            };
+            self.calls_mutex.lockUncancelable(owner.io);
+            self.callbacks.put(owner.allocator, correlation, callback) catch {
+                self.calls_mutex.unlock(owner.io);
+                callback.destroy();
+                return .stop;
+            };
+            self.callback_threads += 1;
+            self.calls_mutex.unlock(owner.io);
+            const thread = std.Thread.spawn(.{ .stack_size = callback_stack_bytes }, serveCallback, .{callback}) catch {
+                callback.finish();
+                return .stop;
+            };
+            thread.detach();
+            return .ok;
+        },
+        .control => {
+            var storage: [64]u8 = undefined;
+            var fixed = std.heap.FixedBufferAllocator.init(&storage);
+            const value = payload.decodeExact(rpc.Control, fixed.allocator(), bytes) catch return .stop;
+            switch (value) {
+                .cancel => |target| {
+                    self.calls_mutex.lockUncancelable(owner.io);
+                    if (self.callbacks.get(target)) |callback| callback.cancelled.store(true, .release);
+                    self.calls_mutex.unlock(owner.io);
+                },
+                .credit => return .stop,
+            }
             return .ok;
         },
         .event => {
@@ -492,6 +705,288 @@ fn buildEvent(allocator: std.mem.Allocator, value: rpc.Event) !contract.OwnedCor
         .event = try agent.decodeCoreEvent(allocator, json),
         .allocator = allocator,
     };
+}
+
+// ---------------------------------------------------------------------------
+// Callbacks
+// ---------------------------------------------------------------------------
+
+/// A transport the process stands in for: one member of a membership this
+/// half composed, kept alive here for as long as the process may use it.
+const Transport = struct {
+    id: u64,
+    member: *mcp_runtime.Member,
+    connections: u32 = 0,
+    /// The process let go of it, or is gone.
+    released: bool = false,
+
+    fn destroy(self: *Transport, allocator: std.mem.Allocator) void {
+        self.member.release();
+        allocator.destroy(self);
+    }
+};
+
+const Connection = struct {
+    id: u64,
+    transport: *Transport,
+    backend: *anyopaque,
+    /// Exchanges in progress on it.
+    calls: u32 = 0,
+    closing: bool = false,
+};
+
+/// One callback being served.
+const Callback = struct {
+    generation: *Generation,
+    correlation: u64,
+    bytes: []u8,
+    cancelled: std.atomic.Value(bool) = .init(false),
+
+    fn cancellation(self: *Callback) mcp_connector.Cancellation {
+        return .{ .context = self, .is_cancelled_fn = isCancelled };
+    }
+
+    fn isCancelled(context: ?*const anyopaque) bool {
+        const self: *const Callback = @ptrCast(@alignCast(context.?));
+        return self.cancelled.load(.acquire);
+    }
+
+    fn destroy(self: *Callback) void {
+        const allocator = self.generation.owner.allocator;
+        std.crypto.secureZero(u8, self.bytes);
+        allocator.free(self.bytes);
+        allocator.destroy(self);
+    }
+
+    /// Off the table, and this thread no longer counted.
+    fn finish(self: *Callback) void {
+        const generation = self.generation;
+        const io = generation.owner.io;
+        generation.calls_mutex.lockUncancelable(io);
+        _ = generation.callbacks.remove(self.correlation);
+        generation.callback_threads -= 1;
+        if (generation.callback_threads == 0) generation.calls_idle.broadcast(io);
+        generation.calls_mutex.unlock(io);
+        self.destroy();
+        _ = generation.owner.options.wake.notify();
+    }
+};
+
+fn serveCallback(callback: *Callback) void {
+    defer callback.finish();
+    const generation = callback.generation;
+    const allocator = generation.owner.allocator;
+    const header = rpc.decodeHeader(rpc.Callback, callback.bytes) catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const answer = switch (header.method) {
+        inline else => |method| answer: {
+            const request = rpc.decodeRequest(method, arena, header.body) catch break :answer null;
+            break :answer performCallback(callback, method, header.handle, request);
+        },
+    } orelse {
+        // A callback this half cannot read or cannot name is not from the
+        // process it started.
+        generation.lose();
+        return;
+    };
+    defer {
+        std.crypto.secureZero(u8, answer);
+        allocator.free(answer);
+    }
+    // `.closed` is the process already gone; nobody waits for this answer.
+    _ = generation.host.outbound.submitWaiting(.response, callback.correlation, answer) catch {};
+}
+
+/// The encoded answer, or `null` when the request names nothing this process
+/// was given.
+fn performCallback(
+    callback: *Callback,
+    comptime method: rpc.Callback,
+    handle: u64,
+    request: rpc.Request(method),
+) ?[]u8 {
+    const generation = callback.generation;
+    const owner = generation.owner;
+    const allocator = owner.allocator;
+    const io = owner.io;
+    switch (method) {
+        .mcp_open => {
+            generation.calls_mutex.lockUncancelable(io);
+            const transport = generation.transports.get(handle) orelse {
+                generation.calls_mutex.unlock(io);
+                return null;
+            };
+            if (transport.released) {
+                generation.calls_mutex.unlock(io);
+                return null;
+            }
+            // Counted before the open, so the transport outlives it.
+            transport.connections += 1;
+            generation.calls_mutex.unlock(io);
+            const outcome = transport.member.transport().open_fn(
+                transport.member.transport().context,
+                request.purpose,
+                request.era,
+                request.timeout_ms,
+            );
+            // Whether the count taken above still has to be given back here.
+            var counted = true;
+            const opened: rpc.McpOpened = switch (outcome) {
+                .failure => |failure| .{ .failure = failure },
+                .connection => |backend| opened: {
+                    const connection = allocator.create(Connection) catch {
+                        transport.member.transport().close_fn(backend);
+                        break :opened .{ .failure = .fatal };
+                    };
+                    connection.* = .{ .id = owner.nextName(), .transport = transport, .backend = backend };
+                    generation.calls_mutex.lockUncancelable(io);
+                    // A process that went while this opened will never close
+                    // it, so it is not registered for one.
+                    const registered = !generation.lost.load(.acquire) and
+                        if (generation.connections.put(allocator, connection.id, connection)) true else |_| false;
+                    generation.calls_mutex.unlock(io);
+                    if (!registered) {
+                        // Gives the count back itself.
+                        generation.closeConnection(connection);
+                        counted = false;
+                        break :opened .{ .failure = .fatal };
+                    }
+                    break :opened .{ .connection = connection.id };
+                },
+            };
+            if (opened == .failure and counted) {
+                generation.calls_mutex.lockUncancelable(io);
+                transport.connections -= 1;
+                const done = transport.released and transport.connections == 0;
+                if (done) _ = generation.transports.remove(transport.id);
+                generation.calls_mutex.unlock(io);
+                if (done) transport.destroy(allocator);
+            }
+            return rpc.encodeOk(method, allocator, opened) catch null;
+        },
+        .mcp_request, .mcp_notify => {
+            const connection = beginExchange(generation, handle) orelse return null;
+            defer endExchange(generation, connection);
+            const member = connection.transport.member;
+            const transport = member.transport();
+            const encoded = switch (method) {
+                .mcp_request => encoded: {
+                    // The same fail-closed scan the in-process connector
+                    // applies, here where the secrets are.
+                    if (member.containsSecret(request.bytes))
+                        break :encoded rpc.encodeOk(method, allocator, .{ .failure = .fatal });
+                    const exchange = if (request.tool) transport.tool_request_fn orelse transport.request_fn else transport.request_fn;
+                    const outcome = exchange(connection.backend, allocator, request.bytes, request.timeout_ms, callback.cancellation());
+                    break :encoded switch (outcome) {
+                        .failure => |failure| rpc.encodeOk(method, allocator, .{ .failure = failure }),
+                        .response => |response| response: {
+                            defer if (response.body.len != 0) {
+                                std.crypto.secureZero(u8, response.body);
+                                allocator.free(response.body);
+                            };
+                            if (member.containsSecret(response.body))
+                                break :response rpc.encodeOk(method, allocator, .{ .failure = .fatal });
+                            break :response rpc.encodeOk(method, allocator, .{ .response = .{
+                                .http_status = response.http_status,
+                                .body = response.body,
+                            } });
+                        },
+                    };
+                },
+                .mcp_notify => encoded: {
+                    if (member.containsSecret(request.bytes))
+                        break :encoded rpc.encodeOk(method, allocator, .fatal);
+                    break :encoded rpc.encodeOk(method, allocator, transport.notify_fn(
+                        connection.backend,
+                        request.bytes,
+                        request.timeout_ms,
+                        callback.cancellation(),
+                    ));
+                },
+                else => comptime unreachable,
+            };
+            return encoded catch null;
+        },
+        .mcp_close => {
+            generation.calls_mutex.lockUncancelable(io);
+            const connection = generation.connections.get(handle) orelse {
+                generation.calls_mutex.unlock(io);
+                return null;
+            };
+            connection.closing = true;
+            const now_closing = connection.calls == 0;
+            if (now_closing) _ = generation.connections.remove(handle);
+            generation.calls_mutex.unlock(io);
+            if (now_closing) generation.closeConnection(connection);
+            return rpc.encodeOk(method, allocator, {}) catch null;
+        },
+        .mcp_install_put => {
+            const installation = installationOf(generation, handle) orelse
+                return rpc.encodeOk(method, allocator, .unavailable) catch null;
+            // The Host's own copy, in the allocator its capability names.
+            const json = installation.allocator.dupe(u8, request.json) catch
+                return rpc.encodeOk(method, allocator, .unavailable) catch null;
+            const draft: contract.McpInstallationRequest = .{ .allocator = installation.allocator, .json = json };
+            const result = installation.try_put_fn(installation.context, request.task_id, request.run_id, request.generation, draft);
+            if (result != .submitted) {
+                var refused = draft;
+                refused.deinit();
+            }
+            return rpc.encodeOk(method, allocator, result) catch null;
+        },
+        .mcp_install_wake => {
+            if (installationOf(generation, handle)) |installation| installation.wake_fn(installation.context);
+            return rpc.encodeOk(method, allocator, {}) catch null;
+        },
+        .mcp_release => {
+            generation.calls_mutex.lockUncancelable(io);
+            const transport = generation.transports.get(handle) orelse {
+                generation.calls_mutex.unlock(io);
+                return null;
+            };
+            transport.released = true;
+            const done = transport.connections == 0;
+            if (done) _ = generation.transports.remove(handle);
+            generation.calls_mutex.unlock(io);
+            if (done) transport.destroy(allocator);
+            return rpc.encodeOk(method, allocator, {}) catch null;
+        },
+    }
+}
+
+/// The installation capability the Session named by `handle` gave its Runs.
+/// A Session released meanwhile has none, and its Run is told the Host is
+/// unavailable, as the capability itself says once it is closed.
+fn installationOf(generation: *Generation, handle: u64) ?contract.McpInstallationInput {
+    const owner = generation.owner;
+    owner.mutex.lockUncancelable(owner.io);
+    defer owner.mutex.unlock(owner.io);
+    for (generation.sessions.items) |remote| {
+        if (remote.handle == handle) return remote.installation;
+    }
+    return null;
+}
+
+fn beginExchange(generation: *Generation, id: u64) ?*Connection {
+    const io = generation.owner.io;
+    generation.calls_mutex.lockUncancelable(io);
+    defer generation.calls_mutex.unlock(io);
+    const connection = generation.connections.get(id) orelse return null;
+    if (connection.closing) return null;
+    connection.calls += 1;
+    return connection;
+}
+
+fn endExchange(generation: *Generation, connection: *Connection) void {
+    const io = generation.owner.io;
+    generation.calls_mutex.lockUncancelable(io);
+    connection.calls -= 1;
+    const close = connection.closing and connection.calls == 0;
+    if (close) _ = generation.connections.remove(connection.id);
+    generation.calls_mutex.unlock(io);
+    if (close) generation.closeConnection(connection);
 }
 
 // ---------------------------------------------------------------------------
@@ -587,6 +1082,9 @@ const RemoteSession = struct {
     refs: u32 = 0,
     closing: bool = false,
     workspace_root: ?[]u8 = null,
+    /// The MCP installation capability its Runs were last given, which a
+    /// Run's request reaches by calling back. Under `owner.mutex`.
+    installation: ?contract.McpInstallationInput = null,
 
     fn io(self: *RemoteSession) std.Io {
         return self.generation.owner.io;
@@ -679,7 +1177,12 @@ fn forget(remote: *RemoteSession) void {
 
 fn runtimeCreateSessionRoute(context: ?*anyopaque, options: surface.SessionOpenOptions) Allocating!port.SessionRoute {
     const owner = ownerOf(context);
-    const wire_options = rpc.openOptionsToWire(options) catch return error.DependencyUnreachable;
+    var scratch = std.heap.ArenaAllocator.init(owner.allocator);
+    defer scratch.deinit();
+    const wire_options = rpc.openOptionsToWire(options, scratch.allocator()) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.DependencyUnreachable,
+    };
     const generation = owner.ensure() orelse return error.DependencyUnreachable;
     defer generation.release();
     var reply = call(generation, .create_session, 0, wire_options) orelse return error.DependencyUnreachable;
@@ -723,7 +1226,12 @@ fn readSource(
 
 fn runtimeRestoreSessionRoute(context: ?*anyopaque, options: surface.SessionRestoreOptions) Allocating!port.SessionRestoreRoute {
     const owner = ownerOf(context);
-    const wire_session = rpc.openOptionsToWire(options.session) catch return error.DependencyUnreachable;
+    var scratch = std.heap.ArenaAllocator.init(owner.allocator);
+    defer scratch.deinit();
+    const wire_session = rpc.openOptionsToWire(options.session, scratch.allocator()) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.DependencyUnreachable,
+    };
     var bytes: std.ArrayList(u8) = .empty;
     defer {
         std.crypto.secureZero(u8, bytes.items);
@@ -836,46 +1344,178 @@ fn runtimeRestoreAdmission(context: ?*anyopaque, releasing_route_id: ?u64) port.
     };
 }
 
-// Not offered in this step: skills, MCP, and the Run tools whose inputs they
-// carry. Nothing can hand these methods a handle, because nothing that would
-// issue one is ever answered.
+// ---------------------------------------------------------------------------
+// MCP
+// ---------------------------------------------------------------------------
+//
+// Every MCP object that crosses is plain data and crosses as a copy: an
+// activation, a selection and a restore selection are each rebuilt in the
+// receiver's allocator, and the Runtime that later sees one checks its owner
+// and generation exactly as it checks a value of its own.
 
-fn runtimeActivateMcp(_: ?*anyopaque) Allocating!surface.McpActivationOutcome {
-    return .empty;
+fn runtimeActivateMcp(context: ?*anyopaque) Allocating!surface.McpActivationOutcome {
+    const owner = ownerOf(context);
+    // The process holds exactly the membership applied here, and a Runtime
+    // with no servers activates nothing; no process is started to say so.
+    owner.mcp_mutex.lockUncancelable(owner.io);
+    const empty = owner.mcp_applied.memberList().len == 0;
+    owner.mcp_mutex.unlock(owner.io);
+    if (empty) return .empty;
+    const generation = owner.ensure() orelse return error.DependencyUnreachable;
+    defer generation.release();
+    var reply = call(generation, .activate_mcp, 0, .{}) orelse return error.DependencyUnreachable;
+    defer reply.deinit();
+    return switch (reply.answer) {
+        .err => |err| narrow(Allocating, err),
+        .ok => |value| try rpc.activationOutcomeFromWire(value, owner.allocator, owner.io),
+    };
 }
 
 fn runtimeCreateMcpAdmissionSelection(
-    _: ?*anyopaque,
-    _: *const contract.McpActivation,
-    _: []const contract.McpServerAllowlist,
+    context: ?*anyopaque,
+    activation: *const contract.McpActivation,
+    allowlists: []const contract.McpServerAllowlist,
 ) Allocating!?*contract.McpSelection {
-    return error.DependencyUnreachable;
+    const owner = ownerOf(context);
+    var scratch = std.heap.ArenaAllocator.init(owner.allocator);
+    defer scratch.deinit();
+    const wire_activation = try mcp_catalog.activationToWire(activation, scratch.allocator());
+    const generation = owner.ensure() orelse return error.DependencyUnreachable;
+    defer generation.release();
+    var reply = call(generation, .create_mcp_admission_selection, 0, .{
+        .activation = wire_activation,
+        .allowlists = allowlists,
+    }) orelse return error.DependencyUnreachable;
+    defer reply.deinit();
+    return switch (reply.answer) {
+        .err => |err| narrow(Allocating, err),
+        .ok => |value| if (value) |selection| try mcp_catalog.selectionFromWire(owner.allocator, selection) else null,
+    };
 }
 
 fn runtimePrepareMcpRestoreSelection(
-    _: ?*anyopaque,
-    _: *const contract.McpRestoreSelection,
-    _: *const contract.McpActivation,
-    _: []const contract.McpActivationTool,
+    context: ?*anyopaque,
+    original: *const contract.McpRestoreSelection,
+    activation: *const contract.McpActivation,
+    ceiling: []const contract.McpActivationTool,
 ) Allocating!*contract.McpSelection {
-    return error.DependencyUnreachable;
+    const owner = ownerOf(context);
+    var scratch = std.heap.ArenaAllocator.init(owner.allocator);
+    defer scratch.deinit();
+    const wire_activation = try mcp_catalog.activationToWire(activation, scratch.allocator());
+    const generation = owner.ensure() orelse return error.DependencyUnreachable;
+    defer generation.release();
+    var reply = call(generation, .prepare_mcp_restore_selection, 0, .{
+        .original = mcp_catalog.restoreSelectionToWire(original),
+        .activation = wire_activation,
+        .ceiling = ceiling,
+    }) orelse return error.DependencyUnreachable;
+    defer reply.deinit();
+    return switch (reply.answer) {
+        .err => |err| narrow(Allocating, err),
+        .ok => |value| try mcp_catalog.selectionFromWire(owner.allocator, value),
+    };
 }
 
+/// Composed here, from this half's copy of the applied membership, by the
+/// Runtime's own composition, so a membership the process would refuse for
+/// its shape is refused here first.
 fn runtimePrepareMcpMembership(
-    _: ?*anyopaque,
-    _: u64,
-    _: ?*const contract.McpRuntimeInput,
-    _: []const []const u8,
-) Allocating!contract.McpRuntimeInput {
-    return error.DependencyUnreachable;
+    context: ?*anyopaque,
+    generation: u64,
+    additions: ?*const mcp_runtime.Input,
+    server_ids: []const []const u8,
+) Allocating!mcp_runtime.Input {
+    const owner = ownerOf(context);
+    owner.mcp_mutex.lockUncancelable(owner.io);
+    defer owner.mcp_mutex.unlock(owner.io);
+    return mcp_runtime.Input.compose(owner.allocator, generation, &owner.mcp_applied, additions, server_ids) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidConfig => error.McpConfigurationApplyFailed,
+    };
 }
 
-fn runtimeApplyMcpConfiguration(_: ?*anyopaque, _: *contract.McpRuntimeInput) Allocating!surface.McpConfigurationApplyOutcome {
-    return error.DependencyUnreachable;
+/// Sends `members` to the process as its membership. A lost answer is a
+/// failure: the process that might have applied it is gone, and the next one
+/// is given the membership applied before.
+fn applyMembership(
+    generation: *Generation,
+    registry_generation: u64,
+    members: []const *mcp_runtime.Member,
+) Allocating!surface.McpConfigurationApplyOutcome {
+    const allocator = generation.owner.allocator;
+    const wire_members = try allocator.alloc(rpc.McpMember, members.len);
+    defer allocator.free(wire_members);
+    {
+        // Named under the MCP lock, so one member is never named twice in a
+        // process.
+        const owner = generation.owner;
+        owner.mcp_mutex.lockUncancelable(owner.io);
+        defer owner.mcp_mutex.unlock(owner.io);
+        for (members, wire_members) |member, *target| target.* = .{
+            .transport = try generation.nameMember(member),
+            .descriptor = member.describe(),
+        };
+    }
+    var reply = call(generation, .apply_mcp_configuration, 0, .{
+        .generation = registry_generation,
+        .members = wire_members,
+    }) orelse return error.McpConfigurationApplyFailed;
+    defer reply.deinit();
+    return switch (reply.answer) {
+        .err => |err| narrow(Allocating, err),
+        .ok => |value| value,
+    };
 }
 
-fn runtimeProbeMcp(_: ?*anyopaque, _: *contract.McpRuntimeInput) Allocating!surface.McpActivationOutcome {
-    return error.DependencyUnreachable;
+fn runtimeApplyMcpConfiguration(context: ?*anyopaque, input: *mcp_runtime.Input) Allocating!surface.McpConfigurationApplyOutcome {
+    const owner = ownerOf(context);
+    var candidate = input.take() catch return error.McpConfigurationApplyFailed;
+    var candidate_owned = true;
+    defer if (candidate_owned) candidate.deinit();
+    const generation = owner.ensure() orelse return error.DependencyUnreachable;
+    defer generation.release();
+    // The candidate is this call's alone, so the process is asked without
+    // the lock; only the swap takes it.
+    const outcome = try applyMembership(generation, input.generation, candidate.memberList());
+    if (outcome == .applied) {
+        owner.mcp_mutex.lockUncancelable(owner.io);
+        var previous = owner.mcp_applied;
+        owner.mcp_applied = candidate;
+        candidate_owned = false;
+        owner.mcp_generation = input.generation;
+        owner.mcp_mutex.unlock(owner.io);
+        previous.deinit();
+    }
+    return outcome;
+}
+
+fn runtimeProbeMcp(context: ?*anyopaque, input: *mcp_runtime.Input) Allocating!surface.McpActivationOutcome {
+    const owner = ownerOf(context);
+    var servers = input.take() catch return error.McpConfigurationApplyFailed;
+    defer servers.deinit();
+    const generation = owner.ensure() orelse return error.DependencyUnreachable;
+    defer generation.release();
+    const wire_members = try owner.allocator.alloc(rpc.McpMember, servers.memberList().len);
+    defer owner.allocator.free(wire_members);
+    {
+        owner.mcp_mutex.lockUncancelable(owner.io);
+        defer owner.mcp_mutex.unlock(owner.io);
+        // A probe's members are its own, so they are named afresh.
+        for (servers.memberList(), wire_members) |member, *target| target.* = .{
+            .transport = try generation.nameMember(member),
+            .descriptor = member.describe(),
+        };
+    }
+    var reply = call(generation, .probe_mcp, 0, .{
+        .generation = input.generation,
+        .members = wire_members,
+    }) orelse return error.DependencyUnreachable;
+    defer reply.deinit();
+    return switch (reply.answer) {
+        .err => |err| narrow(Allocating, err),
+        .ok => |value| try rpc.activationOutcomeFromWire(value, owner.allocator, owner.io),
+    };
 }
 
 fn runtimeQuerySkillCatalog(_: ?*anyopaque, _: contract.CatalogQuery) Allocating!contract.CatalogAcquisition {
@@ -902,8 +1542,12 @@ fn runtimeReleaseSkillRestoreInputs(_: ?*anyopaque, _: *port.SkillRestoreInputs)
     return error.DependencyUnreachable;
 }
 
-fn runtimeReleaseRestoreInputs(_: ?*anyopaque, _: *port.SessionRestoreInputs) Error!void {
-    return error.DependencyUnreachable;
+/// Only what `sessionCaptureRestoreInputs` hands out, which carries no skill
+/// part.
+fn runtimeReleaseRestoreInputs(_: ?*anyopaque, inputs: *port.SessionRestoreInputs) Error!void {
+    std.debug.assert(inputs.skill == null);
+    if (inputs.mcp) |selection| selection.deinit();
+    inputs.* = undefined;
 }
 
 const runtime_vtable: port.RuntimePort.VTable = .{
@@ -1007,8 +1651,24 @@ fn sessionSkillPolicyMatches(_: ?*anyopaque, _: *contract.CatalogLease, _: surfa
     return false;
 }
 
-fn sessionCaptureRestoreInputs(_: ?*anyopaque) Allocating!port.SessionRestoreInputs {
-    return error.DependencyUnreachable;
+fn sessionCaptureRestoreInputs(context: ?*anyopaque) Allocating!port.SessionRestoreInputs {
+    const remote = remoteOf(context);
+    const owner = remote.generation.owner;
+    var reply = call(remote.generation, .capture_restore_inputs, remote.handle, .{}) orelse
+        return error.DependencyUnreachable;
+    defer reply.deinit();
+    const captured = switch (reply.answer) {
+        .err => |err| return narrow(Allocating, err),
+        .ok => |value| value,
+    };
+    return .{
+        .agent = owner.runtimePort(),
+        .skill = null,
+        .mcp = if (captured.mcp) |value| try mcp_catalog.restoreSelectionFromWire(owner.allocator, value) else null,
+        .permission_mode = captured.permission_mode,
+        .shell_policy = captured.shell_policy,
+        .permission_interaction = captured.permission_interaction,
+    };
 }
 
 const gone_snapshot: surface.SessionSnapshot = .{
@@ -1056,7 +1716,7 @@ fn sessionRequestTermination(context: ?*anyopaque, run_id: u64, signal: control.
 }
 
 fn sessionPrepareRun(context: ?*anyopaque, input: surface.RunInput) Allocating!u64 {
-    return sessionCall(remoteOf(context), .prepare_run, Allocating, .{ .input = input });
+    return sessionCall(remoteOf(context), .prepare_run, Allocating, .{ .input = input, .mcp_installation = null });
 }
 
 fn sessionPrepareRunWithTools(
@@ -1067,13 +1727,24 @@ fn sessionPrepareRunWithTools(
     mcp: ?contract.McpInstallationInput,
     video: ?contract.VideoGenerationRunInput,
 ) Allocating!u64 {
-    // None of the four is composed when this link is in use, so a Run that
-    // carries one was composed against a different Runtime.
-    if (image != null or delivery != null or mcp != null or video != null) {
+    // None of these three is composed when this link is in use, so a Run
+    // that carries one was composed against a different Runtime.
+    if (image != null or delivery != null or video != null) {
         std.log.warn("execution link: a Run asked for a tool this link does not carry", .{});
         return error.DependencyUnreachable;
     }
-    return sessionPrepareRun(context, input);
+    const remote = remoteOf(context);
+    const installation = mcp orelse return sessionPrepareRun(context, input);
+    {
+        const owner = remote.generation.owner;
+        owner.mutex.lockUncancelable(owner.io);
+        defer owner.mutex.unlock(owner.io);
+        remote.installation = installation;
+    }
+    return sessionCall(remote, .prepare_run, Allocating, .{
+        .input = input,
+        .mcp_installation = .{ .task_id = installation.task_id },
+    });
 }
 
 const gone_begin_run: port.BeginRunOutcome = .{ .failure = .{

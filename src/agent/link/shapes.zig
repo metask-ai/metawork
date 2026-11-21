@@ -521,7 +521,9 @@ pub const SessionOpenOptions = struct {
     /// thing and a decoder would have to be told which one it is reading.
     skill_catalog: handle_table.Id,
     skill_policy: ?surface.SkillPolicyInput,
-    mcp_selection: handle_table.Id,
+    /// A selection is plain data, so it crosses as a copy the receiving
+    /// Runtime checks exactly as it checks one of its own.
+    mcp_selection: ?contract.mcp.catalog.SelectionWire,
     operation_id_floor: surface.OperationIdFloor,
 };
 

@@ -12,13 +12,21 @@
 //! control's context is the Session's control block, so a Run is a Session
 //! plus `(run_id, generation)`, and that is what crosses.
 //!
+//! Calls go both ways. The UI half calls the execution half's Runtime
+//! (`Method`); the execution half calls back for the effects that stay where
+//! they were configured (`Callback`), such as an MCP server's transport. Both
+//! use the same frames and the same correlation table; which set a `request`
+//! names is said by the direction it travels, and each side numbers its own
+//! calls.
+//!
 //! Frames:
 //!
 //!   * `request`  -- `[u16 method][u64 handle]` then the method's request.
 //!   * `response` -- `[u16 status]` then, when the status is zero, the
 //!     method's response. Any other status is the error's registered number.
-//!   * `event`    -- an `Event`.
-//!   * `control`  -- a `Credit`, from the caller to the execution half.
+//!   * `event`    -- an `Event`, from the execution half.
+//!   * `control`  -- a `Control`: credit from the UI half, cancellations from
+//!     the execution half.
 
 const std = @import("std");
 const contract = @import("agent_contract");
@@ -32,6 +40,9 @@ const handle_table = @import("handle_table.zig");
 const port = contract.port;
 const surface = contract.surface;
 const control = contract.control;
+const mcp_catalog = contract.mcp.catalog;
+const mcp_runtime = contract.mcp.runtime;
+const mcp_connector = contract.mcp.connector;
 
 pub const Method = enum(u16) {
     create_session = 1,
@@ -66,11 +77,26 @@ pub const Method = enum(u16) {
     run_submit_input = 30,
     run_input_observation = 31,
     run_request_termination = 32,
+    activate_mcp = 33,
+    create_mcp_admission_selection = 34,
+    prepare_mcp_restore_selection = 35,
+    apply_mcp_configuration = 36,
+    probe_mcp = 37,
+    capture_restore_inputs = 38,
 
     /// Whether the call names a Session. The rest are the Runtime's.
     pub fn namesSession(self: Method) bool {
         return switch (self) {
-            .create_session, .restore_session, .request_run_termination, .restore_admission => false,
+            .create_session,
+            .restore_session,
+            .request_run_termination,
+            .restore_admission,
+            .activate_mcp,
+            .create_mcp_admission_selection,
+            .prepare_mcp_restore_selection,
+            .apply_mcp_configuration,
+            .probe_mcp,
+            => false,
             else => true,
         };
     }
@@ -80,6 +106,78 @@ pub const Method = enum(u16) {
     pub fn isTerminal(self: Method) bool {
         return self == .run_execute or self == .execute_prepared_compact;
     }
+};
+
+/// The calls the execution half makes of the UI half.
+pub const Callback = enum(u16) {
+    /// Opens a connection on a transport the UI half holds. Names the
+    /// transport.
+    mcp_open = 1,
+    /// One exchange on a connection. Names the connection.
+    mcp_request = 2,
+    mcp_notify = 3,
+    mcp_close = 4,
+    /// The execution half no longer reaches the server through this
+    /// transport. Names the transport.
+    mcp_release = 5,
+    /// A Run's MCP installation request, for the Host to carry out. Names
+    /// the Session whose Run made it.
+    mcp_install_put = 6,
+    mcp_install_wake = 7,
+};
+
+/// That a Run may ask the Host to install an MCP server, for this Task. The
+/// capability itself stays with the UI half.
+pub const McpInstallation = struct {
+    task_id: u64,
+};
+
+/// One MCP member as the execution half stands in for it: the transport the
+/// UI half keeps, by the UI half's name for it, and everything else about
+/// the server.
+pub const McpMember = struct {
+    transport: u64,
+    descriptor: mcp_runtime.ServerDescriptor,
+};
+
+pub const McpMembership = struct {
+    generation: u64,
+    members: []const McpMember,
+};
+
+pub const McpActivationOutcome = union(enum) {
+    empty,
+    activated: mcp_catalog.ActivationWire,
+    unavailable: surface.McpActivationUnavailableReason,
+};
+
+/// What `capture_restore_inputs` captures, as data. The skill part does not
+/// cross yet; the execution half refuses a capture that has one.
+pub const RestoreInputs = struct {
+    mcp: ?mcp_catalog.RestoreSelectionWire,
+    permission_mode: control.PermissionMode,
+    shell_policy: control.ShellPolicy,
+    permission_interaction: surface.PermissionInteraction,
+};
+
+pub const McpOpened = union(enum) {
+    connection: u64,
+    failure: mcp_connector.Failure,
+};
+
+pub const McpExchanged = union(enum) {
+    response: struct { http_status: u32, body: []const u8 },
+    failure: mcp_connector.Failure,
+};
+
+/// A `control` frame. Never fragmented, so each one passes a data message in
+/// flight within one fragment.
+pub const Control = union(enum) {
+    /// UI half to execution half: the room made for events, as totals.
+    credit: Credit,
+    /// Execution half to UI half: the callback under this correlation is no
+    /// longer wanted. Its answer still comes.
+    cancel: u64,
 };
 
 pub const SessionRoute = struct {
@@ -158,7 +256,51 @@ pub const Credit = struct {
 
 const Empty = struct {};
 
-pub fn Request(comptime method: Method) type {
+/// The method set a method belongs to. An untyped literal is a `Method`.
+fn Set(comptime method: anytype) type {
+    const T = @TypeOf(method);
+    return if (T == @TypeOf(.enum_literal)) Method else T;
+}
+
+/// A request's body type, for either direction's method set.
+pub fn Request(comptime method: anytype) type {
+    return switch (Set(method)) {
+        Method => MethodRequest(method),
+        Callback => CallbackRequest(method),
+        else => @compileError("not a link method"),
+    };
+}
+
+/// A response's body type, for either direction's method set.
+pub fn Response(comptime method: anytype) type {
+    return switch (Set(method)) {
+        Method => MethodResponse(method),
+        Callback => CallbackResponse(method),
+        else => @compileError("not a link method"),
+    };
+}
+
+fn CallbackRequest(comptime callback: Callback) type {
+    return switch (callback) {
+        .mcp_open => struct { purpose: mcp_connector.Purpose, era: mcp_connector.Era, timeout_ms: u32 },
+        .mcp_request => struct { bytes: []const u8, timeout_ms: u32, tool: bool },
+        .mcp_notify => struct { bytes: []const u8, timeout_ms: u32 },
+        .mcp_close, .mcp_release, .mcp_install_wake => Empty,
+        .mcp_install_put => struct { task_id: u64, run_id: u64, generation: u64, json: []const u8 },
+    };
+}
+
+fn CallbackResponse(comptime callback: Callback) type {
+    return switch (callback) {
+        .mcp_open => McpOpened,
+        .mcp_request => McpExchanged,
+        .mcp_notify => ?mcp_connector.Failure,
+        .mcp_close, .mcp_release, .mcp_install_wake => void,
+        .mcp_install_put => contract.McpInstallationResult,
+    };
+}
+
+fn MethodRequest(comptime method: Method) type {
     return switch (method) {
         .create_session => shapes.SessionOpenOptions,
         .restore_session => RestoreRequest,
@@ -180,7 +322,7 @@ pub fn Request(comptime method: Method) type {
         .rewind_to_user_message => struct { position: u64 },
         .update_credential => struct { credential: []const u8 },
         .request_termination => struct { run_id: u64, signal: control.TerminationSignal },
-        .prepare_run => struct { input: surface.RunInput },
+        .prepare_run => struct { input: surface.RunInput, mcp_installation: ?McpInstallation },
         .begin_run, .cancel_prepared_run, .fail_ui_request_identity_contract => struct { run_id: u64 },
         .cancel_prepared_compact, .execute_prepared_compact => struct { operation_id: u64 },
         .request_compact_cancellation => struct { operation_id: u64, interruption: control.ExternalInterruption },
@@ -189,10 +331,21 @@ pub fn Request(comptime method: Method) type {
         .run_execute, .run_input_observation => struct { run_id: u64, generation: u64 },
         .run_submit_input => struct { run_id: u64, generation: u64, input_id: u64, text: []const u8 },
         .run_request_termination => struct { run_id: u64, generation: u64, signal: control.TerminationSignal },
+        .activate_mcp, .capture_restore_inputs => Empty,
+        .create_mcp_admission_selection => struct {
+            activation: mcp_catalog.ActivationWire,
+            allowlists: []const mcp_catalog.ServerAllowlist,
+        },
+        .prepare_mcp_restore_selection => struct {
+            original: mcp_catalog.RestoreSelectionWire,
+            activation: mcp_catalog.ActivationWire,
+            ceiling: []const mcp_catalog.ActivationTool,
+        },
+        .apply_mcp_configuration, .probe_mcp => McpMembership,
     };
 }
 
-pub fn Response(comptime method: Method) type {
+fn MethodResponse(comptime method: Method) type {
     return switch (method) {
         .create_session => SessionRoute,
         .restore_session => SessionRestoreRoute,
@@ -226,6 +379,11 @@ pub fn Response(comptime method: Method) type {
         .run_submit_input => control.InputSubmission,
         .run_input_observation => ?control.InputObservation,
         .run_request_termination => control.TerminationRequestResult,
+        .activate_mcp, .probe_mcp => McpActivationOutcome,
+        .create_mcp_admission_selection => ?mcp_catalog.SelectionWire,
+        .prepare_mcp_restore_selection => mcp_catalog.SelectionWire,
+        .apply_mcp_configuration => surface.McpConfigurationApplyOutcome,
+        .capture_restore_inputs => RestoreInputs,
     };
 }
 
@@ -236,8 +394,13 @@ comptime {
         const Out = Response(method);
         if (Out != void) payload.requireStructural(Out);
     }
+    for (std.enums.values(Callback)) |callback| {
+        payload.requireStructural(Request(callback));
+        const Out = Response(callback);
+        if (Out != void) payload.requireStructural(Out);
+    }
     payload.requireStructural(Event);
-    payload.requireStructural(Credit);
+    payload.requireStructural(Control);
 }
 
 // ---------------------------------------------------------------------------
@@ -247,32 +410,38 @@ comptime {
 pub const request_header_bytes: usize = 2 + 8;
 
 pub fn encodeRequest(
-    comptime method: Method,
+    comptime method: anytype,
     allocator: std.mem.Allocator,
     handle: u64,
     value: Request(method),
 ) std.mem.Allocator.Error![]u8 {
     const body_len = payload.encodedSize(Request(method), value);
     const buffer = try allocator.alloc(u8, request_header_bytes + body_len);
-    std.mem.writeInt(u16, buffer[0..2], @intFromEnum(method), .little);
+    std.mem.writeInt(u16, buffer[0..2], @intFromEnum(@as(Set(method), method)), .little);
     std.mem.writeInt(u64, buffer[2..10], handle, .little);
     const written = payload.encode(Request(method), value, buffer[request_header_bytes..]);
     std.debug.assert(written == body_len);
     return buffer;
 }
 
-pub const Received = struct {
-    method: Method,
-    handle: u64,
-    body: []const u8,
-};
+pub fn Header(comptime M: type) type {
+    return struct {
+        method: M,
+        handle: u64,
+        body: []const u8,
+    };
+}
+
+pub const Received = Header(Method);
 
 pub const HeaderError = error{ Truncated, UnknownMethod };
 
-pub fn decodeRequestHeader(bytes: []const u8) HeaderError!Received {
+/// A request's header, read as `M`: `Method` on the execution half,
+/// `Callback` on the UI half.
+pub fn decodeHeader(comptime M: type, bytes: []const u8) HeaderError!Header(M) {
     if (bytes.len < request_header_bytes) return error.Truncated;
     const raw = std.mem.readInt(u16, bytes[0..2], .little);
-    const method = std.enums.fromInt(Method, raw) orelse return error.UnknownMethod;
+    const method = std.enums.fromInt(M, raw) orelse return error.UnknownMethod;
     return .{
         .method = method,
         .handle = std.mem.readInt(u64, bytes[2..10], .little),
@@ -280,8 +449,12 @@ pub fn decodeRequestHeader(bytes: []const u8) HeaderError!Received {
     };
 }
 
+pub fn decodeRequestHeader(bytes: []const u8) HeaderError!Received {
+    return decodeHeader(Method, bytes);
+}
+
 pub fn decodeRequest(
-    comptime method: Method,
+    comptime method: anytype,
     arena: std.mem.Allocator,
     body: []const u8,
 ) payload.DecodeError!Request(method) {
@@ -293,7 +466,7 @@ pub fn decodeRequest(
 // ---------------------------------------------------------------------------
 
 pub fn encodeOk(
-    comptime method: Method,
+    comptime method: anytype,
     allocator: std.mem.Allocator,
     value: Response(method),
 ) std.mem.Allocator.Error![]u8 {
@@ -314,7 +487,7 @@ pub fn encodeError(allocator: std.mem.Allocator, err: error_code.LinkError) std.
     return buffer;
 }
 
-pub fn Answer(comptime method: Method) type {
+pub fn Answer(comptime method: anytype) type {
     return union(enum) {
         ok: Response(method),
         /// The far side's own error, as its registered number.
@@ -327,7 +500,7 @@ pub const ResponseError = payload.DecodeError || error{UnknownErrorCode};
 /// `[]const u8` in the answer borrows `bytes`; every other slice is in
 /// `arena`.
 pub fn decodeResponse(
-    comptime method: Method,
+    comptime method: anytype,
     arena: std.mem.Allocator,
     bytes: []const u8,
 ) ResponseError!Answer(method) {
@@ -350,15 +523,20 @@ pub fn decodeResponse(
 // ---------------------------------------------------------------------------
 
 pub const MirrorError = error{
-    /// The options name a skill catalog or an MCP selection. Neither crosses
-    /// in this step, so a caller that has one is not using this link.
+    /// The options name a skill catalog, which does not cross yet, so a
+    /// caller that has one is not using this link.
     CapabilityNotOffered,
-    /// A handle id where this step never sends one.
+    /// A handle id where this link never sends one.
     UnexpectedHandle,
 };
 
-pub fn openOptionsToWire(value: surface.SessionOpenOptions) MirrorError!shapes.SessionOpenOptions {
-    if (value.skill_catalog != null or value.mcp_selection != null) return error.CapabilityNotOffered;
+/// The options as the wire carries them. The selection's selectors are
+/// rebuilt in `scratch`; everything else borrows from `value`.
+pub fn openOptionsToWire(
+    value: surface.SessionOpenOptions,
+    scratch: std.mem.Allocator,
+) (MirrorError || std.mem.Allocator.Error)!shapes.SessionOpenOptions {
+    if (value.skill_catalog != null) return error.CapabilityNotOffered;
     return .{
         .task_id = value.task_id,
         .binding_epoch = value.binding_epoch,
@@ -371,27 +549,76 @@ pub fn openOptionsToWire(value: surface.SessionOpenOptions) MirrorError!shapes.S
         .workspace_epoch = value.workspace_epoch,
         .skill_catalog = handle_table.Id.none,
         .skill_policy = value.skill_policy,
-        .mcp_selection = handle_table.Id.none,
+        .mcp_selection = if (value.mcp_selection) |selection|
+            try mcp_catalog.selectionToWire(selection, scratch)
+        else
+            null,
         .operation_id_floor = value.operation_id_floor,
     };
 }
 
-pub fn openOptionsFromWire(value: shapes.SessionOpenOptions) MirrorError!surface.SessionOpenOptions {
-    if (value.skill_catalog.valid() or value.mcp_selection.valid()) return error.UnexpectedHandle;
+/// Options received over the link, and the selection copy they name, which
+/// the receiver frees once the Session they open has taken what it needs.
+pub const OpenOptions = struct {
+    options: surface.SessionOpenOptions,
+    selection: ?*mcp_catalog.Selection,
+
+    pub fn deinit(self: *OpenOptions) void {
+        if (self.selection) |selection| selection.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn openOptionsFromWire(
+    value: shapes.SessionOpenOptions,
+    allocator: std.mem.Allocator,
+) (MirrorError || std.mem.Allocator.Error)!OpenOptions {
+    if (value.skill_catalog.valid()) return error.UnexpectedHandle;
+    const selection = if (value.mcp_selection) |wire_selection|
+        try mcp_catalog.selectionFromWire(allocator, wire_selection)
+    else
+        null;
     return .{
-        .task_id = value.task_id,
-        .binding_epoch = value.binding_epoch,
-        .model_binding = value.model_binding,
-        .permission_mode = value.permission_mode,
-        .shell_policy = value.shell_policy,
-        .permission_interaction = value.permission_interaction,
-        .workspace = value.workspace,
-        .canonical_user_home = value.canonical_user_home,
-        .workspace_epoch = value.workspace_epoch,
-        .skill_catalog = null,
-        .skill_policy = value.skill_policy,
-        .mcp_selection = null,
-        .operation_id_floor = value.operation_id_floor,
+        .options = .{
+            .task_id = value.task_id,
+            .binding_epoch = value.binding_epoch,
+            .model_binding = value.model_binding,
+            .permission_mode = value.permission_mode,
+            .shell_policy = value.shell_policy,
+            .permission_interaction = value.permission_interaction,
+            .workspace = value.workspace,
+            .canonical_user_home = value.canonical_user_home,
+            .workspace_epoch = value.workspace_epoch,
+            .skill_catalog = null,
+            .skill_policy = value.skill_policy,
+            .mcp_selection = selection,
+            .operation_id_floor = value.operation_id_floor,
+        },
+        .selection = selection,
+    };
+}
+
+pub fn activationOutcomeToWire(
+    value: surface.McpActivationOutcome,
+    scratch: std.mem.Allocator,
+) std.mem.Allocator.Error!McpActivationOutcome {
+    return switch (value) {
+        .empty => .empty,
+        .unavailable => |reason| .{ .unavailable = reason },
+        .activated => |activation| .{ .activated = try mcp_catalog.activationToWire(activation, scratch) },
+    };
+}
+
+/// The receiver owns the activation in the result.
+pub fn activationOutcomeFromWire(
+    value: McpActivationOutcome,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) std.mem.Allocator.Error!surface.McpActivationOutcome {
+    return switch (value) {
+        .empty => .empty,
+        .unavailable => |reason| .{ .unavailable = reason },
+        .activated => |activation| .{ .activated = try mcp_catalog.activationFromWire(allocator, io, activation) },
     };
 }
 
@@ -534,9 +761,35 @@ test "events and credit round-trip" {
     try testing.expectEqual(credit, try payload.decodeExact(Credit, arena.allocator(), credit_bytes));
 }
 
-test "options that name a capability this step does not carry are refused" {
+test "options that name a capability the link does not carry are refused" {
     var options: surface.SessionOpenOptions = undefined;
     options.skill_catalog = @ptrFromInt(0x1000);
     options.mcp_selection = null;
-    try testing.expectError(error.CapabilityNotOffered, openOptionsToWire(options));
+    try testing.expectError(error.CapabilityNotOffered, openOptionsToWire(options, testing.allocator));
+}
+
+test "a callback is read with the callback set, and a control frame says which it is" {
+    const bytes = try encodeRequest(Callback.mcp_request, testing.allocator, 9, .{ .bytes = "{}", .timeout_ms = 5, .tool = true });
+    defer testing.allocator.free(bytes);
+    const received = try decodeHeader(Callback, bytes);
+    try testing.expectEqual(Callback.mcp_request, received.method);
+    try testing.expectEqual(@as(u64, 9), received.handle);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const value = try decodeRequest(Callback.mcp_request, arena.allocator(), received.body);
+    try testing.expectEqualStrings("{}", value.bytes);
+    try testing.expect(value.tool);
+
+    const answer = try encodeOk(Callback.mcp_request, testing.allocator, .{ .failure = .cancelled });
+    defer testing.allocator.free(answer);
+    try testing.expectEqual(
+        mcp_connector.Failure.cancelled,
+        (try decodeResponse(Callback.mcp_request, arena.allocator(), answer)).ok.failure,
+    );
+
+    for ([_]Control{ .{ .cancel = 77 }, .{ .credit = .{ .count = 1, .bytes = 2 } } }) |sent| {
+        const encoded = try payload.encodeAlloc(Control, testing.allocator, sent);
+        defer testing.allocator.free(encoded);
+        try testing.expectEqualDeep(sent, try payload.decodeExact(Control, arena.allocator(), encoded));
+    }
 }
