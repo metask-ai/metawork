@@ -6467,6 +6467,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .account-update-trigger:hover:not(:disabled),
 .primary-navigation-item:hover,
 .primary-navigation-item[aria-current="page"],
+.inbox-list-row:hover,
+.inbox-list-row[aria-current="true"],
 .sidebar-action:hover:where(:not(:disabled)),
 .sidebar-action[data-active="true"],
 .sidebar-action[aria-current="page"],

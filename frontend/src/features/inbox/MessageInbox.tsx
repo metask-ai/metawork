@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { Icon } from "../../components/ui/Icon.tsx";
+import { Badge } from "../../components/ui/badge.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n } from "../../i18n/context.ts";
@@ -131,6 +132,7 @@ export function InboxConversationList({
                 aria-current={
                   selectedId === conversation.id ? "true" : undefined
                 }
+                data-unread={unread > 0}
                 onClick={() => onSelect(conversation.id)}
               >
                 <InboxAvatar name={name} />
@@ -177,12 +179,23 @@ function LinkedInboxTask({ task }: { task: InboxTask }) {
           <span>{t("inbox.linked_task")}</span>
           <strong>{task.title[language]}</strong>
         </span>
-        <Icon name="chevron-right" />
+        <span className="inbox-task-end">
+          <Badge
+            variant={task.status === "done" ? "success" : "neutral"}
+            className="shrink-0 whitespace-nowrap"
+          >
+            {status}
+          </Badge>
+          <Icon name="chevron-right" />
+        </span>
       </Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Backdrop />
         <Dialog.Popup>
           <div className="inbox-task-dialog-header">
+            <span className="inbox-task-icon">
+              <Icon name="new-task" />
+            </span>
             <Dialog.Title>{task.title[language]}</Dialog.Title>
             <Dialog.Close
               className="icon-button"
@@ -231,7 +244,9 @@ export function InboxConversationView({
         </span>
         <h1>{t("inbox.pick_conversation")}</h1>
         <p>{t("inbox.pick_hint")}</p>
-        <span className="inbox-sample">{t("inbox.sample")}</span>
+        <Badge className="mt-1 whitespace-nowrap text-(--ui-content-muted)">
+          {t("inbox.sample")}
+        </Badge>
       </div>
     );
 
@@ -244,7 +259,9 @@ export function InboxConversationView({
       <header className="inbox-detail-header">
         <InboxAvatar name={name} />
         <h1 id="inbox-conversation-title">{name}</h1>
-        <span className="inbox-sample">{t("inbox.sample")}</span>
+        <Badge className="ms-auto shrink-0 whitespace-nowrap text-(--ui-content-muted)">
+          {t("inbox.sample")}
+        </Badge>
       </header>
       <div className="inbox-transcript-scroll" key={conversation.id}>
         <p className="inbox-transcript-date">
@@ -256,6 +273,7 @@ export function InboxConversationView({
               className="inbox-message"
               key={message.id}
               data-direction={message.direction}
+              data-linked-task={message.task !== undefined}
             >
               <div className="inbox-message-meta">
                 <span>
@@ -269,8 +287,8 @@ export function InboxConversationView({
               </div>
               <div className="inbox-bubble">
                 <p>{message.text[language]}</p>
-                {message.task && <LinkedInboxTask task={message.task} />}
               </div>
+              {message.task && <LinkedInboxTask task={message.task} />}
             </li>
           ))}
         </ol>
