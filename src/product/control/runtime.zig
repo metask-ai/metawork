@@ -7597,11 +7597,6 @@ pub const Runtime = struct {
         self.task_runtime.relinquishSessionsAfterRuntimeShutdown();
     }
 
-    pub fn abandonAgentSessionsForRuntimeDeinit(self: *Runtime) void {
-        std.debug.assert(self.executor_shutdown);
-        self.task_runtime.abandonSessionsForRuntimeDeinit();
-    }
-
     fn settleCheckpointTransactionsForShutdown(self: *Runtime) void {
         self.task_runtime.settleCheckpointTransactionsForShutdown();
     }

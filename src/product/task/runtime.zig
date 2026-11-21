@@ -6566,23 +6566,6 @@ pub const Runtime = struct {
         self.agent_runtime_shutdown_complete = true;
     }
 
-    pub fn abandonSessionsForRuntimeDeinit(self: *Runtime) void {
-        for (self.tasks) |*entry| {
-            const task = entry.* orelse continue;
-            if (task.runtime.close_thread) |thread| {
-                thread.join();
-                task.runtime.close_thread = null;
-            }
-            const binding = task.runtime.bindingAfterCloseJoin() orelse continue;
-            switch (binding.state()) {
-                .owned, .closed => binding.abandonForRuntimeDeinit(),
-                .released, .relinquished, .moved, .fixture, .abandoned => {},
-            }
-            task.runtime.clearClosingRouteAfterRuntimeShutdown();
-        }
-        self.agent_runtime_shutdown_complete = true;
-    }
-
     pub fn deinitTasks(self: *Runtime, effects: ReleaseEffects) void {
         _ = self.settleModelIntent(false);
         if (self.taskCount() != 0) self.noteSearchChange();
