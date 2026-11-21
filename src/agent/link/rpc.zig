@@ -35,7 +35,6 @@ const checkpoint_restore = @import("agent_checkpoint_restore");
 const payload = @import("payload.zig");
 const shapes = @import("shapes.zig");
 const error_code = @import("error_code.zig");
-const handle_table = @import("handle_table.zig");
 
 const port = contract.port;
 const surface = contract.surface;
@@ -83,6 +82,12 @@ pub const Method = enum(u16) {
     apply_mcp_configuration = 36,
     probe_mcp = 37,
     capture_restore_inputs = 38,
+    /// Names nothing; answers with the name of the lease it acquired.
+    query_skill_catalog = 39,
+    /// Names the lease.
+    release_skill_catalog = 40,
+    refresh_skill_catalog = 41,
+    skill_policy_matches = 42,
 
     /// Whether the call names a Session. The rest are the Runtime's.
     pub fn namesSession(self: Method) bool {
@@ -96,6 +101,8 @@ pub const Method = enum(u16) {
             .prepare_mcp_restore_selection,
             .apply_mcp_configuration,
             .probe_mcp,
+            .query_skill_catalog,
+            .release_skill_catalog,
             => false,
             else => true,
         };
@@ -151,13 +158,32 @@ pub const McpActivationOutcome = union(enum) {
     unavailable: surface.McpActivationUnavailableReason,
 };
 
-/// What `capture_restore_inputs` captures, as data. The skill part does not
-/// cross yet; the execution half refuses a capture that has one.
+/// What `capture_restore_inputs` captures, as data. The skill part is its
+/// grants: its lease is the one the Session was bound with, which the UI half
+/// already names.
 pub const RestoreInputs = struct {
+    skill: ?[]const []const u8,
     mcp: ?mcp_catalog.RestoreSelectionWire,
     permission_mode: control.PermissionMode,
     shell_policy: control.ShellPolicy,
     permission_interaction: surface.PermissionInteraction,
+};
+
+/// A skill catalog query without its source lifetime: the UI half keeps that
+/// pinned for as long as anything there refers to the lease.
+pub const SkillQuery = struct {
+    canonical_user_home: []const u8,
+    target: contract.CatalogQueryTarget,
+    additional_sources: []const contract.CatalogSource,
+    default_source_priority: i32,
+};
+
+pub const SkillAcquisition = struct {
+    lease: u64,
+    revision: []const u8,
+    health: contract.CatalogHealth,
+    skills: []const contract.CatalogSkill,
+    issues: []const contract.CatalogIssue,
 };
 
 pub const McpOpened = union(enum) {
@@ -346,6 +372,9 @@ fn MethodRequest(comptime method: Method) type {
             ceiling: []const mcp_catalog.ActivationTool,
         },
         .apply_mcp_configuration, .probe_mcp => McpMembership,
+        .query_skill_catalog => SkillQuery,
+        .release_skill_catalog => Empty,
+        .refresh_skill_catalog, .skill_policy_matches => struct { lease: u64, policy: surface.SkillPolicyInput },
     };
 }
 
@@ -388,6 +417,9 @@ fn MethodResponse(comptime method: Method) type {
         .prepare_mcp_restore_selection => mcp_catalog.SelectionWire,
         .apply_mcp_configuration => surface.McpConfigurationApplyOutcome,
         .capture_restore_inputs => RestoreInputs,
+        .query_skill_catalog => SkillAcquisition,
+        .release_skill_catalog, .refresh_skill_catalog => void,
+        .skill_policy_matches => bool,
     };
 }
 
@@ -526,21 +558,15 @@ pub fn decodeResponse(
 // Mirrors in the direction `shapes.zig` does not already provide
 // ---------------------------------------------------------------------------
 
-pub const MirrorError = error{
-    /// The options name a skill catalog, which does not cross yet, so a
-    /// caller that has one is not using this link.
-    CapabilityNotOffered,
-    /// A handle id where this link never sends one.
-    UnexpectedHandle,
-};
-
-/// The options as the wire carries them. The selection's selectors are
+/// The options as the wire carries them, with `skill_lease` the execution
+/// half's name for the lease `value` binds. The selection's selectors are
 /// rebuilt in `scratch`; everything else borrows from `value`.
 pub fn openOptionsToWire(
     value: surface.SessionOpenOptions,
+    skill_lease: ?u64,
     scratch: std.mem.Allocator,
-) (MirrorError || std.mem.Allocator.Error)!shapes.SessionOpenOptions {
-    if (value.skill_catalog != null) return error.CapabilityNotOffered;
+) std.mem.Allocator.Error!shapes.SessionOpenOptions {
+    std.debug.assert((value.skill_catalog == null) == (skill_lease == null));
     return .{
         .task_id = value.task_id,
         .binding_epoch = value.binding_epoch,
@@ -551,7 +577,7 @@ pub fn openOptionsToWire(
         .workspace = value.workspace,
         .canonical_user_home = value.canonical_user_home,
         .workspace_epoch = value.workspace_epoch,
-        .skill_catalog = handle_table.Id.none,
+        .skill_catalog = skill_lease,
         .skill_policy = value.skill_policy,
         .mcp_selection = if (value.mcp_selection) |selection|
             try mcp_catalog.selectionToWire(selection, scratch)
@@ -573,11 +599,13 @@ pub const OpenOptions = struct {
     }
 };
 
+/// `skill_lease` is the lease the options name, resolved by the receiver.
 pub fn openOptionsFromWire(
     value: shapes.SessionOpenOptions,
+    skill_lease: ?*contract.CatalogLease,
     allocator: std.mem.Allocator,
-) (MirrorError || std.mem.Allocator.Error)!OpenOptions {
-    if (value.skill_catalog.valid()) return error.UnexpectedHandle;
+) std.mem.Allocator.Error!OpenOptions {
+    std.debug.assert((value.skill_catalog == null) == (skill_lease == null));
     const selection = if (value.mcp_selection) |wire_selection|
         try mcp_catalog.selectionFromWire(allocator, wire_selection)
     else
@@ -593,7 +621,7 @@ pub fn openOptionsFromWire(
             .workspace = value.workspace,
             .canonical_user_home = value.canonical_user_home,
             .workspace_epoch = value.workspace_epoch,
-            .skill_catalog = null,
+            .skill_catalog = skill_lease,
             .skill_policy = value.skill_policy,
             .mcp_selection = selection,
             .operation_id_floor = value.operation_id_floor,
@@ -763,13 +791,6 @@ test "events and credit round-trip" {
     const credit_bytes = try payload.encodeAlloc(Credit, testing.allocator, credit);
     defer testing.allocator.free(credit_bytes);
     try testing.expectEqual(credit, try payload.decodeExact(Credit, arena.allocator(), credit_bytes));
-}
-
-test "options that name a capability the link does not carry are refused" {
-    var options: surface.SessionOpenOptions = undefined;
-    options.skill_catalog = @ptrFromInt(0x1000);
-    options.mcp_selection = null;
-    try testing.expectError(error.CapabilityNotOffered, openOptionsToWire(options, testing.allocator));
 }
 
 test "a callback is read with the callback set, and a control frame says which it is" {

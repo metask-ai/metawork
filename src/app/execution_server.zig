@@ -211,6 +211,10 @@ const Server = struct {
     mcp_mutex: std.Io.Mutex = .init,
     mcp_members: std.StringHashMapUnmanaged(u64) = .empty,
 
+    /// Skill catalog leases the UI half names, each holding the reference
+    /// its acquisition took until the UI half lets go of it.
+    leases: Leases = .{},
+
     forward_mutex: std.Io.Mutex = .init,
     forward_condition: std.Io.Condition = .init,
     /// Set by anything the forwarder has to look at again.
@@ -397,6 +401,43 @@ const Registry = struct {
     }
 };
 
+/// Leases by the name this half gave them. Names are never reused, so a name
+/// the UI half still holds after letting go of it resolves to nothing.
+const Leases = struct {
+    mutex: std.Io.Mutex = .init,
+    entries: std.AutoHashMapUnmanaged(u64, *contract.CatalogLease) = .empty,
+    next: u64 = 0,
+
+    fn add(self: *Leases, half: *Server, lease: *contract.CatalogLease) std.mem.Allocator.Error!u64 {
+        self.mutex.lockUncancelable(half.io);
+        defer self.mutex.unlock(half.io);
+        try self.entries.ensureUnusedCapacity(half.allocator, 1);
+        self.next += 1;
+        self.entries.putAssumeCapacity(self.next, lease);
+        return self.next;
+    }
+
+    fn get(self: *Leases, half: *Server, id: u64) ?*contract.CatalogLease {
+        self.mutex.lockUncancelable(half.io);
+        defer self.mutex.unlock(half.io);
+        return self.entries.get(id);
+    }
+
+    fn take(self: *Leases, half: *Server, id: u64) ?*contract.CatalogLease {
+        self.mutex.lockUncancelable(half.io);
+        defer self.mutex.unlock(half.io);
+        const removed = self.entries.fetchRemove(id) orelse return null;
+        return removed.value;
+    }
+};
+
+/// The lease a request names, which the UI half was given by this half. A
+/// name it never gave is a peer that is not the UI half it serves.
+fn resolveLease(self: *Server, id: ?u64) ?*contract.CatalogLease {
+    const name = id orelse return null;
+    return self.leases.get(self, name) orelse self.fail(.protocol_violation);
+}
+
 // ---------------------------------------------------------------------------
 // Reading
 // ---------------------------------------------------------------------------
@@ -517,7 +558,7 @@ fn dispatch(
     const request = rpc.decodeRequest(method, arena, body) catch self.fail(.protocol_violation);
 
     if (comptime !method.namesSession()) {
-        const bytes = answerRuntime(self, method, request, arena);
+        const bytes = answerRuntime(self, method, handle, request, arena);
         return send(self, correlation, bytes);
     }
 
@@ -532,14 +573,17 @@ fn dispatch(
         send(self, correlation, bytes);
 }
 
-fn answerRuntime(self: *Server, comptime method: rpc.Method, request: rpc.Request(method), arena: std.mem.Allocator) []u8 {
+fn answerRuntime(self: *Server, comptime method: rpc.Method, handle: u64, request: rpc.Request(method), arena: std.mem.Allocator) []u8 {
     const runtime = self.runtime.port;
     switch (method) {
+        .release_skill_catalog => {
+            const lease = self.leases.take(self, handle) orelse self.fail(.protocol_violation);
+            runtime.releaseSkillCatalog(lease) catch |err| return replyError(self, err);
+            return reply(self, method, {});
+        },
         .create_session => {
-            var opened = rpc.openOptionsFromWire(request, self.allocator) catch |err| switch (err) {
-                error.OutOfMemory => self.fail(.resource_unavailable),
-                else => self.fail(.protocol_violation),
-            };
+            var opened = rpc.openOptionsFromWire(request, resolveLease(self, request.skill_catalog), self.allocator) catch
+                self.fail(.resource_unavailable);
             defer opened.deinit();
             const route = runtime.createSessionRoute(opened.options) catch |err| return replyError(self, err);
             const id = self.registry.add(self, route.id, route.session) catch self.fail(.resource_unavailable);
@@ -547,10 +591,8 @@ fn answerRuntime(self: *Server, comptime method: rpc.Method, request: rpc.Reques
         },
         .restore_session => {
             var source: MemorySource = .{ .bytes = request.source.bytes, .end = request.source.end };
-            var opened = rpc.openOptionsFromWire(request.session, self.allocator) catch |err| switch (err) {
-                error.OutOfMemory => self.fail(.resource_unavailable),
-                else => self.fail(.protocol_violation),
-            };
+            var opened = rpc.openOptionsFromWire(request.session, resolveLease(self, request.session.skill_catalog), self.allocator) catch
+                self.fail(.resource_unavailable);
             defer opened.deinit();
             const options: contract.surface.SessionRestoreOptions = .{
                 .session = opened.options,
@@ -600,6 +642,24 @@ fn answerRuntime(self: *Server, comptime method: rpc.Method, request: rpc.Reques
             return reply(self, method, mcp_catalog.selectionToWire(selection, arena) catch self.fail(.resource_unavailable));
         },
         .apply_mcp_configuration => return applyMcp(self, request, arena),
+        .query_skill_catalog => {
+            var acquisition = runtime.querySkillCatalog(.{
+                .canonical_user_home = request.canonical_user_home,
+                .target = request.target,
+                .additional_sources = request.additional_sources,
+                .default_source_priority = request.default_source_priority,
+            }) catch |err| return replyError(self, err);
+            defer acquisition.deinitProjection();
+            const id = self.leases.add(self, acquisition.lease) catch self.fail(.resource_unavailable);
+            const projection = acquisition.projection;
+            return reply(self, method, rpc.SkillAcquisition{
+                .lease = id,
+                .revision = projection.revision,
+                .health = projection.health,
+                .skills = projection.skills,
+                .issues = projection.issues,
+            });
+        },
         .probe_mcp => {
             var input = standInMembership(self, request, true) catch |err| switch (err) {
                 error.OutOfMemory => self.fail(.resource_unavailable),
@@ -727,15 +787,25 @@ fn answerSession(
         .capture_restore_inputs => captured: {
             var inputs = session.captureRestoreInputs() catch |err| break :captured replyError(self, err);
             defer inputs.release() catch {};
-            // No skill catalog crosses, so no Session here has one to capture.
-            if (inputs.skill != null) self.fail(.protocol_violation);
             break :captured reply(self, method, rpc.RestoreInputs{
+                .skill = if (inputs.skill) |skill|
+                    (inputs.agent.borrowSkillRestoreInputs(skill) orelse self.fail(.resource_unavailable)).policy.granted_skill_ids
+                else
+                    null,
                 .mcp = if (inputs.mcp) |value| mcp_catalog.restoreSelectionToWire(value) else null,
                 .permission_mode = inputs.permission_mode,
                 .shell_policy = inputs.shell_policy,
                 .permission_interaction = inputs.permission_interaction,
             });
         },
+        .refresh_skill_catalog => reply(self, method, session.refreshSkillCatalog(
+            resolveLease(self, request.lease).?,
+            request.policy,
+        )),
+        .skill_policy_matches => reply(self, method, session.skillPolicyMatches(
+            resolveLease(self, request.lease).?,
+            request.policy,
+        )),
         .copy_pending_ui_request => copied: {
             const value = session.copyPendingUiRequest(arena) catch |err|
                 break :copied replyError(self, err);
@@ -825,6 +895,8 @@ fn answerSession(
         .prepare_mcp_restore_selection,
         .apply_mcp_configuration,
         .probe_mcp,
+        .query_skill_catalog,
+        .release_skill_catalog,
         => comptime unreachable,
     };
 }

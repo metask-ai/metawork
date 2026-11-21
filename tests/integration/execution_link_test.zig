@@ -974,3 +974,122 @@ test "a process that dies on every start is not started again on every ask" {
     try std.testing.expect(owner.started <= 5);
     try std.testing.expect(asks > 50);
 }
+
+// ---------------------------------------------------------------------------
+// Skills over the link
+// ---------------------------------------------------------------------------
+
+fn skillSessionOptions(root: []const u8, lease: *agent.CatalogLease, grants: []const []const u8) agent.SessionOpenOptions {
+    return .{
+        .task_id = 1,
+        .binding_epoch = 1,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = .anthropic_messages,
+                .base_url = "",
+                .model = "fixture-model",
+            },
+            .credential = "fixture-secret",
+        },
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .canonical_user_home = root,
+        .workspace_epoch = "skills-over-the-link",
+        .skill_catalog = lease,
+        .skill_policy = .{ .granted_skill_ids = grants },
+    };
+}
+
+/// Counts what the UI half's source lifetime is asked, as Product's pins an
+/// Office version.
+const SourcePin = struct {
+    held: std.atomic.Value(i32) = .init(0),
+
+    fn lifetime(self: *SourcePin) agent.CatalogSourceLifetime {
+        return .{ .context = self, .retain_fn = retain, .release_fn = release };
+    }
+
+    fn retain(context: *anyopaque) bool {
+        const self: *SourcePin = @ptrCast(@alignCast(context));
+        _ = self.held.fetchAdd(1, .acq_rel);
+        return true;
+    }
+
+    fn release(context: *anyopaque) void {
+        const self: *SourcePin = @ptrCast(@alignCast(context));
+        _ = self.held.fetchSub(1, .acq_rel);
+    }
+};
+
+test "a skill catalog stays in the execution process, and a Session bound with it is bound again after the process is gone" {
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var pin: SourcePin = .{};
+    {
+        var wake: Wake = .{};
+        var owner: execution_client.Owner = undefined;
+        try startOwner(&owner, &wake, &.{ fixture, "--with-runtime" }, fixture_message_limits, null);
+        defer owner.deinit();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+        defer allocator.free(root);
+        const port = owner.runtimePort();
+
+        var acquisition = try port.querySkillCatalog(.{
+            .canonical_user_home = root,
+            .target = .{ .workspace = .{ .canonical_root = root, .epoch = "skills-over-the-link" } },
+            .source_lifetime = pin.lifetime(),
+        });
+        defer acquisition.deinitProjection();
+        try std.testing.expectEqual(@as(usize, 1), acquisition.projection.skills.len);
+        const grants = [_][]const u8{lifecycle.fixture_skill_id};
+        // The pin is this half's, held for as long as the lease is referred to.
+        try std.testing.expectEqual(@as(i32, 1), pin.held.load(.acquire));
+
+        const route = try port.createSessionRoute(skillSessionOptions(root, acquisition.lease, &grants));
+        try std.testing.expect(route.session.skillPolicyMatches(acquisition.lease, .{ .granted_skill_ids = &grants }));
+
+        // A capture is the lease the Session was bound with and its grants,
+        // and narrowing, cloning and borrowing it happen here.
+        var captured = try route.session.captureRestoreInputs();
+        const borrow = port.borrowSkillRestoreInputs(captured.skill.?).?;
+        try std.testing.expectEqual(acquisition.lease, borrow.catalog);
+        try std.testing.expectEqualStrings(lifecycle.fixture_skill_id, borrow.policy.granted_skill_ids[0]);
+        const narrowed = try port.narrowSkillRestoreInputs(captured.skill.?, .{});
+        try std.testing.expectEqual(@as(usize, 0), port.borrowSkillRestoreInputs(narrowed).?.policy.granted_skill_ids.len);
+        try port.releaseSkillRestoreInputs(narrowed);
+        const kept = try port.cloneSkillRestoreInputs(captured.skill.?);
+        try captured.release();
+
+        try std.testing.expect(route.session.closeOutcome(.session_close) == .closed);
+        try port.releaseClosedSession(route.session);
+
+        // The process goes, and its catalog with it.
+        execution_client.TestSupport.killCurrent(&owner);
+        var waited: u64 = 0;
+        while (owner.takeLoss() == null) : (waited += wait_tick_ms) {
+            if (waited >= wait_limit_ms) return error.LossNeverReported;
+            try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+        }
+        owner.sweep();
+
+        // What a restore does with its capture: open with the borrowed lease
+        // and grants. The lease is acquired again in the new process, as the
+        // same catalog.
+        const kept_borrow = port.borrowSkillRestoreInputs(kept).?;
+        const reopened = try port.createSessionRoute(skillSessionOptions(root, kept_borrow.catalog, kept_borrow.policy.granted_skill_ids));
+        try std.testing.expect(owner.currentProcessId() != null);
+        try std.testing.expect(reopened.session.skillPolicyMatches(acquisition.lease, .{ .granted_skill_ids = &grants }));
+        try std.testing.expect(reopened.session.closeOutcome(.session_close) == .closed);
+        try port.releaseClosedSession(reopened.session);
+        try port.releaseSkillRestoreInputs(kept);
+
+        try std.testing.expectEqual(@as(i32, 1), pin.held.load(.acquire));
+        try port.releaseSkillCatalog(acquisition.lease);
+    }
+    // Nothing refers to the lease any more, here or there.
+    try std.testing.expectEqual(@as(i32, 0), pin.held.load(.acquire));
+}

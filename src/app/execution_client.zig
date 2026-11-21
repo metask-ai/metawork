@@ -1198,6 +1198,9 @@ const RemoteSession = struct {
     /// The MCP installation capability its Runs were last given, which a
     /// Run's request reaches by calling back. Under `owner.mutex`.
     installation: ?contract.McpInstallationInput = null,
+    /// The skill catalog it is bound with, held for as long as it is: in
+    /// process the Session holds its lease the same way.
+    skill_lease: ?*RemoteLease = null,
 
     fn io(self: *RemoteSession) std.Io {
         return self.generation.owner.io;
@@ -1233,7 +1236,17 @@ const RemoteSession = struct {
 
     fn destroy(self: *RemoteSession, allocator: std.mem.Allocator) void {
         if (self.workspace_root) |value| allocator.free(value);
+        if (self.skill_lease) |lease| lease.release();
         allocator.destroy(self);
+    }
+
+    /// Now bound with `lease`, or with none; the reference moves in.
+    fn rebindSkills(self: *RemoteSession, lease: ?*RemoteLease) void {
+        self.mutex.lockUncancelable(self.io());
+        const previous = self.skill_lease;
+        self.skill_lease = lease;
+        self.mutex.unlock(self.io());
+        if (previous) |value| value.release();
     }
 };
 
@@ -1292,12 +1305,11 @@ fn runtimeCreateSessionRoute(context: ?*anyopaque, options: surface.SessionOpenO
     const owner = ownerOf(context);
     var scratch = std.heap.ArenaAllocator.init(owner.allocator);
     defer scratch.deinit();
-    const wire_options = rpc.openOptionsToWire(options, scratch.allocator()) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.DependencyUnreachable,
-    };
     const generation = owner.ensure() orelse return error.DependencyUnreachable;
     defer generation.release();
+    const skill_lease: ?*RemoteLease = if (options.skill_catalog) |lease| leaseOf(lease) else null;
+    const skill_name: ?u64 = if (skill_lease) |lease| try lease.bind(generation) else null;
+    const wire_options = try rpc.openOptionsToWire(options, skill_name, scratch.allocator());
     var reply = call(generation, .create_session, 0, wire_options) orelse return error.DependencyUnreachable;
     defer reply.deinit();
     const route = switch (reply.answer) {
@@ -1308,6 +1320,7 @@ fn runtimeCreateSessionRoute(context: ?*anyopaque, options: surface.SessionOpenO
         discardUnnamed(generation, route.handle);
         return error.OutOfMemory;
     };
+    if (skill_lease) |lease| remote.rebindSkills(lease.retain());
     return .{ .id = route.route_id, .session = remote.sessionPort() };
 }
 
@@ -1341,10 +1354,6 @@ fn runtimeRestoreSessionRoute(context: ?*anyopaque, options: surface.SessionRest
     const owner = ownerOf(context);
     var scratch = std.heap.ArenaAllocator.init(owner.allocator);
     defer scratch.deinit();
-    const wire_session = rpc.openOptionsToWire(options.session, scratch.allocator()) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.DependencyUnreachable,
-    };
     var bytes: std.ArrayList(u8) = .empty;
     defer {
         std.crypto.secureZero(u8, bytes.items);
@@ -1353,6 +1362,9 @@ fn runtimeRestoreSessionRoute(context: ?*anyopaque, options: surface.SessionRest
     const end = try readSource(owner.allocator, options.source, options.checkpoint_limits.hard_bytes, &bytes);
     const generation = owner.ensure() orelse return error.DependencyUnreachable;
     defer generation.release();
+    const skill_lease: ?*RemoteLease = if (options.session.skill_catalog) |lease| leaseOf(lease) else null;
+    const skill_name: ?u64 = if (skill_lease) |lease| try lease.bind(generation) else null;
+    const wire_session = try rpc.openOptionsToWire(options.session, skill_name, scratch.allocator());
     var reply = call(generation, .restore_session, 0, .{
         .session = wire_session,
         .checkpoint_limits = options.checkpoint_limits,
@@ -1374,6 +1386,7 @@ fn runtimeRestoreSessionRoute(context: ?*anyopaque, options: surface.SessionRest
         discardUnnamed(generation, route.handle);
         return error.OutOfMemory;
     };
+    if (skill_lease) |lease| remote.rebindSkills(lease.retain());
     return .{ .id = route.route_id, .session = remote.sessionPort(), .report = route.report };
 }
 
@@ -1631,34 +1644,232 @@ fn runtimeProbeMcp(context: ?*anyopaque, input: *mcp_runtime.Input) Allocating!s
     };
 }
 
-fn runtimeQuerySkillCatalog(_: ?*anyopaque, _: contract.CatalogQuery) Allocating!contract.CatalogAcquisition {
-    return error.DependencyUnreachable;
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+//
+// A skill catalog lease is a Core handle, so it stays in the execution
+// process and this half holds a stand-in that names it. The stand-in keeps
+// the query that acquired it and the catalog revision Product was shown, and
+// keeps the query's source lifetime pinned for as long as anything here
+// refers to it. That is as long as anything there does: Product's
+// acquisition, the Sessions bound with it and the restore captures made from
+// them each hold a reference here and release it when theirs there is
+// released. So the source lifetime never has to cross.
+//
+// A process that is gone took its leases with it. A stand-in used again is
+// acquired anew, by the same query, in the process there is now, and is that
+// catalog only if its revision is the one Product was shown; otherwise it is
+// refused as a lease of another Runtime is.
+//
+// Restore inputs are a lease and a list of grants, so they live here whole.
+
+const RemoteLease = struct {
+    owner: *Owner,
+    arena: std.heap.ArenaAllocator,
+    query: rpc.SkillQuery,
+    revision: []const u8 = "",
+    source_lifetime: ?contract.CatalogSourceLifetime,
+    mutex: std.Io.Mutex = .init,
+    references: u32 = 1,
+    /// The process it is acquired in, by number, and its name there.
+    bound: u32 = 0,
+    name: u64 = 0,
+
+    fn retain(self: *RemoteLease) *RemoteLease {
+        const io = self.owner.io;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        std.debug.assert(self.references != 0);
+        self.references += 1;
+        return self;
+    }
+
+    /// The last reference lets go of the lease where it lives, if that
+    /// process is still there, and of the source lifetime.
+    fn release(self: *RemoteLease) void {
+        const io = self.owner.io;
+        self.mutex.lockUncancelable(io);
+        self.references -= 1;
+        const last = self.references == 0;
+        self.mutex.unlock(io);
+        if (!last) return;
+        if (self.bound != 0) releaseNamed(self.owner, self.bound, self.name);
+        if (self.source_lifetime) |lifetime| lifetime.release();
+        const allocator = self.owner.allocator;
+        self.arena.deinit();
+        allocator.destroy(self);
+    }
+
+    /// Its name in `generation`'s process, acquiring it there first if it
+    /// was acquired in a process that is gone.
+    fn bind(self: *RemoteLease, generation: *Generation) Allocating!u64 {
+        const io = self.owner.io;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.bound == generation.number) return self.name;
+        var reply = call(generation, .query_skill_catalog, 0, self.query) orelse return error.DependencyUnreachable;
+        defer reply.deinit();
+        const acquired = switch (reply.answer) {
+            .err => |err| return narrow(Allocating, err),
+            .ok => |value| value,
+        };
+        if (!std.mem.eql(u8, acquired.revision, self.revision)) {
+            releaseNamed(self.owner, generation.number, acquired.lease);
+            return error.CatalogBindingMismatch;
+        }
+        self.bound = generation.number;
+        self.name = acquired.lease;
+        return self.name;
+    }
+};
+
+fn leaseOf(lease: *const contract.CatalogLease) *RemoteLease {
+    return @ptrCast(@alignCast(@constCast(lease)));
 }
 
-fn runtimeReleaseSkillCatalog(_: ?*anyopaque, _: *contract.CatalogLease) Error!void {
-    return error.DependencyUnreachable;
+/// Lets go of the lease named `name` in process `number`, if that is the
+/// process there is now. One that is gone took the lease with it.
+fn releaseNamed(owner: *Owner, number: u32, name: u64) void {
+    const generation = owner.live() orelse return;
+    defer generation.release();
+    if (generation.number != number) return;
+    if (call(generation, .release_skill_catalog, name, .{})) |reply| {
+        var value = reply;
+        defer value.deinit();
+        if (value.answer == .err)
+            std.log.warn("execution process refused to release a skill catalog: {s}", .{@errorName(value.answer.err)});
+    }
 }
 
-fn runtimeNarrowSkillRestoreInputs(_: ?*anyopaque, _: *port.SkillRestoreInputs, _: surface.SkillPolicyInput) Allocating!*port.SkillRestoreInputs {
-    return error.DependencyUnreachable;
+/// The query, without its source lifetime, in `arena`.
+fn copySkillQuery(arena: std.mem.Allocator, query: contract.CatalogQuery) std.mem.Allocator.Error!rpc.SkillQuery {
+    const sources = try arena.alloc(contract.CatalogSource, query.additional_sources.len);
+    for (query.additional_sources, sources) |source, *target| target.* = .{
+        .canonical_root = try arena.dupe(u8, source.canonical_root),
+        .scope = source.scope,
+        .source_instance_id = try arena.dupe(u8, source.source_instance_id),
+        .priority = source.priority,
+    };
+    return .{
+        .canonical_user_home = try arena.dupe(u8, query.canonical_user_home),
+        .target = switch (query.target) {
+            .management => .management,
+            .workspace => |workspace| .{ .workspace = .{
+                .canonical_root = try arena.dupe(u8, workspace.canonical_root),
+                .epoch = try arena.dupe(u8, workspace.epoch),
+            } },
+        },
+        .additional_sources = sources,
+        .default_source_priority = query.default_source_priority,
+    };
 }
 
-fn runtimeCloneSkillRestoreInputs(_: ?*anyopaque, _: *port.SkillRestoreInputs) Allocating!*port.SkillRestoreInputs {
-    return error.DependencyUnreachable;
+fn runtimeQuerySkillCatalog(context: ?*anyopaque, query: contract.CatalogQuery) Allocating!contract.CatalogAcquisition {
+    const owner = ownerOf(context);
+    if (query.source_lifetime) |lifetime| try lifetime.retain();
+    const lease = owner.allocator.create(RemoteLease) catch |err| {
+        if (query.source_lifetime) |lifetime| lifetime.release();
+        return err;
+    };
+    lease.* = .{
+        .owner = owner,
+        .arena = .init(owner.allocator),
+        .query = undefined,
+        .source_lifetime = query.source_lifetime,
+    };
+    // From here the stand-in owns the pin, and its release lets go of it.
+    errdefer lease.release();
+    lease.query = try copySkillQuery(lease.arena.allocator(), query);
+    const generation = owner.ensure() orelse return error.DependencyUnreachable;
+    defer generation.release();
+    var reply = call(generation, .query_skill_catalog, 0, lease.query) orelse return error.DependencyUnreachable;
+    defer reply.deinit();
+    const acquired = switch (reply.answer) {
+        .err => |err| return narrow(Allocating, err),
+        .ok => |value| value,
+    };
+    lease.bound = generation.number;
+    lease.name = acquired.lease;
+    lease.revision = try lease.arena.allocator().dupe(u8, acquired.revision);
+    const projection = try contract.CatalogProjection.own(
+        owner.allocator,
+        acquired.revision,
+        acquired.health,
+        acquired.skills,
+        acquired.issues,
+    );
+    return .{ .lease = @ptrCast(lease), .projection = projection };
 }
 
-fn runtimeBorrowSkillRestoreInputs(_: ?*anyopaque, _: *const port.SkillRestoreInputs) ?port.SkillRestoreBorrow {
-    return null;
+/// Never refused: a lease of a process that is gone went with it.
+fn runtimeReleaseSkillCatalog(_: ?*anyopaque, lease: *contract.CatalogLease) Error!void {
+    leaseOf(lease).release();
 }
 
-fn runtimeReleaseSkillRestoreInputs(_: ?*anyopaque, _: *port.SkillRestoreInputs) Error!void {
-    return error.DependencyUnreachable;
+const RemoteSkillInputs = struct {
+    lease: *RemoteLease,
+    arena: std.heap.ArenaAllocator,
+    grants: []const []const u8,
+
+    /// Takes the reference to `lease` in.
+    fn create(owner: *Owner, lease: *RemoteLease, grants: []const []const u8) Allocating!*port.SkillRestoreInputs {
+        errdefer lease.release();
+        const self = try owner.allocator.create(RemoteSkillInputs);
+        errdefer owner.allocator.destroy(self);
+        self.* = .{ .lease = lease, .arena = .init(owner.allocator), .grants = &.{} };
+        errdefer self.arena.deinit();
+        const copied = try self.arena.allocator().alloc([]const u8, grants.len);
+        for (grants, copied) |grant, *target| target.* = try self.arena.allocator().dupe(u8, grant);
+        self.grants = copied;
+        return @ptrCast(self);
+    }
+
+    fn of(inputs: *const port.SkillRestoreInputs) *RemoteSkillInputs {
+        return @ptrCast(@alignCast(@constCast(inputs)));
+    }
+
+    fn destroy(self: *RemoteSkillInputs) void {
+        const lease = self.lease;
+        const allocator = lease.owner.allocator;
+        self.arena.deinit();
+        allocator.destroy(self);
+        lease.release();
+    }
+};
+
+/// A current Host policy may revoke original grants, never add one.
+fn runtimeNarrowSkillRestoreInputs(context: ?*anyopaque, inputs: *port.SkillRestoreInputs, ceiling: surface.SkillPolicyInput) Allocating!*port.SkillRestoreInputs {
+    const owner = ownerOf(context);
+    const original = RemoteSkillInputs.of(inputs);
+    var kept: std.ArrayList([]const u8) = .empty;
+    defer kept.deinit(owner.allocator);
+    for (original.grants) |grant| {
+        for (ceiling.granted_skill_ids) |allowed| if (std.mem.eql(u8, grant, allowed)) {
+            try kept.append(owner.allocator, grant);
+            break;
+        };
+    }
+    return RemoteSkillInputs.create(owner, original.lease.retain(), kept.items);
 }
 
-/// Only what `sessionCaptureRestoreInputs` hands out, which carries no skill
-/// part.
-fn runtimeReleaseRestoreInputs(_: ?*anyopaque, inputs: *port.SessionRestoreInputs) Error!void {
-    std.debug.assert(inputs.skill == null);
+fn runtimeCloneSkillRestoreInputs(context: ?*anyopaque, inputs: *port.SkillRestoreInputs) Allocating!*port.SkillRestoreInputs {
+    const original = RemoteSkillInputs.of(inputs);
+    return RemoteSkillInputs.create(ownerOf(context), original.lease.retain(), original.grants);
+}
+
+/// Always made: the inputs are here.
+fn runtimeBorrowSkillRestoreInputs(_: ?*anyopaque, inputs: *const port.SkillRestoreInputs) ?port.SkillRestoreBorrow {
+    const value = RemoteSkillInputs.of(inputs);
+    return .{ .catalog = @ptrCast(value.lease), .policy = .{ .granted_skill_ids = value.grants } };
+}
+
+fn runtimeReleaseSkillRestoreInputs(_: ?*anyopaque, inputs: *port.SkillRestoreInputs) Error!void {
+    RemoteSkillInputs.of(inputs).destroy();
+}
+
+fn runtimeReleaseRestoreInputs(context: ?*anyopaque, inputs: *port.SessionRestoreInputs) Error!void {
+    if (inputs.skill) |skill| try runtimeReleaseSkillRestoreInputs(context, skill);
     if (inputs.mcp) |selection| selection.deinit();
     inputs.* = undefined;
 }
@@ -1748,8 +1959,12 @@ fn sessionCloseOutcome(context: ?*anyopaque, interruption: control.ExternalInter
     return outcome;
 }
 
-fn sessionRefreshSkillCatalog(_: ?*anyopaque, _: *contract.CatalogLease, _: surface.SkillPolicyInput) Allocating!void {
-    return error.DependencyUnreachable;
+fn sessionRefreshSkillCatalog(context: ?*anyopaque, lease: *contract.CatalogLease, policy: surface.SkillPolicyInput) Allocating!void {
+    const remote = remoteOf(context);
+    const stand_in = leaseOf(lease);
+    const name = try stand_in.bind(remote.generation);
+    try sessionCall(remote, .refresh_skill_catalog, Allocating, .{ .lease = name, .policy = policy });
+    remote.rebindSkills(stand_in.retain());
 }
 
 fn sessionSetModel(context: ?*anyopaque, model: []const u8) Error!void {
@@ -1757,11 +1972,17 @@ fn sessionSetModel(context: ?*anyopaque, model: []const u8) Error!void {
 }
 
 fn sessionClearSkillPolicy(context: ?*anyopaque) Allocating!void {
-    return sessionCall(remoteOf(context), .clear_skill_policy, Allocating, .{});
+    const remote = remoteOf(context);
+    try sessionCall(remote, .clear_skill_policy, Allocating, .{});
+    remote.rebindSkills(null);
 }
 
-fn sessionSkillPolicyMatches(_: ?*anyopaque, _: *contract.CatalogLease, _: surface.SkillPolicyInput) bool {
-    return false;
+/// A lease that cannot be bound, or a Session that cannot be asked, does
+/// not match: the caller then refreshes, which says why.
+fn sessionSkillPolicyMatches(context: ?*anyopaque, lease: *contract.CatalogLease, policy: surface.SkillPolicyInput) bool {
+    const remote = remoteOf(context);
+    const name = leaseOf(lease).bind(remote.generation) catch return false;
+    return sessionCall(remote, .skill_policy_matches, Error, .{ .lease = name, .policy = policy }) catch false;
 }
 
 fn sessionCaptureRestoreInputs(context: ?*anyopaque) Allocating!port.SessionRestoreInputs {
@@ -1774,9 +1995,18 @@ fn sessionCaptureRestoreInputs(context: ?*anyopaque) Allocating!port.SessionRest
         .err => |err| return narrow(Allocating, err),
         .ok => |value| value,
     };
+    const skill: ?*port.SkillRestoreInputs = if (captured.skill) |grants| skill: {
+        remote.mutex.lockUncancelable(remote.io());
+        const lease = if (remote.skill_lease) |value| value.retain() else null;
+        remote.mutex.unlock(remote.io());
+        // Grants without the lease they were made against are not a
+        // capture this half can make.
+        break :skill try RemoteSkillInputs.create(owner, lease orelse return error.DependencyUnreachable, grants);
+    } else null;
+    errdefer if (skill) |value| RemoteSkillInputs.of(value).destroy();
     return .{
         .agent = owner.runtimePort(),
-        .skill = null,
+        .skill = skill,
         .mcp = if (captured.mcp) |value| try mcp_catalog.restoreSelectionFromWire(owner.allocator, value) else null,
         .permission_mode = captured.permission_mode,
         .shell_policy = captured.shell_policy,
