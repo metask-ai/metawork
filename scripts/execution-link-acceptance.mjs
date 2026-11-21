@@ -7,7 +7,10 @@
 //
 // The baseline is the automation Debug artifact of a build from before the
 // execution process was the default (the merge base with main), built in its
-// own checkout; this build has no in-process mode to compare against.
+// own checkout and copied under this one, since the harness only runs an
+// application inside the repository (for example
+// `.zig-cache/execution-link-baseline/bin`); this build has no in-process
+// mode to compare against.
 //
 // Builds this checkout's automation Debug artifact once (skipped when
 // `METAWORK_VERTICAL_PREBUILT=1`), then runs the AgentCore vertical harness
@@ -68,8 +71,13 @@ function runHarness(mode, round) {
       mode === "linked" ? path.join("zig-out", "bin") : baselineAppCwd,
     METAWORK_EXECUTION_LINK_EVIDENCE: evidencePath,
   };
-  if (mode === "baseline") env.METAWORK_EXECUTION_LINK_BASELINE = "1";
-  else delete env.METAWORK_EXECUTION_LINK_BASELINE;
+  if (mode === "baseline") {
+    env.METAWORK_EXECUTION_LINK_BASELINE = "1";
+    env.METAWORK_TEST_APP_BINARY = path.join(baselineAppCwd, "metawork.exe");
+  } else {
+    delete env.METAWORK_EXECUTION_LINK_BASELINE;
+    delete env.METAWORK_TEST_APP_BINARY;
+  }
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,

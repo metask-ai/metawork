@@ -8,7 +8,11 @@
 // only to be measured. `scripts/execution-link-acceptance.mjs` runs both and
 // compares their memory.
 //
-// It checks the five acceptance points:
+// Idle, before any Task, Product's refresh of the personal Skill catalog
+// has already asked for the execution process, so idle is measured over the
+// window and that process together; on a baseline build there is none.
+//
+// It checks these acceptance points:
 //   1. an ordinary Task completes and an `--execution-host` child exists;
 //   2. ending that child by PID mid-reply leaves the window up, and the cut
 //      reply is interrupted, recorded as incomplete and out of the
@@ -19,9 +23,17 @@
 //      a Task calls its tool, the server process belongs to the window
 //      process, and after the child is ended the next one is given the
 //      server again and the tool still works;
-//   5. a normal quit leaves no child behind, and no MCP server;
+//   5. a child that stops answering is given up within the liveness
+//      deadline, the window answers meanwhile, and the next message is
+//      served by a new child;
+//   6. a Run asks to install an MCP server with the `InstallMcpServer`
+//      tool: the tool runs in the child, and the window takes the request
+//      and asks for the user's confirmation in a native dialog. Native
+//      dialogs are answered by a person, never synthetically, so the
+//      installation is then cancelled through the Bridge and must end;
+//   7. a normal quit leaves no child behind, and no MCP server;
 // and on a baseline build:
-//   6. no child ever exists, and a Task completes as before.
+//   8. no child ever exists, and a Task completes as before.
 //
 // Processes are only ever ended by PID. Nothing here reads or writes outside
 // the harness's temporary platform home.
@@ -37,6 +49,9 @@ import { fixtureModelSelection } from "./test-support/fixture-model-selection.mj
 const execFileAsync = promisify(execFile);
 const settleMs = 3000;
 const runTimeoutMs = 60_000;
+/// The window gives up on a child that has not answered a ping for five
+/// seconds, pinging every second; the rest is this probe's own polling.
+const hangGivenUpWithinMs = 10_000;
 
 // The harness's title fixture accepts exactly this first input.
 const firstInput = "Review";
@@ -74,6 +89,18 @@ export async function executionHosts(appPid) {
       `ConvertTo-Json -Compress -Depth 2 -InputObject @(Get-CimInstance Win32_Process -Filter "ParentProcessId=${appPid}" | Where-Object { $_.CommandLine -like '*--execution-host*' } | Select-Object ProcessId,CommandLine)`,
     ),
   ).map((row) => ({ pid: row.ProcessId, commandLine: row.CommandLine }));
+}
+
+/// Stops every thread of `pid` without ending it: a child that hangs.
+async function suspendProcess(pid) {
+  const result = await powershellJson(
+    `Add-Type -Namespace MetaWorkAcceptance -Name Ntdll -MemberDefinition '[System.Runtime.InteropServices.DllImport("ntdll.dll")] public static extern int NtSuspendProcess(System.IntPtr process);'; $process = [System.Diagnostics.Process]::GetProcessById(${pid}); ConvertTo-Json -Compress -InputObject @{ status = [MetaWorkAcceptance.Ntdll]::NtSuspendProcess($process.Handle) }`,
+  );
+  assert.equal(
+    result?.status,
+    0,
+    `NtSuspendProcess: ${JSON.stringify(result)}`,
+  );
 }
 
 async function memory(pids) {
@@ -424,6 +451,188 @@ async function verifyMcp({
   };
 }
 
+/// A Run asks the Host to install a stdio MCP server. The tool call runs in
+/// the execution process; the installation and its confirmation belong to
+/// the window. The confirmation is a native dialog, which only a person
+/// answers, so the installation is cancelled once it waits on it.
+async function verifyMcpInstall({
+  invoke,
+  snapshot,
+  poll,
+  provider,
+  textSse,
+  toolSse,
+  appPid,
+  workspaceId,
+  workspaceEpoch,
+  repositoryRoot,
+  fixtureRoot,
+  record,
+}) {
+  const tracePath = path.join(fixtureRoot, "execution-link-mcp-install.jsonl");
+  const marker = "execution-link-mcp-install.jsonl";
+  const displayName = "Installed by a Run";
+  const mcpView = async () => (await snapshot({ mcpOnly: true })).mcp;
+  const created = await invoke("metawork.tasks.create", {
+    projectId: null,
+    workspace: {
+      kind: "manual",
+      workspaceId,
+      expectedWorkspaceEpoch: workspaceEpoch,
+    },
+    modelSelection: fixtureModelSelection(await snapshot()),
+    expectedSkillCatalogRevision: null,
+    expectedSkillSelectionRevision: null,
+    approvalMode: "manual",
+  });
+  assert.equal(created.accepted, true, JSON.stringify(created));
+  const taskId = created.taskId;
+  await invoke("metawork.tasks.rename", {
+    taskId,
+    title: "Execution link MCP installation",
+  });
+  const seen = {};
+  provider.enqueue(
+    (payload) => {
+      seen.offered = payload.tools.some(
+        (tool) => tool.name === "InstallMcpServer",
+      );
+      assert.equal(seen.offered, true, "InstallMcpServer is offered");
+      return toolSse("install", "install-call", "InstallMcpServer", {
+        sourceUrl: "https://mcp.example.test/execution-link-fixture",
+        connection: {
+          displayName,
+          transport: "stdio",
+          command: process.execPath,
+          arguments: [
+            path.join(repositoryRoot, "tests/fixtures/mcp_server.mjs"),
+            "--transport",
+            "stdio",
+            "--protocol",
+            "2026-07-28",
+            "--ttl-ms",
+            "60000",
+            "--trace",
+            tracePath,
+          ],
+          authMode: "none",
+        },
+      });
+    },
+    (payload) => {
+      const results = payload.messages
+        .at(-1)
+        .content.filter((part) => part.type === "tool_result");
+      assert.equal(results.length, 1);
+      seen.toolResult = results[0];
+      return textSse("install-done", "MCP server installed");
+    },
+  );
+  const sent = await invoke("metawork.tasks.sendInput", {
+    taskId,
+    operationId: "link-mcp-install",
+    input: { kind: "text", text: "Install the fixture MCP server" },
+  });
+  assert.equal(sent.outcome, "accepted", JSON.stringify(sent));
+  const steps = [];
+  let lastSeen = null;
+  // The installation the tool submitted, as the window reports it.
+  const followInstallation = async () => {
+    const scoped = await snapshot({ mcpOnly: true });
+    const operation = scoped.mcpInstallation?.operations.find(
+      (item) => item.taskId === taskId,
+    );
+    lastSeen = {
+      installation: scoped.mcpInstallation,
+      servers: scoped.mcp.servers.map((item) => ({
+        displayName: item.displayName,
+        runtimeStatus: item.runtimeStatus,
+      })),
+    };
+    if (operation && steps.at(-1)?.phase !== operation.phase)
+      steps.push({ phase: operation.phase, failure: operation.failure });
+    return operation;
+  };
+  const finished = await poll(
+    async () => {
+      const current = (await snapshot()).tasks.find(
+        (task) => task.id === taskId,
+      );
+      const run = current?.runs.at(-1);
+      if (run?.terminal && !current.activeOperation) return run;
+      if (current?.pendingUi?.kind === "permission") {
+        const answer = await invoke("metawork.tasks.respondUi", {
+          taskId,
+          runId: current.pendingUi.runId,
+          requestId: current.pendingUi.requestId,
+          kind: "permission",
+          permission: "allow_once",
+        });
+        steps.push({ permission: answer.answered });
+        return null;
+      }
+      await followInstallation();
+      return null;
+    },
+    runTimeoutMs,
+    "the installing Run reached its terminal",
+  );
+  assert.equal(
+    finished.terminal.outcome,
+    "completed",
+    JSON.stringify({ terminal: finished.terminal, steps }),
+  );
+  assert.equal(
+    seen.toolResult.is_error ?? false,
+    false,
+    JSON.stringify(seen.toolResult),
+  );
+  const diagnose = (error) => {
+    throw new Error(
+      `${error.message}: ${JSON.stringify({ steps, lastSeen, toolResult: seen.toolResult })}`,
+    );
+  };
+  // The window took the request from the child and asks the user.
+  const waiting = await poll(
+    async () => {
+      const operation = await followInstallation();
+      return operation?.phase === "needs_authorization" ? operation : null;
+    },
+    runTimeoutMs,
+    "the installation waits on the user's confirmation",
+  ).catch(diagnose);
+  assert.equal(waiting.canCancel, true, JSON.stringify(waiting));
+  const cancelled = await invoke("metawork.mcp.cancelInstallation", {
+    serverId: waiting.serverId,
+    installationRevision: waiting.revision,
+  });
+  steps.push({ cancel: cancelled.outcome });
+  const ended = await poll(
+    async () => {
+      const operation = await followInstallation();
+      if (operation === undefined) return { phase: "removed" };
+      return ["cancelled", "failed"].includes(operation.phase)
+        ? operation
+        : null;
+    },
+    runTimeoutMs,
+    "the cancelled installation ended",
+  ).catch(diagnose);
+  assert.notEqual(ended.phase, "failed", JSON.stringify({ ended, steps }));
+  // Nothing was started for a server that was never confirmed.
+  const servers = await processesMentioning(marker);
+  assert.deepEqual(servers, [], JSON.stringify(servers));
+  const facts = {
+    taskId,
+    steps,
+    toolResult: seen.toolResult.content,
+    serverId: waiting.serverId,
+    ended: ended.phase,
+  };
+  record("mcp installation asked for by a Run", facts);
+  return { ...facts, serverPids: [] };
+}
+
 export async function runExecutionLinkVertical({
   invoke,
   snapshot,
@@ -503,15 +712,18 @@ export async function runExecutionLinkVertical({
     );
 
   try {
-    // Idle: nothing needs the execution process yet.
+    // Idle: no Task yet. The personal Skill catalog's refresh is what asks
+    // for the execution process before any Task does.
     await new Promise((resolve) => setTimeout(resolve, settleMs));
     const idleHosts = await executionHosts(appPid);
-    assert.deepEqual(
-      idleHosts,
-      [],
-      "no execution process before a Task needs one",
-    );
-    evidence.idle = { hosts: idleHosts, memory: await memory([appPid]) };
+    if (linked)
+      assert.ok(idleHosts.length <= 1, `idle: ${JSON.stringify(idleHosts)}`);
+    else
+      assert.deepEqual(idleHosts, [], "a baseline build: no execution process");
+    evidence.idle = {
+      hosts: idleHosts,
+      memory: await memory([appPid, ...idleHosts.map((host) => host.pid)]),
+    };
     record("idle", evidence.idle);
 
     // 1. An ordinary Task.
@@ -614,8 +826,14 @@ export async function runExecutionLinkVertical({
       JSON.stringify(cut.terminal),
     );
     assert.equal(cut.conversationCoverage, "excluded", JSON.stringify(cut));
+    // Product queries its Skill catalogs again once it hears of the loss,
+    // as it does at startup, which may already have started the next one.
     const afterKill = await executionHosts(appPid);
-    assert.deepEqual(afterKill, [], "no execution process until one is needed");
+    assert.ok(
+      afterKill.length <= 1 &&
+        afterKill.every((host) => host.pid !== firstHost.pid),
+      `after the kill: ${JSON.stringify(afterKill)}`,
+    );
     evidence.cut = {
       windowAlive: true,
       terminal: cut.terminal,
@@ -669,18 +887,82 @@ export async function runExecutionLinkVertical({
       fixtureRoot,
       record,
     });
-    const mcpServers = evidence.mcp.serverPids;
+    // 5. A process that stops answering: given up within the deadline,
+    // the window answering meanwhile, and the next message served by a new
+    // process.
+    const [hung] = await executionHosts(appPid);
+    assert.ok(hung, "an execution process to suspend");
+    const suspendedAt = Date.now();
+    await suspendProcess(hung.pid);
+    const readStarted = Date.now();
+    await snapshot();
+    const snapshotMs = Date.now() - readStarted;
+    let givenUpMs = null;
+    for (let waited = 0; waited <= 2 * hangGivenUpWithinMs; waited += 100) {
+      if (!alive(hung.pid)) {
+        givenUpMs = Date.now() - suspendedAt;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.notEqual(givenUpMs, null, "the suspended process was never ended");
+    assert.ok(
+      givenUpMs <= hangGivenUpWithinMs,
+      `the suspended process was ended after ${givenUpMs} ms`,
+    );
+    assert.ok(snapshotMs < hangGivenUpWithinMs, `a read took ${snapshotMs} ms`);
+    assert.ok(alive(appPid), "the window outlives a hung execution process");
+    provider.enqueue(textSse("link-turn-4", `Still here: ${codeWord}.`));
+    await send(taskId, "link-turn-4", "Are you still there?");
+    await lastRunCompleted(taskId, 4);
+    const afterHang = await executionHosts(appPid);
+    assert.equal(afterHang.length, 1, JSON.stringify(afterHang));
+    assert.notEqual(afterHang[0].pid, hung.pid);
+    evidence.hang = {
+      suspendedPid: hung.pid,
+      snapshotMs,
+      givenUpMs,
+      hosts: afterHang,
+    };
+    record("hung process given up", evidence.hang);
 
-    // 5. A normal quit leaves no execution process behind, and no MCP
+    // 6. A Run installs an MCP server through the Host.
+    evidence.mcpInstall = await verifyMcpInstall({
+      invoke,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      toolSse,
+      appPid,
+      workspaceId,
+      workspaceEpoch,
+      repositoryRoot,
+      fixtureRoot,
+      record,
+    });
+    const mcpServers = [
+      ...evidence.mcp.serverPids,
+      ...evidence.mcpInstall.serverPids,
+    ];
+    const hostsSeen = [
+      ...evidence.mcp.hostPids,
+      hung.pid,
+      ...(await executionHosts(appPid)).map((host) => host.pid),
+    ];
+
+    // 7. A normal quit leaves no execution process behind, and no MCP
     // server.
     await stopApplication("execution link acceptance");
     // The harness's `poll` refuses to run once the application has exited,
     // which is exactly the state this waits in, so the wait is its own.
     const children = [
-      firstHost.pid,
-      secondHosts[0].pid,
-      ...evidence.mcp.hostPids,
-      ...mcpServers,
+      ...new Set([
+        firstHost.pid,
+        secondHosts[0].pid,
+        ...hostsSeen,
+        ...mcpServers,
+      ]),
     ];
     let leftover = children;
     for (let waited = 0; waited <= 10_000; waited += 200) {
