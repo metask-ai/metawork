@@ -521,10 +521,10 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   assert.doesNotMatch(css, /\[data-platform=/);
   assert.match(css, /\.window-controls/);
   assert.match(css, /--window-bar-height: 52px/);
-  assert.match(
+  assert.doesNotMatch(
     css,
-    /\.app-window\[data-left-open="true"\] \.workbench-commandbar::before \{[\s\S]*?top: calc\(0px - env\(safe-area-inset-top, 0px\)\);/,
-    "the left rail surface and divider must cross the native safe-area inset",
+    /\.workbench-commandbar::before\s*\{[^}]*border-right:/,
+    "the resting sidebar divider starts below the titlebar",
   );
   assert.match(
     css,

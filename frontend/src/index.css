@@ -274,6 +274,11 @@ summary::-webkit-details-marker {
   font-weight: 500;
 }
 
+.primary-sidebar,
+.workbench-commandbar {
+  background: var(--ui-surface-panel-2);
+}
+
 .primary-sidebar {
   display: flex;
   flex: 0 0 var(--primary-navigation-width);
@@ -281,7 +286,6 @@ summary::-webkit-details-marker {
   flex-direction: column;
   align-items: stretch;
   border-right: 1px solid var(--ui-border);
-  background: var(--ui-surface-panel-2);
 }
 
 .primary-navigation {
@@ -317,6 +321,7 @@ summary::-webkit-details-marker {
   min-width: 0;
   flex: 1 1 0;
   overflow: hidden;
+  border-top: 1px solid var(--ui-border);
   border-right: 1px solid var(--ui-border);
 }
 
@@ -3550,22 +3555,7 @@ button.run-process-tool:hover {
   padding: 8px calc(10px + var(--metawork-window-chrome-trailing)) 8px
     var(--commandbar-left-inset);
   gap: 8px;
-  background: var(--ui-surface-canvas);
   user-select: none;
-}
-
-.app-window[data-left-open="true"] .workbench-commandbar::before {
-  position: absolute;
-  z-index: 0;
-  top: calc(0px - env(safe-area-inset-top, 0px));
-  right: auto;
-  bottom: 0;
-  left: 0;
-  width: var(--left-column);
-  border-right: 1px solid var(--ui-border);
-  background: var(--ui-surface-canvas);
-  content: "";
-  pointer-events: none;
 }
 
 .workbench-commandbar > * {
@@ -3583,6 +3573,15 @@ button.run-process-tool:hover {
   min-width: 0;
   align-items: center;
   gap: 4px;
+}
+
+.commandbar-leading-actions .brand-logo {
+  height: auto;
+}
+
+.commandbar-leading-actions .brand-logo > img {
+  width: auto;
+  height: 15px;
 }
 
 .window-controls {
@@ -3703,9 +3702,20 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 @media (max-width: 414px) {
-  html[data-metawork-renderer-window-controls="true"] .workbench-commandbar {
-    /* Reserve room for window controls, gaps and all seven workbench actions. */
+  .workbench-commandbar {
+    /* Reserve room for the mark, window controls and all seven workbench actions. */
     --commandbar-action-width: clamp(24px, (100vw - 150px) / 7, 32px);
+    --commandbar-left-inset: calc(8px + var(--metawork-window-chrome-leading));
+    gap: 4px;
+  }
+
+  .workbench-commandbar
+    :is(
+      .commandbar-leading-actions,
+      .commandbar-alert-slot,
+      .commandbar-context-actions
+    ) {
+    gap: 2px;
   }
 
   html[data-metawork-renderer-window-controls="true"]
@@ -3715,8 +3725,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     width: 32px;
   }
 
-  html[data-metawork-renderer-window-controls="true"]
-    .workbench-commandbar
+  .workbench-commandbar
     :is(.icon-button, .commandbar-alert summary, .task-attention-locator) {
     width: var(--commandbar-action-width);
   }
@@ -6291,16 +6300,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   mask-repeat: no-repeat;
   mask-position: center;
   mask-size: contain;
-}
-
-.brand-name {
-  display: flex;
-  min-height: 26px;
-  margin: 0 2px;
-  align-items: center;
-  font-size: var(--text-lead);
-  font-weight: 720;
-  letter-spacing: -0.01em;
 }
 
 .section-label {

@@ -59,7 +59,6 @@ import {
   connectionFailurePresentation,
   connectionStatus,
 } from "./connection-status.ts";
-import { BrandLogo } from "../components/ui/BrandLogo.tsx";
 import { Icon } from "../components/ui/Icon.tsx";
 import { FeedbackNotice } from "../components/ui/FeedbackNotice.tsx";
 import { DiagnosticDisclosure } from "../components/ui/DiagnosticDisclosure.tsx";
@@ -5428,9 +5427,6 @@ export default function App() {
       )}
       left={(dismissDrawer) => (
         <div className="sidebar-primary">
-          <p className="brand-name">
-            <BrandLogo label={t("app.name")} showMark={false} />
-          </p>
           <button
             type="button"
             className="sidebar-action sidebar-new-task focus-ring"

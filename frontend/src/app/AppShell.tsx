@@ -10,6 +10,7 @@ import {
 } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
+import { BrandLogo } from "../components/ui/BrandLogo.tsx";
 import { ResizableSeparator } from "../components/ui/ResizableSeparator.tsx";
 import { WindowControls } from "../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../components/ui/WindowTitlebar.tsx";
@@ -483,6 +484,7 @@ export function AppShell({
           className="commandbar-leading-actions"
           data-native-window-drag-exclude=""
         >
+          {navigation && <BrandLogo label={t("app.name")} markOnly />}
           <div
             className="commandbar-inert-content"
             inert={overlay ? true : undefined}

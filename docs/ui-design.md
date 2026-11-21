@@ -160,7 +160,6 @@ Project（可空归属；Manual Workspace 提供默认目录）
 
 - 一体化命令栏：默认 52 px 产品视觉基线；Windows 沿用历史实现的 40 px 标题栏，macOS 交通灯安全区由 Host geometry 注入；
 - 一级导航位于最左侧，常规桌面宽 56 px，底部放置账户与应用入口。旁边的任务列表默认 320 px，可通过分界线在 240–480 px 范围内调整并保存偏好，支持键盘方向键。空间不足时收窄显示中的列表，为中央工作区保留 360 px，保存宽度保持原值；
-- 左栏品牌区使用紧凑单行的 MetaWork 字标，不显示字标左侧的独立标志，不把品牌区表现成第二层标题栏，也不额外重复产品名称、首字母图标、产品说明或宣传副标题；
 - 横向工作区：`app-window` 继续用 Grid 管理命令栏与工作区两行，并作为可用宽度的唯一 owner；工作区内部使用受父级约束的 Flex，子栏及其内容不得反向撑宽父级或成为自身宽度计算的测量源。扣除停靠的一级导航与任务列表后，剩余空间默认按中央 Task stage 2 份、Task Panel 1 份分配。停靠时中央 Task stage 与 Task Panel 都只设置 360 px 硬下限；最小宽度约束优先于保存比例，保存比例优先于默认 2:1；
 - Task Panel：停靠态保存其在剩余工作区中的比例，默认 `1/3`；分界线仅在停靠态出现，拖拽和键盘调整以 16 px 为步进显示实际宽度，再换算为比例保存。其动态可调范围为 360 px 至“剩余工作区减去中央 360 px”，不另设上限。停靠栏开合使用约 160–180 ms 的 `flex-basis` 过渡，拖拽调整直接跟手且不使用过渡；扣除左栏后的空间少于 720 px 时改用右侧非模态 overlay，默认 400 px 且不允许拉伸，overlay 使用不参与工作区布局的 `transform` 过渡。空间恢复后沿用保存比例。入口、显隐和比例属于应用布局，用户可独立开合或通过具体对象入口展开；无 Task、无内容时也允许打开空栏，不触发普通 Run 或审批状态驱动的自动开合；
 - 已有 Task 不额外占用独立内容标题区；Task 名称只在顶部命令栏显示；
@@ -187,10 +186,10 @@ Project（可空归属；Manual Workspace 提供默认目录）
 
 主窗口使用 `hidden_inset_tall`：Renderer 命令栏承担自定义标题栏的产品视觉，不叠加独立的标准系统标题行。React 绘制产品 header，以 SDK 正式标记声明拖拽区域及交互排除，并绘制带固定 `data-metawork-window-control` 语义的窗口按钮；browser-side Bridge 只把窗口按钮转换为受限 Host command。Native SDK/OS 承担 native hit test、拖动循环、系统菜单、resize、close policy 与真实窗口状态；SDK 缺失的原生输入路径只按[已登记兼容能力](architecture.md#35-native-sdk)补齐。React component 不推断平台、不直接调用 transport，也不持有原生窗口 identity、handle 或执行权。
 
-- 命令栏是窗口交互层，不表现为独立横向标题栏：不使用贯穿全窗的底边或异色横带；左侧 Task rail 的背景与竖分隔线必须延伸到窗口顶部，中央命令区与 Task 工作面使用同一 surface；
+- 命令栏与一级导航共用背景色。任务列表和中央工作区的上沿由同色细线相接，侧栏与工作区的静态竖分隔线从命令栏下方开始。
 - macOS 保留系统交通灯；Windows 由 Renderer 绘制最小化、最大化/还原与关闭按钮。Host 只发布 `rendererControls` capability、`maximized` 真值和安全 inset，browser-side Bridge 将它们转换为 document dataset/CSS variables；React 不读取平台名或调用 transport，最大化与还原使用互斥的可访问按钮，由 Host 真值控制显隐；
 - 产品 header 默认视觉基线为 52 px；Windows Renderer header 沿用历史实现的 40 px 高度，每个 window control 使用 46 px 命中宽度并贴齐窗口右缘。关闭 hover/focus 使用系统危险红色，其余按钮保持中性色。macOS 交通灯与可拖动 top band 的真实安全区以 Host geometry 为准；
-- 命令栏只包含左栏开关、当前 Task 名称、全局搜索、只读任务信息、Task Panel 常驻开关和按需异常/审批定位入口；不在 Task 名称前重复 Workspace，`左栏开关` 只控制能力与 Task 导航，不兼任 Task Panel 开关；
+- MetaWork 品牌标志位于命令栏左端、左栏开关之前，避开系统窗口按钮的安全区。命令栏另承载当前 Task 名称、全局搜索、只读任务信息、Task Panel 常驻开关和按需异常/审批定位入口；不在 Task 名称前重复 Workspace，`左栏开关` 只控制能力与 Task 导航，不兼任 Task Panel 开关；
 - 主窗口启用 SDK `window_drag_regions`，`WindowTitlebar` 仅在真实 header 声明 `data-native-window-drag`。标题栏内按钮（含 disabled 与 SVG 子节点）、输入、选择框、标签、链接、disclosure、可编辑/可聚焦内容及其他交互子树必须自身或由可命中的外层显式声明 `data-native-window-drag-exclude`；SDK 不自动推断产品控件语义。动态动作与菜单沿同一规则。inert 子树的可命中外层仍保留排除标记，避免浏览器跳过 inert 内容后命中可拖动 header。菜单、popover、tooltip、select/combobox、dialog/drawer 及其 backdrop 的实际 portal 根统一显式排除：Windows 原生区域不会因任意 DOM 遮挡自动消失，浮层即使挂在 header 之外也必须声明 no-drag。不维护几何镜像。普通标题文字保持可拖动；业务控件保留点击、编辑和键盘行为，不因原生拖拽取消或移动窗口；
 - 窗口 resize/maximize/restore 由 Native SDK/OS 执行，browser-side Bridge 由 SDK 正式 resize event、动作受理后和重新获得焦点时触发同 generation 的 `refresh`。窗口状态只从 `connect/refresh` 响应投影；动作确认不代表原生交互完成。刷新最多一个在途请求并合并后续需求，新动作和原生变化使旧读取失效；卸载后迟到响应不得恢复 UI 或覆盖新文档。不得因 resize、layout 或 command failure 重新 `connect`。React 只由 Host 的 `maximized` 真值选择互斥按钮；
 - SDK/OS 独占原生按下、命中、拖动循环、双击时间/距离与系统偏好；Windows 使用 SDK 正式 WebView2 非客户区支持，macOS 使用 SDK/AppKit 原生事件。应用不监听拖拽 pointerdown/mousedown、不选择浏览器点击计数动作、不实现双击计时，不通过 Bridge 发起手势或模拟窗口位移。声明区域按实际呈现位置与缩放参与 SDK 命中，不再由应用额外裁剪到固定 native top-band；React 不注册标题栏 double-click 或 context-menu handler；

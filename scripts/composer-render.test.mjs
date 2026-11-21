@@ -544,12 +544,16 @@ test("model selection keeps its exact identity when display metadata is absent",
   assert.doesNotMatch(markup, />Available model</);
 });
 
-test("Workbench keeps Search as an icon beside the sidebar control", () => {
+test("Workbench places the brand before the sidebar and Search controls", () => {
   const markup = renderShell(null);
   const leading = markup.indexOf('class="commandbar-leading-actions"');
+  const brand = markup.indexOf('aria-label="MetaWork"');
+  const sidebar = markup.indexOf('aria-label="Toggle task sidebar"');
   const search = markup.indexOf('aria-label="Search"');
   const context = markup.indexOf('class="commandbar-context"');
-  assert.ok(leading >= 0 && search > leading && context > search);
+  assert.ok(leading >= 0 && brand > leading && sidebar > brand);
+  assert.ok(search > sidebar && context > search);
+  assert.equal(markup.match(/aria-label="MetaWork"/g)?.length, 1);
   assert.doesNotMatch(markup, /<kbd>.*K<\/kbd>/);
   assert.doesNotMatch(markup, /<span>Search<\/span>/);
   assert.doesNotMatch(markup, /title="Search"/);
