@@ -950,7 +950,7 @@ test("an accepted model reset remains accepted when its own refresh advances sec
   const user = userEvent.setup({ document });
   await user.click(
     screen.getByRole("button", {
-      name: translate("en-US", "app.account_and_application_menu"),
+      name: "Sign in · Account and application menu",
     }),
   );
   await user.click(

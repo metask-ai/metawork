@@ -159,10 +159,8 @@ Project（可空归属；Manual Workspace 提供默认目录）
 默认尺寸：
 
 - 一体化命令栏：默认 52 px 产品视觉基线；Windows 沿用历史实现的 40 px 标题栏，macOS 交通灯安全区由 Host geometry 注入；
-- 左栏：默认 320 px；常规桌面可通过分界线在 240–480 px 内调整并保存偏好，键盘聚焦分界线后可用方向键调整；窄窗 overlay 保持固定宽度；
-- 左栏品牌区使用紧凑单行的 MetaWork 字标，不显示字标左侧的独立标志，不把品牌区表现成第二层标题栏，也不额外重复产品名称、首字母图标、产品说明或宣传副标题；
-- 左栏的能力入口、项目标题和任务行使用统一的紧凑行高。栏目之间保留短间距以区分项目与最近任务。粗指针设备的这些行保留 44 px 最小命中高度。
-- 横向工作区：`app-window` 继续用 Grid 管理命令栏与工作区两行，并作为可用宽度的唯一 owner；工作区内部使用受父级约束的 Flex，子栏及其内容不得反向撑宽父级或成为自身宽度计算的测量源。左栏占固定的偏好宽度；扣除左栏后的空间默认按中央 Task stage 2 份、Task Panel 1 份分配。中央 Task stage 与 Task Panel 都只设置 360 px 硬下限，不设置固定最大宽度或固定比例范围；最小宽度约束优先于保存比例，保存比例优先于默认 2:1；
+- 一级导航位于最左侧，常规桌面宽 56 px，底部放置账户与应用入口。旁边的任务列表默认 320 px，可通过分界线在 240–480 px 范围内调整并保存偏好，支持键盘方向键。空间不足时收窄显示中的列表，为中央工作区保留 360 px，保存宽度保持原值；
+- 横向工作区：`app-window` 继续用 Grid 管理命令栏与工作区两行，并作为可用宽度的唯一 owner；工作区内部使用受父级约束的 Flex，子栏及其内容不得反向撑宽父级或成为自身宽度计算的测量源。扣除停靠的一级导航与任务列表后，剩余空间默认按中央 Task stage 2 份、Task Panel 1 份分配。停靠时中央 Task stage 与 Task Panel 都只设置 360 px 硬下限；最小宽度约束优先于保存比例，保存比例优先于默认 2:1；
 - Task Panel：停靠态保存其在剩余工作区中的比例，默认 `1/3`；分界线仅在停靠态出现，拖拽和键盘调整以 16 px 为步进显示实际宽度，再换算为比例保存。其动态可调范围为 360 px 至“剩余工作区减去中央 360 px”，不另设上限。停靠栏开合使用约 160–180 ms 的 `flex-basis` 过渡，拖拽调整直接跟手且不使用过渡；扣除左栏后的空间少于 720 px 时改用右侧非模态 overlay，默认 400 px 且不允许拉伸，overlay 使用不参与工作区布局的 `transform` 过渡。空间恢复后沿用保存比例。入口、显隐和比例属于应用布局，用户可独立开合或通过具体对象入口展开；无 Task、无内容时也允许打开空栏，不触发普通 Run 或审批状态驱动的自动开合；
 - 已有 Task 不额外占用独立内容标题区；Task 名称只在顶部命令栏显示；
 - 中间正文推荐最大宽度：760 px；
@@ -171,7 +169,7 @@ Project（可空归属；Manual Workspace 提供默认目录）
 - Native 主窗口声明 320 × 520 logical px 的系统最小尺寸，保证窗口不能被缩到 Renderer 已定义布局下限之外；960 × 680 仍只是窄窗口回归样本，不是固定设计画布；
 - Task Panel 的停靠由扣除桌面左栏后的 720 px 最小工作区决定，而不是单独的 viewport 断点；低于 820 px 时左栏和 Task Panel 互斥，低于 620 px 时 Task Panel 使用全宽 overlay；低于约 560 px 时命令栏隐藏次级文字。
 
-左栏折叠后完全隐藏并把宽度归还横向工作区，不保留 56 px 图标栏，也不用匿名图标映射任意 Task。命令栏左侧始终保留打开/关闭入口，折叠状态与桌面宽度按用户偏好保存；窗口变窄到 820 px 以下时自动收起左栏但不改写该偏好，回到 820 px 及以上时按偏好恢复，最小化或隐藏产生的空视口不视为变窄；左栏宽度变化时，中央与右栏按同一保存比例同步重分配。右侧栏显隐与对象选择分别管理：常驻开关、关闭、Escape 与窄窗互斥操作控制显隐，打开具体对象可显式展开右栏。切换或删除 Task、切换主页面及目标失效只清空不再适用的内容，保持右栏显隐与比例。显隐默认关闭，在本窗口会话中保持，不建立每 Task 记忆。折叠只改变视图，不改变 Task、审批或运行状态。
+常规桌面上，命令栏左侧开关控制任务列表，一级导航和账户入口始终可达。低于 820 px 时两栏合为浮动抽屉，默认收起；命令栏按钮打开抽屉，选择页面、任务或新建任务后关闭，Escape 和点击遮罩也可关闭。抽屉开合不改写桌面列表的显隐与宽度偏好，回到桌面宽度后按偏好恢复；最小化或隐藏产生的空视口不视为变窄。左侧占用变化时，中央与右栏按保存比例重新分配。右侧栏显隐与对象选择分别管理：常驻开关、关闭、Escape 与窄窗互斥操作控制显隐，打开具体对象可显式展开右栏。切换或删除 Task、切换主页面及目标失效只清空不再适用的内容，保持右栏显隐与比例。显隐默认关闭，在本窗口会话中保持，不建立每 Task 记忆。折叠只改变视图，不改变 Task、审批或运行状态。
 
 左栏收起时，命令栏在搜索图标与任务标题之间显示「新建任务」图标，手动折叠和窄窗自动收起使用同一入口。按钮复用左栏新建任务动作，打开草稿并聚焦 Composer，tooltip 显示当前平台的快捷键。左栏展开时由左栏提供入口。
 
@@ -188,10 +186,10 @@ Project（可空归属；Manual Workspace 提供默认目录）
 
 主窗口使用 `hidden_inset_tall`：Renderer 命令栏承担自定义标题栏的产品视觉，不叠加独立的标准系统标题行。React 绘制产品 header，以 SDK 正式标记声明拖拽区域及交互排除，并绘制带固定 `data-metawork-window-control` 语义的窗口按钮；browser-side Bridge 只把窗口按钮转换为受限 Host command。Native SDK/OS 承担 native hit test、拖动循环、系统菜单、resize、close policy 与真实窗口状态；SDK 缺失的原生输入路径只按[已登记兼容能力](architecture.md#35-native-sdk)补齐。React component 不推断平台、不直接调用 transport，也不持有原生窗口 identity、handle 或执行权。
 
-- 命令栏是窗口交互层，不表现为独立横向标题栏：不使用贯穿全窗的底边或异色横带；左侧 Task rail 的背景与竖分隔线必须延伸到窗口顶部，中央命令区与 Task 工作面使用同一 surface；
+- 命令栏与一级导航共用背景色。任务列表和中央工作区的上沿由同色细线相接，侧栏与工作区的静态竖分隔线从命令栏下方开始。
 - macOS 保留系统交通灯；Windows 由 Renderer 绘制最小化、最大化/还原与关闭按钮。Host 只发布 `rendererControls` capability、`maximized` 真值和安全 inset，browser-side Bridge 将它们转换为 document dataset/CSS variables；React 不读取平台名或调用 transport，最大化与还原使用互斥的可访问按钮，由 Host 真值控制显隐；
 - 产品 header 默认视觉基线为 52 px；Windows Renderer header 沿用历史实现的 40 px 高度，每个 window control 使用 46 px 命中宽度并贴齐窗口右缘。关闭 hover/focus 使用系统危险红色，其余按钮保持中性色。macOS 交通灯与可拖动 top band 的真实安全区以 Host geometry 为准；
-- 命令栏只包含左栏开关、当前 Task 名称、全局搜索、只读任务信息、Task Panel 常驻开关和按需异常/审批定位入口；不在 Task 名称前重复 Workspace，`左栏开关` 只控制能力与 Task 导航，不兼任 Task Panel 开关；
+- MetaWork 品牌标志位于命令栏左端、左栏开关之前，避开系统窗口按钮的安全区。命令栏另承载当前 Task 名称、全局搜索、只读任务信息、Task Panel 常驻开关和按需异常/审批定位入口；不在 Task 名称前重复 Workspace，`左栏开关` 只控制能力与 Task 导航，不兼任 Task Panel 开关；
 - 主窗口启用 SDK `window_drag_regions`，`WindowTitlebar` 仅在真实 header 声明 `data-native-window-drag`。标题栏内按钮（含 disabled 与 SVG 子节点）、输入、选择框、标签、链接、disclosure、可编辑/可聚焦内容及其他交互子树必须自身或由可命中的外层显式声明 `data-native-window-drag-exclude`；SDK 不自动推断产品控件语义。动态动作与菜单沿同一规则。inert 子树的可命中外层仍保留排除标记，避免浏览器跳过 inert 内容后命中可拖动 header。菜单、popover、tooltip、select/combobox、dialog/drawer 及其 backdrop 的实际 portal 根统一显式排除：Windows 原生区域不会因任意 DOM 遮挡自动消失，浮层即使挂在 header 之外也必须声明 no-drag。不维护几何镜像。普通标题文字保持可拖动；业务控件保留点击、编辑和键盘行为，不因原生拖拽取消或移动窗口；
 - 窗口 resize/maximize/restore 由 Native SDK/OS 执行，browser-side Bridge 由 SDK 正式 resize event、动作受理后和重新获得焦点时触发同 generation 的 `refresh`。窗口状态只从 `connect/refresh` 响应投影；动作确认不代表原生交互完成。刷新最多一个在途请求并合并后续需求，新动作和原生变化使旧读取失效；卸载后迟到响应不得恢复 UI 或覆盖新文档。不得因 resize、layout 或 command failure 重新 `connect`。React 只由 Host 的 `maximized` 真值选择互斥按钮；
 - SDK/OS 独占原生按下、命中、拖动循环、双击时间/距离与系统偏好；Windows 使用 SDK 正式 WebView2 非客户区支持，macOS 使用 SDK/AppKit 原生事件。应用不监听拖拽 pointerdown/mousedown、不选择浏览器点击计数动作、不实现双击计时，不通过 Bridge 发起手势或模拟窗口位移。声明区域按实际呈现位置与缩放参与 SDK 命中，不再由应用额外裁剪到固定 native top-band；React 不注册标题栏 double-click 或 context-menu handler；
@@ -227,14 +225,14 @@ Project（可空归属；Manual Workspace 提供默认目录）
 
 ## 5. 左栏：能力与 Task
 
-> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 AgentCore Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 与项目导航和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的连接器页面与持久定时任务都作为同级全局能力进入该 shell。
+> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 AgentCore Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 与项目导航和左下角账号入口。工作台提供 Skill 中心、消费 Host-owned management/Runtime/admission 事实的连接器页面和持久定时任务。
 
 ### 5.1 Task 列表与路径上下文
 
-登录后的左栏从上到下只承担五类稳定职责：品牌/窗口识别、New task、已接通的全局能力入口、Task 导航、左下角账号入口。搜索由标题栏或命令面板提供，不在窄侧栏重复占据首要位置。
+工作台侧栏从上到下提供独立的「新建任务」动作、已接通的工作台工具、项目和最近任务，随左栏开关展开或收起。搜索由标题栏或命令面板提供。
 
-- New task、全局能力入口、可操作的项目目录行与 Task 行共用 36 px 最小行高、相同内容宽度、8 px 圆角的中性状态样式；内容垂直居中，导航、项目和任务行的高亮左右边缘对齐，任务区出现滚动条也不缩窄高亮区域。浅色主题的左栏采用浅灰底，悬停与当前项统一使用稍深的中性灰色和主要文字色；标题栏左侧与账户区域延续左栏底色，账户入口沿用相同的中性高亮，深色主题采用对应中性色；不使用紫色底或侧边紫色标记。项目目录行与 Task 行在操作菜单展开时沿用当前项底色，菜单关闭后恢复悬停或默认状态；实际 Task 与全局能力的当前项继续由导航状态决定。
-- 品牌到能力导航留白 12 px，能力导航到任务区域留白 24 px，项目分组间距 8 px；“项目”“最近”标题左边缘与文件夹图标对齐。组内保持 1 px 行间距、14 px 左右留白，项目区到“最近”保留 24 px 间距；
+- 新建任务、可操作的项目目录行与 Task 行使用紧凑行高、对齐的高亮边缘和中性状态样式。滚动条不缩窄高亮范围。粗指针设备保留至少 44 px 的命中高度。项目目录行与 Task 行在操作菜单展开时沿用当前项底色，菜单关闭后恢复悬停或默认状态；
+- “项目”“最近”标题左边缘与文件夹图标对齐。组内保持紧凑行间距，项目区与“最近”以分组留白区分；
 - 左栏保留全局 Task 列表，并按 [Task 列表、项目与排序](#56-task-列表项目与排序) 额外展示按归属组织的项目导航，并提供显式“添加项目”；不提供全局 Workspace 切换器。只消费同一 canonical snapshot 中的 Workspace、项目入口状态与所属 Task；项目入口状态不改变全局 Task 列表，Host 撤销授权并移出 Snapshot 的 Workspace 不生成可点击的死入口；
 - Task 被选择后使用自身绑定的 Workspace 路径，不提交额外的全局 Workspace 导航动作；不同路径下的后台 Task 都必须持续可见；
 - 无项目草稿默认选择 Automatic Workspace，项目草稿默认采用项目关联目录，已有明确目录选择优先。Automatic intent 的工具带按钮显示“选择工作目录”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；用户确认目录后即完成授权并只更新草稿上下文，不得追加 trust 确认、自动创建 Task 或发送已有内容。选定 Manual Workspace 后，按钮显示目录名，悬停可查看完整目录。创建后可在右上角的任务信息查看已选目录。
@@ -252,23 +250,9 @@ Project（可空归属；Manual Workspace 提供默认目录）
 
 > Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore discovery/catalog；定时任务入口依赖 Schedule 持久状态的投影、后台 Host timer/notification 与真实 Task admission。连接器入口与 route 已进入稳定 shell；当前合同由 Product MCP 的 typed 管理能力、Runtime/catalog availability 与新 Task authority 三类事实共同驱动，页面不得把其中任何一个状态冒充另一个。
 
-`新建任务`、`技能`、`连接器` 与 `定时任务` 位于 Task 列表上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
+一级导航的「工作台」入口仅显示图标，悬停或键盘聚焦时提示名称，并提供完整可访问名称和至少 44 × 44 px 的点击区域。进入工作台工具页面时它保持选中。工作台侧栏在「新建任务」下方按顺序排列「技能」「连接器」「定时任务」，在一行内显示图标和标签。当前工具使用中性选中样式并设置 `aria-current="page"`。
 
-左栏字体权重保持克制：产品名作为唯一品牌锚点保留强调，能力入口、分组标题与账号名称使用 medium，普通 Task 名称使用 regular，当前 Task 最多提升到 medium。Task 选中态使用中性底色和最多 medium 字重，不增加品牌色竖线；运行、提醒和失败状态由语义图标表达，不通过整栏粗体重复表达。
-
-```text
-MetaWork
-
-  +  New task
-  /  Skills
-  ⌁  Connectors
-  ◷  Scheduled tasks
-
-Tasks
-```
-
-- 四个菜单项使用相同行高、左右 padding、图标列、字号、字重、hover 与 focus 样式；`New task` 不再使用独立填充按钮，快捷键只作为 tooltip 或不改变布局的尾部提示；
-- 当前能力 route 使用 `--ui-action-selected-surface` 弱背景、`--ui-action-selected-content` 图标/文字和左侧 2 px 选中标识，并设置 `aria-current="page"`；选中不能只靠颜色；
+- 返回工作台恢复当前 Task 或草稿。新建任务是任务列表和命令栏内的独立动作；
 - 一个能力可用时只显示一行；后续能力按真实 owner 与使用频率增加，不预留 disabled 占位、不用 `More` 收纳尚不存在的产品；
 - 点击能力入口保留主界面左栏和 Task 选择，只替换中央 route；点击 New task 或 Task 回到对应页面。Settings 覆盖整个 主界面内容区，保留窗口壳层和底层内容的挂载，不重复显示或操作 Task 左栏；
 - 能力页面打开期间后台 Task 继续运行，左栏的 `Needs your attention`、Running 与失败信号继续更新。
@@ -424,9 +408,9 @@ Task 菜单在归档之后提供“移入项目”或“更改项目”，打开
 
 ### 5.8 左下角账号入口
 
-主界面左栏底部固定显示紧凑的 Metask identity：已登录时只显示头像或首字母与显示名，不重复展示“Metask 已连接”或成功状态点，也不为已删除的第二行保留空白高度；入口仍保持至少 44 px 命中高度。未登录、检查中或授权中仍使用第二行简短状态说明当前需要。它同时是账户与应用轻量菜单的触发器，不显示完整 API Key，也不承担模型快速选择。
+一级导航底部固定显示账户与应用入口。已登录时用头像或首字母作触发器，完整显示名在菜单顶部及触发器的辅助说明中可见。未登录时触发器显示「登录」，菜单同时提供登录、设置和关于。检查中和授权中显示账户图标，状态在辅助说明和菜单中提供。
 
-点击后打开最宽 224 px 的轻量菜单，窄窗口下继续受视口宽度约束，视觉复用 [Foundation 菜单规则](#165-foundation-组件)：
+点击后从入口右侧朝上展开最宽 224 px 的轻量菜单，位置随视口空间调整，视觉复用 [Foundation 菜单规则](#165-foundation-组件)：
 
 ```text
 张三
@@ -438,7 +422,7 @@ Task 菜单在归档之后提供“移入项目”或“更改项目”，打开
 ```
 
 - “关于”是本地产品级动作，位于设置之后、退出登录之前；菜单项不重复展示产品名或版本，也不新增常驻侧栏行、主界面一级导航或设置分区。点击后打开紧凑模态窗，展示 canonical Logo、产品名、Metask 开发者归属、从 `app.zon` 构建注入的当前版本和版本更新区域；不渲染宣传文案、占位动作或死链接；
-- 账户行移除下拉箭头，头像与账号名称仍为账户与应用菜单按钮。唯一常驻更新提醒位于同一行右侧：有新版时显示独立“有新版”按钮，无新版时留空；按钮与菜单触发器必须为并列交互元素，不能嵌套。长身份名称省略，更新按钮不被挤出；两者保持 44 px 最小命中高度、可访问名称和键盘焦点。未登录时也提供更新入口，不增加其他菜单标记、横幅、系统通知或自动弹窗；
+- 有新版时在账号入口正上方显示独立的圆形上箭头按钮，图标圆形轮廓与头像大小一致。底部账户区与上方导航以留白区分。悬停或键盘聚焦显示「有新版」，可访问名称包括版本号。两者均保持至少 44 × 44 px 命中区和可见键盘焦点。更新入口独立于登录状态；
 - “有新版”打开同一个关于 Dialog，不打开账号菜单或自动下载。关闭后焦点返回原更新按钮；该按钮已经消失时回到账户与应用入口。关于的版本区域呈现未检查、检查中、最新、发现新版、缺本平台包、检查失败及下载交接状态，提供检查/重试、可用时的下载动作，以及始终可见的官网下载。打开 Dialog 本身不触发网络检查；Bridge 不可用时保留静态信息并禁用无法执行的动作，不能虚构最新状态；
 - 下载按钮绑定显示的版本，只在用户点击后请求预检与系统浏览器交接。检查与命令在途防重复提交；交接成功只写“已交给浏览器，请在浏览器中查看下载”，保留角落提醒，不展示虚假的下载进度或完成。失效链接明确提示“下载链接暂不可用，请前往官网下载”，临时失败、缺包与版本漂移使用对应可操作原因；官网仅由用户点击打开。检查失败允许显示上次确认版本并标明本次未刷新，不报最新；
 - 更新状态由 Host 发布，局部 command busy/error 只属于当前 Dialog 和 connection generation；关闭、卸载或连接变化后的迟到回执不得恢复旧反馈。检查/下载结果原位呈现，普通后台失败不抢焦点；状态使用可访问的 live region，错误有可读文字。窄窗操作行可换行，沿用既有深浅主题与 Foundation 组件。领域与下载失败语义以[Product 架构](product-architecture.md#28-版本提醒与下载交接)为准；
@@ -1172,7 +1156,7 @@ Account与 Models状态在设置中分别投影：Account按 `checking | signed_
 - 管理页不提供默认模型设置；Account 只影响 Metask 授权，自定义模型独立可用。后台同步只更新目录与状态，不隐式选择其他来源或改写草稿、既有 Task 或定时任务绑定；
 - 编辑和删除不因来源正被 Task/Session/Run 使用而禁用，也不查询 consumer usage。若 mutation 使 desired default 不可解析，Product Control 独立关闭新 admission 并进入 reconciliation；既有消费者保持 owned binding，历史不改写。该分组不扩展到 Workspace、权限策略或 AgentCore 内部状态。
 
-Skill 中心、MCP 与定时任务按 §5.2–§5.5 进入 主界面一级能力导航；MCP 使用稳定入口，并分别消费 Host-owned management health、Runtime/catalog availability 与 new Task access。空 registry 是可管理空状态，management capability 未接通或 outcome unknown 才进入对应不可用/恢复面；Renderer 不从 Runtime ready 推导管理动作。其他连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航，不照搬其他 Agent 产品的信息架构。
+Skill 中心、MCP 与定时任务按 §5.2–§5.5 进入工作台工具区。MCP 使用稳定入口，并分别消费 Host-owned management health、Runtime/catalog availability 与 new Task access。空 registry 是可管理空状态，management capability 未接通或 outcome unknown 才进入对应不可用/恢复面；Renderer 不从 Runtime ready 推导管理动作。其他连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航，不照搬其他 Agent 产品的信息架构。
 
 ## 15. 国际化
 
@@ -1450,7 +1434,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 右侧栏常驻开关可由键盘操作，无 Task 时也能独立开合；Task 切换、删除、目标失效不改变布局显隐或保存比例；任务信息纯图标、上下文压力提醒与审批定位入口可由键盘操作，缺少 pressure 时不显示上下文入口；Run 用量和历史 auto compact 不独立展示；
 - 右侧只挂载活动对象标签的文件详情或同 Run File Changes Review；标签切换卸载非活动 DOM，关闭标签后聚焦相邻标签，关闭最后一个标签同步隐藏面板并回到该标签的真实 opener，opener 失效时回到稳定 Task Panel 开关。Review 直接挂载连续差异文档并保持明确 Task + Run 身份，不提供列表/详情层级或内部返回；Escape 隐藏右栏并回到真实对话入口；
 - 普通 Run start/terminal、新 pendingUi 和 usage revision 不自动开合右栏、不抢焦点；切换 Task、关闭标签或对象失效不泄漏旧详情和已读取 bytes，晚到 Promise 不覆盖新对象；隐藏右栏保留当前 Task 会话，切换 Task 清空会话；
-- 左栏折叠后完全隐藏且命令栏入口仍可达；Task Panel 关闭或 overlay 显示后功能不丢失；停靠态始终为中央工作面与 Task Panel 各保留至少 360 px，两者都不设置固定最大宽度；扣除左栏后的空间少于 720 px 时切换 overlay，低于 820 px 与左栏互斥，低于 620 px 使用全宽 overlay。验证样本至少覆盖 1440/左栏 320 的约 746+374、1200/左栏 320 的 520+360、1200/左栏 480 的 360+360、960/左栏关闭的 600+360、960/左栏打开的 overlay，以及超宽窗口右栏仍可继续扩大。
+- 常规窗口收起任务列表后，一级导航、账号与命令栏入口仍可达。窄窗打开或关闭抽屉、切换页面与恢复桌面偏好分别验证。Task Panel 停靠态为中央工作面与 Task Panel 各保留至少 360 px；扣除一级导航和任务列表后的空间少于 720 px 时切换 overlay，低于 820 px 与抽屉互斥，低于 620 px 使用全宽 overlay。覆盖任务列表宽度调整、列表关闭、右栏停靠边界和超宽窗口。
 - Windows Renderer 窗口按钮在根启动/连接失败表面与主界面均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；
 
 ### 19.9 视觉与 Foundation

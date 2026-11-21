@@ -197,8 +197,14 @@ function renderShell(
           onSearch() {},
           onNewTask() {},
           newTaskDisabled: false,
+          navigation:
+            left === null
+              ? undefined
+              : () => createElement("nav", null, "Primary navigation"),
           left:
-            left === undefined ? createElement("p", null, "Navigation") : left,
+            left === null
+              ? null
+              : () => left ?? createElement("p", null, "Tasks"),
           rightPanel,
           rightPanelOpen,
           onToggleRightPanel() {},
@@ -538,12 +544,16 @@ test("model selection keeps its exact identity when display metadata is absent",
   assert.doesNotMatch(markup, />Available model</);
 });
 
-test("Workbench keeps Search as an icon beside the sidebar control", () => {
+test("Workbench places the brand before the sidebar and Search controls", () => {
   const markup = renderShell(null);
   const leading = markup.indexOf('class="commandbar-leading-actions"');
+  const brand = markup.indexOf('aria-label="MetaWork"');
+  const sidebar = markup.indexOf('aria-label="Toggle task sidebar"');
   const search = markup.indexOf('aria-label="Search"');
   const context = markup.indexOf('class="commandbar-context"');
-  assert.ok(leading >= 0 && search > leading && context > search);
+  assert.ok(leading >= 0 && brand > leading && sidebar > brand);
+  assert.ok(search > sidebar && context > search);
+  assert.equal(markup.match(/aria-label="MetaWork"/g)?.length, 1);
   assert.doesNotMatch(markup, /<kbd>.*K<\/kbd>/);
   assert.doesNotMatch(markup, /<span>Search<\/span>/);
   assert.doesNotMatch(markup, /title="Search"/);
@@ -583,33 +593,40 @@ test("bounded proportional columns preserve both docked minimums", () => {
       containerWidth: viewportWidth,
       leftOpen,
       leftWidth,
+      navigationWidth: 56,
       rightOpen: true,
       rightShare: 1 / 3,
     });
 
   assert.deepEqual(resolve(1440, true), {
-    availableWidth: 1120,
+    dockedLeftWidth: 376,
+    dockedListWidth: 320,
+    leftMaximum: 480,
+    availableWidth: 1064,
     docked: true,
-    middleWidth: 746,
-    rightWidth: 374,
+    middleWidth: 704,
+    rightWidth: 360,
     rightMinimum: 360,
-    rightMaximum: 760,
+    rightMaximum: 704,
     rightShare: 1 / 3,
   });
   assert.deepEqual(resolve(1200, true), {
-    availableWidth: 880,
+    dockedLeftWidth: 376,
+    dockedListWidth: 320,
+    leftMaximum: 480,
+    availableWidth: 824,
     docked: true,
-    middleWidth: 520,
+    middleWidth: 464,
     rightWidth: 360,
     rightMinimum: 360,
-    rightMaximum: 520,
+    rightMaximum: 464,
     rightShare: 1 / 3,
   });
   assert.deepEqual(
     {
-      docked: resolve(1200, true, 480).docked,
-      middleWidth: resolve(1200, true, 480).middleWidth,
-      rightWidth: resolve(1200, true, 480).rightWidth,
+      docked: resolve(1256, true, 480).docked,
+      middleWidth: resolve(1256, true, 480).middleWidth,
+      rightWidth: resolve(1256, true, 480).rightWidth,
     },
     { docked: true, middleWidth: 360, rightWidth: 360 },
   );
@@ -619,14 +636,17 @@ test("bounded proportional columns preserve both docked minimums", () => {
       middleWidth: resolve(960, false).middleWidth,
       rightWidth: resolve(960, false).rightWidth,
     },
-    { docked: true, middleWidth: 600, rightWidth: 360 },
+    { docked: true, middleWidth: 544, rightWidth: 360 },
   );
+  assert.equal(resolve(1200, true, 480).docked, false);
   assert.equal(resolve(960, true).docked, false);
+  assert.equal(resolve(820, true, 480).middleWidth, 360);
+  assert.equal(resolve(390, true).dockedLeftWidth, 0);
 
   const ultrawide = resolve(2560, true);
   assert.equal(ultrawide.docked, true);
-  assert.equal(ultrawide.rightWidth, 747);
-  assert.equal(ultrawide.middleWidth, 1493);
+  assert.equal(ultrawide.rightWidth, 728);
+  assert.equal(ultrawide.middleWidth, 1456);
 });
 
 test("Settings uses the global stage without retaining the Task sidebar", () => {
@@ -1470,17 +1490,13 @@ test("Sidebar typography reserves bold weight for the product identity", async (
     new URL("../frontend/src/index.css", import.meta.url),
     "utf8",
   );
-  assert.match(stylesheet, /\.sidebar-capability\s*\{[^}]*font-weight: 500/s);
+  assert.match(stylesheet, /\.sidebar-action\s*\{[^}]*font-weight: 500/s);
   assert.doesNotMatch(stylesheet, /\.task-group/);
   assert.match(stylesheet, /\.section-label\s*\{[^}]*font-weight: 500/s);
   assert.match(stylesheet, /\.task-list-title\s*\{[^}]*font-weight: 400/s);
   assert.match(
     stylesheet,
     /\.task-list-item\[aria-current="page"\] \.task-list-title\s*\{[^}]*font-weight: 500/s,
-  );
-  assert.match(
-    stylesheet,
-    /\.account-identity-copy strong\s*\{[^}]*font-weight: 500/s,
   );
 });
 
@@ -1492,11 +1508,11 @@ test("Account identity and its menu stay compact without shrinking the hit targe
 
   assert.match(
     stylesheet,
-    /\.account-identity\s*\{[^}]*padding: 4px 8px calc\(4px \+ env\(safe-area-inset-bottom, 0px\)\);/s,
+    /\.account-identity\s*\{[^}]*padding: 4px 0 calc\(4px \+ env\(safe-area-inset-bottom, 0px\)\);/s,
   );
   assert.match(
     stylesheet,
-    /\.account-identity-trigger\s*\{[^}]*min-height: 44px;/s,
+    /\.account-identity-trigger,\s*\.account-update-trigger\s*\{[^}]*min-width: 44px;[^}]*min-height: 44px;/s,
   );
   assert.match(
     stylesheet,

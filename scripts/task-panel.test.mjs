@@ -8438,13 +8438,65 @@ test("App previews exact operation references, rejects superseded reads, and ref
   assert.equal(document.activeElement, openers[1]);
 });
 
+test("App groups tools in the Workbench sidebar and keeps the primary entry available", async (ctx) => {
+  const { snapshot } = await renderAppFixture(ctx, 1440);
+  await selectRecentTask(/First task/);
+  const navigation = screen.getByRole("navigation", {
+    name: "Primary navigation",
+  });
+  assert.equal(within(navigation).getAllByRole("button").length, 1);
+  const workbench = within(navigation).getByRole("button", {
+    name: "Workbench",
+  });
+  assert.equal(workbench.textContent, "");
+  assert.ok(workbench.querySelector("svg"));
+  const tools = screen.getByRole("navigation", { name: "Workbench tools" });
+  assert.equal(
+    screen.getByRole("button", { name: "New task" }).nextElementSibling,
+    tools,
+  );
+  assert.deepEqual(
+    within(tools)
+      .getAllByRole("button")
+      .map((button) => button.textContent),
+    snapshot.capabilities.scheduledTaskPersistenceHealth === "unavailable"
+      ? ["Skills", "Connectors"]
+      : ["Skills", "Connectors", "Scheduled tasks"],
+  );
+  const skills = within(tools).getByRole("button", { name: "Skills" });
+  fireEvent.click(skills);
+  assert.equal(skills.getAttribute("aria-current"), "page");
+  assert.equal(workbench.getAttribute("aria-current"), "page");
+
+  const listToggle = screen.getByRole("button", {
+    name: "Toggle task sidebar",
+  });
+  fireEvent.click(listToggle);
+  assert.equal(listToggle.getAttribute("aria-expanded"), "false");
+  assert.equal(
+    screen.queryByRole("navigation", { name: "Workbench tools" }),
+    null,
+  );
+  assert.ok(
+    screen.getByRole("button", { name: /Account and application menu/i }),
+  );
+  assert.equal(screen.queryByRole("button", { name: /First task/ }), null);
+  fireEvent.click(workbench);
+  assert.equal(workbench.getAttribute("aria-current"), "page");
+  assert.match(
+    document.querySelector(".commandbar-task").textContent,
+    /First task/,
+  );
+  assert.equal(listToggle.getAttribute("aria-expanded"), "false");
+});
+
 test("App attention only locates the original approval in docked and overlay layouts", async (ctx) => {
   for (const width of [1440, 390]) {
     const { snapshot, previews, publish } = await renderAppFixture(ctx, width);
     // A small-window sidebar is explicitly opened only to select the Task.
     if (width < 820)
       fireEvent.click(
-        screen.getByRole("button", { name: "Toggle task sidebar" }),
+        screen.getByRole("button", { name: "Toggle navigation drawer" }),
       );
     await selectRecentTask(/First task/);
     const info = await screen.findByRole("button", {
@@ -9163,9 +9215,10 @@ test("App exposes one compact sync recovery, retains draft and never marks a pen
     ctx,
     390,
   );
-  fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Toggle navigation drawer" }),
+  );
   await selectRecentTask(/First task/);
-  fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
   const draft = screen.getByRole("combobox", { name: "" });
   fireEvent.change(draft, { target: { value: "Keep this local draft" } });
   setSnapshotFailure(true);
@@ -9205,7 +9258,7 @@ test("App exposes one compact sync recovery, retains draft and never marks a pen
     true,
   );
   assert.equal(draft.value, "Keep this local draft");
-  const newTask = document.querySelector(".sidebar-capability");
+  const newTask = document.querySelector(".sidebar-new-task");
   assert.equal(newTask.disabled, true);
   await act(async () => release(structuredClone(snapshot)));
   await waitFor(() =>

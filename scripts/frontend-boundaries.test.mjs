@@ -267,7 +267,7 @@ test("draft Workspace selection stays local until Task creation", async () => {
     /function setDraftWorkspaceById\(workspaceId: string\) \{[\s\S]*?newTaskDrafts\.setDirectory\(\{[\s\S]*?kind: "explicit"/,
   );
   assert.doesNotMatch(app, /client\.selectWorkspace|WorkspaceSelectionIntents/);
-  assert.match(app, /onSelectTask=\{openTask\}/);
+  assert.match(app, /onSelectTask=\{\(id\) => \{\s*openTask\(id\)/);
   assert.match(app, /openTask\(result\.taskId\)/);
 });
 
@@ -362,7 +362,7 @@ test("Settings is a full content overlay that preserves the Workbench mount", as
   );
   assert.match(
     css,
-    /\.settings-page\s*\{[\s\S]*--settings-navigation-track: var\(--left-column-width\);/,
+    /\.settings-page\s*\{[\s\S]*--settings-navigation-track: calc\(\s*var\(--left-column-width\) \+ var\(--docked-navigation-width\)\s*\);/,
   );
   assert.match(
     css,
@@ -521,10 +521,10 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   assert.doesNotMatch(css, /\[data-platform=/);
   assert.match(css, /\.window-controls/);
   assert.match(css, /--window-bar-height: 52px/);
-  assert.match(
+  assert.doesNotMatch(
     css,
-    /\.app-window\[data-left-open="true"\] \.workbench-commandbar::before \{[\s\S]*?top: calc\(0px - env\(safe-area-inset-top, 0px\)\);/,
-    "the left rail surface and divider must cross the native safe-area inset",
+    /\.workbench-commandbar::before\s*\{[^}]*border-right:/,
+    "the resting sidebar divider starts below the titlebar",
   );
   assert.match(
     css,

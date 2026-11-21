@@ -10,6 +10,7 @@ import {
 } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
+import { BrandLogo } from "../components/ui/BrandLogo.tsx";
 import { ResizableSeparator } from "../components/ui/ResizableSeparator.tsx";
 import { WindowControls } from "../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../components/ui/WindowTitlebar.tsx";
@@ -28,6 +29,8 @@ const defaultLeftWidth = 320;
 const minimumLeftWidth = 240;
 const maximumLeftWidth = 480;
 const leftWidthStep = 16;
+const primaryNavigationWidth = 56;
+const desktopWorkbenchWidth = 820;
 const rightSharePreference = "metawork.panel.task.share";
 const defaultRightShare = 1 / 3;
 const defaultRightOverlayWidth = 400;
@@ -46,12 +49,14 @@ export function resolveWorkbenchColumns({
   containerWidth,
   leftOpen,
   leftWidth,
+  navigationWidth = 0,
   rightOpen,
   rightShare,
 }: {
   containerWidth: number;
   leftOpen: boolean;
   leftWidth: number;
+  navigationWidth?: number;
   rightOpen: boolean;
   rightShare: number;
 }) {
@@ -59,8 +64,15 @@ export function resolveWorkbenchColumns({
     Number.isFinite(containerWidth) && containerWidth > 0
       ? Math.floor(containerWidth)
       : 0;
-  const dockedLeftWidth =
-    leftOpen && resolvedContainerWidth >= 820 ? clampLeftWidth(leftWidth) : 0;
+  const desktop = resolvedContainerWidth >= desktopWorkbenchWidth;
+  const dockedNavigationWidth = desktop ? navigationWidth : 0;
+  const leftMaximum = clampLeftWidth(
+    resolvedContainerWidth - dockedNavigationWidth - minimumTaskStageWidth,
+  );
+  const dockedListWidth =
+    desktop && leftOpen ? Math.min(clampLeftWidth(leftWidth), leftMaximum) : 0;
+  const dockedLeftWidth = dockedNavigationWidth + dockedListWidth;
+  const leftColumns = { dockedLeftWidth, dockedListWidth, leftMaximum };
   const availableWidth = Math.max(0, resolvedContainerWidth - dockedLeftWidth);
   const normalizedRightShare = normalizeRightShare(rightShare);
   const rightMinimum = minimumRightWidth;
@@ -72,6 +84,7 @@ export function resolveWorkbenchColumns({
 
   if (!docked) {
     return {
+      ...leftColumns,
       availableWidth,
       docked,
       middleWidth: availableWidth,
@@ -94,6 +107,7 @@ export function resolveWorkbenchColumns({
     ),
   );
   return {
+    ...leftColumns,
     availableWidth,
     docked,
     middleWidth: availableWidth - rightWidth,
@@ -119,7 +133,7 @@ export function isTaskStageExposed({
 }) {
   return (
     !overlayOpen &&
-    !(leftOpen && viewportWidth < 820) &&
+    !(leftOpen && viewportWidth < desktopWorkbenchWidth) &&
     !(rightPanelOpen && !rightPanelDocked)
   );
 }
@@ -146,9 +160,12 @@ function preferredPanelOpen(key: string) {
   return readLocalPreference(key) !== "closed";
 }
 
-function initialPanel(key: string, minimumWidth: number) {
+function initialLeftPanel() {
   if (typeof window === "undefined") return true;
-  return window.innerWidth >= minimumWidth && preferredPanelOpen(key);
+  return (
+    window.innerWidth >= desktopWorkbenchWidth &&
+    preferredPanelOpen(leftPreference)
+  );
 }
 
 // A minimized or hidden window can report an empty viewport. That is not a
@@ -171,6 +188,7 @@ export function AppShell({
   searchButtonRef,
   taskStageRef,
   taskStageLabel,
+  navigation,
   left,
   rightPanel,
   rightPanelOpen,
@@ -194,7 +212,8 @@ export function AppShell({
   searchButtonRef?: RefObject<HTMLButtonElement | null>;
   taskStageRef?: Ref<HTMLElement>;
   taskStageLabel?: string;
-  left: ReactNode | null;
+  navigation?: (dismissDrawer: () => void) => ReactNode;
+  left: ((dismissDrawer: () => void) => ReactNode) | null;
   rightPanel: ReactNode | null;
   rightPanelOpen: boolean;
   onDismissRightPanel: (restoreFocus?: boolean) => void;
@@ -205,9 +224,7 @@ export function AppShell({
   children: ReactNode;
 }) {
   const { t } = useI18n();
-  const [leftOpen, setLeftOpen] = useState(() =>
-    initialPanel(leftPreference, 820),
-  );
+  const [leftOpen, setLeftOpen] = useState(initialLeftPanel);
   const [leftWidth, setLeftWidth] = useState(initialLeftWidth);
   const [rightShare, setRightShare] = useState(initialRightShare);
   const [resizingLeft, setResizingLeft] = useState(false);
@@ -216,14 +233,25 @@ export function AppShell({
     typeof window === "undefined" ? 1440 : window.innerWidth,
   );
   const workbenchElement = useRef<HTMLElement>(null);
+  const sidebarToggle = useRef<HTMLButtonElement>(null);
+  const wideWorkbench = workbenchWidth >= desktopWorkbenchWidth;
   const leftAvailable = left !== null;
   const effectiveLeftOpen = leftAvailable && leftOpen;
+  const drawerOpen = !wideWorkbench && effectiveLeftOpen;
+  const sidebarVisible =
+    drawerOpen ||
+    (wideWorkbench && (effectiveLeftOpen || navigation !== undefined));
+  const sidebarToggleLabel = t(
+    wideWorkbench ? "app.toggle_sidebar" : "app.toggle_navigation",
+  );
+  const navigationWidth = navigation ? primaryNavigationWidth : 0;
   const newTaskShortcut = desktopPlatform() === "macos" ? "⌘N" : "Ctrl+N";
   const effectiveRightPanelOpen = rightPanelOpen;
   const columns = resolveWorkbenchColumns({
     containerWidth: workbenchWidth,
     leftOpen: effectiveLeftOpen,
     leftWidth,
+    navigationWidth,
     rightOpen: effectiveRightPanelOpen,
     rightShare,
   });
@@ -233,6 +261,7 @@ export function AppShell({
         containerWidth: workbenchWidth,
         leftOpen: effectiveLeftOpen,
         leftWidth,
+        navigationWidth,
         rightOpen: true,
         rightShare,
       });
@@ -273,7 +302,9 @@ export function AppShell({
   }, [onTaskStageExposureChange, taskStageExposed]);
 
   useEffect(() => {
-    const narrow = window.matchMedia("(max-width: 819px)");
+    const narrow = window.matchMedia(
+      `(max-width: ${desktopWorkbenchWidth - 1}px)`,
+    );
     const closeForViewport = () => {
       if (narrow.matches && hasViewport()) setLeftOpen(false);
     };
@@ -317,12 +348,11 @@ export function AppShell({
   }, []);
 
   useEffect(() => {
-    if (effectiveRightPanelOpen && workbenchWidth < 820) setLeftOpen(false);
-  }, [effectiveRightPanelOpen, workbenchWidth]);
+    if (effectiveRightPanelOpen && !wideWorkbench) setLeftOpen(false);
+  }, [effectiveRightPanelOpen, wideWorkbench]);
 
   // Narrow layouts collapse the sidebar without rewriting the saved choice, so
   // regaining the desktop width restores that choice.
-  const wideWorkbench = workbenchWidth >= 820;
   const wasWideWorkbench = useRef(wideWorkbench);
   useEffect(() => {
     const widened = wideWorkbench && !wasWideWorkbench.current;
@@ -343,9 +373,16 @@ export function AppShell({
 
   function toggleLeft() {
     const next = !leftOpen;
-    if (next && workbenchWidth < 820) onDismissRightPanel(false);
-    writeLocalPreference(leftPreference, next ? "open" : "closed");
+    if (wideWorkbench)
+      writeLocalPreference(leftPreference, next ? "open" : "closed");
+    else if (next) onDismissRightPanel(false);
     setLeftOpen(next);
+  }
+
+  function dismissDrawer() {
+    if (!drawerOpen) return;
+    setLeftOpen(false);
+    sidebarToggle.current?.focus();
   }
 
   function shareForRightWidth(width: number) {
@@ -375,7 +412,10 @@ export function AppShell({
       data-resizing-right={resizingRight}
       style={
         {
-          "--left-column-width": `${leftWidth}px`,
+          "--left-column-width": `${Math.min(leftWidth, columns.leftMaximum)}px`,
+          "--left-column": `${columns.dockedLeftWidth}px`,
+          "--primary-navigation-width": `${navigationWidth}px`,
+          "--docked-navigation-width": `${wideWorkbench ? navigationWidth : 0}px`,
           "--right-panel-width": `${rightPanelPlacement.rightWidth}px`,
         } as CSSProperties
       }
@@ -422,6 +462,11 @@ export function AppShell({
           target.closest('[role="dialog"], [role="menu"], [role="alertdialog"]')
         )
           return;
+        if (drawerOpen && event.key === "Escape" && !event.defaultPrevented) {
+          event.preventDefault();
+          dismissDrawer();
+          return;
+        }
         if (
           !shouldDismissSidePanelForEscape(
             effectiveRightPanelOpen,
@@ -439,17 +484,21 @@ export function AppShell({
           className="commandbar-leading-actions"
           data-native-window-drag-exclude=""
         >
+          {navigation && <BrandLogo label={t("app.name")} markOnly />}
           <div
             className="commandbar-inert-content"
             inert={overlay ? true : undefined}
           >
             {leftAvailable && (
               <button
+                ref={sidebarToggle}
                 className="icon-button focus-ring"
-                aria-controls="workspace-sidebar"
-                aria-expanded={leftOpen}
-                aria-label={t("app.toggle_sidebar")}
-                title={t("app.toggle_sidebar")}
+                aria-controls={
+                  wideWorkbench ? "workspace-task-list" : "workspace-sidebar"
+                }
+                aria-expanded={effectiveLeftOpen}
+                aria-label={sidebarToggleLabel}
+                title={sidebarToggleLabel}
                 onClick={toggleLeft}
               >
                 <Icon name="sidebar" />
@@ -583,23 +632,32 @@ export function AppShell({
       </WindowTitlebar>
 
       <div className="app-columns" inert={overlay ? true : undefined}>
-        {leftAvailable && (
+        {(leftAvailable || navigation) && (
           <aside
             id="workspace-sidebar"
             className="workspace-sidebar"
-            aria-hidden={!leftOpen}
-            inert={!leftOpen}
+            aria-hidden={!sidebarVisible}
+            inert={!sidebarVisible}
           >
-            {left}
+            {navigation?.(dismissDrawer)}
+            {left && (
+              <div
+                id="workspace-task-list"
+                className="workspace-task-list"
+                hidden={!effectiveLeftOpen}
+              >
+                {left(dismissDrawer)}
+              </div>
+            )}
           </aside>
         )}
-        {effectiveLeftOpen && (
+        {effectiveLeftOpen && wideWorkbench && (
           <ResizableSeparator
             className="workspace-resize-handle"
             label={t("app.resize_sidebar")}
-            value={leftWidth}
+            value={columns.dockedListWidth}
             minimum={minimumLeftWidth}
-            maximum={maximumLeftWidth}
+            maximum={columns.leftMaximum}
             step={leftWidthStep}
             onChange={setLeftWidth}
             onCommit={(width) =>
@@ -611,6 +669,7 @@ export function AppShell({
         )}
         <section
           className="task-stage"
+          inert={drawerOpen}
           ref={taskStageRef}
           aria-label={taskStageLabel}
           role={taskStageLabel ? "group" : undefined}
@@ -648,13 +707,11 @@ export function AppShell({
 
       {overlay && <div className="app-overlay-layer">{overlay}</div>}
 
-      {effectiveLeftOpen && !overlay && (
+      {drawerOpen && !overlay && (
         <button
           className="panel-scrim"
           aria-label={t("app.dismiss_panels")}
-          onClick={() => {
-            if (workbenchWidth < 820) setLeftOpen(false);
-          }}
+          onClick={dismissDrawer}
         />
       )}
     </main>

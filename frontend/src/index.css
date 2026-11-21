@@ -274,27 +274,73 @@ summary::-webkit-details-marker {
   font-weight: 500;
 }
 
-.sidebar-frame {
+.primary-sidebar,
+.workbench-commandbar {
+  background: var(--ui-surface-panel-2);
+}
+
+.primary-sidebar {
   display: flex;
-  height: 100%;
+  flex: 0 0 var(--primary-navigation-width);
   min-height: 0;
   flex-direction: column;
+  align-items: stretch;
+  border-right: 1px solid var(--ui-border);
+}
+
+.primary-navigation {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  align-content: start;
+  gap: 4px;
+  padding: 4px;
+  overflow: auto;
+  scrollbar-width: none;
+}
+
+.primary-navigation-item {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  justify-self: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ui-content-muted);
+}
+
+.primary-navigation-item svg,
+.account-identity-trigger svg {
+  font-size: 18px;
+}
+
+.workspace-task-list {
+  min-width: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+  border-top: 1px solid var(--ui-border);
+  border-right: 1px solid var(--ui-border);
 }
 
 .sidebar-primary {
   display: flex;
+  height: 100%;
   min-height: 0;
   padding: 10px 14px 0;
-  flex: 1;
   flex-direction: column;
   container-type: inline-size;
 }
 
-.sidebar-capabilities {
-  margin-top: 8px;
+.workbench-tools {
+  display: grid;
+  gap: 1px;
+  margin-top: 2px;
 }
 
-.sidebar-capability,
+.sidebar-action,
 .task-project-heading,
 .task-list-item {
   display: grid;
@@ -303,21 +349,21 @@ summary::-webkit-details-marker {
 }
 
 @media (pointer: coarse) {
-  .sidebar-capability,
+  .sidebar-action,
   .task-project-heading,
   .task-list-item {
     min-height: 44px;
   }
 }
 
-.sidebar-capability,
+.sidebar-action,
 .task-project-heading {
   grid-template-columns: 22px minmax(0, 1fr);
   padding-inline: 8px 10px;
   gap: 7px;
 }
 
-.sidebar-capability {
+.sidebar-action {
   width: 100%;
   padding-block: 0;
   border: 0;
@@ -328,20 +374,9 @@ summary::-webkit-details-marker {
   text-align: left;
 }
 
-.sidebar-capability + .sidebar-capability {
-  margin-top: 1px;
-}
-
-.sidebar-capability-mark svg {
+.sidebar-action svg {
   font-size: var(--text-lead);
-}
-
-.sidebar-capability-mark {
-  display: grid;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  color: currentColor;
+  justify-self: center;
 }
 
 .sidebar-navigation {
@@ -397,50 +432,36 @@ summary::-webkit-details-marker {
 
 .account-identity {
   display: flex;
-  align-items: center;
-  gap: 4px;
-  position: relative;
-  padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px));
-  border-top: 1px solid var(--ui-border);
-  background: transparent;
-}
-
-.account-identity-trigger {
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
-  flex: 1;
-  min-width: 0;
-  width: 100%;
-  min-height: 44px;
-  padding: 5px 7px;
-  align-items: center;
-  gap: 9px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  color: var(--ui-content-primary);
-  background: transparent;
-  text-align: left;
-}
-
-.account-update-trigger {
+  flex-direction: column;
   flex-shrink: 0;
-  min-height: 44px;
-  padding: 5px 10px;
-  border: 0;
-  border-radius: 7px;
-  color: var(--ui-action-primary);
-  background: transparent;
-  font-size: var(--text-label);
-  font-weight: 500;
-  white-space: nowrap;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 0 calc(4px + env(safe-area-inset-bottom, 0px));
 }
 
-.account-update-trigger:hover:not(:disabled) {
-  background: var(--metask-primary-soft);
+.account-identity-trigger,
+.account-update-trigger {
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  max-width: 100%;
+  min-height: 44px;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--ui-content-muted);
+  background: transparent;
+  font-size: var(--text-micro);
+  font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .account-update-trigger:disabled {
   opacity: 0.5;
+}
+
+.account-update-trigger svg {
+  font-size: 32px;
 }
 
 .account-avatar,
@@ -456,36 +477,10 @@ summary::-webkit-details-marker {
   font-weight: 720;
 }
 
-.account-identity-copy,
-.account-identity-copy strong,
-.account-identity-copy small {
-  display: block;
-  min-width: 0;
-}
-
-.account-identity-copy strong {
-  overflow: hidden;
-  font-size: var(--text-label);
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-identity-copy small {
-  margin-top: 2px;
-  overflow: hidden;
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-identity-copy small[data-attention="true"] {
-  color: var(--ui-content-warning);
-}
-
 .account-menu {
   width: min(224px, calc(100vw - 24px));
+  max-height: var(--available-height, calc(100dvh - 24px));
+  overflow-y: auto;
 }
 
 .account-menu-heading {
@@ -495,13 +490,9 @@ summary::-webkit-details-marker {
 
 .account-menu-heading strong {
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-menu-heading strong {
   font-size: var(--text-label);
+  font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .about-dialog {
@@ -644,7 +635,9 @@ summary::-webkit-details-marker {
 }
 
 .settings-page {
-  --settings-navigation-track: var(--left-column-width);
+  --settings-navigation-track: calc(
+    var(--left-column-width) + var(--docked-navigation-width)
+  );
   --settings-content-max-width: 960px;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -3531,6 +3524,8 @@ button.run-process-tool:hover {
 .app-window {
   --left-column: 0px;
   --left-column-width: 320px;
+  --primary-navigation-width: 0px;
+  --docked-navigation-width: 0px;
   --right-panel-width: 0px;
   --workbench-content-surface: var(--ui-surface-panel);
   display: grid;
@@ -3542,10 +3537,6 @@ button.run-process-tool:hover {
   padding-top: env(safe-area-inset-top, 0px);
   background: var(--ui-surface-canvas);
   isolation: isolate;
-}
-
-.app-window[data-left-open="true"] {
-  --left-column: var(--left-column-width);
 }
 
 .workbench-commandbar {
@@ -3564,22 +3555,7 @@ button.run-process-tool:hover {
   padding: 8px calc(10px + var(--metawork-window-chrome-trailing)) 8px
     var(--commandbar-left-inset);
   gap: 8px;
-  background: var(--ui-surface-canvas);
   user-select: none;
-}
-
-.app-window[data-left-open="true"] .workbench-commandbar::before {
-  position: absolute;
-  z-index: 0;
-  top: calc(0px - env(safe-area-inset-top, 0px));
-  right: auto;
-  bottom: 0;
-  left: 0;
-  width: var(--left-column);
-  border-right: 1px solid var(--ui-border);
-  background: var(--ui-surface-canvas);
-  content: "";
-  pointer-events: none;
 }
 
 .workbench-commandbar > * {
@@ -3597,6 +3573,15 @@ button.run-process-tool:hover {
   min-width: 0;
   align-items: center;
   gap: 4px;
+}
+
+.commandbar-leading-actions .brand-logo {
+  height: auto;
+}
+
+.commandbar-leading-actions .brand-logo > img {
+  width: auto;
+  height: 15px;
 }
 
 .window-controls {
@@ -3717,9 +3702,20 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 @media (max-width: 414px) {
-  html[data-metawork-renderer-window-controls="true"] .workbench-commandbar {
-    /* Reserve room for window controls, gaps and all seven workbench actions. */
+  .workbench-commandbar {
+    /* Reserve room for the mark, window controls and all seven workbench actions. */
     --commandbar-action-width: clamp(24px, (100vw - 150px) / 7, 32px);
+    --commandbar-left-inset: calc(8px + var(--metawork-window-chrome-leading));
+    gap: 4px;
+  }
+
+  .workbench-commandbar
+    :is(
+      .commandbar-leading-actions,
+      .commandbar-alert-slot,
+      .commandbar-context-actions
+    ) {
+    gap: 2px;
   }
 
   html[data-metawork-renderer-window-controls="true"]
@@ -3729,8 +3725,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     width: 32px;
   }
 
-  html[data-metawork-renderer-window-controls="true"]
-    .workbench-commandbar
+  .workbench-commandbar
     :is(.icon-button, .commandbar-alert summary, .task-attention-locator) {
     width: var(--commandbar-action-width);
   }
@@ -4023,9 +4018,9 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .workspace-sidebar {
+  display: flex;
   flex: 0 0 var(--left-column);
   padding: 0;
-  border-right: 1px solid var(--ui-border);
   background: var(--ui-surface-canvas);
   overflow: hidden;
 }
@@ -6307,16 +6302,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   mask-size: contain;
 }
 
-.brand-name {
-  display: flex;
-  min-height: 26px;
-  margin: 0 2px;
-  align-items: center;
-  font-size: var(--text-lead);
-  font-weight: 720;
-  letter-spacing: -0.01em;
-}
-
 .section-label {
   margin: 0;
   color: var(--ui-content-muted);
@@ -6467,7 +6452,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-top: 4px;
 }
 
-.sidebar-capability,
+.sidebar-action,
 .task-project-context,
 .task-project-heading,
 .task-list-item {
@@ -6475,9 +6460,14 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .account-identity-trigger:hover,
+.account-identity-trigger[data-popup-open],
 .account-identity-trigger[data-active="true"],
-.sidebar-capability:hover:where(:not(:disabled)),
-.sidebar-capability[data-active="true"],
+.account-update-trigger:hover:not(:disabled),
+.primary-navigation-item:hover,
+.primary-navigation-item[aria-current="page"],
+.sidebar-action:hover:where(:not(:disabled)),
+.sidebar-action[data-active="true"],
+.sidebar-action[aria-current="page"],
 .task-project-context:hover,
 .task-project-context:has(.task-list-action:focus-visible),
 .task-project-context[data-menu-open="true"],
@@ -9739,17 +9729,16 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     max-width: 94px;
   }
 
-  .app-window {
-    --left-column: 0px;
-  }
-
   .workspace-sidebar {
     position: fixed;
     z-index: 45;
     top: calc(var(--window-bar-height) + env(safe-area-inset-top, 0px));
     bottom: 0;
     left: 0;
-    width: min(280px, calc(100vw - 44px));
+    width: min(
+      calc(280px + var(--primary-navigation-width)),
+      calc(100vw - 44px)
+    );
     transform: translateX(-100%);
     box-shadow: 16px 0 40px rgba(24, 50, 71, 0.12);
     transition: transform 160ms ease;

@@ -7,6 +7,7 @@ import {
   Box,
   CalendarDays,
   Check,
+  CircleArrowUp,
   ChevronRight,
   ChevronDown,
   Clock3,
@@ -20,6 +21,7 @@ import {
   Pencil,
   FileDiff,
   Layers3,
+  LayoutGrid,
   History,
   ListTree,
   LoaderCircle,
@@ -57,6 +59,8 @@ import {
 type IconName =
   | "more"
   | "sidebar"
+  | "workbench"
+  | "update-available"
   | "minimize"
   | "maximize"
   | "restore"
@@ -119,6 +123,8 @@ const icons: Record<IconName, LucideIcon> = {
   "folder-x": FolderX,
   more: Ellipsis,
   sidebar: PanelLeft,
+  workbench: LayoutGrid,
+  "update-available": CircleArrowUp,
   minimize: Minus,
   maximize: Square,
   restore: Copy,
