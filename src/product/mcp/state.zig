@@ -194,7 +194,6 @@ pub const McpAuthorizationFailureStep = enum {
     registration,
     authorization,
     token_exchange,
-    verification,
 };
 
 pub const McpAuthorizationFailureReason = enum {
@@ -207,7 +206,6 @@ pub const McpAuthorizationFailureReason = enum {
     unsupported_server,
     browser_unavailable,
     invalid_callback,
-    access_denied,
     internal,
 };
 

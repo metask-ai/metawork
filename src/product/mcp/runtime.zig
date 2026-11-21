@@ -3061,21 +3061,21 @@ test "Product MCP projects a server's authorization failure until that server is
     var first = (try runtime.beginAuthorization(1, "oauth", "first")).?;
     first.deinit();
     try std.testing.expect(runtime.finishAuthorization("first", .{
-        .step = .verification,
-        .reason = .access_denied,
-        .http_status = 403,
-        .error_code = "insufficient_scope",
-        .description = "Token is missing library:write",
+        .step = .token_exchange,
+        .reason = .oauth_error,
+        .http_status = 400,
+        .error_code = "invalid_grant",
+        .description = "Authorization code expired",
     }));
     {
         const parsed = try testAuthorizationFailureProjection(&runtime, &bytes);
         defer parsed.deinit();
         const failure = parsed.value.object.get("servers").?.array.items[0].object.get("authorizationFailure").?.object;
-        try std.testing.expectEqualStrings("verification", failure.get("step").?.string);
-        try std.testing.expectEqualStrings("access_denied", failure.get("reason").?.string);
-        try std.testing.expectEqual(@as(i64, 403), failure.get("httpStatus").?.integer);
-        try std.testing.expectEqualStrings("insufficient_scope", failure.get("error").?.string);
-        try std.testing.expectEqualStrings("Token is missing library:write", failure.get("errorDescription").?.string);
+        try std.testing.expectEqualStrings("token_exchange", failure.get("step").?.string);
+        try std.testing.expectEqualStrings("oauth_error", failure.get("reason").?.string);
+        try std.testing.expectEqual(@as(i64, 400), failure.get("httpStatus").?.integer);
+        try std.testing.expectEqualStrings("invalid_grant", failure.get("error").?.string);
+        try std.testing.expectEqualStrings("Authorization code expired", failure.get("errorDescription").?.string);
     }
 
     // Starting again clears the old failure; out-of-bound values and text

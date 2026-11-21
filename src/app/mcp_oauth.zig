@@ -362,8 +362,6 @@ pub const FailureReason = enum {
     unsupported_server,
     browser_unavailable,
     invalid_callback,
-    /// The MCP server rejected the newly issued token.
-    access_denied,
     /// A local precondition or durable state step failed.
     internal,
 };
@@ -982,9 +980,6 @@ const TokenResponse = oauth_mechanics.TokenResponse(.{
 const Challenge = struct {
     resource_metadata: ?[]const u8 = null,
     scope: ?[]const u8 = null,
-    /// RFC 6750 section 3 diagnostics.
-    error_code: ?[]const u8 = null,
-    error_description: ?[]const u8 = null,
 };
 
 pub fn discoverResourceEffect(
@@ -1972,79 +1967,6 @@ pub fn exchangeAuthorizationCodeEffect(
         return error.TokenOutcomeUnknown;
 }
 
-pub const TokenVerification = enum {
-    /// The MCP server answered the authenticated request with 2xx.
-    accepted,
-    /// 401 or 403: the server refused this token.
-    rejected,
-    /// No authentication verdict (another status, or no response); the
-    /// connection step that follows reports whatever is wrong.
-    unverified,
-};
-
-/// Sends one MCP `initialize` request carrying the new access token before
-/// the token is committed. Only the response head is read: a 2xx proves
-/// the server accepts the token, a 401/403 proves it does not, and anything
-/// else leaves the decision to the regular connection. The MCP response
-/// itself is never interpreted; the Agent connection performs the real
-/// handshake once the grant is saved.
-pub fn verifyAccessTokenEffect(
-    transport: Transport,
-    resource: []const u8,
-    access_token: []const u8,
-    diagnostic: ?*Diagnostic,
-) TokenVerification {
-    if (!validHttpsUrl(resource) or access_token.len == 0 or
-        access_token.len > Limits.secret_bytes or !validSecretValue(access_token))
-    {
-        Diagnostic.record(diagnostic, .internal, 0);
-        return .unverified;
-    }
-    var authorization_storage: ["Bearer ".len + Limits.secret_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &authorization_storage);
-    const authorization = std.fmt.bufPrint(&authorization_storage, "Bearer {s}", .{access_token}) catch {
-        Diagnostic.record(diagnostic, .internal, 0);
-        return .unverified;
-    };
-    var body_buffer: [1]u8 = undefined;
-    var header_buffer: [Limits.header_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &header_buffer);
-    const response = transport.fetch(.{
-        .method = .post,
-        .url = resource,
-        .headers = &.{
-            .{ .name = "Accept", .value = "application/json, text/event-stream" },
-            .{ .name = "Content-Type", .value = "application/json" },
-            .{ .name = "Authorization", .value = authorization },
-        },
-        .body = initialize_probe_body,
-        .read_body = false,
-    }, &body_buffer, &header_buffer) catch |err| {
-        Diagnostic.recordFetch(diagnostic, err);
-        return .unverified;
-    };
-    if (response.status >= 200 and response.status < 300) return .accepted;
-    if (response.status != 401 and response.status != 403) {
-        Diagnostic.record(diagnostic, .http_status, response.status);
-        return .unverified;
-    }
-    var challenge_storage: [Limits.header_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &challenge_storage);
-    const challenge: Challenge = if (response.www_authenticate) |header|
-        parseBearerChallenge(header, &challenge_storage) catch .{}
-    else
-        .{};
-    Diagnostic.recordRemote(
-        diagnostic,
-        .access_denied,
-        response.status,
-        challenge.error_code,
-        challenge.error_description,
-        &.{access_token},
-    );
-    return .rejected;
-}
-
 const initialize_probe_body =
     \\{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"MetaWork","version":"0"}}}
 ;
@@ -2207,10 +2129,6 @@ fn parseBearerChallenge(input: []const u8, storage: []u8) error{InvalidChallenge
             if (result.resource_metadata == null) result.resource_metadata = value;
         } else if (std.ascii.eqlIgnoreCase(name, "scope")) {
             if (result.scope == null) result.scope = value;
-        } else if (std.ascii.eqlIgnoreCase(name, "error")) {
-            if (result.error_code == null) result.error_code = value;
-        } else if (std.ascii.eqlIgnoreCase(name, "error_description")) {
-            if (result.error_description == null) result.error_description = value;
         }
         cursor = std.mem.trimStart(u8, cursor, " \t");
         if (cursor.len == 0) break;
@@ -3785,8 +3703,7 @@ fn testHeader(headers: []const Header, name: []const u8) ?[]const u8 {
 
 /// Shaped like api.suno.com/mcp (2026-11-20): the 401 names only
 /// `resource_metadata`, the protected resource lists the scopes it needs,
-/// registration insists on both grants, and the MCP endpoint refuses a token
-/// that lacks a listed scope with an RFC 6750 `insufficient_scope` challenge.
+/// and registration insists on both grants.
 const SunoLikeServer = struct {
     const endpoint = "https://api.suno.test/mcp";
     const metadata_url = "https://api.suno.test/.well-known/oauth-protected-resource/mcp";
@@ -3794,31 +3711,11 @@ const SunoLikeServer = struct {
     const redirect = "http://127.0.0.1:49152/auth/callback";
     const all_scopes = "api%3Av0%20credits%3Aspend%20download%20library%3Aread%20library%3Asearch%20library%3Awrite%20offline_access%20profile%3Aread";
 
-    /// Whether the authorization server grants every requested scope.
-    grant_all: bool = true,
-    verifications: usize = 0,
+    const transport: Transport = .{ .fetch_fn = fetch };
 
-    fn transport(self: *SunoLikeServer) Transport {
-        return .{ .context = self, .fetch_fn = fetch };
-    }
-
-    fn fetch(context: ?*anyopaque, request: Request, _: []u8, _: []u8) FetchError!Response {
-        const self: *SunoLikeServer = @ptrCast(@alignCast(context.?));
-        if (std.mem.eql(u8, request.url, endpoint)) {
-            const authorization = testHeader(request.headers, "Authorization") orelse
-                return .{ .status = 401, .www_authenticate = "Bearer resource_metadata=\"" ++ metadata_url ++ "\"" };
-            self.verifications += 1;
-            if (request.method != .post or request.read_body or
-                std.mem.indexOf(u8, request.body, "\"method\":\"initialize\"") == null or
-                std.mem.indexOf(u8, testHeader(request.headers, "Accept") orelse "", "text/event-stream") == null)
-                return error.InvalidResponse;
-            if (std.mem.eql(u8, authorization, "Bearer token-with-every-scope"))
-                return .{ .status = 200, .content_type = "text/event-stream" };
-            return .{
-                .status = 403,
-                .www_authenticate = "Bearer error=\"insufficient_scope\", error_description=\"Token is missing library:write\", scope=\"library:write\", resource_metadata=\"" ++ metadata_url ++ "\"",
-            };
-        }
+    fn fetch(_: ?*anyopaque, request: Request, _: []u8, _: []u8) FetchError!Response {
+        if (std.mem.eql(u8, request.url, endpoint))
+            return .{ .status = 401, .www_authenticate = "Bearer resource_metadata=\"" ++ metadata_url ++ "\"" };
         if (std.mem.eql(u8, request.url, metadata_url)) return .{
             .status = 200,
             .content_type = "application/json",
@@ -3837,18 +3734,14 @@ const SunoLikeServer = struct {
         if (std.mem.eql(u8, request.url, issuer ++ "/token/")) return .{
             .status = 200,
             .content_type = "application/json",
-            .body = if (self.grant_all)
-                "{\"access_token\":\"token-with-every-scope\",\"token_type\":\"Bearer\",\"refresh_token\":\"refresh\",\"expires_in\":3600}"
-            else
-                "{\"access_token\":\"token-without-library-write\",\"token_type\":\"Bearer\",\"refresh_token\":\"refresh\",\"expires_in\":3600}",
+            .body = "{\"access_token\":\"token-with-every-scope\",\"token_type\":\"Bearer\",\"refresh_token\":\"refresh\",\"expires_in\":3600}",
         };
         return .{ .status = 404 };
     }
 };
 
-test "MCP OAuth asks a Suno-like server for every listed scope and checks the issued token" {
-    var suno: SunoLikeServer = .{};
-    const transport = suno.transport();
+test "MCP OAuth asks a Suno-like server for every listed scope" {
+    const transport = SunoLikeServer.transport;
     var diagnostic: Diagnostic = .{};
     var resource = try discoverResourceEffect(std.testing.allocator, transport, SunoLikeServer.endpoint, &diagnostic);
     defer resource.deinit();
@@ -3868,56 +3761,8 @@ test "MCP OAuth asks a Suno-like server for every listed scope and checks the is
     var code = try AuthorizationCode.init(std.testing.allocator, "authorization-code");
     defer code.deinit();
     const verifier = "0123456789012345678901234567890123456789012";
-    {
-        var tokens = try exchangeAuthorizationCodeEffect(std.testing.allocator, transport, &server, registration.client_id, null, .none, &code, verifier, SunoLikeServer.redirect, resource.resource, 1000, &diagnostic);
-        defer tokens.deinit();
-        try std.testing.expectEqual(TokenVerification.accepted, verifyAccessTokenEffect(transport, resource.resource, tokens.access_token.view(), &diagnostic));
-    }
-
-    // A token short of a required scope is refused, and the refusal says why.
-    suno.grant_all = false;
     var tokens = try exchangeAuthorizationCodeEffect(std.testing.allocator, transport, &server, registration.client_id, null, .none, &code, verifier, SunoLikeServer.redirect, resource.resource, 1000, &diagnostic);
     defer tokens.deinit();
-    var refusal: Diagnostic = .{};
-    try std.testing.expectEqual(TokenVerification.rejected, verifyAccessTokenEffect(transport, resource.resource, tokens.access_token.view(), &refusal));
-    try std.testing.expectEqual(FailureReason.access_denied, refusal.reason);
-    try std.testing.expectEqual(@as(u16, 403), refusal.http_status);
-    try std.testing.expectEqualStrings("insufficient_scope", refusal.errorCode().?);
-    try std.testing.expectEqualStrings("Token is missing library:write", refusal.description().?);
-    try std.testing.expectEqual(@as(usize, 2), suno.verifications);
-}
-
-test "MCP OAuth token check withholds echoed tokens and leaves other answers undecided" {
-    const Fake = struct {
-        response: Response,
-        failure: ?FetchError = null,
-        fn fetch(context: ?*anyopaque, _: Request, _: []u8, _: []u8) FetchError!Response {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            if (self.failure) |err| return err;
-            return self.response;
-        }
-    };
-    var fake: Fake = .{ .response = .{
-        .status = 401,
-        .www_authenticate = "Bearer error=\"invalid_token\", error_description=\"bad token secret-access-token\"",
-    } };
-    const transport: Transport = .{ .context = &fake, .fetch_fn = Fake.fetch };
-    var diagnostic: Diagnostic = .{};
-    try std.testing.expectEqual(TokenVerification.rejected, verifyAccessTokenEffect(transport, "https://mcp.example.test/mcp", "secret-access-token", &diagnostic));
-    try std.testing.expectEqualStrings("invalid_token", diagnostic.errorCode().?);
-    try std.testing.expect(diagnostic.description() == null);
-
-    // Without a Bearer challenge the refusal still stands on its status.
-    fake.response = .{ .status = 401 };
-    try std.testing.expectEqual(TokenVerification.rejected, verifyAccessTokenEffect(transport, "https://mcp.example.test/mcp", "token", &diagnostic));
-    try std.testing.expect(diagnostic.errorCode() == null);
-
-    fake.response = .{ .status = 500 };
-    try std.testing.expectEqual(TokenVerification.unverified, verifyAccessTokenEffect(transport, "https://mcp.example.test/mcp", "token", &diagnostic));
-    try std.testing.expectEqual(FailureReason.http_status, diagnostic.reason);
-    fake.failure = error.DeadlineExceeded;
-    try std.testing.expectEqual(TokenVerification.unverified, verifyAccessTokenEffect(transport, "https://mcp.example.test/mcp", "token", &diagnostic));
-    try std.testing.expectEqual(FailureReason.timed_out, diagnostic.reason);
 }
 
 test "MCP OAuth DCR asks for refresh_token without metadata saying so and reports rejection text" {

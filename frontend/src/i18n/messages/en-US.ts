@@ -2032,7 +2032,6 @@ export const enUS = {
   "mcp.authorization_failure.step.registration": "Registering MetaWork",
   "mcp.authorization_failure.step.authorization": "Browser sign-in",
   "mcp.authorization_failure.step.token_exchange": "Getting the access token",
-  "mcp.authorization_failure.step.verification": "Checking the access token",
   "mcp.authorization_failure.reason.network": "the server could not be reached",
   "mcp.authorization_failure.reason.timed_out": "it took too long",
   "mcp.authorization_failure.reason.http_status":
@@ -2049,8 +2048,6 @@ export const enUS = {
     "the browser could not be opened",
   "mcp.authorization_failure.reason.invalid_callback":
     "the browser returned an invalid response",
-  "mcp.authorization_failure.reason.access_denied":
-    "the server refused the new access token",
   "mcp.authorization_failure.reason.internal":
     "MetaWork could not continue this step",
   "mcp.authorization.action": "Sign in",
