@@ -146,6 +146,11 @@ const callback_stack_bytes: usize = 4 * 1024 * 1024;
 pub const RouteRange = struct {
     first: u64,
     end: u64,
+    /// The latest process lost: its id, and the wall-clock time just before
+    /// it was spawned. Its fault record, if it left one, carries the same id
+    /// and a later start, which an older record of a reused id does not.
+    process_id: u32 = 0,
+    spawned_unix_ms: i64 = 0,
 };
 
 pub const Spawn = union(enum) {
@@ -170,6 +175,8 @@ pub const Options = struct {
     credit_count_override: ?u64 = null,
     heartbeat_interval_ms: u64 = default_heartbeat_interval_ms,
     heartbeat_deadline_ms: u64 = default_heartbeat_deadline_ms,
+    /// The data root, where a process keeps its fault record. Passed on.
+    data_root: ?[]const u8 = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -464,6 +471,8 @@ const Generation = struct {
     answered_ns: std.atomic.Value(i64) = .init(0),
     /// When it started, on the same clock.
     started_ms: i64 = 0,
+    /// Just before it was spawned, on the wall clock a fault record uses.
+    spawned_unix_ms: i64 = 0,
 
     fn start(owner: *Owner, number: u32) ?*Generation {
         const self = owner.allocator.create(Generation) catch return null;
@@ -484,16 +493,25 @@ const Generation = struct {
             execution_host.session_floor_flag,
             self.floor,
         }) catch unreachable;
+        var root_text: [4096 + execution_host.data_root_flag.len]u8 = undefined;
+        var arguments_storage: [2][]const u8 = undefined;
+        var arguments: std.ArrayList([]const u8) = .initBuffer(&arguments_storage);
+        arguments.appendAssumeCapacity(floor_argument);
+        if (owner.options.data_root) |data_root| if (std.fmt.bufPrint(&root_text, "{s}{s}", .{
+            execution_host.data_root_flag,
+            data_root,
+        })) |argument| arguments.appendAssumeCapacity(argument) else |_| {};
         var argv_storage: [16][]const u8 = undefined;
         const spawn: execution_host.Host.Spawn = switch (owner.options.spawn) {
-            .self => .{ .self_with = &.{floor_argument} },
+            .self => .{ .self_with = arguments.items },
             .explicit => |prefix| explicit: {
-                std.debug.assert(prefix.len < argv_storage.len);
+                std.debug.assert(prefix.len + arguments.items.len <= argv_storage.len);
                 @memcpy(argv_storage[0..prefix.len], prefix);
-                argv_storage[prefix.len] = floor_argument;
-                break :explicit .{ .explicit = argv_storage[0 .. prefix.len + 1] };
+                @memcpy(argv_storage[prefix.len..][0..arguments.items.len], arguments.items);
+                break :explicit .{ .explicit = argv_storage[0 .. prefix.len + arguments.items.len] };
             },
         };
+        self.spawned_unix_ms = @intCast(@divTrunc(std.Io.Timestamp.now(owner.io, .real).nanoseconds, std.time.ns_per_ms));
         const failure = self.host.start(
             owner.io,
             owner.allocator,
@@ -557,10 +575,17 @@ const Generation = struct {
         if (owner.current == self) owner.current = null;
         if (!stopping) {
             owner.noteLossLocked(now(owner.io) - self.started_ms);
-            const range: RouteRange = .{ .first = self.floor, .end = self.floor + generation_span };
+            const range: RouteRange = .{
+                .first = self.floor,
+                .end = self.floor + generation_span,
+                .process_id = self.host.pid,
+                .spawned_unix_ms = self.spawned_unix_ms,
+            };
             owner.loss = if (owner.loss) |earlier| .{
                 .first = @min(earlier.first, range.first),
                 .end = @max(earlier.end, range.end),
+                .process_id = range.process_id,
+                .spawned_unix_ms = range.spawned_unix_ms,
             } else range;
         }
         owner.mutex.unlock(owner.io);

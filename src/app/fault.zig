@@ -38,10 +38,27 @@
 const builtin = @import("builtin");
 const std = @import("std");
 
-/// Which half of the process wrote the record. Execution isolation adds an
-/// `exec` value with its own install call; the Application is the only caller
-/// today and hard-codes `ui`.
-pub const Role = enum(u8) { ui = 1 };
+/// Which process wrote the record: the window, or the execution process that
+/// runs AgentCore for it. Each has a record file of its own, so the execution
+/// process never overwrites the record of the window it serves.
+pub const Role = enum(u8) {
+    ui = 1,
+    execution = 2,
+
+    pub fn recordFileName(self: Role) []const u8 {
+        return switch (self) {
+            .ui => record_file_name,
+            .execution => execution_record_file_name,
+        };
+    }
+
+    pub fn reportFileName(self: Role) []const u8 {
+        return switch (self) {
+            .ui => report_file_name,
+            .execution => execution_report_file_name,
+        };
+    }
+};
 
 pub const ArtifactKind = enum(u8) {
     unknown = 0,
@@ -118,6 +135,8 @@ pub const Options = struct {
 pub const directory_name = "faults";
 pub const record_file_name = "last-fault.bin";
 pub const report_file_name = "last-fault.txt";
+pub const execution_record_file_name = "last-execution-fault.bin";
+pub const execution_report_file_name = "last-execution-fault.txt";
 
 // ---------------------------------------------------------------------------
 // Record layout
@@ -279,7 +298,7 @@ pub fn install(io: std.Io, options: Options) InstallError!void {
     // Never truncated: the previous process's record is the evidence this
     // process reports at startup, and a fault here overwrites it in place
     // with a record of identical length.
-    const file = dir.createFile(io, record_file_name, .{
+    const file = dir.createFile(io, options.role.recordFileName(), .{
         .read = false,
         .truncate = false,
         .permissions = filePermissions(),
@@ -891,10 +910,7 @@ pub fn decodeMarker(bytes: []const u8) ?Marker {
     var result: Marker = .{
         .pid = std.mem.readInt(u32, bytes[markerLayout.pid..][0..4], .little),
         .started_at_unix_ms = std.mem.readInt(i64, bytes[markerLayout.started_at_unix_ms..][0..8], .little),
-        .role = switch (bytes[markerLayout.role]) {
-            @intFromEnum(Role.ui) => .ui,
-            else => return null,
-        },
+        .role = std.enums.fromInt(Role, bytes[markerLayout.role]) orelse return null,
         .artifact_kind = artifactKind(bytes[markerLayout.artifact_kind]),
         .version_storage = undefined,
     };
@@ -1068,10 +1084,7 @@ pub fn decodeRecord(bytes: []const u8) DecodeError!Record {
         readInt(u32, bytes, recordLayout.total_bytes) != record_bytes)
         return error.UnsupportedFormat;
     var result: Record = .{
-        .role = switch (bytes[recordLayout.role]) {
-            @intFromEnum(Role.ui) => .ui,
-            else => return error.Malformed,
-        },
+        .role = std.enums.fromInt(Role, bytes[recordLayout.role]) orelse return error.Malformed,
         .artifact_kind = artifactKind(bytes[recordLayout.artifact_kind]),
         .optimize = optimizeMode(bytes[recordLayout.optimize]),
         .os_tag = osTag(bytes[recordLayout.os_tag]),
@@ -1137,11 +1150,16 @@ pub fn decodeRecord(bytes: []const u8) DecodeError!Record {
 /// install keeps the file's contents, but a fault in this process overwrites
 /// them.
 pub fn readRecord(io: std.Io, data_root: []const u8, storage: *[record_bytes]u8) ?Record {
+    return readRoleRecord(io, data_root, .ui, storage);
+}
+
+/// The record a process of `role` left, if any.
+pub fn readRoleRecord(io: std.Io, data_root: []const u8, role: Role, storage: *[record_bytes]u8) ?Record {
     var path_storage: [4096]u8 = undefined;
     const path = std.fmt.bufPrint(
         &path_storage,
-        "{s}" ++ std.fs.path.sep_str ++ directory_name ++ std.fs.path.sep_str ++ record_file_name,
-        .{data_root},
+        "{s}" ++ std.fs.path.sep_str ++ directory_name ++ std.fs.path.sep_str ++ "{s}",
+        .{ data_root, role.recordFileName() },
     ) catch return null;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{ .follow_symlinks = false }) catch
         return null;
@@ -1181,20 +1199,47 @@ pub fn reportPreviousRun(
 ) []const u8 {
     if (previous.marker == null) return "";
     const summary = describePreviousRun(previous, storage);
+    writeReport(io, data_root, .ui, summary);
+    return summary;
+}
+
+/// The report on an execution process the window has just lost: written next
+/// to its record and returned, when the record is that process's and holds a
+/// fault. That process is the one with `pid` that started no earlier than
+/// `spawned_unix_ms`, so an older record left by a process whose id has since
+/// been reused is not mistaken for it. A process ended from outside, or one
+/// that died without dispatching anything, leaves none, and this returns "".
+pub fn reportExecutionLoss(io: std.Io, data_root: []const u8, pid: u32, spawned_unix_ms: i64, storage: []u8) []const u8 {
+    var stored: [record_bytes]u8 = undefined;
+    const record = readRoleRecord(io, data_root, .execution, &stored) orelse return "";
+    if (record.role != .execution or record.pid != pid or record.fault == null) return "";
+    if (record.process_started_at_unix_ms < spawned_unix_ms) return "";
+    var writer = std.Io.Writer.fixed(storage);
+    writer.print(
+        "The execution process ended with a fault.\n" ++
+            "  build: {s} {s} (pid {d}, started at unix ms {d})\n",
+        .{ record.version(), @tagName(record.artifact_kind), record.pid, record.process_started_at_unix_ms },
+    ) catch {};
+    describeFault(&writer, record);
+    const summary = writer.buffered();
+    writeReport(io, data_root, .execution, summary);
+    return summary;
+}
+
+fn writeReport(io: std.Io, data_root: []const u8, role: Role, summary: []const u8) void {
     var path_storage: [4096]u8 = undefined;
     const path = std.fmt.bufPrint(
         &path_storage,
-        "{s}" ++ std.fs.path.sep_str ++ directory_name ++ std.fs.path.sep_str ++ report_file_name,
-        .{data_root},
-    ) catch return summary;
+        "{s}" ++ std.fs.path.sep_str ++ directory_name ++ std.fs.path.sep_str ++ "{s}",
+        .{ data_root, role.reportFileName() },
+    ) catch return;
     const file = std.Io.Dir.createFileAbsolute(io, path, .{
         .read = false,
         .truncate = true,
         .permissions = filePermissions(),
-    }) catch return summary;
+    }) catch return;
     defer file.close(io);
     file.writeStreamingAll(io, summary) catch {};
-    return summary;
 }
 
 /// Formats what the previous process left into `storage`, newest fact first.
@@ -1210,6 +1255,19 @@ pub fn describePreviousRun(previous: PreviousRun, storage: []u8) []const u8 {
         .{ marker.version(), @tagName(marker.artifact_kind), marker.pid, marker.started_at_unix_ms },
     ) catch {};
     if (previous.faultOfLastExit()) |record| {
+        describeFault(&writer, record);
+    } else {
+        writer.writeAll(
+            "  no fault record for this exit: the process died without " ++
+                "dispatching a fault, so the Runs it interrupted are unknown.\n",
+        ) catch {};
+    }
+    return writer.buffered();
+}
+
+/// The fault a record holds and the Runs it interrupted.
+fn describeFault(writer: *std.Io.Writer, record: Record) void {
+    {
         const fault = record.fault.?;
         writer.print(
             "  fault: {s} code 0x{x} at unix ms {d}\n" ++
@@ -1245,13 +1303,7 @@ pub fn describePreviousRun(previous: PreviousRun, storage: []u8) []const u8 {
                 },
             ) catch {};
         }
-    } else {
-        writer.writeAll(
-            "  no fault record for this exit: the process died without " ++
-                "dispatching a fault, so the Runs it interrupted are unknown.\n",
-        ) catch {};
     }
-    return writer.buffered();
 }
 
 // ---------------------------------------------------------------------------

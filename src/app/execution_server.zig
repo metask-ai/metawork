@@ -107,6 +107,14 @@ pub const Options = struct {
     /// Tests only: wait this long before sending each event, so that a
     /// terminal not held behind its events would observably overtake them.
     event_delay_ms: u64 = 0,
+    /// Names each executing Run in the fault record, as the window's own
+    /// workers do, so a fault here says which Tasks it interrupted.
+    run_breadcrumbs: ?RunBreadcrumbs = null,
+};
+
+pub const RunBreadcrumbs = struct {
+    begin_fn: *const fn (task_id: u64, run_id: u64) u32,
+    finish_fn: *const fn (claim: u32, task_id: u64, run_id: u64) void,
 };
 
 /// Ends this process now, running nothing on the way out.
@@ -144,6 +152,7 @@ fn serve(context: ?*anyopaque, link: execution_mode.Link) Exit {
         .registry = .{ .allocator = link.allocator, .io = link.io },
         .runtime = undefined,
         .event_delay_ms = options.event_delay_ms,
+        .run_breadcrumbs = options.run_breadcrumbs,
     };
     self.callbacks.init(link.io, link.allocator, callback_slots) catch return .resource_unavailable;
     self.outbound.start(link.io, link.allocator, link.output, link.queue_limits) catch
@@ -204,6 +213,7 @@ const Server = struct {
     runtime: Runtime,
     violated: std.atomic.Value(bool) = .init(false),
     event_delay_ms: u64 = 0,
+    run_breadcrumbs: ?RunBreadcrumbs = null,
 
     /// The transport each MCP server in the Runtime's applied configuration
     /// reaches its server through, by server id. A member whose server and
@@ -250,6 +260,8 @@ const Deferred = struct {
 
 const Entry = struct {
     route_id: u64,
+    /// Product's Task, which a fault record names.
+    task_id: u64,
     session: contract.port.SessionPort,
     /// Begun Runs, until their `execute` returns.
     runs: std.AutoHashMapUnmanaged(u64, contract.port.RunPort) = .empty,
@@ -328,10 +340,10 @@ const Registry = struct {
     entries: std.AutoHashMapUnmanaged(u64, *Entry) = .empty,
     next: u64 = 0,
 
-    fn add(self: *Registry, half: *Server, route_id: u64, session: contract.port.SessionPort) std.mem.Allocator.Error!u64 {
+    fn add(self: *Registry, half: *Server, route_id: u64, task_id: u64, session: contract.port.SessionPort) std.mem.Allocator.Error!u64 {
         const entry = try self.allocator.create(Entry);
         errdefer self.allocator.destroy(entry);
-        entry.* = .{ .route_id = route_id, .session = session };
+        entry.* = .{ .route_id = route_id, .task_id = task_id, .session = session };
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
@@ -606,7 +618,7 @@ fn answerRuntime(self: *Server, comptime method: rpc.Method, handle: u64, reques
                 self.fail(.resource_unavailable);
             defer opened.deinit();
             const route = runtime.createSessionRoute(opened.options) catch |err| return replyError(self, err);
-            const id = self.registry.add(self, route.id, route.session) catch self.fail(.resource_unavailable);
+            const id = self.registry.add(self, route.id, request.task_id, route.session) catch self.fail(.resource_unavailable);
             return reply(self, method, rpc.SessionRoute{ .route_id = route.id, .handle = id });
         },
         .restore_session => {
@@ -627,7 +639,7 @@ fn answerRuntime(self: *Server, comptime method: rpc.Method, handle: u64, reques
                 },
             };
             const route = runtime.restoreSessionRoute(options) catch |err| return replyError(self, err);
-            const id = self.registry.add(self, route.id, route.session) catch self.fail(.resource_unavailable);
+            const id = self.registry.add(self, route.id, request.session.task_id, route.session) catch self.fail(.resource_unavailable);
             return reply(self, method, rpc.SessionRestoreRoute{ .route_id = route.id, .handle = id, .report = route.report });
         },
         .request_run_termination => return reply(self, method, runtime.requestRunTermination(request.session_id, request.run_id, request.signal)),
@@ -900,7 +912,9 @@ fn answerSession(
         .run_execute => executed: {
             var run = self.registry.takeRun(entry, request.run_id) orelse self.fail(.protocol_violation);
             if (run.generation != request.generation) self.fail(.protocol_violation);
+            const claim = if (self.run_breadcrumbs) |crumbs| crumbs.begin_fn(entry.task_id, request.run_id) else 0;
             var result = run.execute();
+            if (self.run_breadcrumbs) |crumbs| crumbs.finish_fn(claim, entry.task_id, request.run_id);
             run.deinit();
             defer result.deinit();
             self.registry.dropEffects(entry, request.run_id);
@@ -1545,7 +1559,7 @@ test "an entry removed while a call is inside it lives until that call is done" 
         registry.entries.deinit(allocator);
     }
     const session: contract.port.SessionPort = .{ .context = null, .vtable = undefined };
-    const handle = try registry.add(undefined, 7, session);
+    const handle = try registry.add(undefined, 7, 1, session);
     const entry = registry.acquire(handle).?;
     registry.remove(handle);
     // Gone from the map, so no new call can reach it ...
@@ -1561,9 +1575,9 @@ test "handles are issued once and never reused" {
     var registry: Registry = .{ .allocator = allocator, .io = std.testing.io };
     defer registry.entries.deinit(allocator);
     const session: contract.port.SessionPort = .{ .context = null, .vtable = undefined };
-    const first = try registry.add(undefined, 1, session);
+    const first = try registry.add(undefined, 1, 1, session);
     registry.remove(first);
-    const second = try registry.add(undefined, 2, session);
+    const second = try registry.add(undefined, 2, 1, session);
     try std.testing.expect(second != first);
     registry.remove(second);
 }

@@ -118,6 +118,9 @@ pub const Host = struct {
     /// Taken at spawn, released once on the way out, so it outlives the reap.
     termination: Termination,
     termination_released: bool = false,
+    /// The child's process id, as the child itself would report it. Taken at
+    /// spawn, so it is still known once the reap has cleared `child.id`.
+    pid: u32 = 0,
     /// Our write end of the child's stdin.
     to_child: std.Io.File,
     /// Our read end of the child's stdout.
@@ -238,6 +241,7 @@ pub const Host = struct {
             .allocator = allocator,
             .child = child,
             .termination = termination,
+            .pid = processIdOf(&child),
             .to_child = to_child,
             .from_child = from_child,
             .read_buffer = read_buffer,
@@ -398,6 +402,34 @@ pub const session_floor_flag = "--session-id-floor=";
 
 /// The floor this process was started with; zero when there is none or the
 /// argument does not parse.
+/// Where the execution process keeps its fault record: the window's data
+/// root, which the child has no other way to know.
+pub const data_root_flag = "--data-root=";
+
+/// The data root the window passed, if it passed one. The caller owns it.
+pub fn dataRoot(args: std.process.Args, gpa: std.mem.Allocator) ?[]u8 {
+    var iterator = std.process.Args.Iterator.initAllocator(args, gpa) catch return null;
+    defer iterator.deinit();
+    _ = iterator.next(); // argv[0]
+    while (iterator.next()) |argument| {
+        if (!std.mem.startsWith(u8, argument, data_root_flag)) continue;
+        const value = argument[data_root_flag.len..];
+        if (value.len == 0) return null;
+        return gpa.dupe(u8, value) catch null;
+    }
+    return null;
+}
+
+extern "kernel32" fn GetProcessId(process: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.DWORD;
+
+fn processIdOf(child: *const std.process.Child) u32 {
+    const id = child.id orelse return 0;
+    return switch (builtin.os.tag) {
+        .windows => GetProcessId(id),
+        else => @intCast(id),
+    };
+}
+
 pub fn sessionFloor(args: std.process.Args, gpa: std.mem.Allocator) u64 {
     var iterator = std.process.Args.Iterator.initAllocator(args, gpa) catch return 0;
     defer iterator.deinit();

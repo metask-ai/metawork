@@ -34,6 +34,11 @@
 //!     so the UI half can check both sides.
 //!   * `--no-runtime` -- the Agent Runtime cannot be created, so the process
 //!     ends right after agreeing on identity, every time it is started.
+//!   * `--data-root=<path>` -- as the application passes it: fault capture
+//!     is installed with the execution role, and executing Runs leave
+//!     breadcrumbs, the way the application's execution half does it.
+//!   * `--crash-in-run` -- a Run traps while it executes, on the worker
+//!     thread executing it.
 //!   * `--exercise-mcp` -- before applying an MCP configuration, drive each
 //!     member's transport the way AgentCore drives a connector: open, an
 //!     exchange whose answer is echoed back, one carrying a secret, one its
@@ -44,6 +49,7 @@ const std = @import("std");
 
 const execution_mode = @import("app_execution_mode");
 const execution_server = @import("app_execution_server");
+const fault = @import("app_fault");
 const agent_link = @import("metawork_agent_link");
 const lifecycle_fixture = @import("lifecycle_fixture");
 
@@ -61,6 +67,13 @@ pub const session_floor_flag = "--session-id-floor=";
 pub const exercise_mcp_flag = "--exercise-mcp";
 pub const no_runtime_flag = "--no-runtime";
 pub const exercise_effects_flag = "--exercise-effects";
+pub const data_root_flag = "--data-root=";
+pub const crash_in_run_flag = "--crash-in-run";
+
+/// The fault record identity this fixture installs with. The version is the
+/// link's own, so a test can tell this process's record from any other.
+pub const fault_artifact_kind: fault.ArtifactKind = .development;
+pub const fault_core_abi_revision: u16 = 28;
 
 const Flags = struct {
     ignore_eof: bool = false,
@@ -74,6 +87,8 @@ const Flags = struct {
     exercise_mcp: bool = false,
     no_runtime: bool = false,
     exercise_effects: bool = false,
+    crash_in_run: bool = false,
+    data_root: ?[]u8 = null,
     session_id_floor: u64 = 0,
 };
 
@@ -93,6 +108,9 @@ fn readFlags(init: std.process.Init) Flags {
         if (std.mem.eql(u8, argument, exercise_mcp_flag)) flags.exercise_mcp = true;
         if (std.mem.eql(u8, argument, no_runtime_flag)) flags.no_runtime = true;
         if (std.mem.eql(u8, argument, exercise_effects_flag)) flags.exercise_effects = true;
+        if (std.mem.eql(u8, argument, crash_in_run_flag)) flags.crash_in_run = true;
+        if (std.mem.startsWith(u8, argument, data_root_flag))
+            flags.data_root = init.gpa.dupe(u8, argument[data_root_flag.len..]) catch null;
         if (std.mem.startsWith(u8, argument, checkpoint_bytes_flag))
             flags.checkpoint_bytes = std.fmt.parseInt(usize, argument[checkpoint_bytes_flag.len..], 10) catch null;
         if (std.mem.startsWith(u8, argument, session_floor_flag))
@@ -152,10 +170,12 @@ const FakeRuntime = struct {
         }) catch return null;
         self.runtime = runtime;
         var runtime_port = runtime.runtimePort();
-        if (self.flags.exercise_mcp or self.flags.exercise_effects) {
+        if (self.flags.exercise_mcp or self.flags.exercise_effects or self.flags.crash_in_run) {
             exercising_vtable = runtime_port.vtable.*;
             if (self.flags.exercise_mcp) exercising_vtable.apply_mcp_configuration = applyExercised;
-            if (self.flags.exercise_effects) exercising_vtable.create_session_route = createExercised;
+            if (self.flags.exercise_effects or self.flags.crash_in_run) exercising_vtable.create_session_route = createExercised;
+            exercise_effects = self.flags.exercise_effects;
+            crash_in_run = self.flags.crash_in_run;
             runtime_port.vtable = &exercising_vtable;
         }
         return .{ .port = runtime_port, .context = self, .shutdown_fn = shutdown };
@@ -165,6 +185,16 @@ const FakeRuntime = struct {
     var exercising_session_vtable: agent.SessionPort.VTable = undefined;
     var original_prepare: @FieldType(agent.SessionPort.VTable, "prepare_run_with_tools") = undefined;
     var original_cancel: @FieldType(agent.SessionPort.VTable, "cancel_prepared_run") = undefined;
+    var original_begin: @FieldType(agent.SessionPort.VTable, "begin_run_outcome") = undefined;
+    var exercise_effects: bool = false;
+    var crash_in_run: bool = false;
+    const RunVTable = @typeInfo(@FieldType(RunPort, "vtable")).pointer.child;
+    const RunTerminal = @typeInfo(@typeInfo(@FieldType(RunVTable, "execute")).pointer.child).@"fn".return_type.?;
+    const crashing_run_vtable: RunVTable = .{ .execute = executeCrashing };
+
+    const BeginFn = @FieldType(agent.SessionPort.VTable, "begin_run_outcome");
+    const BeginOutcome = @typeInfo(@typeInfo(BeginFn).pointer.child).@"fn".return_type.?;
+    const RunPort = @FieldType(BeginOutcome, "run");
     /// The effects of the Run last prepared, used when it is cancelled: by
     /// then both halves know the Run, as they do whenever a tool runs.
     var stashed_image: ?agent.ImageGenerationRunInput = null;
@@ -178,12 +208,34 @@ const FakeRuntime = struct {
         const runtime: *agent.Runtime = @ptrCast(@alignCast(context.?));
         var route = try runtime.runtimePort().createSessionRoute(options);
         exercising_session_vtable = route.session.vtable.*;
-        original_prepare = exercising_session_vtable.prepare_run_with_tools;
-        original_cancel = exercising_session_vtable.cancel_prepared_run;
-        exercising_session_vtable.prepare_run_with_tools = prepareExercised;
-        exercising_session_vtable.cancel_prepared_run = cancelExercised;
+        if (exercise_effects) {
+            original_prepare = exercising_session_vtable.prepare_run_with_tools;
+            original_cancel = exercising_session_vtable.cancel_prepared_run;
+            exercising_session_vtable.prepare_run_with_tools = prepareExercised;
+            exercising_session_vtable.cancel_prepared_run = cancelExercised;
+        }
+        if (crash_in_run) {
+            original_begin = exercising_session_vtable.begin_run_outcome;
+            exercising_session_vtable.begin_run_outcome = beginCrashing;
+        }
         route.session.vtable = &exercising_session_vtable;
         return route;
+    }
+
+    fn beginCrashing(context: ?*anyopaque, run_id: u64) BeginOutcome {
+        var outcome = original_begin(context, run_id);
+        switch (outcome) {
+            .run => |*run| run.vtable = &crashing_run_vtable,
+            else => {},
+        }
+        return outcome;
+    }
+
+    fn executeCrashing(context: ?*anyopaque, run_id: u64, generation: u64) RunTerminal {
+        _ = context;
+        _ = run_id;
+        _ = generation;
+        @trap();
     }
 
     fn prepareExercised(
@@ -364,11 +416,23 @@ pub fn main(init: std.process.Init) !void {
     var digest: [32]u8 = @splat(0);
     @memset(&digest, digest_text[0]);
 
+    if (flags.data_root) |data_root| fault.install(init.io, .{
+        .role = .execution,
+        .data_root = data_root,
+        .identity = .{
+            .version = version,
+            .artifact_kind = fault_artifact_kind,
+            .core_manifest_sha256 = digest,
+            .core_abi_revision = fault_core_abi_revision,
+        },
+    }) catch |failure| std.log.warn("fixture fault capture unavailable: {s}", .{@errorName(failure)});
+
     lifecycle_fixture.use(std.heap.c_allocator, init.io);
     var fake: FakeRuntime = .{ .flags = flags };
     const server_options: execution_server.Options = .{
         .factory = fake.factory(),
         .event_delay_ms = if (flags.slow_events) 200 else 0,
+        .run_breadcrumbs = if (fault.isInstalled()) .{ .begin_fn = fault.beginRun, .finish_fn = fault.finishRun } else null,
     };
 
     const exit = execution_mode.run(init.io, std.heap.c_allocator, .{

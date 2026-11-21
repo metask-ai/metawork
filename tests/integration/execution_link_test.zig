@@ -15,6 +15,7 @@ const execution_mode = @import("app_execution_mode");
 const execution_client = @import("app_execution_client");
 const agent_link = @import("metawork_agent_link");
 const lifecycle = @import("lifecycle_fixture");
+const fault = @import("app_fault");
 
 const agent = lifecycle.lifecycle;
 const product_control = lifecycle.product_control;
@@ -1241,4 +1242,96 @@ test "a Run's file delivery, image and video effects stay with the Host and are 
 
     try std.testing.expect(route.session.closeOutcome(.session_close) == .closed);
     try port.releaseClosedSession(route.session);
+}
+
+test "an execution process that faults in a Run leaves a record of its own, which the window reports when it loses it" {
+    // The window passes its data root; the execution process installs fault
+    // capture there under its own role and file, and names the Runs it is
+    // executing. A Run that traps on the worker executing it must therefore
+    // leave a record naming that process and that Task, and the window, on
+    // losing the process, must find it and report it.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var root_dir = std.testing.tmpDir(.{});
+    defer root_dir.cleanup();
+    const root = try root_dir.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try owner.init(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .queue_limits = .{},
+        .spawn = .{ .explicit = &.{ fixture, "--with-runtime", "--crash-in-run" } },
+        .wake = wake.notifier(),
+        .data_root = root,
+    });
+    defer owner.deinit();
+    {
+        var control = try product_control.Runtime.init(allocator, io, owner.runtimePort(), product_limits, lifecycle.productControlConfiguration());
+        defer control.deinit();
+        const task_id = try createRunningTask(&control, "Say something short");
+
+        var lost: ?execution_client.RouteRange = null;
+        var waited: u64 = 0;
+        while (lost == null) : (waited += wait_tick_ms) {
+            if (waited >= wait_limit_ms) {
+                printSnapshot(&control);
+                return error.ProcessNeverLost;
+            }
+            try control.drainAgentEvents();
+            if (owner.takeLoss()) |range| {
+                lost = range;
+                control.abandonSessionsInRouteRange(range.first, range.end);
+                control.expireMcpCatalog();
+            }
+            control.syncLifecycle();
+            owner.sweep();
+            try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+        }
+        try waitSnapshot(&control, &owner, "\"outcome\":\"interrupted\"");
+        const range = lost.?;
+        try std.testing.expect(range.process_id != 0);
+
+        // The process's own record, under its own role.
+        var record_storage: [fault.record_bytes]u8 = undefined;
+        const record = fault.readRoleRecord(io, root, .execution, &record_storage) orelse
+            return error.NoExecutionRecord;
+        try std.testing.expectEqual(fault.Role.execution, record.role);
+        try std.testing.expectEqual(range.process_id, record.pid);
+        try std.testing.expect(record.process_started_at_unix_ms >= range.spawned_unix_ms);
+        try std.testing.expect(record.fault != null);
+        try std.testing.expectEqualStrings(matching_identity.version, record.version());
+        var interrupted_storage: [fault.breadcrumb_capacity]fault.Breadcrumb = undefined;
+        const interrupted = record.interruptedRuns(&interrupted_storage);
+        try std.testing.expectEqual(@as(usize, 1), interrupted.len);
+        try std.testing.expectEqual(task_id, interrupted[0].task_id);
+        try std.testing.expectEqual(record.fault.?.thread_id, interrupted[0].thread_id);
+
+        // The window's record is the window's: the execution process never
+        // wrote to it.
+        try std.testing.expectError(
+            error.FileNotFound,
+            root_dir.dir.access(io, fault.directory_name ++ std.fs.path.sep_str ++ fault.record_file_name, .{}),
+        );
+
+        // Reported for the process lost, and only for it: another id, or a
+        // process spawned after this record was written, finds nothing.
+        var summary_storage: [8 * 1024]u8 = undefined;
+        try std.testing.expectEqualStrings("", fault.reportExecutionLoss(io, root, range.process_id +% 1, range.spawned_unix_ms, &summary_storage));
+        try std.testing.expectEqualStrings("", fault.reportExecutionLoss(io, root, range.process_id, record.process_started_at_unix_ms + 1, &summary_storage));
+        const summary = fault.reportExecutionLoss(io, root, range.process_id, range.spawned_unix_ms, &summary_storage);
+        try std.testing.expect(std.mem.startsWith(u8, summary, "The execution process ended with a fault."));
+        var task_text: [32]u8 = undefined;
+        try std.testing.expect(std.mem.indexOf(u8, summary, try std.fmt.bufPrint(&task_text, "Task {d} Run", .{task_id})) != null);
+        const written = try root_dir.dir.readFileAlloc(
+            io,
+            fault.directory_name ++ std.fs.path.sep_str ++ fault.execution_report_file_name,
+            allocator,
+            .limited(16 * 1024),
+        );
+        defer allocator.free(written);
+        try std.testing.expectEqualStrings(summary, written);
+    }
 }

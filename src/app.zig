@@ -663,6 +663,17 @@ const App = struct {
         // its Sessions are given up.
         if (comptime execution_link_switch_compiled) if (self.execution) |owner| {
             if (owner.takeLoss()) |range| {
+                if (owner.options.data_root) |data_root| {
+                    var summary_storage: [8 * 1024]u8 = undefined;
+                    const summary = fault.reportExecutionLoss(
+                        self.io,
+                        data_root,
+                        range.process_id,
+                        range.spawned_unix_ms,
+                        &summary_storage,
+                    );
+                    if (summary.len != 0) std.log.warn("{s}", .{summary});
+                }
                 control.abandonSessionsInRouteRange(range.first, range.end);
                 control.expireMcpCatalog();
             }
@@ -783,12 +794,27 @@ fn runExecutionHalf(init: std.process.Init) noreturn {
                 std.log.warn("execution half Agent Runtime shutdown: {s}", .{@errorName(failure)});
         }
     };
+    // The window passes its data root, which it alone resolved and holds the
+    // instance lease for; this process keeps a record file of its own there,
+    // so a fault here never overwrites the window's evidence.
+    const capturing = if (execution_host.dataRoot(init.minimal.args, init.gpa)) |data_root| installed: {
+        fault.install(init.io, .{
+            .role = .execution,
+            .data_root = data_root,
+            .identity = fault_identity,
+        }) catch |failure| {
+            std.log.warn("execution process fault capture unavailable: {s}", .{@errorName(failure)});
+            break :installed false;
+        };
+        break :installed true;
+    } else false;
     var factory: Factory = .{
         .io = init.io,
         .floor = execution_host.sessionFloor(init.minimal.args, init.gpa),
     };
     const options: execution_server.Options = .{
         .factory = .{ .context = &factory, .create_fn = Factory.create },
+        .run_breadcrumbs = if (capturing) .{ .begin_fn = fault.beginRun, .finish_fn = fault.finishRun } else null,
     };
     const exit = execution_mode.run(init.io, std.heap.c_allocator, .{
         .identity = link_identity,
@@ -859,22 +885,6 @@ pub fn run(init: std.process.Init) !void {
         .notify_fn = app_platform.Adapter.notifyAgentEvents,
     });
     defer app.automation.deinit();
-    if (comptime execution_link_switch_compiled) if (executionLinkRequested(init.environ_map)) {
-        // Nothing is started here: the first call that needs the execution
-        // process starts it.
-        const owner = try std.heap.c_allocator.create(execution_client.Owner);
-        try owner.init(init.io, std.heap.c_allocator, .{
-            .identity = link_identity,
-            .message_limits = switch_message_limits,
-            .queue_limits = switch_queue_limits,
-            .wake = app.agent_events.notifier(),
-        });
-        app.execution = owner;
-        std.log.warn(
-            "development switch " ++ execution_link_switch ++ ": AgentCore runs in a separate process",
-            .{},
-        );
-    };
     const archive_tool: ?product_control.AttachmentArchiveTool = if (product_identity.artifact_kind != .release) configured: {
         const python = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_PYTHON");
         const helper = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_HELPER");
@@ -954,6 +964,24 @@ pub fn run(init: std.process.Init) !void {
         );
         std.log.warn("{s}", .{summary});
     }
+
+    if (comptime execution_link_switch_compiled) if (executionLinkRequested(init.environ_map)) {
+        // Nothing is started here: the first call that needs the execution
+        // process starts it.
+        const owner = try std.heap.c_allocator.create(execution_client.Owner);
+        try owner.init(init.io, std.heap.c_allocator, .{
+            .identity = link_identity,
+            .message_limits = switch_message_limits,
+            .queue_limits = switch_queue_limits,
+            .wake = app.agent_events.notifier(),
+            .data_root = paths_state.dataDir(),
+        });
+        app.execution = owner;
+        std.log.warn(
+            "development switch " ++ execution_link_switch ++ ": AgentCore runs in a separate process",
+            .{},
+        );
+    };
 
     const builtin_skill_root: ?[:0]u8 = if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .macos)
         office_skills.prepare(std.heap.c_allocator, init.io, paths_state.dataDir()) catch |failure| failed: {

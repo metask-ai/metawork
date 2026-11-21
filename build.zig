@@ -713,6 +713,7 @@ pub fn build(b: *std.Build) void {
     execution_link_fixture_module.addImport("app_execution_mode", test_modules.app_execution_mode);
     execution_link_fixture_module.addImport("app_execution_server", test_modules.app_execution_server);
     execution_link_fixture_module.addImport("metawork_agent_link", test_modules.agent_link);
+    execution_link_fixture_module.addImport("app_fault", test_modules.app_fault);
     // The fake Core the fixture serves a Runtime over, the same instance the
     // in-process tests use.
     execution_link_fixture_module.addImport("lifecycle_fixture", lifecycle_fixture);
@@ -732,6 +733,7 @@ pub fn build(b: *std.Build) void {
     execution_link_module.addImport("app_execution_client", test_modules.app_execution_client);
     execution_link_module.addImport("metawork_agent_link", test_modules.agent_link);
     execution_link_module.addImport("lifecycle_fixture", lifecycle_fixture);
+    execution_link_module.addImport("app_fault", test_modules.app_fault);
     const execution_link_tests_run = b.addRunArtifact(b.addTest(.{
         .name = "metawork-execution-link",
         .root_module = execution_link_module,
