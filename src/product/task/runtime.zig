@@ -6533,8 +6533,8 @@ pub const Runtime = struct {
     /// would be refused for as long as the window stays open. Poisoning hands
     /// it to the same close, after which the next message restores.
     ///
-    /// Only the development switch's execution link calls this; in process a
-    /// Session's Runtime cannot be gone while the window is up.
+    /// The execution link calls this when it loses the process; a Runtime in
+    /// the window's own process could not be gone while the window is up.
     pub fn abandonSessionsInRouteRange(self: *Runtime, first: u64, end: u64) bool {
         var changed = false;
         for (self.tasks) |*entry| {
@@ -6559,23 +6559,6 @@ pub const Runtime = struct {
             const binding = task.runtime.bindingAfterCloseJoin() orelse continue;
             switch (binding.state()) {
                 .owned, .closed => binding.relinquishAfterRuntimeShutdown(),
-                .released, .relinquished, .moved, .fixture, .abandoned => {},
-            }
-            task.runtime.clearClosingRouteAfterRuntimeShutdown();
-        }
-        self.agent_runtime_shutdown_complete = true;
-    }
-
-    pub fn abandonSessionsForRuntimeDeinit(self: *Runtime) void {
-        for (self.tasks) |*entry| {
-            const task = entry.* orelse continue;
-            if (task.runtime.close_thread) |thread| {
-                thread.join();
-                task.runtime.close_thread = null;
-            }
-            const binding = task.runtime.bindingAfterCloseJoin() orelse continue;
-            switch (binding.state()) {
-                .owned, .closed => binding.abandonForRuntimeDeinit(),
                 .released, .relinquished, .moved, .fixture, .abandoned => {},
             }
             task.runtime.clearClosingRouteAfterRuntimeShutdown();

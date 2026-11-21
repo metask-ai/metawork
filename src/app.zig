@@ -175,12 +175,10 @@ const App = struct {
     account_platform_binding: ?account_platform_binding.Adapter = null,
     models_platform_binding: ?models_platform_binding.Adapter = null,
     dispatcher: ?*bridge_api.Dispatcher = null,
-    agent_runtime: ?*agent.Runtime = null,
-    /// The execution process's owner, when the development switch put
-    /// AgentCore there. Exactly one of this and `agent_runtime` is set once
-    /// `start` has run. Absent from a build without the switch.
-    execution: if (execution_link_switch_compiled) ?*execution_client.Owner else void =
-        if (execution_link_switch_compiled) null else {},
+    /// The execution process's owner. AgentCore runs in that process, never
+    /// in this one; set before `start`, and nothing is started until a call
+    /// needs the process.
+    execution: ?*execution_client.Owner = null,
     control: ?*product_control.Runtime = null,
     agent_shutdown: bool = false,
     agent_events: agent_event_coordinator.Coordinator = .{},
@@ -203,12 +201,6 @@ const App = struct {
     update_transport: ?update_http.Adapter = null,
     updates: ?update_coordinator.Coordinator = null,
     history_restore_owner: ?*app_stores.Stores = null,
-
-    /// Whether the development switch moved AgentCore out of this process.
-    fn executionLinked(self: *const App) bool {
-        if (comptime !execution_link_switch_compiled) return false;
-        return self.execution != null;
-    }
 
     fn prepareFileDelivery(context: *anyopaque, authority: product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
         const self: *App = @ptrCast(@alignCast(context));
@@ -263,20 +255,11 @@ const App = struct {
         var runtime_manifest = try mcp_startup.emptyRuntimeManifest(std.heap.c_allocator);
         var runtime_manifest_owned = true;
         defer if (runtime_manifest_owned) runtime_manifest.deinit();
-        // In this process, unless the development switch put AgentCore in
-        // its own; then nothing is started here, and the first call that
-        // needs that process starts it.
-        const agent_runtime: ?*agent.Runtime = if (!self.executionLinked()) try createAgentRuntime(
-            self.io,
-            self.agent_events.notifier(),
-            null,
-            0,
-        ) else null;
-        self.agent_runtime = agent_runtime;
-        if (agent_runtime) |runtime| {
-            self.mcp_budget = try mcp_platform.CatalogBudget.init(std.heap.c_allocator, self.io, runtime);
-            mcp_host_environment.catalog_budget = self.mcp_budget;
-        }
+        // The one Runtime port everything below drives: the execution
+        // process's, through the link.
+        const agent_port = (self.execution orelse @panic("execution process owner is not composed")).runtimePort();
+        self.mcp_budget = try mcp_platform.CatalogBudget.init(std.heap.c_allocator, self.io, agent_port);
+        mcp_host_environment.catalog_budget = self.mcp_budget;
         self.mcp_authorizations = .{ .allocator = std.heap.c_allocator };
         // Startup preparation may transiently own resolved credential bytes.
         // The empty Runtime cannot consume them, and Product Control must never
@@ -294,10 +277,7 @@ const App = struct {
             .model_test = custom_provider_capability_available,
         };
         if (self.mcp_budget) |budget| configuration.mcp_catalog = budget.catalog();
-        // MCP is composed around an in-process Runtime and does not cross the
-        // link, so the development switch leaves it out; Product already runs
-        // without one.
-        if (agent_runtime != null) configuration.mcp = .{
+        configuration.mcp = .{
             .preparation = &preparation,
             .activation = null,
             .activation_failed = false,
@@ -320,12 +300,7 @@ const App = struct {
         control_storage.* = try product_control.Runtime.init(
             std.heap.c_allocator,
             self.io,
-            if (agent_runtime) |runtime|
-                runtime.runtimePort()
-            else if (comptime execution_link_switch_compiled)
-                self.execution.?.runtimePort()
-            else
-                unreachable,
+            agent_port,
             .{
                 .worker_count = host_worker_count,
                 .queue_capacity = 8,
@@ -337,8 +312,7 @@ const App = struct {
             },
             configuration,
         );
-        // Product took the preparation only if MCP was composed.
-        if (agent_runtime != null) preparation_owned = false;
+        preparation_owned = false;
         if (configuration.mcp.management != null) runtime_manifest_owned = false;
         self.control = control_storage;
         self.control_initialized = true;
@@ -347,25 +321,23 @@ const App = struct {
         self.history_restore_owner = null;
 
         try self.platform.installScheduleHost(control_storage.scheduleHost());
-        if (agent_runtime) |runtime| {
-            self.mcp_management = mcp_management_coordinator.Coordinator.init(
-                std.heap.c_allocator,
-                self.io,
-                control_storage.mcpManagementPort(),
-                runtime,
-                &self.mcp_credential_store.?,
-                &self.mcp_authorizations.?,
-                mcp_management_host,
-                mcp_host_environment,
-            );
-            (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).attachMcpManagementHost(
-                mcp_bridge_adapter.host(&self.mcp_management.?),
-            );
-            // Initial MCP connection and catalog discovery use the same complete
-            // declarative apply transaction as later Desired mutations. No
-            // external MCP effect remains on the Application readiness path.
-            _ = self.mcp_management.?.applyConfiguration(.automatic) catch {};
-        }
+        self.mcp_management = mcp_management_coordinator.Coordinator.init(
+            std.heap.c_allocator,
+            self.io,
+            control_storage.mcpManagementPort(),
+            agent_port,
+            &self.mcp_credential_store.?,
+            &self.mcp_authorizations.?,
+            mcp_management_host,
+            mcp_host_environment,
+        );
+        (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).attachMcpManagementHost(
+            mcp_bridge_adapter.host(&self.mcp_management.?),
+        );
+        // Initial MCP connection and catalog discovery use the same complete
+        // declarative apply transaction as later Desired mutations. No
+        // external MCP effect remains on the Application readiness path.
+        _ = self.mcp_management.?.applyConfiguration(.automatic) catch {};
         self.mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(
             std.heap.c_allocator,
             self.io,
@@ -383,16 +355,11 @@ const App = struct {
         // run() only reserves Product storage; Runtime.init above must finish
         // before installing capabilities that initialization would overwrite.
         control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
-        // Image and video generation and file delivery do not cross the link,
-        // so the development switch does not offer them.
-        if (agent_runtime != null) {
-            control_storage.setImageRunPreparation(models_management.imageRunPreparation());
-            control_storage.setVideoRunPreparation(models_management.videoRunPreparation());
-        }
+        control_storage.setImageRunPreparation(models_management.imageRunPreparation());
+        control_storage.setVideoRunPreparation(models_management.videoRunPreparation());
         control_storage.setMetaskAuthorizationCheck(models_management.metaskAuthorizationCheck());
         models_management.setCredentialRenewal(control_storage.metaskCredentialRenewal());
-        if (agent_runtime != null)
-            control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery, .validate_path_fn = output_file.validatePath });
+        control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery, .validate_path_fn = output_file.validatePath });
         control_storage.setOutputFileReveal(self.platform.outputFileReveal());
         control_storage.setOutputFileOpen(self.platform.outputFileOpen());
         control_storage.setOutputFileSave(self.platform.outputFileSave());
@@ -541,17 +508,13 @@ const App = struct {
         // Required-wake producers are joined above. Release the relay and
         // platform references even if Agent shutdown reports an error.
         defer self.platform.stop(native_runtime);
-        if (self.agent_runtime) |agent_runtime| {
-            try agent_runtime.shutdown();
-            self.agent_shutdown = true;
-        }
         // Ending the link is the execution process's shutdown: it closes
         // every Session it holds and leaves, and the host's grace period
         // bounds one that does not.
-        if (comptime execution_link_switch_compiled) if (self.execution) |owner| {
+        if (self.execution) |owner| {
             owner.shutdown();
             self.agent_shutdown = true;
-        };
+        }
         self.drainAgentEvents();
         if (self.control) |control| {
             control.syncLifecycle();
@@ -671,10 +634,25 @@ const App = struct {
         self.agent_events.drain(control.agentEventConsumer());
         // After the drain, so whatever a dead process sent is applied before
         // its Sessions are given up.
-        if (comptime execution_link_switch_compiled) if (self.execution) |owner| {
-            if (owner.takeLoss()) |range| control.abandonSessionsInRouteRange(range.first, range.end);
+        if (self.execution) |owner| {
+            if (owner.takeLoss()) |range| {
+                if (owner.options.data_root) |data_root| {
+                    var summary_storage: [8 * 1024]u8 = undefined;
+                    const summary = fault.reportExecutionLoss(
+                        self.io,
+                        data_root,
+                        range.process_id,
+                        range.spawned_unix_ms,
+                        &summary_storage,
+                    );
+                    if (summary.len != 0) std.log.warn("{s}", .{summary});
+                }
+                control.abandonSessionsInRouteRange(range.first, range.end);
+                control.expireMcpCatalog();
+                control.expireSkillCatalogs();
+            }
             owner.sweep();
-        };
+        }
     }
 
     fn advanceMcp(self: *App) void {
@@ -714,60 +692,47 @@ fn createAgentRuntime(
     });
 }
 
-/// The development switch that puts AgentCore in a process of its own.
-const execution_link_switch = "METAWORK_DEV_EXECUTION_LINK";
+/// A checkpoint crosses the link whole: an export's bytes in its answer, a
+/// restore's in its request. Both are bounded by the export's own limit plus
+/// room for the rest of the message, so whatever exports can be restored, and
+/// no checkpoint limit is lowered to fit the link.
+const link_message_overhead_bytes: usize = 1024 * 1024;
 
-/// Whether this build carries the switch at all.
-///
-/// The artifact kind alone does not keep it out of what ships: `build.zig`
-/// refuses `-Dartifact=release` until the release identity is registered, so
-/// the installers are built as `development` in ReleaseSafe. A Debug build
-/// that is not a release is what `scripts/build.mjs debug` and the automation
-/// harness produce, and nothing a user installs is one. Comptime, so a build
-/// without the switch reads no variable and contains neither half.
-const execution_link_switch_compiled = product_identity.artifact_kind != .release and
-    @import("builtin").mode == .Debug;
-
-fn executionLinkRequested(environ: *std.process.Environ.Map) bool {
-    if (comptime !execution_link_switch_compiled) return false;
-    return std.mem.eql(u8, environ.get(execution_link_switch) orelse "", "1");
-}
-
-/// Under the switch a checkpoint crosses whole: an export's bytes in its
-/// answer, a restore's in its request. Both are bounded by the export's own
-/// limit plus room for the rest of the message, so whatever exports can be
-/// restored, and no checkpoint limit is lowered to fit the link.
-const switch_message_overhead_bytes: usize = 1024 * 1024;
-const switch_message_limits: agent_link.MessageLimits = .{
-    .event = link_message_limits.event,
-    .request = product_control.checkpoint_export_limits.hard_bytes + switch_message_overhead_bytes,
-    .response = product_control.checkpoint_export_limits.hard_bytes + switch_message_overhead_bytes,
-    .ui_request = link_message_limits.ui_request,
-    .ui_response = link_message_limits.ui_response,
+/// Message-size policy for the link. The numbers belong to the owners of the
+/// limits they come from, so they are named here rather than inside the link.
+const link_message_limits: agent_link.MessageLimits = .{
+    .event = (event_pump.Limits{ .session_slots = 1 }).max_event_bytes,
+    .request = product_control.checkpoint_export_limits.hard_bytes + link_message_overhead_bytes,
+    .response = product_control.checkpoint_export_limits.hard_bytes + link_message_overhead_bytes,
+    .ui_request = pending_ui_json_capacity,
+    .ui_response = max_link_ui_response_bytes,
 };
 /// A message larger than the queue's byte bound could never be queued.
-const switch_queue_limits: agent_link.QueueLimits = .{ .data_bytes = switch_message_limits.max() };
+const link_queue_limits: agent_link.QueueLimits = .{ .data_bytes = link_message_limits.max() };
 
 comptime {
     const checkpoint_bytes = product_control.checkpoint_export_limits.hard_bytes;
     // A restore reads one byte past the limit, so the limit itself is refused
     // by the restore rather than by the link.
-    if (switch_message_limits.request < checkpoint_bytes + 1 + 64 * 1024) @compileError(
+    if (link_message_limits.request < checkpoint_bytes + 1 + 64 * 1024) @compileError(
         "the execution link cannot carry the largest checkpoint's restore",
     );
-    if (switch_message_limits.response < checkpoint_bytes + 64 * 1024) @compileError(
+    if (link_message_limits.response < checkpoint_bytes + 64 * 1024) @compileError(
         "the execution link cannot carry the largest checkpoint's export",
     );
-    if (switch_message_limits.request < max_link_request_bytes) @compileError(
+    if (link_message_limits.request < max_link_request_bytes) @compileError(
         "the execution link cannot carry the largest Run input",
     );
-    if (switch_queue_limits.data_bytes < switch_message_limits.max()) @compileError(
+    if (link_message_limits.response < max_link_response_bytes) @compileError(
+        "the execution link cannot carry the largest skill catalog projection",
+    );
+    if (link_queue_limits.data_bytes < link_message_limits.max()) @compileError(
         "the execution link's queue cannot hold its own largest message",
     );
 }
 
-/// The execution half under the switch: the same Agent Runtime the UI half
-/// would build, served over the link. Never returns.
+/// The execution process: the Agent Runtime, served over the link to the
+/// window that started it. Never returns.
 fn runExecutionHalf(init: std.process.Init) noreturn {
     const Factory = struct {
         io: std.Io,
@@ -790,17 +755,32 @@ fn runExecutionHalf(init: std.process.Init) noreturn {
                 std.log.warn("execution half Agent Runtime shutdown: {s}", .{@errorName(failure)});
         }
     };
+    // The window passes its data root, which it alone resolved and holds the
+    // instance lease for; this process keeps a record file of its own there,
+    // so a fault here never overwrites the window's evidence.
+    const capturing = if (execution_host.dataRoot(init.minimal.args, init.gpa)) |data_root| installed: {
+        fault.install(init.io, .{
+            .role = .execution,
+            .data_root = data_root,
+            .identity = fault_identity,
+        }) catch |failure| {
+            std.log.warn("execution process fault capture unavailable: {s}", .{@errorName(failure)});
+            break :installed false;
+        };
+        break :installed true;
+    } else false;
     var factory: Factory = .{
         .io = init.io,
         .floor = execution_host.sessionFloor(init.minimal.args, init.gpa),
     };
     const options: execution_server.Options = .{
         .factory = .{ .context = &factory, .create_fn = Factory.create },
+        .run_breadcrumbs = if (capturing) .{ .begin_fn = fault.beginRun, .finish_fn = fault.finishRun } else null,
     };
     const exit = execution_mode.run(init.io, std.heap.c_allocator, .{
         .identity = link_identity,
-        .message_limits = switch_message_limits,
-        .queue_limits = switch_queue_limits,
+        .message_limits = link_message_limits,
+        .queue_limits = link_queue_limits,
         .server = execution_server.server(&options),
     });
     execution_server.hardExit(@intFromEnum(exit));
@@ -813,16 +793,6 @@ const link_identity: agent_link.Identity = .{
     .version = product_identity.version,
     .core_manifest_sha256 = fault.digestFromHex(agent.core_manifest_sha256),
     .core_abi_revision = agent.core_abi_revision,
-};
-
-/// Message-size policy for the link. The numbers belong to the owners of the
-/// limits they come from, so they are named here rather than inside the link.
-const link_message_limits: agent_link.MessageLimits = .{
-    .event = (event_pump.Limits{ .session_slots = 1 }).max_event_bytes,
-    .request = max_link_request_bytes,
-    .response = max_link_response_bytes,
-    .ui_request = pending_ui_json_capacity,
-    .ui_response = max_link_ui_response_bytes,
 };
 
 /// A Run input is the largest thing the UI sends. The ABI's prompt bound is
@@ -838,14 +808,7 @@ pub fn run(init: std.process.Init) !void {
     // The execution half runs instead of the application. It must fork before
     // the Native SDK runner is entered, because a process that reaches the
     // runner has a window, and this one must never have one.
-    if (execution_host.requested(init.minimal.args, init.gpa)) {
-        if (comptime execution_link_switch_compiled) runExecutionHalf(init);
-        const exit = execution_mode.run(init.io, std.heap.c_allocator, .{
-            .identity = link_identity,
-            .message_limits = link_message_limits,
-        });
-        std.process.exit(@intFromEnum(exit));
-    }
+    if (execution_host.requested(init.minimal.args, init.gpa)) runExecutionHalf(init);
     var http_engine: @import("metawork_http_transport").Engine = undefined;
     http_engine.init(std.heap.c_allocator, init.io);
     defer http_engine.deinit();
@@ -866,23 +829,6 @@ pub fn run(init: std.process.Init) !void {
         .notify_fn = app_platform.Adapter.notifyAgentEvents,
     });
     defer app.automation.deinit();
-    if (comptime execution_link_switch_compiled) if (executionLinkRequested(init.environ_map)) {
-        // Nothing is started here: the first call that needs the execution
-        // process starts it.
-        const owner = try std.heap.c_allocator.create(execution_client.Owner);
-        try owner.init(init.io, std.heap.c_allocator, .{
-            .identity = link_identity,
-            .message_limits = switch_message_limits,
-            .queue_limits = switch_queue_limits,
-            .wake = app.agent_events.notifier(),
-        });
-        app.execution = owner;
-        std.log.warn(
-            "development switch " ++ execution_link_switch ++ ": AgentCore runs in a separate process; " ++
-                "skills, MCP, file delivery, MCP installation, image and video generation are not offered",
-            .{},
-        );
-    };
     const archive_tool: ?product_control.AttachmentArchiveTool = if (product_identity.artifact_kind != .release) configured: {
         const python = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_PYTHON");
         const helper = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_HELPER");
@@ -962,6 +908,22 @@ pub fn run(init: std.process.Init) !void {
         );
         std.log.warn("{s}", .{summary});
     }
+
+    // AgentCore runs in a process of its own. Nothing is started here: the
+    // first call that needs the execution process starts it.
+    const execution_owner = try std.heap.c_allocator.create(execution_client.Owner);
+    defer std.heap.c_allocator.destroy(execution_owner);
+    try execution_owner.init(init.io, std.heap.c_allocator, .{
+        .identity = link_identity,
+        .message_limits = link_message_limits,
+        .queue_limits = link_queue_limits,
+        .wake = app.agent_events.notifier(),
+        .data_root = paths_state.dataDir(),
+    });
+    // After Product has let go of every Session, which the teardown below
+    // does first: deferred calls run in reverse.
+    defer execution_owner.deinit();
+    app.execution = execution_owner;
 
     const builtin_skill_root: ?[:0]u8 = if (@import("builtin").os.tag == .windows or @import("builtin").os.tag == .macos)
         office_skills.prepare(std.heap.c_allocator, init.io, paths_state.dataDir()) catch |failure| failed: {
@@ -1094,27 +1056,20 @@ pub fn run(init: std.process.Init) !void {
             app.mcp_oauth_refresh = null;
         }
         if (app.control_initialized) control.shutdownExecutor();
-        if (app.agent_runtime) |runtime| {
-            const shutdown_complete = if (app.agent_shutdown)
-                true
-            else shutdown: {
-                runtime.shutdown() catch break :shutdown false;
-                app.agent_shutdown = true;
-                break :shutdown true;
-            };
-            if (app.control_initialized) {
-                control.syncLifecycle();
-                if (shutdown_complete)
-                    control.relinquishAgentSessionsAfterRuntimeShutdown()
-                else
-                    control.abandonAgentSessionsForRuntimeDeinit();
-                control.deinit();
-            }
-            if (app.mcp_authorizations) |*authorizations| {
-                authorizations.deinit();
-                app.mcp_authorizations = null;
-            }
-            runtime.deinit();
+        // Ending the link is the execution process's shutdown, and it cannot
+        // fail: whatever Sessions the process held end with it.
+        if (!app.agent_shutdown) {
+            execution_owner.shutdown();
+            app.agent_shutdown = true;
+        }
+        if (app.control_initialized) {
+            control.syncLifecycle();
+            control.relinquishAgentSessionsAfterRuntimeShutdown();
+            control.deinit();
+        }
+        if (app.mcp_authorizations) |*authorizations| {
+            authorizations.deinit();
+            app.mcp_authorizations = null;
         }
         if (app.mcp_budget) |budget| {
             budget.release();
@@ -1270,48 +1225,6 @@ test "the fault breadcrumb ring covers every Run this host can execute at once" 
         fault.BreadcrumbPhase.finished,
         fault.breadcrumbSnapshot()[claims[0].?].phaseValue(),
     );
-}
-
-test "main-loop wake joins the required relay after Agent shutdown failure" {
-    const fixture = @import("lifecycle_fixture");
-    const Wake = struct {
-        var calls: std.atomic.Value(usize) = .init(0);
-        fn notify(_: ?*anyopaque) anyerror!void {
-            _ = calls.fetchAdd(1, .monotonic);
-        }
-    };
-    Wake.calls.store(0, .monotonic);
-    fixture.fake_core.reset();
-    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
-    defer harness.destroy(std.testing.allocator);
-    harness.runtime.options.platform.services.wake_fn = Wake.notify;
-    const agent_runtime = try agent.Runtime.initWithApi(std.testing.io, std.testing.allocator, &fixture.fake_api, .{ .max_sessions = 1 });
-    defer {
-        agent_runtime.shutdown() catch unreachable;
-        agent_runtime.deinit();
-    }
-    var composition: App = .{
-        .env_map = undefined,
-        .io = std.testing.io,
-        .frontend_asset_root = "",
-        .main_thread_id = std.Thread.getCurrentId(),
-        .automation = undefined,
-        .platform = app_platform.Adapter.init(std.testing.io, std.Thread.getCurrentId()),
-        .completion_transport = undefined,
-        .agent_runtime = agent_runtime,
-    };
-    try composition.platform.start(&harness.runtime);
-    defer composition.platform.stop(&harness.runtime);
-    app_platform.Adapter.notifyRequired(&composition.platform);
-    fixture.fake_core.failNextRuntimeDestroy();
-
-    try std.testing.expectError(error.RuntimeDestroyFailed, App.stop(&composition, &harness.runtime));
-
-    try std.testing.expect(composition.platform.services() == null);
-    try std.testing.expect(composition.platform.native_runtime == null);
-    try std.testing.expect(composition.platform.required_wake == null);
-    try std.testing.expectEqual(@as(usize, 1), Wake.calls.load(.monotonic));
-    try std.testing.expect(!composition.agent_shutdown);
 }
 
 test "SDK consumption Application test roots" {
@@ -1721,7 +1634,7 @@ test "main-loop wake consumes catalog completion and fairly schedules MCP recove
         .platform = undefined,
         .completion_transport = undefined,
         .control = &control,
-        .mcp_management = mcp_management_coordinator.Coordinator.init(allocator, std.testing.io, control.mcpManagementPort(), agent_runtime, &credentials, &authorizations, .{
+        .mcp_management = mcp_management_coordinator.Coordinator.init(allocator, std.testing.io, control.mcpManagementPort(), agent_runtime.runtimePort(), &credentials, &authorizations, .{
             .context = &host,
             .request_dialog_fn = Effects.request,
             .open_url_fn = Effects.open,

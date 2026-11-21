@@ -18,7 +18,6 @@ pub const frame = @import("link/frame.zig");
 pub const handshake = @import("link/handshake.zig");
 pub const error_code = @import("link/error_code.zig");
 pub const payload = @import("link/payload.zig");
-pub const handle_table = @import("link/handle_table.zig");
 pub const pending = @import("link/pending.zig");
 pub const shapes = @import("link/shapes.zig");
 pub const channel = @import("link/channel.zig");
@@ -141,7 +140,6 @@ test {
     _ = handshake;
     _ = error_code;
     _ = payload;
-    _ = handle_table;
     _ = pending;
     _ = shapes;
     _ = channel;

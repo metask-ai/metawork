@@ -74,6 +74,10 @@ pub const Table = struct {
     next: Correlation = 0,
     live: usize = 0,
     closed: bool = false,
+    /// Callers in `claimWatching`, which wait on `signals` rather than on
+    /// `condition` because they also wake on a clock.
+    watchers: usize = 0,
+    signals: std.atomic.Value(u32) = .init(0),
 
     pub fn init(
         self: *Table,
@@ -99,7 +103,7 @@ pub const Table = struct {
                 slot.response = null;
             }
         }
-        self.condition.broadcast(self.io);
+        self.wake();
         self.mutex.unlock(self.io);
     }
 
@@ -180,17 +184,77 @@ pub const Table = struct {
             if (slot.response) |bytes| {
                 slot.* = .{};
                 self.live -= 1;
-                self.condition.broadcast(self.io);
+                self.wake();
                 return .{ .response = bytes };
             }
             if (self.closed) {
                 slot.* = .{};
                 self.live -= 1;
-                self.condition.broadcast(self.io);
+                self.wake();
                 return .link_closed;
             }
             self.condition.waitUncancelable(self.io, &self.mutex);
         }
+    }
+
+    /// What `claimWatching` asks while it waits.
+    pub const Watch = struct {
+        context: ?*anyopaque,
+        /// Called about every interval, never with the table locked. Returns
+        /// true once it has done what it watches for; it is not called again.
+        poll_fn: *const fn (?*anyopaque) bool,
+    };
+
+    /// `claim`, for a caller whose own caller may withdraw the call while it
+    /// is in flight. It still waits for the answer, which still comes; the
+    /// watch only gets the chance to say that it is no longer wanted.
+    pub fn claimWatching(
+        self: *Table,
+        correlation: Correlation,
+        interval: std.Io.Duration,
+        watch: Watch,
+    ) Claimed {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const index = self.indexOf(correlation) orelse return .link_closed;
+        var watching = true;
+        self.watchers += 1;
+        defer self.watchers -= 1;
+        while (true) {
+            const slot = &self.slots[index];
+            if (slot.response) |bytes| {
+                slot.* = .{};
+                self.live -= 1;
+                self.wake();
+                return .{ .response = bytes };
+            }
+            if (self.closed) {
+                slot.* = .{};
+                self.live -= 1;
+                self.wake();
+                return .link_closed;
+            }
+            if (!watching) {
+                self.condition.waitUncancelable(self.io, &self.mutex);
+                continue;
+            }
+            const seen = self.signals.load(.acquire);
+            self.mutex.unlock(self.io);
+            self.io.futexWaitTimeout(u32, &self.signals.raw, seen, .{ .duration = .{
+                .raw = interval,
+                .clock = .awake,
+            } }) catch {};
+            if (watch.poll_fn(watch.context)) watching = false;
+            self.mutex.lockUncancelable(self.io);
+        }
+    }
+
+    /// Every change a waiter may be waiting for. Called with the lock held.
+    fn wake(self: *Table) void {
+        self.condition.broadcast(self.io);
+        if (self.watchers == 0) return;
+        _ = self.signals.fetchAdd(1, .release);
+        self.io.futexWake(u32, &self.signals.raw, std.math.maxInt(u32));
     }
 
     /// Stops waiting without ending the call. The reader may still deposit a
@@ -206,7 +270,7 @@ pub const Table = struct {
             self.allocator.free(bytes);
             slot.* = .{};
             self.live -= 1;
-            self.condition.broadcast(self.io);
+            self.wake();
             return;
         }
         slot.abandoned = true;
@@ -234,7 +298,7 @@ pub const Table = struct {
         if (slot.response) |bytes| self.allocator.free(bytes);
         slot.* = .{};
         self.live -= 1;
-        self.condition.broadcast(self.io);
+        self.wake();
     }
 
     /// The reader's side. Takes ownership of `bytes` on success; on an
@@ -252,7 +316,7 @@ pub const Table = struct {
             self.allocator.free(bytes);
             slot.* = .{};
             self.live -= 1;
-            self.condition.broadcast(self.io);
+            self.wake();
             return;
         }
         if (slot.response != null) {
@@ -263,7 +327,7 @@ pub const Table = struct {
             return;
         }
         slot.response = bytes;
-        self.condition.broadcast(self.io);
+        self.wake();
     }
 
     pub fn liveCount(self: *Table) usize {
@@ -387,6 +451,64 @@ test "abandoning keeps the slot until the peer answers, and never reuses the cor
     table.deposit(first, owned("answer to the call that is gone"));
     try testing.expectEqual(@as(usize, 1), table.liveCount());
     table.abandon(second);
+}
+
+test "a watched claim polls while it waits, and returns the answer" {
+    var table: Table = undefined;
+    try table.init(testing.io, testing.allocator, 2);
+    defer table.deinit();
+    const Watcher = struct {
+        polls: u32 = 0,
+        table: *Table,
+        correlation: Correlation,
+        fn poll(context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.polls += 1;
+            // The only deposit is made from here, so returning at all proves
+            // the wait woke on the clock and then on the deposit.
+            if (self.polls == 3) self.table.deposit(self.correlation, owned("answer"));
+            return false;
+        }
+    };
+    const correlation = try table.open();
+    var watcher: Watcher = .{ .table = &table, .correlation = correlation };
+    const claimed = table.claimWatching(correlation, .fromMilliseconds(1), .{ .context = &watcher, .poll_fn = Watcher.poll });
+    try testing.expectEqual(@as(u32, 3), watcher.polls);
+    try testing.expectEqualStrings("answer", claimed.response);
+    testing.allocator.free(claimed.response);
+    try testing.expectEqual(@as(usize, 0), table.liveCount());
+}
+
+test "a watch that is done is not polled again, and the answer still reaches the caller" {
+    var table: Table = undefined;
+    try table.init(testing.io, testing.allocator, 2);
+    defer table.deinit();
+    const Watcher = struct {
+        polls: u32 = 0,
+        polled: std.Io.Event = .unset,
+        fn poll(context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.polls += 1;
+            self.polled.set(testing.io);
+            return true;
+        }
+    };
+    const Answer = struct {
+        // Only after the watch has finished, so the answer can only reach a
+        // caller that is no longer polling.
+        fn run(target: *Table, correlation: Correlation, watcher: *Watcher) void {
+            watcher.polled.waitUncancelable(target.io);
+            target.deposit(correlation, owned("late"));
+        }
+    };
+    const correlation = try table.open();
+    var watcher: Watcher = .{};
+    const thread = try std.Thread.spawn(.{}, Answer.run, .{ &table, correlation, &watcher });
+    defer thread.join();
+    const claimed = table.claimWatching(correlation, .fromMilliseconds(1), .{ .context = &watcher, .poll_fn = Watcher.poll });
+    try testing.expectEqual(@as(u32, 1), watcher.polls);
+    try testing.expectEqualStrings("late", claimed.response);
+    testing.allocator.free(claimed.response);
 }
 
 const Opener = struct {

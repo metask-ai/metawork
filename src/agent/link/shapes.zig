@@ -26,7 +26,6 @@ const contract = @import("agent_contract");
 const error_code = @import("error_code.zig");
 const payload = @import("payload.zig");
 const checkpoint = @import("agent_checkpoint");
-const handle_table = @import("handle_table.zig");
 
 const control = contract.control;
 const surface = contract.surface;
@@ -516,12 +515,12 @@ pub const SessionOpenOptions = struct {
     workspace: surface.WorkspaceInput,
     canonical_user_home: []const u8,
     workspace_epoch: []const u8,
-    /// Absent as `Id.none`, not as an optional: a zero id is already invalid
-    /// by construction, so an `?Id` would be a second way to say the same
-    /// thing and a decoder would have to be told which one it is reading.
-    skill_catalog: handle_table.Id,
+    /// The execution half's name for the catalog lease the Session binds.
+    skill_catalog: ?u64,
     skill_policy: ?surface.SkillPolicyInput,
-    mcp_selection: handle_table.Id,
+    /// A selection is plain data, so it crosses as a copy the receiving
+    /// Runtime checks exactly as it checks one of its own.
+    mcp_selection: ?contract.mcp.catalog.SelectionWire,
     operation_id_floor: surface.OperationIdFloor,
 };
 

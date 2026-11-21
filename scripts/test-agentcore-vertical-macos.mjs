@@ -586,8 +586,12 @@ if (
   ].some(Boolean)
 )
   throw new Error("Task memory growth measurement requires its own scope");
-if (executionLinkOnly && process.platform !== "win32")
-  throw new Error("The execution link acceptance requires Windows");
+if (
+  executionLinkOnly &&
+  process.platform !== "win32" &&
+  process.platform !== "darwin"
+)
+  throw new Error("The execution link acceptance requires Windows or macOS");
 if (
   executionLinkOnly &&
   [
@@ -768,9 +772,9 @@ desktopVertical: try {
       join(
         root,
         ".zig-cache/execution-link-desktop",
-        process.env.METAWORK_DEV_EXECUTION_LINK === "1"
-          ? "evidence-on.json"
-          : "evidence-off.json",
+        process.env.METAWORK_EXECUTION_LINK_BASELINE === "1"
+          ? "evidence-baseline.json"
+          : "evidence-linked.json",
       );
     await runExecutionLinkVertical({
       invoke: invokeBridge,
@@ -778,8 +782,11 @@ desktopVertical: try {
       poll,
       provider,
       textSse,
+      toolSse,
       sse,
       app,
+      repositoryRoot: root,
+      fixtureRoot,
       workspaceId,
       workspaceEpoch: expectedWorkspaceEpoch,
       stopApplication,
@@ -787,7 +794,7 @@ desktopVertical: try {
       evidencePath,
     });
     process.stdout.write(
-      `Execution link desktop vertical passed (${process.env.METAWORK_DEV_EXECUTION_LINK === "1" ? "switch on" : "switch off"}); evidence in ${evidencePath}\n`,
+      `Execution link desktop vertical passed (${process.env.METAWORK_EXECUTION_LINK_BASELINE === "1" ? "baseline build" : "execution process"}); evidence in ${evidencePath}\n`,
     );
     break desktopVertical;
   }

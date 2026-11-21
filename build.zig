@@ -713,6 +713,7 @@ pub fn build(b: *std.Build) void {
     execution_link_fixture_module.addImport("app_execution_mode", test_modules.app_execution_mode);
     execution_link_fixture_module.addImport("app_execution_server", test_modules.app_execution_server);
     execution_link_fixture_module.addImport("metawork_agent_link", test_modules.agent_link);
+    execution_link_fixture_module.addImport("app_fault", test_modules.app_fault);
     // The fake Core the fixture serves a Runtime over, the same instance the
     // in-process tests use.
     execution_link_fixture_module.addImport("lifecycle_fixture", lifecycle_fixture);
@@ -732,6 +733,7 @@ pub fn build(b: *std.Build) void {
     execution_link_module.addImport("app_execution_client", test_modules.app_execution_client);
     execution_link_module.addImport("metawork_agent_link", test_modules.agent_link);
     execution_link_module.addImport("lifecycle_fixture", lifecycle_fixture);
+    execution_link_module.addImport("app_fault", test_modules.app_fault);
     const execution_link_tests_run = b.addRunArtifact(b.addTest(.{
         .name = "metawork-execution-link",
         .root_module = execution_link_module,
@@ -1808,7 +1810,7 @@ fn wireAgentCore(
     agent_provider_probe.addImport("agent_model_binding", agent_model_binding);
     agent.addImport("agent_provider_probe", agent_provider_probe);
     // The UI half's side of the execution link: the RuntimePort Product
-    // drives when the development switch puts AgentCore in its own process.
+    // drives, with AgentCore in its own process.
     const app_execution_client = b.createModule(.{
         .root_source_file = b.path("src/app/execution_client.zig"),
         .target = target,
@@ -2839,8 +2841,8 @@ fn wireAgentCore(
     app.addImport("metawork_agent_link", agent_link);
     app.addImport("app_execution_host", app_execution_host);
     app.addImport("app_execution_mode", app_execution_mode);
-    // Both halves of the development switch. `src/app.zig` references them
-    // only where the switch is compiled in, so other builds contain neither.
+    // Both halves of the execution link: the same executable is the window
+    // and, started with `--execution-host`, the process that runs AgentCore.
     app.addImport("app_execution_client", app_execution_client);
     app.addImport("app_execution_server", app_execution_server);
     app.addImport("event_pump", event_pump);

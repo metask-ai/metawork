@@ -244,7 +244,7 @@ const SelectionStorage = struct {
     published_tools: []const ActivationTool,
 };
 
-const RestoreTool = struct {
+pub const RestoreTool = struct {
     binding_identity: [32]u8,
     configuration_fingerprint: [32]u8,
     server_id: []const u8,
@@ -792,6 +792,275 @@ test "MCP restore capture clone and revalidation are allocation failure atomic" 
             try std.testing.expectEqual(@as(usize, 1), restored.selectedTools().len);
         }
     }.run, .{});
+}
+
+// ---------------------------------------------------------------------------
+// Copies for another process
+// ---------------------------------------------------------------------------
+//
+// Each of these objects is plain data in an arena of its own: the facts one
+// catalog refresh observed, the selectors chosen from them, the provenance a
+// restore checks against. Another process therefore needs a copy rather than
+// a handle, and a copy answers every read, `takeSelection` and `deinit` the
+// way the original does, because its arena is the receiver's. The Runtime
+// that later accepts or refuses one checks its owner and generation exactly
+// as it checks a value made in its own process.
+
+pub const ProjectionWire = struct {
+    owner_id: u64,
+    generation: u64,
+    /// How long before the copy was made the descriptor was observed, when
+    /// it was. The receiver restates it against its own clock.
+    observed_age_ns: ?u64,
+    servers: []const Server,
+    tools: []const Tool,
+    issues: []const Issue,
+};
+
+pub const SelectionWire = struct {
+    owner_id: u64,
+    generation: u64,
+    selectors: []const Selector,
+    published_tools: []const ActivationTool,
+};
+
+pub const RestoreSelectionWire = struct {
+    owner_id: u64,
+    tools: []const RestoreTool,
+};
+
+pub const ActivationWire = struct {
+    registry_generation: u64,
+    state: ActivationState,
+    projection: ProjectionWire,
+    selection: ?SelectionWire,
+    published_servers: []const ActivationServer,
+    published_tools: []const ActivationTool,
+};
+
+/// Borrows from `projection`.
+fn projectionToWire(projection: *const Projection) ProjectionWire {
+    const storage = projectionStorageConst(projection);
+    const age: ?u64 = age: {
+        const io = storage.observed_io orelse break :age null;
+        const observed = storage.observed_at orelse break :age null;
+        const elapsed = observed.durationTo(.now(io, .awake)).nanoseconds;
+        break :age std.math.cast(u64, @max(elapsed, 0));
+    };
+    return .{
+        .owner_id = storage.owner_id,
+        .generation = storage.generation,
+        .observed_age_ns = age,
+        .servers = storage.servers,
+        .tools = storage.tools,
+        .issues = storage.issues,
+    };
+}
+
+/// The selectors are rebuilt in `scratch`; everything else borrows.
+pub fn selectionToWire(selection: *const Selection, scratch: std.mem.Allocator) std.mem.Allocator.Error!SelectionWire {
+    const storage = selectionStorageConst(selection);
+    const selectors = try scratch.alloc(Selector, storage.raw_selectors.len);
+    for (storage.raw_selectors, selectors) |raw, *target| target.* = .{
+        .binding_identity = raw.server_binding_identity,
+        // Written by `createSelection` from a slice, so it always borrows.
+        .tool_name = sdk.borrowedBytes(raw.tool_name) catch unreachable,
+    };
+    return .{
+        .owner_id = storage.owner_id,
+        .generation = storage.generation,
+        .selectors = selectors,
+        .published_tools = storage.published_tools,
+    };
+}
+
+pub fn restoreSelectionToWire(selection: *const RestoreSelection) RestoreSelectionWire {
+    const storage = restoreStorageConst(selection);
+    return .{ .owner_id = storage.owner_id, .tools = storage.tools };
+}
+
+pub fn activationToWire(activation: *const Activation, scratch: std.mem.Allocator) std.mem.Allocator.Error!ActivationWire {
+    const storage = activationStorageConst(activation);
+    return .{
+        .registry_generation = storage.registry_generation,
+        .state = storage.state,
+        .projection = projectionToWire(storage.projection),
+        .selection = if (storage.selection) |selection| try selectionToWire(selection, scratch) else null,
+        .published_servers = storage.published_servers,
+        .published_tools = storage.published_tools,
+    };
+}
+
+fn copyTools(arena: std.mem.Allocator, source: []const ActivationTool) std.mem.Allocator.Error![]const ActivationTool {
+    const tools = try arena.alloc(ActivationTool, source.len);
+    for (source, tools) |tool, *target| target.* = .{
+        .server_id = try arena.dupe(u8, tool.server_id),
+        .name = try arena.dupe(u8, tool.name),
+    };
+    return tools;
+}
+
+fn projectionFromWire(allocator: std.mem.Allocator, io: std.Io, value: ProjectionWire) std.mem.Allocator.Error!*Projection {
+    const storage = try allocator.create(ProjectionStorage);
+    errdefer allocator.destroy(storage);
+    storage.* = .{
+        .allocator = allocator,
+        .owner_id = value.owner_id,
+        .generation = value.generation,
+        .servers = &.{},
+        .tools = &.{},
+        .issues = &.{},
+        .published_servers = &.{},
+        .published_tools = &.{},
+        .published_issues = &.{},
+        .arena = std.heap.ArenaAllocator.init(allocator),
+    };
+    errdefer storage.arena.deinit();
+    const arena = storage.arena.allocator();
+    // Two copies, as `copyProjection` makes: the canonical arrays the checks
+    // read, and the published ones a caller may inspect.
+    inline for (.{ "servers", "published_servers" }) |field| {
+        const servers = try arena.alloc(Server, value.servers.len);
+        for (value.servers, servers) |source, *target| {
+            target.* = source;
+            target.namespace = try arena.dupe(u8, source.namespace);
+        }
+        @field(storage, field) = servers;
+    }
+    inline for (.{ "tools", "published_tools" }) |field| {
+        const tools = try arena.alloc(Tool, value.tools.len);
+        for (value.tools, tools) |source, *target| target.* = .{
+            .binding_identity = source.binding_identity,
+            .name = try arena.dupe(u8, source.name),
+        };
+        @field(storage, field) = tools;
+    }
+    inline for (.{ "issues", "published_issues" }) |field| {
+        const issues = try arena.alloc(Issue, value.issues.len);
+        for (value.issues, issues) |source, *target| target.* = .{
+            .binding_identity = source.binding_identity,
+            .tool_name = if (source.tool_name) |name| try arena.dupe(u8, name) else null,
+        };
+        @field(storage, field) = issues;
+    }
+    if (value.observed_age_ns) |age| {
+        storage.observed_io = io;
+        storage.observed_at = std.Io.Timestamp.now(io, .awake).subDuration(.fromNanoseconds(age));
+    }
+    return @ptrCast(storage);
+}
+
+pub fn selectionFromWire(allocator: std.mem.Allocator, value: SelectionWire) std.mem.Allocator.Error!*Selection {
+    const storage = try allocator.create(SelectionStorage);
+    errdefer allocator.destroy(storage);
+    storage.* = .{
+        .allocator = allocator,
+        .owner_id = value.owner_id,
+        .generation = value.generation,
+        .arena = std.heap.ArenaAllocator.init(allocator),
+        .raw_selectors = &.{},
+        .published_tools = &.{},
+    };
+    errdefer storage.arena.deinit();
+    const arena = storage.arena.allocator();
+    const raw_selectors = try arena.alloc(wire.McpSelectorV1, value.selectors.len);
+    for (value.selectors, raw_selectors) |source, *raw| raw.* = .{
+        .struct_size = @sizeOf(wire.McpSelectorV1),
+        .reserved0 = 0,
+        .server_binding_identity = source.binding_identity,
+        .tool_name = sdk.bytesView(try arena.dupe(u8, source.tool_name)),
+        .reserved = [_]u64{0} ** 3,
+    };
+    storage.raw_selectors = raw_selectors;
+    storage.published_tools = try copyTools(arena, value.published_tools);
+    return @ptrCast(storage);
+}
+
+pub fn restoreSelectionFromWire(allocator: std.mem.Allocator, value: RestoreSelectionWire) std.mem.Allocator.Error!*RestoreSelection {
+    const storage = try newRestoreStorage(allocator, value.owner_id, value.tools.len);
+    errdefer @as(*RestoreSelection, @ptrCast(storage)).deinit();
+    for (value.tools, storage.tools) |tool, *target| target.* = try copyRestoreTool(storage.arena.allocator(), tool);
+    return @ptrCast(storage);
+}
+
+pub fn activationFromWire(allocator: std.mem.Allocator, io: std.Io, value: ActivationWire) std.mem.Allocator.Error!*Activation {
+    const storage = try allocator.create(ActivationStorage);
+    errdefer allocator.destroy(storage);
+    const projection = try projectionFromWire(allocator, io, value.projection);
+    errdefer projection.deinit();
+    const selection = if (value.selection) |selected| try selectionFromWire(allocator, selected) else null;
+    errdefer if (selection) |selected| selected.deinit();
+    storage.* = .{
+        .allocator = allocator,
+        .registry_generation = value.registry_generation,
+        .state = value.state,
+        .projection = projection,
+        .selection = selection,
+        .published_servers = &.{},
+        .published_tools = &.{},
+        .arena = std.heap.ArenaAllocator.init(allocator),
+    };
+    errdefer storage.arena.deinit();
+    const arena = storage.arena.allocator();
+    const servers = try arena.alloc(ActivationServer, value.published_servers.len);
+    for (value.published_servers, servers) |source, *target| {
+        target.* = source;
+        target.id = try arena.dupe(u8, source.id);
+    }
+    storage.published_servers = servers;
+    storage.published_tools = try copyTools(arena, value.published_tools);
+    return @ptrCast(storage);
+}
+
+test "a copy of an activation answers every read, and its own selection, like the original" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const servers = [_]ExpectedServer{.{ .id = "files", .binding_identity = @splat(1), .namespace = "files", .allowed_tools = &.{ "read", "write" }, .configuration_fingerprint = @splat(7) }};
+            const original = try testRestoreActivation(allocator, 11, 4, &.{ "read", "write" }, &servers);
+            defer original.deinit();
+            projectionStorage(activationStorage(original).projection).observed_io = std.testing.io;
+            projectionStorage(activationStorage(original).projection).observed_at = std.Io.Timestamp.now(std.testing.io, .awake);
+
+            var scratch = std.heap.ArenaAllocator.init(allocator);
+            defer scratch.deinit();
+            const copy = try activationFromWire(allocator, std.testing.io, try activationToWire(original, scratch.allocator()));
+            defer copy.deinit();
+            try std.testing.expectEqual(original.registryGeneration(), copy.registryGeneration());
+            try std.testing.expectEqual(original.catalogGeneration(), copy.catalogGeneration());
+            try std.testing.expectEqual(original.state(), copy.state());
+            try std.testing.expectEqualDeep(original.serverHealth(), copy.serverHealth());
+            try std.testing.expectEqualDeep(original.selectedTools(), copy.selectedTools());
+            try std.testing.expectEqualDeep(original.catalogServers(), copy.catalogServers());
+            try std.testing.expectEqualDeep(original.catalogTools(), copy.catalogTools());
+            try std.testing.expect(copy.catalogAgeMs() != null);
+            // The copy owns a selection of its own, built from the same
+            // selectors, and the original keeps its.
+            const selection = copy.takeSelection().?;
+            defer selection.deinit();
+            try std.testing.expectEqualDeep(original.selectedTools(), selection.selectedTools());
+            try std.testing.expect(belongsTo(selection, 11));
+            try std.testing.expectEqual(@as(u64, 4), selectionGeneration(selection));
+            const raw = rawSelectionReplacement(selection);
+            try std.testing.expectEqual(@as(u64, 2), raw.selector_count);
+            try std.testing.expectEqualStrings("write", try sdk.borrowedBytes(raw.selectors.?[1].tool_name));
+        }
+    }.run, .{});
+}
+
+test "a copied restore selection revalidates like the original" {
+    const servers = [_]ExpectedServer{.{ .id = "files", .binding_identity = @splat(1), .namespace = "files", .allowed_tools = &.{"read"}, .configuration_fingerprint = @splat(7) }};
+    const activation = try testRestoreActivation(std.testing.allocator, 11, 2, &.{"read"}, &servers);
+    defer activation.deinit();
+    const selected = activation.takeSelection().?;
+    defer selected.deinit();
+    const saved = try captureRestoreSelection(std.testing.allocator, 11, selected, &servers);
+    defer saved.deinit();
+    const copy = try restoreSelectionFromWire(std.testing.allocator, restoreSelectionToWire(saved));
+    defer copy.deinit();
+    try std.testing.expect(!copy.isEmpty());
+    const restored = try restoreSelectionForActivation(std.testing.allocator, 11, copy, activation, &servers, activation.selectedTools());
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("read", restored.selectedTools()[0].name);
 }
 
 pub fn belongsTo(selection: *const Selection, owner_id: u64) bool {

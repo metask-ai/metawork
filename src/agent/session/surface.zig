@@ -135,6 +135,12 @@ pub const McpActivationUnavailableReason = enum {
     invalid_selection,
 };
 
+pub const McpConfigurationApplyOutcome = enum {
+    applied,
+    superseded,
+    rejected,
+};
+
 pub const McpActivationOutcome = union(enum) {
     empty,
     activated: *McpActivation,

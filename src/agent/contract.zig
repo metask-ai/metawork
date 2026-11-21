@@ -61,11 +61,13 @@ pub const SkillRestoreBorrow = port.SkillRestoreBorrow;
 pub const BeginRunFailure = surface.BeginRunFailure;
 pub const CatalogAcquisition = catalog.Acquisition;
 pub const CatalogHealth = catalog.Health;
+pub const CatalogIssue = catalog.Issue;
 pub const CatalogIssueCode = catalog.IssueCode;
 pub const CatalogIssueKind = catalog.IssueKind;
 pub const CatalogLease = catalog.Lease;
 pub const CatalogProjection = catalog.Projection;
 pub const CatalogQuery = catalog.Query;
+pub const CatalogQueryTarget = catalog.QueryTarget;
 pub const CatalogResourceReason = catalog.ResourceReason;
 pub const CatalogSkill = catalog.Skill;
 pub const CatalogSource = catalog.Source;
@@ -99,16 +101,28 @@ pub const ImageGenerationReceipt = image_generation.Receipt;
 pub const ImageGenerationRunInput = surface.ImageGenerationRunInput;
 pub const InputCounts = control.InputCounts;
 pub const InputPart = multimodal.InputPart;
+/// The MCP owners the execution link stands in for across a process
+/// boundary, named here so the link, which imports only this module, reaches
+/// them without the AgentCore archive.
+pub const mcp = struct {
+    pub const catalog = mcp_catalog;
+    pub const runtime = mcp_runtime;
+    pub const connector = mcp_connector;
+};
+/// The HTTP transport a media tool performs its requests through.
+pub const http_transport = image_http;
 pub const McpActivation = mcp_catalog.Activation;
 pub const McpActivationOutcome = surface.McpActivationOutcome;
 pub const McpActivationTool = mcp_catalog.ActivationTool;
 pub const McpActivationUnavailableReason = surface.McpActivationUnavailableReason;
 pub const McpCatalogServer = mcp_catalog.Server;
+pub const McpConfigurationApplyOutcome = surface.McpConfigurationApplyOutcome;
 pub const McpInstallRequest = mcp_install.InstallRequest;
 pub const McpInstallationInput = mcp_install.Input;
 pub const McpInstallationRequest = mcp_install.OwnedRequest;
 pub const McpInstallationResult = mcp_install.Result;
 pub const McpRestoreSelection = mcp_catalog.RestoreSelection;
+pub const McpRuntimeInput = mcp_runtime.Input;
 pub const McpSelection = mcp_catalog.Selection;
 pub const McpServerAllowlist = mcp_catalog.ServerAllowlist;
 pub const ModelBinding = model_binding.ModelBinding;

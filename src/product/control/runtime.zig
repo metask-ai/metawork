@@ -7565,9 +7565,6 @@ pub const Runtime = struct {
         self.commitTaskStateNoFail();
     }
 
-    /// Records the Application-owned Runtime shutdown fact and permanently
-    /// invalidates every remaining Task Session Binding. Application calls
-    /// this only after Runtime.shutdown succeeds and the final lifecycle sync.
     /// The Sessions with route ids in `[first, end)` lived in an execution
     /// process that is gone. Gives them up through the ordinary close, so
     /// their Tasks restore on the next message. See
@@ -7576,14 +7573,28 @@ pub const Runtime = struct {
         if (self.task_runtime.abandonSessionsInRouteRange(first, end)) self.syncLifecycle();
     }
 
+    /// The execution process whose Runtime held the MCP catalog is gone, so
+    /// the catalog Product holds describes nothing any more. Refreshes it the
+    /// way an expired one is, before a new Task relies on it.
+    pub fn expireMcpCatalog(self: *Runtime) void {
+        self.recoverExpiredMcpCatalogNoFail();
+    }
+
+    /// The same for the Skill catalogs: each lease pinned a snapshot that
+    /// went with the process, so each catalog Product holds is queried again
+    /// before a new Task is bound with one.
+    pub fn expireSkillCatalogs(self: *Runtime) void {
+        if (self.shutting_down) return;
+        self.skill.expireCatalogs(self.skillProjectionBudget());
+        self.bumpRevision();
+    }
+
+    /// Records the Application-owned Runtime shutdown fact and permanently
+    /// invalidates every remaining Task Session Binding. Application calls
+    /// this only after Runtime.shutdown succeeds and the final lifecycle sync.
     pub fn relinquishAgentSessionsAfterRuntimeShutdown(self: *Runtime) void {
         std.debug.assert(self.executor_shutdown);
         self.task_runtime.relinquishSessionsAfterRuntimeShutdown();
-    }
-
-    pub fn abandonAgentSessionsForRuntimeDeinit(self: *Runtime) void {
-        std.debug.assert(self.executor_shutdown);
-        self.task_runtime.abandonSessionsForRuntimeDeinit();
     }
 
     fn settleCheckpointTransactionsForShutdown(self: *Runtime) void {

@@ -51,6 +51,9 @@ pub const StartFailure = union(enum) {
     /// nothing is negotiated.
     refused: agent_link.Failure,
     resource_unavailable,
+    /// The child did not agree on identity within the deadline, and was
+    /// ended.
+    unresponsive,
 };
 
 pub const Stopped = union(enum) {
@@ -73,9 +76,9 @@ pub const Stopped = union(enum) {
 /// reused.
 ///
 /// On POSIX the pid is the only name there is. It is reusable once the child
-/// has been reaped, so one window remains: a reap that lands between the
-/// grace period expiring and the signal going out. Closing it would take a
-/// pidfd, which macOS does not have.
+/// has been reaped, so no signal goes out once the reaper has collected the
+/// child, and one window remains: a reap that lands between that check and
+/// the signal. Closing it would take a pidfd, which macOS does not have.
 const Termination = switch (builtin.os.tag) {
     .windows => std.os.windows.HANDLE,
     else => std.posix.pid_t,
@@ -118,6 +121,9 @@ pub const Host = struct {
     /// Taken at spawn, released once on the way out, so it outlives the reap.
     termination: Termination,
     termination_released: bool = false,
+    /// The child's process id, as the child itself would report it. Taken at
+    /// spawn, so it is still known once the reap has cleared `child.id`.
+    pid: u32 = 0,
     /// Our write end of the child's stdin.
     to_child: std.Io.File,
     /// Our read end of the child's stdout.
@@ -162,7 +168,9 @@ pub const Host = struct {
 
     /// Starts the execution process and completes the identity exchange.
     /// Returns a failure rather than a half-built host: a refused identity is
-    /// a final answer for this attempt.
+    /// a final answer for this attempt. A child that has not agreed on
+    /// identity within `handshake_deadline_ms` is ended, so a start never
+    /// waits longer than that on a process stuck before it speaks.
     pub fn start(
         self: *Host,
         io: std.Io,
@@ -170,6 +178,7 @@ pub const Host = struct {
         identity: agent_link.Identity,
         queue_limits: agent_link.QueueLimits,
         spawn: Spawn,
+        handshake_deadline_ms: u64,
     ) StartError!?StartFailure {
         var path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var self_argv: [2 + max_extra_arguments][]const u8 = undefined;
@@ -238,6 +247,7 @@ pub const Host = struct {
             .allocator = allocator,
             .child = child,
             .termination = termination,
+            .pid = processIdOf(&child),
             .to_child = to_child,
             .from_child = from_child,
             .read_buffer = read_buffer,
@@ -247,13 +257,31 @@ pub const Host = struct {
         };
         self.reader = self.from_child.readerStreaming(io, self.read_buffer);
 
-        const outcome = agent_link.exchangeIdentityDetailed(
+        // Ending the child is what bounds the exchange: its end of the
+        // stream ends the read the exchange is waiting in.
+        var watch: HandshakeWatch = .{ .host = self, .deadline_ms = handshake_deadline_ms };
+        const watcher = std.Thread.spawn(
+            .{ .stack_size = 64 * 1024 },
+            HandshakeWatch.run,
+            .{&watch},
+        ) catch {
+            self.abandon();
+            return .resource_unavailable;
+        };
+        const exchanged = agent_link.exchangeIdentityDetailed(
             io,
             self.to_child,
             &self.reader.interface,
             .ui,
             identity,
-        ) catch {
+        );
+        watch.finished.set(io);
+        watcher.join();
+        if (watch.expired.load(.acquire)) {
+            self.abandon();
+            return .unresponsive;
+        }
+        const outcome = exchanged catch {
             self.abandon();
             return .{ .refused = .malformed_identity };
         };
@@ -311,15 +339,43 @@ pub const Host = struct {
     /// because a child that gets here is one that is not cooperating.
     ///
     /// Safe from any thread and any number of times while the host lives.
-    pub fn terminate(self: *Host) void {
+    /// Returns whether a signal went out. On POSIX none does once the reaper
+    /// has collected the child: a crash is usually reaped before the reader
+    /// sees the end of the stream and the loss asks for this, and by then
+    /// the pid may name another process.
+    pub fn terminate(self: *Host) bool {
         switch (builtin.os.tag) {
-            .windows => _ = std.os.windows.ntdll.NtTerminateProcess(
-                self.termination,
-                @enumFromInt(@as(u32, 1)),
-            ),
-            else => std.posix.kill(self.termination, .KILL) catch {},
+            .windows => {
+                _ = std.os.windows.ntdll.NtTerminateProcess(
+                    self.termination,
+                    @enumFromInt(@as(u32, 1)),
+                );
+                return true;
+            },
+            else => {
+                if (self.reaped.isSet()) return false;
+                std.posix.kill(self.termination, .KILL) catch {};
+                return true;
+            },
         }
     }
+
+    const HandshakeWatch = struct {
+        host: *Host,
+        deadline_ms: u64,
+        finished: std.Io.Event = .unset,
+        expired: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *HandshakeWatch) void {
+            self.finished.waitTimeout(self.host.io, .{ .duration = .{
+                .raw = .fromMilliseconds(@intCast(self.deadline_ms)),
+                .clock = .awake,
+            } }) catch {
+                self.expired.store(true, .release);
+                _ = self.host.terminate();
+            };
+        }
+    };
 
     fn reaperMain(self: *Host) void {
         self.term = self.child.wait(self.io) catch null;
@@ -350,7 +406,7 @@ pub const Host = struct {
         };
         // The signal only. The join below is what waits for the child to be
         // gone, because the reaper is the one holding the wait.
-        if (!graceful) self.terminate();
+        if (!graceful) _ = self.terminate();
         if (self.reaper) |thread| thread.join();
         self.reaper = null;
         if (self.settle) |settle| settle.settle_fn(settle.context);
@@ -398,6 +454,34 @@ pub const session_floor_flag = "--session-id-floor=";
 
 /// The floor this process was started with; zero when there is none or the
 /// argument does not parse.
+/// Where the execution process keeps its fault record: the window's data
+/// root, which the child has no other way to know.
+pub const data_root_flag = "--data-root=";
+
+/// The data root the window passed, if it passed one. The caller owns it.
+pub fn dataRoot(args: std.process.Args, gpa: std.mem.Allocator) ?[]u8 {
+    var iterator = std.process.Args.Iterator.initAllocator(args, gpa) catch return null;
+    defer iterator.deinit();
+    _ = iterator.next(); // argv[0]
+    while (iterator.next()) |argument| {
+        if (!std.mem.startsWith(u8, argument, data_root_flag)) continue;
+        const value = argument[data_root_flag.len..];
+        if (value.len == 0) return null;
+        return gpa.dupe(u8, value) catch null;
+    }
+    return null;
+}
+
+extern "kernel32" fn GetProcessId(process: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.DWORD;
+
+fn processIdOf(child: *const std.process.Child) u32 {
+    const id = child.id orelse return 0;
+    return switch (builtin.os.tag) {
+        .windows => GetProcessId(id),
+        else => @intCast(id),
+    };
+}
+
 pub fn sessionFloor(args: std.process.Args, gpa: std.mem.Allocator) u64 {
     var iterator = std.process.Args.Iterator.initAllocator(args, gpa) catch return 0;
     defer iterator.deinit();

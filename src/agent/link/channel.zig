@@ -16,12 +16,13 @@
 //! aspirational: without it, a Stop queued behind an 11 MB Run input would
 //! wait for all of it.
 //!
-//! `Inbound` reads frames and reassembles messages. It needs exactly one
-//! reassembly buffer, because the writer sends one data message at a time and
-//! only non-fragmenting control frames may appear between its fragments. A
-//! fragment for a different message arriving mid-reassembly therefore means
-//! the peer is not the writer in this file, which is a protocol violation and
-//! ends the link.
+//! `Inbound` reads frames and reassembles messages. It needs one reassembly
+//! buffer, because the writer sends one data message at a time, and one small
+//! buffer for control, because a control frame is the only thing the writer
+//! lets pass between a data message's fragments. A control frame is delivered
+//! as it arrives and leaves the reassembly where it was. A fragment of any
+//! other message arriving mid-reassembly means the peer is not the writer in
+//! this file, which is a protocol violation and ends the link.
 
 const std = @import("std");
 const frame = @import("frame.zig");
@@ -403,6 +404,8 @@ pub const Inbound = struct {
     assembly: []u8,
     assembled: usize = 0,
     in_progress: ?struct { kind: frame.Kind, correlation: u64 } = null,
+    /// A control frame's payload, read apart from any reassembly.
+    control: []u8,
 
     pub const InitError = error{InvalidLimits} || std.mem.Allocator.Error;
 
@@ -416,6 +419,8 @@ pub const Inbound = struct {
     ) InitError!void {
         if (!limits.valid()) return error.InvalidLimits;
         const assembly = try allocator.alloc(u8, @min(initial_assembly_bytes, limits.max()));
+        errdefer allocator.free(assembly);
+        const control = try allocator.alloc(u8, limits.forKind(.control));
         self.* = .{
             .io = io,
             .allocator = allocator,
@@ -423,12 +428,14 @@ pub const Inbound = struct {
             .limits = limits,
             .sink = sink,
             .assembly = assembly,
+            .control = control,
         };
     }
 
     pub fn deinit(self: *Inbound) void {
         std.crypto.secureZero(u8, self.assembly);
         self.allocator.free(self.assembly);
+        self.allocator.free(self.control);
         self.* = undefined;
     }
 
@@ -467,6 +474,19 @@ pub const Inbound = struct {
             const header = frame.decode(&header_bytes) catch
                 return .{ .violation = .frame_header };
             if (header.kind == .goodbye) return .peer_closed;
+            if (header.kind == .control) {
+                // One frame, always final, and allowed between another
+                // message's fragments: delivered on its own.
+                const payload = self.control[0..header.payload_len];
+                if (payload.len != 0) self.reader.readSliceAll(payload) catch |err| return switch (err) {
+                    error.EndOfStream => .peer_closed,
+                    else => .read_failed,
+                };
+                const flow = self.sink.deliver(.control, header.correlation, payload);
+                std.crypto.secureZero(u8, payload);
+                if (flow == .stop) return .consumer_stopped;
+                continue;
+            }
 
             const limit = self.limits.forKind(header.kind);
             if (self.in_progress) |current| {
@@ -906,6 +926,30 @@ fn appendFrame(
     header.encode(&bytes);
     try storage.appendSlice(allocator, &bytes);
     try storage.appendSlice(allocator, payload);
+}
+
+test "a control frame between a message's fragments arrives on its own, and the message whole" {
+    const allocator = testing.allocator;
+    var storage: std.ArrayList(u8) = .empty;
+    defer storage.deinit(allocator);
+    try appendFrame(&storage, allocator, .{ .kind = .request, .final = false, .correlation = 1, .payload_len = 4 }, "aaaa");
+    try appendFrame(&storage, allocator, .{ .kind = .control, .final = true, .correlation = 0, .payload_len = 2 }, "ok");
+    try appendFrame(&storage, allocator, .{ .kind = .request, .final = true, .correlation = 1, .payload_len = 4 }, "bbbb");
+
+    const io = testing.io;
+    var reader = std.Io.Reader.fixed(storage.items);
+    var collector: Collector = .{ .allocator = allocator };
+    defer collector.records.deinit(allocator);
+    var inbound: Inbound = undefined;
+    try inbound.init(io, allocator, &reader, test_message_limits, collector.sink());
+    defer inbound.deinit();
+    try testing.expectEqual(Stopped.peer_closed, inbound.run());
+    try testing.expectEqual(@as(usize, 2), collector.records.items.len);
+    try testing.expectEqual(frame.Kind.control, collector.records.items[0].kind);
+    try testing.expectEqual(@as(usize, 2), collector.records.items[0].len);
+    try testing.expectEqual(frame.Kind.request, collector.records.items[1].kind);
+    try testing.expectEqual(@as(usize, 8), collector.records.items[1].len);
+    try testing.expectEqual(@as(u8, 'a'), collector.records.items[1].first);
 }
 
 test "the reassembler ends the link on an interleaved or orphan continuation" {

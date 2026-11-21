@@ -662,6 +662,30 @@ pub const Runtime = struct {
         return .{ .activated = activation };
     }
 
+    /// Activates `input` in a Runtime of its own that serves no Session, then
+    /// ends that Runtime: a connection test that shares nothing with this one
+    /// except the AgentCore it is made from. The input's servers are taken
+    /// once the test Runtime starts; the caller still deinits the input.
+    pub fn probeMcp(
+        self: *Runtime,
+        input: *root.McpRuntimeInput,
+    ) (Error || std.mem.Allocator.Error)!McpActivationOutcome {
+        const probe = try initWithValidatedApi(self.io, self.allocator, self.api, .{
+            .max_sessions = 1,
+            .mcp_input = input,
+        }, null);
+        defer probe.deinit();
+        const outcome = probe.activateMcp() catch |err| {
+            probe.shutdown() catch {};
+            return err;
+        };
+        probe.shutdown() catch |err| {
+            if (outcome == .activated) outcome.activated.deinit();
+            return err;
+        };
+        return outcome;
+    }
+
     pub fn createMcpSelection(
         self: *Runtime,
         projection: *const McpCatalogProjection,
