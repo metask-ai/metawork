@@ -130,8 +130,6 @@ const JobFailure = enum {
     cancelled_before_send,
     rejected,
     invalid_grant,
-    /// The token endpoint issued tokens that the MCP server then refused.
-    token_rejected,
     outcome_unknown,
 };
 
@@ -218,9 +216,6 @@ const ExchangeInput = struct {
     verifier: []u8,
     redirect_uri: []u8,
     resource: []u8,
-    /// The MCP endpoint itself, which the new token is checked against. It
-    /// can differ from `resource` when the server declares a parent path.
-    endpoint: []u8,
     now_unix_ms: u64,
 };
 
@@ -244,8 +239,6 @@ const Job = struct {
     result: JobResult = .pending,
     /// Filled by the effect that failed; read only after `finished`.
     diagnostic: mcp_oauth.Diagnostic = .{},
-    /// Set when the failure belongs to a later step than the input's own.
-    failure_step: ?FailureStep = null,
     finished: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
 
@@ -254,7 +247,7 @@ const Job = struct {
     }
 
     fn step(self: *const Job) FailureStep {
-        return self.failure_step orelse switch (self.input) {
+        return switch (self.input) {
             .discovery => .discovery,
             .registration => .registration,
             .callback => .authorization,
@@ -357,7 +350,7 @@ const Job = struct {
 
     fn runExchange(self: *Job, input: *ExchangeInput) void {
         var http: mcp_oauth.StdHttpTransport = undefined;
-        var tokens = mcp_oauth.exchangeAuthorizationCodeEffect(
+        const tokens = mcp_oauth.exchangeAuthorizationCodeEffect(
             self.allocator,
             self.transport(&http),
             input.authorization,
@@ -380,21 +373,6 @@ const Job = struct {
             } });
             return;
         };
-        // A token the MCP server refuses is never committed as a grant.
-        switch (mcp_oauth.verifyAccessTokenEffect(
-            self.transport(&http),
-            input.endpoint,
-            tokens.access_token.view(),
-            &self.diagnostic,
-        )) {
-            .accepted, .unverified => {},
-            .rejected => {
-                tokens.deinit();
-                self.failure_step = .verification;
-                self.publish(.{ .failed = .token_rejected });
-                return;
-            },
-        }
         self.result = .{ .tokens = tokens };
         self.finish();
     }
@@ -443,7 +421,6 @@ fn deinitJobInput(allocator: std.mem.Allocator, input: *JobInput) void {
             secureFree(allocator, value.verifier);
             allocator.free(value.redirect_uri);
             secureFree(allocator, value.resource);
-            secureFree(allocator, value.endpoint);
         },
     }
     input.* = undefined;
@@ -2207,15 +2184,11 @@ pub const Coordinator = struct {
             try self.allocator.dupe(u8, binding.resource);
         var resource_owned = true;
         errdefer if (resource_owned) secureFree(self.allocator, resource);
-        const endpoint = try self.allocator.dupe(u8, flow.start.endpoint);
-        var endpoint_owned = true;
-        errdefer if (endpoint_owned) secureFree(self.allocator, endpoint);
         const now_unix_ms = self.host.nowUnixMs() orelse return error.ClockUnavailable;
         client_id_owned = false;
         verifier_owned = false;
         redirect_owned = false;
         resource_owned = false;
-        endpoint_owned = false;
         code_owned = false;
         secret_owned = false;
         try self.installJob(flow, .{ .exchange = .{
@@ -2227,7 +2200,6 @@ pub const Coordinator = struct {
             .verifier = verifier,
             .redirect_uri = redirect_uri,
             .resource = resource,
-            .endpoint = endpoint,
             .now_unix_ms = now_unix_ms,
         } });
         flow.durable_request_started = true;
@@ -2475,7 +2447,7 @@ fn containsAuthMethod(
 
 fn durableFailureRequiresRecovery(failure: JobFailure) bool {
     return switch (failure) {
-        .invalid_grant, .token_rejected, .outcome_unknown => true,
+        .invalid_grant, .outcome_unknown => true,
         .definitive, .not_sent, .cancelled_before_send, .rejected => false,
     };
 }
@@ -2510,7 +2482,6 @@ test "MCP durable request cleanup distinguishes pre-send cancellation" {
     try std.testing.expect(!durableFailureRequiresRecovery(.rejected));
     try std.testing.expect(!durableFailureRequiresRecovery(.definitive));
     try std.testing.expect(durableFailureRequiresRecovery(.invalid_grant));
-    try std.testing.expect(durableFailureRequiresRecovery(.token_rejected));
     try std.testing.expect(durableFailureRequiresRecovery(.outcome_unknown));
 }
 
@@ -2702,16 +2673,11 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
         ) mcp_oauth.FetchError!mcp_oauth.Response {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             _ = self.calls.fetchAdd(1, .acq_rel);
-            if (std.mem.eql(u8, request.url, "https://mcp.example.test/mcp")) {
-                for (request.headers) |header|
-                    if (std.ascii.eqlIgnoreCase(header.name, "Authorization") and
-                        std.mem.eql(u8, header.value, "Bearer access-1") and request.method == .post)
-                        return .{ .status = 200, .content_type = "text/event-stream" };
+            if (std.mem.eql(u8, request.url, "https://mcp.example.test/mcp"))
                 return .{
                     .status = 401,
                     .www_authenticate = "Bearer resource_metadata=\"https://mcp.example.test/oauth-resource\", scope=\"files.read\"",
                 };
-            }
             if (std.mem.eql(u8, request.url, "https://mcp.example.test/oauth-resource"))
                 return .{
                     .status = 200,
@@ -2948,8 +2914,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     try std.testing.expect(coordinator.drain());
     host_context.finish();
     try std.testing.expect(coordinator.flow == null);
-    // Discovery 3, registration, token, and the token's acceptance check.
-    try std.testing.expectEqual(@as(usize, 6), fake_http.calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 5), fake_http.calls.load(.acquire));
     try std.testing.expect(workbench_owner.mcpAuthorizationOperation() == null);
     try std.testing.expectEqual(@as(usize, 1), host_context.confirmations.load(.acquire));
     try std.testing.expect(host_context.saw_replacement_notice);
@@ -3067,7 +3032,7 @@ fn sendTestCallback(coordinator: *Coordinator) !std.Io.net.Stream {
     return stream;
 }
 
-test "MCP Application coordinator asks a Suno-like server for every scope and never saves a refused token" {
+test "MCP Application coordinator asks a Suno-like server for every scope" {
     // Each credential needs its own locator, so this generator counts.
     const LocatorGenerator = struct {
         next: u8 = 0x10,
@@ -3106,27 +3071,18 @@ test "MCP Application coordinator asks a Suno-like server for every scope and ne
             return true;
         }
     };
-    // Shaped like api.suno.com/mcp (2026-11-20): an unscoped challenge, eight
-    // listed scopes, and an MCP endpoint that refuses a token short of one.
+    // Shaped like api.suno.com/mcp (2026-11-20): an unscoped challenge and
+    // eight listed scopes.
     const SunoLike = struct {
         const endpoint = "https://api.suno.test/mcp";
         const metadata = "https://api.suno.test/.well-known/oauth-protected-resource/mcp";
         const issuer = "https://studio.suno.test/api/v2/external/oauth";
-        grant_all: std.atomic.Value(bool) = .init(false),
         registrations: std.atomic.Value(usize) = .init(0),
-        verifications: std.atomic.Value(usize) = .init(0),
 
         fn fetch(context: ?*anyopaque, request: mcp_oauth.Request, _: []u8, _: []u8) mcp_oauth.FetchError!mcp_oauth.Response {
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            if (std.mem.eql(u8, request.url, endpoint)) {
-                const authorization = for (request.headers) |header| {
-                    if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) break header.value;
-                } else return .{ .status = 401, .www_authenticate = "Bearer resource_metadata=\"" ++ metadata ++ "\"" };
-                _ = self.verifications.fetchAdd(1, .acq_rel);
-                if (std.mem.eql(u8, authorization, "Bearer token-with-every-scope"))
-                    return .{ .status = 200, .content_type = "application/json" };
-                return .{ .status = 403, .www_authenticate = "Bearer error=\"insufficient_scope\", error_description=\"Token is missing library:write\", scope=\"library:write\"" };
-            }
+            if (std.mem.eql(u8, request.url, endpoint))
+                return .{ .status = 401, .www_authenticate = "Bearer resource_metadata=\"" ++ metadata ++ "\"" };
             if (std.mem.eql(u8, request.url, metadata)) return .{
                 .status = 200,
                 .content_type = "application/json",
@@ -3144,10 +3100,7 @@ test "MCP Application coordinator asks a Suno-like server for every scope and ne
             if (std.mem.eql(u8, request.url, issuer ++ "/token/")) return .{
                 .status = 200,
                 .content_type = "application/json",
-                .body = if (self.grant_all.load(.acquire))
-                    "{\"access_token\":\"token-with-every-scope\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"refresh_token\":\"refresh-1\"}"
-                else
-                    "{\"access_token\":\"token-without-library-write\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"refresh_token\":\"refresh-1\"}",
+                .body = "{\"access_token\":\"token-with-every-scope\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"refresh_token\":\"refresh-1\"}",
             };
             return .{ .status = 404 };
         }
@@ -3262,7 +3215,7 @@ test "MCP Application coordinator asks a Suno-like server for every scope and ne
     defer std.testing.allocator.free(registry_storage);
     const all_scopes = "scope=api%3Av0%20credits%3Aspend%20download%20library%3Aread%20library%3Asearch%20library%3Awrite%20offline_access%20profile%3Aread&";
 
-    // First sign-in: the authorization server grants less than requested.
+    // First sign-in: the request lists every scope.
     try std.testing.expect(try coordinator.authorizeOauth(coordinator.control.inspectMcpDesiredConfiguration().?.desired_generation.?, server_id) == .started);
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
@@ -3280,31 +3233,8 @@ test "MCP Application coordinator asks a Suno-like server for every scope and ne
     waitForCoordinatorJob(&coordinator);
     try std.testing.expect(coordinator.drain());
     try std.testing.expect(coordinator.flow == null);
-    try std.testing.expectEqual(@as(usize, 1), suno.verifications.load(.acquire));
-    {
-        const generation = coordinator.control.inspectMcpDesiredConfiguration().?.desired_generation.?;
-        const registry = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try coordinator.control.writeMcpDesiredConfiguration(generation, registry_storage), .{});
-        defer registry.deinit();
-        const oauth = registry.value.object.get("servers").?.array.items[0].object.get("auth").?.object.get("oauth").?.object;
-        // The refused token is not saved; the server asks to sign in again.
-        try std.testing.expect(oauth.get("grant").? == .null);
-        try std.testing.expectEqualStrings("reauth_required", oauth.get("status").?.string);
-        try std.testing.expect(registry.value.object.get("oauth_operation").? == .null);
-        try std.testing.expectEqual(@as(usize, 8), oauth.get("consent").?.object.get("scopes").?.array.items.len);
-    }
-    {
-        const failures = workbench_owner.mcp.?.state.authorization_failures.items;
-        try std.testing.expectEqual(@as(usize, 1), failures.len);
-        try std.testing.expectEqual(.verification, failures[0].step);
-        try std.testing.expectEqual(.access_denied, failures[0].reason);
-        try std.testing.expectEqual(@as(?u16, 403), failures[0].http_status);
-        try std.testing.expectEqualStrings("insufficient_scope", failures[0].error_code.?);
-        try std.testing.expectEqualStrings("Token is missing library:write", failures[0].description.?);
-    }
 
-    // Signing in again with every scope granted saves the grant and clears
-    // the earlier failure. The registered client is reused.
-    suno.grant_all.store(true, .release);
+    // Signing in again saves the grant. The registered client is reused.
     try std.testing.expect(try coordinator.authorizeOauth(coordinator.control.inspectMcpDesiredConfiguration().?.desired_generation.?, server_id) == .started);
     try std.testing.expectEqual(@as(usize, 0), workbench_owner.mcp.?.state.authorization_failures.items.len);
     waitForCoordinatorJob(&coordinator);
@@ -3320,7 +3250,6 @@ test "MCP Application coordinator asks a Suno-like server for every scope and ne
     try std.testing.expect(coordinator.drain());
     try std.testing.expect(coordinator.flow == null);
     try std.testing.expectEqual(@as(usize, 1), suno.registrations.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 2), suno.verifications.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), workbench_owner.mcp.?.state.authorization_failures.items.len);
     {
         const generation = coordinator.control.inspectMcpDesiredConfiguration().?.desired_generation.?;
@@ -3357,7 +3286,6 @@ test "MCP Application coordinator signs in to an AceDataCloud-like server that n
     const AceDataLike = struct {
         const endpoint = "https://suno.acedata.test/mcp";
         const origin = "https://suno.acedata.test/";
-        verifications: std.atomic.Value(usize) = .init(0),
         token_resource_ok: std.atomic.Value(bool) = .init(false),
 
         fn fetch(context: ?*anyopaque, request: mcp_oauth.Request, _: []u8, _: []u8) mcp_oauth.FetchError!mcp_oauth.Response {
@@ -3365,14 +3293,8 @@ test "MCP Application coordinator signs in to an AceDataCloud-like server that n
             const authorization = for (request.headers) |header| {
                 if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) break header.value;
             } else null;
-            if (std.mem.eql(u8, request.url, endpoint)) {
-                if (authorization) |value| {
-                    if (!std.mem.eql(u8, value, "Bearer acedata-token")) return .{ .status = 401 };
-                    _ = self.verifications.fetchAdd(1, .acq_rel);
-                    return .{ .status = 200, .content_type = "text/event-stream" };
-                }
+            if (std.mem.eql(u8, request.url, endpoint))
                 return .{ .status = 401, .www_authenticate = "Bearer error=\"invalid_token\", error_description=\"Authentication required\", resource_metadata=\"https://suno.acedata.test/.well-known/oauth-protected-resource\"" };
-            }
             if (std.mem.eql(u8, request.url, "https://suno.acedata.test/.well-known/oauth-protected-resource")) return .{
                 .status = 200,
                 .content_type = "application/json",
@@ -3525,8 +3447,6 @@ test "MCP Application coordinator signs in to an AceDataCloud-like server that n
     try std.testing.expect(coordinator.drain());
     try std.testing.expect(coordinator.flow == null);
     try std.testing.expect(acedata.token_resource_ok.load(.acquire));
-    // The new token was checked against the MCP endpoint, not the origin.
-    try std.testing.expectEqual(@as(usize, 1), acedata.verifications.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), workbench_owner.mcp.?.state.authorization_failures.items.len);
     const registry_storage = try std.testing.allocator.alloc(u8, mcp_configuration.max_store_bytes);
     defer std.testing.allocator.free(registry_storage);

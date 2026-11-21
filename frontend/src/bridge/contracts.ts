@@ -1797,7 +1797,6 @@ export const mcpAuthorizationFailureSteps = [
   "registration",
   "authorization",
   "token_exchange",
-  "verification",
 ] as const;
 export const mcpAuthorizationFailureReasons = [
   "network",
@@ -1809,7 +1808,6 @@ export const mcpAuthorizationFailureReasons = [
   "unsupported_server",
   "browser_unavailable",
   "invalid_callback",
-  "access_denied",
   "internal",
 ] as const;
 /** Latest failed OAuth authorization of one server; process-local Host fact. */

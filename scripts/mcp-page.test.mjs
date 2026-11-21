@@ -2706,12 +2706,12 @@ test("MCP sensitive address uses a one-shot password field and never refills a s
   await waitFor(() => assert.equal(replacement.disabled, false));
 });
 
-const suno403 = {
-  step: "verification",
-  reason: "access_denied",
-  httpStatus: 403,
-  error: "insufficient_scope",
-  errorDescription: "Token is missing library:write",
+const expiredCode = {
+  step: "token_exchange",
+  reason: "oauth_error",
+  httpStatus: 400,
+  error: "invalid_grant",
+  errorDescription: "Authorization code expired",
 };
 
 test("MCP installation card names the failed OAuth step and the server's answer", () => {
@@ -2720,14 +2720,14 @@ test("MCP installation card names the failed OAuth step and the server's answer"
       ...installation,
       phase: "failed",
       failure: "authorization_failed",
-      authorizationFailure: suno403,
+      authorizationFailure: expiredCode,
       canCancel: false,
     }),
   );
   screen.getByText(
-    "Checking the access token failed: the server refused the new access token. (HTTP 403)",
+    "Getting the access token failed: the server returned an error. (HTTP 400)",
   );
-  screen.getByText("insufficient_scope: Token is missing library:write");
+  screen.getByText("invalid_grant: Authorization code expired");
 });
 
 test("MCP installation card shows a failure without remote text as the step alone", () => {
@@ -2759,17 +2759,15 @@ test("MCP connector detail shows why the last sign-in failed beside Sign in agai
       desiredGeneration: "14",
       runtimeAlignment: "current",
       redacted: false,
-      servers: [{ ...servers[1], authorizationFailure: suno403 }],
+      servers: [{ ...servers[1], authorizationFailure: expiredCode }],
     }),
   );
   fireEvent.click(screen.getByRole("button", { name: /Notion/ }));
   const dialog = screen.getByRole("dialog", { name: "Notion" });
   within(dialog).getByText(
-    "Checking the access token failed: the server refused the new access token. (HTTP 403)",
+    "Getting the access token failed: the server returned an error. (HTTP 400)",
   );
-  within(dialog).getByText(
-    "insufficient_scope: Token is missing library:write",
-  );
+  within(dialog).getByText("invalid_grant: Authorization code expired");
   within(dialog).getByRole("button", { name: "Sign in again" });
 });
 
@@ -2791,14 +2789,14 @@ test("MCP connector detail hides a stale failure while a new sign-in runs", () =
         {
           ...servers[1],
           authorizationStatus: "authorizing",
-          authorizationFailure: suno403,
+          authorizationFailure: expiredCode,
         },
       ],
     }),
   );
   fireEvent.click(screen.getByRole("button", { name: /Notion/ }));
   assert.equal(
-    screen.queryByText("insufficient_scope: Token is missing library:write"),
+    screen.queryByText("invalid_grant: Authorization code expired"),
     null,
   );
 });

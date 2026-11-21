@@ -88,11 +88,11 @@ test("MCP installation operations are strict safe facts with terminal history", 
 
 test("MCP authorization failure detail is bounded display text tied to its failure", () => {
   const authorizationFailure = {
-    step: "verification",
-    reason: "access_denied",
-    httpStatus: 403,
-    error: "insufficient_scope",
-    errorDescription: "Token is missing library:write",
+    step: "token_exchange",
+    reason: "oauth_error",
+    httpStatus: 400,
+    error: "invalid_grant",
+    errorDescription: "Authorization code expired",
   };
   const operation = {
     serverId: "mcp-01234567890123456789",
