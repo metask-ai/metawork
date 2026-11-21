@@ -8,6 +8,7 @@
 //! cross-process test is indistinguishable from a passing one.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const execution_host = @import("app_execution_host");
 const execution_mode = @import("app_execution_mode");
@@ -702,6 +703,70 @@ test "an export's bytes reach the caller's sink on the caller's own thread" {
 
     try std.testing.expect(route.session.closeOutcome(.session_close) == .closed);
     try port.releaseClosedSession(route.session);
+}
+
+// ---------------------------------------------------------------------------
+// Liveness
+// ---------------------------------------------------------------------------
+
+extern "ntdll" fn NtSuspendProcess(process: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.NTSTATUS;
+
+/// Stops the process without ending it, the way a hang looks from outside:
+/// it neither answers nor exits.
+fn suspendProcess(id: std.process.Child.Id) !void {
+    switch (builtin.os.tag) {
+        .windows => if (NtSuspendProcess(id) != .SUCCESS) return error.SuspendFailed,
+        else => try std.posix.kill(id, std.posix.SIG.STOP),
+    }
+}
+
+test "a process that stops answering is given up within the deadline, and a call waiting on it returns" {
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    const deadline_ms: u64 = 300;
+    try owner.init(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .queue_limits = .{},
+        .spawn = .{ .explicit = &.{ fixture, "--with-runtime" } },
+        .wake = wake.notifier(),
+        .heartbeat_interval_ms = 50,
+        .heartbeat_deadline_ms = deadline_ms,
+    });
+    defer owner.deinit();
+    {
+        var control = try product_control.Runtime.init(allocator, io, owner.runtimePort(), product_limits, lifecycle.productControlConfiguration());
+        defer control.deinit();
+        const task_id = try createRunningTask(&control, "Say something short");
+        try waitSnapshot(&control, &owner, "\"terminal\":{\"outcome\":\"completed\"");
+        const first = owner.currentProcessId() orelse return error.NoProcess;
+
+        // Answers for as long as it answers pings: well past the deadline,
+        // the process is still the same one.
+        try std.Io.sleep(io, .fromMilliseconds(@intCast(deadline_ms * 3)), .awake);
+        try std.testing.expectEqual(first, owner.currentProcessId().?);
+        try std.testing.expect(owner.takeLoss() == null);
+
+        try suspendProcess(first);
+        // A call on the UI's own thread, as Product's projection makes on every
+        // Task read. With the process stopped, nothing but the liveness check
+        // can end this wait.
+        const started = std.Io.Timestamp.now(io, .awake);
+        const admission = owner.runtimePort().restoreAdmission(null);
+        const waited_ms = started.durationTo(.now(io, .awake)).toMilliseconds();
+        // The lost answer: the process holds nothing any more.
+        try std.testing.expectEqual(agent.RuntimePort.RestoreAdmission.available, admission);
+        // It did wait: nothing answered it but the end of the process.
+        try std.testing.expect(waited_ms >= @as(i64, @intCast(deadline_ms / 2)));
+        try std.testing.expect(waited_ms < 10_000);
+
+        // Given up exactly as a crash is: the process is ended, and its Task
+        // detached for the next message to restore.
+        try waitDetached(&control, &owner, task_id);
+        try std.testing.expect(owner.currentProcessId() == null);
+    }
 }
 
 // ---------------------------------------------------------------------------

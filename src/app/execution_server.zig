@@ -35,6 +35,13 @@
 //! process. When the link is gone so is every answer, and the stand-in reports
 //! the failure the in-process effect reports for a peer that went away.
 //!
+//! ## Being alive
+//!
+//! The reader answers the UI half's pings itself, between requests. A process
+//! that stops answering them is one the UI half gives up on, whatever it is
+//! doing, which is what keeps a UI thread waiting on this process from waiting
+//! for ever.
+//!
 //! ## Lifetime
 //!
 //! Nothing here is ever freed. When the link ends, a watchdog is armed, the
@@ -430,7 +437,8 @@ fn deliver(context: ?*anyopaque, kind: agent_link.Kind, correlation: u64, bytes:
                     self.forward_condition.signal(self.io);
                     self.forward_mutex.unlock(self.io);
                 },
-                .cancel => {
+                .ping => |number| sendControl(self, .{ .pong = number }),
+                .pong, .cancel => {
                     self.violated.store(true, .release);
                     return .stop;
                 },

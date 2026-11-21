@@ -47,6 +47,14 @@
 //! is given the applied membership before anything else uses it, so what it
 //! loses is its catalog, which Product already knows how to refresh.
 //!
+//! ## Liveness
+//!
+//! A process can be there and not answer. The UI half pings it on a clock and
+//! treats one that has not answered within the deadline as gone, which ends
+//! every wait on it. That is the one bound on a UI thread waiting for an
+//! answer; no call has a timeout of its own, because some calls legitimately
+//! last a whole Run.
+//!
 //! ## Events and credit
 //!
 //! Events arrive on the reader thread and go into a pump of the same type the
@@ -114,6 +122,13 @@ pub const credit_bytes: u64 = credit: {
 const credit_batch_count: u64 = 64;
 const credit_batch_bytes: u64 = 4 * 1024 * 1024;
 
+/// How often the execution process is asked whether it is alive.
+pub const default_heartbeat_interval_ms: u64 = 1_000;
+/// How long it may go without answering before it is treated as gone. Long
+/// enough that a loaded machine does not cost a user a Run; short enough
+/// that a UI thread waiting on a stopped process is released.
+pub const default_heartbeat_deadline_ms: u64 = 5_000;
+
 /// Stack for a thread that performs a callback: an MCP exchange over stdio
 /// or HTTP, as an AgentCore tool thread performs it in process.
 const callback_stack_bytes: usize = 4 * 1024 * 1024;
@@ -143,6 +158,8 @@ pub const Options = struct {
     /// Tests only: a smaller pump budget, so that holding events back is
     /// observable with a handful of them.
     credit_count_override: ?u64 = null,
+    heartbeat_interval_ms: u64 = default_heartbeat_interval_ms,
+    heartbeat_deadline_ms: u64 = default_heartbeat_deadline_ms,
 };
 
 // ---------------------------------------------------------------------------
@@ -397,6 +414,11 @@ const Generation = struct {
     callbacks: std.AutoHashMapUnmanaged(u64, *Callback) = .empty,
     callback_threads: u32 = 0,
 
+    watch: ?std.Thread = null,
+    watch_stop: std.Io.Event = .unset,
+    /// When the process last answered a ping, on the awake clock.
+    answered_ns: std.atomic.Value(i64) = .init(0),
+
     fn start(owner: *Owner, number: u32) ?*Generation {
         const self = owner.allocator.create(Generation) catch return null;
         self.* = .{
@@ -456,6 +478,16 @@ const Generation = struct {
             owner.allocator.destroy(self);
             return null;
         };
+        self.answered_ns.store(now(owner.io), .release);
+        // A process nobody can watch is one nobody can give up on.
+        self.watch = std.Thread.spawn(
+            .{ .stack_size = channel.io_thread_stack_bytes },
+            watchMain,
+            .{self},
+        ) catch {
+            self.lose();
+            return self;
+        };
         return self;
     }
 
@@ -467,6 +499,7 @@ const Generation = struct {
         // given for this process is true of a process that is ending.
         if (!stopping) self.host.terminate();
         self.pending.close();
+        self.watch_stop.set(self.owner.io);
         // Whatever this process asked for is no longer wanted.
         self.calls_mutex.lockUncancelable(self.owner.io);
         var callbacks = self.callbacks.valueIterator();
@@ -512,6 +545,8 @@ const Generation = struct {
         if (!self.stopped) self.stop();
         if (self.reader) |thread| thread.join();
         self.reader = null;
+        if (self.watch) |thread| thread.join();
+        self.watch = null;
         // Callbacks were cancelled when the process went; each still finishes
         // the exchange it is in and closes what it was the last user of.
         self.calls_mutex.lockUncancelable(io);
@@ -626,6 +661,35 @@ fn readerMain(self: *Generation) void {
     self.releaseCallees();
 }
 
+fn now(io: std.Io) i64 {
+    return @intCast(@divTrunc(std.Io.Timestamp.now(io, .awake).nanoseconds, std.time.ns_per_ms));
+}
+
+/// Pings the process on a clock, and gives it up when it has not answered
+/// within the deadline.
+fn watchMain(self: *Generation) void {
+    const io = self.owner.io;
+    const options = self.owner.options;
+    var number: u64 = 0;
+    while (!self.lost.load(.acquire)) {
+        self.watch_stop.waitTimeout(io, .{ .duration = .{
+            .raw = .fromMilliseconds(@intCast(options.heartbeat_interval_ms)),
+            .clock = .awake,
+        } }) catch {};
+        if (self.lost.load(.acquire)) return;
+        const silent_ms = now(io) - self.answered_ns.load(.acquire);
+        if (silent_ms > @as(i64, @intCast(options.heartbeat_deadline_ms))) {
+            std.log.warn("execution process has not answered for {d} ms; giving it up", .{silent_ms});
+            self.lose();
+            return;
+        }
+        number += 1;
+        var bytes: [32]u8 = undefined;
+        const written = payload.encode(rpc.Control, .{ .ping = number }, &bytes);
+        _ = self.host.outbound.trySubmit(.control, 0, bytes[0..written]) catch {};
+    }
+}
+
 fn deliverFrame(context: ?*anyopaque, kind: agent_link.Kind, correlation: u64, bytes: []const u8) channel.Flow {
     const self: *Generation = @ptrCast(@alignCast(context.?));
     const owner = self.owner;
@@ -664,12 +728,13 @@ fn deliverFrame(context: ?*anyopaque, kind: agent_link.Kind, correlation: u64, b
             var fixed = std.heap.FixedBufferAllocator.init(&storage);
             const value = payload.decodeExact(rpc.Control, fixed.allocator(), bytes) catch return .stop;
             switch (value) {
+                .pong => self.answered_ns.store(now(owner.io), .release),
                 .cancel => |target| {
                     self.calls_mutex.lockUncancelable(owner.io);
                     if (self.callbacks.get(target)) |callback| callback.cancelled.store(true, .release);
                     self.calls_mutex.unlock(owner.io);
                 },
-                .credit => return .stop,
+                .credit, .ping => return .stop,
             }
             return .ok;
         },

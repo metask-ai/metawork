@@ -25,8 +25,8 @@
 //!   * `response` -- `[u16 status]` then, when the status is zero, the
 //!     method's response. Any other status is the error's registered number.
 //!   * `event`    -- an `Event`, from the execution half.
-//!   * `control`  -- a `Control`: credit from the UI half, cancellations from
-//!     the execution half.
+//!   * `control`  -- a `Control`: credit and pings from the UI half, pongs and
+//!     cancellations from the execution half.
 
 const std = @import("std");
 const contract = @import("agent_contract");
@@ -175,6 +175,10 @@ pub const McpExchanged = union(enum) {
 pub const Control = union(enum) {
     /// UI half to execution half: the room made for events, as totals.
     credit: Credit,
+    /// UI half to execution half: answer with a `pong` of the same number.
+    ping: u64,
+    /// Execution half to UI half.
+    pong: u64,
     /// Execution half to UI half: the callback under this correlation is no
     /// longer wanted. Its answer still comes.
     cancel: u64,
@@ -787,7 +791,7 @@ test "a callback is read with the callback set, and a control frame says which i
         (try decodeResponse(Callback.mcp_request, arena.allocator(), answer)).ok.failure,
     );
 
-    for ([_]Control{ .{ .cancel = 77 }, .{ .credit = .{ .count = 1, .bytes = 2 } } }) |sent| {
+    for ([_]Control{ .{ .ping = 3 }, .{ .pong = 3 }, .{ .cancel = 77 }, .{ .credit = .{ .count = 1, .bytes = 2 } } }) |sent| {
         const encoded = try payload.encodeAlloc(Control, testing.allocator, sent);
         defer testing.allocator.free(encoded);
         try testing.expectEqualDeep(sent, try payload.decodeExact(Control, arena.allocator(), encoded));
