@@ -1140,16 +1140,18 @@ fn performCallback(
             return rpc.encodeOk(method, allocator, {}) catch null;
         },
         .delivery_inspect => {
-            const effects = effectsOf(generation, handle, request.run_id);
-            const input = (if (effects) |value| value.delivery else null) orelse
+            const loan = EffectsLoan.take(generation, handle, request.run_id);
+            defer if (loan) |value| value.giveBack();
+            const input = (if (loan) |value| value.effects.delivery else null) orelse
                 return rpc.encodeOk(method, allocator, .{ .failed = .unavailable }) catch null;
             return rpc.encodeOk(method, allocator, input.inspect_fn(input.context, request.path, &callback.cancelled)) catch null;
         },
         .media_credential_read => {
-            const effects = effectsOf(generation, handle, request.run_id);
-            const reader: ?contract.ImageGenerationCredentialReader = if (effects) |value| switch (request.tool) {
-                .image => if (value.image) |image| image.binding.credential_reader else null,
-                .video => if (value.video) |video| video.credential else null,
+            const loan = EffectsLoan.take(generation, handle, request.run_id);
+            defer if (loan) |value| value.giveBack();
+            const reader: ?contract.ImageGenerationCredentialReader = if (loan) |value| switch (request.tool) {
+                .image => if (value.effects.image) |image| image.binding.credential_reader else null,
+                .video => if (value.effects.video) |video| video.credential else null,
             } else null;
             const source = reader orelse return rpc.encodeOk(method, allocator, null) catch null;
             const buffer = allocator.alloc(u8, request.capacity) catch return rpc.encodeOk(method, allocator, null) catch null;
@@ -1163,8 +1165,9 @@ fn performCallback(
         },
         .media_perform => return performMedia(callback, handle, request) catch null,
         .image_commit => {
-            const effects = effectsOf(generation, handle, request.run_id);
-            const image = (if (effects) |value| value.image else null) orelse
+            const loan = EffectsLoan.take(generation, handle, request.run_id);
+            defer if (loan) |value| value.giveBack();
+            const image = (if (loan) |value| value.effects.image else null) orelse
                 return rpc.encodeOk(method, allocator, .{ .failed = .{ .code = .unavailable } }) catch null;
             var cancellation: contract.http_transport.Cancellation = .{};
             callback.watchHttp(&cancellation);
@@ -1173,8 +1176,9 @@ fn performCallback(
             return rpc.encodeOk(method, allocator, output.commit_fn(output.context, request.bytes, request.format, &cancellation)) catch null;
         },
         .video_commit => {
-            const effects = effectsOf(generation, handle, request.run_id);
-            const video = (if (effects) |value| value.video else null) orelse
+            const loan = EffectsLoan.take(generation, handle, request.run_id);
+            defer if (loan) |value| value.giveBack();
+            const video = (if (loan) |value| value.effects.video else null) orelse
                 return rpc.encodeOk(method, allocator, .{ .failed = .output_failed }) catch null;
             var cancellation: contract.http_transport.Cancellation = .{};
             callback.watchHttp(&cancellation);
@@ -1200,19 +1204,41 @@ fn performCallback(
 }
 
 /// The effects the Run `run_id` of the Session named by `handle` was given,
-/// as long as the Run is not over.
-fn effectsOf(generation: *Generation, handle: u64, run_id: u64) ?RunEffects {
-    const owner = generation.owner;
-    owner.mutex.lockUncancelable(owner.io);
-    defer owner.mutex.unlock(owner.io);
-    for (generation.sessions.items) |remote| {
-        if (remote.handle != handle) continue;
-        remote.mutex.lockUncancelable(owner.io);
-        defer remote.mutex.unlock(owner.io);
-        return remote.effects.get(run_id);
+/// lent to one callback while its effect runs. They point into what Product
+/// prepared for the Run, which Product releases as soon as the Run is over,
+/// so the Run's end waits for every loan to come back. In process the same
+/// holds by construction: a Run's execute returns only after its tools have.
+const EffectsLoan = struct {
+    remote: *RemoteSession,
+    run_id: u64,
+    effects: RunEffects,
+
+    /// `null` once the Run is over, or for a Run with no effects.
+    fn take(generation: *Generation, handle: u64, run_id: u64) ?EffectsLoan {
+        const owner = generation.owner;
+        owner.mutex.lockUncancelable(owner.io);
+        defer owner.mutex.unlock(owner.io);
+        for (generation.sessions.items) |remote| {
+            if (remote.handle != handle) continue;
+            remote.mutex.lockUncancelable(owner.io);
+            defer remote.mutex.unlock(owner.io);
+            const held = remote.effects.getPtr(run_id) orelse return null;
+            if (held.ending) return null;
+            held.loans += 1;
+            return .{ .remote = remote, .run_id = run_id, .effects = held.effects };
+        }
+        return null;
     }
-    return null;
-}
+
+    fn giveBack(self: EffectsLoan) void {
+        const remote = self.remote;
+        remote.mutex.lockUncancelable(remote.io());
+        defer remote.mutex.unlock(remote.io());
+        const held = remote.effects.getPtr(self.run_id).?;
+        held.loans -= 1;
+        if (held.loans == 0) remote.condition.broadcast(remote.io());
+    }
+};
 
 /// A streamed response, read whole for the Run's receiver.
 const StreamCapture = struct {
@@ -1251,10 +1277,11 @@ fn performMedia(callback: *Callback, handle: u64, request: rpc.Request(rpc.Callb
     const owner = generation.owner;
     const allocator = owner.allocator;
     const method = rpc.Callback.media_perform;
-    const effects = effectsOf(generation, handle, request.run_id);
-    const transport: contract.http_transport.Transport = (if (effects) |value| switch (request.tool) {
-        .image => if (value.image) |image| image.transport else null,
-        .video => if (value.video) |video| video.transport else null,
+    const loan = EffectsLoan.take(generation, handle, request.run_id);
+    defer if (loan) |value| value.giveBack();
+    const transport: contract.http_transport.Transport = (if (loan) |value| switch (request.tool) {
+        .image => if (value.effects.image) |image| image.transport else null,
+        .video => if (value.effects.video) |video| video.transport else null,
     } else null) orelse return rpc.encodeOk(method, allocator, .{ .failure = .Unexpected });
     // What one answer can carry, less room for the rest of it.
     const limit = owner.options.message_limits.response -| 64 * 1024;
@@ -1426,8 +1453,8 @@ const RemoteSession = struct {
     /// process the Session holds its lease the same way.
     skill_lease: ?*RemoteLease = null,
     /// Each prepared Run's file delivery and media effects, which its
-    /// callbacks reach, until the Run is over. Under `mutex`.
-    effects: std.AutoHashMapUnmanaged(u64, RunEffects) = .empty,
+    /// callbacks borrow, until the Run is over. Under `mutex`.
+    effects: std.AutoHashMapUnmanaged(u64, HeldEffects) = .empty,
 
     fn io(self: *RemoteSession) std.Io {
         return self.generation.owner.io;
@@ -1468,10 +1495,19 @@ const RemoteSession = struct {
         allocator.destroy(self);
     }
 
-    /// The Run is over, or will never start; Product releases its effects.
+    /// The Run is over, or will never start; Product releases its effects
+    /// as soon as this returns, so it returns once no callback still uses
+    /// them. The wait is bounded: a process that is gone had its callbacks
+    /// withdrawn, which requests each effect's cancellation, and a live one
+    /// withdraws its own before its Run ends.
     fn dropEffects(self: *RemoteSession, run_id: u64) void {
         self.mutex.lockUncancelable(self.io());
         defer self.mutex.unlock(self.io());
+        while (self.effects.getPtr(run_id)) |held| {
+            held.ending = true;
+            if (held.loans == 0) break;
+            self.condition.waitUncancelable(self.io(), &self.mutex);
+        }
         _ = self.effects.remove(run_id);
     }
 
@@ -2310,6 +2346,14 @@ const RunEffects = struct {
     delivery: ?contract.FileDeliveryInput,
 };
 
+/// A Run's effects with the callbacks still using them; see `EffectsLoan`.
+const HeldEffects = struct {
+    effects: RunEffects,
+    loans: u32 = 0,
+    /// The Run is over: nothing new borrows them.
+    ending: bool = false,
+};
+
 fn sessionPrepareRunWithTools(
     context: ?*anyopaque,
     input: surface.RunInput,
@@ -2347,7 +2391,7 @@ fn sessionPrepareRunWithTools(
     if (has_effects) {
         remote.mutex.lockUncancelable(remote.io());
         defer remote.mutex.unlock(remote.io());
-        remote.effects.putAssumeCapacity(run_id, .{ .image = image, .video = video, .delivery = delivery });
+        remote.effects.putAssumeCapacity(run_id, .{ .effects = .{ .image = image, .video = video, .delivery = delivery } });
     }
     return run_id;
 }

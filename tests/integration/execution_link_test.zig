@@ -1400,3 +1400,101 @@ test "a process lost before it is published is never handed out, and the next as
     try std.testing.expectEqual(@as(u32, 2), owner.started);
     try std.testing.expect(owner.currentProcess() == null);
 }
+
+/// Image effects whose commit outlasts the loss of the process that asked
+/// for it: it waits for its cancellation, then takes a while to end, as a
+/// write already under way does.
+const LingeringCommit = struct {
+    entered: std.atomic.Value(bool) = .init(false),
+    cancelled: std.atomic.Value(bool) = .init(false),
+    returned: std.atomic.Value(bool) = .init(false),
+
+    fn of(context: ?*anyopaque) *LingeringCommit {
+        return @ptrCast(@alignCast(context.?));
+    }
+
+    fn readCredential(_: *anyopaque, buffer: []u8) ?usize {
+        const key = "renewed-key";
+        @memcpy(buffer[0..key.len], key);
+        return key.len;
+    }
+
+    fn perform(
+        _: ?*anyopaque,
+        _: agent.CompletionHttpRequest,
+        _: *const agent.ImageGenerationCancellation,
+        buffer: []u8,
+    ) agent.CompletionTransportError!agent.CompletionTransportResponse {
+        const body = "{\"ok\":1}";
+        @memcpy(buffer[0..body.len], body);
+        return .{ .status = 200, .body = buffer[0..body.len] };
+    }
+
+    fn commitImage(context: *anyopaque, bytes: []const u8, format: agent.ImageGenerationFormat, cancellation: *const agent.ImageGenerationCancellation) agent.ImageGenerationOutputResult {
+        const self = of(context);
+        self.entered.store(true, .release);
+        var waited: u64 = 0;
+        while (!cancellation.isRequested() and waited < wait_limit_ms) : (waited += 1)
+            std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+        self.cancelled.store(cancellation.isRequested(), .release);
+        std.Io.sleep(io, .fromMilliseconds(300), .awake) catch {};
+        self.returned.store(true, .release);
+        return .{ .saved = agent.ImageGenerationReceipt.init("images/a.png", bytes.len, format) catch unreachable };
+    }
+};
+
+test "a Run's effects are released only after the callbacks using them return, when its process is lost" {
+    // Product releases a Run's effects as soon as the Run is over. Over the
+    // link a lost process ends the Run at once, while the window may still
+    // be inside one of those effects on a callback thread.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try startOwner(&owner, &wake, &.{ fixture, "--with-runtime", "--exercise-effects" }, fixture_message_limits, null);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const port = owner.runtimePort();
+    const route = try port.createSessionRoute(plainSessionOptions(root));
+
+    var effects: LingeringCommit = .{};
+    const run_id = try route.session.prepareRunWithTools(.{ .text = "hello" }, .{
+        .binding = .{
+            .endpoint = "https://media.example.test/v1/images/generations",
+            .source = "fixture-source",
+            .model = "fixture-image",
+            .credential = "first-key",
+            .credential_reader = .{ .context = &effects, .read_fn = LingeringCommit.readCredential },
+            .output = .{ .context = &effects, .commit_fn = LingeringCommit.commitImage },
+        },
+        .transport = .{ .context = &effects, .perform_fn = LingeringCommit.perform },
+    }, null, null, null);
+
+    // Cancelled, the fixture's execution half uses the image effect first,
+    // and the commit is still going when the process is lost.
+    const Cancel = struct {
+        effects_returned_first: bool = false,
+        fn run(self: *@This(), session: agent.SessionPort, id: u64, lingering: *LingeringCommit) void {
+            session.cancelPreparedRun(id) catch {};
+            self.effects_returned_first = lingering.returned.load(.acquire);
+        }
+    };
+    var cancel: Cancel = .{};
+    const thread = try std.Thread.spawn(.{}, Cancel.run, .{ &cancel, route.session, run_id, &effects });
+    var waited: u64 = 0;
+    while (!effects.entered.load(.acquire)) : (waited += wait_tick_ms) {
+        if (waited >= wait_limit_ms) return error.CommitNeverEntered;
+        try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+    }
+    execution_client.TestSupport.killCurrent(&owner);
+    thread.join();
+    // The loss asked the effect to stop, and the Run's end waited for it.
+    try std.testing.expect(effects.cancelled.load(.acquire));
+    try std.testing.expect(cancel.effects_returned_first);
+
+    _ = route.session.closeOutcome(.session_close);
+    port.releaseClosedSession(route.session) catch {};
+}
