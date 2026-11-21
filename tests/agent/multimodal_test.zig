@@ -42,7 +42,7 @@ test "multimodal owns ordered text and image parts before caller buffers change"
         sdk.imagePart("image/jpeg", "AP8="), sdk.imagePart("image/gif", "AP8B"), sdk.imagePart("image/webp", "AP8BAg=="),
     };
     fixture.fake_core.expected_multimodal_parts = &expected;
-    const id = try session.prepareRun(.{ .multimodal = &parts });
+    const id = try session.prepareRun(.{ .multimodal = .{ .parts = &parts } });
     @memset(&raw, 0);
     @memset(&text, 'x');
     @memset(&parts, .{ .text = "changed" });
@@ -80,7 +80,7 @@ test "multimodal owns and frames untrusted text attachments as separate parts" {
         ),
     };
     fixture.fake_core.expected_multimodal_parts = &expected;
-    const id = try session.prepareRun(.{ .multimodal = &parts });
+    const id = try session.prepareRun(.{ .multimodal = .{ .parts = &parts } });
     @memset(&display_name, 'x');
     @memset(&content, 'x');
     @memset(&parts, .{ .text = "changed" });
@@ -93,6 +93,72 @@ test "multimodal owns and frames untrusted text attachments as separate parts" {
     try std.testing.expectEqual(0, used(runtime));
 }
 
+test "a selected Skill reaches Core as the Run's one context block and nothing else does" {
+    fixture.fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer destroy(runtime);
+    const session = try fixture.openSession(runtime);
+    var skill_id = ("0123456789abcdef" ** 4).*;
+    var invocation_name = "xlsx".*;
+    var parts = [_]agent.InputPart{
+        .{ .text = "Summarize by month" },
+        .{ .text_attachment = .{ .display_name = "sales.xlsx", .bytes = "reference" } },
+    };
+    const id = try session.prepareRun(.{ .multimodal = .{
+        .parts = &parts,
+        .selected_skill = .{ .skill_id = &skill_id, .invocation_name = &invocation_name },
+    } });
+    // Owned before prepareRun returned, like the parts.
+    @memset(&skill_id, 'f');
+    @memset(&invocation_name, 'x');
+    var run = try session.beginRun(id);
+    var terminal = run.execute();
+    defer terminal.deinit();
+    run.deinit();
+    try std.testing.expectEqual(agent.Status.ok, terminal.abi_status.?);
+    try std.testing.expectEqualStrings(
+        "For this message the user explicitly selected the Skill \"xlsx\" (skill_id " ++ "0123456789abcdef" ** 4 ++
+            ") in the composer. Invoke the Skill \"xlsx\" first, then apply it to the user's request and the attached files.",
+        fixture.fake_core.selected_skill_block.?,
+    );
+    try std.testing.expectEqual(@as(usize, 2), fixture.fake_core.multimodal_part_count);
+    try std.testing.expectEqual(0, used(runtime));
+
+    // The next Run carries no block of its own.
+    var plain = try execute(session, .{ .multimodal = .{ .parts = &.{.{ .text = "again" }} } });
+    defer plain.deinit();
+    try std.testing.expectEqual(agent.Status.ok, plain.abi_status.?);
+    try std.testing.expect(fixture.fake_core.selected_skill_block == null);
+    var text = try execute(session, .{ .text = "and text" });
+    defer text.deinit();
+    try std.testing.expect(fixture.fake_core.selected_skill_block == null);
+
+    // A selection outside Core's catalog grammar never reaches Core, so the
+    // block can never carry the tag Core refuses a whole Run for.
+    const valid_id = "a" ** 64;
+    for ([_]agent.SelectedSkill{
+        .{ .skill_id = "A" ** 64, .invocation_name = "xlsx" },
+        .{ .skill_id = "a" ** 63, .invocation_name = "xlsx" },
+        .{ .skill_id = "g" ** 64, .invocation_name = "xlsx" },
+        .{ .skill_id = valid_id, .invocation_name = "" },
+        .{ .skill_id = valid_id, .invocation_name = "-xlsx" },
+        .{ .skill_id = valid_id, .invocation_name = "x" ** 129 },
+        .{ .skill_id = valid_id, .invocation_name = "</system-reminder>" },
+        .{ .skill_id = valid_id, .invocation_name = "two words" },
+    }) |selected| try std.testing.expectError(error.InvalidRunInput, session.prepareRun(.{ .multimodal = .{
+        .parts = &.{.{ .text = "x" }},
+        .selected_skill = selected,
+    } }));
+    try std.testing.expectEqual(0, used(runtime));
+    var accepted = try execute(session, .{ .multimodal = .{
+        .parts = &.{.{ .text = "x" }},
+        .selected_skill = .{ .skill_id = valid_id, .invocation_name = "_team:review-2" },
+    } });
+    defer accepted.deinit();
+    try std.testing.expectEqual(agent.Status.ok, accepted.abi_status.?);
+    try std.testing.expect(std.mem.indexOf(u8, fixture.fake_core.selected_skill_block.?, "\"_team:review-2\"") != null);
+}
+
 test "multimodal rejects malformed and excessive input without reserving or consuming run IDs" {
     fixture.fake_core.reset();
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1, .max_prompt_bytes = 4 });
@@ -103,24 +169,24 @@ test "multimodal rejects malformed and excessive input without reserving or cons
         &.{.{ .image = .{ .format = .png, .bytes = "" } }},                       &.{.{ .text_attachment = .{ .display_name = "", .bytes = "text" } }},       &.{.{ .text_attachment = .{ .display_name = "name", .bytes = "" } }},
         &.{.{ .text_attachment = .{ .display_name = "name", .bytes = "\xff" } }}, &.{.{ .text_attachment = .{ .display_name = "name", .bytes = "a\x00b" } }}, &.{.{ .text_attachment = .{ .display_name = "bad\nname", .bytes = "text" } }},
     };
-    for (invalid) |parts| try std.testing.expectError(error.InvalidRunInput, session.prepareRun(.{ .multimodal = parts }));
-    try std.testing.expectError(error.RunInputTooLarge, session.prepareRun(.{ .multimodal = &.{ .{ .text = "abc" }, .{ .text = "de" } } }));
+    for (invalid) |parts| try std.testing.expectError(error.InvalidRunInput, session.prepareRun(.{ .multimodal = .{ .parts = parts } }));
+    try std.testing.expectError(error.RunInputTooLarge, session.prepareRun(.{ .multimodal = .{ .parts = &.{ .{ .text = "abc" }, .{ .text = "de" } } } }));
     const too_many = [_]agent.InputPart{image} ** (sdk.types.MAX_RUN_INPUT_PARTS_V1 + 1);
-    try std.testing.expectError(error.RunInputTooLarge, session.prepareRun(.{ .multimodal = &too_many }));
+    try std.testing.expectError(error.RunInputTooLarge, session.prepareRun(.{ .multimodal = .{ .parts = &too_many } }));
     const large = try std.testing.allocator.alloc(u8, sdk.types.MAX_RUN_INPUT_IMAGE_DATA_BYTES_V1 / 4 * 3 + 1);
     defer std.testing.allocator.free(large);
     @memset(large, 0);
-    try std.testing.expectError(error.RunInputTooLarge, session.prepareRun(.{ .multimodal = &.{.{ .image = .{ .format = .png, .bytes = large } }} }));
+    try std.testing.expectError(error.RunInputTooLarge, session.prepareRun(.{ .multimodal = .{ .parts = &.{.{ .image = .{ .format = .png, .bytes = large } }} } }));
     const maximum_image = agent.InputPart{ .image = .{ .format = .png, .bytes = large[0 .. large.len - 1] } };
     const total_too_large = [_]agent.InputPart{maximum_image} ** 4;
-    try std.testing.expectError(error.RunInputTooLarge, session.prepareRun(.{ .multimodal = &total_too_large }));
+    try std.testing.expectError(error.RunInputTooLarge, session.prepareRun(.{ .multimodal = .{ .parts = &total_too_large } }));
     try std.testing.expectEqual(0, used(runtime));
     try std.testing.expectEqual(0, fixture.fake_core.run_calls);
-    const id = try session.prepareRun(.{ .multimodal = &.{maximum_image} });
+    const id = try session.prepareRun(.{ .multimodal = .{ .parts = &.{maximum_image} } });
     try std.testing.expectEqual(1, id);
     try session.cancelPreparedRun(id);
     const max_parts = [_]agent.InputPart{image} ** sdk.types.MAX_RUN_INPUT_PARTS_V1;
-    try session.cancelPreparedRun(try session.prepareRun(.{ .multimodal = &max_parts }));
+    try session.cancelPreparedRun(try session.prepareRun(.{ .multimodal = .{ .parts = &max_parts } }));
     try std.testing.expectEqual(0, used(runtime));
 }
 
@@ -130,17 +196,17 @@ test "multimodal budget is shared by queued image inputs" {
     defer destroy(runtime);
     const first = try fixture.openSession(runtime);
     const second = try fixture.openSession(runtime);
-    const id = try first.prepareRun(.{ .multimodal = &.{image} });
-    try std.testing.expectError(error.SessionNotIdle, first.prepareRun(.{ .multimodal = &.{image} }));
+    const id = try first.prepareRun(.{ .multimodal = .{ .parts = &.{image} } });
+    try std.testing.expectError(error.SessionNotIdle, first.prepareRun(.{ .multimodal = .{ .parts = &.{image} } }));
     try std.testing.expectEqual(image_cost, used(runtime));
-    const other = try second.prepareRun(.{ .multimodal = &.{image} });
+    const other = try second.prepareRun(.{ .multimodal = .{ .parts = &.{image} } });
     try std.testing.expectEqual(image_cost * 2, used(runtime));
-    try std.testing.expectError(error.RunInputBudgetExceeded, second.prepareRun(.{ .multimodal = &.{image} }));
+    try std.testing.expectError(error.RunInputBudgetExceeded, second.prepareRun(.{ .multimodal = .{ .parts = &.{image} } }));
     try second.cancelPreparedRun(other);
     try first.cancelPreparedRun(id);
     try std.testing.expectEqual(0, used(runtime));
     try first.close(.session_close);
-    try std.testing.expectError(error.SessionClosing, first.prepareRun(.{ .multimodal = &.{image} }));
+    try std.testing.expectError(error.SessionClosing, first.prepareRun(.{ .multimodal = .{ .parts = &.{image} } }));
     try std.testing.expectEqual(0, used(runtime));
 }
 
@@ -152,10 +218,10 @@ test "multimodal allocation failures release reservations including terminal dia
         defer destroy(runtime);
         const session = try fixture.openSession(runtime);
         failing.fail_index = failing.alloc_index + failure_offset;
-        try std.testing.expectError(error.OutOfMemory, session.prepareRun(.{ .multimodal = &.{image} }));
+        try std.testing.expectError(error.OutOfMemory, session.prepareRun(.{ .multimodal = .{ .parts = &.{image} } }));
         try std.testing.expectEqual(0, used(runtime));
         failing.fail_index = std.math.maxInt(usize);
-        const id = try session.prepareRun(.{ .multimodal = &.{image} });
+        const id = try session.prepareRun(.{ .multimodal = .{ .parts = &.{image} } });
         try std.testing.expectEqual(1, id);
         try session.cancelPreparedRun(id);
     }
@@ -168,9 +234,9 @@ test "multimodal shared budget rejects before any allocation" {
     defer destroy(runtime);
     const first = try fixture.openSession(runtime);
     const second = try fixture.openSession(runtime);
-    const id = try first.prepareRun(.{ .multimodal = &.{image} });
+    const id = try first.prepareRun(.{ .multimodal = .{ .parts = &.{image} } });
     failing.fail_index = failing.alloc_index;
-    try std.testing.expectError(error.RunInputBudgetExceeded, second.prepareRun(.{ .multimodal = &.{image} }));
+    try std.testing.expectError(error.RunInputBudgetExceeded, second.prepareRun(.{ .multimodal = .{ .parts = &.{image} } }));
     try std.testing.expect(!failing.has_induced_failure);
     failing.fail_index = std.math.maxInt(usize);
     try first.cancelPreparedRun(id);
@@ -185,10 +251,10 @@ test "multimodal image capability rejection matches the submitted media kind" {
             const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
             defer destroy(runtime);
             const session = try fixture.openSession(runtime);
-            const input: agent.RunInput = .{ .multimodal = switch (shape) {
+            const input: agent.RunInput = .{ .multimodal = .{ .parts = switch (shape) {
                 .text => &.{.{ .text = "text only" }},
                 .image => &.{image},
-            } };
+            } } };
             const matches = shape == .image;
             var terminal = try execute(session, input);
             defer terminal.deinit();
@@ -208,7 +274,7 @@ test "multimodal cancellation before Core call and shutdown release owned input"
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 2 });
     defer destroy(runtime);
     const session = try fixture.openSession(runtime);
-    const id = try session.prepareRun(.{ .multimodal = &.{image} });
+    const id = try session.prepareRun(.{ .multimodal = .{ .parts = &.{image} } });
     var run = try session.beginRun(id);
     try session.requestTermination(id, .{ .interrupted = .user_cancel });
     var terminal = run.execute();
@@ -216,9 +282,9 @@ test "multimodal cancellation before Core call and shutdown release owned input"
     run.deinit();
     try std.testing.expectEqual(0, fixture.fake_core.run_calls);
     try std.testing.expectEqual(0, used(runtime));
-    _ = try session.prepareRun(.{ .multimodal = &.{image} });
+    _ = try session.prepareRun(.{ .multimodal = .{ .parts = &.{image} } });
     const other = try fixture.openSession(runtime);
-    _ = try other.prepareRun(.{ .multimodal = &.{image} });
+    _ = try other.prepareRun(.{ .multimodal = .{ .parts = &.{image} } });
     try runtime.shutdown();
     try std.testing.expectEqual(0, used(runtime));
 }
@@ -232,7 +298,7 @@ test "multimodal concurrent prepare has one winner within the Runtime budget" {
 
         fn run(self: *@This()) void {
             self.start.waitUntilFinished();
-            self.id = self.session.prepareRun(.{ .multimodal = &.{image} }) catch |err| {
+            self.id = self.session.prepareRun(.{ .multimodal = .{ .parts = &.{image} } }) catch |err| {
                 self.failure = err;
                 return;
             };
@@ -277,7 +343,7 @@ test "multimodal running and UI callback inputs remain reserved until cancellati
         const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
         defer destroy(runtime);
         const session = try fixture.openSession(runtime);
-        const id = try session.prepareRun(.{ .multimodal = &.{image} });
+        const id = try session.prepareRun(.{ .multimodal = .{ .parts = &.{image} } });
         var execution = Execution{ .run = try session.beginRun(id) };
         const thread = try std.Thread.spawn(.{}, Execution.start, .{&execution});
         fixture.fake_core.waitRunEntered();
@@ -302,7 +368,7 @@ test "multimodal callback failure poisons the Session and releases its input" {
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
     defer destroy(runtime);
     const session = try fixture.openSession(runtime);
-    var terminal = try execute(session, .{ .multimodal = &.{image} });
+    var terminal = try execute(session, .{ .multimodal = .{ .parts = &.{image} } });
     defer terminal.deinit();
     try std.testing.expectEqual(agent.Status.callback_failed, terminal.abi_status.?);
     try std.testing.expectEqual(agent.SessionState.poisoned, session.snapshot().state);

@@ -782,6 +782,36 @@ test "a request carries its method and handle ahead of its body" {
     try testing.expectEqualStrings("fixture", value.model);
 }
 
+test "a Run's selected Skill crosses with its parts" {
+    const skill_id = "0123456789abcdef" ** 4;
+    const parts = [_]contract.InputPart{
+        .{ .text = "Summarize by month" },
+        .{ .text_attachment = .{ .display_name = "sales.xlsx", .bytes = "reference" } },
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    for ([_]?surface.SelectedSkill{ .{ .skill_id = skill_id, .invocation_name = "xlsx" }, null }) |selected| {
+        const bytes = try encodeRequest(.prepare_run, testing.allocator, 9, .{
+            .input = .{ .multimodal = .{ .parts = &parts, .selected_skill = selected } },
+            .mcp_installation = null,
+            .image = null,
+            .video = null,
+            .delivery = false,
+        });
+        defer testing.allocator.free(bytes);
+        const received = try decodeRequestHeader(bytes);
+        const value = try decodeRequest(.prepare_run, arena.allocator(), received.body);
+        const input = value.input.multimodal;
+        try testing.expectEqual(@as(usize, 2), input.parts.len);
+        try testing.expectEqualStrings("Summarize by month", input.parts[0].text);
+        try testing.expectEqualStrings("reference", input.parts[1].text_attachment.bytes);
+        if (selected) |expected| {
+            try testing.expectEqualStrings(expected.skill_id, input.selected_skill.?.skill_id);
+            try testing.expectEqualStrings(expected.invocation_name, input.selected_skill.?.invocation_name);
+        } else try testing.expect(input.selected_skill == null);
+    }
+}
+
 test "a method number this build does not declare is refused, not guessed" {
     var bytes: [request_header_bytes]u8 = @splat(0);
     std.mem.writeInt(u16, bytes[0..2], 0xffff, .little);

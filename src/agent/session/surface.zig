@@ -175,9 +175,18 @@ pub const WorkspaceInput = struct {
     trust: WorkspaceTrust,
 };
 
-pub const RunInput = union(enum) {
+pub const SelectedSkill = multimodal.SelectedSkill;
+
+pub const MultimodalInput = struct {
     /// Ordered borrowed blocks, copied/encoded before prepareRun returns.
-    multimodal: []const InputPart,
+    parts: []const InputPart,
+    /// The Skill the user selected for this message, sent as the Run's one
+    /// Host context block. Borrowed until prepareRun returns.
+    selected_skill: ?SelectedSkill = null,
+};
+
+pub const RunInput = union(enum) {
+    multimodal: MultimodalInput,
     text: []const u8,
     skill: struct {
         skill_id: []const u8,

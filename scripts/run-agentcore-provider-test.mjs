@@ -432,9 +432,43 @@ function sseFor(provider) {
     .join("");
 }
 
+// The one Host block MetaWork sends (#201), exactly as the Agent renders it.
+const selectedSkillBlock =
+  "# Selected Skill\nFor this message the user explicitly selected the Skill " +
+  `"xlsx" (skill_id ${"0123456789abcdef".repeat(4)}) in the composer. ` +
+  'Invoke the Skill "xlsx" first, then apply it to the user\'s request and the attached files.';
+
+function verifySelectedSkillRequest(users, followUp) {
+  const reminder = /^<system-reminder>([\s\S]*?)<\/system-reminder>/;
+  const selected = users.at(followUp ? -2 : -1);
+  const body = reminder.exec(selected[0]?.text ?? "")?.[1] ?? "";
+  // Core's date leads one reminder, then the Selected Skill block verbatim.
+  const date = body.indexOf("# currentDate\n");
+  const block = body.indexOf(selectedSkillBlock);
+  assert.ok(date >= 0 && block > date, "the block follows Core's date");
+  assert.equal(body.split("# Selected Skill\n").length, 2);
+  // The user's words and the attachment stay in their own parts.
+  assert.ok(!body.includes("Selected Skill request."));
+  assert.ok(!body.includes("sales.xlsx"));
+  const [own] = verifyCoreTime([selected]);
+  const ownText = own.map((part) => part.text ?? "").join("\n");
+  assert.ok(ownText.startsWith("Selected Skill request."));
+  assert.ok(
+    ownText.indexOf("Filename: sales.xlsx\n") >
+      ownText.indexOf("Selected Skill request."),
+  );
+  assert.ok(ownText.endsWith("Selected Skill attachment reference."));
+  if (!followUp) return;
+  // The block stays in history but is not sent again with the next Run.
+  const latest = users.at(-1);
+  verifyCoreTime([latest]);
+  assert.ok(!JSON.stringify(latest).includes("# Selected Skill"));
+}
+
 let activeProvider = null;
 let requestCount = 0;
 let longErrorRequestCount = 0;
+let selectedSkillRequestCount = 0;
 let requestError = null;
 let baselineSystemPrompt = null;
 const server = createServer((request, response) => {
@@ -505,6 +539,27 @@ const server = createServer((request, response) => {
             },
           }),
         );
+        return;
+      }
+      if (
+        hostMode &&
+        (latestUserText.endsWith("Selected Skill attachment reference.") ||
+          latestUserText.endsWith("Selected Skill follow-up."))
+      ) {
+        if (activeProvider.name !== "gemini")
+          assert.equal(payload.model, activeProvider.model);
+        assertHostIdentity(payload, false);
+        verifySelectedSkillRequest(
+          userParts(activeProvider, payload),
+          latestUserText.endsWith("Selected Skill follow-up."),
+        );
+        selectedSkillRequestCount += 1;
+        response.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "close",
+        });
+        response.end(sseFor(activeProvider));
         return;
       }
       if (hostMode && requestCount >= 10) {
@@ -692,6 +747,7 @@ pub fn build(b: *std.Build) void {
     activeProvider = provider;
     requestCount = 0;
     longErrorRequestCount = 0;
+    selectedSkillRequestCount = 0;
     requestError = null;
     const baseUrl = `${serverRoot}${provider.baseUrlSuffix}`;
     if (source !== null) {
@@ -765,17 +821,19 @@ pub fn build(b: *std.Build) void {
         : 12
       : 6;
     const expectedLongErrors = hostMode && provider.name === "openai" ? 1 : 0;
+    const expectedSelectedSkillRequests = hostMode ? 2 : 0;
     if (requestError)
       providerFailures.push(
         new Error(`${provider.name}: ${requestError.message}`),
       );
     else if (
       requestCount !== expectedRequests ||
-      longErrorRequestCount !== expectedLongErrors
+      longErrorRequestCount !== expectedLongErrors ||
+      selectedSkillRequestCount !== expectedSelectedSkillRequests
     )
       providerFailures.push(
         new Error(
-          `${provider.name}: expected ${expectedRequests} requests and ${expectedLongErrors} long-field rejection, got ${requestCount} and ${longErrorRequestCount}`,
+          `${provider.name}: expected ${expectedRequests} requests, ${expectedLongErrors} long-field rejection and ${expectedSelectedSkillRequests} Selected Skill requests, got ${requestCount}, ${longErrorRequestCount} and ${selectedSkillRequestCount}`,
         ),
       );
     else

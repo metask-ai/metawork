@@ -113,14 +113,14 @@ pub fn main(init: std.process.Init) !void {
     };
     const session = try runtime.createSession(options);
     _ = try success(runtime, session, .{ .text = "Reply with one short sentence." });
-    _ = try success(runtime, session, .{ .multimodal = &.{
+    _ = try success(runtime, session, .{ .multimodal = .{ .parts = &.{
         .{ .text = "First image." },
         .{ .image = .{ .format = .png, .bytes = png } },
         .{ .text = "Second image." },
         .{ .image = .{ .format = .gif, .bytes = gif } },
-    } });
+    } } });
     _ = try success(runtime, session, .{ .text = "Continue with the images." });
-    const last_run = try success(runtime, session, .{ .multimodal = &.{.{ .image = .{ .format = .png, .bytes = large_png } }} });
+    const last_run = try success(runtime, session, .{ .multimodal = .{ .parts = &.{.{ .image = .{ .format = .png, .bytes = large_png } }} } });
 
     var checkpoint = Checkpoint{ .bytes = try allocator.alloc(u8, 16 * 1024 * 1024) };
     defer allocator.free(checkpoint.bytes);
@@ -166,7 +166,7 @@ pub fn main(init: std.process.Init) !void {
     _ = try success(runtime, restored.session, .{ .text = "Continue after restore." });
     if (protocol != .gemini_native) {
         try restored.session.setModel("unknown-provider-test-model");
-        var rejected = try execute(restored.session, .{ .multimodal = &.{.{ .image = .{ .format = .png, .bytes = png } }} });
+        var rejected = try execute(restored.session, .{ .multimodal = .{ .parts = &.{.{ .image = .{ .format = .png, .bytes = png } }} } });
         defer rejected.deinit();
         if (rejected.abi_status != .image_input_capability_unknown or rejected.failure != .abi_status or
             rejected.stop_reason != null or rejected.durable_budget != null or
@@ -174,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
             return error.InvalidImageRejection;
         try restored.session.setModel(model);
     } else {
-        if (restored.session.prepareRun(.{ .multimodal = &.{.{ .text = "" }} })) |_| {
+        if (restored.session.prepareRun(.{ .multimodal = .{ .parts = &.{.{ .text = "" }} } })) |_| {
             return error.AcceptedInvalidInput;
         } else |err| if (err != error.InvalidRunInput) return err;
     }
@@ -219,8 +219,28 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Host provider failure and later explicit Run passed: {s}\n", .{provider});
     }
     if (protocol == .openai_chat_completions) try longModelError(runtime, options);
+    try selectedSkill(runtime, options);
     std.debug.print("Host identity, legacy restore and isolated Skill inheritance passed: {s}\n", .{provider});
     std.debug.print("Host multimodal history and checkpoint acceptance passed: {s}\n", .{provider});
+}
+
+/// #201: the Skill a user selects with attachments reaches the Provider as
+/// the Run's one Host block, ahead of the user's own words. The runner checks
+/// the request bodies; a follow-up Run carries no block of its own.
+fn selectedSkill(runtime: *agent.Runtime, options: agent.SessionOpenOptions) !void {
+    const session = try runtime.createSession(options);
+    defer {
+        session.close(.session_close) catch unreachable;
+        runtime.releaseClosedSession(session) catch unreachable;
+    }
+    _ = try success(runtime, session, .{ .multimodal = .{
+        .parts = &.{
+            .{ .text = "Selected Skill request." },
+            .{ .text_attachment = .{ .display_name = "sales.xlsx", .bytes = "Selected Skill attachment reference." } },
+        },
+        .selected_skill = .{ .skill_id = "0123456789abcdef" ** 4, .invocation_name = "xlsx" },
+    } });
+    _ = try success(runtime, session, .{ .text = "Selected Skill follow-up." });
 }
 
 fn longModelError(runtime: *agent.Runtime, options: agent.SessionOpenOptions) !void {

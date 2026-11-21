@@ -55,6 +55,7 @@ pub const SessionRestoreOptions = surface.SessionRestoreOptions;
 pub const CloseOutcome = surface.CloseOutcome;
 pub const BeginRunFailure = surface.BeginRunFailure;
 pub const RunInput = surface.RunInput;
+pub const SelectedSkill = surface.SelectedSkill;
 pub const PendingUiRequest = surface.PendingUiRequest;
 pub const SessionSnapshot = surface.SessionSnapshot;
 pub const ImageGenerationRunInput = surface.ImageGenerationRunInput;
@@ -285,7 +286,13 @@ const OwnedRunInput = union(enum) {
         input_budget: *multimodal.Budget,
     ) (Error || std.mem.Allocator.Error)!OwnedRunInput {
         return switch (input) {
-            .multimodal => |parts| .{ .multimodal = try multimodal.OwnedInput.init(allocator, parts, max_input_bytes, input_budget) },
+            .multimodal => |value| .{ .multimodal = try multimodal.OwnedInput.init(
+                allocator,
+                value.parts,
+                value.selected_skill,
+                max_input_bytes,
+                input_budget,
+            ) },
             .text => |text| {
                 if (text.len > max_input_bytes) return error.RunInputTooLarge;
                 if (!std.unicode.utf8ValidateSlice(text))
@@ -2132,6 +2139,12 @@ pub const Session = struct {
         // Skill Runs carry the date block under the same SYSTEM policy.
         options.time_context_code = wire.TIME_CONTEXT_SYSTEM;
         options.stream_retry_budget = stream_retry_budget;
+        // The one Host context block MetaWork sends (#201): the Skill the user
+        // selected for a multimodal message. Every other Run sends none.
+        if (input.* == .multimodal) if (input.multimodal.selected_skill_block) |*selected_skill_block| {
+            options.context_blocks = @ptrCast(selected_skill_block);
+            options.context_block_count = 1;
+        };
         self.core_call_in_progress = true;
         self.unlock();
         // A successful Core call must still populate and validate the complete

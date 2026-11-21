@@ -10157,7 +10157,7 @@ fn validateRunInput(
             if (requires_instruction and
                 std.mem.trim(u8, multimodal.text, " \t\r\n").len == 0)
                 return error.MissingInstruction;
-            break :blk .{ .multimodal = parts[0..part_count] };
+            break :blk .{ .multimodal = .{ .parts = parts[0..part_count] } };
         },
         .skill => |skill_input| blk: {
             const pinned = input_catalog orelse (if (task.runtime.pinnedCatalogConst()) |snapshot| snapshot.view() else return error.CatalogUnavailable);

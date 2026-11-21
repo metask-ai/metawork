@@ -243,9 +243,11 @@ Compact 的 `Queued / Compacting / Stopping` 不是由 Worker 直接覆盖同一
 
 ### Agent Session 多模态输入
 
-Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本、带来源名称的非空 UTF-8 文本附件，或带 `ImageFormat` 的非空图片文件字节。图片格式为 PNG、JPEG、GIF、WebP；调用方负责图片文件字节与声明格式相符。允许纯图片及图文交错；既有 Text/Skill 语义保持不变。该入口不接受 document part、URL、路径、file ID、调用方 Base64、Skill 与附件混合或音视频。Product 附件能力只消费其中 PNG、JPEG、WebP 及按[产品输入限制](requirements.md#53-task)接纳的其他文件的有界 UTF-8 原件引用，普通附件原件大小不作为模型输入大小。Product 构造有界图片预览与 Task 本地原件引用文本，固定为可空用户文字 part 后接 attachment chip 顺序；含非图片文件时 Product 必须要求非空用户指令。GIF 与正文内图文交错仍只属于 Agent 公共能力，不据此宣称 Renderer 已开放。
+Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本、带来源名称的非空 UTF-8 文本附件，或带 `ImageFormat` 的非空图片文件字节。图片格式为 PNG、JPEG、GIF、WebP；调用方负责图片文件字节与声明格式相符。允许纯图片及图文交错；既有 Text/Skill 语义保持不变。该入口不接受 document part、URL、路径、file ID、调用方 Base64 或音视频。Product 附件能力只消费其中 PNG、JPEG、WebP 及按[产品输入限制](requirements.md#53-task)接纳的其他文件的有界 UTF-8 原件引用，普通附件原件大小不作为模型输入大小。Product 构造有界图片预览与 Task 本地原件引用文本，固定为可空用户文字 part 后接 attachment chip 顺序；含非图片文件时 Product 必须要求非空用户指令。GIF 与正文内图文交错仍只属于 Agent 公共能力，不据此宣称 Renderer 已开放。
 
 调用方只需保证输入 slice 和字节活到 `prepareRun` 返回。Agent 直接从 borrowed 图片字节编码到 owned 标准 Base64，不额外持有一份 raw 副本；文本附件则在同一次 owned allocation 中加入固定的不可信资料声明、经校验的来源名称和字节长度，并与用户指令保持独立 `textPart`。全部输入通过官方 `textPart`、`imagePart` 和 `runMultimodal` 传入 Core，普通附件的 Task 原件引用是有界的不可信资料文本，路径指向保留的 Host-owned copy；Agent 按格式选择可用 Skill 或工具处理原件，文本可用既有 built-in Read/Grep 按需取内容。公共输入类型不暴露 SDK wire，也不增加 AgentCore ABI 或 Provider-specific document path。Provider 协议编码和 Core 模型媒体能力判断仍由 AgentCore 负责；Host 不导入 Account 元数据、不猜模型能力，也不丢弃媒体、自动重试或切换模型。
+
+Core 的 Skill 输入不带 parts，用户为一条带附件的消息选择的 Skill 因此随 multimodal 输入以可空的 `selected_skill` 传入，只含两项目录事实：Core 的 64 位小写十六进制 `skill_id` 与 Skill 工具接受的调用名。Agent 在 admission 时按 Core 目录语法校验二者，不合规即 `InvalidRunInput`，不进入 Core；再把它渲染成本轮唯一的 Host context block，label 固定为 `Selected Skill`，正文是固定的英文说明加这两项事实，要求先调用该 Skill 再处理用户请求与附件。Skill 的显示名、说明、用户文字与参数一律不进 block：前两者是作者文本而非 Host 事实，后两者属于用户 part；由于语法排除了 `<`，block 不可能带上 Core 拒绝整轮的 system-reminder 标签。Core 把它接在 `currentDate` 之后、合成本轮用户记录开头唯一的 system-reminder，并写入对话历史；后续 Run 不再重复发送。Skill 仍由模型经 built-in Skill 工具按 Session 已绑定的 catalog 与 policy 加载，Host 不读取 Skill 正文，也不为这一轮收窄 policy。Skill 是否被调用取决于模型照做，Host 不伪造调用。
 
 单次输入的 parts 数、单图 Base64 上限和总 prompt 上限使用 canonical SDK 常量。Host 的总 prompt 核算包括用户文字、文本附件封装与正文、Base64 和 media type 字节；全部 text part 合计还受既有 `max_prompt_bytes` 限制。Runtime 的 `max_multimodal_input_bytes` 约束 owned parts 数组与文本/Base64 storage 的总分配请求字节，包括尚未完成 admission 的并发准备；它不表示调用方 raw bytes、Core Conversation、allocator overhead 或进程整体内存上限。Runtime 预算耗尽返回 `RunInputBudgetExceeded`，单次输入超限返回 `RunInputTooLarge`；均在 owned allocation 前失败。已开始执行的输入须在 Core 调用、相关 callback 和 abort 调用静止后释放。
 
@@ -255,7 +257,7 @@ Models 声明的图片输入能力必须随执行配置冻结，并在 Session c
 
 ### 每 Run 时间上下文
 
-日期采样、系统时区解析、日期文本和注入均由 AgentCore 拥有。Agent 只选择官方系统时间策略，不向 Runtime 注入时钟 callback，不通过 Application 或 Native SDK 取得日期与时区，不提供 Host context blocks。普通文本与多模态 Run 在 Core 开始执行时取得本轮日期；排队和恢复后的新 Run 同样重新采样，一个 Run 内的工具循环使用本轮快照。Run 显式选择官方 `TIME_CONTEXT_SYSTEM`，`utc_offset_minutes` 为零，Host `context_blocks` 为 null、count 为零。
+日期采样、系统时区解析、日期文本和注入均由 AgentCore 拥有。Agent 只选择官方系统时间策略，不向 Runtime 注入时钟 callback，不通过 Application 或 Native SDK 取得日期与时区，不以 Host context block 提供日期或时区。普通文本与多模态 Run 在 Core 开始执行时取得本轮日期；排队和恢复后的新 Run 同样重新采样，一个 Run 内的工具循环使用本轮快照。Run 显式选择官方 `TIME_CONTEXT_SYSTEM`，`utc_offset_minutes` 为零；Host `context_blocks` 只在带所选 Skill 的 multimodal Run 上为上节唯一的 `Selected Skill` block，其余 Run 为 null、count 为零。
 
 Core 将日期写入本轮用户记录的 `currentDate` system-reminder，系统提示保持稳定；历史和 checkpoint 中旧 Run 的日期继续由 Core 消费，不由 Host 删除、重写或重放。Skill Run 按官方语义同样携带日期 block，独立 Completion 和 manual compact 不建立 Host 日期注入。系统日期的产品范围见 [产品需求](requirements.md#54-agent-交互)，验证责任与已知缺口见 [验证规范](validation.md)。
 
