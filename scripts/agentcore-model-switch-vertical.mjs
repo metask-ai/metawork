@@ -84,6 +84,17 @@ export async function runModelSwitchVertical({
   const endpoint = `http://127.0.0.1:${server.address().port}/v1/responses`;
   const accepted = (result) =>
     assert.equal(result.accepted, true, JSON.stringify(result));
+  // A Session that is still preparing its Skill catalog refuses a Run
+  // without starting it. Only that refusal is asked again; the catalog
+  // query crosses to the execution process, so it can still be in flight.
+  const run = (payload) =>
+    wait(async () => {
+      const result = await invoke("metawork.tasks.run", payload);
+      if (result.accepted) return result;
+      assert.equal(result.runId, null, JSON.stringify(result));
+      assert.equal(result.reason, "catalog_loading", JSON.stringify(result));
+      return null;
+    }, "a Run accepted once its Session's catalog is prepared");
   const wait = (operation, label) =>
     poll(
       async () => {
@@ -195,13 +206,11 @@ export async function runModelSwitchVertical({
       await sourceGate;
       return textSse("model-switch-source", "SOURCE_DESKTOP_CONTEXT");
     });
-    accepted(
-      await invoke("metawork.tasks.run", {
-        taskId,
-        expectedBindingEpoch: created.bindingEpoch,
-        input: { kind: "text", text: "ORIGINAL_DESKTOP_CONTEXT" },
-      }),
-    );
+    await run({
+      taskId,
+      expectedBindingEpoch: created.bindingEpoch,
+      input: { kind: "text", text: "ORIGINAL_DESKTOP_CONTEXT" },
+    });
     await wait(() => sourceEntered, "original model Run entered");
     await wait(
       () =>
@@ -426,13 +435,11 @@ export async function runModelSwitchVertical({
       BigInt(installed.binding.epoch),
       BigInt(created.bindingEpoch) + 1n,
     );
-    accepted(
-      await invoke("metawork.tasks.run", {
-        taskId,
-        expectedBindingEpoch: installed.binding.epoch,
-        input: { kind: "text", text: "Continue the original conversation." },
-      }),
-    );
+    await run({
+      taskId,
+      expectedBindingEpoch: installed.binding.epoch,
+      input: { kind: "text", text: "Continue the original conversation." },
+    });
     const final = await wait(async () => {
       const task = await readTask();
       return task.runs.length === 2 &&
