@@ -1498,3 +1498,100 @@ test "a Run's effects are released only after the callbacks using them return, w
     _ = route.session.closeOutcome(.session_close);
     port.releaseClosedSession(route.session) catch {};
 }
+
+/// A process outside the Owner's reach, by id: the grandchild below.
+const ForeignProcess = struct {
+    const windows = std.os.windows;
+    extern "kernel32" fn OpenProcess(access: windows.DWORD, inherit: windows.BOOL, pid: windows.DWORD) callconv(.winapi) ?windows.HANDLE;
+    extern "kernel32" fn TerminateProcess(process: windows.HANDLE, code: windows.UINT) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn GetExitCodeProcess(process: windows.HANDLE, code: *windows.DWORD) callconv(.winapi) windows.BOOL;
+    const process_terminate: windows.DWORD = 0x0001;
+    const process_query_limited_information: windows.DWORD = 0x1000;
+    const still_active: windows.DWORD = 259;
+
+    fn alive(pid: u32) bool {
+        if (builtin.os.tag != .windows) {
+            std.posix.kill(@intCast(pid), @enumFromInt(0)) catch return false;
+            return true;
+        }
+        const handle = OpenProcess(process_query_limited_information, .FALSE, pid) orelse return false;
+        defer windows.CloseHandle(handle);
+        var code: windows.DWORD = 0;
+        if (GetExitCodeProcess(handle, &code) == .FALSE) return false;
+        return code == still_active;
+    }
+
+    fn end(pid: u32) void {
+        if (builtin.os.tag != .windows) {
+            std.posix.kill(@intCast(pid), .KILL) catch {};
+            return;
+        }
+        const handle = OpenProcess(process_terminate, .FALSE, pid) orelse return;
+        defer windows.CloseHandle(handle);
+        _ = TerminateProcess(handle, 1);
+    }
+};
+
+test "a process the execution process starts does not hold the link once that process is gone" {
+    // The fixture starts a long-lived grandchild with its standard handles
+    // inherited, as AgentCore starts a tool. Ending the execution process must
+    // still end the link: the liveness deadline here is a minute, so only the
+    // end of the stream can report the loss in time, and the generation can
+    // only be collected once its reader has seen that end.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const pid_path = try std.fs.path.join(allocator, &.{ root, "grandchild.pid" });
+    defer allocator.free(pid_path);
+    const flag = try std.mem.concat(allocator, u8, &.{ "--spawn-grandchild=", pid_path });
+    defer allocator.free(flag);
+
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try owner.init(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .queue_limits = .{},
+        .spawn = .{ .explicit = &.{ fixture, "--with-runtime", flag } },
+        .wake = wake.notifier(),
+        .heartbeat_deadline_ms = 60_000,
+    });
+    defer owner.deinit();
+    const port = owner.runtimePort();
+    _ = port.restoreAdmission(null);
+    const route = try port.createSessionRoute(plainSessionOptions(root));
+
+    var pid_text: [32]u8 = undefined;
+    var waited: u64 = 0;
+    const grandchild: u32 = while (true) : (waited += wait_tick_ms) {
+        if (tmp.dir.readFile(io, "grandchild.pid", &pid_text)) |text| {
+            if (text.len != 0) break try std.fmt.parseInt(u32, text, 10);
+        } else |_| {}
+        if (waited >= wait_limit_ms) return error.GrandchildNeverStarted;
+        try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+    };
+    // Registered after the Owner's deinit, so it runs first: should the link
+    // still be held, the Owner's stop would otherwise wait on it.
+    defer ForeignProcess.end(grandchild);
+    try std.testing.expect(ForeignProcess.alive(grandchild));
+
+    execution_client.TestSupport.killCurrent(&owner);
+    waited = 0;
+    while (owner.takeLoss() == null) : (waited += wait_tick_ms) {
+        if (waited >= 5_000) return error.EndOfStreamNeverSeen;
+        try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+    }
+    _ = route.session.closeOutcome(.session_close);
+    port.releaseClosedSession(route.session) catch {};
+    waited = 0;
+    while (owner.generations.items.len != 0) : (waited += wait_tick_ms) {
+        owner.sweep();
+        if (waited >= wait_limit_ms) return error.GenerationNeverCollected;
+        try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+    }
+    // And all of it with the grandchild still running.
+    try std.testing.expect(ForeignProcess.alive(grandchild));
+}

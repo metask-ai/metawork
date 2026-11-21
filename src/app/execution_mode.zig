@@ -14,6 +14,7 @@
 //! creates no window. Everything it will own arrives explicitly.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const agent_link = @import("metawork_agent_link");
 
@@ -69,8 +70,9 @@ pub fn run(
     allocator: std.mem.Allocator,
     options: Options,
 ) Exit {
-    const input = std.Io.File.stdin();
-    const output = std.Io.File.stdout();
+    const ends = takeLink() catch return .transport_failed;
+    const input = ends.input;
+    const output = ends.output;
 
     const read_buffer = allocator.alloc(u8, options.read_buffer_bytes) catch
         return .resource_unavailable;
@@ -168,4 +170,103 @@ test "every other outcome is distinguishable from the normal end" {
         for (values[index + 1 ..]) |other|
             try std.testing.expect(@intFromEnum(value) != @intFromEnum(other));
     }
+}
+
+// ---------------------------------------------------------------------------
+// The link's ends, kept from what this process starts
+// ---------------------------------------------------------------------------
+
+const LinkEnds = struct {
+    input: std.Io.File,
+    output: std.Io.File,
+};
+
+/// Moves the link off the standard input and output before anything else
+/// here runs, and leaves the null device in their place.
+///
+/// AgentCore starts processes -- shell commands, MCP servers, a server a
+/// command leaves running -- and a process started with the standard
+/// handles inherited would hold both ends of the link. One that outlives
+/// this process keeps the window from ever reading the end of the stream,
+/// so the window never learns this process is gone, cannot collect what it
+/// kept for it, and waits on that read at exit; one that writes to its
+/// standard output writes into the link. Kept on handles nothing inherits,
+/// the link ends with this process whatever it started.
+fn takeLink() error{LinkUnavailable}!LinkEnds {
+    if (builtin.os.tag == .windows) return takeLinkWindows();
+    const c = std.c;
+    // Above the standard three, closed on exec.
+    const input = c.fcntl(c.STDIN_FILENO, c.F.DUPFD_CLOEXEC, @as(c_int, 3));
+    if (input < 0) return error.LinkUnavailable;
+    const output = c.fcntl(c.STDOUT_FILENO, c.F.DUPFD_CLOEXEC, @as(c_int, 3));
+    if (output < 0) return error.LinkUnavailable;
+    const null_device = c.open("/dev/null", .{ .ACCMODE = .RDWR });
+    if (null_device < 0) return error.LinkUnavailable;
+    if (c.dup2(null_device, c.STDIN_FILENO) < 0 or c.dup2(null_device, c.STDOUT_FILENO) < 0)
+        return error.LinkUnavailable;
+    if (null_device > c.STDERR_FILENO) _ = c.close(null_device);
+    return .{
+        .input = .{ .handle = input, .flags = .{ .nonblocking = false } },
+        .output = .{ .handle = output, .flags = .{ .nonblocking = false } },
+    };
+}
+
+const windows = std.os.windows;
+
+extern "kernel32" fn DuplicateHandle(
+    source_process: windows.HANDLE,
+    source: windows.HANDLE,
+    target_process: windows.HANDLE,
+    target: *windows.HANDLE,
+    desired_access: windows.DWORD,
+    inherit: windows.BOOL,
+    options: windows.DWORD,
+) callconv(.winapi) windows.BOOL;
+
+extern "kernel32" fn SetStdHandle(which: windows.DWORD, handle: windows.HANDLE) callconv(.winapi) windows.BOOL;
+
+extern "kernel32" fn CreateFileW(
+    name: [*:0]const u16,
+    access: windows.DWORD,
+    share: windows.DWORD,
+    security: ?*windows.SECURITY_ATTRIBUTES,
+    disposition: windows.DWORD,
+    flags: windows.DWORD,
+    template: ?windows.HANDLE,
+) callconv(.winapi) windows.HANDLE;
+
+const std_input_handle: windows.DWORD = @bitCast(@as(i32, -10));
+const std_output_handle: windows.DWORD = @bitCast(@as(i32, -11));
+const duplicate_close_source: windows.DWORD = 0x1;
+const duplicate_same_access: windows.DWORD = 0x2;
+const generic_read: windows.DWORD = 0x80000000;
+const generic_write: windows.DWORD = 0x40000000;
+const file_share_read_write: windows.DWORD = 0x1 | 0x2;
+const open_existing: windows.DWORD = 3;
+
+fn takeLinkWindows() error{LinkUnavailable}!LinkEnds {
+    const process = windows.GetCurrentProcess();
+    const parameters = windows.peb().ProcessParameters;
+    // Duplicated without inheritance; the inheritable originals close.
+    var input: windows.HANDLE = undefined;
+    if (DuplicateHandle(process, parameters.hStdInput, process, &input, 0, .FALSE, duplicate_same_access | duplicate_close_source) == .FALSE)
+        return error.LinkUnavailable;
+    var output: windows.HANDLE = undefined;
+    if (DuplicateHandle(process, parameters.hStdOutput, process, &output, 0, .FALSE, duplicate_same_access | duplicate_close_source) == .FALSE)
+        return error.LinkUnavailable;
+    // Inheritable, so a child handed the standard handles gets a working
+    // device rather than an invalid handle.
+    var security: windows.SECURITY_ATTRIBUTES = .{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = null,
+        .bInheritHandle = .TRUE,
+    };
+    const null_device = CreateFileW(std.unicode.utf8ToUtf16LeStringLiteral("NUL"), generic_read | generic_write, file_share_read_write, &security, open_existing, 0, null);
+    if (null_device == windows.INVALID_HANDLE_VALUE) return error.LinkUnavailable;
+    if (SetStdHandle(std_input_handle, null_device) == .FALSE or SetStdHandle(std_output_handle, null_device) == .FALSE)
+        return error.LinkUnavailable;
+    return .{
+        .input = .{ .handle = input, .flags = .{ .nonblocking = false } },
+        .output = .{ .handle = output, .flags = .{ .nonblocking = false } },
+    };
 }

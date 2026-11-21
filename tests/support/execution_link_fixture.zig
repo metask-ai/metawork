@@ -39,6 +39,10 @@
 //!     breadcrumbs, the way the application's execution half does it.
 //!   * `--crash-in-run` -- a Run traps while it executes, on the worker
 //!     thread executing it.
+//!   * `--spawn-grandchild=<path>` -- once the link is served, start this
+//!     fixture again with `--linger`, its standard handles inherited the way
+//!     a tool process's are, and write its process id to `path`.
+//!   * `--linger` -- do nothing for a minute and exit: the grandchild.
 //!   * `--exercise-mcp` -- before applying an MCP configuration, drive each
 //!     member's transport the way AgentCore drives a connector: open, an
 //!     exchange whose answer is echoed back, one carrying a secret, one its
@@ -69,6 +73,8 @@ pub const no_runtime_flag = "--no-runtime";
 pub const exercise_effects_flag = "--exercise-effects";
 pub const data_root_flag = "--data-root=";
 pub const crash_in_run_flag = "--crash-in-run";
+pub const spawn_grandchild_flag = "--spawn-grandchild=";
+pub const linger_flag = "--linger";
 
 /// The fault record identity this fixture installs with. The version is the
 /// link's own, so a test can tell this process's record from any other.
@@ -89,6 +95,8 @@ const Flags = struct {
     exercise_effects: bool = false,
     crash_in_run: bool = false,
     data_root: ?[]u8 = null,
+    grandchild_pid_path: ?[]u8 = null,
+    linger: bool = false,
     session_id_floor: u64 = 0,
 };
 
@@ -109,6 +117,9 @@ fn readFlags(init: std.process.Init) Flags {
         if (std.mem.eql(u8, argument, no_runtime_flag)) flags.no_runtime = true;
         if (std.mem.eql(u8, argument, exercise_effects_flag)) flags.exercise_effects = true;
         if (std.mem.eql(u8, argument, crash_in_run_flag)) flags.crash_in_run = true;
+        if (std.mem.eql(u8, argument, linger_flag)) flags.linger = true;
+        if (std.mem.startsWith(u8, argument, spawn_grandchild_flag))
+            flags.grandchild_pid_path = init.gpa.dupe(u8, argument[spawn_grandchild_flag.len..]) catch null;
         if (std.mem.startsWith(u8, argument, data_root_flag))
             flags.data_root = init.gpa.dupe(u8, argument[data_root_flag.len..]) catch null;
         if (std.mem.startsWith(u8, argument, checkpoint_bytes_flag))
@@ -138,6 +149,7 @@ pub const large_message_limits: agent_link.MessageLimits = .{
 /// The fake Core's Runtime, made the way the application makes the real one.
 const FakeRuntime = struct {
     flags: Flags,
+    io: std.Io,
     runtime: ?*agent.Runtime = null,
 
     fn factory(self: *FakeRuntime) execution_server.Factory {
@@ -147,6 +159,8 @@ const FakeRuntime = struct {
     fn create(context: ?*anyopaque, notifier: agent.EventReadyNotifier) ?execution_server.Runtime {
         const self: *FakeRuntime = @ptrCast(@alignCast(context.?));
         if (self.flags.no_runtime) return null;
+        if (self.flags.grandchild_pid_path) |path| spawnGrandchild(self.io, path) catch |err|
+            std.log.warn("fixture grandchild not started: {s}", .{@errorName(err)});
         if (self.flags.hold_runs and self.flags.session_id_floor == 0)
             lifecycle_fixture.fake_core.setNextPlan(.controlled_executing_tools);
         if (self.flags.text_events) {
@@ -409,8 +423,36 @@ const FakeRuntime = struct {
     }
 };
 
+extern "kernel32" fn GetProcessId(process: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.DWORD;
+
+/// A process started the way a tool process is, standard handles inherited,
+/// which outlives this one.
+fn spawnGrandchild(io: std.Io, pid_path: []const u8) !void {
+    var path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try std.process.executablePath(io, &path_storage);
+    const child = try std.process.spawn(io, .{
+        .argv = &.{ path_storage[0..length], linger_flag },
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+        .create_no_window = true,
+    });
+    const pid: u32 = switch (@import("builtin").os.tag) {
+        .windows => GetProcessId(child.id.?),
+        else => @intCast(child.id.?),
+    };
+    var text: [16]u8 = undefined;
+    const file = try std.Io.Dir.createFileAbsolute(io, pid_path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, try std.fmt.bufPrint(&text, "{d}", .{pid}));
+}
+
 pub fn main(init: std.process.Init) !void {
     const flags = readFlags(init);
+    if (flags.linger) {
+        std.Io.sleep(init.io, .fromSeconds(60), .awake) catch {};
+        std.process.exit(0);
+    }
     const version = init.environ_map.get("METAWORK_EXEC_LINK_VERSION") orelse "fixture-0";
     const digest_text = init.environ_map.get("METAWORK_EXEC_LINK_DIGEST") orelse "11";
     var digest: [32]u8 = @splat(0);
@@ -428,7 +470,7 @@ pub fn main(init: std.process.Init) !void {
     }) catch |failure| std.log.warn("fixture fault capture unavailable: {s}", .{@errorName(failure)});
 
     lifecycle_fixture.use(std.heap.c_allocator, init.io);
-    var fake: FakeRuntime = .{ .flags = flags };
+    var fake: FakeRuntime = .{ .flags = flags, .io = init.io };
     const server_options: execution_server.Options = .{
         .factory = fake.factory(),
         .event_delay_ms = if (flags.slow_events) 200 else 0,
