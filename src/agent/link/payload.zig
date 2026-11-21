@@ -138,59 +138,6 @@ fn Wire(comptime T: type) type {
     return std.meta.Int(@typeInfo(T).int.signedness, intBytes(T) * 8);
 }
 
-/// The largest number of bytes any value of `T` can encode to, or `null` if
-/// `T` has no such bound.
-///
-/// Only a slice is unbounded, so `null` is precisely "this type carries a
-/// slice somewhere inside it". Everything else is decided by the type: an
-/// optional costs its tag byte plus its child's worst case, a union its tag
-/// plus its widest arm.
-///
-/// This exists for the one frame kind that cannot fragment. A `control`
-/// frame is never split, so a control-transport method whose request could
-/// exceed one fragment is a method that cannot travel on the transport it is
-/// registered with -- and the registration is the only place that says which
-/// transport it uses. Asking the type rather than the value is what makes
-/// that a build failure instead of an assertion the first large Stop trips.
-pub fn maxEncodedSize(comptime T: type) ?usize {
-    comptime {
-        requireStructural(T);
-        return switch (@typeInfo(T)) {
-            .void => 0,
-            .bool => 1,
-            .int => intBytes(T),
-            .@"enum" => |info| intBytes(info.tag_type),
-            .optional => |info| blk: {
-                const child = maxEncodedSize(info.child) orelse break :blk null;
-                break :blk 1 + child;
-            },
-            .array => |info| blk: {
-                const element = maxEncodedSize(info.child) orelse break :blk null;
-                break :blk element * info.len;
-            },
-            .@"struct" => |info| blk: {
-                var total: usize = 0;
-                for (info.fields) |field| {
-                    total += maxEncodedSize(field.type) orelse break :blk null;
-                }
-                break :blk total;
-            },
-            .@"union" => |info| blk: {
-                var widest: usize = 0;
-                for (info.fields) |field| {
-                    const arm = maxEncodedSize(field.type) orelse break :blk null;
-                    widest = @max(widest, arm);
-                }
-                break :blk intBytes(@typeInfo(info.tag_type.?).@"enum".tag_type) + widest;
-            },
-            // A slice: its length is a runtime fact, which is the whole
-            // distinction this function draws.
-            .pointer => null,
-            else => unreachable,
-        };
-    }
-}
-
 /// How many bytes `value` encodes to.
 pub fn encodedSize(comptime T: type, value: T) usize {
     requireStructural(T);

@@ -1,10 +1,9 @@
 //! The explicit wire shapes for the payload types the structural codec
 //! refuses.
 //!
-//! `crossings.zig` records which types owe a shape and why; this is where the
-//! shapes live. Each one is a plain-data mirror that `payload.zig` can carry,
-//! plus the conversion in whichever direction is meaningful without the other
-//! half's context. A mirror is never a second source of truth: every field it
+//! Each one is a plain-data mirror that `payload.zig` can carry, plus the
+//! conversion in whichever direction is meaningful without the other half's
+//! context. A mirror is never a second source of truth: every field it
 //! has, it has because the original has it, and `requireStructural` on the
 //! mirror plus a round-trip test is what keeps the two from drifting.
 //!
@@ -27,29 +26,10 @@ const contract = @import("agent_contract");
 const error_code = @import("error_code.zig");
 const payload = @import("payload.zig");
 const checkpoint = @import("agent_checkpoint");
-const catalog = @import("agent_catalog");
-const mcp_catalog = @import("agent_mcp_catalog");
-const checkpoint_restore = @import("agent_checkpoint_restore");
 const handle_table = @import("handle_table.zig");
-const handles = @import("handles.zig");
-const image_generation = contract.image_generation;
-const generate_video = contract.generate_video;
 
 const control = contract.control;
 const surface = contract.surface;
-
-/// An id standing in for an object that stays on the far side. Zero is never
-/// a live handle, so a decoded zero is a protocol violation rather than a
-/// null object.
-pub const HandleId = struct {
-    value: u64,
-
-    pub const none: HandleId = .{ .value = 0 };
-
-    pub fn valid(self: HandleId) bool {
-        return self.value != 0;
-    }
-};
 
 // ---------------------------------------------------------------------------
 // An embedded error set becomes its registered number
@@ -455,14 +435,11 @@ pub const CheckpointDescription = struct {
 };
 
 /// `checkpoint.Outcome`: the export's identity and the description, or the
-/// typed failure. The bytes stayed on the far side's disk.
+/// typed failure.
 pub const CheckpointOutcome = union(enum) {
     success: struct {
         checkpoint: checkpoint.Export,
-        /// Where the bytes are. Plain data already -- a tag and a bounded
-        /// name -- and it has to cross, because it is the one thing the
-        /// caller cannot work out for itself: the execution half wrote into
-        /// its own stage area, and nothing in the export's own facts says so.
+        /// Where the bytes are. Plain data already, so it crosses as it is.
         placement: checkpoint.Placement,
         description: CheckpointDescription,
     },
@@ -517,199 +494,8 @@ pub const PendingUiRequest = struct {
 };
 
 // ---------------------------------------------------------------------------
-// A capability the far side composes, and the inputs it needs to
-// ---------------------------------------------------------------------------
-
-// Nothing crosses for an export's destination.
-//
-// This used to be `CheckpointDestination`, carrying `task_id`, `generation`
-// and `hard_bytes`. Working out what it actually had to contain emptied it:
-// `task_id` is on the Session, `hard_bytes` is in the call's own `limits`,
-// and `generation` was the wrong kind of field altogether -- the export
-// assigns it, so a caller filling it in asserted something it could not
-// know. What the execution half needs is composed over there, as
-// `call_frame.BlobDestination`.
-//
-// Kept as a comment rather than deleted silently, because
-// `crossings.zig` records this type as owing a shape, and "its shape is
-// nothing" is an answer that has to be readable somewhere.
-
-/// That a Run may deliver files, and nothing else.
-///
-/// An earlier version of this carried the delivery root, because this file
-/// said the inspection callback was composed in the execution half against
-/// it. That was wrong, and wrong in the direction that matters.
-/// `deliver_file.zig` opens by saying that file effects and Product commit
-/// are separate owners and that a model-provided path never constitutes a
-/// receipt; `src/app.zig` composes the capability with the Host's own copy of
-/// the root and refuses the effect on the main thread. The inspection is the
-/// caller's, so it stays the caller's: it is registered in `reverse.zig` as a
-/// reverse call rather than rebuilt over here.
-///
-/// With the inspection answered by the half that already holds the root, the
-/// root has no reader on this side -- and an asserted root that nobody reads
-/// is worse than none, because it looks like a fact that was checked. So the
-/// whole content is the optional's presence: enabled, or absent.
-pub const FileDeliveryEnabled = struct {};
-
-/// `catalog.Query` without its borrowed source lifetime.
-///
-/// The lifetime is a retain/release pair over an object the caller owns -- the
-/// registered skill source -- and its own contract requires the callbacks to
-/// be "thread-safe, nonblocking reference accounting only". A cross-process
-/// call is blocking by construction, so that contract rules out forwarding it
-/// over the link at all; and the blocking would run the wrong way, with the
-/// execution half waiting on a UI the architecture says may be unreachable.
-///
-/// So nothing crosses for it. The caller retains before the query goes out and
-/// releases when the lease it got back is released, and the execution half
-/// receives a guarantee instead of a hook: these sources are pinned for this
-/// lease's life. That keeps the decision to pin with the owner, and it is why
-/// a handle table is needed only in the execution half -- this was the one
-/// capability that pointed the other way.
-pub const CatalogQuery = struct {
-    canonical_user_home: []const u8,
-    target: catalog.QueryTarget,
-    additional_sources: []const catalog.Source,
-    default_source_priority: i32,
-};
-
-/// What crosses for a generated-image Run: the endpoint, the execution source
-/// and the model, and deliberately not the credential.
-///
-/// Three capabilities in the original are composed in the execution half
-/// instead of travelling -- the HTTP transport, the output commit, and the
-/// credential reader -- and the reader is why the bytes stay behind. `execute`
-/// reads the reader live and never looks at the binding's bytes when one is
-/// present, so a credential sent per request would cross, be `secureZero`ed,
-/// and never be read. It would also be the one secret on this wire that no
-/// rule requires: section 6 lists where a credential may live and a link
-/// payload is not among them.
-///
-/// The reader matters for more than this one tool. Image, video, the automatic
-/// title and the approval reviewer all read a credential that
-/// `update_credential` renews over the link, so the execution half holds one
-/// credential source fed by the link rather than four readers wired
-/// separately -- which is also what keeps #175 from recurring in another
-/// shape, since a per-Run cached copy is a renewal point that can be missed.
-pub const ImageGenerationBinding = struct {
-    endpoint: []const u8,
-    source: []const u8,
-    model: []const u8,
-};
-
-/// The same for a generated-video Run, which never had the question: its
-/// original takes the credential only as a reader. Both tools now cross the
-/// same three fields for the same reason.
-pub const VideoGenerationBinding = struct {
-    endpoint: []const u8,
-    source: []const u8,
-    model: []const u8,
-};
-
-// ---------------------------------------------------------------------------
-// A projection minus the arena that owns it
-// ---------------------------------------------------------------------------
-
-/// `catalog.Projection` without `storage`. Its contents are flat data; the
-/// struct merely carries a pointer to its own arena, which is the receiver's
-/// business and not the sender's.
-pub const CatalogProjection = struct {
-    revision: []const u8,
-    health: catalog.Health,
-    skills: []const catalog.Skill,
-    issues: []const catalog.Issue,
-
-    pub fn from(value: catalog.Projection) CatalogProjection {
-        return .{
-            .revision = value.revision,
-            .health = value.health,
-            .skills = value.skills,
-            .issues = value.issues,
-        };
-    }
-};
-
-// ---------------------------------------------------------------------------
 // A borrowed handle becomes an id the far side's table resolves
 // ---------------------------------------------------------------------------
-
-/// `port.SessionRoute`: the route id the Runtime assigned, plus the Session
-/// handle the caller will name in later calls.
-pub const SessionRoute = struct {
-    route_id: u64,
-    session: handle_table.Id,
-};
-
-/// The same, plus the restore report, which is already plain data.
-pub const SessionRestoreRoute = struct {
-    route_id: u64,
-    session: handle_table.Id,
-    report: checkpoint_restore.Report,
-};
-
-/// A Run handed to its executor. The original keeps its identity inline and
-/// its control lease as a pointer pair; across the link the identity travels
-/// as it is and the lease becomes an id.
-pub const RunRoute = struct {
-    run_id: u64,
-    generation: u64,
-    /// The Run's entry, which is also its control's.
-    ///
-    /// One id rather than two, because over there one entry holds both: a
-    /// `RunPort`'s vtable and the `RunControl` every retain and release goes
-    /// through live in the same `adapters.BegunRun`. Sending a second id for
-    /// the same entry would be a second lifetime to keep in step with the
-    /// first, and nothing would notice when they stopped agreeing.
-    run: handle_table.Id,
-};
-
-/// `port.BeginRunOutcome` with the Run named as above.
-pub const BeginRunOutcome = union(enum) {
-    run: RunRoute,
-    failure: BeginRunFailure,
-};
-
-/// What crosses for the MCP installation host tool: the Task the install
-/// belongs to, and nothing else.
-///
-/// The original is a capability whose `try_put_fn` hands an install request to
-/// Product **and reads Product's answer back**, because the tool has to tell
-/// the model whether the request was accepted. That is a call from the
-/// execution half into the caller, and it is the first one: every other
-/// capability either composes locally or, like a catalog source lifetime, was
-/// ruled out from crossing. So `handle_table.zig`'s claim that nothing calls
-/// back into the caller is not true in general -- it is true of everything
-/// except this.
-///
-/// The reverse path is a question about the protocol's shape rather than a
-/// detail inside a stub, and the tool is MCP-shaped, so it belongs to the MCP
-/// step. Recorded here so it is a known debt rather than a surprise when that
-/// step starts.
-pub const McpInstallationTarget = struct {
-    task_id: u64,
-};
-
-/// `port.SessionRestoreInputs`: the handles a caller only retains and hands
-/// back. The Runtime it names does not travel -- across the link the Runtime
-/// *is* the link -- and the two capabilities become ids.
-pub const SessionRestoreInputs = struct {
-    /// Absent as `Id.none`, not as an optional: a zero id is already invalid
-    /// by construction, so an `?Id` would be a second way to say the same
-    /// thing and a decoder would have to be told which one it is reading.
-    skill: handle_table.Id,
-    mcp: handle_table.Id,
-    permission_mode: control.PermissionMode,
-    shell_policy: control.ShellPolicy,
-    permission_interaction: surface.PermissionInteraction,
-};
-
-/// `port.SkillRestoreBorrow`: what a captured skill capability grants, read
-/// without taking it. The lease stays behind as an id.
-pub const SkillRestoreBorrow = struct {
-    catalog: handle_table.Id,
-    policy: surface.SkillPolicyInput,
-};
 
 /// `surface.SessionOpenOptions` with its two borrowed handles named by id.
 ///
@@ -730,7 +516,9 @@ pub const SessionOpenOptions = struct {
     workspace: surface.WorkspaceInput,
     canonical_user_home: []const u8,
     workspace_epoch: []const u8,
-    /// Absent as `Id.none`; see `SessionRestoreInputs`.
+    /// Absent as `Id.none`, not as an optional: a zero id is already invalid
+    /// by construction, so an `?Id` would be a second way to say the same
+    /// thing and a decoder would have to be told which one it is reading.
     skill_catalog: handle_table.Id,
     skill_policy: ?surface.SkillPolicyInput,
     mcp_selection: handle_table.Id,
@@ -739,109 +527,10 @@ pub const SessionOpenOptions = struct {
 
 const model_binding_type = @FieldType(surface.SessionOpenOptions, "model_binding");
 
-/// Where a restore reads its checkpoint from. The source is a byte callback
-/// and does not cross; the execution half opens the blob itself, which is the
-/// same division the export already uses -- only the identity of the blob
-/// travels, never its bytes.
-pub const CheckpointSourceDescriptor = struct {
-    task_id: u64,
-    generation: u64,
-    digest: [32]u8,
-    byte_size: u64,
-};
-
-/// `surface.SessionRestoreOptions` with the session options above, a source
-/// descriptor in place of the read callback, and the expectation as data.
-pub const SessionRestoreOptions = struct {
-    session: SessionOpenOptions,
-    checkpoint_limits: contract.CheckpointLimits,
-    source: CheckpointSourceDescriptor,
-    expectation: checkpoint_restore.Expectation,
-};
-
-/// `catalog.Acquisition`: the lease stays behind as an id, the projection is
-/// data.
-pub const CatalogAcquisition = struct {
-    lease: handle_table.Id,
-    projection: CatalogProjection,
-};
-
-/// What an MCP activation projects. These are the eight reads `handles.zig`
-/// classifies as fixed once the activation is built, so they ride across with
-/// the handle and the caller answers them locally. `catalogAgeMs` is absent on
-/// purpose: it is elapsed time against the clock now, and a projected age is
-/// stale the instant it crosses while looking exactly like a fresh one.
-pub const McpActivationProjection = struct {
-    registry_generation: u64,
-    catalog_generation: u64,
-    state: mcp_catalog.ActivationState,
-    server_health: []const mcp_catalog.ActivationServer,
-    selected_tools: []const mcp_catalog.ActivationTool,
-    catalog_servers: []const mcp_catalog.Server,
-    catalog_tools: []const mcp_catalog.Tool,
-    catalog_issues: []const mcp_catalog.Issue,
-};
-
-// The projection above must carry exactly the reads `handles.zig` records as
-// fixed once the activation is built -- no more, no fewer.
-//
-// This is a cross-file invariant, not a duplicated number, which is why it is
-// checked rather than deleted. Drift in either direction is the failure this
-// change keeps refusing: a field here for a read that is no longer fixed would
-// answer a caller with a stale value indistinguishable from a fresh one, and a
-// projected read with no field here would leave the caller with no way to
-// answer at all.
-comptime {
-    const projected = handles.methodsWith(mcp_catalog.Activation, .projected);
-    const fields = @typeInfo(McpActivationProjection).@"struct".fields;
-    if (fields.len != projected.len) @compileError(
-        "the MCP activation projection carries " ++
-            std.fmt.comptimePrint("{d}", .{fields.len}) ++ " fields but " ++
-            std.fmt.comptimePrint("{d}", .{projected.len}) ++
-            " of its reads are recorded as fixed; see src/agent/link/handles.zig",
-    );
-    for (projected) |method| {
-        const field = snakeCase(method);
-        if (!@hasField(McpActivationProjection, field)) @compileError(
-            "the MCP activation projection has no `" ++ field ++ "` for the fixed read `" ++
-                method ++ "`; add it, or record that read as a call in handles.zig",
-        );
-    }
-}
-
-/// `registryGeneration` becomes `registry_generation`. The record names
-/// methods and the projection names fields, so one of them has to convert, and
-/// converting is what lets the check compare them at all.
-fn snakeCase(comptime camel: []const u8) []const u8 {
-    comptime {
-        var out: []const u8 = "";
-        for (camel) |character| {
-            if (std.ascii.isUpper(character)) {
-                out = out ++ "_" ++ [_]u8{std.ascii.toLower(character)};
-            } else {
-                out = out ++ [_]u8{character};
-            }
-        }
-        return out;
-    }
-}
-
-/// `surface.McpActivationOutcome` with the activation named by id and its
-/// fixed reads projected beside it.
-pub const McpActivationOutcome = union(enum) {
-    empty,
-    activated: struct {
-        activation: handle_table.Id,
-        projection: McpActivationProjection,
-    },
-    unavailable: surface.McpActivationUnavailableReason,
-};
-
 comptime {
     // Every shape in this file is one the wire can actually carry. Without
     // this, a mirror could pick up a field that is itself unshippable and the
     // failure would surface at the first call instead of the build.
-    payload.requireStructural(HandleId);
     payload.requireStructural(CloseOutcome);
     payload.requireStructural(CallbackRejection);
     payload.requireStructural(BeginRunFailure);
@@ -850,24 +539,7 @@ comptime {
     payload.requireStructural(CheckpointDescription);
     payload.requireStructural(CheckpointOutcome);
     payload.requireStructural(PendingUiRequest);
-    payload.requireStructural(FileDeliveryEnabled);
-    payload.requireStructural(CatalogProjection);
-    payload.requireStructural(CatalogQuery);
-    payload.requireStructural(ImageGenerationBinding);
-    payload.requireStructural(VideoGenerationBinding);
     payload.requireStructural(SessionOpenOptions);
-    payload.requireStructural(CheckpointSourceDescriptor);
-    payload.requireStructural(SessionRestoreOptions);
-    payload.requireStructural(CatalogAcquisition);
-    payload.requireStructural(McpActivationProjection);
-    payload.requireStructural(McpActivationOutcome);
-    payload.requireStructural(SessionRoute);
-    payload.requireStructural(SessionRestoreRoute);
-    payload.requireStructural(RunRoute);
-    payload.requireStructural(BeginRunOutcome);
-    payload.requireStructural(SkillRestoreBorrow);
-    payload.requireStructural(SessionRestoreInputs);
-    payload.requireStructural(McpInstallationTarget);
 }
 
 /// Asserts that a mirror and its original describe the same thing, in both
@@ -881,12 +553,6 @@ comptime {
 /// *mirror's* fields -- a field that is not there is not a question anyone is
 /// asked -- and it was only building the direction that reads a mirror back
 /// that made it show, as seven fields with no value to put in them.
-///
-/// An earlier version of this comment said `crossings.zig` catches a field
-/// added to the original. It does not: it classifies the type as a whole and
-/// has nothing to say about which of its fields a mirror carries. So the
-/// check belongs here, where both lists are, and each entry in `left_behind`
-/// is a decision with a reason rather than an omission.
 fn mirrors(comptime Mirror: type, comptime Origin: type, comptime decided: Decided) void {
     comptime {
         @setEvalBranchQuota(100_000);
@@ -943,36 +609,7 @@ comptime {
         // The error itself crosses as its registered number.
         .left_behind = &.{"err"},
     });
-    mirrors(CatalogProjection, catalog.Projection, .{
-        // An opaque pointer to the arena the projection's contents live in.
-        // The contents cross; which arena holds them is the receiver's.
-        .left_behind = &.{"storage"},
-    });
-    mirrors(CatalogQuery, catalog.Query, .{
-        // Nonblocking reference accounting, and a cross-process call blocks.
-        // The caller retaining before the call is what replaces it.
-        .left_behind = &.{"source_lifetime"},
-    });
-    mirrors(ImageGenerationBinding, image_generation.BindingInput, .{
-        // The execution half reads a credential live from the one source the
-        // link renews, so a copy sent per request would be zeroed and never
-        // read. Section 6 also does not list a link payload as somewhere a
-        // credential may live. The mirror's own doc comment has the whole
-        // argument; this is the entry that makes the compiler ask for it.
-        //
-        // `credential_reader` and `output` are capabilities, composed in the
-        // execution half rather than sent: a function pointer into this
-        // process means nothing over there.
-        .left_behind = &.{ "credential", "credential_reader", "output" },
-    });
-    mirrors(VideoGenerationBinding, generate_video.Input, .{
-        // The same three, and this one never had the credential question:
-        // its original takes only a reader.
-        .left_behind = &.{ "credential", "transport", "output" },
-    });
     mirrors(SessionOpenOptions, surface.SessionOpenOptions, .{});
-    mirrors(SessionRestoreOptions, surface.SessionRestoreOptions, .{});
-    mirrors(CatalogAcquisition, catalog.Acquisition, .{});
     mirrors(CallbackRejection, control.CallbackRejection, .{
         .reshaped = &.{ "failure_code", "failure_unnamed" },
         // Any error in the program, so it crosses as its number when the
@@ -982,11 +619,6 @@ comptime {
 }
 
 const testing = std.testing;
-
-test "a handle id of zero is never a live handle" {
-    try testing.expect(!HandleId.none.valid());
-    try testing.expect((HandleId{ .value = 1 }).valid());
-}
 
 test "an outcome's error survives as its registered number" {
     const failed: surface.CloseOutcome = .{ .failure = .{
