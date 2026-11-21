@@ -177,6 +177,14 @@ pub const Options = struct {
     heartbeat_deadline_ms: u64 = default_heartbeat_deadline_ms,
     /// The data root, where a process keeps its fault record. Passed on.
     data_root: ?[]const u8 = null,
+    /// Tests only: called with a started process's `lost` flag before the
+    /// process is published, so a test can hold a start there.
+    after_start: ?StartHook = null,
+};
+
+pub const StartHook = struct {
+    context: ?*anyopaque,
+    call_fn: *const fn (?*anyopaque, *const std.atomic.Value(bool)) void,
 };
 
 // ---------------------------------------------------------------------------
@@ -318,9 +326,14 @@ pub const Owner = struct {
             return null;
         }
         if (self.current) |generation| {
-            _ = generation.in_flight.fetchAdd(1, .acq_rel);
-            self.mutex.unlock(self.io);
-            return generation;
+            if (!generation.lost.load(.acquire)) {
+                _ = generation.in_flight.fetchAdd(1, .acq_rel);
+                self.mutex.unlock(self.io);
+                return generation;
+            }
+            // Lost, with its `lose` not yet past this lock: no longer the
+            // one to hand out, and `lose` unpublishes only itself.
+            self.current = null;
         }
         // Held back: the answer is the one a process that died would give.
         if (now(self.io) < self.starts_held_until_ms) {
@@ -338,6 +351,7 @@ pub const Owner = struct {
             self.mutex.unlock(self.io);
             return null;
         };
+        if (builtin.is_test) if (self.options.after_start) |hook| hook.call_fn(hook.context, &generation.lost);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.generations.append(self.allocator, generation) catch {
@@ -347,6 +361,14 @@ pub const Owner = struct {
             self.mutex.lockUncancelable(self.io);
             return null;
         };
+        // A process already lost -- its watch could not start, or it ended
+        // right after agreeing on identity and its reader got here first --
+        // is left for the sweep and never handed out. `lose` clears only the
+        // process that is current when it runs, so this one, once published,
+        // would be current until the application restarts. Checked under the
+        // lock `lose` takes after setting the flag, so one of the two always
+        // sees the other.
+        if (generation.lost.load(.acquire)) return null;
         self.current = generation;
         // Room for what the pump can take now: events a dead process left
         // behind are still in it, and consuming them grants this one more.

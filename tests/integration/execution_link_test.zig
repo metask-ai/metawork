@@ -1339,3 +1339,64 @@ test "an execution process that faults in a Run leaves a record of its own, whic
         try std.testing.expectEqualStrings(summary, written);
     }
 }
+
+fn plainSessionOptions(root: []const u8) agent.SessionOpenOptions {
+    return .{
+        .task_id = 1,
+        .binding_epoch = 1,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = .anthropic_messages,
+                .base_url = "",
+                .model = "fixture-model",
+            },
+            .credential = "fixture-secret",
+        },
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .canonical_user_home = root,
+        .workspace_epoch = "",
+    };
+}
+
+test "a process lost before it is published is never handed out, and the next ask starts another" {
+    // The fixture agrees on identity and ends at once. The hook holds each
+    // start until the reader has seen that, which is the order in which a
+    // lost process used to be published and then handed out until restart.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    const Hold = struct {
+        fn call(_: ?*anyopaque, lost: *const std.atomic.Value(bool)) void {
+            var waited: u64 = 0;
+            while (!lost.load(.acquire) and waited < wait_limit_ms) : (waited += 1)
+                std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+        }
+    };
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try owner.init(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .queue_limits = .{},
+        .spawn = .{ .explicit = &.{ fixture, "--with-runtime", "--no-runtime" } },
+        .wake = wake.notifier(),
+        .after_start = .{ .context = null, .call_fn = Hold.call },
+    });
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const port = owner.runtimePort();
+
+    if (port.createSessionRoute(plainSessionOptions(root))) |_| return error.ProcessServed else |_| {}
+    try std.testing.expectEqual(@as(u32, 1), owner.started);
+    // Not published at all: `currentProcess` would hide a lost one.
+    try std.testing.expect(owner.current == null);
+    // Asked again, a new process is started rather than the lost one used.
+    if (port.createSessionRoute(plainSessionOptions(root))) |_| return error.ProcessServed else |_| {}
+    try std.testing.expectEqual(@as(u32, 2), owner.started);
+    try std.testing.expect(owner.currentProcess() == null);
+}
