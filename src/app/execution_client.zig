@@ -861,6 +861,23 @@ fn runtimePrepareMcpRestoreSelection(
     return error.DependencyUnreachable;
 }
 
+fn runtimePrepareMcpMembership(
+    _: ?*anyopaque,
+    _: u64,
+    _: ?*const contract.McpRuntimeInput,
+    _: []const []const u8,
+) Allocating!contract.McpRuntimeInput {
+    return error.DependencyUnreachable;
+}
+
+fn runtimeApplyMcpConfiguration(_: ?*anyopaque, _: *contract.McpRuntimeInput) Allocating!surface.McpConfigurationApplyOutcome {
+    return error.DependencyUnreachable;
+}
+
+fn runtimeProbeMcp(_: ?*anyopaque, _: *contract.McpRuntimeInput) Allocating!surface.McpActivationOutcome {
+    return error.DependencyUnreachable;
+}
+
 fn runtimeQuerySkillCatalog(_: ?*anyopaque, _: contract.CatalogQuery) Allocating!contract.CatalogAcquisition {
     return error.DependencyUnreachable;
 }
@@ -902,6 +919,9 @@ const runtime_vtable: port.RuntimePort.VTable = .{
     .activate_mcp = runtimeActivateMcp,
     .create_mcp_admission_selection = runtimeCreateMcpAdmissionSelection,
     .prepare_mcp_restore_selection = runtimePrepareMcpRestoreSelection,
+    .prepare_mcp_membership = runtimePrepareMcpMembership,
+    .apply_mcp_configuration = runtimeApplyMcpConfiguration,
+    .probe_mcp = runtimeProbeMcp,
     .query_skill_catalog = runtimeQuerySkillCatalog,
     .release_skill_catalog = runtimeReleaseSkillCatalog,
     .narrow_skill_restore_inputs = runtimeNarrowSkillRestoreInputs,

@@ -17,6 +17,7 @@ const surface = @import("surface.zig");
 const multimodal = @import("multimodal.zig");
 const catalog = @import("agent_catalog");
 const mcp_catalog = @import("agent_mcp_catalog");
+const mcp_runtime = @import("agent_mcp_runtime");
 const checkpoint = @import("agent_checkpoint");
 const checkpoint_restore = @import("agent_checkpoint_restore");
 const event_pump = @import("event_pump");
@@ -518,6 +519,22 @@ pub const RuntimePort = struct {
             *const mcp_catalog.Activation,
             []const mcp_catalog.ActivationTool,
         ) Allocating!*mcp_catalog.Selection,
+        /// The complete MCP membership `apply_mcp_configuration` would
+        /// install: this Runtime's current members named in `server_ids`,
+        /// with `additions` taking precedence. `additions` stays the caller's.
+        prepare_mcp_membership: *const fn (
+            ?*anyopaque,
+            u64,
+            ?*const mcp_runtime.Input,
+            []const []const u8,
+        ) Allocating!mcp_runtime.Input,
+        /// Installs a membership `prepare_mcp_membership` composed. Once the
+        /// servers are taken, every outcome consumes them.
+        apply_mcp_configuration: *const fn (?*anyopaque, *mcp_runtime.Input) Allocating!surface.McpConfigurationApplyOutcome,
+        /// Activates `input` in a Runtime of its own that serves no Session,
+        /// then ends that Runtime: a connection test. The servers are taken
+        /// once it starts; the caller still deinits the input.
+        probe_mcp: *const fn (?*anyopaque, *mcp_runtime.Input) Allocating!surface.McpActivationOutcome,
         query_skill_catalog: *const fn (?*anyopaque, catalog.Query) Allocating!catalog.Acquisition,
         release_skill_catalog: *const fn (?*anyopaque, *catalog.Lease) Error!void,
         /// Narrows a captured restore capability; the result is a new handle
@@ -620,6 +637,21 @@ pub const RuntimePort = struct {
                 @panic("Agent call on a Runtime port that has no Agent");
             }
         }.call,
+        .prepare_mcp_membership = struct {
+            fn call(_: ?*anyopaque, _: u64, _: ?*const mcp_runtime.Input, _: []const []const u8) Allocating!mcp_runtime.Input {
+                @panic("Agent call on a Runtime port that has no Agent");
+            }
+        }.call,
+        .apply_mcp_configuration = struct {
+            fn call(_: ?*anyopaque, _: *mcp_runtime.Input) Allocating!surface.McpConfigurationApplyOutcome {
+                @panic("Agent call on a Runtime port that has no Agent");
+            }
+        }.call,
+        .probe_mcp = struct {
+            fn call(_: ?*anyopaque, _: *mcp_runtime.Input) Allocating!surface.McpActivationOutcome {
+                @panic("Agent call on a Runtime port that has no Agent");
+            }
+        }.call,
         .query_skill_catalog = struct {
             fn call(_: ?*anyopaque, _: catalog.Query) Allocating!catalog.Acquisition {
                 @panic("Agent call on a Runtime port that has no Agent");
@@ -717,6 +749,23 @@ pub const RuntimePort = struct {
         ceiling: []const mcp_catalog.ActivationTool,
     ) Allocating!*mcp_catalog.Selection {
         return self.vtable.prepare_mcp_restore_selection(self.context, original, activation, ceiling);
+    }
+
+    pub fn prepareMcpMembership(
+        self: RuntimePort,
+        generation: u64,
+        additions: ?*const mcp_runtime.Input,
+        server_ids: []const []const u8,
+    ) Allocating!mcp_runtime.Input {
+        return self.vtable.prepare_mcp_membership(self.context, generation, additions, server_ids);
+    }
+
+    pub fn applyMcpConfiguration(self: RuntimePort, input: *mcp_runtime.Input) Allocating!surface.McpConfigurationApplyOutcome {
+        return self.vtable.apply_mcp_configuration(self.context, input);
+    }
+
+    pub fn probeMcp(self: RuntimePort, input: *mcp_runtime.Input) Allocating!surface.McpActivationOutcome {
+        return self.vtable.probe_mcp(self.context, input);
     }
 
     pub fn querySkillCatalog(self: RuntimePort, input: catalog.Query) Allocating!catalog.Acquisition {

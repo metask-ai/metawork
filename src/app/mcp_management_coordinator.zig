@@ -491,7 +491,9 @@ const ConnectionTestJob = struct {
     draft_http_observation: mcp_platform.DraftHttpObservation = .{},
     detection: mcp_configuration.HttpDraftDetection = .failed,
     target: Target,
-    runtime: ?*agent.Runtime,
+    agent: agent.RuntimePort,
+    /// Taken by the probe; the job deinits what is left of it.
+    input: ?agent.McpRuntimeInput,
     authorizations: mcp_platform.HttpAuthorizations,
     result: ConnectionTestResult = .{},
     finished: std.atomic.Value(bool) = .init(false),
@@ -520,8 +522,9 @@ const ConnectionTestJob = struct {
     }
 
     fn run(self: *ConnectionTestJob) void {
-        const runtime = self.runtime.?;
-        if (runtime.activateMcp()) |activation_outcome| switch (activation_outcome) {
+        // The probe's Runtime is its own and ends inside the call; a failure
+        // to end it is a failed test, as is any other.
+        if (self.agent.probeMcp(&self.input.?)) |activation_outcome| switch (activation_outcome) {
             .activated => |activation| {
                 defer activation.deinit();
                 if (activation.serverHealth().len == 1 and
@@ -538,11 +541,8 @@ const ConnectionTestJob = struct {
             },
             .empty, .unavailable => {},
         } else |_| {}
-        runtime.shutdown() catch {
-            self.result.outcome = .failed;
-        };
-        runtime.deinit();
-        self.runtime = null;
+        self.input.?.deinit();
+        self.input = null;
         self.authorizations.deinit();
         if (self.target == .draft) self.detection = self.detectDraft();
         self.finished.store(true, .release);
@@ -584,7 +584,7 @@ const ConnectionTestJob = struct {
     }
 
     fn deinit(self: *ConnectionTestJob) void {
-        std.debug.assert(self.thread == null and self.runtime == null);
+        std.debug.assert(self.thread == null and self.input == null);
         switch (self.target) {
             .saved => |id| self.allocator.free(id),
             .draft => |draft| {
@@ -616,7 +616,7 @@ const ConfigurationApplyJob = struct {
     allocator: std.mem.Allocator,
     host: Host,
     generation: u64,
-    runtime: *agent.Runtime,
+    runtime: agent.RuntimePort,
     preparation: mcp_configuration.Preparation,
     manifest: mcp_configuration.RuntimeManifest,
     input: ?agent.McpRuntimeInput,
@@ -807,7 +807,7 @@ pub const Coordinator = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     control: control_ports.McpManagementPort,
-    agent_runtime: *agent.Runtime,
+    agent: agent.RuntimePort,
     credential_store: *mcp_platform.CredentialStore,
     active_authorizations: *mcp_platform.HttpAuthorizations,
     host: Host,
@@ -834,7 +834,7 @@ pub const Coordinator = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         control: control_ports.McpManagementPort,
-        agent_runtime: *agent.Runtime,
+        agent_port: agent.RuntimePort,
         credential_store: *mcp_platform.CredentialStore,
         active_authorizations: *mcp_platform.HttpAuthorizations,
         host: Host,
@@ -844,7 +844,7 @@ pub const Coordinator = struct {
             .allocator = allocator,
             .io = io,
             .control = control,
-            .agent_runtime = agent_runtime,
+            .agent = agent_port,
             .credential_store = credential_store,
             .active_authorizations = active_authorizations,
             .host = host,
@@ -1026,7 +1026,8 @@ pub const Coordinator = struct {
                 .saved => |id| .{ .saved = try self.allocator.dupe(u8, id) },
                 else => target,
             },
-            .runtime = null,
+            .agent = self.agent,
+            .input = null,
             .authorizations = .{ .allocator = self.allocator },
         };
         defer if (!started and job.target == .saved) self.allocator.free(job.target.saved);
@@ -1036,13 +1037,12 @@ pub const Coordinator = struct {
         if (target == .draft) test_environment.draft_http_observation = &job.draft_http_observation;
         var runtime_build = mcp_platform.buildRuntime(self.io, self.allocator, preparation, test_environment) catch return .unavailable;
         defer runtime_build.deinit();
-        const input = if (runtime_build.input) |*value| value else return .unavailable;
-        const runtime = agent.Runtime.init(self.io, self.allocator, .{ .max_sessions = 1, .mcp_input = input }) catch return .unavailable;
-        job.runtime = runtime;
+        job.input = runtime_build.input orelse return .unavailable;
+        runtime_build.input = null;
         job.authorizations = runtime_build.takeAuthorizations();
         defer if (!started) {
-            runtime.shutdown() catch {};
-            runtime.deinit();
+            job.input.?.deinit();
+            job.input = null;
             job.authorizations.deinit();
         };
         if (job.target == .saved) try self.control.beginMcpConnectionTest(job.target.saved);
@@ -1113,7 +1113,7 @@ pub const Coordinator = struct {
         var processes = try (self.active_processes orelse empty_processes).compose(runtime_build.processes orelse empty_processes, step.member_ids, step.candidate_id);
         var processes_owned = true;
         defer if (processes_owned) processes.deinit();
-        var input = try self.agent_runtime.prepareMcpMembership(generation, if (runtime_build.input) |*value| value else null, step.member_ids);
+        var input = try self.agent.prepareMcpMembership(generation, if (runtime_build.input) |*value| value else null, step.member_ids);
         var input_owned = true;
         defer if (input_owned) input.deinit();
         var authorizations = try self.active_authorizations.compose(&runtime_build.authorizations, step.member_ids, step.candidate_id);
@@ -1134,7 +1134,7 @@ pub const Coordinator = struct {
             .allocator = self.allocator,
             .host = self.host,
             .generation = generation,
-            .runtime = self.agent_runtime,
+            .runtime = self.agent,
             .preparation = step.preparation,
             .manifest = manifest,
             .input = input,
@@ -2628,7 +2628,7 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
         failing.allocator(),
         std.testing.io,
         workbench_owner.mcpManagementPort(),
-        agent_runtime,
+        agent_runtime.runtimePort(),
         &credential_store,
         &authorizations,
         .{
@@ -2877,7 +2877,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
         std.testing.allocator,
         std.testing.io,
         workbench_owner.mcpManagementPort(),
-        agent_runtime,
+        agent_runtime.runtimePort(),
         &credential_store,
         &active_authorizations,
         .{
@@ -3242,7 +3242,7 @@ test "MCP Application coordinator asks a Suno-like server for every scope and ne
         std.testing.allocator,
         std.testing.io,
         workbench_owner.mcpManagementPort(),
-        agent_runtime,
+        agent_runtime.runtimePort(),
         &credential_store,
         &active_authorizations,
         .{
@@ -3487,7 +3487,7 @@ test "MCP Application coordinator signs in to an AceDataCloud-like server that n
         std.testing.allocator,
         std.testing.io,
         workbench_owner.mcpManagementPort(),
-        agent_runtime,
+        agent_runtime.runtimePort(),
         &credential_store,
         &active_authorizations,
         .{

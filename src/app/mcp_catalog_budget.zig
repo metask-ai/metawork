@@ -8,7 +8,7 @@ const product_mcp = @import("metawork_product_mcp");
 pub const Budget = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    runtime: *agent.Runtime,
+    agent: agent.RuntimePort,
     references: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
     epoch: u64 = 0,
@@ -17,9 +17,9 @@ pub const Budget = struct {
     initial_installation: bool = false,
     started_ns: i96 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, runtime: *agent.Runtime) std.mem.Allocator.Error!*Budget {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, runtime: agent.RuntimePort) std.mem.Allocator.Error!*Budget {
         const self = try allocator.create(Budget);
-        self.* = .{ .allocator = allocator, .io = io, .runtime = runtime };
+        self.* = .{ .allocator = allocator, .io = io, .agent = runtime };
         return self;
     }
 
@@ -63,17 +63,17 @@ pub const Budget = struct {
 
     fn activate(raw: *anyopaque) product_mcp.CatalogError!agent.McpActivationOutcome {
         const self: *Budget = @ptrCast(@alignCast(raw));
-        return self.runtime.activateMcp();
+        return self.agent.activateMcp();
     }
 
     fn createAdmission(raw: *anyopaque, activation: *const agent.McpActivation, allowlists: []const agent.McpServerAllowlist) product_mcp.CatalogError!?*agent.McpSelection {
         const self: *Budget = @ptrCast(@alignCast(raw));
-        return self.runtime.createMcpAdmissionSelection(activation, allowlists);
+        return self.agent.createMcpAdmissionSelection(activation, allowlists);
     }
 
     fn prepareRestore(raw: *anyopaque, original: *const agent.McpRestoreSelection, activation: *const agent.McpActivation, ceiling: []const agent.McpActivationTool) product_mcp.CatalogError!*agent.McpSelection {
         const self: *Budget = @ptrCast(@alignCast(raw));
-        return self.runtime.prepareMcpRestoreSelection(original, activation, ceiling);
+        return self.agent.prepareMcpRestoreSelection(original, activation, ceiling);
     }
 };
 
@@ -170,7 +170,7 @@ const Transport = struct {
 };
 
 test "candidate deadline ends at adoption and never follows old members into later applies" {
-    var budget: Budget = .{ .allocator = std.testing.allocator, .io = std.testing.io, .runtime = undefined };
+    var budget: Budget = .{ .allocator = std.testing.allocator, .io = std.testing.io, .agent = undefined };
     var candidate: Transport = .{ .allocator = std.testing.allocator, .budget = &budget, .underlying = undefined, .epoch = 1, .timeout_ms = 20, .initial_installation = false };
     try budget.begin(1, false);
     budget.started_ns -= 1000 * std.time.ns_per_ms;
@@ -215,7 +215,7 @@ test "management timeout limit preserves long tool calls with and without a cand
             self.destroyed = true;
         }
     };
-    var budget: Budget = .{ .allocator = std.testing.allocator, .io = std.testing.io, .runtime = undefined };
+    var budget: Budget = .{ .allocator = std.testing.allocator, .io = std.testing.io, .agent = undefined };
     for ([_]?*Budget{ null, &budget }) |scope| {
         var capture: Capture = .{};
         var source = agent.McpTransportOwner.init(.{ .context = &capture, .open_fn = Capture.open, .request_fn = Capture.request, .tool_request_fn = Capture.tool, .notify_fn = Capture.notify, .close_fn = Capture.close }, Capture.destroy);
@@ -262,7 +262,7 @@ test "MCP initial installation covers discovery while tools retain their configu
         fn destroy(_: *anyopaque) void {}
     };
     var capture: Capture = .{};
-    var budget: Budget = .{ .allocator = std.testing.allocator, .io = std.testing.io, .runtime = undefined };
+    var budget: Budget = .{ .allocator = std.testing.allocator, .io = std.testing.io, .agent = undefined };
     var source = agent.McpTransportOwner.init(.{ .context = &capture, .open_fn = Capture.open, .request_fn = Capture.request, .notify_fn = Capture.notify, .close_fn = Capture.close }, Capture.destroy);
     var owner = try wrapTransport(std.testing.allocator, &source, 30_000, &budget, true);
     defer owner.deinit();

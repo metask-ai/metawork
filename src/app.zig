@@ -274,7 +274,7 @@ const App = struct {
         ) else null;
         self.agent_runtime = agent_runtime;
         if (agent_runtime) |runtime| {
-            self.mcp_budget = try mcp_platform.CatalogBudget.init(std.heap.c_allocator, self.io, runtime);
+            self.mcp_budget = try mcp_platform.CatalogBudget.init(std.heap.c_allocator, self.io, runtime.runtimePort());
             mcp_host_environment.catalog_budget = self.mcp_budget;
         }
         self.mcp_authorizations = .{ .allocator = std.heap.c_allocator };
@@ -352,7 +352,7 @@ const App = struct {
                 std.heap.c_allocator,
                 self.io,
                 control_storage.mcpManagementPort(),
-                runtime,
+                runtime.runtimePort(),
                 &self.mcp_credential_store.?,
                 &self.mcp_authorizations.?,
                 mcp_management_host,
@@ -1721,7 +1721,7 @@ test "main-loop wake consumes catalog completion and fairly schedules MCP recove
         .platform = undefined,
         .completion_transport = undefined,
         .control = &control,
-        .mcp_management = mcp_management_coordinator.Coordinator.init(allocator, std.testing.io, control.mcpManagementPort(), agent_runtime, &credentials, &authorizations, .{
+        .mcp_management = mcp_management_coordinator.Coordinator.init(allocator, std.testing.io, control.mcpManagementPort(), agent_runtime.runtimePort(), &credentials, &authorizations, .{
             .context = &host,
             .request_dialog_fn = Effects.request,
             .open_url_fn = Effects.open,

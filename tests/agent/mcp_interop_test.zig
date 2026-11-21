@@ -1110,7 +1110,7 @@ fn expectProductionCatalogBudget(hanging_loaded: bool) !void {
         runtime.shutdown() catch unreachable;
         runtime.deinit();
     }
-    const budget = try mcp_platform.CatalogBudget.init(a, std.testing.io, runtime);
+    const budget = try mcp_platform.CatalogBudget.init(a, std.testing.io, runtime.runtimePort());
     defer budget.release();
     var preparation = try prepareHttpFixture(source_a.endpoint, "2026-07-28");
     defer preparation.deinit();
@@ -4244,7 +4244,7 @@ test "real Coordinator settles eligibility loss and edit without self waking" {
         runtime.shutdown() catch unreachable;
         runtime.deinit();
     };
-    const budget = try mcp_platform.CatalogBudget.init(a, std.testing.io, runtime);
+    const budget = try mcp_platform.CatalogBudget.init(a, std.testing.io, runtime.runtimePort());
     defer budget.release();
     var control = try product_control.Runtime.init(a, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 4 }, .{ .mcp = .{ .preparation = &preparation, .management = managementConfiguration(&durable, &manifest) } });
     runtime_owned = false;
@@ -4261,7 +4261,7 @@ test "real Coordinator settles eligibility loss and edit without self waking" {
     var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = a };
     defer authorizations.deinit();
     var host: CoordinatorHost = .{};
-    var coordinator = management_coordinator.Coordinator.init(a, std.testing.io, control.mcpManagementPort(), runtime, &credentials, &authorizations, host.host(), .{ .http_engine = &http_engine, .catalog_budget = budget });
+    var coordinator = management_coordinator.Coordinator.init(a, std.testing.io, control.mcpManagementPort(), runtime.runtimePort(), &credentials, &authorizations, host.host(), .{ .http_engine = &http_engine, .catalog_budget = budget });
     defer coordinator.deinit();
     try std.testing.expectEqual(.saved, (try control.createMcpHttpServer(0, .{ .display_name = "Source", .url = source.endpoint, .timeout_ms = 2000, .negotiation = "modern_only" })).outcome);
     try settleCoordinator(&coordinator);
@@ -4354,7 +4354,7 @@ test "production candidate budget admits a slow healthy source beside four exist
         runtime.shutdown() catch unreachable;
         runtime.deinit();
     }
-    const budget = try mcp_platform.CatalogBudget.init(a, std.testing.io, runtime);
+    const budget = try mcp_platform.CatalogBudget.init(a, std.testing.io, runtime.runtimePort());
     defer budget.release();
     var first = try mcp_platform.buildRuntime(std.testing.io, a, &preparation, .{ .http_engine = &http_engine, .catalog_budget = budget });
     defer first.deinit();
@@ -4676,7 +4676,7 @@ fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
         runtime.shutdown() catch unreachable;
         runtime.deinit();
     };
-    const budget = try mcp_platform.CatalogBudget.init(a, std.testing.io, runtime);
+    const budget = try mcp_platform.CatalogBudget.init(a, std.testing.io, runtime.runtimePort());
     defer budget.release();
     var configuration = managementConfiguration(&durable, &manifest);
     configuration.credentials = credentials.effects();
@@ -4714,7 +4714,7 @@ fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
     var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = a };
     defer authorizations.deinit();
     var host: InstallationTestHost = .{ .refuse = mode == .oauth_cancel };
-    var coordinator = management_coordinator.Coordinator.init(a, std.testing.io, control.mcpManagementPort(), runtime, &credentials, &authorizations, .{ .context = &host, .confirmation_available = true, .capture_available = true, .oauth_available = true, .request_dialog_fn = InstallationTestHost.request, .open_url_fn = InstallationTestHost.open, .now_unix_ms_fn = InstallationTestHost.now, .notify_fn = InstallationTestHost.notify }, .{ .http_engine = &http_engine, .catalog_budget = budget, .executable_search_path = std.fs.path.dirname(options.node_path), .windows_system_root = options.windows_system_root });
+    var coordinator = management_coordinator.Coordinator.init(a, std.testing.io, control.mcpManagementPort(), runtime.runtimePort(), &credentials, &authorizations, .{ .context = &host, .confirmation_available = true, .capture_available = true, .oauth_available = true, .request_dialog_fn = InstallationTestHost.request, .open_url_fn = InstallationTestHost.open, .now_unix_ms_fn = InstallationTestHost.now, .notify_fn = InstallationTestHost.notify }, .{ .http_engine = &http_engine, .catalog_budget = budget, .executable_search_path = std.fs.path.dirname(options.node_path), .windows_system_root = options.windows_system_root });
     defer coordinator.deinit();
     coordinator.transport_override = .{ .context = &host, .fetch_fn = InstallationTestHost.fetch };
     var retried = false;

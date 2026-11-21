@@ -16,6 +16,7 @@ const surface = contract.surface;
 const session_control = contract.control;
 const catalog = @import("agent_catalog");
 const mcp_catalog = @import("agent_mcp_catalog");
+const mcp_runtime = @import("agent_mcp_runtime");
 const checkpoint = @import("agent_checkpoint");
 const event_pump = @import("event_pump");
 const delivery = @import("agent_file_delivery");
@@ -387,6 +388,26 @@ const runtime_vtable: port.RuntimePort.VTable = .{
             ceiling: []const mcp_catalog.ActivationTool,
         ) (surface.Error || std.mem.Allocator.Error)!*mcp_catalog.Selection {
             return runtimeOf(context).prepareMcpRestoreSelection(original, activation, ceiling);
+        }
+    }.call,
+    .prepare_mcp_membership = struct {
+        fn call(
+            context: ?*anyopaque,
+            generation: u64,
+            additions: ?*const mcp_runtime.Input,
+            server_ids: []const []const u8,
+        ) (surface.Error || std.mem.Allocator.Error)!mcp_runtime.Input {
+            return runtimeOf(context).prepareMcpMembership(generation, additions, server_ids);
+        }
+    }.call,
+    .apply_mcp_configuration = struct {
+        fn call(context: ?*anyopaque, input: *mcp_runtime.Input) (surface.Error || std.mem.Allocator.Error)!surface.McpConfigurationApplyOutcome {
+            return runtimeOf(context).applyMcpConfiguration(input);
+        }
+    }.call,
+    .probe_mcp = struct {
+        fn call(context: ?*anyopaque, input: *mcp_runtime.Input) (surface.Error || std.mem.Allocator.Error)!surface.McpActivationOutcome {
+            return runtimeOf(context).probeMcp(input);
         }
     }.call,
     .query_skill_catalog = struct {

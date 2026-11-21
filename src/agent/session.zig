@@ -195,11 +195,7 @@ pub const RunControlLease = session_binding.RunControlLease;
 const SessionControlBlock = session_binding.SessionControlBlock;
 pub const Runtime = session_runtime.Runtime;
 
-pub const McpConfigurationApplyOutcome = enum {
-    applied,
-    superseded,
-    rejected,
-};
+pub const McpConfigurationApplyOutcome = surface.McpConfigurationApplyOutcome;
 
 pub const CheckpointLimits = checkpoint.Limits;
 pub const CheckpointSink = checkpoint.Sink;
