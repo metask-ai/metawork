@@ -1,5 +1,5 @@
 // Runs the execution link desktop acceptance, and compares its memory with a
-// build that still ran AgentCore in the window process. Windows.
+// build that still ran AgentCore in the window process. Windows and macOS.
 //
 //   $env:METAWORK_EXECUTION_LINK_BASELINE_APP_CWD = "<baseline>\zig-out\bin"
 //   node scripts/execution-link-acceptance.mjs
@@ -31,8 +31,8 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { buildAutomationDebugArtifact } from "./build.mjs";
 
-if (process.platform !== "win32")
-  throw new Error("execution-link-acceptance.mjs requires Windows");
+if (process.platform !== "win32" && process.platform !== "darwin")
+  throw new Error("execution-link-acceptance.mjs requires Windows or macOS");
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const evidenceDir = path.join(root, ".zig-cache", "execution-link-desktop");
@@ -73,7 +73,10 @@ function runHarness(mode, round) {
   };
   if (mode === "baseline") {
     env.METAWORK_EXECUTION_LINK_BASELINE = "1";
-    env.METAWORK_TEST_APP_BINARY = path.join(baselineAppCwd, "metawork.exe");
+    env.METAWORK_TEST_APP_BINARY = path.join(
+      baselineAppCwd,
+      process.platform === "win32" ? "metawork.exe" : "metawork",
+    );
   } else {
     delete env.METAWORK_EXECUTION_LINK_BASELINE;
     delete env.METAWORK_TEST_APP_BINARY;

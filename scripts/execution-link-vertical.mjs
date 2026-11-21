@@ -1,5 +1,5 @@
 // Desktop acceptance for AgentCore running in its own process (issue 197).
-// Windows only.
+// Windows and macOS.
 //
 // Selected by `METAWORK_EXECUTION_LINK_ONLY=1` inside the AgentCore vertical
 // harness, which owns the isolated platform home, the automation build and
@@ -73,8 +73,38 @@ async function powershellJson(command) {
   return payload.length === 0 ? null : JSON.parse(payload);
 }
 
+const windows = process.platform === "win32";
+
+/// Every process on a POSIX system: id, parent and full command line.
+async function posixProcesses() {
+  const { stdout } = await execFileAsync(
+    "ps",
+    ["-axww", "-o", "pid=,ppid=,command="],
+    {
+      maxBuffer: 16 * 1024 * 1024,
+    },
+  );
+  return stdout
+    .split("\n")
+    .map((line) => line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/))
+    .filter(Boolean)
+    .map(([, pid, parentPid, command]) => ({
+      pid: Number(pid),
+      parentPid: Number(parentPid),
+      command,
+    }));
+}
+
 /// Every process whose command line mentions `marker`, with its parent.
 async function processesMentioning(marker) {
+  if (!windows)
+    return (await posixProcesses())
+      .filter(
+        (row) =>
+          row.command.includes(marker) &&
+          path.basename(row.command.split(" ")[0]) === "node",
+      )
+      .map(({ pid, parentPid }) => ({ pid, parentPid }));
   return asArray(
     await powershellJson(
       `ConvertTo-Json -Compress -Depth 2 -InputObject @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${marker}*' -and $_.Name -eq 'node.exe' } | Select-Object ProcessId,ParentProcessId)`,
@@ -84,6 +114,13 @@ async function processesMentioning(marker) {
 
 /// The application's `--execution-host` children, with their command lines.
 export async function executionHosts(appPid) {
+  if (!windows)
+    return (await posixProcesses())
+      .filter(
+        (row) =>
+          row.parentPid === appPid && row.command.includes("--execution-host"),
+      )
+      .map((row) => ({ pid: row.pid, commandLine: row.command }));
   return asArray(
     await powershellJson(
       `ConvertTo-Json -Compress -Depth 2 -InputObject @(Get-CimInstance Win32_Process -Filter "ParentProcessId=${appPid}" | Where-Object { $_.CommandLine -like '*--execution-host*' } | Select-Object ProcessId,CommandLine)`,
@@ -91,8 +128,26 @@ export async function executionHosts(appPid) {
   ).map((row) => ({ pid: row.ProcessId, commandLine: row.CommandLine }));
 }
 
+/// Ends `pid` at once, as a crash would.
+async function endProcess(pid) {
+  if (!windows) {
+    process.kill(pid, "SIGKILL");
+    return "SIGKILL";
+  }
+  const { stdout } = await execFileAsync(
+    "taskkill",
+    ["/PID", String(pid), "/F"],
+    { windowsHide: true },
+  );
+  return stdout.trim();
+}
+
 /// Stops every thread of `pid` without ending it: a child that hangs.
 async function suspendProcess(pid) {
+  if (!windows) {
+    process.kill(pid, "SIGSTOP");
+    return;
+  }
   const result = await powershellJson(
     `Add-Type -Namespace MetaWorkAcceptance -Name Ntdll -MemberDefinition '[System.Runtime.InteropServices.DllImport("ntdll.dll")] public static extern int NtSuspendProcess(System.IntPtr process);'; $process = [System.Diagnostics.Process]::GetProcessById(${pid}); ConvertTo-Json -Compress -InputObject @{ status = [MetaWorkAcceptance.Ntdll]::NtSuspendProcess($process.Handle) }`,
   );
@@ -103,7 +158,40 @@ async function suspendProcess(pid) {
   );
 }
 
+/// On macOS: the resident set as the working set, and the physical
+/// footprint, which `footprint` reports, as the private bytes.
+async function posixMemory(pids) {
+  const result = {};
+  for (const pid of pids) {
+    const { stdout: rss } = await execFileAsync("ps", [
+      "-o",
+      "rss=",
+      "-p",
+      String(pid),
+    ]).catch(() => ({ stdout: "" }));
+    if (rss.trim().length === 0) continue;
+    const { stdout: footprint } = await execFileAsync("footprint", [
+      String(pid),
+    ]);
+    const match = footprint.match(/Footprint:\s+([\d.]+)\s+(B|KB|MB|GB)/);
+    assert.ok(match, `footprint ${pid}: ${footprint.slice(0, 200)}`);
+    const unit = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 }[match[2]];
+    const { stdout: threads } = await execFileAsync("ps", [
+      "-M",
+      "-p",
+      String(pid),
+    ]);
+    result[String(pid)] = {
+      workingSetBytes: Number(rss.trim()) * 1024,
+      privateBytes: Math.round(Number(match[1]) * unit),
+      threads: threads.trim().split("\n").length - 1,
+    };
+  }
+  return result;
+}
+
 async function memory(pids) {
+  if (!windows) return posixMemory(pids);
   const rows = await processCounters(pids);
   return Object.fromEntries(
     rows.map((row) => [
@@ -399,9 +487,7 @@ async function verifyMcp({
   // A new execution process is given the same server. Product hears that
   // the catalog it held went with the old one and refreshes it, which starts
   // the new process; the next Task then has the tool again.
-  await execFileAsync("taskkill", ["/PID", String(hosts[0].pid), "/F"], {
-    windowsHide: true,
-  });
+  await endProcess(hosts[0].pid);
   const refreshedHosts = await poll(
     async () => {
       const current = await executionHosts(appPid);
@@ -650,10 +736,9 @@ export async function runExecutionLinkVertical({
   readCheckpoint,
   evidencePath,
 }) {
-  assert.equal(
-    process.platform,
-    "win32",
-    "the execution link acceptance runs on Windows",
+  assert.ok(
+    process.platform === "win32" || process.platform === "darwin",
+    "the execution link acceptance runs on Windows and macOS",
   );
   const linked = process.env.METAWORK_EXECUTION_LINK_BASELINE !== "1";
   const appPid = app.pid;
@@ -796,12 +881,8 @@ export async function runExecutionLinkVertical({
       runTimeoutMs,
       "partial reply visible",
     );
-    const { stdout: killed } = await execFileAsync(
-      "taskkill",
-      ["/PID", String(firstHost.pid), "/F"],
-      { windowsHide: true },
-    );
-    record("ended by PID", { pid: firstHost.pid, taskkill: killed.trim() });
+    const killed = await endProcess(firstHost.pid);
+    record("ended by PID", { pid: firstHost.pid, ended: killed });
     const cut = await poll(
       async () => {
         const run = (await taskOf(taskId))?.runs[1];
@@ -926,21 +1007,31 @@ export async function runExecutionLinkVertical({
     };
     record("hung process given up", evidence.hang);
 
-    // 6. A Run installs an MCP server through the Host.
-    evidence.mcpInstall = await verifyMcpInstall({
-      invoke,
-      snapshot,
-      poll,
-      provider,
-      textSse,
-      toolSse,
-      appPid,
-      workspaceId,
-      workspaceEpoch,
-      repositoryRoot,
-      fixtureRoot,
-      record,
-    });
+    // 6. A Run installs an MCP server through the Host. The installation
+    // stores a credential; on a Mac whose login keychain is locked that
+    // write waits on the keychain's unlock prompt, on the window's main
+    // thread, so a locked machine opts out and says so in the evidence.
+    if (process.env.METAWORK_EXECUTION_LINK_SKIP_MCP_INSTALL === "1") {
+      evidence.mcpInstall = {
+        skipped: "METAWORK_EXECUTION_LINK_SKIP_MCP_INSTALL",
+        serverPids: [],
+      };
+      record("mcp installation skipped", evidence.mcpInstall);
+    } else
+      evidence.mcpInstall = await verifyMcpInstall({
+        invoke,
+        snapshot,
+        poll,
+        provider,
+        textSse,
+        toolSse,
+        appPid,
+        workspaceId,
+        workspaceEpoch,
+        repositoryRoot,
+        fixtureRoot,
+        record,
+      });
     const mcpServers = [
       ...evidence.mcp.serverPids,
       ...evidence.mcpInstall.serverPids,
@@ -966,7 +1057,9 @@ export async function runExecutionLinkVertical({
     ];
     let leftover = children;
     for (let waited = 0; waited <= 10_000; waited += 200) {
-      leftover = (await processCounters(children)).map((row) => row.Id);
+      leftover = windows
+        ? (await processCounters(children)).map((row) => row.Id)
+        : children.filter(alive);
       if (leftover.length === 0) break;
       await new Promise((resolve) => setTimeout(resolve, 200));
     }

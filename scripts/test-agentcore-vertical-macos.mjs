@@ -586,8 +586,12 @@ if (
   ].some(Boolean)
 )
   throw new Error("Task memory growth measurement requires its own scope");
-if (executionLinkOnly && process.platform !== "win32")
-  throw new Error("The execution link acceptance requires Windows");
+if (
+  executionLinkOnly &&
+  process.platform !== "win32" &&
+  process.platform !== "darwin"
+)
+  throw new Error("The execution link acceptance requires Windows or macOS");
 if (
   executionLinkOnly &&
   [
