@@ -49,12 +49,21 @@ if (!baselineAppCwd)
   );
 
 const MiB = 1024 * 1024;
-/// The step's memory targets, as deltas of this build over the baseline.
+/// The step's memory targets. The execution process runs from startup, an
+/// accepted cost (Product's personal Skill catalog needs it before any
+/// Task), so idle is judged in two parts: the window against the baseline's
+/// window, and the execution process against a ceiling of its own, set
+/// above what it measured on Windows and macOS so that a growing standing
+/// cost is caught. After a Task, both processes against the baseline.
+/// `delta` is this build's median minus the baseline's; `ceiling` is this
+/// build's median alone.
 const targets = {
-  idleWorkingSetBytes: 2 * MiB,
-  idlePrivateBytes: 2 * MiB,
-  afterTaskWorkingSetBytes: 30 * MiB,
-  afterTaskPrivateBytes: 64 * MiB,
+  idleWindowWorkingSetBytes: { delta: 2 * MiB },
+  idleWindowPrivateBytes: { delta: 2 * MiB },
+  idleExecutionWorkingSetBytes: { ceiling: 40 * MiB },
+  idleExecutionPrivateBytes: { ceiling: 24 * MiB },
+  afterTaskWorkingSetBytes: { delta: 30 * MiB },
+  afterTaskPrivateBytes: { delta: 64 * MiB },
 };
 
 if (process.env.METAWORK_VERTICAL_PREBUILT !== "1")
@@ -102,6 +111,11 @@ function runHarness(mode, round) {
 
 const sum = (memory, field) =>
   Object.values(memory).reduce((total, process) => total + process[field], 0);
+/// The window process's counter, or the sum over the other processes.
+const windowOnly = (evidence, phase, field) =>
+  evidence[phase].memory[String(evidence.appPid)][field];
+const othersOnly = (evidence, phase, field) =>
+  sum(evidence[phase].memory, field) - windowOnly(evidence, phase, field);
 
 function median(values) {
   const sorted = [...values].sort((first, second) => first - second);
@@ -120,8 +134,18 @@ for (let round = 1; round <= rounds; round += 1) {
     const evidence = JSON.parse(await readFile(evidencePath, "utf8"));
     samples[mode].push({
       round,
-      idleWorkingSetBytes: sum(evidence.idle.memory, "workingSetBytes"),
-      idlePrivateBytes: sum(evidence.idle.memory, "privateBytes"),
+      idleWindowWorkingSetBytes: windowOnly(
+        evidence,
+        "idle",
+        "workingSetBytes",
+      ),
+      idleWindowPrivateBytes: windowOnly(evidence, "idle", "privateBytes"),
+      idleExecutionWorkingSetBytes: othersOnly(
+        evidence,
+        "idle",
+        "workingSetBytes",
+      ),
+      idleExecutionPrivateBytes: othersOnly(evidence, "idle", "privateBytes"),
       afterTaskWorkingSetBytes: sum(
         evidence.afterTask.memory,
         "workingSetBytes",
@@ -149,7 +173,10 @@ const deltas = Object.fromEntries(
     medians.linked[field] - medians.baseline[field],
   ]),
 );
-const exceeded = fields.filter((field) => deltas[field] > targets[field]);
+const judged = (field) =>
+  targets[field].delta !== undefined ? deltas[field] : medians.linked[field];
+const limit = (field) => targets[field].delta ?? targets[field].ceiling;
+const exceeded = fields.filter((field) => judged(field) > limit(field));
 const mib = (bytes) => Math.round((bytes / MiB) * 10) / 10;
 
 const summary = { rounds, samples, medians, deltas, targets, exceeded };
@@ -159,7 +186,7 @@ await writeFile(
 );
 for (const field of fields)
   process.stdout.write(
-    `${field.padEnd(26)} linked ${String(mib(medians.linked[field])).padStart(7)} MiB  baseline ${String(mib(medians.baseline[field])).padStart(7)} MiB  delta ${String(mib(deltas[field])).padStart(6)} MiB  target <= ${mib(targets[field])} MiB\n`,
+    `${field.padEnd(30)} linked ${String(mib(medians.linked[field])).padStart(7)} MiB  baseline ${String(mib(medians.baseline[field])).padStart(7)} MiB  delta ${String(mib(deltas[field])).padStart(6)} MiB  ${targets[field].delta !== undefined ? "delta" : "linked"} <= ${mib(limit(field))} MiB\n`,
   );
 if (exceeded.length > 0) {
   process.stderr.write(`memory targets exceeded: ${exceeded.join(", ")}\n`);
