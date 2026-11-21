@@ -8595,6 +8595,60 @@ test("App shows conversations in the narrow navigation drawer and closes it on s
   );
 });
 
+test("App keeps inbox reply drafts per conversation and protects IME confirmation", async (ctx) => {
+  await renderAppFixture(ctx, 1440);
+  const user = userEvent.setup({ document: dom.window.document });
+  await user.click(screen.getByRole("button", { name: "Messages" }));
+  assert.equal(screen.queryByRole("textbox", { name: /^Reply to / }), null);
+
+  await user.click(screen.getByRole("button", { name: "Tao Lin" }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Reply to Tao Lin" }),
+    "Draft for Tao",
+  );
+  await user.click(screen.getByRole("button", { name: "An Chen" }));
+  const editor = screen.getByRole("textbox", { name: "Reply to An Chen" });
+  const send = screen.getByRole("button", { name: "Send reply" });
+  assert.equal(editor.value, "");
+  assert.equal(send.disabled, true);
+  await user.type(editor, "  ");
+  assert.equal(send.disabled, true);
+  await user.type(editor, "Thanks");
+  await user.keyboard("{Shift>}{Enter}{/Shift}");
+  await user.type(editor, "See you tomorrow.");
+
+  fireEvent.compositionStart(editor);
+  assert.equal(fireEvent.keyDown(editor, { key: "Enter" }), true);
+  fireEvent.compositionEnd(editor);
+  assert.equal(fireEvent.keyDown(editor, { key: "Enter", keyCode: 229 }), true);
+  assert.equal(editor.value, "  Thanks\nSee you tomorrow.");
+
+  await user.keyboard("{Enter}");
+  const conversation = screen.getByRole("region", { name: "An Chen" });
+  const reply = within(conversation).getByText("Thanks See you tomorrow.");
+  assert.equal(reply.textContent, "Thanks\nSee you tomorrow.");
+  assert.equal(editor.value, "");
+  assert.equal(document.activeElement, editor);
+  assert.match(
+    screen.getByRole("button", { name: "An Chen" }).textContent,
+    /Thanks/,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Tao Lin" }));
+  assert.equal(
+    screen.getByRole("textbox", { name: "Reply to Tao Lin" }).value,
+    "Draft for Tao",
+  );
+  await user.click(screen.getByRole("button", { name: "Send reply" }));
+  within(screen.getByRole("region", { name: "Tao Lin" })).getByText(
+    "Draft for Tao",
+  );
+  await user.click(screen.getByRole("button", { name: "An Chen" }));
+  within(screen.getByRole("region", { name: "An Chen" })).getByText(
+    "Thanks See you tomorrow.",
+  );
+});
+
 test("App attention only locates the original approval in docked and overlay layouts", async (ctx) => {
   for (const width of [1440, 390]) {
     const { snapshot, previews, publish } = await renderAppFixture(ctx, width);

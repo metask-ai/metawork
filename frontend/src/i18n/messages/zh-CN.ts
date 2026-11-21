@@ -164,6 +164,8 @@ export const zhCN: Record<MessageId, string> = {
   "inbox.pick_conversation": "选择一个会话",
   "inbox.pick_hint": "选择会话后即可查看消息和关联任务。",
   "inbox.sender_self": "你",
+  "inbox.reply_to": "回复 {name}",
+  "inbox.send_reply": "发送回复",
   "inbox.linked_task": "关联任务",
   "inbox.task_status.doing": "进行中",
   "inbox.task_status.done": "已完成",

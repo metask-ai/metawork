@@ -5993,7 +5993,12 @@ export default function App() {
       }
     >
       {inboxOpen ? (
-        <InboxConversationView conversation={inbox.selected} />
+        <InboxConversationView
+          conversation={inbox.selected}
+          draft={inbox.draft}
+          onDraftChange={inbox.updateDraft}
+          onSend={inbox.sendReply}
+        />
       ) : route === "skills" ? (
         snapshot.skillManagement ? (
           <SkillsPage

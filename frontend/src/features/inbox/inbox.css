@@ -215,6 +215,12 @@
   margin-inline: auto;
 }
 
+.inbox-transcript-entry {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
 .inbox-message {
   max-width: min(92%, 540px);
   align-self: flex-start;
@@ -336,4 +342,20 @@
 
 .inbox-task-facts dt {
   color: var(--ui-content-muted);
+}
+
+.inbox-reply-bar {
+  flex: none;
+  padding: 12px clamp(12px, 3vw, 32px) 16px;
+  border-top: 1px solid var(--ui-border);
+  background: var(--ui-surface-panel);
+}
+
+.inbox-reply-form {
+  display: grid;
+  width: min(100%, var(--content-measure));
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  margin-inline: auto;
 }

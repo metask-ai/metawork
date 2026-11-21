@@ -204,6 +204,8 @@ export const enUS = {
   "inbox.pick_hint":
     "Choose a conversation to view its messages and linked tasks.",
   "inbox.sender_self": "You",
+  "inbox.reply_to": "Reply to {name}",
+  "inbox.send_reply": "Send reply",
   "inbox.linked_task": "Linked task",
   "inbox.task_status.doing": "In progress",
   "inbox.task_status.done": "Completed",

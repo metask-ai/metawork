@@ -11,7 +11,7 @@ export type InboxMessage = {
   id: string;
   sentAt: string;
   direction: "incoming" | "outgoing";
-  text: Copy;
+  text: Copy | string;
   unread?: true;
   task?: InboxTask;
 };
