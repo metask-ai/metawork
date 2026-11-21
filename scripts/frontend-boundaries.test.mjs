@@ -267,7 +267,7 @@ test("draft Workspace selection stays local until Task creation", async () => {
     /function setDraftWorkspaceById\(workspaceId: string\) \{[\s\S]*?newTaskDrafts\.setDirectory\(\{[\s\S]*?kind: "explicit"/,
   );
   assert.doesNotMatch(app, /client\.selectWorkspace|WorkspaceSelectionIntents/);
-  assert.match(app, /onSelectTask=\{openTask\}/);
+  assert.match(app, /onSelectTask=\{\(id\) => \{\s*openTask\(id\)/);
   assert.match(app, /openTask\(result\.taskId\)/);
 });
 
@@ -362,7 +362,7 @@ test("Settings is a full content overlay that preserves the Workbench mount", as
   );
   assert.match(
     css,
-    /\.settings-page\s*\{[\s\S]*--settings-navigation-track: var\(--left-column-width\);/,
+    /\.settings-page\s*\{[\s\S]*--settings-navigation-track: calc\(\s*var\(--left-column-width\) \+ var\(--docked-navigation-width\)\s*\);/,
   );
   assert.match(
     css,

@@ -21,10 +21,10 @@ export async function probeWorkbenchSyncRecovery(port, evidenceDir) {
     await webview.send("Page.bringToFront");
     await webview.send("Emulation.setFocusEmulationEnabled", { enabled: true });
     await until(
-      `document.querySelector('.sidebar-capability:not(:disabled)') !== null`,
+      `document.querySelector('.sidebar-new-task:not(:disabled)') !== null`,
     );
     await webview.evaluate(`(() => {
-      [...document.querySelectorAll('.sidebar-capability')].find(e => /Skills|技能/.test(e.textContent)).click();
+      [...document.querySelectorAll('.workbench-tools button')].find(e => /Skills|技能/.test(e.textContent)).click();
     })()`);
     await until(
       `document.querySelector('.skill-header-actions button:not(:disabled)') !== null`,
@@ -141,7 +141,7 @@ export async function probeWorkbenchSyncRecovery(port, evidenceDir) {
       notice.querySelector('.commandbar-alert-content button').click();
     })()`);
     await until(
-      `document.querySelector('.commandbar-alert') === null && document.querySelector('.sidebar-capability').disabled === false`,
+      `document.querySelector('.commandbar-alert') === null && document.querySelector('.sidebar-new-task').disabled === false`,
     );
     const result = await webview.evaluate(`window.__syncProbe`);
     const connectCalls = result.calls.filter(

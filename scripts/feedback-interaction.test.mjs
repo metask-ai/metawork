@@ -184,7 +184,7 @@ async function setup(ctx, errorCode = "metask_service_unavailable") {
     assert.ok(document.querySelector(".account-identity-trigger")),
   );
   await waitFor(() =>
-    assert.equal(document.querySelector(".sidebar-capability").disabled, false),
+    assert.equal(document.querySelector(".sidebar-new-task").disabled, false),
   );
   return {
     controls,

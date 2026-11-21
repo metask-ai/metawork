@@ -1054,35 +1054,22 @@ test("schedule editor controls have explicit semantics and no native chrome", as
   await waitFor(() => assert.ok(document.activeElement === trigger));
 });
 
-test("New task, Skills, MCP, and Scheduled tasks share one compact peer menu", async () => {
+test("Workbench tools reuse the Skills, MCP and Scheduled task routes", () => {
   const source = readFileSync(
     join(process.cwd(), "frontend/src/app/App.tsx"),
     "utf8",
   );
   const navigation = source.match(
-    /<nav\s+className="sidebar-capabilities"[\s\S]*?<\/nav>/,
+    /<nav\s+className="workbench-tools"[\s\S]*?<\/nav>/,
   )?.[0];
   assert.ok(navigation);
-  assert.ok(
-    navigation.indexOf('t("task.new")') <
-      navigation.indexOf('t("skills.title")'),
+  assert.deepEqual(
+    [...navigation.matchAll(/\["([^"]+)", "[^"]+", "[^"]+"\]/g)].map(
+      ([, route]) => route,
+    ),
+    ["skills", "mcp", "scheduled-tasks"],
   );
-  assert.ok(
-    navigation.indexOf('t("skills.title")') <
-      navigation.indexOf('t("mcp.title")'),
-  );
-  assert.ok(
-    navigation.indexOf('t("mcp.title")') <
-      navigation.indexOf('t("scheduled.title")'),
-  );
-  assert.equal(
-    (navigation.match(/className="sidebar-capability focus-ring"/g) ?? [])
-      .length,
-    4,
-  );
-  for (const icon of ["new-task", "skills", "mcp", "scheduled-tasks"])
-    assert.match(navigation, new RegExp(`<Icon name="${icon}"`));
-  assert.match(navigation, /setRoute\("mcp"\)/);
+  assert.doesNotMatch(navigation, /task\.new/);
   assert.doesNotMatch(navigation, /capabilities\.mcpManagement/);
   assert.match(source, /<McpPage[\s\S]*?management=\{snapshot\.mcp\}/);
   assert.doesNotMatch(

@@ -360,7 +360,7 @@ try {
   const stopMs = performance.now() - stopAt;
   async function openManagement(pattern, ready, label) {
     await webview.evaluate(
-      `(() => {const button=[...document.querySelectorAll('.sidebar-capability')].find(item=>${pattern}.test(item.textContent));if(!button)throw Error('missing management button');button.click();})()`,
+      `(() => {const button=[...document.querySelectorAll('.workbench-tools button')].find(item=>${pattern}.test(item.textContent));if(!button)throw Error('missing management button');button.click();})()`,
     );
     await until(() => webview.evaluate(ready), label);
     assert.equal(

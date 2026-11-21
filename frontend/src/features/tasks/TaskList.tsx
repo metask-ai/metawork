@@ -403,7 +403,7 @@ export function TaskList({
               (
                 target ??
                 document.querySelector<HTMLButtonElement>(
-                  ".task-list-item, .sidebar-capability",
+                  ".task-list-item, .sidebar-new-task",
                 )
               )?.focus();
             });

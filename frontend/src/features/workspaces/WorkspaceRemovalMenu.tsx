@@ -195,9 +195,7 @@ export function WorkspaceRemovalMenu({
             finalFocus={() =>
               trigger.current?.isConnected
                 ? trigger.current
-                : document.querySelector<HTMLButtonElement>(
-                    ".sidebar-capability",
-                  )
+                : document.querySelector<HTMLButtonElement>(".sidebar-new-task")
             }
           >
             <AlertDialog.Title>

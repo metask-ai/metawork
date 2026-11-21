@@ -274,6 +274,51 @@ summary::-webkit-details-marker {
   font-weight: 500;
 }
 
+.primary-sidebar {
+  display: flex;
+  flex: 0 0 var(--primary-navigation-width);
+  min-height: 0;
+  flex-direction: column;
+  align-items: stretch;
+  border-right: 1px solid var(--ui-border);
+  background: var(--ui-surface-panel-2);
+}
+
+.primary-navigation {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  align-content: start;
+  gap: 4px;
+  padding: 4px;
+  overflow: auto;
+  scrollbar-width: none;
+}
+
+.primary-navigation-item {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  justify-self: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ui-content-muted);
+}
+
+.primary-navigation-item svg {
+  font-size: 18px;
+}
+
+.workspace-task-list {
+  min-width: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+  border-right: 1px solid var(--ui-border);
+}
+
 .sidebar-frame {
   display: flex;
   height: 100%;
@@ -290,11 +335,13 @@ summary::-webkit-details-marker {
   container-type: inline-size;
 }
 
-.sidebar-capabilities {
-  margin-top: 8px;
+.workbench-tools {
+  display: grid;
+  gap: 1px;
+  margin-top: 2px;
 }
 
-.sidebar-capability,
+.sidebar-action,
 .task-project-heading,
 .task-list-item {
   display: grid;
@@ -303,21 +350,21 @@ summary::-webkit-details-marker {
 }
 
 @media (pointer: coarse) {
-  .sidebar-capability,
+  .sidebar-action,
   .task-project-heading,
   .task-list-item {
     min-height: 44px;
   }
 }
 
-.sidebar-capability,
+.sidebar-action,
 .task-project-heading {
   grid-template-columns: 22px minmax(0, 1fr);
   padding-inline: 8px 10px;
   gap: 7px;
 }
 
-.sidebar-capability {
+.sidebar-action {
   width: 100%;
   padding-block: 0;
   border: 0;
@@ -328,20 +375,9 @@ summary::-webkit-details-marker {
   text-align: left;
 }
 
-.sidebar-capability + .sidebar-capability {
-  margin-top: 1px;
-}
-
-.sidebar-capability-mark svg {
+.sidebar-action svg {
   font-size: var(--text-lead);
-}
-
-.sidebar-capability-mark {
-  display: grid;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  color: currentColor;
+  justify-self: center;
 }
 
 .sidebar-navigation {
@@ -644,7 +680,9 @@ summary::-webkit-details-marker {
 }
 
 .settings-page {
-  --settings-navigation-track: var(--left-column-width);
+  --settings-navigation-track: calc(
+    var(--left-column-width) + var(--docked-navigation-width)
+  );
   --settings-content-max-width: 960px;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -3531,6 +3569,8 @@ button.run-process-tool:hover {
 .app-window {
   --left-column: 0px;
   --left-column-width: 320px;
+  --primary-navigation-width: 0px;
+  --docked-navigation-width: 0px;
   --right-panel-width: 0px;
   --workbench-content-surface: var(--ui-surface-panel);
   display: grid;
@@ -3542,10 +3582,6 @@ button.run-process-tool:hover {
   padding-top: env(safe-area-inset-top, 0px);
   background: var(--ui-surface-canvas);
   isolation: isolate;
-}
-
-.app-window[data-left-open="true"] {
-  --left-column: var(--left-column-width);
 }
 
 .workbench-commandbar {
@@ -4023,9 +4059,9 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .workspace-sidebar {
+  display: flex;
   flex: 0 0 var(--left-column);
   padding: 0;
-  border-right: 1px solid var(--ui-border);
   background: var(--ui-surface-canvas);
   overflow: hidden;
 }
@@ -6467,7 +6503,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-top: 4px;
 }
 
-.sidebar-capability,
+.sidebar-action,
 .task-project-context,
 .task-project-heading,
 .task-list-item {
@@ -6476,8 +6512,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .account-identity-trigger:hover,
 .account-identity-trigger[data-active="true"],
-.sidebar-capability:hover:where(:not(:disabled)),
-.sidebar-capability[data-active="true"],
+.primary-navigation-item:hover,
+.primary-navigation-item[aria-current="page"],
+.sidebar-action:hover:where(:not(:disabled)),
+.sidebar-action[data-active="true"],
+.sidebar-action[aria-current="page"],
 .task-project-context:hover,
 .task-project-context:has(.task-list-action:focus-visible),
 .task-project-context[data-menu-open="true"],
@@ -9739,17 +9778,16 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     max-width: 94px;
   }
 
-  .app-window {
-    --left-column: 0px;
-  }
-
   .workspace-sidebar {
     position: fixed;
     z-index: 45;
     top: calc(var(--window-bar-height) + env(safe-area-inset-top, 0px));
     bottom: 0;
     left: 0;
-    width: min(280px, calc(100vw - 44px));
+    width: min(
+      calc(280px + var(--primary-navigation-width)),
+      calc(100vw - 44px)
+    );
     transform: translateX(-100%);
     box-shadow: 16px 0 40px rgba(24, 50, 71, 0.12);
     transition: transform 160ms ease;

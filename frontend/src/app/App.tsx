@@ -9,7 +9,6 @@ import {
   UserInputMessage,
 } from "../features/tasks/UserInputMessage.tsx";
 import type { OutputEditResult } from "../features/tasks/RunOutputs.tsx";
-import { BrandLogo } from "../components/ui/BrandLogo.tsx";
 import {
   historyProgress,
   earlierHistoryGoal,
@@ -60,6 +59,7 @@ import {
   connectionFailurePresentation,
   connectionStatus,
 } from "./connection-status.ts";
+import { BrandLogo } from "../components/ui/BrandLogo.tsx";
 import { Icon } from "../components/ui/Icon.tsx";
 import { FeedbackNotice } from "../components/ui/FeedbackNotice.tsx";
 import { DiagnosticDisclosure } from "../components/ui/DiagnosticDisclosure.tsx";
@@ -68,6 +68,7 @@ import { AlertDialog } from "../components/ui/alert-dialog.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { Dialog } from "../components/ui/dialog.tsx";
 import { Input } from "../components/ui/input.tsx";
+import { Tooltip } from "../components/ui/tooltip.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { ConnectionFailureScreen } from "../features/connection/ConnectionFailureScreen.tsx";
 import { accountFeedback } from "../features/account/account-feedback.ts";
@@ -3213,6 +3214,11 @@ export default function App() {
     setRoute("workbench");
     dispatchWorkbench({ type: "task.selected", taskId });
   }
+  function openWorkbenchPage(destination: ShellRoute) {
+    if (route === destination) return;
+    pendingTaskSelection.current = null;
+    setRoute(destination);
+  }
   function openSettings(target: SettingsFocusTarget = "title") {
     if (modelSetupOpen) {
       modelSetupReturnFocus.current = null;
@@ -5366,76 +5372,84 @@ export default function App() {
           )}
         </div>
       }
-      left={
+      navigation={(dismissDrawer) => (
+        <div className="primary-sidebar">
+          <nav className="primary-navigation" aria-label={t("app.navigation")}>
+            <Tooltip.Root>
+              <Tooltip.Trigger
+                type="button"
+                className="primary-navigation-item"
+                aria-label={t("app.workbench")}
+                aria-current="page"
+                onClick={() => {
+                  openWorkbenchPage("workbench");
+                  dismissDrawer();
+                }}
+              >
+                <Icon name="workbench" />
+              </Tooltip.Trigger>
+              <Tooltip.Portal>
+                <Tooltip.Positioner side="right">
+                  <Tooltip.Popup>{t("app.workbench")}</Tooltip.Popup>
+                </Tooltip.Positioner>
+              </Tooltip.Portal>
+            </Tooltip.Root>
+          </nav>
+        </div>
+      )}
+      left={(dismissDrawer) => (
         <div className="sidebar-frame">
           <div className="sidebar-primary">
             <p className="brand-name">
               <BrandLogo label={t("app.name")} showMark={false} />
             </p>
-            <nav
-              className="sidebar-capabilities"
-              aria-label={t("skills.navigation_label")}
+            <button
+              type="button"
+              className="sidebar-action sidebar-new-task focus-ring"
+              data-active={route === "workbench" && newTaskDraftActive}
+              disabled={bridgeUnavailable}
+              onClick={() => {
+                dismissDrawer();
+                beginNewTask();
+              }}
             >
-              <button
-                className="sidebar-capability focus-ring"
-                data-active={route === "workbench" && newTaskDraftActive}
-                disabled={bridgeUnavailable}
-                onClick={beginNewTask}
-              >
-                <span className="sidebar-capability-mark" aria-hidden="true">
-                  <Icon name="new-task" />
-                </span>
-                <span>{t("task.new")}</span>
-              </button>
-              <button
-                className="sidebar-capability focus-ring"
-                data-active={route === "skills"}
-                aria-current={route === "skills" ? "page" : undefined}
-                onClick={() => {
-                  pendingTaskSelection.current = null;
-                  setRoute("skills");
-                }}
-              >
-                <span className="sidebar-capability-mark" aria-hidden="true">
-                  <Icon name="skills" />
-                </span>
-                <span>{t("skills.title")}</span>
-              </button>
-              <button
-                className="sidebar-capability focus-ring"
-                data-active={route === "mcp"}
-                aria-current={route === "mcp" ? "page" : undefined}
-                onClick={() => {
-                  pendingTaskSelection.current = null;
-                  setRoute("mcp");
-                }}
-              >
-                <span className="sidebar-capability-mark" aria-hidden="true">
-                  <Icon name="mcp" />
-                </span>
-                <span>{t("mcp.title")}</span>
-              </button>
-              {snapshot.capabilities.scheduledTaskPersistenceHealth !==
-                "unavailable" && (
-                <button
-                  className="sidebar-capability focus-ring"
-                  data-active={route === "scheduled-tasks"}
-                  aria-current={
-                    route === "scheduled-tasks" ? "page" : undefined
-                  }
-                  onClick={() => {
-                    pendingTaskSelection.current = null;
-                    setRoute("scheduled-tasks");
-                  }}
-                >
-                  <span className="sidebar-capability-mark" aria-hidden="true">
-                    <Icon name="scheduled-tasks" />
-                  </span>
-                  <span>{t("scheduled.title")}</span>
-                </button>
-              )}
+              <Icon name="new-task" />
+              <span>{t("task.new")}</span>
+            </button>
+            <nav
+              className="workbench-tools"
+              aria-label={t("app.workbench_tools")}
+            >
+              {(
+                [
+                  ["skills", "skills.title", "skills"],
+                  ["mcp", "mcp.title", "mcp"],
+                  ["scheduled-tasks", "scheduled.title", "scheduled-tasks"],
+                ] as const
+              ).map(([destination, label, icon]) => {
+                if (
+                  destination === "scheduled-tasks" &&
+                  snapshot.capabilities.scheduledTaskPersistenceHealth ===
+                    "unavailable"
+                )
+                  return null;
+                return (
+                  <button
+                    key={destination}
+                    type="button"
+                    className="sidebar-action focus-ring"
+                    aria-current={route === destination ? "page" : undefined}
+                    onClick={() => {
+                      openWorkbenchPage(destination);
+                      dismissDrawer();
+                    }}
+                  >
+                    <Icon name={icon} />
+                    <span>{t(label)}</span>
+                  </button>
+                );
+              })}
             </nav>
-
             <div className="sidebar-navigation">
               {snapshot.capabilities.taskHistoryPersistenceHealth !== "ready" &&
                 snapshot.capabilities.taskHistoryPersistenceHealth !==
@@ -5477,7 +5491,10 @@ export default function App() {
                   route === "workbench" ? workbench.activeTaskId : null
                 }
                 suppressedCompletionTaskId={suppressedCompletionTaskId}
-                onSelectTask={openTask}
+                onSelectTask={(id) => {
+                  openTask(id);
+                  dismissDrawer();
+                }}
                 onTaskAction={handleTaskAction}
                 onSetProject={changeTaskProject}
                 renderProjectFeedback={renderProjectFeedback}
@@ -5505,7 +5522,10 @@ export default function App() {
                   <WorkspaceRemovalMenu
                     workspace={workspace}
                     openDisabled={workbenchMutationDisabled}
-                    onNewTask={() => openNewTaskDraft(workspace.id)}
+                    onNewTask={() => {
+                      dismissDrawer();
+                      openNewTaskDraft(workspace.id);
+                    }}
                     onOpen={() =>
                       client.openWorkspace(workspace.id, workspace.epoch)
                     }
@@ -5532,10 +5552,8 @@ export default function App() {
               />
             </div>
           </div>
-
           <AccountIdentity
             account={snapshot.account}
-
             updates={snapshot.updates}
             updateControls={{
               disabled: bridgeUnavailable,
@@ -5564,7 +5582,7 @@ export default function App() {
             onLogout={() => void runAccountCommand(() => client.logout())}
           />
         </div>
-      }
+      )}
       rightPanelOpen={rightPanelOpen && !settingsOpen}
       rightPanelToggleRef={taskPanelToggle}
       onTaskStageExposureChange={setTaskStageExposed}

@@ -20,6 +20,7 @@ import {
   Pencil,
   FileDiff,
   Layers3,
+  LayoutGrid,
   History,
   ListTree,
   LoaderCircle,
@@ -57,6 +58,7 @@ import {
 type IconName =
   | "more"
   | "sidebar"
+  | "workbench"
   | "minimize"
   | "maximize"
   | "restore"
@@ -119,6 +121,7 @@ const icons: Record<IconName, LucideIcon> = {
   "folder-x": FolderX,
   more: Ellipsis,
   sidebar: PanelLeft,
+  workbench: LayoutGrid,
   minimize: Minus,
   maximize: Square,
   restore: Copy,
