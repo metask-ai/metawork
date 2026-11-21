@@ -536,6 +536,40 @@ pub const Runtime = struct {
         };
     }
 
+    /// The Agent Runtime every catalog lease here was acquired in is gone,
+    /// and each lease pinned a snapshot only that Runtime held. Each catalog
+    /// that was queried is dropped and queried again, as at startup, and
+    /// reads as loading until it is back, so nothing new is bound with a
+    /// lease of the Runtime that is gone. A query still in flight answers for
+    /// that Runtime, so its answer is not taken.
+    pub fn expireCatalogs(self: *Runtime, budget: ProjectionBudget) void {
+        if (self.shutting_down) return;
+        if (self.state.catalog.slot != .uninitialized or self.personal_job != null or self.personal_reschedule_pending) {
+            self.invalidateControlWithBudget(&self.state.catalog, budget);
+            if (nextGeneration(self.state.catalog.request_generation)) |generation| {
+                self.state.catalog.request_generation = generation;
+                if (self.personal_job != null) {
+                    self.personal_reschedule_pending = true;
+                } else self.startPersonal(generation, null) catch |err| {
+                    self.personal_reschedule_pending = err == error.QueueFull;
+                };
+            }
+        }
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            if (!workspace.authorized) continue;
+            if (workspace.control.slot == .uninitialized and workspace.job == null and !workspace.reschedule_pending) continue;
+            self.invalidateControlWithBudget(&workspace.control, budget);
+            const generation = nextGeneration(workspace.control.request_generation) orelse continue;
+            workspace.control.request_generation = generation;
+            if (workspace.job != null) {
+                workspace.reschedule_pending = true;
+            } else self.startWorkspace(workspace, generation, null) catch |err| {
+                workspace.reschedule_pending = err == error.QueueFull;
+            };
+        }
+    }
+
     pub fn refreshWorkspace(self: *Runtime, id: u64, epoch: u64) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         const workspace = self.findWorkspace(id) orelse return error.UnknownWorkspace;
@@ -3098,6 +3132,57 @@ test "catalog job failure is committed by the Product Skill owner" {
         catalog.CatalogAvailability.unavailable,
         (try runtime.workspaceCatalogProjection(7, 3)).availability,
     );
+}
+
+test "expiry queries each catalog again and does not take the answer of a query in flight" {
+    var harness: TestHarness = .{};
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    runtime.registerWorkspaceOwned(.{
+        .id = 7,
+        .epoch = 3,
+        .catalog_authorized = true,
+        .canonical_root = try std.testing.allocator.dupe(u8, "/workspace/a"),
+    }, harness.budget());
+    runtime.registerWorkspaceOwned(.{
+        .id = 8,
+        .epoch = 1,
+        .catalog_authorized = true,
+        .canonical_root = try std.testing.allocator.dupe(u8, "/workspace/never-queried"),
+    }, harness.budget());
+
+    // A query asked of the Runtime that is about to go.
+    try runtime.refreshWorkspace(7, 3);
+    const asked = runtime.findWorkspace(7).?.control.request_generation;
+    runtime.expireCatalogs(harness.budget());
+    const workspace = runtime.findWorkspace(7).?;
+    try std.testing.expect(workspace.control.request_generation > asked);
+    try std.testing.expect(workspace.reschedule_pending);
+    try std.testing.expectEqual(
+        catalog.CatalogAvailability.loading,
+        (try runtime.workspaceCatalogProjection(7, 3)).availability,
+    );
+    // Nothing was ever asked of the other one, so nothing is asked now.
+    try std.testing.expect(!runtime.hasWorkspaceJob(8));
+
+    // The old answer arrives and is not taken; the new query goes out.
+    harness.runQueued();
+    try std.testing.expect(runtime.sync(harness.budget(), test_snapshot_limits, null));
+    try std.testing.expect(workspace.control.completed_generation < workspace.control.request_generation);
+    try std.testing.expect(runtime.hasWorkspaceJob(7));
+    try std.testing.expectEqual(
+        catalog.CatalogAvailability.loading,
+        (try runtime.workspaceCatalogProjection(7, 3)).availability,
+    );
+    harness.runQueued();
+    try std.testing.expect(runtime.sync(harness.budget(), test_snapshot_limits, null));
+    try std.testing.expectEqual(workspace.control.request_generation, workspace.control.completed_generation);
+    try std.testing.expectEqual(@as(usize, 2), harness.query_count);
+    try std.testing.expectEqual(
+        catalog.CatalogAvailability.unavailable,
+        (try runtime.workspaceCatalogProjection(7, 3)).availability,
+    );
+    try std.testing.expect(!runtime.hasWorkspaceJob(8));
 }
 
 test "workspace identity replacement discards stale completion and reschedules" {

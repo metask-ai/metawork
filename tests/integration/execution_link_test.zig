@@ -342,6 +342,7 @@ fn turn(control: *product_control.Runtime, owner: *execution_client.Owner) !void
     if (owner.takeLoss()) |range| {
         control.abandonSessionsInRouteRange(range.first, range.end);
         control.expireMcpCatalog();
+        control.expireSkillCatalogs();
     }
     control.syncLifecycle();
     owner.sweep();
@@ -1287,6 +1288,7 @@ test "an execution process that faults in a Run leaves a record of its own, whic
                 lost = range;
                 control.abandonSessionsInRouteRange(range.first, range.end);
                 control.expireMcpCatalog();
+                control.expireSkillCatalogs();
             }
             control.syncLifecycle();
             owner.sweep();

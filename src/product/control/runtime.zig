@@ -7580,6 +7580,15 @@ pub const Runtime = struct {
         self.recoverExpiredMcpCatalogNoFail();
     }
 
+    /// The same for the Skill catalogs: each lease pinned a snapshot that
+    /// went with the process, so each catalog Product holds is queried again
+    /// before a new Task is bound with one.
+    pub fn expireSkillCatalogs(self: *Runtime) void {
+        if (self.shutting_down) return;
+        self.skill.expireCatalogs(self.skillProjectionBudget());
+        self.bumpRevision();
+    }
+
     /// Records the Application-owned Runtime shutdown fact and permanently
     /// invalidates every remaining Task Session Binding. Application calls
     /// this only after Runtime.shutdown succeeds and the final lifecycle sync.

@@ -649,6 +649,7 @@ const App = struct {
                 }
                 control.abandonSessionsInRouteRange(range.first, range.end);
                 control.expireMcpCatalog();
+                control.expireSkillCatalogs();
             }
             owner.sweep();
         }
