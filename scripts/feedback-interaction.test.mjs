@@ -199,7 +199,7 @@ async function setup(ctx, errorCode = "metask_service_unavailable") {
       const user = userEvent.setup({ document });
       await user.click(
         screen.getByRole("button", {
-          name: translate("en-US", "app.account_and_application_menu"),
+          name: /Account and application menu/,
         }),
       );
       await user.click(

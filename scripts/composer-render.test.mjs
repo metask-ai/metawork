@@ -1494,10 +1494,6 @@ test("Sidebar typography reserves bold weight for the product identity", async (
     stylesheet,
     /\.task-list-item\[aria-current="page"\] \.task-list-title\s*\{[^}]*font-weight: 500/s,
   );
-  assert.match(
-    stylesheet,
-    /\.account-identity-copy strong\s*\{[^}]*font-weight: 500/s,
-  );
 });
 
 test("Account identity and its menu stay compact without shrinking the hit target", async () => {
@@ -1508,11 +1504,11 @@ test("Account identity and its menu stay compact without shrinking the hit targe
 
   assert.match(
     stylesheet,
-    /\.account-identity\s*\{[^}]*padding: 4px 8px calc\(4px \+ env\(safe-area-inset-bottom, 0px\)\);/s,
+    /\.account-identity\s*\{[^}]*padding: 4px 0 calc\(4px \+ env\(safe-area-inset-bottom, 0px\)\);/s,
   );
   assert.match(
     stylesheet,
-    /\.account-identity-trigger\s*\{[^}]*min-height: 44px;/s,
+    /\.account-identity-trigger,\s*\.account-update-trigger\s*\{[^}]*min-width: 44px;[^}]*min-height: 44px;/s,
   );
   assert.match(
     stylesheet,

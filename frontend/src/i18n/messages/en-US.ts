@@ -344,6 +344,7 @@ export const enUS = {
   "account.operation.loading_keys": "Loading API Keys",
   "account.operation.selecting_key": "Choose an API Key",
   "account.login": "Sign in with Metask",
+  "account.login_short": "Sign in",
   "account.api_key": "API Key",
   "account.model": "Model",
   "account.choose_key": "Choose an API Key",

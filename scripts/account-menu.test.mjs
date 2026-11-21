@@ -139,15 +139,18 @@ function renderIdentity(callbacks, accountView = account, locale = "en-US") {
   return render(identityElement(callbacks, accountView, locale));
 }
 
-test("authenticated account identity does not repeat a healthy connection status", () => {
+test("authenticated account identity shows a compact avatar and describes the account", async () => {
   renderIdentity({});
 
   const trigger = screen.getByRole("button", {
     name: "Account and application menu",
   });
-  assert.match(trigger.textContent, /Metask User/);
-  assert.doesNotMatch(trigger.textContent, /Metask connected/);
-  assert.equal(trigger.querySelector("small"), null);
+  assert.equal(trigger.textContent, "M");
+  assert.equal(trigger.getAttribute("aria-description"), "Metask User");
+  await userEvent.setup({ document: dom.window.document }).click(trigger);
+  const menu = await screen.findByRole("menu");
+  assert.match(menu.textContent, /Metask User/);
+  assert.doesNotMatch(menu.textContent, /Metask connected/);
 });
 
 test("authenticated account without a username uses its email hint", () => {
@@ -164,7 +167,7 @@ test("authenticated account without a username uses its email hint", () => {
   const trigger = screen.getByRole("button", {
     name: "Account and application menu",
   });
-  assert.match(trigger.textContent, /m\*\*\*@example\.com/);
+  assert.equal(trigger.getAttribute("aria-description"), "m***@example.com");
   assert.equal(container.querySelector(".account-avatar")?.textContent, "M");
 });
 
@@ -182,7 +185,7 @@ test("authenticated phone account uses its masked phone hint", () => {
   const trigger = screen.getByRole("button", {
     name: "Account and application menu",
   });
-  assert.match(trigger.textContent, /138\*\*\*\*8000/);
+  assert.equal(trigger.getAttribute("aria-description"), "138****8000");
   assert.equal(container.querySelector(".account-avatar")?.textContent, "M");
 });
 
@@ -195,14 +198,14 @@ test("authenticated account without profile data uses a neutral identity", () =>
   const trigger = screen.getByRole("button", {
     name: "Account and application menu",
   });
-  assert.match(trigger.textContent, /Signed in/);
+  assert.equal(trigger.getAttribute("aria-description"), "Signed in");
   assert.equal(container.querySelector(".account-avatar")?.textContent, "M");
 });
 
 test("signed-out account identity separates account, status, and login action", async () => {
   let loginCalls = 0;
   const user = userEvent.setup({ document: dom.window.document });
-  const { container } = renderIdentity(
+  renderIdentity(
     {
       onBeginLogin() {
         loginCalls += 1;
@@ -214,17 +217,15 @@ test("signed-out account identity separates account, status, and login action", 
   );
 
   const trigger = screen.getByRole("button", {
-    name: "Account and application menu",
+    name: "Sign in · Account and application menu",
   });
-  assert.match(trigger.textContent, /Metask/);
-  assert.match(trigger.textContent, /Not signed in/);
-  assert.equal(container.querySelector(".account-avatar")?.textContent, "M");
-  assert.doesNotMatch(trigger.textContent, /Sign in with Metask/);
+  assert.equal(trigger.textContent, "Sign in");
+  assert.equal(trigger.getAttribute("aria-description"), "Not signed in");
 
   await user.click(trigger);
 
   const menu = await screen.findByRole("menu", {
-    name: "Account and application menu",
+    name: "Sign in · Account and application menu",
   });
   assert.doesNotMatch(menu.textContent, /Metask account/);
   assert.doesNotMatch(menu.textContent, /Not signed in/);
@@ -327,7 +328,8 @@ test("authorization without cancellation keeps app actions available without an 
   const menu = await screen.findByRole("menu", {
     name: "Account and application menu",
   });
-  assert.equal(menu.querySelector('[role="separator"]'), null);
+  assert.match(menu.textContent, /Finishing Metask sign-in/);
+  assert.equal(screen.queryByRole("menuitem", { name: "Cancel" }), null);
   await user.click(screen.getByRole("menuitem", { name: "About" }));
   assert.notEqual(
     await screen.findByRole("dialog", { name: "MetaWork" }),
@@ -421,6 +423,15 @@ test("new version uses a separate corner button without a dropdown arrow or acci
     name: "View new version 0.2.10",
   });
   assert.equal(updateTrigger.parentElement, accountTrigger.parentElement);
+  assert.equal(updateTrigger.parentElement.firstElementChild, updateTrigger);
+  assert.ok(updateTrigger.querySelector("svg"));
+  assert.equal(updateTrigger.textContent, "");
+  await user.tab();
+  assert.equal(document.activeElement, updateTrigger);
+  assert.equal(
+    (await screen.findByText("Update available")).dataset.instant,
+    "focus",
+  );
   await user.click(accountTrigger);
   assert.ok(await screen.findByRole("menu"));
   await user.click(updateTrigger);

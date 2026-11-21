@@ -285,6 +285,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.operation.loading_keys": "正在加载 API Key",
   "account.operation.selecting_key": "请选择 API Key",
   "account.login": "登录 Metask",
+  "account.login_short": "登录",
   "account.api_key": "API Key",
   "account.model": "模型",
   "account.choose_key": "选择 API Key",

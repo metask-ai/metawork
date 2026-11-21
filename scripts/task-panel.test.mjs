@@ -8477,6 +8477,9 @@ test("App groups tools in the Workbench sidebar and keeps the primary entry avai
     screen.queryByRole("navigation", { name: "Workbench tools" }),
     null,
   );
+  assert.ok(
+    screen.getByRole("button", { name: /Account and application menu/i }),
+  );
   assert.equal(screen.queryByRole("button", { name: /First task/ }), null);
   fireEvent.click(workbench);
   assert.equal(workbench.getAttribute("aria-current"), "page");

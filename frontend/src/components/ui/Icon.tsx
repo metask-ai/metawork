@@ -7,6 +7,7 @@ import {
   Box,
   CalendarDays,
   Check,
+  CircleArrowUp,
   ChevronRight,
   ChevronDown,
   Clock3,
@@ -59,6 +60,7 @@ type IconName =
   | "more"
   | "sidebar"
   | "workbench"
+  | "update-available"
   | "minimize"
   | "maximize"
   | "restore"
@@ -122,6 +124,7 @@ const icons: Record<IconName, LucideIcon> = {
   more: Ellipsis,
   sidebar: PanelLeft,
   workbench: LayoutGrid,
+  "update-available": CircleArrowUp,
   minimize: Minus,
   maximize: Square,
   restore: Copy,

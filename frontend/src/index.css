@@ -308,7 +308,8 @@ summary::-webkit-details-marker {
   color: var(--ui-content-muted);
 }
 
-.primary-navigation-item svg {
+.primary-navigation-item svg,
+.account-identity-trigger svg {
   font-size: 18px;
 }
 
@@ -319,18 +320,11 @@ summary::-webkit-details-marker {
   border-right: 1px solid var(--ui-border);
 }
 
-.sidebar-frame {
+.sidebar-primary {
   display: flex;
   height: 100%;
   min-height: 0;
-  flex-direction: column;
-}
-
-.sidebar-primary {
-  display: flex;
-  min-height: 0;
   padding: 10px 14px 0;
-  flex: 1;
   flex-direction: column;
   container-type: inline-size;
 }
@@ -433,50 +427,36 @@ summary::-webkit-details-marker {
 
 .account-identity {
   display: flex;
-  align-items: center;
-  gap: 4px;
-  position: relative;
-  padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px));
-  border-top: 1px solid var(--ui-border);
-  background: transparent;
-}
-
-.account-identity-trigger {
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
-  flex: 1;
-  min-width: 0;
-  width: 100%;
-  min-height: 44px;
-  padding: 5px 7px;
-  align-items: center;
-  gap: 9px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  color: var(--ui-content-primary);
-  background: transparent;
-  text-align: left;
-}
-
-.account-update-trigger {
+  flex-direction: column;
   flex-shrink: 0;
-  min-height: 44px;
-  padding: 5px 10px;
-  border: 0;
-  border-radius: 7px;
-  color: var(--ui-action-primary);
-  background: transparent;
-  font-size: var(--text-label);
-  font-weight: 500;
-  white-space: nowrap;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 0 calc(4px + env(safe-area-inset-bottom, 0px));
 }
 
-.account-update-trigger:hover:not(:disabled) {
-  background: var(--metask-primary-soft);
+.account-identity-trigger,
+.account-update-trigger {
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  max-width: 100%;
+  min-height: 44px;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--ui-content-muted);
+  background: transparent;
+  font-size: var(--text-micro);
+  font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .account-update-trigger:disabled {
   opacity: 0.5;
+}
+
+.account-update-trigger svg {
+  font-size: 32px;
 }
 
 .account-avatar,
@@ -492,36 +472,10 @@ summary::-webkit-details-marker {
   font-weight: 720;
 }
 
-.account-identity-copy,
-.account-identity-copy strong,
-.account-identity-copy small {
-  display: block;
-  min-width: 0;
-}
-
-.account-identity-copy strong {
-  overflow: hidden;
-  font-size: var(--text-label);
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-identity-copy small {
-  margin-top: 2px;
-  overflow: hidden;
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-identity-copy small[data-attention="true"] {
-  color: var(--ui-content-warning);
-}
-
 .account-menu {
   width: min(224px, calc(100vw - 24px));
+  max-height: var(--available-height, calc(100dvh - 24px));
+  overflow-y: auto;
 }
 
 .account-menu-heading {
@@ -531,13 +485,9 @@ summary::-webkit-details-marker {
 
 .account-menu-heading strong {
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-menu-heading strong {
   font-size: var(--text-label);
+  font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .about-dialog {
@@ -6511,7 +6461,9 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .account-identity-trigger:hover,
+.account-identity-trigger[data-popup-open],
 .account-identity-trigger[data-active="true"],
+.account-update-trigger:hover:not(:disabled),
 .primary-navigation-item:hover,
 .primary-navigation-item[aria-current="page"],
 .sidebar-action:hover:where(:not(:disabled)),

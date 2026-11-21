@@ -5,6 +5,7 @@ import { SignOutConfirmation } from "../../components/SignOutConfirmation.tsx";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
+import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import {
   accountIdentityInitial,
@@ -56,6 +57,8 @@ export function AccountIdentity({
         : account.state === "signed_out"
           ? t("account.signed_out")
           : null;
+  const pending =
+    account.state === "checking" || account.state === "authorizing";
   const initial = accountIdentityInitial(account);
 
   useEffect(() => {
@@ -72,15 +75,17 @@ export function AccountIdentity({
       <Menu.Root open={open} onOpenChange={setOpen}>
         <div className="account-identity">
           <Menu.Portal>
-            <Menu.Positioner side="top" align="end" sideOffset={8}>
+            <Menu.Positioner side="right" align="end" sideOffset={8}>
               <Menu.Popup
                 className="account-menu"
                 aria-label={t("app.account_and_application_menu")}
               >
-                {authenticated && (
+                {(authenticated || pending) && (
                   <>
                     <div className="account-menu-heading">
-                      <strong title={identityName}>{identityName}</strong>
+                      <strong title={identityName}>
+                        {identityStatus ?? identityName}
+                      </strong>
                     </div>
                     <Menu.Separator />
                   </>
@@ -143,36 +148,52 @@ export function AccountIdentity({
               </Menu.Popup>
             </Menu.Positioner>
           </Menu.Portal>
+          {updates.updateAvailable && (
+            <Tooltip.Root>
+              <Tooltip.Trigger
+                type="button"
+                className="account-update-trigger"
+                aria-label={t("updates.open", {
+                  version: updates.latestVersion!,
+                })}
+                aria-haspopup="dialog"
+                disabled={updateControls.disabled}
+                onClick={(event) => {
+                  aboutReturnFocus.current = event.currentTarget;
+                  choose(() => setAboutOpen(true));
+                }}
+              >
+                <Icon name="update-available" />
+              </Tooltip.Trigger>
+              <Tooltip.Portal>
+                <Tooltip.Positioner side="right">
+                  <Tooltip.Popup>{t("updates.available")}</Tooltip.Popup>
+                </Tooltip.Positioner>
+              </Tooltip.Portal>
+            </Tooltip.Root>
+          )}
           <Menu.Trigger
             ref={trigger}
             className="account-identity-trigger focus-ring"
             data-active={active}
-            aria-label={t("app.account_and_application_menu")}
+            aria-label={
+              account.state === "signed_out"
+                ? `${t("account.login_short")} · ${t("app.account_and_application_menu")}`
+                : t("app.account_and_application_menu")
+            }
+            aria-description={identityStatus ?? identityName}
+            title={identityStatus ?? identityName}
           >
-            <span className="account-avatar" aria-hidden="true">
-              {initial}
-            </span>
-            <span className="account-identity-copy">
-              <strong title={identityName}>{identityName}</strong>
-              {identityStatus && <small>{identityStatus}</small>}
-            </span>
+            {authenticated ? (
+              <span className="account-avatar" aria-hidden="true">
+                {initial}
+              </span>
+            ) : pending ? (
+              <Icon name="account" />
+            ) : (
+              t("account.login_short")
+            )}
           </Menu.Trigger>
-          {updates.updateAvailable && (
-            <button
-              type="button"
-              className="account-update-trigger focus-ring"
-              aria-label={t("updates.open", {
-                version: updates.latestVersion!,
-              })}
-              disabled={updateControls.disabled}
-              onClick={(event) => {
-                aboutReturnFocus.current = event.currentTarget;
-                choose(() => setAboutOpen(true));
-              }}
-            >
-              {t("updates.available")}
-            </button>
-          )}
         </div>
       </Menu.Root>
 
@@ -185,7 +206,10 @@ export function AccountIdentity({
           if (!nextOpen)
             window.requestAnimationFrame(() => {
               const target = aboutReturnFocus.current;
-              (target?.isConnected ? target : trigger.current)?.focus();
+              (target?.isConnected && !target.disabled
+                ? target
+                : trigger.current
+              )?.focus();
             });
         }}
       />
