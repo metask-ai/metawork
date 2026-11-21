@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "./styles/metask-tokens.css";
+@import "./features/inbox/inbox.css";
 
 :root {
   --window-bar-height: 52px;
@@ -300,6 +301,7 @@ summary::-webkit-details-marker {
 }
 
 .primary-navigation-item {
+  position: relative;
   display: grid;
   width: 44px;
   height: 44px;
@@ -6465,6 +6467,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .account-update-trigger:hover:not(:disabled),
 .primary-navigation-item:hover,
 .primary-navigation-item[aria-current="page"],
+.inbox-list-row:hover,
+.inbox-list-row[aria-current="true"],
 .sidebar-action:hover:where(:not(:disabled)),
 .sidebar-action[data-active="true"],
 .sidebar-action[aria-current="page"],
