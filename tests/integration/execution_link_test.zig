@@ -1637,3 +1637,32 @@ test "a process stuck before it agrees on identity is ended within the deadline,
     // The process was ended and reaped by the failed start, not left behind.
     try std.testing.expectEqual(@as(usize, 0), owner.generations.items.len);
 }
+
+test "a child the reaper has collected is not signalled: its pid may already name another process" {
+    // A crash is usually reaped before the reader sees the end of the
+    // stream, and the loss that follows asks the host to end the child.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var host: execution_host.Host = undefined;
+    const failure = try host.start(
+        io,
+        allocator,
+        matching_identity,
+        .{},
+        .{ .explicit = &.{ fixture, "--with-runtime", "--no-runtime" } },
+        test_handshake_deadline_ms,
+    );
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer host.deinit();
+    var waited: u64 = 0;
+    while (!host.reaped.isSet()) : (waited += wait_tick_ms) {
+        if (waited >= wait_limit_ms) return error.NeverReaped;
+        try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+    }
+    // On Windows the host ends the child through its own duplicate of the
+    // process handle, which no other process can come to name.
+    try std.testing.expectEqual(builtin.os.tag == .windows, host.terminate());
+}

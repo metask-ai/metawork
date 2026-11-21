@@ -76,9 +76,9 @@ pub const Stopped = union(enum) {
 /// reused.
 ///
 /// On POSIX the pid is the only name there is. It is reusable once the child
-/// has been reaped, so one window remains: a reap that lands between the
-/// grace period expiring and the signal going out. Closing it would take a
-/// pidfd, which macOS does not have.
+/// has been reaped, so no signal goes out once the reaper has collected the
+/// child, and one window remains: a reap that lands between that check and
+/// the signal. Closing it would take a pidfd, which macOS does not have.
 const Termination = switch (builtin.os.tag) {
     .windows => std.os.windows.HANDLE,
     else => std.posix.pid_t,
@@ -339,13 +339,24 @@ pub const Host = struct {
     /// because a child that gets here is one that is not cooperating.
     ///
     /// Safe from any thread and any number of times while the host lives.
-    pub fn terminate(self: *Host) void {
+    /// Returns whether a signal went out. On POSIX none does once the reaper
+    /// has collected the child: a crash is usually reaped before the reader
+    /// sees the end of the stream and the loss asks for this, and by then
+    /// the pid may name another process.
+    pub fn terminate(self: *Host) bool {
         switch (builtin.os.tag) {
-            .windows => _ = std.os.windows.ntdll.NtTerminateProcess(
-                self.termination,
-                @enumFromInt(@as(u32, 1)),
-            ),
-            else => std.posix.kill(self.termination, .KILL) catch {},
+            .windows => {
+                _ = std.os.windows.ntdll.NtTerminateProcess(
+                    self.termination,
+                    @enumFromInt(@as(u32, 1)),
+                );
+                return true;
+            },
+            else => {
+                if (self.reaped.isSet()) return false;
+                std.posix.kill(self.termination, .KILL) catch {};
+                return true;
+            },
         }
     }
 
@@ -361,7 +372,7 @@ pub const Host = struct {
                 .clock = .awake,
             } }) catch {
                 self.expired.store(true, .release);
-                self.host.terminate();
+                _ = self.host.terminate();
             };
         }
     };
@@ -395,7 +406,7 @@ pub const Host = struct {
         };
         // The signal only. The join below is what waits for the child to be
         // gone, because the reaper is the one holding the wait.
-        if (!graceful) self.terminate();
+        if (!graceful) _ = self.terminate();
         if (self.reaper) |thread| thread.join();
         self.reaper = null;
         if (self.settle) |settle| settle.settle_fn(settle.context);

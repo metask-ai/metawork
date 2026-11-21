@@ -593,7 +593,7 @@ const Generation = struct {
         const stopping = self.stopping.load(.acquire);
         // The signal before anything else answers, so that every answer
         // given for this process is true of a process that is ending.
-        if (!stopping) self.host.terminate();
+        if (!stopping) _ = self.host.terminate();
         self.pending.close();
         self.watch_stop.set(self.owner.io);
         // Whatever this process asked for is no longer wanted.
@@ -2699,7 +2699,7 @@ pub const TestSupport = struct {
     pub fn killCurrent(owner: *Owner) void {
         owner.mutex.lockUncancelable(owner.io);
         defer owner.mutex.unlock(owner.io);
-        if (owner.current) |generation| generation.host.terminate();
+        if (owner.current) |generation| _ = generation.host.terminate();
     }
 };
 
