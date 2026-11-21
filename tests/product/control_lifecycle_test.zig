@@ -5888,7 +5888,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Compare these\",\"attachments\":[{\"kind\":\"image\",\"format\":\"png\",\"displayName\":\"diagram.png\",\"sizeBytes\":\"12\",\"media\":true,\"redacted\":false},{\"kind\":\"image\",\"format\":\"webp\",\"displayName\":\"brief.webp\",\"sizeBytes\":\"16\",\"media\":true,\"redacted\":false}],\"redacted\":false}",
+        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Compare these\",\"attachments\":[{\"kind\":\"image\",\"format\":\"png\",\"displayName\":\"diagram.png\",\"sizeBytes\":\"12\",\"media\":true,\"redacted\":false},{\"kind\":\"image\",\"format\":\"webp\",\"displayName\":\"brief.webp\",\"sizeBytes\":\"16\",\"media\":true,\"redacted\":false}],\"skill\":null,\"redacted\":false}",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "attachmentTokens") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "PNG\\r\\n") == null);
@@ -5918,7 +5918,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(std.mem.indexOf(
         u8,
         pure_snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":null,\"attachments\":[{\"kind\":\"image\",\"format\":\"jpeg\",\"displayName\":\"photo.jpg\",\"sizeBytes\":\"7\",\"media\":true,\"redacted\":false}],\"redacted\":false}",
+        "\"input\":{\"kind\":\"multimodal\",\"text\":null,\"attachments\":[{\"kind\":\"image\",\"format\":\"jpeg\",\"displayName\":\"photo.jpg\",\"sizeBytes\":\"7\",\"media\":true,\"redacted\":false}],\"skill\":null,\"redacted\":false}",
     ) != null);
 
     const text_files = [_]product_control.AttachmentCandidate{.{
@@ -5955,7 +5955,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(std.mem.indexOf(
         u8,
         text_snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Summarize this file\",\"attachments\":[{\"kind\":\"file\",\"displayName\":\"report.docx\",\"sizeBytes\":\"12\",\"redacted\":false}],\"redacted\":false}",
+        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Summarize this file\",\"attachments\":[{\"kind\":\"file\",\"displayName\":\"report.docx\",\"sizeBytes\":\"12\",\"redacted\":false}],\"skill\":null,\"redacted\":false}",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, text_snapshot, "PK\x03\x04\x00\xffbinary") == null);
     try std.testing.expect(!workbench.releaseAttachment(retry_ids[0]));
@@ -6052,6 +6052,112 @@ test "new accepted input does not inherit an abandoned direct Run preparation" {
     try settleWorkspaceSkillQueries(&workbench, workspace_id);
     try probe.expectQueries(2);
     try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+}
+
+test "a Skill selected with attachments runs as one multimodal Run carrying its Host block" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var skill_enablement_store = try product_skill.enablement.FileStore.init(std.testing.io, home);
+    defer skill_enablement_store.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var attachment_store = try product_control.AttachmentFileStore.init(std.testing.io, std.testing.allocator, root_storage[0..root_len]);
+    defer attachment_store.deinit();
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime.runtimePort(),
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 3,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .canonical_user_home = home },
+            .skill_enablement = .{ .file_store = &skill_enablement_store },
+            .attachment_store = &attachment_store,
+            .attachment_images = .{ .prepare_fn = fixture.prepareTestAttachmentImage },
+        },
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
+    const catalog = try waitCatalogReady(&workbench, workspace_id);
+    const task_id = try workbench.createTaskInWorkspace(workspace_id, try workbench.workspaceEpoch(workspace_id), try product_control.TestSupport.fixtureModelSelection(&workbench), catalog.revision, catalog.selection_revision, .{ .interactive = null });
+    const files = [_]product_control.AttachmentCandidate{.{ .display_name = "sales.xlsx", .bytes = "PK\x03\x04sheet" }};
+    var descriptor_storage: [1]product_control.AttachmentDescriptor = undefined;
+
+    // A selection the user saw against another catalog is refused before
+    // anything reaches Core, and the attachments stay with the draft.
+    var descriptors = try workbench.stageAttachments(&files, &descriptor_storage);
+    var ids = [_]u64{descriptors[0].id};
+    try std.testing.expectError(error.StaleCatalog, runPreparedTask(&workbench, task_id, .{ .multimodal = .{
+        .text = "Summarize by month",
+        .attachment_ids = &ids,
+        .skill = .{ .skill_id = fixture.fixture_skill_id, .catalog_revision = "stale-revision", .selection_revision = catalog.selection_revision.? },
+    } }));
+    fake_core.lock();
+    try std.testing.expectEqual(@as(usize, 0), fake_core.run_calls);
+    fake_core.unlock();
+    try std.testing.expect(workbench.releaseAttachment(ids[0]));
+
+    descriptors = try workbench.stageAttachments(&files, &descriptor_storage);
+    ids = .{descriptors[0].id};
+    const run_id = try runPreparedTask(&workbench, task_id, .{ .multimodal = .{
+        .text = "Summarize by month",
+        .attachment_ids = &ids,
+        .skill = .{ .skill_id = fixture.fixture_skill_id, .catalog_revision = catalog.revision, .selection_revision = catalog.selection_revision.? },
+    } });
+    var terminal_needle: [96]u8 = undefined;
+    try waitControlSnapshot(&workbench, try std.fmt.bufPrint(&terminal_needle, "\"id\":\"{d}\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"", .{run_id}));
+    fake_core.lock();
+    const block = fake_core.selected_skill_block;
+    const part_count = fake_core.multimodal_part_count;
+    const references = fake_core.multimodal_reference_count;
+    fake_core.unlock();
+    // One Core MULTIMODAL Run: the user's text, the attachment reference, and
+    // the selection as the Run's one Host block holding only catalog facts.
+    try std.testing.expectEqualStrings(
+        "For this message the user explicitly selected the Skill \"review\" (skill_id " ++ fixture.fixture_skill_id ++
+            ") in the composer. Invoke the Skill \"review\" first, then apply it to the user's request and the attached files.",
+        block.?,
+    );
+    try std.testing.expectEqual(@as(usize, 2), part_count);
+    try std.testing.expectEqual(@as(usize, 1), references);
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeAggregateFixture(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Summarize by month\",\"attachments\":[{\"kind\":\"file\",\"displayName\":\"sales.xlsx\",\"sizeBytes\":\"9\",\"redacted\":false}],\"skill\":{\"skillId\":\"" ++
+            fixture.fixture_skill_id ++ "\",\"catalogRevision\":\"" ++ fixture.fixture_catalog_revision ++
+            "\",\"invocationName\":\"review\",\"displayName\":\"Review\"},\"redacted\":false}",
+    ) != null);
+
+    // The next attachment message without a selection carries no block.
+    descriptors = try workbench.stageAttachments(&files, &descriptor_storage);
+    ids = .{descriptors[0].id};
+    const plain_run_id = try runPreparedTask(&workbench, task_id, .{ .multimodal = .{ .text = "Again", .attachment_ids = &ids } });
+    try waitControlSnapshot(&workbench, try std.fmt.bufPrint(&terminal_needle, "\"id\":\"{d}\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"", .{plain_run_id}));
+    fake_core.lock();
+    defer fake_core.unlock();
+    try std.testing.expect(fake_core.selected_skill_block == null);
 }
 
 test "Skill input is accepted once while fresh preparation waits and failed freshness withdraws grants" {

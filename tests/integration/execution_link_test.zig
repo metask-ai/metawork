@@ -442,6 +442,63 @@ test "a Run crosses into the execution process and its events arrive ahead of it
     }
 }
 
+test "a Skill selected with attachments crosses into the execution process as the Run's Host block" {
+    // The fake Core in the execution process streams the block it received
+    // back as the Run's text, so what Core got is read from Product's view.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try startOwner(&owner, &wake, &.{ fixture, "--with-runtime", "--text-events" }, fixture_message_limits, null);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    var skill_enablement_store = try lifecycle.product_skill.enablement.FileStore.init(io, root);
+    defer skill_enablement_store.deinit();
+    var attachment_store = try product_control.AttachmentFileStore.init(io, allocator, root);
+    defer attachment_store.deinit();
+    {
+        var control = try product_control.Runtime.init(allocator, io, owner.runtimePort(), product_limits, .{
+            .directories = .{ .canonical_user_home = root },
+            .skill_enablement = .{ .file_store = &skill_enablement_store },
+            .attachment_store = &attachment_store,
+            .attachment_images = .{ .prepare_fn = lifecycle.prepareTestAttachmentImage },
+        });
+        defer control.deinit();
+        try lifecycle.installProductControlExecution(&control);
+        const workspace_id = try control.openWorkspace(lifecycle.productControlTaskInput());
+        const catalog = catalog: {
+            var waited: u64 = 0;
+            while (waited < wait_limit_ms) : (waited += wait_tick_ms) {
+                try turn(&control, &owner);
+                const projection = try control.workspaceCatalog(workspace_id);
+                switch (projection.availability) {
+                    .ready, .degraded => break :catalog projection,
+                    .unavailable => return error.CatalogUnavailable,
+                    .uninitialized, .loading => try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake),
+                }
+            }
+            return error.CatalogNeverReady;
+        };
+        const task_id = try control.createTaskInWorkspace(workspace_id, try control.workspaceEpoch(workspace_id), try product_control.TestSupport.fixtureModelSelection(&control), catalog.revision, catalog.selection_revision, .{ .interactive = null });
+        const files = [_]product_control.AttachmentCandidate{.{ .display_name = "sales.xlsx", .bytes = "PK\x03\x04sheet" }};
+        var descriptor_storage: [1]product_control.AttachmentDescriptor = undefined;
+        const descriptors = try control.stageAttachments(&files, &descriptor_storage);
+        const ids = [_]u64{descriptors[0].id};
+        _ = try lifecycle.runPreparedTask(&control, task_id, .{ .multimodal = .{
+            .text = "Summarize by month",
+            .attachment_ids = &ids,
+            .skill = .{ .skill_id = lifecycle.fixture_skill_id, .catalog_revision = catalog.revision, .selection_revision = catalog.selection_revision.? },
+        } });
+        try waitSnapshot(&control, &owner, "\"terminal\":{\"outcome\":\"completed\"");
+        try waitSnapshot(&control, &owner, "For this message the user explicitly selected the Skill \\\"review\\\" (skill_id " ++
+            lifecycle.fixture_skill_id ++ ") in the composer. Invoke the Skill \\\"review\\\" first");
+        try std.testing.expect(owner.currentProcess() != null);
+    }
+}
+
 test "a process killed under a running Task leaves Product up and the cut Run interrupted" {
     const fixture = try fixturePath();
     defer allocator.free(fixture);

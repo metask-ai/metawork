@@ -1536,13 +1536,14 @@ fn projectInput(allocator: std.mem.Allocator, record: task_state.RunInputRecord)
                 } else null,
             };
             attachments = items;
+            const skill = multimodal.skill;
             break :input .{
                 .kind = "multimodal",
                 .text = multimodal.text,
-                .skill_id = null,
-                .catalog_revision = null,
-                .invocation_name = null,
-                .display_name = null,
+                .skill_id = if (skill) |value| value.skill_id else null,
+                .catalog_revision = if (skill) |value| value.catalog_revision else null,
+                .invocation_name = if (skill) |value| value.invocation_name else null,
+                .display_name = if (skill) |value| value.display_name else null,
                 .argument_values = null,
                 .attachments = items,
                 .redacted = multimodal.redacted,
@@ -2491,9 +2492,12 @@ fn restoreRunInput(
             try projection.copy(value, projection.limits.max_user_message_bytes)
         else
             null;
+        errdefer if (text) |value| projection.free(value);
+        const skill = try restoreSelectedSkill(projection, wire);
         return .{ .multimodal = .{
             .text = text,
             .attachments = items,
+            .skill = skill,
             .redacted = wire.redacted,
         } };
     }
@@ -2856,6 +2860,41 @@ fn deinitRestoredTool(projection: RestoreProjection, tool: *task_state.ToolView)
     tool.* = undefined;
 }
 
+/// A multimodal row names its Skill with the four identity fields a Skill row
+/// uses (#201): all four or none. Rows written before then carry none.
+fn restoreSelectedSkill(
+    projection: RestoreProjection,
+    wire: RunInputWire,
+) RestoreError!?task_state.SelectedSkillRecord {
+    const skill_id_wire = wire.skill_id orelse {
+        if (wire.catalog_revision != null or wire.invocation_name != null or wire.display_name != null)
+            return error.TaskStoreCorrupt;
+        return null;
+    };
+    const skill_id = try projection.copy(skill_id_wire, projection.limits.max_tool_field_bytes);
+    errdefer projection.free(skill_id);
+    const catalog_revision = try projection.copy(
+        wire.catalog_revision orelse return error.TaskStoreCorrupt,
+        projection.limits.max_tool_field_bytes,
+    );
+    errdefer projection.free(catalog_revision);
+    const invocation_name = try projection.copy(
+        wire.invocation_name orelse return error.TaskStoreCorrupt,
+        projection.limits.max_tool_field_bytes,
+    );
+    errdefer projection.free(invocation_name);
+    const display_name = try projection.copy(
+        wire.display_name orelse return error.TaskStoreCorrupt,
+        projection.limits.max_tool_field_bytes,
+    );
+    return .{
+        .skill_id = skill_id,
+        .catalog_revision = catalog_revision,
+        .invocation_name = invocation_name,
+        .display_name = display_name,
+    };
+}
+
 fn deinitRestoredRunInput(
     projection: RestoreProjection,
     input: *task_state.RunInputRecord,
@@ -2866,6 +2905,12 @@ fn deinitRestoredRunInput(
             if (multimodal.text) |text| projection.free(text);
             for (multimodal.attachments) |item| projection.free(item.display_name);
             projection.allocator.free(multimodal.attachments);
+            if (multimodal.skill) |skill| {
+                projection.free(skill.skill_id);
+                projection.free(skill.catalog_revision);
+                projection.free(skill.invocation_name);
+                projection.free(skill.display_name);
+            }
         },
         .skill => |skill| {
             projection.free(skill.skill_id);
@@ -4246,9 +4291,16 @@ fn validateRunInput(input: RunInputWire, limits: Limits) !void {
         return;
     }
     if (std.mem.eql(u8, input.kind, "multimodal")) {
-        if (input.skill_id != null or input.catalog_revision != null or
-            input.invocation_name != null or input.display_name != null or
-            input.argument_values != null)
+        // A selected Skill (#201) names itself with all four identity fields;
+        // a multimodal message never carries Skill arguments.
+        if (input.argument_values != null) return error.Invalid;
+        if (input.skill_id) |skill_id| {
+            if (!validText(skill_id, limits.max_tool_field_bytes, false) or
+                !validText(input.catalog_revision orelse return error.Invalid, limits.max_tool_field_bytes, false) or
+                !validText(input.invocation_name orelse return error.Invalid, limits.max_tool_field_bytes, false) or
+                !validText(input.display_name orelse return error.Invalid, limits.max_tool_field_bytes, false))
+                return error.Invalid;
+        } else if (input.catalog_revision != null or input.invocation_name != null or input.display_name != null)
             return error.Invalid;
         if (input.text) |text|
             if (!validText(text, limits.max_user_message_bytes, false))
@@ -5965,6 +6017,67 @@ test "a stored identity that MetaWork would not mint is a corrupt record" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.TaskStoreCorrupt, restoreTestTask(&arena, mediaTestTask(&mismatched)));
+}
+
+test "a multimodal row names its selected Skill with all four identity fields or none" {
+    const skill_id = "0123456789abcdef" ** 4;
+    var attachments = [_]AttachmentWire{.{ .kind = "file", .format = null, .display_name = "sales.xlsx", .size_bytes = 2403, .redacted = false }};
+    {
+        var task = mediaTestTask(&attachments);
+        task.runs[0].input.skill_id = skill_id;
+        task.runs[0].input.catalog_revision = "catalog-7";
+        task.runs[0].input.invocation_name = "xlsx";
+        task.runs[0].input.display_name = "XLSX";
+        try validateRunInput(task.runs[0].input, testLimits());
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const restored = try restoreTestTask(&arena, task);
+        const input = restored.durable.runs[0].?.input.multimodal;
+        const skill = input.skill.?;
+        try std.testing.expectEqualStrings(skill_id, skill.skill_id);
+        try std.testing.expectEqualStrings("catalog-7", skill.catalog_revision);
+        try std.testing.expectEqualStrings("xlsx", skill.invocation_name);
+        try std.testing.expectEqualStrings("XLSX", skill.display_name);
+        try std.testing.expectEqualStrings("look at this", input.text.?);
+        // And it projects back into the same four fields, with no arguments.
+        const wire = try projectInput(std.testing.allocator, restored.durable.runs[0].?.input);
+        defer freeInputWire(std.testing.allocator, wire);
+        try std.testing.expectEqualStrings("multimodal", wire.kind);
+        try std.testing.expectEqualStrings(skill_id, wire.skill_id.?);
+        try std.testing.expectEqualStrings("catalog-7", wire.catalog_revision.?);
+        try std.testing.expectEqualStrings("xlsx", wire.invocation_name.?);
+        try std.testing.expectEqualStrings("XLSX", wire.display_name.?);
+        try std.testing.expect(wire.argument_values == null);
+    }
+    {
+        // Rows written before #201 carry none, and stay a plain message.
+        const task = mediaTestTask(&attachments);
+        try validateRunInput(task.runs[0].input, testLimits());
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const restored = try restoreTestTask(&arena, task);
+        try std.testing.expect(restored.durable.runs[0].?.input.multimodal.skill == null);
+    }
+    for (0..4) |missing| {
+        var task = mediaTestTask(&attachments);
+        task.runs[0].input.skill_id = if (missing == 0) null else skill_id;
+        task.runs[0].input.catalog_revision = if (missing == 1) null else "catalog-7";
+        task.runs[0].input.invocation_name = if (missing == 2) null else "xlsx";
+        task.runs[0].input.display_name = if (missing == 3) null else "XLSX";
+        try std.testing.expectError(error.Invalid, validateRunInput(task.runs[0].input, testLimits()));
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        try std.testing.expectError(error.TaskStoreCorrupt, restoreTestTask(&arena, task));
+    }
+    // A multimodal message never carries Skill arguments.
+    var values = [_][]const u8{"x"};
+    var task = mediaTestTask(&attachments);
+    task.runs[0].input.skill_id = skill_id;
+    task.runs[0].input.catalog_revision = "catalog-7";
+    task.runs[0].input.invocation_name = "xlsx";
+    task.runs[0].input.display_name = "XLSX";
+    task.runs[0].input.argument_values = &values;
+    try std.testing.expectError(error.Invalid, validateRunInput(task.runs[0].input, testLimits()));
 }
 
 fn testLimits() Limits {
