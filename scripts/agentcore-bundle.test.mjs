@@ -624,7 +624,7 @@ async function installPlatformPackage(repositoryRoot, bundle) {
     repositoryRoot,
     "node_modules",
     "@zogien",
-    "agentcore-win32-x64",
+    "agent-sdk-win32-x64",
   );
   await cp(bundle, installed, { recursive: true });
   await writeFile(path.join(installed, "package.json"), "{}");
@@ -673,7 +673,7 @@ test("installs a missing platform package at the version package.json pins", asy
   const pin = (version) =>
     writeFile(
       path.join(repositoryRoot, "package.json"),
-      JSON.stringify({ devDependencies: { "@zogien/agentcore": version } }),
+      JSON.stringify({ devDependencies: { "@zogien/agent-sdk": version } }),
     );
 
   // Anything but the exact pinned release is refused before npm is run.
@@ -681,7 +681,7 @@ test("installs a missing platform package at the version package.json pins", asy
     await pin(version);
     await assert.rejects(
       stageAgentCorePackage(options),
-      /must pin @zogien\/agentcore to an exact fork release/,
+      /must pin @zogien\/agent-sdk to an exact fork release/,
       String(version),
     );
   }
@@ -690,7 +690,7 @@ test("installs a missing platform package at the version package.json pins", asy
   await pin("0.1.0-fork.1");
   await stageAgentCorePackage(options);
   assert.deepEqual(requests, [
-    [repositoryRoot, "@zogien/agentcore-win32-x64@0.1.0-fork.1"],
+    [repositoryRoot, "@zogien/agent-sdk-win32-x64@0.1.0-fork.1"],
   ]);
   await verifyStagedAgentCoreBundle(repositoryRoot, injectedVerification);
 });

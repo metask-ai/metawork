@@ -230,14 +230,14 @@ export async function stageAgentCorePackage({
   if (!(await exists(source))) {
     const version = JSON.parse(
       await readFile(path.join(repositoryRoot, "package.json"), "utf8"),
-    ).devDependencies?.["@zogien/agentcore"];
+    ).devDependencies?.["@zogien/agent-sdk"];
     // The version goes on a command line, so only the exact pinned form does.
     if (
       typeof version !== "string" ||
       !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-fork\.[1-9]\d*$/.test(version)
     )
       throw new Error(
-        "package.json must pin @zogien/agentcore to an exact fork release",
+        "package.json must pin @zogien/agent-sdk to an exact fork release",
       );
     await install(repositoryRoot, `${name}@${version}`);
   }

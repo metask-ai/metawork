@@ -15,7 +15,7 @@ Host、SDK 和 bundle 必须使用相同 architecture、OS 与 ABI；Windows 使
 
 ### 1.1 官方发布来源与手动更新
 
-AgentCore 取自 npm 包 `@zogien/agentcore`，由 `package.json` 精确指定版本，`npm ci` 把本机 target 的平台包装入 `node_modules`。更新由用户明确发起并确定版本；开发环境准备沿用当前 lock。版本只接受 `major.minor.patch-fork.N`，不接受其他预发布标识或 build metadata，源码身份由独立的 `source.commit` 固定。
+AgentCore 取自 npm 包 `@zogien/agent-sdk`，由 `package.json` 精确指定版本，`npm ci` 把本机 target 的平台包装入 `node_modules`。更新由用户明确发起并确定版本；开发环境准备沿用当前 lock。版本只接受 `major.minor.patch-fork.N`，不接受其他预发布标识或 build metadata，源码身份由独立的 `source.commit` 固定。
 
 `stage-agentcore-bundle.mjs [target-id]` 按 target 从 `node_modules` 取平台包；交叉 target 的平台包不在其中时，先用 `npm install --no-save --force` 按 `package.json` 的版本装入同一个 `node_modules`。平台包根目录在 bundle 之外只容许 `package.json` 与 `LICENSE`；npm 的安装不替代包内 manifest、repository lock 或 verifier。
 
