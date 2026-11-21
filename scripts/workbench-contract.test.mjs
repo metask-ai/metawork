@@ -1160,6 +1160,33 @@ test("attachment results enforce opaque grants and atomic typed outcomes", () =>
   });
 });
 
+test("a multimodal message's selected Skill decodes from the independent Host fixture", () => {
+  const snapshot = clone(fixture);
+  snapshot.tasks[0].runs[0].input = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/multimodal-skill-input.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
+  assert.equal(snapshot.tasks[0].runs[0].input.skill.invocationName, "xlsx");
+
+  // The Skill key is required, holds exactly its four facts, and never
+  // carries the Skill's arguments: the text is the user's message.
+  const missing = clone(snapshot);
+  delete missing.tasks[0].runs[0].input.skill;
+  assert.throws(() => decodeWorkbenchSnapshot(missing), /expected keys/);
+  const extended = clone(snapshot);
+  extended.tasks[0].runs[0].input.skill.argumentValues = ["x"];
+  assert.throws(() => decodeWorkbenchSnapshot(extended), /expected keys/);
+  const nameless = clone(snapshot);
+  nameless.tasks[0].runs[0].input.skill.invocationName = "";
+  assert.throws(() => decodeWorkbenchSnapshot(nameless), /invocationName/);
+});
+
 test("multimodal Run history keeps only ordered safe attachment metadata", () => {
   const snapshot = clone(fixture);
   snapshot.tasks[0].runs[0].input = {
@@ -1183,6 +1210,7 @@ test("multimodal Run history keeps only ordered safe attachment metadata", () =>
         redacted: false,
       },
     ],
+    skill: null,
     redacted: false,
   };
   assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);

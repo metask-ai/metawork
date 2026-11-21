@@ -144,6 +144,7 @@ pub const Protocol = agent_protocol.Protocol;
 pub const RewindOutcome = surface.RewindOutcome;
 pub const RewindRefusal = surface.RewindRefusal;
 pub const RunInput = surface.RunInput;
+pub const SelectedSkill = surface.SelectedSkill;
 pub const RunStatePhase = sdk.protocol.RunStatePhase;
 pub const SessionDisposition = control.SessionDisposition;
 pub const SessionOpenOptions = surface.SessionOpenOptions;

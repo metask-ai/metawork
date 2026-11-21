@@ -23,6 +23,7 @@ import {
   readNewTaskDraftRecord,
   writeNewTaskDraftRecord,
   readTaskDraft,
+  remainingAttachmentFiles,
   writeNewTaskDraft,
   writeTaskDraft,
 } from "../frontend/src/features/composer/drafts.ts";
@@ -459,6 +460,42 @@ test("Composer drafts survive a WebView reload scope and fail safely when storag
     text: "Keep only this text",
     attachmentsReloadRequired: true,
   });
+  // A selected Skill outlives the reload as its Skill draft, its files to be
+  // chosen again.
+  const selection = {
+    skillId: "builtin.xlsx",
+    skillPolicyKey: "xlsx",
+    invocationName: "xlsx",
+    displayName: "Excel",
+    catalogRevision: "17",
+    selectionRevision: "3",
+    argumentNames: [],
+    maxValues: 64,
+  };
+  writeTaskDraft("media-skill", {
+    kind: "multimodal",
+    text: "Summarize by month",
+    attachments: [
+      {
+        token: "b".repeat(48),
+        kind: "file",
+        displayName: "secret-sales.xlsx",
+        sizeBytes: "128",
+      },
+    ],
+    skill: selection,
+  });
+  assert.doesNotMatch(
+    values.get("metawork.task-draft.v1.media-skill"),
+    /secret-sales|bbbbbbbb/,
+  );
+  assert.deepEqual(readTaskDraft("media-skill"), {
+    kind: "skill",
+    ...selection,
+    argumentValues: ["Summarize by month"],
+    attachmentsReloadRequired: true,
+  });
+  assert.equal(remainingAttachmentFiles(readTaskDraft("media-skill"), "8"), 8);
   writeNewTaskDraft(unscopedNewTaskDraftId, {
     kind: "text",
     text: "First instruction",

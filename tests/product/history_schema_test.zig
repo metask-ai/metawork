@@ -195,6 +195,35 @@ test "a store written before the attachment media identity keeps its plain chips
     try std.testing.expectEqual(@as(u32, schema.migrations.len), database.schemaVersion());
 }
 
+test "a store written before the selected Skill keeps its multimodal messages plain" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try temporaryPath(a, temporary.dir);
+    const state = try history.fixture(a);
+    state.tasks[0].runs[0].input = .{ .kind = "multimodal", .text = "look", .skill_id = null, .catalog_revision = null, .invocation_name = null, .display_name = null, .argument_values = null, .attachments = try a.dupe(history.wire.AttachmentWire, &.{
+        .{ .kind = "file", .format = null, .display_name = "notes.txt", .size_bytes = 12, .redacted = false },
+    }), .redacted = false };
+    {
+        // Written at the version before a multimodal message could name a Skill.
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..12]);
+        defer database.destroy() catch unreachable;
+        try insertAtVersion(a, database.capability(), state, 12);
+    }
+    {
+        const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        defer database.destroy() catch unreachable;
+        // The upgrade adds no column and names no Skill for those messages.
+        try expectSame(a, database.capability(), state);
+        try std.testing.expectEqual(@as(u32, schema.migrations.len), database.schemaVersion());
+    }
+    // Once upgraded, a build from before the selection refuses the store
+    // rather than read a message shape it would take for a corrupt row.
+    try std.testing.expectError(error.VersionUnknown, sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..12]));
+}
+
 test "Project removal survives SQL restart without changing Workspace or Task authority" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -335,7 +364,7 @@ test "history input JSON preserves reading anchors beyond surviving output" {
 }
 
 test "history schema preserves null empty and nonterminal history variants" {
-    for (0..4) |variant| {
+    for (0..5) |variant| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
@@ -407,6 +436,13 @@ test "history schema preserves null empty and nonterminal history variants" {
                 run.file_changes.?[0].kind = "modified";
                 run.file_changes.?[0].from_display_path = null;
                 run.file_changes.?[0].artifact = null;
+            },
+            4 => {
+                // #201: a multimodal message with the Skill the user selected.
+                const attachments = try allocator.dupe(history.wire.AttachmentWire, &.{
+                    .{ .kind = "file", .format = null, .display_name = "sales 世.xlsx", .size_bytes = 2403, .redacted = false },
+                });
+                run.input = .{ .kind = "multimodal", .text = "Summarize by month", .skill_id = "0123456789abcdef" ** 4, .catalog_revision = "catalog-7", .invocation_name = "xlsx", .display_name = "XLSX 世", .argument_values = null, .attachments = attachments, .redacted = false };
             },
             else => unreachable,
         }

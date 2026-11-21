@@ -509,7 +509,7 @@ test "model error is owned and delivered for Text multimodal and Skill Runs" {
         try runtime.releaseSkillCatalog(catalog.lease);
         const input: lifecycle.RunInput = switch (kind) {
             0 => .{ .text = "model error" },
-            1 => .{ .multimodal = &.{ .{ .text = "model error" }, .{ .image = .{ .format = .png, .bytes = &.{1} } } } },
+            1 => .{ .multimodal = .{ .parts = &.{ .{ .text = "model error" }, .{ .image = .{ .format = .png, .bytes = &.{1} } } } } },
             else => .{ .skill = .{ .skill_id = fixture.fixture_skill_id, .catalog_revision = fixture.fixture_catalog_revision, .argument_values = &.{ "src/main.zig", "correctness" } } },
         };
         const id = try session.prepareRun(input);

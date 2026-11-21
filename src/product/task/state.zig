@@ -452,8 +452,17 @@ pub const RunInputRecord = union(enum) {
     multimodal: struct {
         text: ?[]u8,
         attachments: []AttachmentRecord,
+        /// The Skill the user selected for this message (#201), as executed.
+        skill: ?SelectedSkillRecord = null,
         redacted: bool = false,
     },
+};
+
+pub const SelectedSkillRecord = struct {
+    skill_id: []u8,
+    catalog_revision: []u8,
+    invocation_name: []u8,
+    display_name: []u8,
 };
 
 pub const MultimodalAttachment = struct {
@@ -468,6 +477,14 @@ pub const MultimodalAttachment = struct {
     media: ?AttachmentMedia = null,
 };
 
+/// The Skill a multimodal message names (#201): the same exact selection a
+/// Skill message makes, without arguments. The message text is the user's.
+pub const SkillReference = struct {
+    skill_id: []const u8,
+    catalog_revision: []const u8,
+    selection_revision: u64,
+};
+
 /// Borrowed command input. An accepted submission owns its slices separately.
 pub const RunInput = union(enum) {
     text: []const u8,
@@ -477,7 +494,24 @@ pub const RunInput = union(enum) {
         selection_revision: u64,
         argument_values: []const []const u8,
     },
-    multimodal: struct { text: []const u8, attachments: []const MultimodalAttachment },
+    multimodal: struct {
+        text: []const u8,
+        attachments: []const MultimodalAttachment,
+        skill: ?SkillReference = null,
+    },
+
+    /// The exact Skill selection this input makes, if any.
+    pub fn skillReference(self: RunInput) ?SkillReference {
+        return switch (self) {
+            .text => null,
+            .skill => |skill| .{
+                .skill_id = skill.skill_id,
+                .catalog_revision = skill.catalog_revision,
+                .selection_revision = skill.selection_revision,
+            },
+            .multimodal => |media| media.skill,
+        };
+    }
 };
 
 pub const Submission = struct {
@@ -524,6 +558,8 @@ pub const OwnedRunInput = struct {
                     for ([_][]const u8{ part.display_name, part.bytes, part.reference }) |value|
                         length = std.math.add(usize, length, value.len) catch return error.ProjectionCapacity;
                 }
+                if (media.skill) |skill|
+                    length = std.math.add(usize, length, std.math.add(usize, skill.skill_id.len, skill.catalog_revision.len) catch return error.ProjectionCapacity) catch return error.ProjectionCapacity;
             },
         }
         if (selection) |skill| length = std.math.add(usize, length, skill.policy_key.len) catch return error.ProjectionCapacity;
@@ -550,7 +586,12 @@ pub const OwnedRunInput = struct {
                     target.bytes = copy(bytes, &offset, part.bytes);
                     target.reference = copy(bytes, &offset, part.reference);
                 }
-                break :blk .{ .multimodal = .{ .text = text, .attachments = attachments } };
+                const skill: ?SkillReference = if (media.skill) |value| .{
+                    .skill_id = copy(bytes, &offset, value.skill_id),
+                    .catalog_revision = copy(bytes, &offset, value.catalog_revision),
+                    .selection_revision = value.selection_revision,
+                } else null;
+                break :blk .{ .multimodal = .{ .text = text, .attachments = attachments, .skill = skill } };
             },
         };
         return .{

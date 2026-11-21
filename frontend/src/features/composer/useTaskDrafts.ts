@@ -12,6 +12,7 @@ import {
   writeTaskDraft,
 } from "./drafts.ts";
 import {
+  draftWithoutAttachments,
   emptyComposerDraft,
   type ComposerAttachment,
   type ComposerDraft,
@@ -96,7 +97,7 @@ function useDrafts(
             id,
             attachments.length
               ? { ...current, attachments }
-              : { kind: "text", text: current.text },
+              : draftWithoutAttachments(current, false),
           );
       }
     },
@@ -138,13 +139,8 @@ function useDrafts(
   const invalidateAttachments = useCallback(() => {
     const next = { ...draftsRef.current };
     for (const [id, value] of Object.entries(next))
-      if (value.kind === "multimodal") {
-        next[id] = {
-          kind: "text",
-          text: value.text,
-          attachmentsReloadRequired: true,
-        };
-      }
+      if (value.kind === "multimodal")
+        next[id] = draftWithoutAttachments(value, true);
     publish(next);
   }, [publish]);
   return {

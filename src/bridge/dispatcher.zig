@@ -3762,6 +3762,11 @@ pub const Dispatcher = struct {
                 break :multimodal_input .{ .multimodal = .{
                     .text = multimodal.text,
                     .attachment_ids = ids,
+                    .skill = if (multimodal.skill) |skill| .{
+                        .skill_id = skill.skill_id,
+                        .catalog_revision = skill.catalog_revision,
+                        .selection_revision = skill.selection_revision,
+                    } else null,
                     .acceptance = .{
                         .context = &attachment_acceptance,
                         .accept_fn = acceptAttachmentGrants,
@@ -3840,6 +3845,11 @@ pub const Dispatcher = struct {
                 break :multimodal_input .{ .multimodal = .{
                     .text = multimodal.text,
                     .attachment_ids = ids,
+                    .skill = if (multimodal.skill) |skill| .{
+                        .skill_id = skill.skill_id,
+                        .catalog_revision = skill.catalog_revision,
+                        .selection_revision = skill.selection_revision,
+                    } else null,
                     .acceptance = .{
                         .context = &attachment_acceptance,
                         .accept_fn = acceptAttachmentGrants,
@@ -3892,9 +3902,11 @@ pub const Dispatcher = struct {
                 break :text_input .{ .text = text };
             },
             // A Skill invocation is not free text, so there is nothing to edit
-            // in it; the entry is never offered for one.
+            // in it; the entry is never offered for one, with or without
+            // attachments.
             .skill => return error.InvalidBridgePayload,
             .multimodal => |multimodal| multimodal_input: {
+                if (multimodal.skill != null) return error.InvalidBridgePayload;
                 if (multimodal.text.len > (product_control.Limits{}).max_user_message_bytes)
                     return error.InvalidBridgePayload;
                 const ids = self.attachment_grants.resolve(
@@ -3912,6 +3924,11 @@ pub const Dispatcher = struct {
                 break :multimodal_input .{ .multimodal = .{
                     .text = multimodal.text,
                     .attachment_ids = ids,
+                    .skill = if (multimodal.skill) |skill| .{
+                        .skill_id = skill.skill_id,
+                        .catalog_revision = skill.catalog_revision,
+                        .selection_revision = skill.selection_revision,
+                    } else null,
                     .acceptance = .{
                         .context = &attachment_acceptance,
                         .accept_fn = acceptAttachmentGrants,

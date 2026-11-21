@@ -13,14 +13,8 @@ export type ComposerTextDraft = {
 
 export type ComposerAttachment = AttachmentDescriptor;
 
-export type ComposerMultimodalDraft = {
-  kind: "multimodal";
-  text: string;
-  attachments: ComposerAttachment[];
-};
-
-export type ComposerSkillDraft = {
-  kind: "skill";
+/** One exact Skill selection, as a Skill draft and an attachment draft hold it. */
+export type ComposerSkillSelection = {
   // Older session drafts acquire this only from an exact valid selection.
   skillPolicyKey?: string;
   skillId: string;
@@ -29,9 +23,22 @@ export type ComposerSkillDraft = {
   catalogRevision: string;
   selectionRevision: string;
   argumentNames: string[];
-  argumentValues: string[];
   maxValues: number;
 };
+
+export type ComposerMultimodalDraft = {
+  kind: "multimodal";
+  text: string;
+  attachments: ComposerAttachment[];
+  /** The Skill selected for this message, sent with the attachments (#201). */
+  skill: ComposerSkillSelection | null;
+};
+
+export type ComposerSkillDraft = { kind: "skill" } & ComposerSkillSelection & {
+    argumentValues: string[];
+    /** The attachments sent with this Skill were lost and must be re-chosen. */
+    attachmentsReloadRequired?: true;
+  };
 
 export type ComposerDraft =
   ComposerTextDraft | ComposerSkillDraft | ComposerMultimodalDraft;
@@ -94,7 +101,7 @@ export function composerDraftToRunInput(
     return draft.attachments.length === 0 ||
       (draft.attachments.some((attachment) => attachment.kind === "file") &&
         draft.text.trim().length === 0) ||
-      parseSlashInput(draft.text)
+      (draft.skill === null && parseSlashInput(draft.text))
       ? null
       : {
           kind: "multimodal",
@@ -102,6 +109,11 @@ export function composerDraftToRunInput(
           attachmentTokens: draft.attachments.map(
             (attachment) => attachment.token,
           ),
+          skill: draft.skill && {
+            skillId: draft.skill.skillId,
+            catalogRevision: draft.skill.catalogRevision,
+            selectionRevision: draft.skill.selectionRevision,
+          },
         };
   return {
     kind: "skill",
@@ -112,7 +124,90 @@ export function composerDraftToRunInput(
   };
 }
 
-function selectedSkill(draft: ComposerSkillDraft, catalog: SkillCatalogView) {
+/** The exact Skill selection a Run input makes, if any. */
+export function runInputSkill(
+  input: TaskRunInput,
+): { catalogRevision: string; selectionRevision: string } | null {
+  if (input.kind === "skill") return input;
+  return input.kind === "multimodal" ? input.skill : null;
+}
+
+/** The Skill a draft has selected, with or without attachments. */
+export function draftSkillSelection(
+  draft: ComposerDraft,
+): ComposerSkillSelection | null {
+  if (draft.kind === "multimodal") return draft.skill;
+  if (draft.kind !== "skill") return null;
+  return {
+    ...(draft.skillPolicyKey === undefined
+      ? {}
+      : { skillPolicyKey: draft.skillPolicyKey }),
+    skillId: draft.skillId,
+    invocationName: draft.invocationName,
+    displayName: draft.displayName,
+    catalogRevision: draft.catalogRevision,
+    selectionRevision: draft.selectionRevision,
+    argumentNames: draft.argumentNames,
+    maxValues: draft.maxValues,
+  };
+}
+
+/** The body the Composer shows: a Skill draft's values read as one text. */
+export function composerDraftText(draft: ComposerDraft) {
+  return draft.kind === "skill" ? draft.argumentValues.join("\n") : draft.text;
+}
+
+/**
+ * Adds attachments to any draft. A Skill draft keeps its selection and its
+ * body becomes the message text exactly as the Composer shows it; with
+ * attachments the text is the user's message, not Skill arguments.
+ */
+export function draftWithAttachments(
+  draft: ComposerDraft,
+  attachments: ComposerAttachment[],
+): ComposerMultimodalDraft {
+  if (draft.kind === "multimodal")
+    return { ...draft, attachments: [...draft.attachments, ...attachments] };
+  return {
+    kind: "multimodal",
+    text: composerDraftText(draft),
+    attachments,
+    skill: draftSkillSelection(draft),
+  };
+}
+
+/**
+ * The draft once its attachments are gone: removed by the user, or lost to a
+ * reload or reconnect, which `reloadRequired` records so the Composer can say
+ * so. A selected Skill becomes a Skill draft again, its text one value.
+ */
+export function draftWithoutAttachments(
+  draft: ComposerMultimodalDraft,
+  reloadRequired: boolean,
+): ComposerDraft {
+  const marker = reloadRequired
+    ? { attachmentsReloadRequired: true as const }
+    : {};
+  return draft.skill
+    ? {
+        kind: "skill",
+        ...draft.skill,
+        argumentValues: draft.text ? [draft.text] : [],
+        ...marker,
+      }
+    : { kind: "text", text: draft.text, ...marker };
+}
+
+/** Removes the selected Skill and keeps the text and any attachments. */
+export function draftWithoutSkill(draft: ComposerDraft): ComposerDraft {
+  if (draft.kind === "multimodal") return { ...draft, skill: null };
+  return { kind: "text", text: composerDraftText(draft) };
+}
+
+function selectedSkill(
+  draft: ComposerSkillSelection,
+  catalog: SkillCatalogView,
+) {
   if (catalog.availability !== "ready" && catalog.availability !== "degraded")
     return undefined;
   return draft.skillPolicyKey
@@ -126,7 +221,7 @@ function selectedSkill(draft: ComposerSkillDraft, catalog: SkillCatalogView) {
 }
 
 function sameArguments(
-  draft: ComposerSkillDraft,
+  draft: ComposerSkillSelection,
   skill: SkillCatalogView["skills"][number],
 ) {
   return (
@@ -138,11 +233,11 @@ function sameArguments(
   );
 }
 
-function bindSkillDraft(
-  draft: ComposerSkillDraft,
+function bindSkillDraft<Selection extends ComposerSkillSelection>(
+  draft: Selection,
   skill: SkillCatalogView["skills"][number],
   catalog: SkillCatalogView,
-): ComposerSkillDraft {
+): Selection {
   if (
     draft.skillId === skill.skillId &&
     draft.skillPolicyKey === skill.skillPolicyKey &&
@@ -170,6 +265,15 @@ export function reconcileSkillDraft(
   draft: ComposerDraft,
   catalog: SkillCatalogView,
 ): ComposerDraft {
+  if (draft.kind === "multimodal") {
+    if (!draft.skill) return draft;
+    // No arguments travel with attachments, so their definition never
+    // holds a selection back.
+    const skill = selectedSkill(draft.skill, catalog);
+    if (!skill?.enabled) return draft;
+    const bound = bindSkillDraft(draft.skill, skill, catalog);
+    return bound === draft.skill ? draft : { ...draft, skill: bound };
+  }
   if (draft.kind !== "skill") return draft;
   const skill = selectedSkill(draft, catalog);
   return skill?.enabled && sameArguments(draft, skill)
@@ -181,12 +285,37 @@ export function skillDraftProblem(
   draft: ComposerSkillDraft,
   catalog: SkillCatalogView,
 ) {
+  return skillSelectionProblem(draft, catalog, true);
+}
+
+/**
+ * Why a selection cannot be sent. Argument definitions matter only to a
+ * Skill draft, whose text is the Skill's arguments.
+ */
+export function skillSelectionProblem(
+  selection: ComposerSkillSelection,
+  catalog: SkillCatalogView,
+  checkArguments: boolean,
+) {
   if (catalog.availability !== "ready" && catalog.availability !== "degraded")
     return "catalog" as const;
-  const skill = selectedSkill(draft, catalog);
+  const skill = selectedSkill(selection, catalog);
   if (!skill) return "missing" as const;
   if (!skill.enabled) return "disabled" as const;
-  return sameArguments(draft, skill) ? null : ("arguments" as const);
+  return !checkArguments || sameArguments(selection, skill)
+    ? null
+    : ("arguments" as const);
+}
+
+/** The draft's Skill problem, if it selects one. */
+export function draftSkillProblem(
+  draft: ComposerDraft,
+  catalog: SkillCatalogView,
+) {
+  if (draft.kind === "skill") return skillDraftProblem(draft, catalog);
+  if (draft.kind === "multimodal" && draft.skill)
+    return skillSelectionProblem(draft.skill, catalog, false);
+  return null;
 }
 
 // Explicitly open the new parameter definition for review, retaining all text.
@@ -203,7 +332,10 @@ export function isSkillDraftCurrent(
   draft: ComposerDraft,
   catalog: SkillCatalogView,
 ) {
-  return draft.kind === "skill" && skillDraftProblem(draft, catalog) === null;
+  return (
+    draftSkillSelection(draft) !== null &&
+    draftSkillProblem(draft, catalog) === null
+  );
 }
 
 export const slashCommandNames = ["new", "compact"] as const;
@@ -388,12 +520,11 @@ export function resolveSlashCandidates({
   return candidates;
 }
 
-export function skillDraftFromCandidate(
+function skillSelectionFromCandidate(
   candidate: Extract<SlashCandidate, { kind: "skill" }>,
-): ComposerSkillDraft {
+): ComposerSkillSelection {
   const maxValues = Math.min(candidate.maxValues, maxSkillArguments);
   return {
-    kind: "skill",
     skillId: candidate.skillId,
     skillPolicyKey: candidate.skillPolicyKey,
     invocationName: candidate.invocationName,
@@ -401,7 +532,33 @@ export function skillDraftFromCandidate(
     catalogRevision: candidate.catalogRevision,
     selectionRevision: candidate.selectionRevision,
     argumentNames: candidate.argumentNames.slice(0, maxValues),
-    argumentValues: candidate.tail ? [candidate.tail] : [],
     maxValues,
   };
+}
+
+export function skillDraftFromCandidate(
+  candidate: Extract<SlashCandidate, { kind: "skill" }>,
+): ComposerSkillDraft {
+  return {
+    kind: "skill",
+    ...skillSelectionFromCandidate(candidate),
+    argumentValues: candidate.tail ? [candidate.tail] : [],
+  };
+}
+
+/**
+ * Selects a Skill in the current draft. Attachments stay and the candidate's
+ * tail becomes the message text; without attachments it is a Skill draft.
+ */
+export function draftWithSkillCandidate(
+  draft: ComposerDraft,
+  candidate: Extract<SlashCandidate, { kind: "skill" }>,
+): ComposerDraft {
+  return draft.kind === "multimodal"
+    ? {
+        ...draft,
+        text: candidate.tail,
+        skill: skillSelectionFromCandidate(candidate),
+      }
+    : skillDraftFromCandidate(candidate);
 }

@@ -43,6 +43,69 @@ pub const InputPart = union(enum) {
     },
 };
 
+/// The Skill the user selected for a multimodal message (#201). Both values
+/// are Core catalog facts the caller read from the catalog it bound: Core
+/// accepts no Skill alongside parts, so the selection travels as the Run's one
+/// Host context block and the model loads the Skill through its Skill tool.
+pub const SelectedSkill = struct {
+    /// Core's concrete identity: 64 lowercase hex digits.
+    skill_id: []const u8,
+    /// The name the Skill tool accepts.
+    invocation_name: []const u8,
+};
+
+pub const selected_skill_block_label = "Selected Skill";
+
+const selected_skill_text = .{
+    "For this message the user explicitly selected the Skill \"",
+    "\" (skill_id ",
+    ") in the composer. Invoke the Skill \"",
+    "\" first, then apply it to the user's request and the attached files.",
+};
+
+/// The block holds only these two catalog facts, never the Skill's author
+/// text or the user's words. Both follow Core's own catalog grammar, so the
+/// text can never carry the `<system-reminder>` tag Core refuses.
+fn selectedSkillTextSize(skill: SelectedSkill) Error!usize {
+    if (!validSkillId(skill.skill_id) or !validInvocationName(skill.invocation_name))
+        return error.InvalidRunInput;
+    var size: usize = 0;
+    inline for (selected_skill_text) |piece| size += piece.len;
+    return size + skill.skill_id.len + 2 * skill.invocation_name.len;
+}
+
+fn writeSelectedSkillText(output: []u8, skill: SelectedSkill) void {
+    var offset: usize = 0;
+    copyInto(output, &offset, selected_skill_text[0]);
+    copyInto(output, &offset, skill.invocation_name);
+    copyInto(output, &offset, selected_skill_text[1]);
+    copyInto(output, &offset, skill.skill_id);
+    copyInto(output, &offset, selected_skill_text[2]);
+    copyInto(output, &offset, skill.invocation_name);
+    copyInto(output, &offset, selected_skill_text[3]);
+    std.debug.assert(offset == output.len);
+}
+
+fn validSkillId(value: []const u8) bool {
+    if (value.len != 64) return false;
+    for (value) |byte| switch (byte) {
+        '0'...'9', 'a'...'f' => {},
+        else => return false,
+    };
+    return true;
+}
+
+/// Core's invocation name grammar.
+fn validInvocationName(value: []const u8) bool {
+    if (value.len == 0 or value.len > 128) return false;
+    if (!std.ascii.isAlphanumeric(value[0]) and value[0] != '_') return false;
+    for (value[1..]) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != ':' and byte != '-')
+            return false;
+    }
+    return true;
+}
+
 const Error = error{ InvalidRunInput, RunInputTooLarge, RunInputBudgetExceeded };
 
 pub const Budget = struct {
@@ -67,19 +130,24 @@ pub const OwnedInput = struct {
     parts: []sdk.types.RunInputPartV1,
     storage: []u8,
     has_images: bool,
+    /// The Run's one Host context block when the user selected a Skill; its
+    /// text lives in `storage`.
+    selected_skill_block: ?sdk.types.ContextBlockV1,
     budget: *Budget,
     reserved_bytes: usize,
 
     pub fn init(
         allocator: std.mem.Allocator,
         input: []const InputPart,
+        selected_skill: ?SelectedSkill,
         max_text_bytes: usize,
         budget: *Budget,
     ) (Error || std.mem.Allocator.Error)!OwnedInput {
         if (input.len == 0) return error.InvalidRunInput;
         if (input.len > sdk.types.MAX_RUN_INPUT_PARTS_V1) return error.RunInputTooLarge;
+        const skill_text_bytes = if (selected_skill) |skill| try selectedSkillTextSize(skill) else 0;
         var text_bytes: usize = 0;
-        var storage_bytes: usize = 0;
+        var storage_bytes: usize = skill_text_bytes;
         var prompt_bytes: usize = 0;
         var has_images = false;
         for (input) |part| {
@@ -121,6 +189,17 @@ pub const OwnedInput = struct {
         const storage = try allocator.alloc(u8, storage_bytes);
         errdefer allocator.free(storage);
         var offset: usize = 0;
+        var selected_skill_block: ?sdk.types.ContextBlockV1 = null;
+        if (selected_skill) |skill| {
+            const text = storage[0..skill_text_bytes];
+            writeSelectedSkillText(text, skill);
+            offset = text.len;
+            var block = std.mem.zeroes(sdk.types.ContextBlockV1);
+            block.struct_size = @sizeOf(sdk.types.ContextBlockV1);
+            block.label = sdk.bytesView(selected_skill_block_label);
+            block.text = sdk.bytesView(text);
+            selected_skill_block = block;
+        }
         for (input, parts) |part, *owned| {
             switch (part) {
                 .text => |value| {
@@ -150,6 +229,7 @@ pub const OwnedInput = struct {
             .parts = parts,
             .storage = storage,
             .has_images = has_images,
+            .selected_skill_block = selected_skill_block,
             .budget = budget,
             .reserved_bytes = reserved_bytes,
         };

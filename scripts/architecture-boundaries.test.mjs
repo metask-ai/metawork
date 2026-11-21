@@ -3726,9 +3726,37 @@ test("AgentCore owns Run dates without a Host clock or timezone seam", () => {
     session,
     /options\.time_context_code = wire\.TIME_CONTEXT_SYSTEM/,
   );
-  assert.doesNotMatch(
+  assert.doesNotMatch(session, /run_time_source|metawork-time-context/);
+  // #201 adds one exception to "no Host context blocks": the Skill the user
+  // selected for a multimodal message travels as a single block labelled
+  // `Selected Skill`, because Core accepts no Skill alongside parts. It holds
+  // two catalog facts and never a date, time zone or clock reading, so Run
+  // dates stay AgentCore's. Any other block, or a second label, is refused.
+  assert.deepEqual(
+    [...session.matchAll(/options\.context_block(?:s|_count)\s*=\s*([^;]+);/g)]
+      .map((match) => match[0].replace(/\s+/g, " "))
+      .sort(),
+    [
+      "options.context_block_count = 1;",
+      "options.context_blocks = @ptrCast(selected_skill_block);",
+    ],
+  );
+  assert.match(
     session,
-    /run_time_source|metawork-time-context|options\.context_blocks\s*=/,
+    /if \(input\.multimodal\.selected_skill_block\) \|\*selected_skill_block\| \{/,
+  );
+  const blockOwners = zigFiles("src/").filter((path) =>
+    /ContextBlockV1/.test(read(path)),
+  );
+  assert.deepEqual(blockOwners.sort(), ["src/agent/session/multimodal.zig"]);
+  const multimodal = read("src/agent/session/multimodal.zig");
+  assert.deepEqual(
+    [...multimodal.matchAll(/\.label = ([^;]+);/g)].map((match) => match[1]),
+    ["sdk.bytesView(selected_skill_block_label)"],
+  );
+  assert.match(
+    multimodal,
+    /pub const selected_skill_block_label = "Selected Skill";/,
   );
   for (const path of [
     "src/agent/session/time_context.zig",

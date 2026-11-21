@@ -1,4 +1,5 @@
 import {
+  draftWithoutAttachments,
   emptyComposerDraft,
   parseSlashInput,
   composerDraftWithinLimits,
@@ -25,7 +26,6 @@ export function remainingAttachmentFiles(
   draft: ComposerDraft,
   maxFiles: string,
 ): number {
-  if (draft.kind === "skill") return 0;
   const count = draft.kind === "multimodal" ? draft.attachments.length : 0;
   const remaining = BigInt(maxFiles) - BigInt(count);
   if (remaining <= 0n) return 0;
@@ -165,6 +165,9 @@ function decodeSkillDraft(
   if (
     !exactKeys(draft, [
       ...(draft.skillPolicyKey === undefined ? [] : ["skillPolicyKey"]),
+      ...(draft.attachmentsReloadRequired === undefined
+        ? []
+        : ["attachmentsReloadRequired"]),
       "kind",
       "skillId",
       "invocationName",
@@ -176,6 +179,8 @@ function decodeSkillDraft(
       "maxValues",
     ]) ||
     draft.kind !== "skill" ||
+    (draft.attachmentsReloadRequired !== undefined &&
+      draft.attachmentsReloadRequired !== true) ||
     (draft.skillPolicyKey !== undefined &&
       !boundedNonEmptyString(draft.skillPolicyKey)) ||
     !boundedNonEmptyString(draft.skillId) ||
@@ -214,6 +219,9 @@ function decodeSkillDraft(
     argumentNames: draft.argumentNames,
     argumentValues: draft.argumentValues,
     maxValues,
+    ...(draft.attachmentsReloadRequired === true
+      ? { attachmentsReloadRequired: true as const }
+      : {}),
   };
   return skillDraftPersistable(decoded) ? decoded : null;
 }
@@ -264,15 +272,11 @@ function decodeLegacyTextDraft(value: string | null): ComposerDraft {
   return { kind: "text", text: value };
 }
 
-function encodeDraft(value: ComposerDraft): string | null {
-  if (value.kind === "multimodal") {
-    const encoded = JSON.stringify({
-      kind: "text",
-      text: value.text,
-      attachmentsReloadRequired: true,
-    });
-    return utf8ByteLength(encoded) <= maxPersistedDraftBytes ? encoded : null;
-  }
+function encodeDraft(draft: ComposerDraft): string | null {
+  // Attachment grants never outlive the connection: an attachment draft is
+  // kept as its text, or its Skill draft, marked for re-choosing the files.
+  const value =
+    draft.kind === "multimodal" ? draftWithoutAttachments(draft, true) : draft;
   if (value.kind === "skill" && !skillDraftPersistable(value)) return null;
   const encoded = JSON.stringify(value);
   return utf8ByteLength(encoded) <= maxPersistedDraftBytes ? encoded : null;

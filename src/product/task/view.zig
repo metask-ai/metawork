@@ -325,6 +325,11 @@ fn safeInputForPreparation(text: TextProjection, input: task_state.RunInputRecor
             if (value.text) |content| {
                 if (text.containsSensitive(content)) break :blk false;
             }
+            if (value.skill) |skill| {
+                if (text.containsSensitive(skill.skill_id) or text.containsSensitive(skill.catalog_revision) or
+                    text.containsSensitive(skill.invocation_name) or text.containsSensitive(skill.display_name))
+                    break :blk false;
+            }
             for (value.attachments) |attachment| {
                 if (attachment.redacted or text.containsSensitive(attachment.display_name)) break :blk false;
             }
@@ -359,8 +364,8 @@ fn writeTerminal(writer: *std.Io.Writer, text: TextProjection, run: *const task_
 }
 
 /// The readable form of a Run's own input: text as written, a Skill as
-/// `/name arguments…`, a multimodal message as its text and then each
-/// attachment name. Search matches over it and the Run manifest excerpts its
+/// `/name arguments…`, a multimodal message as its selected Skill's `/name`,
+/// its text and then each attachment name. Search matches over it and the Run manifest excerpts its
 /// start, so both read this one definition. `sink` takes `append([]const u8)`.
 pub fn appendReadableInput(input: *const task_state.RunInputRecord, sink: anytype) void {
     switch (input.*) {
@@ -378,7 +383,13 @@ pub fn appendReadableInput(input: *const task_state.RunInputRecord, sink: anytyp
         },
         .multimodal => |value| {
             var present = false;
+            if (value.skill) |skill| {
+                sink.append("/");
+                sink.append(skill.invocation_name);
+                present = true;
+            }
             if (value.text) |text| if (text.len != 0) {
+                if (present) sink.append(" ");
                 sink.append(text);
                 present = true;
             };
@@ -862,7 +873,19 @@ pub fn writeInput(writer: *std.Io.Writer, text_projection: TextProjection, input
                 writer.print(",\"redacted\":{}}}", .{item.redacted}) catch
                     return error.SnapshotTooLarge;
             }
-            writer.print("],\"redacted\":{}}}", .{multimodal.redacted}) catch
+            writer.writeAll("],\"skill\":") catch return error.SnapshotTooLarge;
+            if (multimodal.skill) |skill| {
+                writer.writeAll("{\"skillId\":") catch return error.SnapshotTooLarge;
+                try text_projection.writeJson(writer, skill.skill_id);
+                writer.writeAll(",\"catalogRevision\":") catch return error.SnapshotTooLarge;
+                try text_projection.writeJson(writer, skill.catalog_revision);
+                writer.writeAll(",\"invocationName\":") catch return error.SnapshotTooLarge;
+                try text_projection.writeJson(writer, skill.invocation_name);
+                writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
+                try text_projection.writeJson(writer, skill.display_name);
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
+            } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.print(",\"redacted\":{}}}", .{multimodal.redacted}) catch
                 return error.SnapshotTooLarge;
         },
         .skill => |skill| {
@@ -2007,6 +2030,75 @@ test "interrupted Compact serializer matches the independent Renderer fixture" {
     try std.testing.expectEqualStrings(std.mem.trim(u8, @import("task_view_fixture").interrupted_compact, "\r\n"), writer.buffered());
     writer = std.Io.Writer.fixed(storage[0..8]);
     try std.testing.expectError(error.SnapshotTooLarge, writeCompact(&writer, &compact));
+}
+
+test "a multimodal input with a selected Skill matches the independent Renderer fixture" {
+    const Text = struct {
+        fn contains(_: *const anyopaque, _: []const u8) bool {
+            return false;
+        }
+        fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) Error!void {
+            std.json.Stringify.encodeJsonString(value, .{}, writer) catch return error.SnapshotTooLarge;
+        }
+        fn output(_: *const anyopaque, _: *std.Io.Writer, _: []const u8, _: []const u64) Error!bool {
+            unreachable;
+        }
+        fn parts(_: *const anyopaque, _: *std.Io.Writer, _: []const u8, _: []const u8) Error!bool {
+            unreachable;
+        }
+    };
+    const text: TextProjection = .{
+        .context = undefined,
+        .contains_sensitive_fn = Text.contains,
+        .write_json_fn = Text.write,
+        .write_json_output_fn = Text.output,
+        .write_json_parts_fn = Text.parts,
+    };
+    var message = "Summarize the sales by month".*;
+    var chart = "chart.png".*;
+    var sales = "sales.xlsx".*;
+    var attachments = [_]task_state.AttachmentRecord{
+        .{ .kind = .image, .format = .png, .display_name = &chart, .size_bytes = 512 },
+        .{ .kind = .file, .format = null, .display_name = &sales, .size_bytes = 2403 },
+    };
+    var skill_id = ("0123456789abcdef" ** 4).*;
+    var revision = "catalog-7".*;
+    var invocation = "xlsx".*;
+    var display = "XLSX".*;
+    const input: task_state.RunInputRecord = .{ .multimodal = .{
+        .text = &message,
+        .attachments = &attachments,
+        .skill = .{
+            .skill_id = &skill_id,
+            .catalog_revision = &revision,
+            .invocation_name = &invocation,
+            .display_name = &display,
+        },
+    } };
+    var storage: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try writeInput(&writer, text, input, null);
+    try std.testing.expectEqualStrings(std.mem.trim(u8, @import("task_view_fixture").multimodal_skill_input, "\r\n"), writer.buffered());
+    try std.testing.expect(safeInputForPreparation(text, input));
+
+    // Search and the manifest read the Skill first, as the user wrote it.
+    const Sink = struct {
+        buffer: std.Io.Writer,
+        fn append(self: *@This(), value: []const u8) void {
+            self.buffer.writeAll(value) catch unreachable;
+        }
+    };
+    var readable: [256]u8 = undefined;
+    var sink: Sink = .{ .buffer = std.Io.Writer.fixed(&readable) };
+    appendReadableInput(&input, &sink);
+    try std.testing.expectEqualStrings("/xlsx Summarize the sales by month chart.png sales.xlsx", sink.buffer.buffered());
+
+    // Without a selection the same message projects an explicit null.
+    var plain = input;
+    plain.multimodal.skill = null;
+    writer = std.Io.Writer.fixed(&storage);
+    try writeInput(&writer, text, plain, null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), ",\"skill\":null,\"redacted\":false}") != null);
 }
 
 test "Product view owned Tool preparation copies facts and releases every allocation failure" {

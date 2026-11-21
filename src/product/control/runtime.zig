@@ -359,7 +359,21 @@ pub const TaskRunInput = union(enum) {
         text: []const u8,
         attachment_ids: []const u64,
         acceptance: AttachmentAcceptance = .{},
+        /// The Skill the user selected for this message (#201).
+        skill: ?task_runtime.SkillReference = null,
     },
+
+    fn skillReference(self: TaskRunInput) ?task_runtime.SkillReference {
+        return switch (self) {
+            .text => null,
+            .skill => |skill| .{
+                .skill_id = skill.skill_id,
+                .catalog_revision = skill.catalog_revision,
+                .selection_revision = skill.selection_revision,
+            },
+            .multimodal => |media| media.skill,
+        };
+    }
 };
 
 pub const TaskModelSelectionInput = struct {
@@ -4670,7 +4684,7 @@ pub const Runtime = struct {
                 } },
                 .multimodal => |media| blk: {
                     for (media.attachments, 0..) |part, index| ids[index] = part.resource_id;
-                    break :blk .{ .multimodal = .{ .text = media.text, .attachment_ids = ids[0..media.attachments.len] } };
+                    break :blk .{ .multimodal = .{ .text = media.text, .attachment_ids = ids[0..media.attachments.len], .skill = media.skill } };
                 },
             };
         } else if (self.task_runtime.retainedInputForRetry(task_id, original)) |retained| {
@@ -4722,10 +4736,11 @@ pub const Runtime = struct {
         defer if (staged.borrow) |*borrow| borrow.rollback();
         const task_input = try self.borrowTaskInput(task_id, input, &staged, original != null);
         var effects = self.taskRuntimeOperationEffects();
-        effects.input_catalog = if (input == .skill and self.task_runtime.matchesInitialPersonalCatalog(
+        const selected_skill = input.skillReference();
+        effects.input_catalog = if (selected_skill != null and self.task_runtime.matchesInitialPersonalCatalog(
             task_id,
-            input.skill.catalog_revision,
-            input.skill.selection_revision,
+            selected_skill.?.catalog_revision,
+            selected_skill.?.selection_revision,
         ))
             self.skill.personalCatalogProjection()
         else
@@ -4988,6 +5003,7 @@ pub const Runtime = struct {
                 break :input .{ .multimodal = .{
                     .text = multimodal.text,
                     .attachments = staged.items[0..multimodal.attachment_ids.len],
+                    .skill = multimodal.skill,
                 } };
             },
         };
@@ -5029,12 +5045,10 @@ pub const Runtime = struct {
             task_workspace_epoch,
         );
         const command_selection = switch (input) {
-            .command => |command| if (command == .skill) try task_runtime.selectSkillInput(.{ .skill = .{
-                .skill_id = command.skill.skill_id,
-                .catalog_revision = command.skill.catalog_revision,
-                .selection_revision = command.skill.selection_revision,
-                .argument_values = command.skill.argument_values,
-            } }, try self.workspaceCatalog(workspace_id)) else null,
+            .command => |command| if (command.skillReference()) |reference|
+                try task_runtime.selectSkillReference(reference, try self.workspaceCatalog(workspace_id))
+            else
+                null,
             .queued => null,
         };
         try self.prepareTaskSkills(task_id, binding_epoch);

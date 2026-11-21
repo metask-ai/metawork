@@ -1,4 +1,7 @@
-import type { ComposerDraft } from "../features/composer/slash.ts";
+import {
+  draftWithoutAttachments,
+  type ComposerDraft,
+} from "../features/composer/slash.ts";
 
 type RemovalTarget = {
   currentDraft(id: string | null): ComposerDraft | null;
@@ -57,7 +60,7 @@ export class AttachmentRemovalCoordinator {
         request.targetId,
         attachments.length
           ? { ...current, attachments }
-          : { kind: "text", text: current.text },
+          : draftWithoutAttachments(current, false),
       )
     )
       return;

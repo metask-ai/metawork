@@ -508,6 +508,9 @@ pub const FakeCore = struct {
     multimodal_reference_count: usize = 0,
     expected_multimodal_text: ?[]const u8 = null,
     multimodal_text_matches: bool = false,
+    /// The last Run's `Selected Skill` block text (#201); null when it had none.
+    selected_skill_block: ?[]const u8 = null,
+    selected_skill_block_storage: [512]u8 = undefined,
     session_destroy_probe: ?struct { context: *anyopaque, observe_fn: *const fn (*anyopaque) void } = null,
     session_destroy_failures: usize = 0,
     permission_mode_updates: usize = 0,
@@ -2160,9 +2163,32 @@ pub fn sessionRunInput(
     // Every Run kind reaches Core through this entry, so one assertion covers
     // the text, multimodal and Skill paths that share the Host's RunOptions.
     std.debug.assert(run_options.stream_retry_budget == lifecycle.stream_retry_budget);
-    if (run_options.struct_size != @sizeOf(wire.RunOptionsV1) or
-        run_options.context_blocks != null or run_options.context_block_count != 0)
-        return wire.STATUS_INVALID_ARGUMENT;
+    if (run_options.struct_size != @sizeOf(wire.RunOptionsV1)) return wire.STATUS_INVALID_ARGUMENT;
+    // The Host sends one context block, and only for a multimodal message the
+    // user selected a Skill for (#201); any other block fails the Run.
+    var selected_skill_block: ?[]const u8 = null;
+    if (run_options.context_block_count != 0 or run_options.context_blocks != null) {
+        const blocks = run_options.context_blocks orelse return wire.STATUS_INVALID_ARGUMENT;
+        if (run_options.context_block_count != 1 or typed_input.kind_code != wire.RUN_INPUT_MULTIMODAL)
+            return wire.STATUS_INVALID_ARGUMENT;
+        const block = blocks[0];
+        const label = sdk.borrowedBytes(block.label) catch return wire.STATUS_INVALID_ARGUMENT;
+        const text = sdk.borrowedBytes(block.text) catch return wire.STATUS_INVALID_ARGUMENT;
+        if (block.struct_size != @sizeOf(wire.ContextBlockV1) or block.reserved0 != 0 or
+            !std.mem.allEqual(u64, &block.reserved, 0) or
+            !std.mem.eql(u8, label, "Selected Skill") or text.len == 0 or
+            text.len > fake_core.selected_skill_block_storage.len)
+            return wire.STATUS_INVALID_ARGUMENT;
+        selected_skill_block = text;
+    }
+    {
+        fake_core.lock();
+        defer fake_core.unlock();
+        fake_core.selected_skill_block = if (selected_skill_block) |text| copy: {
+            @memcpy(fake_core.selected_skill_block_storage[0..text.len], text);
+            break :copy fake_core.selected_skill_block_storage[0..text.len];
+        } else null;
+    }
     switch (typed_input.kind_code) {
         wire.RUN_INPUT_TEXT => {
             fake_core.lock();
@@ -2346,12 +2372,18 @@ pub fn sessionRunInput(
             return wire.STATUS_CALLBACK_FAILED;
         };
         var event_buffer = "{\"text_chunk\":\"typed event\"}".*;
+        // A Run that carried a Selected Skill block streams that block back as
+        // its text, so a test across the execution link can read what Core got.
+        var selected_skill_event: [1024]u8 = undefined;
         const invalid_utf8_event =
             "{\"tool_result\":{\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":[203],\"is_error\":false,\"elapsed_ms\":1}}";
         const file_changes_event =
             "{\"file_changes\":{\"id\":\"tool-1\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"src/main.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-1\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"unified_diff\":\"-a\\n+b\\n\",\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}";
         const event_json: []const u8 = switch (plan) {
-            .event_callback => &event_buffer,
+            .event_callback => if (selected_skill_block) |text|
+                selectedSkillEvent(&selected_skill_event, text)
+            else
+                &event_buffer,
             .file_changes_callback => file_changes_event,
             .unknown_event_callback => "{\"future_observation\":{\"answer\":42}}",
             .malformed_event_callback => "{}",
@@ -3262,6 +3294,14 @@ const ConcurrentEventInvocation = struct {
         );
     }
 };
+
+fn selectedSkillEvent(buffer: []u8, text: []const u8) []const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    writer.writeAll("{\"text_chunk\":") catch unreachable;
+    std.json.Stringify.encodeJsonString(text, .{}, &writer) catch unreachable;
+    writer.writeByte('}') catch unreachable;
+    return writer.buffered();
+}
 
 fn invokeConcurrentIdentityCallbacks(
     callback: wire.OnEventFnV1,

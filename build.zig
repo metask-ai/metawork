@@ -2464,6 +2464,7 @@ fn wireAgentCore(
     task_view.addImport("product_task_view_contract", task_view_contract);
     const task_view_fixture = b.addOptions();
     task_view_fixture.addOption([]const u8, "interrupted_compact", @embedFile("frontend/src/bridge/__fixtures__/compact-interrupted.fixture"));
+    task_view_fixture.addOption([]const u8, "multimodal_skill_input", @embedFile("frontend/src/bridge/__fixtures__/multimodal-skill-input.fixture"));
     task_view.addOptions("task_view_fixture", task_view_fixture);
     task_view.addImport("metawork_agent_contract", agent_contract);
     task_view.addImport("metawork_product_skill", product_skill);

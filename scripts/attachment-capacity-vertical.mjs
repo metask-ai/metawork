@@ -201,6 +201,7 @@ export async function runAttachmentCapacityVertical({
             kind: "multimodal",
             text: "Inspect these screenshots later.",
             attachmentTokens: batches[0].attachments.map((item) => item.token),
+            skill: null,
           },
         });
         assert.equal(accepted.outcome, "accepted", JSON.stringify(accepted));

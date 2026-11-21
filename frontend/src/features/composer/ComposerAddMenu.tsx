@@ -77,7 +77,7 @@ export function ComposerAddMenu({
                 disabled={skillText === null}
                 title={
                   skillText === null
-                    ? t("composer.add_skill_with_attachments")
+                    ? t("composer.add_skill_selected")
                     : undefined
                 }
               >

@@ -546,7 +546,15 @@ export type TaskRunInput =
       kind: "multimodal";
       text: string;
       attachmentTokens: string[];
+      /** The Skill the user selected for this message (#201). */
+      skill: TaskRunSkillSelection | null;
     };
+/** An exact Skill selection without arguments; the message text is the user's. */
+export type TaskRunSkillSelection = {
+  skillId: string;
+  catalogRevision: string;
+  selectionRevision: string;
+};
 export type AttachmentDescriptor =
   | {
       token: string;
@@ -749,8 +757,16 @@ export type RunInputView =
             redacted: boolean;
           }
       >;
+      /** The Skill selected for this message, as it executed. */
+      skill: RunInputSkillView | null;
       redacted: boolean;
     };
+export type RunInputSkillView = {
+  skillId: string;
+  catalogRevision: string;
+  invocationName: string;
+  displayName: string;
+};
 export const runCauses = [
   "user_cancel",
   "approval_mode_change",

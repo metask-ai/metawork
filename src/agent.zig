@@ -88,6 +88,7 @@ pub const Run = session_impl.Run;
 pub const WorkspaceTrust = session_impl.WorkspaceTrust;
 pub const WorkspaceInput = session_impl.WorkspaceInput;
 pub const RunInput = session_impl.RunInput;
+pub const SelectedSkill = session_impl.SelectedSkill;
 pub const InputPart = session_impl.InputPart;
 pub const ImageFormat = session_impl.ImageFormat;
 pub const MultimodalInputLimits = session_impl.MultimodalInputLimits;

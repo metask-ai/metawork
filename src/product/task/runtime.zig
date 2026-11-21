@@ -237,6 +237,7 @@ pub const attachment_media_name_bytes = task_state.attachment_media_name_bytes;
 pub const attachment_media_max_thumbnail_bytes = task_state.attachment_media_max_thumbnail_bytes;
 pub const attachment_media_max_thumbnail_side = task_state.attachment_media_max_thumbnail_side;
 pub const RunInput = task_state.RunInput;
+pub const SkillReference = task_state.SkillReference;
 pub const Submission = task_state.Submission;
 pub const InputSubmission = task_state.InputSubmission;
 
@@ -2535,7 +2536,7 @@ pub const Runtime = struct {
         }
         var parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
         _ = try validateRunInput(task, input, effects.limits, &parts, effects.input_catalog);
-        const selection = if (input == .skill) try selectSkillInput(input, effects.input_catalog orelse (if (task.runtime.pinnedCatalogConst()) |pinned| pinned.view() else return error.CatalogUnavailable)) else null;
+        const selection = if (input.skillReference() != null) try selectSkillInput(input, effects.input_catalog orelse (if (task.runtime.pinnedCatalogConst()) |pinned| pinned.view() else return error.CatalogUnavailable)) else null;
         var payload = try task_state.OwnedRunInput.cloneSelected(self.allocator, input, agent.max_submitted_input_bytes - self.pending_input_bytes, selection);
         errdefer payload.deinit(self.allocator);
         const credential = if (task.runtime.executionConst()) |execution| execution.secret else &.{};
@@ -8754,6 +8755,12 @@ fn redactInputProjection(input: *task_state.RunInputRecord, credential: []const 
                     item.redacted;
                 redacted = redacted or item.redacted;
             }
+            if (multimodal.skill) |skill| {
+                redacted = effects.redact(skill.skill_id, credential) or redacted;
+                redacted = effects.redact(skill.catalog_revision, credential) or redacted;
+                redacted = effects.redact(skill.invocation_name, credential) or redacted;
+                redacted = effects.redact(skill.display_name, credential) or redacted;
+            }
             multimodal.redacted = redacted or multimodal.redacted;
         },
         .skill => |*skill| {
@@ -9986,6 +9993,7 @@ fn deinitRunInput(
             for (multimodal.attachments) |item|
                 releaseProjectedSlice(self, effects, item.display_name);
             self.allocator.free(multimodal.attachments);
+            if (multimodal.skill) |skill| releaseSelectedSkill(self, effects, skill);
         },
         .skill => |skill| {
             releaseProjectedSlice(self, effects, skill.skill_id);
@@ -9998,6 +10006,13 @@ fn deinitRunInput(
         },
     }
     input.* = undefined;
+}
+
+fn releaseSelectedSkill(self: *Runtime, effects: ReleaseEffects, skill: task_state.SelectedSkillRecord) void {
+    releaseProjectedSlice(self, effects, skill.skill_id);
+    releaseProjectedSlice(self, effects, skill.catalog_revision);
+    releaseProjectedSlice(self, effects, skill.invocation_name);
+    releaseProjectedSlice(self, effects, skill.display_name);
 }
 
 fn releaseAutomaticTitle(title: *task_state.AutomaticTitle) void {
@@ -10078,9 +10093,14 @@ fn agentSessionPermission(
 }
 
 pub fn selectSkillInput(input: RunInput, current: product_skill.catalog.CatalogProjection) RunError!?task_state.SkillSelection {
-    if (input != .skill) return null;
+    const selected = input.skillReference() orelse return null;
+    return try selectSkillReference(selected, current);
+}
+
+/// Captures the logical selection an exact Skill reference makes against the
+/// catalog the user saw.
+pub fn selectSkillReference(selected: task_state.SkillReference, current: product_skill.catalog.CatalogProjection) RunError!task_state.SkillSelection {
     if (current.availability != .ready and current.availability != .degraded) return error.CatalogUnavailable;
-    const selected = input.skill;
     if (!std.mem.eql(u8, current.revision, selected.catalog_revision) or current.selection_revision != selected.selection_revision)
         return error.StaleCatalog;
     const skill = for (current.skills) |candidate| {
@@ -10091,21 +10111,61 @@ pub fn selectSkillInput(input: RunInput, current: product_skill.catalog.CatalogP
 }
 
 pub fn compileSkillInput(input: RunInput, selection: ?task_state.SkillSelection, current: product_skill.catalog.CatalogProjection) RunError!RunInput {
-    if (input != .skill) return input;
+    if (input.skillReference() == null) return input;
     const intent = selection orelse return error.StaleCatalog;
     if (current.availability != .ready and current.availability != .degraded) return error.CatalogUnavailable;
     const skill = for (current.skills) |candidate| {
         if (std.mem.eql(u8, candidate.skill_policy_key, intent.policy_key)) break candidate;
     } else return error.SkillNotFound;
     if (!skill.enabled) return error.SkillUnavailable;
-    if (!std.mem.eql(u8, &intent.argument_shape, &product_skill.catalog.argumentShape(skill)))
-        return error.InvalidSkillArguments;
-    return .{ .skill = .{
-        .skill_id = skill.skill_id,
-        .catalog_revision = current.revision,
-        .selection_revision = current.selection_revision orelse return error.CatalogUnavailable,
-        .argument_values = input.skill.argument_values,
-    } };
+    const selection_revision = current.selection_revision orelse return error.CatalogUnavailable;
+    return switch (input) {
+        .text => unreachable,
+        .skill => |value| {
+            if (!std.mem.eql(u8, &intent.argument_shape, &product_skill.catalog.argumentShape(skill)))
+                return error.InvalidSkillArguments;
+            return .{ .skill = .{
+                .skill_id = skill.skill_id,
+                .catalog_revision = current.revision,
+                .selection_revision = selection_revision,
+                .argument_values = value.argument_values,
+            } };
+        },
+        // A message with attachments sends no Skill arguments, so a changed
+        // argument definition leaves it as executable as before.
+        .multimodal => |value| .{ .multimodal = .{
+            .text = value.text,
+            .attachments = value.attachments,
+            .skill = .{
+                .skill_id = skill.skill_id,
+                .catalog_revision = current.revision,
+                .selection_revision = selection_revision,
+            },
+        } },
+    };
+}
+
+const PinnedSkill = struct {
+    pinned: product_skill.catalog.CatalogProjection,
+    skill: product_skill.catalog.SkillProjection,
+};
+
+/// The pinned catalog entry an exact Skill selection names; a Skill message
+/// and a multimodal message with a selected Skill both require one.
+fn pinnedSkill(
+    task: *const task_state.Task,
+    reference: task_state.SkillReference,
+    input_catalog: ?product_skill.catalog.CatalogProjection,
+) RunError!PinnedSkill {
+    const pinned = input_catalog orelse (if (task.runtime.pinnedCatalogConst()) |snapshot| snapshot.view() else return error.CatalogUnavailable);
+    if (!std.mem.eql(u8, reference.catalog_revision, pinned.revision) or
+        reference.selection_revision != pinned.selection_revision)
+        return error.StaleCatalog;
+    const skill = for (pinned.skills) |candidate| {
+        if (std.mem.eql(u8, candidate.skill_id, reference.skill_id)) break candidate;
+    } else return error.SkillNotFound;
+    if (!skill.enabled) return error.SkillUnavailable;
+    return .{ .pinned = pinned, .skill = skill };
 }
 
 fn validateRunInput(
@@ -10157,17 +10217,21 @@ fn validateRunInput(
             if (requires_instruction and
                 std.mem.trim(u8, multimodal.text, " \t\r\n").len == 0)
                 return error.MissingInstruction;
-            break :blk .{ .multimodal = parts[0..part_count] };
+            // The Agent renders the selection as the Run's one context block
+            // from these two pinned catalog facts, never from caller text.
+            const selected_skill: ?agent.SelectedSkill = if (multimodal.skill) |reference| selected: {
+                const resolved = try pinnedSkill(task, reference, input_catalog);
+                break :selected .{
+                    .skill_id = resolved.skill.skill_id,
+                    .invocation_name = resolved.skill.invocation_name,
+                };
+            } else null;
+            break :blk .{ .multimodal = .{ .parts = parts[0..part_count], .selected_skill = selected_skill } };
         },
         .skill => |skill_input| blk: {
-            const pinned = input_catalog orelse (if (task.runtime.pinnedCatalogConst()) |snapshot| snapshot.view() else return error.CatalogUnavailable);
-            if (!std.mem.eql(u8, skill_input.catalog_revision, pinned.revision) or
-                skill_input.selection_revision != pinned.selection_revision)
-                return error.StaleCatalog;
-            const skill = for (pinned.skills) |candidate| {
-                if (std.mem.eql(u8, candidate.skill_id, skill_input.skill_id)) break candidate;
-            } else return error.SkillNotFound;
-            if (!skill.enabled) return error.SkillUnavailable;
+            const resolved = try pinnedSkill(task, input.skillReference().?, input_catalog);
+            const pinned = resolved.pinned;
+            const skill = resolved.skill;
             if (skill_input.argument_values.len > @min(
                 @as(usize, @intCast(skill.max_values)),
                 limits.max_skill_arguments,
@@ -10261,56 +10325,30 @@ fn copyRunInput(
                 initialized += 1;
                 redacted = redacted or display.redacted;
             }
+            const skill: ?task_state.SelectedSkillRecord = if (multimodal.skill) |reference| selected: {
+                const resolved = try pinnedSkill(task, reference, effects.input_catalog);
+                const projected = try projectSelectedSkill(effects, resolved, credentials);
+                redacted = redacted or projected.redacted;
+                break :selected projected.record;
+            } else null;
             break :blk .{ .multimodal = .{
                 .text = text,
                 .attachments = records,
+                .skill = skill,
                 .redacted = redacted,
             } };
         },
         .skill => |skill_input| blk: {
-            const pinned = effects.input_catalog orelse (if (task.runtime.pinnedCatalogConst()) |snapshot| snapshot.view() else return error.CatalogUnavailable);
-            if (!std.mem.eql(u8, skill_input.catalog_revision, pinned.revision) or
-                skill_input.selection_revision != pinned.selection_revision)
-                return error.StaleCatalog;
-            const skill = for (pinned.skills) |candidate| {
-                if (std.mem.eql(u8, candidate.skill_id, skill_input.skill_id)) break candidate;
-            } else return error.SkillNotFound;
-            if (!skill.enabled) return error.SkillUnavailable;
-            const skill_id = (try effects.text.project(
-                skill.skill_id,
-                effects.limits.max_catalog_projection_bytes,
-                &.{},
-                0,
-            )).value;
-            errdefer effects.text.discardCandidate(skill_id);
-            const revision = (try effects.text.project(
-                pinned.revision,
-                effects.limits.max_catalog_projection_bytes,
-                &.{},
-                0,
-            )).value;
-            errdefer effects.text.discardCandidate(revision);
-            const invocation = try effects.text.project(
-                skill.invocation_name,
-                effects.limits.max_catalog_projection_bytes,
-                credentials,
-                0,
-            );
-            errdefer effects.text.discardCandidate(invocation.value);
-            const display = try effects.text.project(
-                skill.display_name,
-                effects.limits.max_catalog_projection_bytes,
-                credentials,
-                0,
-            );
-            errdefer effects.text.discardCandidate(display.value);
+            const resolved = try pinnedSkill(task, input.skillReference().?, effects.input_catalog);
+            const selected = try projectSelectedSkill(effects, resolved, credentials);
+            errdefer discardSelectedSkill(effects, selected.record);
             const values = try self.allocator.alloc(
                 []u8,
                 skill_input.argument_values.len,
             );
             errdefer self.allocator.free(values);
             var initialized: usize = 0;
-            var redacted = invocation.redacted or display.redacted;
+            var redacted = selected.redacted;
             errdefer for (values[0..initialized]) |value|
                 effects.text.discardCandidate(value);
             for (skill_input.argument_values, values) |value, *target| {
@@ -10325,15 +10363,67 @@ fn copyRunInput(
                 redacted = redacted or projected.redacted;
             }
             break :blk .{ .skill = .{
-                .skill_id = skill_id,
-                .catalog_revision = revision,
-                .invocation_name = invocation.value,
-                .display_name = display.value,
+                .skill_id = selected.record.skill_id,
+                .catalog_revision = selected.record.catalog_revision,
+                .invocation_name = selected.record.invocation_name,
+                .display_name = selected.record.display_name,
                 .argument_values = values,
                 .redacted = redacted,
             } };
         },
     };
+}
+
+/// The safe history form of a pinned Skill: its identity as Core minted it,
+/// and its names as the user saw them, redacted like any other text.
+fn projectSelectedSkill(
+    effects: OperationEffects,
+    resolved: PinnedSkill,
+    credentials: []const []const u8,
+) RunError!struct { record: task_state.SelectedSkillRecord, redacted: bool } {
+    const skill_id = (try effects.text.project(
+        resolved.skill.skill_id,
+        effects.limits.max_catalog_projection_bytes,
+        &.{},
+        0,
+    )).value;
+    errdefer effects.text.discardCandidate(skill_id);
+    const revision = (try effects.text.project(
+        resolved.pinned.revision,
+        effects.limits.max_catalog_projection_bytes,
+        &.{},
+        0,
+    )).value;
+    errdefer effects.text.discardCandidate(revision);
+    const invocation = try effects.text.project(
+        resolved.skill.invocation_name,
+        effects.limits.max_catalog_projection_bytes,
+        credentials,
+        0,
+    );
+    errdefer effects.text.discardCandidate(invocation.value);
+    const display = try effects.text.project(
+        resolved.skill.display_name,
+        effects.limits.max_catalog_projection_bytes,
+        credentials,
+        0,
+    );
+    return .{
+        .record = .{
+            .skill_id = skill_id,
+            .catalog_revision = revision,
+            .invocation_name = invocation.value,
+            .display_name = display.value,
+        },
+        .redacted = invocation.redacted or display.redacted,
+    };
+}
+
+fn discardSelectedSkill(effects: OperationEffects, record: task_state.SelectedSkillRecord) void {
+    effects.text.discardCandidate(record.skill_id);
+    effects.text.discardCandidate(record.catalog_revision);
+    effects.text.discardCandidate(record.invocation_name);
+    effects.text.discardCandidate(record.display_name);
 }
 
 /// Takes every turn from `position` on out of the Conversation, attributing
@@ -11277,10 +11367,18 @@ fn reviewIntent(input: *const task_state.RunInputRecord, buffer: []u8) ![]const 
             .kind = "explicit_multimodal_input",
             .text = value.text,
             .attachments = value.attachments,
+            .selected_skill = selectedSkillIntent(value.skill),
             .limitation = "Attachment contents are not included; do not infer their instructions from filenames.",
         }, .{}, &writer) catch return error.ReviewInputLimit,
     }
     return writer.buffered();
+}
+
+const SelectedSkillIntent = struct { invocation_name: []const u8, display_name: []const u8 };
+
+fn selectedSkillIntent(skill: ?task_state.SelectedSkillRecord) ?SelectedSkillIntent {
+    const value = skill orelse return null;
+    return .{ .invocation_name = value.invocation_name, .display_name = value.display_name };
 }
 
 fn copyReviewField(writer: *std.Io.Writer, text: TextProjection, value: []const u8, max: usize, credentials: []const []const u8) ![]const u8 {
@@ -12655,6 +12753,83 @@ test "queued Skill intent follows the Core winner while preserving argument comp
     current.availability = .unavailable;
     try std.testing.expectError(error.CatalogUnavailable, compileSkillInput(input, selection, current));
     try std.testing.expectEqualStrings("ordinary text", (try compileSkillInput(.{ .text = "ordinary text" }, null, current)).text);
+}
+
+test "a Skill selected on a multimodal message follows the Core winner without arguments to check" {
+    var winner: product_skill.catalog.SkillProjection = .{
+        .skill_id = "old-content",
+        .skill_policy_key = "xlsx",
+        .invocation_name = "xlsx",
+        .provider_id = "agents.directory",
+        .source_scope = .user,
+        .source_instance_id = "metawork.builtin",
+        .contribution_id = "xlsx",
+        .content_revision = "v1",
+        .display_name = "XLSX",
+        .description = "",
+        .argument_names = &.{"request"},
+        .max_values = 64,
+    };
+    var current: product_skill.catalog.CatalogProjection = .{ .availability = .ready, .revision = "one", .selection_revision = 1, .skills = (&winner)[0..1] };
+    const attachments = [_]task_state.MultimodalAttachment{.{ .kind = .file, .format = null, .display_name = "sales.xlsx", .bytes = "reference" }};
+    const input: RunInput = .{ .multimodal = .{
+        .text = "Summarize by month",
+        .attachments = &attachments,
+        .skill = .{ .skill_id = "old-content", .catalog_revision = "one", .selection_revision = 1 },
+    } };
+    const selection = (try selectSkillInput(input, current)).?;
+    try std.testing.expectEqualStrings("xlsx", selection.policy_key);
+    winner.skill_id = "new-content";
+    current.revision = "two";
+    current.selection_revision = 3;
+    // A changed argument definition does not matter: none is sent.
+    winner.argument_names = &.{"changed"};
+    const compiled = (try compileSkillInput(input, selection, current)).multimodal;
+    try std.testing.expectEqualStrings("new-content", compiled.skill.?.skill_id);
+    try std.testing.expectEqualStrings("two", compiled.skill.?.catalog_revision);
+    try std.testing.expectEqual(@as(u64, 3), compiled.skill.?.selection_revision);
+    try std.testing.expectEqualStrings("Summarize by month", compiled.text);
+    try std.testing.expectEqual(@as(usize, 1), compiled.attachments.len);
+    try std.testing.expectError(error.StaleCatalog, selectSkillInput(input, current));
+    winner.enabled = false;
+    try std.testing.expectError(error.SkillUnavailable, compileSkillInput(input, selection, current));
+    winner.enabled = true;
+    winner.skill_policy_key = "another-policy";
+    try std.testing.expectError(error.SkillNotFound, compileSkillInput(input, selection, current));
+    try std.testing.expectError(error.StaleCatalog, compileSkillInput(input, null, current));
+    current.availability = .unavailable;
+    try std.testing.expectError(error.CatalogUnavailable, compileSkillInput(input, selection, current));
+    // A message without a selection is not a Skill input at all.
+    var plain = input;
+    plain.multimodal.skill = null;
+    try std.testing.expectEqual(@as(?task_state.SkillSelection, null), try selectSkillInput(plain, current));
+    try std.testing.expect((try compileSkillInput(plain, null, current)).multimodal.skill == null);
+}
+
+test "a selected Skill reaches the review intent by name and never by its body" {
+    var buffer: [2048]u8 = undefined;
+    var attachments = [_]task_state.AttachmentRecord{.{ .kind = .file, .format = null, .display_name = @constCast("sales.xlsx"), .size_bytes = 3 }};
+    var input: task_state.RunInputRecord = .{ .multimodal = .{
+        .text = @constCast("Summarize by month"),
+        .attachments = &attachments,
+        .skill = .{
+            .skill_id = @constCast("0123456789abcdef" ** 4),
+            .catalog_revision = @constCast("catalog-7"),
+            .invocation_name = @constCast("xlsx"),
+            .display_name = @constCast("XLSX"),
+        },
+    } };
+    const intent = try reviewIntent(&input, &buffer);
+    var decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, intent, .{});
+    defer decoded.deinit();
+    const selected = decoded.value.object.get("selected_skill").?.object;
+    try std.testing.expectEqualStrings("xlsx", selected.get("invocation_name").?.string);
+    try std.testing.expectEqualStrings("XLSX", selected.get("display_name").?.string);
+    try std.testing.expectEqual(@as(usize, 2), selected.count());
+    input.multimodal.skill = null;
+    var plain = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try reviewIntent(&input, &buffer), .{});
+    defer plain.deinit();
+    try std.testing.expect(plain.value.object.get("selected_skill").? == .null);
 }
 
 test "Task owned input preserves Skill and media slices across caller release and allocation failure" {

@@ -471,7 +471,15 @@ pub const TaskRunInput = union(enum) {
     multimodal: struct {
         text: []const u8,
         attachment_tokens: []const []const u8,
+        /// The Skill the user selected for this message (#201).
+        skill: ?TaskRunSkillSelection,
     },
+};
+/// An exact Skill selection without arguments: the message text is the user's.
+pub const TaskRunSkillSelection = struct {
+    skill_id: []const u8,
+    catalog_revision: []const u8,
+    selection_revision: u64,
 };
 pub const ParsedTaskRunInput = struct {
     value: TaskRunInput,
@@ -705,7 +713,9 @@ pub fn parseTaskRunInput(value: std.json.Value) !ParsedTaskRunInput {
         return .{ .value = .{ .text = text } };
     }
     if (std.mem.eql(u8, kind_text, "multimodal")) {
-        if (object.count() != 3) return error.InvalidBridgePayload;
+        if (object.count() != 4) return error.InvalidBridgePayload;
+        const skill = try parseTaskRunSkillSelection(object.get("skill") orelse
+            return error.InvalidBridgePayload);
         const text = switch (object.get("text") orelse return error.InvalidBridgePayload) {
             .string => |text| text,
             else => return error.InvalidBridgePayload,
@@ -727,6 +737,7 @@ pub fn parseTaskRunInput(value: std.json.Value) !ParsedTaskRunInput {
             .value = .{ .multimodal = .{
                 .text = text,
                 .attachment_tokens = tokens,
+                .skill = skill,
             } },
             .owned_attachment_tokens = tokens,
         };
@@ -773,6 +784,34 @@ pub fn parseTaskRunInput(value: std.json.Value) !ParsedTaskRunInput {
             .argument_values = argument_values,
         } },
         .owned_argument_values = argument_values,
+    };
+}
+
+/// `null`, or exactly `{ skillId, catalogRevision, selectionRevision }`.
+fn parseTaskRunSkillSelection(value: std.json.Value) !?TaskRunSkillSelection {
+    const object = switch (value) {
+        .null => return null,
+        .object => |object| object,
+        else => return error.InvalidBridgePayload,
+    };
+    if (object.count() != 3) return error.InvalidBridgePayload;
+    const skill_id = switch (object.get("skillId") orelse return error.InvalidBridgePayload) {
+        .string => |text| text,
+        else => return error.InvalidBridgePayload,
+    };
+    const catalog_revision = switch (object.get("catalogRevision") orelse return error.InvalidBridgePayload) {
+        .string => |text| text,
+        else => return error.InvalidBridgePayload,
+    };
+    const selection_revision = switch (object.get("selectionRevision") orelse return error.InvalidBridgePayload) {
+        .string => |text| try parseWireId(text),
+        else => return error.InvalidBridgePayload,
+    };
+    if (skill_id.len == 0 or catalog_revision.len == 0) return error.InvalidBridgePayload;
+    return .{
+        .skill_id = skill_id,
+        .catalog_revision = catalog_revision,
+        .selection_revision = selection_revision,
     };
 }
 
@@ -946,7 +985,7 @@ test "Task Run input is an exact text skill or multimodal tagged object" {
     try std.testing.expectEqual(@as(usize, 2), skill_input.value.skill.argument_values.len);
 
     var multimodal_payload = try parsePayload(TaskRun,
-        \\{"taskId":"1","expectedBindingEpoch":"2","input":{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}}
+        \\{"taskId":"1","expectedBindingEpoch":"2","input":{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"skill":null}}
     );
     defer multimodal_payload.deinit();
     var multimodal_input = try parseTaskRunInput(multimodal_payload.value.input);
@@ -957,6 +996,20 @@ test "Task Run input is an exact text skill or multimodal tagged object" {
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         multimodal_input.value.multimodal.attachment_tokens[0],
     );
+    try std.testing.expect(multimodal_input.value.multimodal.skill == null);
+
+    // #201: one message can carry a selected Skill and attachments together.
+    var selected_payload = try parsePayload(TaskRun,
+        \\{"taskId":"1","expectedBindingEpoch":"2","input":{"kind":"multimodal","text":"Summarize by month","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"skill":{"skillId":"builtin.xlsx","catalogRevision":"revision","selectionRevision":"3"}}}
+    );
+    defer selected_payload.deinit();
+    var selected_input = try parseTaskRunInput(selected_payload.value.input);
+    defer selected_input.deinit();
+    const selected = selected_input.value.multimodal.skill.?;
+    try std.testing.expectEqualStrings("builtin.xlsx", selected.skill_id);
+    try std.testing.expectEqualStrings("revision", selected.catalog_revision);
+    try std.testing.expectEqual(@as(u64, 3), selected.selection_revision);
+    try std.testing.expectEqualStrings("Summarize by month", selected_input.value.multimodal.text);
 
     var legacy = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
         \\{"kind":"text","prompt":"inspect"}
@@ -977,11 +1030,28 @@ test "Task Run input is an exact text skill or multimodal tagged object" {
     );
 
     const invalid_multimodal = [_][]const u8{
-        \\{"kind":"multimodal","text":"","attachmentTokens":[]}
+        \\{"kind":"multimodal","text":"","attachmentTokens":[],"skill":null}
         ,
-        \\{"kind":"multimodal","text":"","attachmentTokens":["physical/path.png"]}
+        \\{"kind":"multimodal","text":"","attachmentTokens":["physical/path.png"],"skill":null}
+        ,
+        // The Skill key is required, and a flat Skill field is not one.
+        \\{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}
         ,
         \\{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"skillId":"review"}
+        ,
+        \\{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"skill":null,"skillId":"review"}
+        ,
+        \\{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"skill":"review"}
+        ,
+        \\{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"skill":{"skillId":"review","catalogRevision":"r"}}
+        ,
+        \\{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"skill":{"skillId":"review","catalogRevision":"r","selectionRevision":"1","argumentValues":[]}}
+        ,
+        \\{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"skill":{"skillId":"","catalogRevision":"r","selectionRevision":"1"}}
+        ,
+        \\{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"skill":{"skillId":"review","catalogRevision":"","selectionRevision":"1"}}
+        ,
+        \\{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"skill":{"skillId":"review","catalogRevision":"r","selectionRevision":1}}
         ,
     };
     for (invalid_multimodal) |encoded| {
