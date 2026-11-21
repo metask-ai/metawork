@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "./styles/metask-tokens.css";
+@import "./features/inbox/inbox.css";
 
 :root {
   --window-bar-height: 52px;
@@ -300,6 +301,7 @@ summary::-webkit-details-marker {
 }
 
 .primary-navigation-item {
+  position: relative;
   display: grid;
   width: 44px;
   height: 44px;

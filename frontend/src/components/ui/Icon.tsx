@@ -26,6 +26,7 @@ import {
   ListTree,
   LoaderCircle,
   LogOut,
+  MessageSquare,
   Minus,
   PanelLeft,
   PanelRight,
@@ -60,6 +61,7 @@ type IconName =
   | "more"
   | "sidebar"
   | "workbench"
+  | "messages"
   | "update-available"
   | "minimize"
   | "maximize"
@@ -124,6 +126,7 @@ const icons: Record<IconName, LucideIcon> = {
   more: Ellipsis,
   sidebar: PanelLeft,
   workbench: LayoutGrid,
+  messages: MessageSquare,
   "update-available": CircleArrowUp,
   minimize: Minus,
   maximize: Square,

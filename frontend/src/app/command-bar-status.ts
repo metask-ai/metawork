@@ -52,7 +52,8 @@ export function clearSecurityFeedback(
   }
   return { ...state, entries, announcement: null };
 }
-export type ShellRoute = "workbench" | "skills" | "mcp" | "scheduled-tasks";
+export type ShellRoute =
+  "workbench" | "skills" | "mcp" | "scheduled-tasks" | "inbox";
 
 type StatusDetails = Pick<ShellStatus, "values" | "diagnostic" | "sourceId">;
 

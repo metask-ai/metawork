@@ -190,6 +190,7 @@ export function AppShell({
   taskStageLabel,
   navigation,
   left,
+  leftPanelKind = "tasks",
   rightPanel,
   rightPanelOpen,
   onDismissRightPanel,
@@ -214,6 +215,7 @@ export function AppShell({
   taskStageLabel?: string;
   navigation?: (dismissDrawer: () => void) => ReactNode;
   left: ((dismissDrawer: () => void) => ReactNode) | null;
+  leftPanelKind?: "tasks" | "conversations";
   rightPanel: ReactNode | null;
   rightPanelOpen: boolean;
   onDismissRightPanel: (restoreFocus?: boolean) => void;
@@ -225,6 +227,7 @@ export function AppShell({
 }) {
   const { t } = useI18n();
   const [leftOpen, setLeftOpen] = useState(initialLeftPanel);
+  const [conversationListOpen, setConversationListOpen] = useState(true);
   const [leftWidth, setLeftWidth] = useState(initialLeftWidth);
   const [rightShare, setRightShare] = useState(initialRightShare);
   const [resizingLeft, setResizingLeft] = useState(false);
@@ -236,13 +239,20 @@ export function AppShell({
   const sidebarToggle = useRef<HTMLButtonElement>(null);
   const wideWorkbench = workbenchWidth >= desktopWorkbenchWidth;
   const leftAvailable = left !== null;
-  const effectiveLeftOpen = leftAvailable && leftOpen;
+  const showingConversations = leftPanelKind === "conversations";
+  const effectiveLeftOpen =
+    leftAvailable &&
+    (wideWorkbench && showingConversations ? conversationListOpen : leftOpen);
   const drawerOpen = !wideWorkbench && effectiveLeftOpen;
   const sidebarVisible =
     drawerOpen ||
     (wideWorkbench && (effectiveLeftOpen || navigation !== undefined));
   const sidebarToggleLabel = t(
-    wideWorkbench ? "app.toggle_sidebar" : "app.toggle_navigation",
+    !wideWorkbench
+      ? "app.toggle_navigation"
+      : showingConversations
+        ? "inbox.toggle_conversations"
+        : "app.toggle_sidebar",
   );
   const navigationWidth = navigation ? primaryNavigationWidth : 0;
   const newTaskShortcut = desktopPlatform() === "macos" ? "⌘N" : "Ctrl+N";
@@ -372,10 +382,14 @@ export function AppShell({
   }, [overlay]);
 
   function toggleLeft() {
+    if (wideWorkbench && showingConversations) {
+      setConversationListOpen((open) => !open);
+      return;
+    }
     const next = !leftOpen;
     if (wideWorkbench)
       writeLocalPreference(leftPreference, next ? "open" : "closed");
-    else if (next) onDismissRightPanel(false);
+    else if (next && effectiveRightPanelOpen) onDismissRightPanel(false);
     setLeftOpen(next);
   }
 
@@ -512,7 +526,7 @@ export function AppShell({
             >
               <Icon name="search" />
             </button>
-            {leftAvailable && !effectiveLeftOpen && (
+            {leftAvailable && !effectiveLeftOpen && !showingConversations && (
               <button
                 type="button"
                 className="icon-button focus-ring"
@@ -561,22 +575,28 @@ export function AppShell({
             inert={overlay ? true : undefined}
           >
             <div className="commandbar-context-actions">{headerActions}</div>
-            <button
-              type="button"
-              ref={rightPanelToggleRef}
-              className="icon-button commandbar-task-panel-toggle focus-ring"
-              aria-controls="task-panel"
-              aria-expanded={effectiveRightPanelOpen}
-              aria-label={t(
-                effectiveRightPanelOpen ? "task_panel.hide" : "task_panel.open",
-              )}
-              title={t(
-                effectiveRightPanelOpen ? "task_panel.hide" : "task_panel.open",
-              )}
-              onClick={(event) => onToggleRightPanel(event.currentTarget)}
-            >
-              <Icon name="sidebar-right" />
-            </button>
+            {!showingConversations && (
+              <button
+                type="button"
+                ref={rightPanelToggleRef}
+                className="icon-button commandbar-task-panel-toggle focus-ring"
+                aria-controls="task-panel"
+                aria-expanded={effectiveRightPanelOpen}
+                aria-label={t(
+                  effectiveRightPanelOpen
+                    ? "task_panel.hide"
+                    : "task_panel.open",
+                )}
+                title={t(
+                  effectiveRightPanelOpen
+                    ? "task_panel.hide"
+                    : "task_panel.open",
+                )}
+                onClick={(event) => onToggleRightPanel(event.currentTarget)}
+              >
+                <Icon name="sidebar-right" />
+              </button>
+            )}
 
             {attentionNotice && (
               <details

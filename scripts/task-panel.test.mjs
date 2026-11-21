@@ -8444,7 +8444,7 @@ test("App groups tools in the Workbench sidebar and keeps the primary entry avai
   const navigation = screen.getByRole("navigation", {
     name: "Primary navigation",
   });
-  assert.equal(within(navigation).getAllByRole("button").length, 1);
+  assert.equal(within(navigation).getAllByRole("button").length, 2);
   const workbench = within(navigation).getByRole("button", {
     name: "Workbench",
   });
@@ -8488,6 +8488,91 @@ test("App groups tools in the Workbench sidebar and keeps the primary entry avai
     /First task/,
   );
   assert.equal(listToggle.getAttribute("aria-expanded"), "false");
+});
+
+test("App reads a selected inbox conversation and keeps workbench navigation state", async (ctx) => {
+  await renderAppFixture(ctx, 1440);
+  await selectRecentTask(/First task/);
+  fireEvent.click(screen.getByRole("button", { name: "Open side panel" }));
+  fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
+  const user = userEvent.setup({ document: dom.window.document });
+  const workbench = screen.getByRole("button", { name: "Workbench" });
+  const messages = screen.getByRole("button", { name: "Messages" });
+  assert.equal(messages.getAttribute("aria-description"), "Unread messages: 3");
+
+  await user.click(messages);
+  assert.equal(workbench.getAttribute("aria-current"), null);
+  assert.equal(messages.getAttribute("aria-current"), "page");
+  screen.getByRole("heading", { name: "Messages", level: 2 });
+  assert.equal(document.querySelector(".commandbar-task"), null);
+  assert.equal(messages.getAttribute("aria-description"), "Unread messages: 3");
+  assert.equal(
+    screen.queryByRole("navigation", { name: "Workbench tools" }),
+    null,
+  );
+  assertTaskPanelShellHidden();
+  assert.equal(screen.queryByRole("button", { name: /side panel/i }), null);
+  screen.getByRole("heading", { name: "Select a conversation" });
+
+  const lin = screen.getByRole("button", { name: "Tao Lin" });
+  const xu = screen.getByRole("button", { name: "Yu Xu" });
+  assert.equal(lin.getAttribute("aria-description"), "Unread messages: 2");
+  assert.equal(xu.getAttribute("aria-description"), "Unread messages: 1");
+  await user.click(lin);
+  assert.equal(lin.getAttribute("aria-description"), null);
+  assert.equal(xu.getAttribute("aria-description"), "Unread messages: 1");
+  assert.equal(messages.getAttribute("aria-description"), "Unread messages: 1");
+  screen.getByRole("heading", { name: "Tao Lin" });
+  screen.getByText("I added the review notes to this task.");
+  screen.getByText("Sample data");
+
+  await user.click(workbench);
+  assert.equal(workbench.getAttribute("aria-current"), "page");
+  assert.match(
+    document.querySelector(".commandbar-task").textContent,
+    /First task/,
+  );
+  const listToggle = screen.getByRole("button", {
+    name: "Toggle task sidebar",
+  });
+  assert.equal(listToggle.getAttribute("aria-expanded"), "false");
+  assert.equal(
+    screen
+      .getByRole("button", { name: "Hide side panel" })
+      .getAttribute("aria-expanded"),
+    "true",
+  );
+
+  await user.click(messages);
+  screen.getByRole("heading", { name: "Tao Lin" });
+  await user.click(screen.getByRole("button", { name: "Yu Xu" }));
+  assert.equal(messages.getAttribute("aria-description"), null);
+  assert.equal(messages.querySelector(".inbox-unread-badge"), null);
+});
+
+test("App shows conversations in the narrow navigation drawer and closes it on selection", async (ctx) => {
+  await renderAppFixture(ctx, 390);
+  const toggle = screen.getByRole("button", {
+    name: "Toggle navigation drawer",
+  });
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole("button", { name: "Messages" }));
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  const xu = screen.getByRole("button", { name: "Yu Xu" });
+  fireEvent.click(xu);
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  screen.getByRole("heading", { name: "Yu Xu" });
+  assert.equal(document.activeElement, toggle);
+  fireEvent.click(toggle);
+  assert.equal(xu.getAttribute("aria-current"), "true");
+  assert.equal(xu.getAttribute("aria-description"), null);
+  assert.equal(
+    screen
+      .getByRole("button", { name: "Messages" })
+      .getAttribute("aria-description"),
+    "Unread messages: 2",
+  );
 });
 
 test("App attention only locates the original approval in docked and overlay layouts", async (ctx) => {

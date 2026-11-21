@@ -96,6 +96,12 @@ import { useUiResponseStates } from "../features/approvals/useUiResponseStates.t
 import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
 import { SkillsPage } from "../features/skills/SkillsPage.tsx";
 import { McpPage } from "../features/mcp/McpPage.tsx";
+import {
+  InboxConversationList,
+  InboxConversationView,
+  MessageNavigationItem,
+  useMessageInbox,
+} from "../features/inbox/MessageInbox.tsx";
 import { McpInstallationCard } from "../features/mcp/McpInstallationCard.tsx";
 import { WorkspaceDirectoryFact } from "../features/workspaces/WorkspaceDirectoryFact.tsx";
 import { ScheduledTasksPage } from "../features/scheduled-tasks/ScheduledTasksPage.tsx";
@@ -368,6 +374,8 @@ export default function App() {
     Record<string, string>
   >({});
   const [route, setRoute] = useState<ShellRoute>("workbench");
+  const inboxOpen = route === "inbox";
+  const inbox = useMessageInbox();
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -5393,9 +5401,9 @@ export default function App() {
             <Tooltip.Root>
               <Tooltip.Trigger
                 type="button"
-                className="primary-navigation-item"
+                className="primary-navigation-item focus-ring"
                 aria-label={t("app.workbench")}
-                aria-current="page"
+                aria-current={inboxOpen ? undefined : "page"}
                 onClick={() => {
                   openWorkbenchPage("workbench");
                   dismissDrawer();
@@ -5409,6 +5417,11 @@ export default function App() {
                 </Tooltip.Positioner>
               </Tooltip.Portal>
             </Tooltip.Root>
+            <MessageNavigationItem
+              active={inboxOpen}
+              unread={inbox.unread}
+              onOpen={() => openWorkbenchPage("inbox")}
+            />
           </nav>
           <AccountIdentity
             account={snapshot.account}
@@ -5441,165 +5454,177 @@ export default function App() {
           />
         </div>
       )}
-      left={(dismissDrawer) => (
-        <div className="sidebar-primary">
-          <button
-            type="button"
-            className="sidebar-action sidebar-new-task focus-ring"
-            data-active={route === "workbench" && newTaskDraftActive}
-            disabled={bridgeUnavailable}
-            onClick={() => {
+      leftPanelKind={inboxOpen ? "conversations" : "tasks"}
+      left={(dismissDrawer) =>
+        inboxOpen ? (
+          <InboxConversationList
+            entries={inbox.entries}
+            selectedId={inbox.selected?.id}
+            onSelect={(id) => {
+              inbox.openConversation(id);
               dismissDrawer();
-              beginNewTask();
             }}
-          >
-            <Icon name="new-task" />
-            <span>{t("task.new")}</span>
-          </button>
-          <nav
-            className="workbench-tools"
-            aria-label={t("app.workbench_tools")}
-          >
-            {(
-              [
-                ["skills", "skills.title", "skills"],
-                ["mcp", "mcp.title", "mcp"],
-                ["scheduled-tasks", "scheduled.title", "scheduled-tasks"],
-              ] as const
-            ).map(([destination, label, icon]) => {
-              if (
-                destination === "scheduled-tasks" &&
-                snapshot.capabilities.scheduledTaskPersistenceHealth ===
-                  "unavailable"
-              )
-                return null;
-              return (
-                <button
-                  key={destination}
-                  type="button"
-                  className="sidebar-action focus-ring"
-                  aria-current={route === destination ? "page" : undefined}
-                  onClick={() => {
-                    openWorkbenchPage(destination);
-                    dismissDrawer();
-                  }}
-                >
-                  <Icon name={icon} />
-                  <span>{t(label)}</span>
-                </button>
-              );
-            })}
-          </nav>
-          <div className="sidebar-navigation">
-            {snapshot.capabilities.taskHistoryPersistenceHealth !== "ready" &&
-              snapshot.capabilities.taskHistoryPersistenceHealth !==
-                "degraded" &&
-              snapshot.capabilities.taskHistoryPersistenceHealth !==
-                "unavailable" && (
-                <ConfirmationNotice
-                  className="task-persistence-error"
-                  message={t(
-                    `task.persistence.${snapshot.capabilities.taskHistoryPersistenceHealth}`,
-                  )}
-                  detail={t("persistence.recovery.original_retained")}
-                  actionLabel={t("persistence.recovery.action")}
-                  dialogTitle={t("persistence.recovery.task.title")}
-                  dialogDescription={t("persistence.recovery.task.body")}
-                  cancelLabel={t("persistence.recovery.cancel")}
-                  confirmLabel={t("persistence.recovery.confirm")}
-                  pendingLabel={t("persistence.recovery.running")}
-                  failureMessage={t("persistence.recovery.failed")}
-                  actionAvailable={
-                    snapshot.capabilities.taskHistoryRecoveryAvailable
-                  }
-                  disabled={bridgeUnavailable}
-                  onConfirm={async () => {
-                    const result = await client.recoverTaskHistory(
-                      snapshot.revision,
-                    );
-                    return result.outcome === "recovered"
-                      ? null
-                      : t(persistenceRecoveryErrorMessageId(result.outcome));
-                  }}
-                />
-              )}
-            <TaskList
-              key={bridgeGeneration}
-              tasks={navigableTaskItems}
-              workspaces={snapshot.workspaces}
-              activeTaskId={
-                route === "workbench" ? workbench.activeTaskId : null
-              }
-              suppressedCompletionTaskId={suppressedCompletionTaskId}
-              onSelectTask={(id) => {
-                openTask(id);
+          />
+        ) : (
+          <div className="sidebar-primary">
+            <button
+              type="button"
+              className="sidebar-action sidebar-new-task focus-ring"
+              data-active={route === "workbench" && newTaskDraftActive}
+              disabled={bridgeUnavailable}
+              onClick={() => {
                 dismissDrawer();
+                beginNewTask();
               }}
-              onTaskAction={handleTaskAction}
-              onSetProject={changeTaskProject}
-              renderProjectFeedback={renderProjectFeedback}
-              onAddProject={() => void addProject()}
-              addProjectNotice={
-                addProjectFeedback?.tone === "attention" ? (
-                  <div className="task-list-empty">
-                    <p role="status">
-                      {t(addProjectFeedback.id, addProjectFeedback.values)}
-                    </p>
-                    {addProjectFeedback.id ===
-                      "workspace.directory_capacity" && (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => openSettings("directories")}
-                      >
-                        {t("settings.working_directories")}
-                      </Button>
+            >
+              <Icon name="new-task" />
+              <span>{t("task.new")}</span>
+            </button>
+            <nav
+              className="workbench-tools"
+              aria-label={t("app.workbench_tools")}
+            >
+              {(
+                [
+                  ["skills", "skills.title", "skills"],
+                  ["mcp", "mcp.title", "mcp"],
+                  ["scheduled-tasks", "scheduled.title", "scheduled-tasks"],
+                ] as const
+              ).map(([destination, label, icon]) => {
+                if (
+                  destination === "scheduled-tasks" &&
+                  snapshot.capabilities.scheduledTaskPersistenceHealth ===
+                    "unavailable"
+                )
+                  return null;
+                return (
+                  <button
+                    key={destination}
+                    type="button"
+                    className="sidebar-action focus-ring"
+                    aria-current={route === destination ? "page" : undefined}
+                    onClick={() => {
+                      openWorkbenchPage(destination);
+                      dismissDrawer();
+                    }}
+                  >
+                    <Icon name={icon} />
+                    <span>{t(label)}</span>
+                  </button>
+                );
+              })}
+            </nav>
+            <div className="sidebar-navigation">
+              {snapshot.capabilities.taskHistoryPersistenceHealth !== "ready" &&
+                snapshot.capabilities.taskHistoryPersistenceHealth !==
+                  "degraded" &&
+                snapshot.capabilities.taskHistoryPersistenceHealth !==
+                  "unavailable" && (
+                  <ConfirmationNotice
+                    className="task-persistence-error"
+                    message={t(
+                      `task.persistence.${snapshot.capabilities.taskHistoryPersistenceHealth}`,
                     )}
-                  </div>
-                ) : undefined
-              }
-              renderWorkspaceHeading={(workspace, heading) => (
-                <WorkspaceRemovalMenu
-                  workspace={workspace}
-                  openDisabled={workbenchMutationDisabled}
-                  onNewTask={() => {
-                    dismissDrawer();
-                    openNewTaskDraft(workspace.id);
-                  }}
-                  onOpen={() =>
-                    client.openWorkspace(workspace.id, workspace.epoch)
-                  }
-                  onRemove={async () => {
-                    try {
-                      const result = await client.removeProject(
-                        workspace.id,
-                        workspace.epoch,
-                      );
-                      return result.accepted;
-                    } finally {
-                      await refreshSnapshot();
+                    detail={t("persistence.recovery.original_retained")}
+                    actionLabel={t("persistence.recovery.action")}
+                    dialogTitle={t("persistence.recovery.task.title")}
+                    dialogDescription={t("persistence.recovery.task.body")}
+                    cancelLabel={t("persistence.recovery.cancel")}
+                    confirmLabel={t("persistence.recovery.confirm")}
+                    pendingLabel={t("persistence.recovery.running")}
+                    failureMessage={t("persistence.recovery.failed")}
+                    actionAvailable={
+                      snapshot.capabilities.taskHistoryRecoveryAvailable
                     }
-                  }}
-                >
-                  {heading}
-                </WorkspaceRemovalMenu>
-              )}
-              taskMutationDisabled={workbenchMutationDisabled}
-              synchronized={!bridgeUnavailable}
-              retainedTaskCount={Number(
-                snapshot.capabilities.retainedTaskHistoryCount,
-              )}
-            />
+                    disabled={bridgeUnavailable}
+                    onConfirm={async () => {
+                      const result = await client.recoverTaskHistory(
+                        snapshot.revision,
+                      );
+                      return result.outcome === "recovered"
+                        ? null
+                        : t(persistenceRecoveryErrorMessageId(result.outcome));
+                    }}
+                  />
+                )}
+              <TaskList
+                key={bridgeGeneration}
+                tasks={navigableTaskItems}
+                workspaces={snapshot.workspaces}
+                activeTaskId={
+                  route === "workbench" ? workbench.activeTaskId : null
+                }
+                suppressedCompletionTaskId={suppressedCompletionTaskId}
+                onSelectTask={(id) => {
+                  openTask(id);
+                  dismissDrawer();
+                }}
+                onTaskAction={handleTaskAction}
+                onSetProject={changeTaskProject}
+                renderProjectFeedback={renderProjectFeedback}
+                onAddProject={() => void addProject()}
+                addProjectNotice={
+                  addProjectFeedback?.tone === "attention" ? (
+                    <div className="task-list-empty">
+                      <p role="status">
+                        {t(addProjectFeedback.id, addProjectFeedback.values)}
+                      </p>
+                      {addProjectFeedback.id ===
+                        "workspace.directory_capacity" && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => openSettings("directories")}
+                        >
+                          {t("settings.working_directories")}
+                        </Button>
+                      )}
+                    </div>
+                  ) : undefined
+                }
+                renderWorkspaceHeading={(workspace, heading) => (
+                  <WorkspaceRemovalMenu
+                    workspace={workspace}
+                    openDisabled={workbenchMutationDisabled}
+                    onNewTask={() => {
+                      dismissDrawer();
+                      openNewTaskDraft(workspace.id);
+                    }}
+                    onOpen={() =>
+                      client.openWorkspace(workspace.id, workspace.epoch)
+                    }
+                    onRemove={async () => {
+                      try {
+                        const result = await client.removeProject(
+                          workspace.id,
+                          workspace.epoch,
+                        );
+                        return result.accepted;
+                      } finally {
+                        await refreshSnapshot();
+                      }
+                    }}
+                  >
+                    {heading}
+                  </WorkspaceRemovalMenu>
+                )}
+                taskMutationDisabled={workbenchMutationDisabled}
+                synchronized={!bridgeUnavailable}
+                retainedTaskCount={Number(
+                  snapshot.capabilities.retainedTaskHistoryCount,
+                )}
+              />
+            </div>
           </div>
-        </div>
-      )}
-      rightPanelOpen={rightPanelOpen && !settingsOpen}
+        )
+      }
+      rightPanelOpen={rightPanelOpen && !settingsOpen && !inboxOpen}
       rightPanelToggleRef={taskPanelToggle}
       onTaskStageExposureChange={setTaskStageExposed}
       onToggleRightPanel={toggleRightPanel}
       onDismissRightPanel={dismissTaskPanel}
       rightPanel={
-        !settingsOpen && rightPanelOpen ? (
+        !settingsOpen && !inboxOpen && rightPanelOpen ? (
           <TaskPanel
             title={panelTitle}
             fileTreeOpen={fileTreeOpen}
@@ -5967,7 +5992,9 @@ export default function App() {
         ) : null
       }
     >
-      {route === "skills" ? (
+      {inboxOpen ? (
+        <InboxConversationView conversation={inbox.selected} />
+      ) : route === "skills" ? (
         snapshot.skillManagement ? (
           <SkillsPage
             management={snapshot.skillManagement}
