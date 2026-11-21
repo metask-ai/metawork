@@ -113,7 +113,39 @@ pub const ExpectedServer = struct {
 
 pub const Error = error{InvalidConfig};
 
-const Member = struct {
+/// One member as another process needs it to stand in for the member:
+/// every fact of its `ServerInput` except the transport and the secrets,
+/// which stay with the member where they were configured.
+pub const ServerDescriptor = struct {
+    id: []const u8,
+    transport: TransportKind,
+    negotiation: NegotiationPolicy,
+    namespace: []const u8,
+    client_name: []const u8,
+    client_version: []const u8,
+    timeout_ms: u32,
+    configuration_fingerprint: [32]u8,
+    allowed_tools: []const []const u8,
+
+    /// The input for a member that reaches this server through `owner`.
+    /// Carries no secrets: the scan for them belongs where they are.
+    pub fn input(self: ServerDescriptor, owner: *connector.TransportOwner) ServerInput {
+        return .{
+            .id = self.id,
+            .transport_owner = owner,
+            .transport = self.transport,
+            .negotiation = self.negotiation,
+            .namespace = self.namespace,
+            .client_name = self.client_name,
+            .client_version = self.client_version,
+            .timeout_ms = self.timeout_ms,
+            .configuration_fingerprint = self.configuration_fingerprint,
+            .allowed_tools = self.allowed_tools,
+        };
+    }
+};
+
+pub const Member = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     references: std.atomic.Value(usize) = .init(1),
@@ -180,12 +212,47 @@ const Member = struct {
         return member;
     }
 
-    fn retain(self: *Member) void {
+    /// The facts another process needs to stand in for this member.
+    /// Borrows from the member.
+    pub fn describe(self: *const Member) ServerDescriptor {
+        return .{
+            .id = self.expected.id,
+            .transport = switch (self.descriptor.transport_code) {
+                wire.MCP_TRANSPORT_STDIO => .stdio,
+                else => .streamable_http,
+            },
+            .negotiation = switch (self.descriptor.negotiation_policy_code) {
+                wire.MCP_NEGOTIATION_MODERN_ONLY => .modern_only,
+                wire.MCP_NEGOTIATION_LEGACY_ONLY => .compat_only,
+                else => .automatic,
+            },
+            .namespace = self.expected.namespace,
+            // Written by `prepare` from slices, so they always borrow.
+            .client_name = sdk.borrowedBytes(self.descriptor.client_name) catch unreachable,
+            .client_version = sdk.borrowedBytes(self.descriptor.client_version) catch unreachable,
+            .timeout_ms = self.descriptor.timeout_ms,
+            .configuration_fingerprint = self.expected.configuration_fingerprint,
+            .allowed_tools = self.expected.allowed_tools,
+        };
+    }
+
+    /// The concrete transport, for a caller that performs this member's
+    /// exchanges on behalf of another process. Valid while the member is.
+    pub fn transport(self: *const Member) connector.Transport {
+        return self.transport_owner.?.transport;
+    }
+
+    /// The same fail-closed scan the member's own connector applies.
+    pub fn containsSecret(self: *const Member, bytes: []const u8) bool {
+        return self.adapter.containsSecret(bytes);
+    }
+
+    pub fn retain(self: *Member) void {
         const previous = self.references.fetchAdd(1, .monotonic);
         std.debug.assert(previous != 0 and previous != std.math.maxInt(usize));
     }
 
-    fn release(self: *Member) void {
+    pub fn release(self: *Member) void {
         const previous = self.references.fetchSub(1, .acq_rel);
         std.debug.assert(previous != 0);
         if (previous != 1) return;
@@ -285,6 +352,10 @@ pub const Servers = struct {
         return self.expected;
     }
 
+    pub fn memberList(self: *const Servers) []const *Member {
+        return self.members[0..self.initialized_members];
+    }
+
     pub fn isQuiescent(self: *const Servers) bool {
         for (self.members[0..self.initialized_members]) |member| {
             if (member.references.load(.acquire) == 1 and !member.adapter.isQuiescent()) return false;
@@ -333,6 +404,12 @@ pub const Input = struct {
     pub fn deinit(self: *Input) void {
         if (self.servers) |*servers| servers.deinit();
         self.* = undefined;
+    }
+
+    /// The members this input would apply, in order; none once taken.
+    pub fn members(self: *const Input) []const *Member {
+        const servers = self.servers orelse return &.{};
+        return servers.memberList();
     }
 };
 
@@ -444,6 +521,43 @@ test "Runtime input derives authority and consumes transport ownership linearly"
     try std.testing.expectError(error.InvalidConfig, input.take());
     servers.deinit();
     try std.testing.expect(transport.deinitialized);
+}
+
+test "a member described elsewhere publishes the same descriptor, without its secrets" {
+    var transport: FakeTransport = .{};
+    var owner = connector.TransportOwner.init(transport.descriptor(), FakeTransport.deinit);
+    var original = try Input.init(std.testing.allocator, 3, &.{.{
+        .id = "local-files",
+        .transport_owner = &owner,
+        .secrets = &.{"hunter2"},
+        .transport = .streamable_http,
+        .negotiation = .compat_only,
+        .namespace = "files",
+        .client_name = "MetaWork",
+        .client_version = "9",
+        .timeout_ms = 1234,
+        .configuration_fingerprint = @splat(5),
+        .allowed_tools = &.{ "read_file", "write_file" },
+    }});
+    defer original.deinit();
+    const member = original.members()[0];
+    try std.testing.expect(member.containsSecret("a hunter2 b"));
+    try std.testing.expect(!member.containsSecret("nothing"));
+
+    var stand_in_transport: FakeTransport = .{};
+    var stand_in_owner = connector.TransportOwner.init(stand_in_transport.descriptor(), FakeTransport.deinit);
+    var stand_in = try Input.init(std.testing.allocator, 3, &.{member.describe().input(&stand_in_owner)});
+    defer stand_in.deinit();
+    const left = original.servers.?.descriptors[0];
+    const right = stand_in.servers.?.descriptors[0];
+    try std.testing.expectEqual(left.transport_code, right.transport_code);
+    try std.testing.expectEqual(left.negotiation_policy_code, right.negotiation_policy_code);
+    try std.testing.expectEqual(left.timeout_ms, right.timeout_ms);
+    try std.testing.expectEqualDeep(left.server_binding_identity, right.server_binding_identity);
+    try std.testing.expectEqualDeep(left.configuration_fingerprint, right.configuration_fingerprint);
+    try std.testing.expectEqualStrings(try sdk.borrowedBytes(left.client_version), try sdk.borrowedBytes(right.client_version));
+    try std.testing.expectEqualDeep(original.servers.?.expected[0], stand_in.servers.?.expected[0]);
+    try std.testing.expect(!stand_in.members()[0].containsSecret("a hunter2 b"));
 }
 
 test "shared MCP members release old configuration lists without retiring a live connector" {

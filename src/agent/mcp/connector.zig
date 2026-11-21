@@ -226,7 +226,7 @@ pub const Adapter = struct {
             @panic("AgentCore released an unretained MCP connector");
     }
 
-    fn containsSecret(self: *const Adapter, bytes: []const u8) bool {
+    pub fn containsSecret(self: *const Adapter, bytes: []const u8) bool {
         for (self.secrets) |secret| {
             if (std.mem.indexOf(u8, bytes, secret) != null) return true;
         }
