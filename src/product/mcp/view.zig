@@ -531,6 +531,47 @@ fn writeMcpAuthorizationOperation(
     writer.writeAll("{\"kind\":\"idle\"}") catch return error.SnapshotTooLarge;
 }
 
+/// The server's latest failed authorization, or `null`. Remote OAuth text
+/// that contains a known credential is withheld whole.
+pub fn writeAuthorizationFailure(
+    writer: *std.Io.Writer,
+    text: TextProjection,
+    mcp: *const mcp_state.McpProductState,
+    server_id: []const u8,
+) Error!void {
+    const record = for (mcp.authorization_failures.items) |*value| {
+        if (std.mem.eql(u8, value.server_id, server_id)) break value;
+    } else {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    };
+    writer.print("{{\"step\":\"{s}\",\"reason\":\"{s}\",\"httpStatus\":", .{
+        @tagName(record.step),
+        @tagName(record.reason),
+    }) catch return error.SnapshotTooLarge;
+    if (record.http_status) |status|
+        writer.print("{d}", .{status}) catch return error.SnapshotTooLarge
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"error\":") catch return error.SnapshotTooLarge;
+    try writeRemoteText(writer, text, record.error_code);
+    writer.writeAll(",\"errorDescription\":") catch return error.SnapshotTooLarge;
+    try writeRemoteText(writer, text, record.description);
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+fn writeRemoteText(writer: *std.Io.Writer, text: TextProjection, value: ?[]const u8) Error!void {
+    const bytes = value orelse {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    };
+    if (text.containsSensitive(bytes)) {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    }
+    try text.writeJson(writer, bytes);
+}
+
 fn writeMcpTool(
     writer: *std.Io.Writer,
     text: TextProjection,
@@ -682,6 +723,11 @@ pub fn writeProjection(
         else
             writer.writeAll(",\"connectionTest\":{\"status\":\"untested\",\"toolCount\":0,\"issueCount\":0}") catch
                 return error.SnapshotTooLarge;
+        writer.writeAll(",\"authorizationFailure\":") catch return error.SnapshotTooLarge;
+        if (connection_safe)
+            try writeAuthorizationFailure(writer, input.text, mcp, server.id)
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"tools\":[") catch return error.SnapshotTooLarge;
         var tool_count: usize = 0;
         const activation_index = activationServerIndex(mcp, server);

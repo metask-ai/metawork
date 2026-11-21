@@ -56,6 +56,7 @@ test("MCP installation operations are strict safe facts with terminal history", 
     displayName: "Installed MCP",
     phase: "ready",
     failure: null,
+    authorizationFailure: null,
     sourceOrigin: "https://source.example",
     targetOrigin: "https://target.example",
     canCancel: false,
@@ -73,6 +74,83 @@ test("MCP installation operations are strict safe facts with terminal history", 
     { revision: "0" },
     { phase: "proposal_submitted" },
     { failure: "timeout" },
+  ]) {
+    assert.throws(
+      () =>
+        decodeMcpInstallation({
+          operations: [{ ...operation, ...patch }],
+          notice: null,
+        }),
+      /Invalid Host contract/,
+    );
+  }
+});
+
+test("MCP authorization failure detail is bounded display text tied to its failure", () => {
+  const authorizationFailure = {
+    step: "verification",
+    reason: "access_denied",
+    httpStatus: 403,
+    error: "insufficient_scope",
+    errorDescription: "Token is missing library:write",
+  };
+  const operation = {
+    serverId: "mcp-01234567890123456789",
+    taskId: "3",
+    runId: "7",
+    revision: "2",
+    desiredGeneration: "9",
+    displayName: "Suno",
+    phase: "failed",
+    failure: "authorization_failed",
+    authorizationFailure,
+    sourceOrigin: "https://help.suno.com",
+    targetOrigin: "https://api.suno.com",
+    canCancel: false,
+    missingCredentials: [],
+  };
+  assert.deepEqual(
+    decodeMcpInstallation({ operations: [operation], notice: null })
+      .operations[0],
+    operation,
+  );
+  const withoutRemoteText = {
+    ...authorizationFailure,
+    httpStatus: null,
+    error: null,
+    errorDescription: null,
+  };
+  assert.deepEqual(
+    decodeMcpInstallation({
+      operations: [{ ...operation, authorizationFailure: withoutRemoteText }],
+      notice: null,
+    }).operations[0].authorizationFailure,
+    withoutRemoteText,
+  );
+  for (const patch of [
+    // Detail belongs to an authorization failure only.
+    { failure: "timeout" },
+    { phase: "connecting", failure: null },
+    { authorizationFailure: { ...authorizationFailure, step: "consent" } },
+    { authorizationFailure: { ...authorizationFailure, httpStatus: 42 } },
+    { authorizationFailure: { ...authorizationFailure, error: "" } },
+    {
+      authorizationFailure: { ...authorizationFailure, error: "e".repeat(65) },
+    },
+    {
+      authorizationFailure: {
+        ...authorizationFailure,
+        errorDescription: "line\nbreak",
+      },
+    },
+    {
+      // 129 two-byte characters exceed the 256-byte bound.
+      authorizationFailure: {
+        ...authorizationFailure,
+        errorDescription: "é".repeat(129),
+      },
+    },
+    { authorizationFailure: { ...authorizationFailure, extra: true } },
   ]) {
     assert.throws(
       () =>
@@ -1823,6 +1901,7 @@ test("MCP management is capability-gated and identity checked", () => {
         newTaskAccess: "available",
         safeDiagnostic: "",
         connectionTest: { status: "untested", toolCount: 0, issueCount: 0 },
+        authorizationFailure: null,
         tools: [
           {
             name: "search_repositories",
@@ -1859,6 +1938,7 @@ test("MCP management is capability-gated and identity checked", () => {
         newTaskAccess: "unavailable",
         safeDiagnostic: "Sign in again.",
         connectionTest: { status: "untested", toolCount: 0, issueCount: 0 },
+        authorizationFailure: null,
         tools: [],
       },
     ],

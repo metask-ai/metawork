@@ -2025,6 +2025,34 @@ export const enUS = {
   "mcp.authorization_phase.exchanging": "Completing sign-in…",
   "mcp.authorization_phase.refreshing": "Refreshing authorization…",
   "mcp.authorization_phase.cancelling": "Cancelling local wait…",
+  "mcp.authorization_failure.summary": "{step} failed: {reason}.",
+  "mcp.authorization_failure.http_status": "(HTTP {status})",
+  "mcp.authorization_failure.remote": "Server response:",
+  "mcp.authorization_failure.step.discovery": "Finding the sign-in service",
+  "mcp.authorization_failure.step.registration": "Registering MetaWork",
+  "mcp.authorization_failure.step.authorization": "Browser sign-in",
+  "mcp.authorization_failure.step.token_exchange": "Getting the access token",
+  "mcp.authorization_failure.step.verification": "Checking the access token",
+  "mcp.authorization_failure.reason.network": "the server could not be reached",
+  "mcp.authorization_failure.reason.timed_out": "it took too long",
+  "mcp.authorization_failure.reason.http_status":
+    "the server returned an unexpected status",
+  "mcp.authorization_failure.reason.oauth_error":
+    "the server returned an error",
+  "mcp.authorization_failure.reason.invalid_response":
+    "the server's response could not be used",
+  "mcp.authorization_failure.reason.resource_mismatch":
+    "the server's OAuth metadata describes a different address",
+  "mcp.authorization_failure.reason.unsupported_server":
+    "the sign-in service lacks a capability MetaWork requires",
+  "mcp.authorization_failure.reason.browser_unavailable":
+    "the browser could not be opened",
+  "mcp.authorization_failure.reason.invalid_callback":
+    "the browser returned an invalid response",
+  "mcp.authorization_failure.reason.access_denied":
+    "the server refused the new access token",
+  "mcp.authorization_failure.reason.internal":
+    "MetaWork could not continue this step",
   "mcp.authorization.action": "Sign in",
   "mcp.authorization.again": "Sign in again",
   "mcp.authorization.cancel": "Cancel",

@@ -138,6 +138,7 @@ fn exchange(
         redirect,
         resource,
         now_ms,
+        null,
     );
 }
 
@@ -300,7 +301,9 @@ const token_cases = [_]TokenCase{
     .{ .body = "not json", .expected = unknown },
     .{ .body = "[]", .expected = unknown },
     .{ .body = token(base) ++ " x", .expected = unknown },
-    .{ .content_type = "text/plain", .body = token(base), .expected = unknown },
+    // A body that parses is accepted whatever its Content-Type says.
+    .{ .content_type = "text/plain", .body = token(base), .expected = ok("a", null, null) },
+    .{ .content_type = null, .body = token(base), .expected = ok("a", null, null) },
     // OAuth error responses.
     .{ .status = 400, .body = "{\"error\":\"invalid_grant\"}", .expected = invalid_grant },
     .{ .status = 400, .body = "{\"error\":\"invalid_grant\",\"error_description\":\"x\",\"extra\":{\"k\":[1]}}", .expected = invalid_grant },
@@ -362,7 +365,8 @@ const registration_cases = [_]RegistrationCase{
     .{ .body = padded("{\"error\":\"invalid_redirect_uri\",\"pad\":\"", 32 * 1024 + 1), .expected = error.RegistrationOutcomeUnknown },
     .{ .body = "{\"error\":\"invalid_request\"}", .expected = error.RegistrationOutcomeUnknown },
     .{ .body = "{\"error\":\"invalid_redirect_uri\",\"error\":\"invalid_redirect_uri\"}", .expected = error.RegistrationOutcomeUnknown },
-    .{ .content_type = "text/plain", .body = "{\"error\":\"invalid_redirect_uri\"}", .expected = error.RegistrationOutcomeUnknown },
+    // The error body decides, whatever its Content-Type says.
+    .{ .content_type = "text/plain", .body = "{\"error\":\"invalid_redirect_uri\"}", .expected = error.RegistrationRejected },
 };
 
 test "MCP dynamic registration error classification" {
@@ -380,6 +384,7 @@ test "MCP dynamic registration error classification" {
             recorder.transport(),
             &server,
             redirect,
+            null,
         ));
     }
 }

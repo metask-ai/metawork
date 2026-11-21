@@ -54,6 +54,7 @@ pub const McpOauthExpiry = state_module.McpOauthExpiry;
 pub const McpRuntimeAuthorizationFailure = state_module.McpRuntimeAuthorizationFailure;
 pub const McpRuntimeAuthorizationFailureOutcome = state_module.McpRuntimeAuthorizationFailureOutcome;
 pub const McpAuthorizationPhase = state_module.McpAuthorizationPhase;
+pub const McpAuthorizationFailure = state_module.McpAuthorizationFailure;
 pub const McpConnectionTestOutcome = state_module.McpConnectionTestOutcome;
 pub const McpConfigurationApplyState = state_module.McpConfigurationApplyState;
 pub const McpAuthorizationOperationView = state_module.McpAuthorizationOperationView;
@@ -1090,6 +1091,13 @@ pub const Runtime = struct {
             try text.write_json_fn(text.context, writer, server.display_name);
             writer.print(",\"phase\":\"{s}\",\"failure\":", .{phase}) catch return error.SnapshotTooLarge;
             if (operation.failure) |failure| writer.print("\"{s}\"", .{@tagName(failure)}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+            // Only an installation that failed on authorization explains how.
+            writer.writeAll(",\"authorizationFailure\":") catch return error.SnapshotTooLarge;
+            if (operation.phase == .failed and
+                (operation.failure orelse .invalid_request) == .authorization_failed)
+                try view.writeAuthorizationFailure(writer, text, &self.state, server.id)
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
             writer.writeAll(",\"sourceOrigin\":") catch return error.SnapshotTooLarge;
             try text.write_json_fn(text.context, writer, operation.source_origin);
             writer.writeAll(",\"targetOrigin\":") catch return error.SnapshotTooLarge;
@@ -1924,6 +1932,7 @@ pub const Runtime = struct {
         const operation_server_id = try self.allocator.dupe(u8, server.id);
         errdefer self.allocator.free(operation_server_id);
         const operation_identity = try self.allocator.dupe(u8, operation_id);
+        self.removeAuthorizationFailure(server.id);
         self.state.authorization_operation = .{
             .phase = .discovering,
             .server_id = operation_server_id,
@@ -1962,14 +1971,55 @@ pub const Runtime = struct {
         return true;
     }
 
-    pub fn finishAuthorization(self: *Runtime, operation_id: []const u8) bool {
+    /// Ends the operation. A failure is kept for the server as a
+    /// process-local fact; keeping it is best effort and never blocks the
+    /// finish.
+    pub fn finishAuthorization(
+        self: *Runtime,
+        operation_id: []const u8,
+        failure: ?state_module.McpAuthorizationFailure,
+    ) bool {
         const operation = if (self.state.authorization_operation) |*value| value else return false;
         if (!std.mem.eql(u8, operation.operation_id, operation_id)) return false;
+        if (failure) |value| self.recordAuthorizationFailure(operation.server_id, value);
         operation.deinit(self.allocator);
         self.state.authorization_operation = null;
         self.releaseBoundary();
         self.markChanged();
         return true;
+    }
+
+    fn recordAuthorizationFailure(
+        self: *Runtime,
+        server_id: []const u8,
+        failure: state_module.McpAuthorizationFailure,
+    ) void {
+        self.removeAuthorizationFailure(server_id);
+        // Drop records of servers that no longer exist; at most one record
+        // per current server remains.
+        const registry = if (self.state.management) |*management| management.desiredRegistry() else null;
+        var index: usize = 0;
+        while (index < self.state.authorization_failures.items.len) {
+            const record = &self.state.authorization_failures.items[index];
+            const current = if (registry) |value| state_module.findMcpServer(value.servers, record.server_id) != null else false;
+            if (current) {
+                index += 1;
+                continue;
+            }
+            record.deinit(self.allocator);
+            _ = self.state.authorization_failures.swapRemove(index);
+        }
+        var record = state_module.McpAuthorizationFailureRecord.init(self.allocator, server_id, failure) catch return;
+        self.state.authorization_failures.append(self.allocator, record) catch record.deinit(self.allocator);
+    }
+
+    fn removeAuthorizationFailure(self: *Runtime, server_id: []const u8) void {
+        for (self.state.authorization_failures.items, 0..) |*record, index| {
+            if (!std.mem.eql(u8, record.server_id, server_id)) continue;
+            record.deinit(self.allocator);
+            _ = self.state.authorization_failures.swapRemove(index);
+            return;
+        }
     }
 
     pub fn authorizeOauth(
@@ -2948,7 +2998,7 @@ fn testGrantedOauthRuntime(effects: *OauthTestEffects, harness: *TestHarness, re
     var access = "access-token".*;
     var refresh = "refresh-token".*;
     try std.testing.expectEqual(.saved, try runtime.completeOauthCodeExchange(.{ .operation_id = exchange.operation.id, .server_id = "oauth", .access_token = &access, .refresh_token = if (refreshable) &refresh else null, .expires_at_unix_ms = expiry }));
-    try std.testing.expect(runtime.finishAuthorization("attempt"));
+    try std.testing.expect(runtime.finishAuthorization("attempt", null));
     return runtime;
 }
 
@@ -2983,6 +3033,82 @@ fn testOauthRecoveryProjection(runtime: *const Runtime, fixture_name: []const u8
             .bool => |wanted| try std.testing.expectEqual(wanted, value.bool),
             else => unreachable,
         }
+    }
+}
+
+fn testAuthorizationFailureProjection(runtime: *const Runtime, bytes: []u8) !std.json.Parsed(std.json.Value) {
+    // Text containing "secret" stands for a known credential.
+    const Text = struct {
+        fn contains(_: *const anyopaque, value: []const u8) bool {
+            return std.mem.indexOf(u8, value, "secret") != null;
+        }
+        fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) view.Error!void {
+            std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
+        }
+    };
+    var writer = std.Io.Writer.fixed(bytes);
+    try writeProjection(runtime, &writer, .{ .context = runtime, .contains_sensitive_fn = Text.contains, .write_json_fn = Text.write });
+    return std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+}
+
+test "Product MCP projects a server's authorization failure until that server is authorized again" {
+    var effects: OauthTestEffects = .{};
+    var harness: TestHarness = .{};
+    var runtime = try effects.coldRuntime(&harness, "consent_required");
+    defer runtime.deinit();
+    var bytes: [32 * 1024]u8 = undefined;
+
+    var first = (try runtime.beginAuthorization(1, "oauth", "first")).?;
+    first.deinit();
+    try std.testing.expect(runtime.finishAuthorization("first", .{
+        .step = .verification,
+        .reason = .access_denied,
+        .http_status = 403,
+        .error_code = "insufficient_scope",
+        .description = "Token is missing library:write",
+    }));
+    {
+        const parsed = try testAuthorizationFailureProjection(&runtime, &bytes);
+        defer parsed.deinit();
+        const failure = parsed.value.object.get("servers").?.array.items[0].object.get("authorizationFailure").?.object;
+        try std.testing.expectEqualStrings("verification", failure.get("step").?.string);
+        try std.testing.expectEqualStrings("access_denied", failure.get("reason").?.string);
+        try std.testing.expectEqual(@as(i64, 403), failure.get("httpStatus").?.integer);
+        try std.testing.expectEqualStrings("insufficient_scope", failure.get("error").?.string);
+        try std.testing.expectEqualStrings("Token is missing library:write", failure.get("errorDescription").?.string);
+    }
+
+    // Starting again clears the old failure; out-of-bound values and text
+    // naming a known credential are withheld whole.
+    var second = (try runtime.beginAuthorization(1, "oauth", "second")).?;
+    second.deinit();
+    try std.testing.expectEqual(@as(usize, 0), runtime.state.authorization_failures.items.len);
+    try std.testing.expect(runtime.finishAuthorization("second", .{
+        .step = .authorization,
+        .reason = .oauth_error,
+        .http_status = 9999,
+        .error_code = "access_denied",
+        .description = "Denied for secret-value",
+    }));
+    {
+        const parsed = try testAuthorizationFailureProjection(&runtime, &bytes);
+        defer parsed.deinit();
+        const failure = parsed.value.object.get("servers").?.array.items[0].object.get("authorizationFailure").?.object;
+        try std.testing.expectEqualStrings("authorization", failure.get("step").?.string);
+        try std.testing.expect(failure.get("httpStatus").? == .null);
+        try std.testing.expectEqualStrings("access_denied", failure.get("error").?.string);
+        try std.testing.expect(failure.get("errorDescription").? == .null);
+    }
+    try std.testing.expect(runtime.finishAuthorization("second", null) == false);
+
+    // A finish without a failure (success or user cancellation) leaves none.
+    var third = (try runtime.beginAuthorization(1, "oauth", "third")).?;
+    third.deinit();
+    try std.testing.expect(runtime.finishAuthorization("third", null));
+    {
+        const parsed = try testAuthorizationFailureProjection(&runtime, &bytes);
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("servers").?.array.items[0].object.get("authorizationFailure").? == .null);
     }
 }
 
@@ -3213,7 +3339,7 @@ test "refresh of a new consent retains the referenced old descriptor and retries
     var access = "consent-2-access".*;
     var refresh = "consent-2-refresh".*;
     try std.testing.expectEqual(.saved, try runtime.completeOauthCodeExchange(.{ .operation_id = exchange.operation.id, .server_id = "oauth", .access_token = &access, .refresh_token = &refresh, .expires_at_unix_ms = 90_000 }));
-    try std.testing.expect(runtime.finishAuthorization("relogin"));
+    try std.testing.expect(runtime.finishAuthorization("relogin", null));
     var replacement = (try runtime.prepareConfigurationStep(6, .automatic)).?;
     defer replacement.deinit();
     try std.testing.expect(runtime.failConfigurationApply(6, .rejected));
@@ -3275,7 +3401,7 @@ test "ready OAuth re-login cancellation preserves grant only before confirmed co
             try std.testing.expect((try runtime.authorizeOauth(.{ .attempt_id = 2, .server_id = "oauth", .resource = "https://mcp.example.test/mcp", .issuer = "https://issuer.example.test", .scopes = &.{"files.read"}, .redirect_uri = "http://127.0.0.1:43123/auth/callback" })) == .ready);
             generation += 1;
         }
-        try std.testing.expect(runtime.finishAuthorization("ready-relogin"));
+        try std.testing.expect(runtime.finishAuthorization("ready-relogin", null));
         const oauth = runtime.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?;
         try std.testing.expectEqualStrings(if (confirmed) "awaiting_tokens" else "ready", oauth.status);
         try std.testing.expectEqual(!confirmed, oauth.grant != null);
@@ -3398,7 +3524,7 @@ test "cold absence supports consent DCR with a secret and reauthorization throug
         var access = "access-token".*;
         var refresh = "refresh-token".*;
         try std.testing.expectEqual(.saved, try runtime.completeOauthCodeExchange(.{ .operation_id = exchange.started.operation.id, .server_id = "oauth", .access_token = &access, .refresh_token = &refresh, .expires_at_unix_ms = 90_000 }));
-        try std.testing.expect(runtime.finishAuthorization("attempt"));
+        try std.testing.expect(runtime.finishAuthorization("attempt", null));
         const current = runtime.state.management.?.desiredRegistry().?;
         try std.testing.expectEqualStrings("ready", current.servers[0].auth.oauth.?.status);
         const deadline = runtime.state.management.?.oauth_schedule.eligibleAt("oauth", 90_000);

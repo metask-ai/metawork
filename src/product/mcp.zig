@@ -47,6 +47,7 @@ pub const McpOauthExpiry = runtime_module.McpOauthExpiry;
 pub const McpRuntimeAuthorizationFailure = runtime_module.McpRuntimeAuthorizationFailure;
 pub const McpRuntimeAuthorizationFailureOutcome = runtime_module.McpRuntimeAuthorizationFailureOutcome;
 pub const McpAuthorizationPhase = runtime_module.McpAuthorizationPhase;
+pub const McpAuthorizationFailure = runtime_module.McpAuthorizationFailure;
 pub const McpConnectionTestOutcome = runtime_module.McpConnectionTestOutcome;
 pub const McpConfigurationApplyState = runtime_module.McpConfigurationApplyState;
 pub const McpAuthorizationOperationView = runtime_module.McpAuthorizationOperationView;

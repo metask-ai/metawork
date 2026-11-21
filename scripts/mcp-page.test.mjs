@@ -77,6 +77,7 @@ const installation = {
   displayName: "Installed MCP",
   phase: "connecting",
   failure: null,
+  authorizationFailure: null,
   sourceOrigin: "https://source.example",
   targetOrigin: null,
   canCancel: true,
@@ -178,6 +179,7 @@ const servers = [
     newTaskAccess: "available",
     safeDiagnostic: "",
     connectionTest: { status: "untested", toolCount: 0, issueCount: 0 },
+    authorizationFailure: null,
     tools: [
       {
         name: "search_repositories",
@@ -220,6 +222,7 @@ const servers = [
     newTaskAccess: "unavailable",
     safeDiagnostic: "Sign in again to refresh this server's tools.",
     connectionTest: { status: "untested", toolCount: 0, issueCount: 0 },
+    authorizationFailure: null,
     tools: [],
   },
   {
@@ -247,6 +250,7 @@ const servers = [
     newTaskAccess: "not_allowed",
     safeDiagnostic: "",
     connectionTest: { status: "untested", toolCount: 0, issueCount: 0 },
+    authorizationFailure: null,
     tools: [
       {
         name: "read_file",
@@ -2700,4 +2704,101 @@ test("MCP sensitive address uses a one-shot password field and never refills a s
   );
   finish({ outcome: "rejected", desiredGeneration: "9" });
   await waitFor(() => assert.equal(replacement.disabled, false));
+});
+
+const suno403 = {
+  step: "verification",
+  reason: "access_denied",
+  httpStatus: 403,
+  error: "insufficient_scope",
+  errorDescription: "Token is missing library:write",
+};
+
+test("MCP installation card names the failed OAuth step and the server's answer", () => {
+  render(
+    installationElement({
+      ...installation,
+      phase: "failed",
+      failure: "authorization_failed",
+      authorizationFailure: suno403,
+      canCancel: false,
+    }),
+  );
+  screen.getByText(
+    "Checking the access token failed: the server refused the new access token. (HTTP 403)",
+  );
+  screen.getByText("insufficient_scope: Token is missing library:write");
+});
+
+test("MCP installation card shows a failure without remote text as the step alone", () => {
+  render(
+    installationElement({
+      ...installation,
+      phase: "failed",
+      failure: "authorization_failed",
+      authorizationFailure: {
+        step: "authorization",
+        reason: "timed_out",
+        httpStatus: null,
+        error: null,
+        errorDescription: null,
+      },
+      canCancel: false,
+    }),
+  );
+  screen.getByText("Browser sign-in failed: it took too long.");
+  assert.equal(screen.queryByText("Server response:"), null);
+});
+
+test("MCP connector detail shows why the last sign-in failed beside Sign in again", () => {
+  render(
+    pageElement({
+      availability: "ready",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "14",
+      runtimeAlignment: "current",
+      redacted: false,
+      servers: [{ ...servers[1], authorizationFailure: suno403 }],
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Notion/ }));
+  const dialog = screen.getByRole("dialog", { name: "Notion" });
+  within(dialog).getByText(
+    "Checking the access token failed: the server refused the new access token. (HTTP 403)",
+  );
+  within(dialog).getByText(
+    "insufficient_scope: Token is missing library:write",
+  );
+  within(dialog).getByRole("button", { name: "Sign in again" });
+});
+
+test("MCP connector detail hides a stale failure while a new sign-in runs", () => {
+  render(
+    pageElement({
+      availability: "ready",
+      managementHealth: "ready",
+      operation: "idle",
+      authorizationOperation: {
+        kind: "awaiting_browser",
+        serverId: servers[1].id,
+        operationId: "oauth-op-8",
+      },
+      desiredGeneration: "14",
+      runtimeAlignment: "current",
+      redacted: false,
+      servers: [
+        {
+          ...servers[1],
+          authorizationStatus: "authorizing",
+          authorizationFailure: suno403,
+        },
+      ],
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Notion/ }));
+  assert.equal(
+    screen.queryByText("insufficient_scope: Token is missing library:write"),
+    null,
+  );
 });

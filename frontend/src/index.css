@@ -10311,3 +10311,21 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .run-terminal-feedback > .run-options {
   flex-shrink: 0;
 }
+
+.mcp-authorization-failure {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.mcp-authorization-failure p {
+  margin: 0;
+  font-size: var(--text-label);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.mcp-authorization-failure code {
+  font-size: inherit;
+  white-space: pre-wrap;
+}

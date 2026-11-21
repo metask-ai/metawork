@@ -1792,6 +1792,36 @@ export const mcpAuthorizationPhaseValues = [
   "refreshing",
   "cancelling",
 ] as const;
+export const mcpAuthorizationFailureSteps = [
+  "discovery",
+  "registration",
+  "authorization",
+  "token_exchange",
+  "verification",
+] as const;
+export const mcpAuthorizationFailureReasons = [
+  "network",
+  "timed_out",
+  "http_status",
+  "oauth_error",
+  "invalid_response",
+  "resource_mismatch",
+  "unsupported_server",
+  "browser_unavailable",
+  "invalid_callback",
+  "access_denied",
+  "internal",
+] as const;
+/** Latest failed OAuth authorization of one server; process-local Host fact. */
+export type McpAuthorizationFailure = {
+  step: (typeof mcpAuthorizationFailureSteps)[number];
+  reason: (typeof mcpAuthorizationFailureReasons)[number];
+  httpStatus: number | null;
+  /** RFC 6749 `error` returned by the remote server. */
+  error: string | null;
+  /** Remote `error_description`, bounded and free of control characters. */
+  errorDescription: string | null;
+};
 export type McpSecretSlot =
   | {
       kind: "stdio_environment" | "http_header" | "installation_credential";
@@ -1898,6 +1928,7 @@ export type McpManagementView = {
       toolCount: number;
       issueCount: number;
     };
+    authorizationFailure: McpAuthorizationFailure | null;
     tools: {
       name: string;
       discovered: boolean;
@@ -1952,6 +1983,8 @@ export type McpInstallationOperation = {
   displayName: string;
   phase: (typeof mcpInstallationPhases)[number];
   failure: (typeof mcpInstallationFailures)[number] | null;
+  /** Present only when `failure` is `authorization_failed`. */
+  authorizationFailure: McpAuthorizationFailure | null;
   sourceOrigin: string;
   targetOrigin: string | null;
   canCancel: boolean;
