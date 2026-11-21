@@ -80,6 +80,7 @@ import {
   type CatalogRefreshResult,
   type CompactView,
   type RunInputView,
+  type RunInputSkillView,
   type RunActivity,
   type RunView,
   type RunManifest,
@@ -595,6 +596,7 @@ function decodeRunInput(value: unknown, path: string): RunInputView {
       "kind",
       "text",
       "attachments",
+      "skill",
       "redacted",
     ]);
     const attachments = arrayValue(
@@ -651,10 +653,35 @@ function decodeRunInput(value: unknown, path: string): RunInputView {
     );
     if (attachments.length === 0)
       fail(`${path}.attachments`, "multimodal input requires attachments");
+    let skill: RunInputSkillView | null = null;
+    if (item.skill !== null) {
+      const selected = object(item.skill, `${path}.skill`, [
+        "skillId",
+        "catalogRevision",
+        "invocationName",
+        "displayName",
+      ]);
+      skill = {
+        skillId: nonEmptyString(selected.skillId, `${path}.skill.skillId`),
+        catalogRevision: nonEmptyString(
+          selected.catalogRevision,
+          `${path}.skill.catalogRevision`,
+        ),
+        invocationName: nonEmptyString(
+          selected.invocationName,
+          `${path}.skill.invocationName`,
+        ),
+        displayName: nonEmptyString(
+          selected.displayName,
+          `${path}.skill.displayName`,
+        ),
+      };
+    }
     return {
       kind,
       text: item.text === null ? null : stringValue(item.text, `${path}.text`),
       attachments,
+      skill,
       redacted: booleanValue(item.redacted, `${path}.redacted`),
     };
   }

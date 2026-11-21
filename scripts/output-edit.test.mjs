@@ -32,7 +32,12 @@ test("Continue editing keeps existing attachment tokens in their normal input fl
     },
   ];
   const prepared = prepareOutputEditDraft(
-    { kind: "multimodal", text: "Match this template", attachments },
+    {
+      kind: "multimodal",
+      text: "Match this template",
+      attachments,
+      skill: null,
+    },
     reference,
   );
   assert.equal(prepared.kind, "prepared");
@@ -41,6 +46,7 @@ test("Continue editing keeps existing attachment tokens in their normal input fl
     kind: "multimodal",
     text: reference + "\nMatch this template",
     attachmentTokens: ["owned-token"],
+    skill: null,
   });
   const reloaded = {
     kind: "text",

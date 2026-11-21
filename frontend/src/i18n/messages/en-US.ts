@@ -1041,8 +1041,8 @@ export const enUS = {
   "attachment.add": "Add files",
   "composer.add": "Add to message",
   "composer.add_skill": "Add Skill",
-  "composer.add_skill_with_attachments":
-    "Remove attachments before adding a Skill.",
+  "composer.add_skill_selected":
+    "Each message uses one Skill. Remove the selected Skill to choose another.",
   "attachment.removing": "Removing file…",
   "attachment.error.release_unconfirmed":
     "File cleanup could not be confirmed. Restoring the connection; unsent files need to be selected again.",
@@ -1066,8 +1066,6 @@ export const enUS = {
   "attachment.type.file": "File",
   "attachment.reload_required":
     "Unsent attachments are not kept after reload. Add them again before sending.",
-  "attachment.skill_conflict":
-    "Remove the attachments before choosing a Skill, or rewrite the leading slash as ordinary text.",
   "attachment.model_warning.image":
     "This model declares that image input is unsupported. You can still send and receive the exact result.",
   "attachment.error.unsupported_type":

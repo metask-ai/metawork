@@ -34,8 +34,13 @@ export function runInputClipboardText(input: RunInputView): string {
     case "skill":
       return [`/${input.invocationName}`, ...input.argumentValues].join(" ");
     case "multimodal":
+      // A selected Skill reads first, the way the user would type it.
       return [
-        input.text,
+        input.skill
+          ? [`/${input.skill.invocationName}`, input.text]
+              .filter(Boolean)
+              .join(" ")
+          : input.text,
         ...input.attachments.map(({ displayName }) => displayName),
       ]
         .filter((value): value is string => Boolean(value))

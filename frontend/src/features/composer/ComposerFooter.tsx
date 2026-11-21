@@ -32,13 +32,16 @@ import {
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector.tsx";
 import { SlashMenu } from "./SlashMenu.tsx";
 import {
+  composerDraftText,
   composerDraftWithinLimits,
+  draftSkillProblem,
+  draftSkillSelection,
+  draftWithSkillCandidate,
+  draftWithoutSkill,
   emptyComposerDraft,
   reviewSkillDraft,
-  skillDraftProblem,
   parseSlashInput,
   resolveSlashCandidates,
-  skillDraftFromCandidate,
   type ComposerDraft,
   type ComposerAttachment,
   type SlashCandidate,
@@ -286,22 +289,24 @@ export function ComposerFooter({
     removedToken: string;
     adjacentToken: string | null;
   } | null>(null);
-  const text =
-    draft.kind === "skill" ? draft.argumentValues.join("\n") : draft.text;
+  const text = composerDraftText(draft);
+  const selectedSkill = draftSkillSelection(draft);
+  // An attachment draft discovers only Skills: a Command acts on the Task and
+  // would leave the attachments behind.
+  const skillsOnlySlash = draft.kind === "multimodal";
   const slashInput = useMemo(
-    () => (draft.kind === "text" ? parseSlashInput(draft.text) : null),
+    () =>
+      draft.kind === "text" || (draft.kind === "multimodal" && !draft.skill)
+        ? parseSlashInput(draft.text)
+        : null,
     [draft],
   );
-  const attachmentSkillConflict =
-    draft.kind === "multimodal" && parseSlashInput(draft.text) !== null;
   const fileDropEnabled =
     attachmentsEnabled &&
-    draft.kind !== "skill" &&
     !composeDisabled &&
     !attachmentActionsDisabled &&
     !attachmentBusy;
-  const draftProblem =
-    draft.kind === "skill" ? skillDraftProblem(draft, skillCatalog) : null;
+  const draftProblem = draftSkillProblem(draft, skillCatalog);
 
   const draftWithinLimits = composerDraftWithinLimits(draft);
   const sendEnabled =
@@ -316,7 +321,7 @@ export function ComposerFooter({
     onSubmit();
   };
   const removeSkill = () => {
-    onDraftChange({ kind: "text", text });
+    onDraftChange(draftWithoutSkill(draft));
     textareaRef.current?.focus({ preventScroll: true });
   };
   const candidates = useMemo(
@@ -326,9 +331,10 @@ export function ComposerFooter({
             input: slashInput,
             commands: slashCommands,
             catalog: skillCatalog,
+            skillsOnly: skillsOnlySlash,
           })
         : [],
-    [skillCatalog, slashCommands, slashInput],
+    [skillCatalog, slashCommands, slashInput, skillsOnlySlash],
   );
   const activeCandidate =
     candidates.find((candidate) => candidate.key === activeCandidateKey) ??
@@ -352,8 +358,7 @@ export function ComposerFooter({
     },
     onSubmit: submitPrimary,
     onNavigateHistory: navigateInputHistory,
-    onRemoveSkill:
-      draft.kind === "skill" && !composeDisabled ? removeSkill : undefined,
+    onRemoveSkill: selectedSkill && !composeDisabled ? removeSkill : undefined,
   });
   const composing = keyboard.composing;
   const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
@@ -431,7 +436,7 @@ export function ComposerFooter({
       if (!candidate.enabled) return;
       if (candidate.kind === "skill") {
         placeCaretAfterSkill.current = true;
-        onDraftChange(skillDraftFromCandidate(candidate));
+        onDraftChange(draftWithSkillCandidate(draft, candidate));
       } else {
         onDraftChange(emptyComposerDraft());
         onSlashCommand(candidate.name);
@@ -439,16 +444,17 @@ export function ComposerFooter({
       setMenuDismissed(false);
       setActiveCandidateKey(null);
     },
-    [onDraftChange, onSlashCommand],
+    [draft, onDraftChange, onSlashCommand],
   );
 
+  const skillSelected = selectedSkill !== null;
   useLayoutEffect(() => {
-    if (draft.kind !== "skill" || !placeCaretAfterSkill.current) return;
+    if (!skillSelected || !placeCaretAfterSkill.current) return;
     placeCaretAfterSkill.current = false;
     const input = textareaRef.current;
     input?.focus({ preventScroll: true });
     input?.setSelectionRange(0, 0);
-  }, [draft.kind, textareaRef]);
+  }, [skillSelected, textareaRef]);
 
   useEffect(() => {
     const pending = pendingAttachmentFocusRef.current;
@@ -580,7 +586,7 @@ export function ComposerFooter({
   }
 
   function pasteImages(event: ClipboardEvent<HTMLTextAreaElement>) {
-    if (draft.kind === "skill" || composeDisabled || !onPasteImages) return;
+    if (composeDisabled || !onPasteImages) return;
     const files: File[] = [];
     for (const item of Array.from(event.clipboardData.items)) {
       if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
@@ -655,7 +661,7 @@ export function ComposerFooter({
             input={slashInput}
             commands={slashCommands}
             catalog={skillCatalog}
-            skillsOnly={slashInput.explicitSkill}
+            skillsOnly={slashInput.explicitSkill || skillsOnlySlash}
             activeKey={activeCandidate?.key ?? null}
             onActiveKey={setActiveCandidateKey}
             onChoose={chooseCandidate}
@@ -745,14 +751,9 @@ export function ComposerFooter({
               ))}
             </div>
           )}
-          {draft.kind === "text" && draft.attachmentsReloadRequired && (
+          {draft.kind !== "multimodal" && draft.attachmentsReloadRequired && (
             <p className="composer-attachment-notice" role="status">
               {t("attachment.reload_required")}
-            </p>
-          )}
-          {attachmentSkillConflict && (
-            <p className="composer-attachment-notice" role="status">
-              {t("attachment.skill_conflict")}
             </p>
           )}
           {attachmentModelWarning && (
@@ -761,11 +762,15 @@ export function ComposerFooter({
             </p>
           )}
           <div className="composer-message">
-            {draft.kind === "skill" && (
+            {selectedSkill && (
               <span className="skill-message-tag composer-skill-tag">
                 <Icon name="skills" />
-                <span title={draft.displayName || draft.invocationName}>
-                  {draft.displayName || draft.invocationName}
+                <span
+                  title={
+                    selectedSkill.displayName || selectedSkill.invocationName
+                  }
+                >
+                  {selectedSkill.displayName || selectedSkill.invocationName}
                 </span>
                 <Button
                   type="button"
@@ -829,7 +834,7 @@ export function ComposerFooter({
               {t(`run.input_history_${historyRead}`)}
             </p>
           )}
-          {draft.kind === "skill" && draftProblem && (
+          {draftProblem && (
             <div className="skill-draft-warning" role="status">
               <span>
                 {t(
@@ -848,7 +853,7 @@ export function ComposerFooter({
                 size="sm"
                 className="slash-refresh"
                 onClick={() =>
-                  draftProblem === "arguments"
+                  draftProblem === "arguments" && draft.kind === "skill"
                     ? onDraftChange(reviewSkillDraft(draft, skillCatalog))
                     : onRefreshSkillCatalog()
                 }
@@ -923,7 +928,7 @@ export function ComposerFooter({
                     triggerRef={attachmentButtonRef}
                     disabled={composeDisabled || attachmentActionsDisabled}
                     attachmentsEnabled={attachmentsEnabled}
-                    skillText={draft.kind === "text" ? draft.text : null}
+                    skillText={selectedSkill ? null : text}
                     skillCatalog={skillCatalog}
                     onChooseAttachments={onChooseAttachments}
                     onRefreshSkills={onRefreshSkillCatalog}

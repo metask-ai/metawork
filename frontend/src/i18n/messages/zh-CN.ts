@@ -894,7 +894,7 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.add": "添加文件",
   "composer.add": "添加内容",
   "composer.add_skill": "添加技能",
-  "composer.add_skill_with_attachments": "请先移除附件，再添加技能。",
+  "composer.add_skill_selected": "每条消息只能选一个技能，请先移除已选的技能。",
   "attachment.removing": "正在移除文件…",
   "attachment.error.release_unconfirmed":
     "无法确认文件清理结果，正在恢复连接；未发送的附件需要重新选择。",
@@ -915,8 +915,6 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.type.file": "文件",
   "attachment.reload_required":
     "未发送的附件不会在重新载入后保留，请重新添加后再发送。",
-  "attachment.skill_conflict":
-    "请先移除附件再选择技能，或将开头的斜杠改写为普通文本。",
   "attachment.model_warning.image":
     "此模型声明不支持图片输入；仍可发送，并以实际返回结果为准。",
   "attachment.error.unsupported_type": "所选文件为空、无效或无法解码为图片。",

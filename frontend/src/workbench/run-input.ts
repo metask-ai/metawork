@@ -19,6 +19,7 @@ export function runInputDisplay(input: RunInputView) {
   if (input.kind === "text") return input.text;
   if (input.kind === "multimodal")
     return [
+      input.skill ? `/${input.skill.invocationName}` : "",
       input.text ?? "",
       ...input.attachments.map((attachment) => attachment.displayName),
     ]

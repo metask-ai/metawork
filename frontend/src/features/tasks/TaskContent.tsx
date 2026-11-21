@@ -398,7 +398,16 @@ function TaskInput({
       <SkillMessageBody skill={input} />
     ) : (
       <div className="task-multimodal-input">
-        {input.text && <p className="task-input-copy">{input.text}</p>}
+        {input.skill ? (
+          <SkillMessageBody
+            skill={{
+              ...input.skill,
+              argumentValues: input.text ? [input.text] : [],
+            }}
+          />
+        ) : (
+          input.text && <p className="task-input-copy">{input.text}</p>
+        )}
         <div className="task-input-attachments" role="list">
           {input.attachments.map((attachment, index) => {
             // A chip becomes interactive only where the Host still has media

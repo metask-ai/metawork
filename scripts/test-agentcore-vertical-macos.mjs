@@ -2271,6 +2271,7 @@ desktopVertical: try {
       kind: "multimodal",
       text: multimodalInstruction,
       attachmentTokens,
+      skill: null,
     },
   });
   if (
@@ -3018,6 +3019,7 @@ async function assertMultimodalHistory(
         ...attachment,
         redacted: false,
       })),
+      skill: null,
       redacted: false,
     },
   );

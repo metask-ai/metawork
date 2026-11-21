@@ -163,12 +163,17 @@ import {
   composerDraftHasContent,
   composerDraftToRunInput,
   composerDraftWithinLimits,
+  draftSkillSelection,
+  draftWithAttachments,
+  draftWithoutAttachments,
   emptyComposerDraft,
   isSkillDraftCurrent,
   maxSkillArguments,
   resolveSlashCommandStates,
   reconcileSkillDraft,
+  runInputSkill,
   type ComposerDraft,
+  type ComposerSkillSelection,
   type SlashCommandName,
   type SlashCommandState,
 } from "../features/composer/slash.ts";
@@ -189,6 +194,7 @@ import type {
   TaskCompactReason,
   TaskRestoreReason,
   RunInputView,
+  RunInputSkillView,
   McpMutationResult,
   McpRefreshResult,
   McpConfigurationApplyResult,
@@ -1827,7 +1833,7 @@ export default function App() {
     }
   }, [composerDraft, currentComposerDraft, updateComposerDraft]);
   const skillDraftCurrent =
-    composerDraft.kind !== "skill" ||
+    draftSkillSelection(composerDraft) === null ||
     isSkillDraftCurrent(composerDraft, skillCatalog);
   const composerRunInput = composerDraftToRunInput(currentComposerDraft);
   const newTaskModelState = newTaskModelSelectionState(
@@ -3274,8 +3280,8 @@ export default function App() {
                 }
               : { kind: "automatic" },
             newTaskModelState.intent!,
-            input.kind === "skill" ? input.catalogRevision : null,
-            input.kind === "skill" ? input.selectionRevision : null,
+            runInputSkill(input)?.catalogRevision ?? null,
+            runInputSkill(input)?.selectionRevision ?? null,
             newTaskApprovalMode,
             null,
           ),
@@ -3579,8 +3585,7 @@ export default function App() {
     if (
       bridgeUnavailable ||
       !snapshot.capabilities.attachments.enabled ||
-      !taskCanCompose ||
-      composerDraftRef.current.kind === "skill"
+      !taskCanCompose
     ) {
       setAttachmentError("input_unavailable");
       return;
@@ -3645,11 +3650,7 @@ export default function App() {
             ids.has(entry.operationId) && entry.draft.kind === "multimodal"
               ? {
                   ...entry,
-                  draft: {
-                    kind: "text",
-                    text: entry.draft.text,
-                    attachmentsReloadRequired: true,
-                  },
+                  draft: draftWithoutAttachments(entry.draft, true),
                 }
               : entry,
           ),
@@ -3674,7 +3675,7 @@ export default function App() {
         return;
       }
       const current = target.currentDraft(targetId);
-      if (!currentOperation() || !current || current.kind === "skill") {
+      if (!currentOperation() || !current) {
         const cleanup = await add.cancel();
         if (
           cleanup.status === "cleanup_failed" &&
@@ -3695,14 +3696,10 @@ export default function App() {
           );
         return;
       }
-      const next: ComposerDraft = {
-        kind: "multimodal",
-        text: current.text,
-        attachments: [
-          ...(current.kind === "multimodal" ? current.attachments : []),
-          ...result.attachments,
-        ],
-      };
+      const next: ComposerDraft = draftWithAttachments(
+        current,
+        result.attachments,
+      );
       const handedOff = add.handoff(() => {
         if (!currentOperation() || !target.commitDraft(targetId, next))
           return false;
@@ -3915,19 +3912,36 @@ export default function App() {
   ): ComposerDraft | null {
     if (input.redacted) return null;
     if (input.kind === "text") return { kind: "text", text: input.text };
+    // The attachments were consumed by the Run: their files are chosen again,
+    // and a selected Skill comes back as a Skill draft holding the text.
     if (input.kind === "multimodal")
-      return {
-        kind: "text",
-        text: input.text ?? "",
-        attachmentsReloadRequired: true,
-      };
+      return input.skill
+        ? {
+            kind: "skill",
+            ...skillSelectionFromRunInput(input.skill),
+            argumentValues: input.text ? [input.text] : [],
+            attachmentsReloadRequired: true,
+          }
+        : {
+            kind: "text",
+            text: input.text ?? "",
+            attachmentsReloadRequired: true,
+          };
+    return {
+      kind: "skill",
+      ...skillSelectionFromRunInput(input),
+      argumentValues: input.argumentValues,
+    };
+  }
+  function skillSelectionFromRunInput(
+    input: RunInputSkillView,
+  ): ComposerSkillSelection {
     const descriptor = skillCatalog.skills.find(
       (skill) => skill.skillId === input.skillId,
     );
     const confirmed =
       descriptor && skillCatalog.revision === input.catalogRevision;
     return {
-      kind: "skill",
       skillId: input.skillId,
       ...(confirmed ? { skillPolicyKey: descriptor.skillPolicyKey } : {}),
       invocationName: input.invocationName,
@@ -3935,7 +3949,6 @@ export default function App() {
       catalogRevision: input.catalogRevision,
       selectionRevision: skillCatalog.selectionRevision ?? "0",
       argumentNames: confirmed ? descriptor.argumentNames : [],
-      argumentValues: input.argumentValues,
       maxValues: confirmed
         ? Math.min(descriptor.maxValues, maxSkillArguments)
         : maxSkillArguments,
@@ -4679,11 +4692,7 @@ export default function App() {
                   if (!composerDraftHasContent(composerDraftRef.current)) {
                     updateComposerDraft(
                       entry.draft.kind === "multimodal" && !entry.reusableDraft
-                        ? {
-                            kind: "text",
-                            text: entry.draft.text,
-                            attachmentsReloadRequired: true,
-                          }
+                        ? draftWithoutAttachments(entry.draft, true)
                         : entry.draft,
                     );
                     if (entry.reusableDraft)
@@ -4703,6 +4712,13 @@ export default function App() {
       >
         {entry.draft.kind === "skill" ? (
           <SkillMessageBody skill={entry.draft} />
+        ) : entry.draft.kind === "multimodal" && entry.draft.skill ? (
+          <SkillMessageBody
+            skill={{
+              ...entry.draft.skill,
+              argumentValues: entry.draft.text ? [entry.draft.text] : [],
+            }}
+          />
         ) : (
           <div className="task-input-copy">{entry.draft.text}</div>
         )}

@@ -482,6 +482,7 @@ test("App image paste shares staging, rejects overlapping paste and sends the la
     kind: "multimodal",
     text: "new instruction while adding",
     attachmentTokens: ["a".repeat(48), "b".repeat(48)],
+    skill: null,
   });
   await fixture.settle();
 });
@@ -543,6 +544,96 @@ async function renderPendingPasteApp(ctx, options) {
     attachment,
   };
 }
+
+async function renderSkillAttachmentApp(ctx) {
+  const f = await renderPendingPasteApp(ctx, { newTask: true });
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  ctx.mock.method(BridgeClient.prototype, "refreshSkillCatalog", async () => ({
+    accepted: true,
+    reason: null,
+  }));
+  f.snapshot.skillCatalog = {
+    availability: "ready",
+    redacted: false,
+    revision: "personal-catalog",
+    selectionRevision: "1",
+    skills: [
+      {
+        skillId: "xlsx",
+        skillPolicyKey: "xlsx",
+        invocationName: "xlsx",
+        displayName: "Built-in Excel",
+        description: "Fixture Skill",
+        argumentNames: [],
+        maxValues: 64,
+        enabled: true,
+      },
+    ],
+    issues: [],
+  };
+  await f.publish();
+  return f;
+}
+
+async function sendSkillWithAttachment(f, message) {
+  await userEvent
+    .setup({ document })
+    .click(screen.getByRole("button", { name: "Send", exact: true }));
+  assert.equal(f.creations(), 1);
+  // The new Task is created against the catalog the selection came from.
+  assert.deepEqual(f.createRequests[0].slice(2, 4), ["personal-catalog", "1"]);
+  await f.created();
+  await waitFor(() => assert.equal(f.inputs.length, 1));
+  assert.deepEqual(f.inputs[0][2], {
+    kind: "multimodal",
+    text: message,
+    attachmentTokens: [f.attachment.token],
+    skill: {
+      skillId: "xlsx",
+      catalogRevision: "personal-catalog",
+      selectionRevision: "1",
+    },
+  });
+  await f.settle();
+}
+
+test("App sends a Skill chosen after an attachment as one message with it", async (ctx) => {
+  const f = await renderSkillAttachmentApp(ctx);
+  await f.begin();
+  await f.finish();
+  await screen.findByText("pending.png");
+  // With an attachment the Slash menu lists Skills only.
+  const user = userEvent.setup({ document });
+  await user.type(f.textarea, "/");
+  const menu = await screen.findByRole("listbox", { name: "Composer actions" });
+  assert.equal(within(menu).queryByRole("group", { name: "Commands" }), null);
+  await user.click(
+    within(menu).getByRole("option", { name: /Built-in Excel/ }),
+  );
+  assert.ok(document.querySelector(".composer-skill-tag"));
+  await screen.findByText("pending.png");
+  const message = "按月份汇总这份表格里的销售额";
+  fireEvent.change(f.textarea, { target: { value: message } });
+  await sendSkillWithAttachment(f, message);
+});
+
+test("App keeps a selected Skill when an attachment is added and sends both", async (ctx) => {
+  const f = await renderSkillAttachmentApp(ctx);
+  const user = userEvent.setup({ document });
+  await user.type(f.textarea, "/xl");
+  await user.click(
+    await screen.findByRole("option", { name: /Built-in Excel/ }),
+  );
+  const message = "按月份汇总这份表格里的销售额";
+  fireEvent.change(f.textarea, { target: { value: message } });
+  await f.begin();
+  await f.finish();
+  await screen.findByText("pending.png");
+  // The Skill and the text the user typed survive the attachment.
+  assert.ok(document.querySelector(".composer-skill-tag"));
+  assert.equal(f.textarea.value, message);
+  await sendSkillWithAttachment(f, message);
+});
 
 test("App image paste reports unavailable attachments without starting a writer", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { attachmentsEnabled: false });
@@ -637,6 +728,7 @@ test("App image-only paste sends through the existing multimodal Run input", asy
     kind: "multimodal",
     text: "",
     attachmentTokens: [f.attachment.token],
+    skill: null,
   });
   await f.settle();
 });
@@ -1041,6 +1133,7 @@ test("App rejected creation restores the attachment grant with its draft", async
     kind: "multimodal",
     text: "Instruction with attachment",
     attachmentTokens: [fixture.attachment.token],
+    skill: null,
   });
   await fixture.settle();
 });

@@ -4,6 +4,11 @@ import test from "node:test";
 import {
   composerDraftToRunInput,
   composerDraftWithinLimits,
+  draftSkillProblem,
+  draftWithAttachments,
+  draftWithoutAttachments,
+  draftWithoutSkill,
+  draftWithSkillCandidate,
   isSkillDraftCurrent,
   parseSlashInput,
   resolveSlashCandidates,
@@ -142,30 +147,37 @@ test("Run input conversion rejects unresolved Slash outside the UI layer", () =>
   assert.deepEqual(
     composerDraftToRunInput({
       kind: "multimodal",
+      skill: null,
       text: "Explain these",
       attachments,
     }),
     {
       kind: "multimodal",
+      skill: null,
       text: "Explain these",
       attachmentTokens: ["a".repeat(48), "b".repeat(48)],
+      skill: null,
     },
   );
   assert.deepEqual(
     composerDraftToRunInput({
       kind: "multimodal",
+      skill: null,
       text: "",
       attachments: [attachments[0]],
     }),
     {
       kind: "multimodal",
+      skill: null,
       text: "",
       attachmentTokens: ["a".repeat(48)],
+      skill: null,
     },
   );
   assert.deepEqual(
     composerDraftToRunInput({
       kind: "multimodal",
+      skill: null,
       text: "/review",
       attachments,
     }),
@@ -174,6 +186,7 @@ test("Run input conversion rejects unresolved Slash outside the UI layer", () =>
   assert.deepEqual(
     composerDraftToRunInput({
       kind: "multimodal",
+      skill: null,
       text: "Read this",
       attachments: [
         {
@@ -186,13 +199,16 @@ test("Run input conversion rejects unresolved Slash outside the UI layer", () =>
     }),
     {
       kind: "multimodal",
+      skill: null,
       text: "Read this",
       attachmentTokens: ["c".repeat(48)],
+      skill: null,
     },
   );
   assert.equal(
     composerDraftToRunInput({
       kind: "multimodal",
+      skill: null,
       text: " ",
       attachments: [
         {
@@ -346,4 +362,147 @@ test("ordinary text uses a UTF-8 byte budget independent of Skill arguments", ()
       true,
     );
   }
+});
+
+test("a Skill and attachments share one draft in either order and send as one message", () => {
+  const image = {
+    token: "a".repeat(48),
+    kind: "image",
+    format: "png",
+    displayName: "chart.png",
+    sizeBytes: "12",
+  };
+  const file = {
+    token: "b".repeat(48),
+    kind: "file",
+    displayName: "sales.xlsx",
+    sizeBytes: "24",
+  };
+  const [candidate] = resolveSlashCandidates({
+    input: { query: "review", tail: "", explicitSkill: true },
+    commands: [],
+    catalog,
+  }).filter((item) => item.kind === "skill");
+  const selection = {
+    skillId: candidate.skillId,
+    catalogRevision: "17",
+    selectionRevision: "3",
+  };
+
+  // Skill first: the body, as the Composer shows it, becomes the message.
+  const skillDraft = {
+    ...skillDraftFromCandidate(candidate),
+    argumentValues: ["first line", "second line"],
+  };
+  const withFile = draftWithAttachments(skillDraft, [file]);
+  assert.equal(withFile.kind, "multimodal");
+  assert.equal(withFile.text, "first line\nsecond line");
+  assert.equal(withFile.skill.skillId, candidate.skillId);
+  assert.equal("argumentValues" in withFile.skill, false);
+  assert.deepEqual(composerDraftToRunInput(withFile), {
+    kind: "multimodal",
+    text: "first line\nsecond line",
+    attachmentTokens: [file.token],
+    skill: selection,
+  });
+
+  // Attachments first: the tail becomes the text and the files stay.
+  const imageDraft = draftWithAttachments({ kind: "text", text: "/review" }, [
+    image,
+  ]);
+  assert.equal(imageDraft.skill, null);
+  assert.equal(composerDraftToRunInput(imageDraft), null);
+  const chosen = draftWithSkillCandidate(imageDraft, {
+    ...candidate,
+    tail: "Explain the chart",
+  });
+  assert.deepEqual(chosen.attachments, [image]);
+  assert.deepEqual(composerDraftToRunInput(chosen), {
+    kind: "multimodal",
+    text: "Explain the chart",
+    attachmentTokens: [image.token],
+    skill: selection,
+  });
+  // With a Skill selected, a leading slash is ordinary text.
+  assert.equal(
+    composerDraftToRunInput({ ...chosen, text: "/not a command" }).text,
+    "/not a command",
+  );
+  // A file still needs an instruction, Skill or not.
+  assert.equal(
+    composerDraftToRunInput({ ...chosen, text: " ", attachments: [file] }),
+    null,
+  );
+
+  // Removing the Skill keeps text and attachments; removing the last
+  // attachment returns to a Skill draft whose text is one value.
+  assert.deepEqual(draftWithoutSkill(chosen), { ...chosen, skill: null });
+  const back = draftWithoutAttachments(chosen, false);
+  assert.equal(back.kind, "skill");
+  assert.deepEqual(back.argumentValues, ["Explain the chart"]);
+  assert.equal("attachmentsReloadRequired" in back, false);
+  assert.equal(
+    draftWithoutAttachments(chosen, true).attachmentsReloadRequired,
+    true,
+  );
+  assert.deepEqual(draftWithoutAttachments(imageDraft, false), {
+    kind: "text",
+    text: "/review",
+  });
+});
+
+test("a Skill selected with attachments follows the catalog without checking arguments", () => {
+  const draft = {
+    kind: "multimodal",
+    text: "Summarize",
+    attachments: [
+      {
+        token: "a".repeat(48),
+        kind: "file",
+        displayName: "notes.txt",
+        sizeBytes: "4",
+      },
+    ],
+    skill: {
+      skillId: "workspace.review",
+      skillPolicyKey: "review",
+      invocationName: "review",
+      displayName: "Review changes",
+      catalogRevision: "17",
+      selectionRevision: "3",
+      argumentNames: ["target"],
+      maxValues: 2,
+    },
+  };
+  assert.equal(draftSkillProblem(draft, catalog), null);
+  assert.equal(isSkillDraftCurrent(draft, catalog), true);
+  const changed = {
+    ...catalog,
+    revision: "18",
+    skills: catalog.skills.map((skill) =>
+      skill.skillPolicyKey === "review"
+        ? {
+            ...skill,
+            skillId: "workspace.review.v2",
+            argumentNames: ["other"],
+          }
+        : skill,
+    ),
+  };
+  // No argument travels with attachments, so a new definition does not hold
+  // the selection back; it binds to the current winner.
+  assert.equal(draftSkillProblem(draft, changed), null);
+  const bound = reconcileSkillDraft(draft, changed);
+  assert.equal(bound.skill.skillId, "workspace.review.v2");
+  assert.equal(bound.skill.catalogRevision, "18");
+  assert.deepEqual(bound.attachments, draft.attachments);
+  const disabled = {
+    ...catalog,
+    skills: catalog.skills.map((skill) =>
+      skill.skillPolicyKey === "review" ? { ...skill, enabled: false } : skill,
+    ),
+  };
+  assert.equal(draftSkillProblem(draft, disabled), "disabled");
+  assert.equal(isSkillDraftCurrent(draft, disabled), false);
+  assert.equal(draftSkillProblem({ ...draft, skill: null }, disabled), null);
 });

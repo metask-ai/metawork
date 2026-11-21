@@ -299,6 +299,34 @@ test("input copy preserves text and projects structured inputs readably", async 
     }),
     "Compare these\nbefore.png\nnotes.md",
   );
+  // A selected Skill reads first, the way the user would type it.
+  const selected = {
+    kind: "multimodal",
+    text: "Summarize by month",
+    attachments: [
+      {
+        kind: "file",
+        displayName: "sales.xlsx",
+        sizeBytes: "2403",
+        redacted: false,
+      },
+    ],
+    skill: {
+      skillId: "a".repeat(64),
+      catalogRevision: "8",
+      invocationName: "xlsx",
+      displayName: "Excel",
+    },
+    redacted: false,
+  };
+  assert.equal(
+    runInputClipboardText(selected),
+    "/xlsx Summarize by month\nsales.xlsx",
+  );
+  assert.equal(
+    runInputClipboardText({ ...selected, text: null }),
+    "/xlsx\nsales.xlsx",
+  );
 
   const writes = [];
   installClipboard({
