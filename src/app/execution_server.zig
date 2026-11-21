@@ -1,10 +1,6 @@
 //! The execution half's server: one Agent Runtime, answering the calls the
 //! UI half sends over the link.
 //!
-//! Only a build that carries the development switch references this file,
-//! so every other build's `--execution-host` still answers the handshake and
-//! drops what arrives.
-//!
 //! ## One failure model
 //!
 //! Anything this half cannot carry on from -- a frame it cannot read, a

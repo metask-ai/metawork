@@ -6533,8 +6533,8 @@ pub const Runtime = struct {
     /// would be refused for as long as the window stays open. Poisoning hands
     /// it to the same close, after which the next message restores.
     ///
-    /// Only the development switch's execution link calls this; in process a
-    /// Session's Runtime cannot be gone while the window is up.
+    /// The execution link calls this when it loses the process; a Runtime in
+    /// the window's own process could not be gone while the window is up.
     pub fn abandonSessionsInRouteRange(self: *Runtime, first: u64, end: u64) bool {
         var changed = false;
         for (self.tasks) |*entry| {

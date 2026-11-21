@@ -1,14 +1,14 @@
-// Desktop acceptance for the development switch that runs AgentCore in its
-// own process (issue 197, step one). Windows only.
+// Desktop acceptance for AgentCore running in its own process (issue 197).
+// Windows only.
 //
 // Selected by `METAWORK_EXECUTION_LINK_ONLY=1` inside the AgentCore vertical
 // harness, which owns the isolated platform home, the automation build and
-// the fixture model; the mode under test is whatever
-// `METAWORK_DEV_EXECUTION_LINK` says in the harness's environment, which the
-// application inherits. `scripts/execution-link-acceptance.mjs` runs both
-// modes and compares their memory.
+// the fixture model. `METAWORK_EXECUTION_LINK_BASELINE=1` says the build under
+// test is a baseline from before the execution process was the default, run
+// only to be measured. `scripts/execution-link-acceptance.mjs` runs both and
+// compares their memory.
 //
-// With the switch on it checks the five acceptance points:
+// It checks the five acceptance points:
 //   1. an ordinary Task completes and an `--execution-host` child exists;
 //   2. ending that child by PID mid-reply leaves the window up, and the cut
 //      reply is interrupted, recorded as incomplete and out of the
@@ -20,7 +20,7 @@
 //      process, and after the child is ended the next one is given the
 //      server again and the tool still works;
 //   5. a normal quit leaves no child behind, and no MCP server;
-// and with it off:
+// and on a baseline build:
 //   6. no child ever exists, and a Task completes as before.
 //
 // Processes are only ever ended by PID. Nothing here reads or writes outside
@@ -446,7 +446,7 @@ export async function runExecutionLinkVertical({
     "win32",
     "the execution link acceptance runs on Windows",
   );
-  const linked = process.env.METAWORK_DEV_EXECUTION_LINK === "1";
+  const linked = process.env.METAWORK_EXECUTION_LINK_BASELINE !== "1";
   const appPid = app.pid;
   const evidence = {
     mode: linked ? "linked" : "in_process",
@@ -532,7 +532,7 @@ export async function runExecutionLinkVertical({
       assert.deepEqual(
         firstHosts,
         [],
-        "the switch is off: no execution process",
+        "a baseline build: no execution process",
       );
     }
     await new Promise((resolve) => setTimeout(resolve, settleMs));
@@ -543,7 +543,7 @@ export async function runExecutionLinkVertical({
     record("one task completed", evidence.afterTask);
 
     if (!linked) {
-      await stopApplication("execution link acceptance, switch off");
+      await stopApplication("execution link acceptance, baseline build");
       evidence.quit = { exitedCleanly: true, hostsAfterQuit: [] };
       record("quit", evidence.quit);
       await write();
@@ -673,7 +673,7 @@ export async function runExecutionLinkVertical({
 
     // 5. A normal quit leaves no execution process behind, and no MCP
     // server.
-    await stopApplication("execution link acceptance, switch on");
+    await stopApplication("execution link acceptance");
     // The harness's `poll` refuses to run once the application has exited,
     // which is exactly the state this waits in, so the wait is its own.
     const children = [

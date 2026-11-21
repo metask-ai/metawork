@@ -1810,7 +1810,7 @@ fn wireAgentCore(
     agent_provider_probe.addImport("agent_model_binding", agent_model_binding);
     agent.addImport("agent_provider_probe", agent_provider_probe);
     // The UI half's side of the execution link: the RuntimePort Product
-    // drives when the development switch puts AgentCore in its own process.
+    // drives, with AgentCore in its own process.
     const app_execution_client = b.createModule(.{
         .root_source_file = b.path("src/app/execution_client.zig"),
         .target = target,
@@ -2841,8 +2841,8 @@ fn wireAgentCore(
     app.addImport("metawork_agent_link", agent_link);
     app.addImport("app_execution_host", app_execution_host);
     app.addImport("app_execution_mode", app_execution_mode);
-    // Both halves of the development switch. `src/app.zig` references them
-    // only where the switch is compiled in, so other builds contain neither.
+    // Both halves of the execution link: the same executable is the window
+    // and, started with `--execution-host`, the process that runs AgentCore.
     app.addImport("app_execution_client", app_execution_client);
     app.addImport("app_execution_server", app_execution_server);
     app.addImport("event_pump", event_pump);

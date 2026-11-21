@@ -1,5 +1,5 @@
-//! The UI half of the execution link: the `RuntimePort` Product drives when
-//! the development switch puts AgentCore in its own process.
+//! The UI half of the execution link: the `RuntimePort` Product drives, with
+//! AgentCore in a process of its own.
 //!
 //! ## What a call is
 //!

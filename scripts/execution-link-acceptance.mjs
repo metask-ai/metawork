@@ -1,17 +1,23 @@
-// Runs the execution link desktop acceptance with the development switch on
-// and off, and compares their memory against the step's targets. Windows.
+// Runs the execution link desktop acceptance, and compares its memory with a
+// build that still ran AgentCore in the window process. Windows.
 //
+//   $env:METAWORK_EXECUTION_LINK_BASELINE_APP_CWD = "<baseline>\zig-out\bin"
 //   node scripts/execution-link-acceptance.mjs
 //   $env:METAWORK_EXECUTION_LINK_MEMORY_ROUNDS = "3"; node scripts/execution-link-acceptance.mjs
 //
-// Builds the automation Debug artifact once (skipped when
-// `METAWORK_VERTICAL_PREBUILT=1`), then runs the AgentCore vertical harness
-// in its `METAWORK_EXECUTION_LINK_ONLY` scope once per mode per round,
-// alternating which mode goes first, because other work on the machine moves
-// a single sample. Every run uses the harness's own temporary platform home
-// and opens the MetaWork Automation window until it quits by itself.
+// The baseline is the automation Debug artifact of a build from before the
+// execution process was the default (the merge base with main), built in its
+// own checkout; this build has no in-process mode to compare against.
 //
-// Evidence: `.zig-cache/execution-link-desktop/<mode>-<round>.json` per run
+// Builds this checkout's automation Debug artifact once (skipped when
+// `METAWORK_VERTICAL_PREBUILT=1`), then runs the AgentCore vertical harness
+// in its `METAWORK_EXECUTION_LINK_ONLY` scope once per build per round,
+// alternating which goes first, because other work on the machine moves a
+// single sample. The baseline run only measures: idle, one Task, quit. Every
+// run uses the harness's own temporary platform home and opens the MetaWork
+// Automation window until it quits by itself.
+//
+// Evidence: `.zig-cache/execution-link-desktop/<build>-<round>.json` per run
 // and `summary.json` with the medians and the verdict. Exits non-zero when a
 // run fails or a memory target is exceeded.
 
@@ -33,8 +39,14 @@ if (!Number.isInteger(rounds) || rounds < 1)
     "METAWORK_EXECUTION_LINK_MEMORY_ROUNDS must be a positive integer",
   );
 
+const baselineAppCwd = process.env.METAWORK_EXECUTION_LINK_BASELINE_APP_CWD;
+if (!baselineAppCwd)
+  throw new Error(
+    "METAWORK_EXECUTION_LINK_BASELINE_APP_CWD must name the baseline build's zig-out\\bin",
+  );
+
 const MiB = 1024 * 1024;
-/// The step's memory targets, as deltas of the linked mode over in process.
+/// The step's memory targets, as deltas of this build over the baseline.
 const targets = {
   idleWorkingSetBytes: 2 * MiB,
   idlePrivateBytes: 2 * MiB,
@@ -52,11 +64,12 @@ function runHarness(mode, round) {
     ...process.env,
     METAWORK_EXECUTION_LINK_ONLY: "1",
     METAWORK_VERTICAL_PREBUILT: "1",
-    METAWORK_TEST_APP_CWD: path.join("zig-out", "bin"),
+    METAWORK_TEST_APP_CWD:
+      mode === "linked" ? path.join("zig-out", "bin") : baselineAppCwd,
     METAWORK_EXECUTION_LINK_EVIDENCE: evidencePath,
   };
-  if (mode === "on") env.METAWORK_DEV_EXECUTION_LINK = "1";
-  else delete env.METAWORK_DEV_EXECUTION_LINK;
+  if (mode === "baseline") env.METAWORK_EXECUTION_LINK_BASELINE = "1";
+  else delete env.METAWORK_EXECUTION_LINK_BASELINE;
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
@@ -69,7 +82,7 @@ function runHarness(mode, round) {
       else
         reject(
           new Error(
-            `switch ${mode}, round ${round}: harness exited ${code ?? signal}`,
+            `${mode}, round ${round}: harness exited ${code ?? signal}`,
           ),
         );
     });
@@ -87,9 +100,10 @@ function median(values) {
     : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-const samples = { on: [], off: [] };
+const samples = { linked: [], baseline: [] };
 for (let round = 1; round <= rounds; round += 1) {
-  const order = round % 2 === 1 ? ["on", "off"] : ["off", "on"];
+  const order =
+    round % 2 === 1 ? ["linked", "baseline"] : ["baseline", "linked"];
   for (const mode of order) {
     const evidencePath = await runHarness(mode, round);
     const evidence = JSON.parse(await readFile(evidencePath, "utf8"));
@@ -108,7 +122,7 @@ for (let round = 1; round <= rounds; round += 1) {
 
 const fields = Object.keys(targets);
 const medians = Object.fromEntries(
-  ["on", "off"].map((mode) => [
+  ["linked", "baseline"].map((mode) => [
     mode,
     Object.fromEntries(
       fields.map((field) => [
@@ -119,7 +133,10 @@ const medians = Object.fromEntries(
   ]),
 );
 const deltas = Object.fromEntries(
-  fields.map((field) => [field, medians.on[field] - medians.off[field]]),
+  fields.map((field) => [
+    field,
+    medians.linked[field] - medians.baseline[field],
+  ]),
 );
 const exceeded = fields.filter((field) => deltas[field] > targets[field]);
 const mib = (bytes) => Math.round((bytes / MiB) * 10) / 10;
@@ -131,12 +148,12 @@ await writeFile(
 );
 for (const field of fields)
   process.stdout.write(
-    `${field.padEnd(26)} on ${String(mib(medians.on[field])).padStart(7)} MiB  off ${String(mib(medians.off[field])).padStart(7)} MiB  delta ${String(mib(deltas[field])).padStart(6)} MiB  target <= ${mib(targets[field])} MiB\n`,
+    `${field.padEnd(26)} linked ${String(mib(medians.linked[field])).padStart(7)} MiB  baseline ${String(mib(medians.baseline[field])).padStart(7)} MiB  delta ${String(mib(deltas[field])).padStart(6)} MiB  target <= ${mib(targets[field])} MiB\n`,
   );
 if (exceeded.length > 0) {
   process.stderr.write(`memory targets exceeded: ${exceeded.join(", ")}\n`);
   process.exit(1);
 }
 process.stdout.write(
-  `Execution link acceptance passed in both modes over ${rounds} round(s); evidence in ${evidenceDir}\n`,
+  `Execution link acceptance passed over ${rounds} round(s); evidence in ${evidenceDir}\n`,
 );
