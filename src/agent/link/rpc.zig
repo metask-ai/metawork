@@ -131,6 +131,74 @@ pub const Callback = enum(u16) {
     /// the Session whose Run made it.
     mcp_install_put = 6,
     mcp_install_wake = 7,
+    /// A Run's file delivery, image and video effects, which stay with the
+    /// Host. Each names the Session and carries the Run.
+    delivery_inspect = 8,
+    media_credential_read = 9,
+    media_perform = 10,
+    image_commit = 11,
+    video_commit = 12,
+};
+
+pub const MediaTool = enum { image, video };
+
+/// A Run's image generation binding, but its effects: the transport, the
+/// credential reader and the output stay with the Host and are called back.
+/// The credential is the copy execution needs, as a model binding's is.
+pub const ImageRun = struct {
+    endpoint: []const u8,
+    source: []const u8,
+    model: []const u8,
+    credential: []const u8,
+    renews_credential: bool,
+};
+
+pub const VideoRun = struct {
+    endpoint: []const u8,
+    source: []const u8,
+    model: []const u8,
+};
+
+pub const HttpRequest = struct {
+    url: []const u8,
+    headers: []const contract.http_transport.Header,
+    body: []const u8,
+    method: @FieldType(contract.http_transport.HttpRequest, "method"),
+    streams: bool,
+    connect_timeout_ms: u32,
+    source: []const u8,
+};
+
+/// `transport.Error`, as data.
+pub const HttpFailure = enum {
+    Cancelled,
+    DnsFailed,
+    ConnectFailed,
+    TlsFailed,
+    WriteFailed,
+    ReadFailed,
+    InvalidHttp,
+    ResponseTooLarge,
+    ResourceLimit,
+    OutOfMemory,
+    Unexpected,
+};
+
+comptime {
+    for (@typeInfo(contract.http_transport.Error).error_set.?) |member| {
+        if (!@hasField(HttpFailure, member.name)) @compileError("HttpFailure lacks " ++ member.name);
+    }
+}
+
+pub const HttpOutcome = union(enum) {
+    response: struct {
+        status: u16,
+        body: []const u8,
+        /// A streamed response, read whole by the Host, for the Run's
+        /// receiver to read once the request is over.
+        stream: ?struct { content_type: ?[]const u8, content_length: ?u64, bytes: []const u8 },
+    },
+    failure: HttpFailure,
 };
 
 /// That a Run may ask the Host to install an MCP server, for this Task. The
@@ -273,6 +341,11 @@ pub const Event = struct {
     run_id: u64,
     encoded_bytes: u64,
     json: []const u8,
+    /// What a media tool wrote or a delivery verified, which the Agent
+    /// attaches to the event, never read from the event's JSON.
+    generated_image_path: ?[]const u8,
+    generated_video_path: ?[]const u8,
+    delivered_file: ?contract.FileDeliveryReceipt,
 };
 
 /// How much the caller has ever made room for, as running totals.
@@ -317,6 +390,11 @@ fn CallbackRequest(comptime callback: Callback) type {
         .mcp_notify => struct { bytes: []const u8, timeout_ms: u32 },
         .mcp_close, .mcp_release, .mcp_install_wake => Empty,
         .mcp_install_put => struct { task_id: u64, run_id: u64, generation: u64, json: []const u8 },
+        .delivery_inspect => struct { run_id: u64, path: []const u8 },
+        .media_credential_read => struct { run_id: u64, tool: MediaTool, capacity: u32 },
+        .media_perform => struct { run_id: u64, tool: MediaTool, request: HttpRequest, response_capacity: u64 },
+        .image_commit => struct { run_id: u64, bytes: []const u8, format: contract.image_generation.Format },
+        .video_commit => struct { run_id: u64, bytes: []const u8, length: ?u64 },
     };
 }
 
@@ -327,6 +405,11 @@ fn CallbackResponse(comptime callback: Callback) type {
         .mcp_notify => ?mcp_connector.Failure,
         .mcp_close, .mcp_release, .mcp_install_wake => void,
         .mcp_install_put => contract.McpInstallationResult,
+        .delivery_inspect => contract.FileDeliveryInspection,
+        .media_credential_read => ?[]const u8,
+        .media_perform => HttpOutcome,
+        .image_commit => contract.image_generation.OutputResult,
+        .video_commit => contract.generate_video.Outcome,
     };
 }
 
@@ -352,7 +435,13 @@ fn MethodRequest(comptime method: Method) type {
         .rewind_to_user_message => struct { position: u64 },
         .update_credential => struct { credential: []const u8 },
         .request_termination => struct { run_id: u64, signal: control.TerminationSignal },
-        .prepare_run => struct { input: surface.RunInput, mcp_installation: ?McpInstallation },
+        .prepare_run => struct {
+            input: surface.RunInput,
+            mcp_installation: ?McpInstallation,
+            image: ?ImageRun,
+            video: ?VideoRun,
+            delivery: bool,
+        },
         .begin_run, .cancel_prepared_run, .fail_ui_request_identity_contract => struct { run_id: u64 },
         .cancel_prepared_compact, .execute_prepared_compact => struct { operation_id: u64 },
         .request_compact_cancellation => struct { operation_id: u64, interruption: control.ExternalInterruption },
@@ -780,12 +869,21 @@ test "an export's bytes and a restore's source cross whole" {
 test "events and credit round-trip" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const event: Event = .{ .session_id = 1 << 32, .run_id = 3, .encoded_bytes = 5, .json = "{}" };
+    const event: Event = .{
+        .session_id = 1 << 32,
+        .run_id = 3,
+        .encoded_bytes = 5,
+        .json = "{}",
+        .generated_image_path = "images/one.png",
+        .generated_video_path = null,
+        .delivered_file = null,
+    };
     const bytes = try payload.encodeAlloc(Event, testing.allocator, event);
     defer testing.allocator.free(bytes);
     const back = try payload.decodeExact(Event, arena.allocator(), bytes);
     try testing.expectEqual(event.session_id, back.session_id);
     try testing.expectEqualStrings("{}", back.json);
+    try testing.expectEqualStrings("images/one.png", back.generated_image_path.?);
 
     const credit: Credit = .{ .count = 448, .bytes = 30 << 20 };
     const credit_bytes = try payload.encodeAlloc(Credit, testing.allocator, credit);

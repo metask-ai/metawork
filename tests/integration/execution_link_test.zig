@@ -1093,3 +1093,152 @@ test "a skill catalog stays in the execution process, and a Session bound with i
     // Nothing refers to the lease any more, here or there.
     try std.testing.expectEqual(@as(i32, 0), pin.held.load(.acquire));
 }
+
+// ---------------------------------------------------------------------------
+// File delivery and media over the link
+// ---------------------------------------------------------------------------
+
+/// The Host's effects for one Run, recording what reaches them.
+const RecordingEffects = struct {
+    mutex: std.Io.Mutex = .init,
+    inspected: [64]u8 = undefined,
+    inspected_len: usize = 0,
+    sensitive_headers: u32 = 0,
+    image_bytes: [32]u8 = undefined,
+    image_len: usize = 0,
+    video_bytes: [32]u8 = undefined,
+    video_len: usize = 0,
+    report: [1024]u8 = undefined,
+    report_len: usize = 0,
+
+    fn of(context: ?*anyopaque) *RecordingEffects {
+        return @ptrCast(@alignCast(context.?));
+    }
+
+    fn inspect(context: *anyopaque, path: []const u8, _: *const std.atomic.Value(bool)) agent.FileDeliveryInspection {
+        const self = of(context);
+        @memcpy(self.inspected[0..path.len], path);
+        self.inspected_len = path.len;
+        return .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(1) } };
+    }
+
+    fn readCredential(_: *anyopaque, buffer: []u8) ?usize {
+        const key = "renewed-key";
+        @memcpy(buffer[0..key.len], key);
+        return key.len;
+    }
+
+    fn perform(
+        context: ?*anyopaque,
+        request: agent.CompletionHttpRequest,
+        _: *const agent.ImageGenerationCancellation,
+        buffer: []u8,
+    ) agent.CompletionTransportError!agent.CompletionTransportResponse {
+        const self = of(context);
+        for (request.headers) |header| if (header.sensitive) {
+            self.sensitive_headers += 1;
+        };
+        if (std.mem.endsWith(u8, request.url, "/report")) {
+            @memcpy(self.report[0..request.body.len], request.body);
+            self.report_len = request.body.len;
+            return .{ .status = 204, .body = buffer[0..0] };
+        }
+        if (request.stream) |receiver| {
+            var reader = std.Io.Reader.fixed("MP4BYTES");
+            receiver.receive_fn(receiver.context, "video/mp4", 8, &reader);
+            return .{ .status = 200, .body = buffer[0..0] };
+        }
+        const body = "{\"ok\":1}";
+        @memcpy(buffer[0..body.len], body);
+        return .{ .status = 200, .body = buffer[0..body.len] };
+    }
+
+    fn commitImage(context: *anyopaque, bytes: []const u8, format: agent.ImageGenerationFormat, _: *const agent.ImageGenerationCancellation) agent.ImageGenerationOutputResult {
+        const self = of(context);
+        @memcpy(self.image_bytes[0..bytes.len], bytes);
+        self.image_len = bytes.len;
+        return .{ .saved = agent.ImageGenerationReceipt.init("images/a.png", bytes.len, format) catch unreachable };
+    }
+
+    fn commitVideo(context: *anyopaque, reader: *std.Io.Reader, _: ?u64, _: *const agent.ImageGenerationCancellation) agent.VideoGenerationOutcome {
+        const self = of(context);
+        self.video_len = reader.readSliceShort(&self.video_bytes) catch 0;
+        return .{ .saved = agent.VideoGenerationReceipt.init("videos/a.mp4", 1024) catch unreachable };
+    }
+};
+
+test "a Run's file delivery, image and video effects stay with the Host and are reached by calling back" {
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try startOwner(&owner, &wake, &.{ fixture, "--with-runtime", "--exercise-effects" }, fixture_message_limits, null);
+    defer owner.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const port = owner.runtimePort();
+    const route = try port.createSessionRoute(.{
+        .task_id = 1,
+        .binding_epoch = 1,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = .anthropic_messages,
+                .base_url = "",
+                .model = "fixture-model",
+            },
+            .credential = "fixture-secret",
+        },
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .canonical_user_home = root,
+        .workspace_epoch = "",
+    });
+
+    var effects: RecordingEffects = .{};
+    const reader: agent.ImageGenerationCredentialReader = .{ .context = &effects, .read_fn = RecordingEffects.readCredential };
+    const transport: agent.CompletionTransport = .{ .context = &effects, .perform_fn = RecordingEffects.perform };
+    const prepared = route.session.prepareRunWithTools(.{ .text = "hello" }, .{
+        .binding = .{
+            .endpoint = "https://media.example.test/v1/images/generations",
+            .source = "fixture-source",
+            .model = "fixture-image",
+            .credential = "first-key",
+            .credential_reader = reader,
+            .output = .{ .context = &effects, .commit_fn = RecordingEffects.commitImage },
+        },
+        .transport = transport,
+    }, .{ .context = &effects, .inspect_fn = RecordingEffects.inspect }, null, .{
+        .endpoint = "https://media.example.test/v1/videos",
+        .source = "fixture-source",
+        .model = "fixture-video",
+        .credential = reader,
+        .transport = transport,
+        .output = .{ .context = &effects, .commit_fn = RecordingEffects.commitVideo },
+    });
+
+    const run_id = prepared catch |err| {
+        std.debug.print("prepare: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    // Cancelled, the fixture's execution half uses each effect first.
+    try route.session.cancelPreparedRun(run_id);
+
+    // What the execution half got back from each effect, as it reported it.
+    try std.testing.expectEqualStrings(
+        "inspect=verified:42;image_credential=renewed-key;image_http=200:{\"ok\":1};image_saved=images/a.png;" ++
+            "video_credential=renewed-key;video_stream=MP4BYTES;video_saved=videos/a.mp4:1024;",
+        effects.report[0..effects.report_len],
+    );
+    // And what reached the Host's.
+    try std.testing.expectEqualStrings("out/report.txt", effects.inspected[0..effects.inspected_len]);
+    try std.testing.expectEqualStrings("PNGBYTES", effects.image_bytes[0..effects.image_len]);
+    try std.testing.expectEqualStrings("MP4BYTES", effects.video_bytes[0..effects.video_len]);
+    try std.testing.expectEqual(@as(u32, 1), effects.sensitive_headers);
+
+    try std.testing.expect(route.session.closeOutcome(.session_close) == .closed);
+    try port.releaseClosedSession(route.session);
+}

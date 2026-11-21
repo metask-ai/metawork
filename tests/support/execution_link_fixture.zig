@@ -28,6 +28,10 @@
 //!   * `--hang-shutdown` -- the Runtime's shutdown never returns, so only the
 //!     exit deadline can end the process.
 //!   * `--session-id-floor=<n>` -- as the application passes it.
+//!   * `--exercise-effects` -- when a Run prepared with file delivery, image
+//!     or video effects is cancelled, use each the way the tools do first,
+//!     and report what came back in a last request on the video transport,
+//!     so the UI half can check both sides.
 //!   * `--no-runtime` -- the Agent Runtime cannot be created, so the process
 //!     ends right after agreeing on identity, every time it is started.
 //!   * `--exercise-mcp` -- before applying an MCP configuration, drive each
@@ -56,6 +60,7 @@ pub const hang_shutdown_flag = "--hang-shutdown";
 pub const session_floor_flag = "--session-id-floor=";
 pub const exercise_mcp_flag = "--exercise-mcp";
 pub const no_runtime_flag = "--no-runtime";
+pub const exercise_effects_flag = "--exercise-effects";
 
 const Flags = struct {
     ignore_eof: bool = false,
@@ -68,6 +73,7 @@ const Flags = struct {
     hang_shutdown: bool = false,
     exercise_mcp: bool = false,
     no_runtime: bool = false,
+    exercise_effects: bool = false,
     session_id_floor: u64 = 0,
 };
 
@@ -86,6 +92,7 @@ fn readFlags(init: std.process.Init) Flags {
         if (std.mem.eql(u8, argument, hang_shutdown_flag)) flags.hang_shutdown = true;
         if (std.mem.eql(u8, argument, exercise_mcp_flag)) flags.exercise_mcp = true;
         if (std.mem.eql(u8, argument, no_runtime_flag)) flags.no_runtime = true;
+        if (std.mem.eql(u8, argument, exercise_effects_flag)) flags.exercise_effects = true;
         if (std.mem.startsWith(u8, argument, checkpoint_bytes_flag))
             flags.checkpoint_bytes = std.fmt.parseInt(usize, argument[checkpoint_bytes_flag.len..], 10) catch null;
         if (std.mem.startsWith(u8, argument, session_floor_flag))
@@ -145,15 +152,145 @@ const FakeRuntime = struct {
         }) catch return null;
         self.runtime = runtime;
         var runtime_port = runtime.runtimePort();
-        if (self.flags.exercise_mcp) {
+        if (self.flags.exercise_mcp or self.flags.exercise_effects) {
             exercising_vtable = runtime_port.vtable.*;
-            exercising_vtable.apply_mcp_configuration = applyExercised;
+            if (self.flags.exercise_mcp) exercising_vtable.apply_mcp_configuration = applyExercised;
+            if (self.flags.exercise_effects) exercising_vtable.create_session_route = createExercised;
             runtime_port.vtable = &exercising_vtable;
         }
         return .{ .port = runtime_port, .context = self, .shutdown_fn = shutdown };
     }
 
     var exercising_vtable: agent.RuntimePort.VTable = undefined;
+    var exercising_session_vtable: agent.SessionPort.VTable = undefined;
+    var original_prepare: @FieldType(agent.SessionPort.VTable, "prepare_run_with_tools") = undefined;
+    var original_cancel: @FieldType(agent.SessionPort.VTable, "cancel_prepared_run") = undefined;
+    /// The effects of the Run last prepared, used when it is cancelled: by
+    /// then both halves know the Run, as they do whenever a tool runs.
+    var stashed_image: ?agent.ImageGenerationRunInput = null;
+    var stashed_delivery: ?agent.FileDeliveryInput = null;
+    var stashed_video: ?agent.VideoGenerationRunInput = null;
+
+    const CreateFn = @FieldType(agent.RuntimePort.VTable, "create_session_route");
+    const CreateResult = @typeInfo(@typeInfo(CreateFn).pointer.child).@"fn".return_type.?;
+
+    fn createExercised(context: ?*anyopaque, options: agent.SessionOpenOptions) CreateResult {
+        const runtime: *agent.Runtime = @ptrCast(@alignCast(context.?));
+        var route = try runtime.runtimePort().createSessionRoute(options);
+        exercising_session_vtable = route.session.vtable.*;
+        original_prepare = exercising_session_vtable.prepare_run_with_tools;
+        original_cancel = exercising_session_vtable.cancel_prepared_run;
+        exercising_session_vtable.prepare_run_with_tools = prepareExercised;
+        exercising_session_vtable.cancel_prepared_run = cancelExercised;
+        route.session.vtable = &exercising_session_vtable;
+        return route;
+    }
+
+    fn prepareExercised(
+        context: ?*anyopaque,
+        input: agent.RunInput,
+        image: ?agent.ImageGenerationRunInput,
+        delivery: ?agent.FileDeliveryInput,
+        mcp: ?agent.McpInstallationInput,
+        video: ?agent.VideoGenerationRunInput,
+    ) (agent.Error || std.mem.Allocator.Error)!u64 {
+        stashed_image = image;
+        stashed_delivery = delivery;
+        stashed_video = video;
+        return original_prepare(context, input, image, delivery, mcp, video);
+    }
+
+    fn cancelExercised(context: ?*anyopaque, run_id: u64) agent.Error!void {
+        var summary_storage: [1024]u8 = undefined;
+        var summary = std.Io.Writer.fixed(&summary_storage);
+        exerciseEffects(&summary, stashed_image, stashed_delivery, stashed_video) catch {};
+        if (stashed_video) |value| reportOver(value.transport, summary.buffered());
+        return original_cancel(context, run_id);
+    }
+
+    fn exerciseEffects(
+        summary: *std.Io.Writer,
+        image: ?agent.ImageGenerationRunInput,
+        delivery: ?agent.FileDeliveryInput,
+        video: ?agent.VideoGenerationRunInput,
+    ) !void {
+        var never: std.atomic.Value(bool) = .init(false);
+        if (delivery) |value| switch (value.inspect_fn(value.context, "out/report.txt", &never)) {
+            .verified => |verified| try summary.print("inspect=verified:{d};", .{verified.size_bytes}),
+            .failed => |failure| try summary.print("inspect={s};", .{@tagName(failure)}),
+        };
+        if (image) |value| {
+            var credential: [64]u8 = undefined;
+            const count = value.binding.credential_reader.?.read_fn(value.binding.credential_reader.?.context, &credential) orelse 0;
+            try summary.print("image_credential={s};", .{credential[0..count]});
+            var cancellation: agent.ImageGenerationCancellation = .{};
+            var body: [64]u8 = undefined;
+            const response = value.transport.perform(.{
+                .url = "http://127.0.0.1:1/v1/images/generations",
+                .headers = &.{.{ .name = "Authorization", .value = "Bearer image", .sensitive = true }},
+                .body = "{\"prompt\":\"x\"}",
+                .connect_timeout_ms = 1000,
+                .source = "fixture-source",
+            }, &cancellation, &body) catch |err| {
+                try summary.print("image_http={s};", .{@errorName(err)});
+                return;
+            };
+            try summary.print("image_http={d}:{s};", .{ response.status, response.body });
+            switch (value.binding.output.commit_fn(value.binding.output.context, "PNGBYTES", .png, &cancellation)) {
+                .saved => |receipt| try summary.print("image_saved={s};", .{receipt.path[0..receipt.path_len]}),
+                .failed => |failure| try summary.print("image_failed={s};", .{@tagName(failure.code)}),
+            }
+        }
+        if (video) |value| {
+            var credential: [64]u8 = undefined;
+            const count = value.credential.read_fn(value.credential.context, &credential) orelse 0;
+            try summary.print("video_credential={s};", .{credential[0..count]});
+            const Receiver = struct {
+                got: [64]u8 = undefined,
+                len: usize = 0,
+                fn receive(receiver_context: *anyopaque, content_type: ?[]const u8, length: ?u64, reader: *std.Io.Reader) void {
+                    const self: *@This() = @ptrCast(@alignCast(receiver_context));
+                    _ = content_type;
+                    _ = length;
+                    self.len = reader.readSliceShort(&self.got) catch 0;
+                }
+            };
+            var receiver: Receiver = .{};
+            var cancellation: agent.ImageGenerationCancellation = .{};
+            var body: [16]u8 = undefined;
+            _ = value.transport.perform(.{
+                .url = "http://127.0.0.1:1/v1/videos/1/content",
+                .headers = &.{},
+                .body = "",
+                .method = .get,
+                .stream = .{ .context = &receiver, .receive_fn = Receiver.receive },
+                .connect_timeout_ms = 1000,
+                .source = "fixture-source",
+            }, &cancellation, &body) catch |err| {
+                try summary.print("video_stream={s};", .{@errorName(err)});
+                return;
+            };
+            try summary.print("video_stream={s};", .{receiver.got[0..receiver.len]});
+            var reader = std.Io.Reader.fixed(receiver.got[0..receiver.len]);
+            switch (value.output.commit_fn(value.output.context, &reader, receiver.len, &cancellation)) {
+                .saved => |receipt| try summary.print("video_saved={s}:{d};", .{ receipt.path[0..receipt.path_len], receipt.size_bytes }),
+                .failed => |failure| try summary.print("video_failed={s};", .{@tagName(failure)}),
+            }
+        }
+    }
+
+    /// Hands what this half saw to the UI half as one more request.
+    fn reportOver(transport: agent.CompletionTransport, text: []const u8) void {
+        var cancellation: agent.ImageGenerationCancellation = .{};
+        var body: [16]u8 = undefined;
+        _ = transport.perform(.{
+            .url = "http://127.0.0.1:1/report",
+            .headers = &.{},
+            .body = text,
+            .connect_timeout_ms = 1000,
+            .source = "fixture-report",
+        }, &cancellation, &body) catch {};
+    }
 
     fn applyExercised(context: ?*anyopaque, input: *agent.McpRuntimeInput) (agent.Error || std.mem.Allocator.Error)!agent.McpConfigurationApplyOutcome {
         const runtime: *agent.Runtime = @ptrCast(@alignCast(context.?));

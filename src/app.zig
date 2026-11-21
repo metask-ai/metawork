@@ -378,16 +378,11 @@ const App = struct {
         // run() only reserves Product storage; Runtime.init above must finish
         // before installing capabilities that initialization would overwrite.
         control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
-        // Image and video generation and file delivery do not cross the link,
-        // so the development switch does not offer them.
-        if (agent_runtime != null) {
-            control_storage.setImageRunPreparation(models_management.imageRunPreparation());
-            control_storage.setVideoRunPreparation(models_management.videoRunPreparation());
-        }
+        control_storage.setImageRunPreparation(models_management.imageRunPreparation());
+        control_storage.setVideoRunPreparation(models_management.videoRunPreparation());
         control_storage.setMetaskAuthorizationCheck(models_management.metaskAuthorizationCheck());
         models_management.setCredentialRenewal(control_storage.metaskCredentialRenewal());
-        if (agent_runtime != null)
-            control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery, .validate_path_fn = output_file.validatePath });
+        control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery, .validate_path_fn = output_file.validatePath });
         control_storage.setOutputFileReveal(self.platform.outputFileReveal());
         control_storage.setOutputFileOpen(self.platform.outputFileOpen());
         control_storage.setOutputFileSave(self.platform.outputFileSave());
@@ -876,8 +871,7 @@ pub fn run(init: std.process.Init) !void {
         });
         app.execution = owner;
         std.log.warn(
-            "development switch " ++ execution_link_switch ++ ": AgentCore runs in a separate process; " ++
-                "skills, file delivery, MCP installation, image and video generation are not offered",
+            "development switch " ++ execution_link_switch ++ ": AgentCore runs in a separate process",
             .{},
         );
     };

@@ -109,6 +109,8 @@ pub const mcp = struct {
     pub const runtime = mcp_runtime;
     pub const connector = mcp_connector;
 };
+/// The HTTP transport a media tool performs its requests through.
+pub const http_transport = image_http;
 pub const McpActivation = mcp_catalog.Activation;
 pub const McpActivationOutcome = surface.McpActivationOutcome;
 pub const McpActivationTool = mcp_catalog.ActivationTool;

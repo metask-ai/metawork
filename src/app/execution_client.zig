@@ -550,7 +550,7 @@ const Generation = struct {
         // Whatever this process asked for is no longer wanted.
         self.calls_mutex.lockUncancelable(self.owner.io);
         var callbacks = self.callbacks.valueIterator();
-        while (callbacks.next()) |callback| callback.*.cancelled.store(true, .release);
+        while (callbacks.next()) |callback| callback.*.withdraw();
         self.calls_mutex.unlock(self.owner.io);
         const owner = self.owner;
         owner.mutex.lockUncancelable(owner.io);
@@ -779,7 +779,7 @@ fn deliverFrame(context: ?*anyopaque, kind: agent_link.Kind, correlation: u64, b
                 .pong => self.answered_ns.store(now(owner.io), .release),
                 .cancel => |target| {
                     self.calls_mutex.lockUncancelable(owner.io);
-                    if (self.callbacks.get(target)) |callback| callback.cancelled.store(true, .release);
+                    if (self.callbacks.get(target)) |callback| callback.withdraw();
                     self.calls_mutex.unlock(owner.io);
                 },
                 .credit, .ping => return .stop,
@@ -808,7 +808,14 @@ fn deliverFrame(context: ?*anyopaque, kind: agent_link.Kind, correlation: u64, b
 fn buildEvent(allocator: std.mem.Allocator, value: rpc.Event) !contract.OwnedCoreEvent {
     const json = try allocator.dupe(u8, value.json);
     errdefer allocator.free(json);
+    const image_path = if (value.generated_image_path) |path| try allocator.dupe(u8, path) else null;
+    errdefer if (image_path) |path| allocator.free(path);
+    const video_path = if (value.generated_video_path) |path| try allocator.dupe(u8, path) else null;
+    errdefer if (video_path) |path| allocator.free(path);
     return .{
+        .generated_image_path = image_path,
+        .generated_video_path = video_path,
+        .delivered_file = value.delivered_file,
         .session_id = value.session_id,
         .run_id = value.run_id,
         .encoded_bytes = @intCast(value.encoded_bytes),
@@ -854,6 +861,29 @@ const Callback = struct {
     correlation: u64,
     bytes: []u8,
     cancelled: std.atomic.Value(bool) = .init(false),
+    /// An HTTP effect's cancellation while one runs, under `calls_mutex`:
+    /// a withdrawal requests it, which also signals its transport.
+    http_cancellation: ?*contract.http_transport.Cancellation = null,
+
+    fn withdraw(self: *Callback) void {
+        self.cancelled.store(true, .release);
+        if (self.http_cancellation) |value| value.request();
+    }
+
+    fn watchHttp(self: *Callback, value: *contract.http_transport.Cancellation) void {
+        const generation = self.generation;
+        generation.calls_mutex.lockUncancelable(generation.owner.io);
+        defer generation.calls_mutex.unlock(generation.owner.io);
+        self.http_cancellation = value;
+        if (self.cancelled.load(.acquire)) value.request();
+    }
+
+    fn unwatchHttp(self: *Callback) void {
+        const generation = self.generation;
+        generation.calls_mutex.lockUncancelable(generation.owner.io);
+        defer generation.calls_mutex.unlock(generation.owner.io);
+        self.http_cancellation = null;
+    }
 
     fn cancellation(self: *Callback) mcp_connector.Cancellation {
         return .{ .context = self, .is_cancelled_fn = isCancelled };
@@ -1053,6 +1083,50 @@ fn performCallback(
             if (installationOf(generation, handle)) |installation| installation.wake_fn(installation.context);
             return rpc.encodeOk(method, allocator, {}) catch null;
         },
+        .delivery_inspect => {
+            const effects = effectsOf(generation, handle, request.run_id);
+            const input = (if (effects) |value| value.delivery else null) orelse
+                return rpc.encodeOk(method, allocator, .{ .failed = .unavailable }) catch null;
+            return rpc.encodeOk(method, allocator, input.inspect_fn(input.context, request.path, &callback.cancelled)) catch null;
+        },
+        .media_credential_read => {
+            const effects = effectsOf(generation, handle, request.run_id);
+            const reader: ?contract.ImageGenerationCredentialReader = if (effects) |value| switch (request.tool) {
+                .image => if (value.image) |image| image.binding.credential_reader else null,
+                .video => if (value.video) |video| video.credential else null,
+            } else null;
+            const source = reader orelse return rpc.encodeOk(method, allocator, null) catch null;
+            const buffer = allocator.alloc(u8, request.capacity) catch return rpc.encodeOk(method, allocator, null) catch null;
+            defer {
+                std.crypto.secureZero(u8, buffer);
+                allocator.free(buffer);
+            }
+            const count = source.read_fn(source.context, buffer) orelse return rpc.encodeOk(method, allocator, null) catch null;
+            if (count > buffer.len) return rpc.encodeOk(method, allocator, null) catch null;
+            return rpc.encodeOk(method, allocator, buffer[0..count]) catch null;
+        },
+        .media_perform => return performMedia(callback, handle, request) catch null,
+        .image_commit => {
+            const effects = effectsOf(generation, handle, request.run_id);
+            const image = (if (effects) |value| value.image else null) orelse
+                return rpc.encodeOk(method, allocator, .{ .failed = .{ .code = .unavailable } }) catch null;
+            var cancellation: contract.http_transport.Cancellation = .{};
+            callback.watchHttp(&cancellation);
+            defer callback.unwatchHttp();
+            const output = image.binding.output;
+            return rpc.encodeOk(method, allocator, output.commit_fn(output.context, request.bytes, request.format, &cancellation)) catch null;
+        },
+        .video_commit => {
+            const effects = effectsOf(generation, handle, request.run_id);
+            const video = (if (effects) |value| value.video else null) orelse
+                return rpc.encodeOk(method, allocator, .{ .failed = .output_failed }) catch null;
+            var cancellation: contract.http_transport.Cancellation = .{};
+            callback.watchHttp(&cancellation);
+            defer callback.unwatchHttp();
+            var reader = std.Io.Reader.fixed(request.bytes);
+            const output = video.output;
+            return rpc.encodeOk(method, allocator, output.commit_fn(output.context, &reader, request.length, &cancellation)) catch null;
+        },
         .mcp_release => {
             generation.calls_mutex.lockUncancelable(io);
             const transport = generation.transports.get(handle) orelse {
@@ -1067,6 +1141,100 @@ fn performCallback(
             return rpc.encodeOk(method, allocator, {}) catch null;
         },
     }
+}
+
+/// The effects the Run `run_id` of the Session named by `handle` was given,
+/// as long as the Run is not over.
+fn effectsOf(generation: *Generation, handle: u64, run_id: u64) ?RunEffects {
+    const owner = generation.owner;
+    owner.mutex.lockUncancelable(owner.io);
+    defer owner.mutex.unlock(owner.io);
+    for (generation.sessions.items) |remote| {
+        if (remote.handle != handle) continue;
+        remote.mutex.lockUncancelable(owner.io);
+        defer remote.mutex.unlock(owner.io);
+        return remote.effects.get(run_id);
+    }
+    return null;
+}
+
+/// A streamed response, read whole for the Run's receiver.
+const StreamCapture = struct {
+    allocator: std.mem.Allocator,
+    limit: usize,
+    received: bool = false,
+    content_type: ?[]u8 = null,
+    content_length: ?u64 = null,
+    bytes: []u8 = &.{},
+    failed: bool = false,
+
+    fn receive(context: *anyopaque, content_type: ?[]const u8, content_length: ?u64, reader: *std.Io.Reader) void {
+        const self: *StreamCapture = @ptrCast(@alignCast(context));
+        self.received = true;
+        self.content_length = content_length;
+        self.content_type = if (content_type) |value| self.allocator.dupe(u8, value) catch {
+            self.failed = true;
+            return;
+        } else null;
+        self.bytes = reader.allocRemaining(self.allocator, .limited(self.limit)) catch {
+            self.failed = true;
+            return;
+        };
+    }
+
+    fn deinit(self: *StreamCapture) void {
+        if (self.content_type) |value| self.allocator.free(value);
+        self.allocator.free(self.bytes);
+    }
+};
+
+/// One media HTTP request, performed by the transport Product prepared, with
+/// what it streamed read whole so the answer can carry it.
+fn performMedia(callback: *Callback, handle: u64, request: rpc.Request(rpc.Callback.media_perform)) std.mem.Allocator.Error![]u8 {
+    const generation = callback.generation;
+    const owner = generation.owner;
+    const allocator = owner.allocator;
+    const method = rpc.Callback.media_perform;
+    const effects = effectsOf(generation, handle, request.run_id);
+    const transport: contract.http_transport.Transport = (if (effects) |value| switch (request.tool) {
+        .image => if (value.image) |image| image.transport else null,
+        .video => if (value.video) |video| video.transport else null,
+    } else null) orelse return rpc.encodeOk(method, allocator, .{ .failure = .Unexpected });
+    // What one answer can carry, less room for the rest of it.
+    const limit = owner.options.message_limits.response -| 64 * 1024;
+    var capture: StreamCapture = .{ .allocator = allocator, .limit = limit };
+    defer capture.deinit();
+    const buffer = try allocator.alloc(u8, @min(request.response_capacity, limit));
+    defer allocator.free(buffer);
+    var cancellation = contract.http_transport.Cancellation.init(transport);
+    callback.watchHttp(&cancellation);
+    defer callback.unwatchHttp();
+    const wire = request.request;
+    const response = transport.perform(.{
+        .url = wire.url,
+        .headers = wire.headers,
+        .body = wire.body,
+        .method = wire.method,
+        .stream = if (wire.streams) .{ .context = &capture, .receive_fn = StreamCapture.receive } else null,
+        .connect_timeout_ms = wire.connect_timeout_ms,
+        .source = wire.source,
+    }, &cancellation, buffer) catch |err| {
+        const failure: rpc.HttpFailure = switch (err) {
+            inline else => |tag| @field(rpc.HttpFailure, @errorName(tag)),
+        };
+        return rpc.encodeOk(method, allocator, .{ .failure = failure });
+    };
+    if (capture.failed or capture.bytes.len >= limit and capture.received)
+        return rpc.encodeOk(method, allocator, .{ .failure = .ResponseTooLarge });
+    return rpc.encodeOk(method, allocator, .{ .response = .{
+        .status = response.status,
+        .body = response.body,
+        .stream = if (capture.received) .{
+            .content_type = capture.content_type,
+            .content_length = capture.content_length,
+            .bytes = capture.bytes,
+        } else null,
+    } });
 }
 
 /// The installation capability the Session named by `handle` gave its Runs.
@@ -1201,6 +1369,9 @@ const RemoteSession = struct {
     /// The skill catalog it is bound with, held for as long as it is: in
     /// process the Session holds its lease the same way.
     skill_lease: ?*RemoteLease = null,
+    /// Each prepared Run's file delivery and media effects, which its
+    /// callbacks reach, until the Run is over. Under `mutex`.
+    effects: std.AutoHashMapUnmanaged(u64, RunEffects) = .empty,
 
     fn io(self: *RemoteSession) std.Io {
         return self.generation.owner.io;
@@ -1237,7 +1408,15 @@ const RemoteSession = struct {
     fn destroy(self: *RemoteSession, allocator: std.mem.Allocator) void {
         if (self.workspace_root) |value| allocator.free(value);
         if (self.skill_lease) |lease| lease.release();
+        self.effects.deinit(allocator);
         allocator.destroy(self);
+    }
+
+    /// The Run is over, or will never start; Product releases its effects.
+    fn dropEffects(self: *RemoteSession, run_id: u64) void {
+        self.mutex.lockUncancelable(self.io());
+        defer self.mutex.unlock(self.io());
+        _ = self.effects.remove(run_id);
     }
 
     /// Now bound with `lease`, or with none; the reference moves in.
@@ -2059,8 +2238,21 @@ fn sessionRequestTermination(context: ?*anyopaque, run_id: u64, signal: control.
 }
 
 fn sessionPrepareRun(context: ?*anyopaque, input: surface.RunInput) Allocating!u64 {
-    return sessionCall(remoteOf(context), .prepare_run, Allocating, .{ .input = input, .mcp_installation = null });
+    return sessionCall(remoteOf(context), .prepare_run, Allocating, .{
+        .input = input,
+        .mcp_installation = null,
+        .image = null,
+        .video = null,
+        .delivery = false,
+    });
 }
+
+/// A Run's effects that stay with the Host, by what Product prepared.
+const RunEffects = struct {
+    image: ?surface.ImageGenerationRunInput,
+    video: ?contract.VideoGenerationRunInput,
+    delivery: ?contract.FileDeliveryInput,
+};
 
 fn sessionPrepareRunWithTools(
     context: ?*anyopaque,
@@ -2070,24 +2262,38 @@ fn sessionPrepareRunWithTools(
     mcp: ?contract.McpInstallationInput,
     video: ?contract.VideoGenerationRunInput,
 ) Allocating!u64 {
-    // None of these three is composed when this link is in use, so a Run
-    // that carries one was composed against a different Runtime.
-    if (image != null or delivery != null or video != null) {
-        std.log.warn("execution link: a Run asked for a tool this link does not carry", .{});
-        return error.DependencyUnreachable;
-    }
     const remote = remoteOf(context);
-    const installation = mcp orelse return sessionPrepareRun(context, input);
-    {
-        const owner = remote.generation.owner;
+    const owner = remote.generation.owner;
+    if (mcp) |installation| {
         owner.mutex.lockUncancelable(owner.io);
         defer owner.mutex.unlock(owner.io);
         remote.installation = installation;
     }
-    return sessionCall(remote, .prepare_run, Allocating, .{
+    const has_effects = image != null or video != null or delivery != null;
+    if (has_effects) {
+        remote.mutex.lockUncancelable(remote.io());
+        defer remote.mutex.unlock(remote.io());
+        try remote.effects.ensureUnusedCapacity(owner.allocator, 1);
+    }
+    const run_id = try sessionCall(remote, .prepare_run, Allocating, .{
         .input = input,
-        .mcp_installation = .{ .task_id = installation.task_id },
+        .mcp_installation = if (mcp) |installation| .{ .task_id = installation.task_id } else null,
+        .image = if (image) |value| .{
+            .endpoint = value.binding.endpoint,
+            .source = value.binding.source,
+            .model = value.binding.model,
+            .credential = value.binding.credential,
+            .renews_credential = value.binding.credential_reader != null,
+        } else null,
+        .video = if (video) |value| .{ .endpoint = value.endpoint, .source = value.source, .model = value.model } else null,
+        .delivery = delivery != null,
     });
+    if (has_effects) {
+        remote.mutex.lockUncancelable(remote.io());
+        defer remote.mutex.unlock(remote.io());
+        remote.effects.putAssumeCapacity(run_id, .{ .image = image, .video = video, .delivery = delivery });
+    }
+    return run_id;
 }
 
 const gone_begin_run: port.BeginRunOutcome = .{ .failure = .{
@@ -2121,6 +2327,7 @@ fn sessionBeginRunOutcome(context: ?*anyopaque, run_id: u64) port.BeginRunOutcom
 
 fn sessionCancelPreparedRun(context: ?*anyopaque, run_id: u64) Error!void {
     const remote = remoteOf(context);
+    defer remote.dropEffects(run_id);
     // A Run prepared in a process that is gone is cancelled with it.
     if (remote.lost()) return;
     sessionCall(remote, .cancel_prepared_run, Error, .{ .run_id = run_id }) catch |err| {
@@ -2302,6 +2509,9 @@ fn goneTerminal(allocator: std.mem.Allocator) control.TerminalResult {
 fn runExecute(context: ?*anyopaque, run_id: u64, generation: u64) control.TerminalResult {
     const remote = remoteOf(context);
     const allocator = remote.generation.owner.allocator;
+    // Whatever the outcome, the Run is over when this returns, and Product
+    // releases the effects it was given.
+    defer remote.dropEffects(run_id);
     var reply = call(remote.generation, .run_execute, remote.handle, .{
         .run_id = run_id,
         .generation = generation,

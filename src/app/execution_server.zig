@@ -260,6 +260,9 @@ const Entry = struct {
     /// What a Run of this Session hands the Host an MCP installation
     /// through, by calling back. Lives as long as the Session.
     installation: Installation = undefined,
+    /// The file delivery and media stand-ins of prepared Runs, until the Run
+    /// is over. Under the registry's lock.
+    effects: std.AutoHashMapUnmanaged(u64, *RunEffects) = .empty,
     uses: u32 = 0,
     removed: bool = false,
 };
@@ -371,7 +374,24 @@ const Registry = struct {
 
     fn destroy(self: *Registry, entry: *Entry) void {
         entry.runs.deinit(self.allocator);
+        var effects = entry.effects.valueIterator();
+        while (effects.next()) |value| value.*.destroy();
+        entry.effects.deinit(self.allocator);
         self.allocator.destroy(entry);
+    }
+
+    fn putEffects(self: *Registry, entry: *Entry, run_id: u64, effects: *RunEffects) std.mem.Allocator.Error!void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        try entry.effects.put(self.allocator, run_id, effects);
+    }
+
+    /// The Run is over, or will never start: its stand-ins go.
+    fn dropEffects(self: *Registry, entry: *Entry, run_id: u64) void {
+        self.mutex.lockUncancelable(self.io);
+        const removed = entry.effects.fetchRemove(run_id);
+        self.mutex.unlock(self.io);
+        if (removed) |value| value.value.destroy();
     }
 
     fn reserveRun(self: *Registry, entry: *Entry) std.mem.Allocator.Error!void {
@@ -772,11 +792,37 @@ fn answerSession(
         .rewind_to_user_message => reply(self, method, session.rewindToUserMessage(request.position)),
         .update_credential => reply(self, method, session.updateCredential(request.credential)),
         .request_termination => reply(self, method, session.requestTermination(request.run_id, request.signal)),
-        .prepare_run => reply(self, method, if (request.mcp_installation) |installation|
-            session.prepareRunWithTools(request.input, null, null, entry.installation.input(installation.task_id), null)
-        else
-            session.prepareRun(request.input)),
-        .cancel_prepared_run => reply(self, method, session.cancelPreparedRun(request.run_id)),
+        .prepare_run => prepared: {
+            const installation: ?contract.McpInstallationInput = if (request.mcp_installation) |value|
+                entry.installation.input(value.task_id)
+            else
+                null;
+            if (request.image == null and request.video == null and !request.delivery) {
+                break :prepared reply(self, method, if (installation) |value|
+                    session.prepareRunWithTools(request.input, null, null, value, null)
+                else
+                    session.prepareRun(request.input));
+            }
+            const effects = RunEffects.create(self, entry, request.image, request.video) catch self.fail(.resource_unavailable);
+            const run_id = session.prepareRunWithTools(
+                request.input,
+                if (request.image != null) effects.imageInput() else null,
+                if (request.delivery) effects.deliveryInput() else null,
+                installation,
+                if (request.video != null) effects.videoInput() else null,
+            ) catch |err| {
+                effects.destroy();
+                break :prepared replyError(self, err);
+            };
+            effects.run_id = run_id;
+            self.registry.putEffects(entry, run_id, effects) catch self.fail(.resource_unavailable);
+            break :prepared reply(self, method, run_id);
+        },
+        .cancel_prepared_run => cancelled: {
+            session.cancelPreparedRun(request.run_id) catch |err| break :cancelled replyError(self, err);
+            self.registry.dropEffects(entry, request.run_id);
+            break :cancelled reply(self, method, {});
+        },
         .prepare_compact => reply(self, method, session.prepareCompact()),
         .cancel_prepared_compact => reply(self, method, session.cancelPreparedCompact(request.operation_id)),
         .request_compact_cancellation => reply(self, method, session.requestCompactCancellation(request.operation_id, request.interruption)),
@@ -857,6 +903,7 @@ fn answerSession(
             var result = run.execute();
             run.deinit();
             defer result.deinit();
+            self.registry.dropEffects(entry, request.run_id);
             break :executed reply(self, method, shapes.TerminalResult.from(&result));
         },
         .run_submit_input => submitted: {
@@ -981,13 +1028,42 @@ fn CallbackReply(comptime callback: rpc.Callback) type {
 const Withdrawal = struct {
     server: *Server,
     correlation: u64,
-    cancellation: mcp_connector.Cancellation,
+    signal: Withdrawn,
 
     fn poll(context: ?*anyopaque) bool {
         const self: *Withdrawal = @ptrCast(@alignCast(context.?));
-        if (!self.cancellation.isCancelled()) return false;
+        if (!self.signal.poll_fn(self.signal.context)) return false;
         sendControl(self.server, .{ .cancel = self.correlation });
         return true;
+    }
+};
+
+/// What says the caller of a callback no longer wants it: an MCP
+/// cancellation, an HTTP one, or a delivery's flag, each read as it is.
+const Withdrawn = struct {
+    context: ?*const anyopaque,
+    poll_fn: *const fn (?*const anyopaque) bool,
+
+    fn mcp(cancellation: mcp_connector.Cancellation) Withdrawn {
+        return .{ .context = cancellation.context, .poll_fn = cancellation.is_cancelled_fn };
+    }
+
+    fn http(cancellation: *const contract.http_transport.Cancellation) Withdrawn {
+        return .{ .context = cancellation, .poll_fn = struct {
+            fn poll(context: ?*const anyopaque) bool {
+                const value: *const contract.http_transport.Cancellation = @ptrCast(@alignCast(context.?));
+                return value.isRequested();
+            }
+        }.poll };
+    }
+
+    fn flag(value: *const std.atomic.Value(bool)) Withdrawn {
+        return .{ .context = value, .poll_fn = struct {
+            fn poll(context: ?*const anyopaque) bool {
+                const set: *const std.atomic.Value(bool) = @ptrCast(@alignCast(context.?));
+                return set.load(.acquire);
+            }
+        }.poll };
     }
 };
 
@@ -997,7 +1073,7 @@ fn callBack(
     comptime callback: rpc.Callback,
     handle: u64,
     request: rpc.Request(callback),
-    cancellation: ?mcp_connector.Cancellation,
+    withdrawn: ?Withdrawn,
 ) ?CallbackReply(callback) {
     const bytes = rpc.encodeRequest(callback, self.allocator, handle, request) catch self.fail(.resource_unavailable);
     defer {
@@ -1011,8 +1087,8 @@ fn callBack(
         return null;
     }
     var withdrawal: Withdrawal = undefined;
-    const claimed = if (cancellation) |value| watched: {
-        withdrawal = .{ .server = self, .correlation = correlation, .cancellation = value };
+    const claimed = if (withdrawn) |value| watched: {
+        withdrawal = .{ .server = self, .correlation = correlation, .signal = value };
         break :watched self.callbacks.claimWatching(correlation, .fromMilliseconds(cancellation_poll_ms), .{
             .context = &withdrawal,
             .poll_fn = Withdrawal.poll,
@@ -1097,7 +1173,7 @@ const RemoteTransport = struct {
             .bytes = bytes,
             .timeout_ms = timeout_ms,
             .tool = tool,
-        }, cancellation) orelse return .{ .failure = .child_exit };
+        }, .mcp(cancellation)) orelse return .{ .failure = .child_exit };
         defer answer.deinit();
         return switch (answer.value) {
             .failure => |failure| .{ .failure = failure },
@@ -1124,7 +1200,7 @@ const RemoteTransport = struct {
         var answer = callBack(connection.transport.server, .mcp_notify, connection.id, .{
             .bytes = bytes,
             .timeout_ms = timeout_ms,
-        }, cancellation) orelse return .child_exit;
+        }, .mcp(cancellation)) orelse return .child_exit;
         defer answer.deinit();
         return answer.value;
     }
@@ -1151,6 +1227,200 @@ const RemoteTransport = struct {
             value.deinit();
         }
         half.allocator.destroy(self);
+    }
+};
+
+/// A prepared Run's file delivery and media effects, standing in for the
+/// Host's: each call goes to the UI half, which holds the real ones for the
+/// Run. The strings the Run borrows live here until it is over.
+const RunEffects = struct {
+    server: *Server,
+    handle: u64,
+    run_id: u64 = 0,
+    arena: std.heap.ArenaAllocator,
+    image: ?rpc.ImageRun = null,
+    video: ?rpc.VideoRun = null,
+    image_side: Side = .{ .tool = .image },
+    video_side: Side = .{ .tool = .video },
+
+    /// One tool's view, so a callback knows which tool's effect it is.
+    const Side = struct {
+        tool: rpc.MediaTool,
+        effects: *RunEffects = undefined,
+    };
+
+    fn create(half: *Server, entry: *Entry, image: ?rpc.ImageRun, video: ?rpc.VideoRun) std.mem.Allocator.Error!*RunEffects {
+        const self = try half.allocator.create(RunEffects);
+        errdefer half.allocator.destroy(self);
+        self.* = .{ .server = half, .handle = entry.installation.handle, .arena = .init(half.allocator) };
+        errdefer self.arena.deinit();
+        self.image_side.effects = self;
+        self.video_side.effects = self;
+        const arena = self.arena.allocator();
+        if (image) |value| self.image = .{
+            .endpoint = try arena.dupe(u8, value.endpoint),
+            .source = try arena.dupe(u8, value.source),
+            .model = try arena.dupe(u8, value.model),
+            .credential = try arena.dupe(u8, value.credential),
+            .renews_credential = value.renews_credential,
+        };
+        if (video) |value| self.video = .{
+            .endpoint = try arena.dupe(u8, value.endpoint),
+            .source = try arena.dupe(u8, value.source),
+            .model = try arena.dupe(u8, value.model),
+        };
+        return self;
+    }
+
+    fn destroy(self: *RunEffects) void {
+        if (self.image) |value| std.crypto.secureZero(u8, @constCast(value.credential));
+        const allocator = self.server.allocator;
+        self.arena.deinit();
+        allocator.destroy(self);
+    }
+
+    fn imageInput(self: *RunEffects) contract.surface.ImageGenerationRunInput {
+        const value = self.image.?;
+        return .{
+            .binding = .{
+                .endpoint = value.endpoint,
+                .source = value.source,
+                .model = value.model,
+                .credential = value.credential,
+                .credential_reader = if (value.renews_credential)
+                    .{ .context = &self.image_side, .read_fn = readCredential }
+                else
+                    null,
+                .output = .{ .context = self, .commit_fn = commitImage },
+            },
+            .transport = .{ .context = &self.image_side, .perform_fn = perform },
+        };
+    }
+
+    fn videoInput(self: *RunEffects) contract.generate_video.Input {
+        const value = self.video.?;
+        return .{
+            .endpoint = value.endpoint,
+            .source = value.source,
+            .model = value.model,
+            .credential = .{ .context = &self.video_side, .read_fn = readCredential },
+            .transport = .{ .context = &self.video_side, .perform_fn = perform },
+            .output = .{ .context = self, .commit_fn = commitVideo },
+        };
+    }
+
+    fn deliveryInput(self: *RunEffects) contract.FileDeliveryInput {
+        return .{ .context = self, .inspect_fn = inspect };
+    }
+
+    fn sideOf(context: ?*anyopaque) *Side {
+        return @ptrCast(@alignCast(context.?));
+    }
+
+    fn readCredential(context: *anyopaque, buffer: []u8) ?usize {
+        const side = sideOf(context);
+        const self = side.effects;
+        var answer = callBack(self.server, .media_credential_read, self.handle, .{
+            .run_id = self.run_id,
+            .tool = side.tool,
+            .capacity = std.math.cast(u32, buffer.len) orelse std.math.maxInt(u32),
+        }, null) orelse return null;
+        defer answer.deinit();
+        const bytes = answer.value orelse return null;
+        if (bytes.len > buffer.len) return null;
+        @memcpy(buffer[0..bytes.len], bytes);
+        return bytes.len;
+    }
+
+    fn perform(
+        context: ?*anyopaque,
+        request: contract.http_transport.HttpRequest,
+        cancellation: *const contract.http_transport.Cancellation,
+        response_buffer: []u8,
+    ) contract.http_transport.Error!contract.http_transport.Response {
+        const side = sideOf(context);
+        const self = side.effects;
+        var answer = callBack(self.server, .media_perform, self.handle, .{
+            .run_id = self.run_id,
+            .tool = side.tool,
+            .request = .{
+                .url = request.url,
+                .headers = request.headers,
+                .body = request.body,
+                .method = request.method,
+                .streams = request.stream != null,
+                .connect_timeout_ms = request.connect_timeout_ms,
+                .source = request.source,
+            },
+            .response_capacity = response_buffer.len,
+        }, .http(cancellation)) orelse return error.Unexpected;
+        defer answer.deinit();
+        const response = switch (answer.value) {
+            .failure => |failure| return httpError(failure),
+            .response => |value| value,
+        };
+        if (response.body.len > response_buffer.len) return error.ResponseTooLarge;
+        @memcpy(response_buffer[0..response.body.len], response.body);
+        // The Host read the stream whole; the Run's receiver reads it now,
+        // as it would have while the request was in flight.
+        if (response.stream) |stream| if (request.stream) |receiver| {
+            var reader = std.Io.Reader.fixed(stream.bytes);
+            receiver.receive_fn(receiver.context, stream.content_type, stream.content_length, &reader);
+        };
+        return .{ .status = response.status, .body = response_buffer[0..response.body.len] };
+    }
+
+    fn httpError(failure: rpc.HttpFailure) contract.http_transport.Error {
+        return switch (failure) {
+            inline else => |tag| @field(contract.http_transport.Error, @tagName(tag)),
+        };
+    }
+
+    fn commitImage(
+        context: *anyopaque,
+        bytes: []const u8,
+        format: contract.image_generation.Format,
+        cancellation: *const contract.http_transport.Cancellation,
+    ) contract.image_generation.OutputResult {
+        const self: *RunEffects = @ptrCast(@alignCast(context));
+        var answer = callBack(self.server, .image_commit, self.handle, .{
+            .run_id = self.run_id,
+            .bytes = bytes,
+            .format = format,
+        }, .http(cancellation)) orelse return .{ .failed = .{ .code = .unavailable } };
+        defer answer.deinit();
+        return answer.value;
+    }
+
+    fn commitVideo(
+        context: *anyopaque,
+        reader: *std.Io.Reader,
+        length: ?u64,
+        cancellation: *const contract.http_transport.Cancellation,
+    ) contract.generate_video.Outcome {
+        const self: *RunEffects = @ptrCast(@alignCast(context));
+        // Read whole, within the tool's own bound, and committed by the Host.
+        const bytes = reader.allocRemaining(self.server.allocator, .limited(contract.generate_video.max_file_bytes + 1)) catch
+            return .{ .failed = .download_failed };
+        defer self.server.allocator.free(bytes);
+        if (bytes.len > contract.generate_video.max_file_bytes) return .{ .failed = .download_failed };
+        var answer = callBack(self.server, .video_commit, self.handle, .{
+            .run_id = self.run_id,
+            .bytes = bytes,
+            .length = length,
+        }, .http(cancellation)) orelse return .{ .failed = .output_failed };
+        defer answer.deinit();
+        return answer.value;
+    }
+
+    fn inspect(context: *anyopaque, path: []const u8, cancelled: *const std.atomic.Value(bool)) contract.FileDeliveryInspection {
+        const self: *RunEffects = @ptrCast(@alignCast(context));
+        var answer = callBack(self.server, .delivery_inspect, self.handle, .{
+            .run_id = self.run_id,
+            .path = path,
+        }, .flag(cancelled)) orelse return .{ .failed = .unavailable };
+        defer answer.deinit();
+        return answer.value;
     }
 };
 
@@ -1214,15 +1484,14 @@ fn forward(self: *Server, forwarding: *Forwarding) void {
 fn sendEvent(self: *Server, event: *contract.OwnedCoreEvent) void {
     if (self.event_delay_ms != 0)
         std.Io.sleep(self.io, .fromMilliseconds(@intCast(self.event_delay_ms)), .awake) catch {};
-    // Only plain conversation crosses in this step: the tools whose events
-    // carry a path or a receipt are not composed here.
-    if (event.generated_image_path != null or event.generated_video_path != null or event.delivered_file != null)
-        self.fail(.protocol_violation);
     const bytes = payload.encodeAlloc(rpc.Event, self.allocator, .{
         .session_id = event.session_id,
         .run_id = event.run_id,
         .encoded_bytes = event.encoded_bytes,
         .json = event.json,
+        .generated_image_path = event.generated_image_path,
+        .generated_video_path = event.generated_video_path,
+        .delivered_file = event.delivered_file,
     }) catch self.fail(.resource_unavailable);
     event.deinit();
     defer self.allocator.free(bytes);
