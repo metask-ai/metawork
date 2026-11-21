@@ -51,6 +51,9 @@ pub const StartFailure = union(enum) {
     /// nothing is negotiated.
     refused: agent_link.Failure,
     resource_unavailable,
+    /// The child did not agree on identity within the deadline, and was
+    /// ended.
+    unresponsive,
 };
 
 pub const Stopped = union(enum) {
@@ -165,7 +168,9 @@ pub const Host = struct {
 
     /// Starts the execution process and completes the identity exchange.
     /// Returns a failure rather than a half-built host: a refused identity is
-    /// a final answer for this attempt.
+    /// a final answer for this attempt. A child that has not agreed on
+    /// identity within `handshake_deadline_ms` is ended, so a start never
+    /// waits longer than that on a process stuck before it speaks.
     pub fn start(
         self: *Host,
         io: std.Io,
@@ -173,6 +178,7 @@ pub const Host = struct {
         identity: agent_link.Identity,
         queue_limits: agent_link.QueueLimits,
         spawn: Spawn,
+        handshake_deadline_ms: u64,
     ) StartError!?StartFailure {
         var path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var self_argv: [2 + max_extra_arguments][]const u8 = undefined;
@@ -251,13 +257,31 @@ pub const Host = struct {
         };
         self.reader = self.from_child.readerStreaming(io, self.read_buffer);
 
-        const outcome = agent_link.exchangeIdentityDetailed(
+        // Ending the child is what bounds the exchange: its end of the
+        // stream ends the read the exchange is waiting in.
+        var watch: HandshakeWatch = .{ .host = self, .deadline_ms = handshake_deadline_ms };
+        const watcher = std.Thread.spawn(
+            .{ .stack_size = 64 * 1024 },
+            HandshakeWatch.run,
+            .{&watch},
+        ) catch {
+            self.abandon();
+            return .resource_unavailable;
+        };
+        const exchanged = agent_link.exchangeIdentityDetailed(
             io,
             self.to_child,
             &self.reader.interface,
             .ui,
             identity,
-        ) catch {
+        );
+        watch.finished.set(io);
+        watcher.join();
+        if (watch.expired.load(.acquire)) {
+            self.abandon();
+            return .unresponsive;
+        }
+        const outcome = exchanged catch {
             self.abandon();
             return .{ .refused = .malformed_identity };
         };
@@ -324,6 +348,23 @@ pub const Host = struct {
             else => std.posix.kill(self.termination, .KILL) catch {},
         }
     }
+
+    const HandshakeWatch = struct {
+        host: *Host,
+        deadline_ms: u64,
+        finished: std.Io.Event = .unset,
+        expired: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *HandshakeWatch) void {
+            self.finished.waitTimeout(self.host.io, .{ .duration = .{
+                .raw = .fromMilliseconds(@intCast(self.deadline_ms)),
+                .clock = .awake,
+            } }) catch {
+                self.expired.store(true, .release);
+                self.host.terminate();
+            };
+        }
+    };
 
     fn reaperMain(self: *Host) void {
         self.term = self.child.wait(self.io) catch null;

@@ -545,6 +545,10 @@ const Generation = struct {
             owner.options.identity,
             owner.options.queue_limits,
             spawn,
+            // The same bound as an answer to a ping: until it says hello, a
+            // process is starting under the spawn lock, and nothing else can
+            // start one or shut the Owner down.
+            owner.options.heartbeat_deadline_ms,
         ) catch {
             self.pending.deinit();
             owner.allocator.destroy(self);

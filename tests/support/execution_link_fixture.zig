@@ -43,6 +43,8 @@
 //!     fixture again with `--linger`, its standard handles inherited the way
 //!     a tool process's are, and write its process id to `path`.
 //!   * `--linger` -- do nothing for a minute and exit: the grandchild.
+//!   * `--hang-before-hello=<ms>` -- wait this long before agreeing on
+//!     identity, as a process stuck in its startup does.
 //!   * `--exercise-mcp` -- before applying an MCP configuration, drive each
 //!     member's transport the way AgentCore drives a connector: open, an
 //!     exchange whose answer is echoed back, one carrying a secret, one its
@@ -75,6 +77,7 @@ pub const data_root_flag = "--data-root=";
 pub const crash_in_run_flag = "--crash-in-run";
 pub const spawn_grandchild_flag = "--spawn-grandchild=";
 pub const linger_flag = "--linger";
+pub const hang_before_hello_flag = "--hang-before-hello=";
 
 /// The fault record identity this fixture installs with. The version is the
 /// link's own, so a test can tell this process's record from any other.
@@ -97,6 +100,7 @@ const Flags = struct {
     data_root: ?[]u8 = null,
     grandchild_pid_path: ?[]u8 = null,
     linger: bool = false,
+    hang_before_hello_ms: u64 = 0,
     session_id_floor: u64 = 0,
 };
 
@@ -120,6 +124,8 @@ fn readFlags(init: std.process.Init) Flags {
         if (std.mem.eql(u8, argument, linger_flag)) flags.linger = true;
         if (std.mem.startsWith(u8, argument, spawn_grandchild_flag))
             flags.grandchild_pid_path = init.gpa.dupe(u8, argument[spawn_grandchild_flag.len..]) catch null;
+        if (std.mem.startsWith(u8, argument, hang_before_hello_flag))
+            flags.hang_before_hello_ms = std.fmt.parseInt(u64, argument[hang_before_hello_flag.len..], 10) catch 0;
         if (std.mem.startsWith(u8, argument, data_root_flag))
             flags.data_root = init.gpa.dupe(u8, argument[data_root_flag.len..]) catch null;
         if (std.mem.startsWith(u8, argument, checkpoint_bytes_flag))
@@ -453,6 +459,8 @@ pub fn main(init: std.process.Init) !void {
         std.Io.sleep(init.io, .fromSeconds(60), .awake) catch {};
         std.process.exit(0);
     }
+    if (flags.hang_before_hello_ms != 0)
+        std.Io.sleep(init.io, .fromMilliseconds(@intCast(flags.hang_before_hello_ms)), .awake) catch {};
     const version = init.environ_map.get("METAWORK_EXEC_LINK_VERSION") orelse "fixture-0";
     const digest_text = init.environ_map.get("METAWORK_EXEC_LINK_DIGEST") orelse "11";
     var digest: [32]u8 = @splat(0);

@@ -31,6 +31,9 @@ const matching_identity: agent_link.Identity = .{
 
 const fixture_variable = "METAWORK_EXECUTION_LINK_FIXTURE";
 
+/// How long a direct start waits for the fixture to agree on identity.
+const test_handshake_deadline_ms: u64 = 10_000;
+
 /// A missing fixture is a misconfigured build entry, never a reason to pass.
 fn fixturePath() ![]u8 {
     return std.process.Environ.getAlloc(std.testing.environ, allocator, fixture_variable);
@@ -47,6 +50,7 @@ test "the execution half starts, agrees on identity and exits on end of stream" 
         matching_identity,
         .{},
         .{ .explicit = &.{fixture} },
+        test_handshake_deadline_ms,
     );
     if (failure) |value| {
         std.debug.print("start failed: {any}\n", .{value});
@@ -92,7 +96,7 @@ test "the execution half answers a call from its own Runtime" {
     var host: execution_host.Host = undefined;
     const failure = try host.start(io, allocator, matching_identity, .{}, .{
         .explicit = &.{ fixture, "--with-runtime" },
-    });
+    }, test_handshake_deadline_ms);
     if (failure) |value| {
         std.debug.print("start failed: {any}\n", .{value});
         return error.StartFailed;
@@ -132,7 +136,7 @@ test "tidying up that does not finish costs the execution half its deadline, not
     var host: execution_host.Host = undefined;
     const failure = try host.start(io, allocator, matching_identity, .{}, .{
         .explicit = &.{ fixture, "--with-runtime", "--hang-shutdown" },
-    });
+    }, test_handshake_deadline_ms);
     if (failure) |value| {
         std.debug.print("start failed: {any}\n", .{value});
         return error.StartFailed;
@@ -162,6 +166,7 @@ test "a child that ignores end of stream is ended, and the stop returns" {
         matching_identity,
         .{},
         .{ .explicit = &.{ fixture, "--ignore-eof" } },
+        test_handshake_deadline_ms,
     );
     if (failure) |value| {
         std.debug.print("start failed: {any}\n", .{value});
@@ -187,6 +192,7 @@ test "a peer built from other sources is refused, and does not keep running" {
         skewed,
         .{},
         .{ .explicit = &.{fixture} },
+        test_handshake_deadline_ms,
     );
     const value = failure orelse {
         _ = host.stop();
@@ -206,6 +212,7 @@ test "a peer built from other sources is refused, and does not keep running" {
         skewed,
         .{},
         .{ .explicit = &.{fixture} },
+        test_handshake_deadline_ms,
     );
     try std.testing.expect(again != null);
 }
@@ -218,6 +225,7 @@ test "an executable that is not there is a start failure, not a hang" {
         matching_identity,
         .{},
         .{ .explicit = &.{"metawork-no-such-execution-half"} },
+        test_handshake_deadline_ms,
     );
     try std.testing.expectEqual(
         execution_host.StartFailure.spawn_failed,
@@ -1594,4 +1602,38 @@ test "a process the execution process starts does not hold the link once that pr
     }
     // And all of it with the grandchild still running.
     try std.testing.expect(ForeignProcess.alive(grandchild));
+}
+
+test "a process stuck before it agrees on identity is ended within the deadline, and the ask answered" {
+    // The start holds the spawn lock: without a bound on the exchange, every
+    // later ask, and the Owner's shutdown at exit, would wait with it. The
+    // fixture's own hang ends after eight seconds, so a missing bound shows
+    // as a slow answer rather than a test that never returns.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try owner.init(io, allocator, .{
+        .identity = matching_identity,
+        .message_limits = fixture_message_limits,
+        .queue_limits = .{},
+        .spawn = .{ .explicit = &.{ fixture, "--hang-before-hello=8000", "--with-runtime" } },
+        .wake = wake.notifier(),
+        .heartbeat_deadline_ms = 500,
+    });
+    defer owner.deinit();
+    const port = owner.runtimePort();
+
+    const asked = std.Io.Timestamp.now(io, .awake);
+    if (port.createSessionRoute(plainSessionOptions(root))) |_| return error.ProcessServed else |_| {}
+    const answered_ms = asked.durationTo(.now(io, .awake)).toMilliseconds();
+    try std.testing.expect(answered_ms < 4_000);
+    try std.testing.expectEqual(@as(u32, 1), owner.started);
+    try std.testing.expect(owner.current == null);
+    // The process was ended and reaped by the failed start, not left behind.
+    try std.testing.expectEqual(@as(usize, 0), owner.generations.items.len);
 }
