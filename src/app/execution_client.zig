@@ -789,7 +789,7 @@ fn deliverFrame(context: ?*anyopaque, kind: agent_link.Kind, correlation: u64, b
             self.calls_mutex.lockUncancelable(owner.io);
             self.callbacks.put(owner.allocator, correlation, callback) catch {
                 self.calls_mutex.unlock(owner.io);
-                callback.destroy();
+                callback.destroy(owner.allocator);
                 return .stop;
             };
             self.callback_threads += 1;
@@ -924,24 +924,28 @@ const Callback = struct {
         return self.cancelled.load(.acquire);
     }
 
-    fn destroy(self: *Callback) void {
-        const allocator = self.generation.owner.allocator;
+    fn destroy(self: *Callback, allocator: std.mem.Allocator) void {
         std.crypto.secureZero(u8, self.bytes);
         allocator.free(self.bytes);
         allocator.destroy(self);
     }
 
-    /// Off the table, and this thread no longer counted.
+    /// Off the table, and this thread no longer counted. Once the count is
+    /// down the next sweep may destroy the generation, and an exit the Owner
+    /// with it, so what is needed afterwards is taken before.
     fn finish(self: *Callback) void {
         const generation = self.generation;
+        const allocator = generation.owner.allocator;
         const io = generation.owner.io;
+        const wake = generation.owner.options.wake;
         generation.calls_mutex.lockUncancelable(io);
         _ = generation.callbacks.remove(self.correlation);
         generation.callback_threads -= 1;
         if (generation.callback_threads == 0) generation.calls_idle.broadcast(io);
         generation.calls_mutex.unlock(io);
-        self.destroy();
-        _ = generation.owner.options.wake.notify();
+        if (builtin.is_test) if (TestSupport.after_callback_counted_down) |hook| hook.call_fn(hook.context);
+        self.destroy(allocator);
+        _ = wake.notify();
     }
 };
 
@@ -2602,8 +2606,15 @@ const control_vtable: port.RunControl.VTable = .{
 };
 
 pub const TestSupport = struct {
-    /// Ends the running execution process the way a crash would: the UI
-    /// half learns it from the end of the stream.
+    pub const Hook = struct {
+        context: ?*anyopaque,
+        call_fn: *const fn (?*anyopaque) void,
+    };
+
+    /// Called by a finishing callback once it is no longer counted, which is
+    /// when a sweep may free its generation.
+    pub var after_callback_counted_down: ?Hook = null;
+
     /// The current process's OS handle (Windows) or pid (POSIX), for a test
     /// that acts on the process itself. Not an identity: see `currentProcess`.
     pub fn currentChild(owner: *Owner) ?std.process.Child.Id {
@@ -2613,6 +2624,8 @@ pub const TestSupport = struct {
         return generation.host.child.id;
     }
 
+    /// Ends the running execution process the way a crash would: the UI
+    /// half learns it from the end of the stream.
     pub fn killCurrent(owner: *Owner) void {
         owner.mutex.lockUncancelable(owner.io);
         defer owner.mutex.unlock(owner.io);
@@ -2623,6 +2636,59 @@ pub const TestSupport = struct {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "a finishing callback reads nothing of a generation a sweep may already have freed" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const Woken = struct {
+        count: std.atomic.Value(u32) = .init(0),
+        fn notify(context: ?*anyopaque) control.EventReadyNotification {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            _ = self.count.fetchAdd(1, .monotonic);
+            return .scheduled;
+        }
+    };
+    var woken: Woken = .{};
+    var owner: Owner = undefined;
+    try owner.init(io, allocator, .{
+        .identity = .{ .version = "unit", .core_manifest_sha256 = @splat(0), .core_abi_revision = 1 },
+        .message_limits = .{ .event = 1024, .request = 1024, .response = 1024, .ui_request = 1024, .ui_response = 1024 },
+        .queue_limits = .{},
+        .spawn = .{ .explicit = &.{"never-started"} },
+        .wake = .{ .context = &woken, .notify_fn = Woken.notify },
+    });
+    defer owner.deinit();
+    // A generation with one callback in it, as the reader leaves it.
+    const generation = try allocator.create(Generation);
+    generation.* = .{ .owner = &owner, .number = 1, .floor = 0, .host = undefined, .pending = undefined };
+    const callback = try allocator.create(Callback);
+    callback.* = .{ .generation = generation, .correlation = 7, .bytes = try allocator.dupe(u8, "request") };
+    try generation.callbacks.put(allocator, 7, callback);
+    generation.callback_threads = 1;
+
+    const Pause = struct {
+        counted_down: std.Io.Event = .unset,
+        go_on: std.Io.Event = .unset,
+        fn call(context: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.counted_down.set(std.testing.io);
+            self.go_on.waitUncancelable(std.testing.io);
+        }
+    };
+    var pause: Pause = .{};
+    TestSupport.after_callback_counted_down = .{ .context = &pause, .call_fn = Pause.call };
+    defer TestSupport.after_callback_counted_down = null;
+    const thread = try std.Thread.spawn(.{}, Callback.finish, .{callback});
+    pause.counted_down.waitUncancelable(io);
+    // What a sweep does once nothing counts against the generation: it goes,
+    // and the allocator fills what it held.
+    try std.testing.expectEqual(@as(u32, 0), generation.callback_threads);
+    generation.callbacks.deinit(allocator);
+    allocator.destroy(generation);
+    pause.go_on.set(io);
+    thread.join();
+    try std.testing.expectEqual(@as(u32, 1), woken.count.load(.acquire));
+}
 
 test "the credit never grants more than the pump can take" {
     // Every mix of data and control events within the credit fits the pump,
