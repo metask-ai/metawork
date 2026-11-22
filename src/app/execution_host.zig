@@ -373,13 +373,9 @@ pub const Host = struct {
         const stack_bytes: usize = 64 * 1024;
 
         fn run(self: *Watch) void {
-            self.finished.waitTimeout(self.host.io, .{ .duration = .{
-                .raw = .fromMilliseconds(@intCast(self.deadline_ms)),
-                .clock = .awake,
-            } }) catch {
-                self.expired.store(true, .release);
-                _ = self.host.terminate();
-            };
+            if (setWithin(self.host.io, &self.finished, self.deadline_ms)) return;
+            self.expired.store(true, .release);
+            _ = self.host.terminate();
         }
     };
 
@@ -456,6 +452,28 @@ pub const Host = struct {
         self.* = undefined;
     }
 };
+
+/// Whether `event` is set within `bound_ms` on the awake clock.
+///
+/// Not one call of `Event.waitTimeout`: that waits once and answers `Timeout`
+/// whenever the event is still unset afterwards, and the wait can end before
+/// its time -- on Darwin a signal ends it, which is what a child's exit
+/// brings. A deadline read off that answer passes early, and a watch that
+/// acts on it ends a child that still had time. So this waits again for what
+/// is left until the clock says the bound has passed.
+pub fn setWithin(io: std.Io, event: *std.Io.Event, bound_ms: u64) bool {
+    const started = std.Io.Timestamp.now(io, .awake);
+    const bound: i64 = @intCast(bound_ms);
+    while (!event.isSet()) {
+        const elapsed: i64 = started.durationTo(.now(io, .awake)).toMilliseconds();
+        if (elapsed >= bound) return event.isSet();
+        event.waitTimeout(io, .{ .duration = .{
+            .raw = .fromMilliseconds(bound - elapsed),
+            .clock = .awake,
+        } }) catch {};
+    }
+    return true;
+}
 
 /// Whether this process was started as the execution half. Read from the real
 /// argument vector: the mode is never inferred from an environment variable,

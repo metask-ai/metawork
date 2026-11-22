@@ -40,6 +40,38 @@ fn fixturePath() ![]u8 {
     return std.process.Environ.getAlloc(std.testing.environ, allocator, fixture_variable);
 }
 
+test "a bound on an event holds through waits that end early" {
+    // `Event.waitTimeout` answers `Timeout` whenever its one wait ends with
+    // the event unset, and on Darwin a signal -- a child's exit -- ends it
+    // early. A wake without a set is the same thing on every platform, so
+    // this wakes the waiter repeatedly and requires the bound to hold anyway.
+    const Waker = struct {
+        stop: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This(), event: *std.Io.Event) void {
+            while (!self.stop.load(.acquire)) {
+                std.Io.sleep(io, .fromMilliseconds(20), .awake) catch {};
+                io.futexWake(std.Io.Event, event, 1);
+            }
+        }
+    };
+    var event: std.Io.Event = .unset;
+    var waker: Waker = .{};
+    const thread = try std.Thread.spawn(.{}, Waker.run, .{ &waker, &event });
+    const started = std.Io.Timestamp.now(io, .awake);
+    const set = execution_host.setWithin(io, &event, 400);
+    const elapsed_ms = started.durationTo(.now(io, .awake)).toMilliseconds();
+    waker.stop.store(true, .release);
+    thread.join();
+    try std.testing.expect(!set);
+    try std.testing.expect(elapsed_ms >= 400);
+
+    // And a set still ends the wait at once.
+    var later: std.Io.Event = .unset;
+    later.set(io);
+    try std.testing.expect(execution_host.setWithin(io, &later, 10_000));
+}
+
 test "the execution half starts, agrees on identity and exits on end of stream" {
     const fixture = try fixturePath();
     defer allocator.free(fixture);
@@ -247,11 +279,7 @@ test "a child that stops reading with its pipe full is ended within the grace, a
     var stop: Stop = .{};
     const started = std.Io.Timestamp.now(io, .awake);
     const thread = try std.Thread.spawn(.{}, Stop.run, .{ &stop, &host });
-    const bound_ms = execution_host.stop_grace_ms + 10_000;
-    const returned = if (stop.done.waitTimeout(io, .{ .duration = .{
-        .raw = .fromMilliseconds(@intCast(bound_ms)),
-        .clock = .awake,
-    } })) |_| true else |_| false;
+    const returned = execution_host.setWithin(io, &stop.done, execution_host.stop_grace_ms + 10_000);
     if (!returned) _ = host.terminate();
     thread.join();
     const elapsed_ms = started.durationTo(.now(io, .awake)).toMilliseconds();
@@ -589,10 +617,7 @@ test "a shutdown whose Run's terminal waits behind events the window has not mad
     };
     var shutdown: Shutdown = .{};
     const thread = try std.Thread.spawn(.{}, Shutdown.run, .{ &shutdown, &control });
-    const returned = if (shutdown.done.waitTimeout(io, .{ .duration = .{
-        .raw = .fromMilliseconds(10_000),
-        .clock = .awake,
-    } })) |_| true else |_| false;
+    const returned = execution_host.setWithin(io, &shutdown.done, 10_000);
     if (!returned) execution_client.TestSupport.killCurrent(&owner);
     thread.join();
     try std.testing.expect(returned);
@@ -1253,10 +1278,7 @@ test "the owner's shutdown does not wait behind a new process's MCP replay, and 
     };
     var shutdown: Shutdown = .{};
     const shutting = try std.Thread.spawn(.{}, Shutdown.run, .{ &shutdown, &owner });
-    const returned = if (shutdown.done.waitTimeout(io, .{ .duration = .{
-        .raw = .fromMilliseconds(@intCast(execution_host.stop_grace_ms + 5_000)),
-        .clock = .awake,
-    } })) |_| true else |_| false;
+    const returned = execution_host.setWithin(io, &shutdown.done, execution_host.stop_grace_ms + 5_000);
     // Past the bound, end the process: its link ends, the replay with it.
     if (!returned) ForeignProcess.end(second_pid.?);
     shutting.join();
