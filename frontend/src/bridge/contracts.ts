@@ -1169,6 +1169,8 @@ export const sendInputReasons = [
   "models_catalog_loading",
   "models_catalog_failed",
   "metask_authorization_required",
+  "metask_authorization_recovering",
+  "metask_connection_unavailable",
   "session_poisoned",
   "checkpoint_unavailable",
   "execution_rebind_required",
@@ -1277,6 +1279,7 @@ export const modelInputBlockers = [
   "models_catalog_loading",
   "models_catalog_failed",
   "metask_authorization_required",
+  "metask_authorization_recovering",
 ] as const;
 
 export type TaskView = {

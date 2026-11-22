@@ -360,7 +360,7 @@ Skill catalog 的每个候选必填 `skillPolicyKey`，来自 Core 的逻辑策�
 
 `metawork.tasks.retryInput` 精确接收 `{ taskId, originalOperationId, operationId }`。Host 只以该 Task 的未执行失败提交及其进程内保留输入为源，返回普通发送接收结果。原提交已转交时返回已接收的新 `operationId`；响应未知时按操作 ID 查回既有快照回执。`metawork.tasks.discardInputRetry` 精确接收 `{ taskId, originalOperationId }`，返回 `{ discarded }`。这两个命令只接收身份，不接收原文、附件路径或 grant。失败提交可选 `retryAvailable: true` 仅表示 Host 持有可重发输入，重启或淘汰后省略。
 
-Task 的可选 `modelInputBlocker` 由 Host 给出当前 Metask 模型准入阻塞原因，等待中的目录刷新不代表提交已失败。现有 `metawork.models.refreshCatalog` 可由旧任务的目录失败提示调用，完成后等待 canonical view。
+Task 的可选 `modelInputBlocker` 由 Host 给出当前 Metask 模型准入阻塞原因。等待中的目录刷新不代表提交已失败。`metask_authorization_recovering` 也不代表失败：它表示 token 已过期、Account 正在续期，消息只等待下一次续期的结果。那次续期以可重试的失败结束时，等待的消息以 `metask_connection_unavailable` 失败；进入 `signed_out` 时，以 `metask_authorization_required` 失败。这两个原因只在本进程内有效。现有 `metawork.models.refreshCatalog` 可由旧任务的目录失败提示调用，完成后等待 canonical view。
 
 Task 可选 `sessionCloseRetryAvailable: true` 表示当前关闭失败允许显式重试。`metawork.tasks.retrySessionClose` 精确接收 `{ taskId, expectedBindingEpoch }`，返回 `{ accepted }`。Host 复核同一 Task、binding 与关闭资格；接收只表示关闭重试已请求，结果由后续 Task 投影确认。
 

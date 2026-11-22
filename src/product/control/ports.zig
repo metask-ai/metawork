@@ -116,12 +116,29 @@ pub const MetaskAuthorization = struct {
     generation: u64,
 };
 
+/// Account's one Metask authorization fact. A verified identity is never
+/// `unavailable`: once its token expires it is `recovering`.
+pub const MetaskAuthorizationStatus = union(enum) {
+    unavailable,
+    available: MetaskAuthorization,
+    /// Account's renewal epoch, which advances when a refresh attempt ends.
+    recovering: u64,
+};
+
 pub const MetaskAuthorizationCheck = struct {
     context: *anyopaque,
-    current_fn: *const fn (*anyopaque) ?MetaskAuthorization,
+    status_fn: *const fn (*anyopaque) MetaskAuthorizationStatus,
 
+    pub fn status(self: MetaskAuthorizationCheck) MetaskAuthorizationStatus {
+        return self.status_fn(self.context);
+    }
+
+    /// The authorization an admission may use now, if any.
     pub fn current(self: MetaskAuthorizationCheck) ?MetaskAuthorization {
-        return self.current_fn(self.context);
+        return switch (self.status()) {
+            .available => |authorization| authorization,
+            .unavailable, .recovering => null,
+        };
     }
 };
 

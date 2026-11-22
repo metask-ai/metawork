@@ -1018,6 +1018,10 @@ pub const InputFailureReason = enum {
     fn fromRuntime(reason: task_state.SendInputReason) ?InputFailureReason {
         return switch (reason) {
             .models_catalog_loading,
+            // A Metask renewal is a fact of this process; after a restart
+            // the failure stays without a stale cause.
+            .metask_authorization_recovering,
+            .metask_connection_unavailable,
             .task_busy,
             .unsupported_attachment,
             .run_changed,

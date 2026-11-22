@@ -1214,6 +1214,8 @@ pub const ProjectionAuthority = struct {
     model_selection_availability: task_view.ModelSelectionAvailability,
     model_rebind_required: bool = false,
     model_input_blocker: ?SendInputReason = null,
+    /// Account's renewal epoch when the blocker is a Metask renewal.
+    metask_recovery_epoch: ?u64 = null,
 };
 
 /// Command admission uses its own typed observation port. It deliberately
@@ -2802,8 +2804,26 @@ pub const Runtime = struct {
         if (!authority.shutting_down and task_policy.taskLifecycle(task) == .open and
             (continuation == .available or continuation.unavailable == .execution_rebind_required))
         {
+            const record = &task.input_submissions.items[index];
+            const recovering = if (authority.model_input_blocker) |reason|
+                reason == .metask_authorization_recovering
+            else
+                false;
+            if (!recovering) record.metask_recovery_epoch = null;
             if (authority.model_input_blocker) |reason| {
                 if (reason == .models_catalog_loading) return false;
+                if (recovering) {
+                    // Wait for the one renewal attempt underway when this
+                    // message reached the queue head, not every retry after.
+                    const epoch = authority.metask_recovery_epoch orelse 0;
+                    const waited = record.metask_recovery_epoch orelse {
+                        record.metask_recovery_epoch = epoch;
+                        return false;
+                    };
+                    if (waited == epoch) return false;
+                    self.failWaitingInput(task_id, index, .metask_connection_unavailable, null);
+                    return true;
+                }
                 self.failWaitingInput(task_id, index, reason, null);
                 return true;
             }

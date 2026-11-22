@@ -289,13 +289,19 @@ pub const Coordinator = struct {
     }
 
     pub fn metaskAuthorizationCheck(self: *Coordinator) control_ports.MetaskAuthorizationCheck {
-        return .{ .context = self, .current_fn = currentMetaskAuthorization };
+        return .{ .context = self, .status_fn = metaskAuthorizationStatus };
     }
 
-    fn currentMetaskAuthorization(context: *anyopaque) ?control_ports.MetaskAuthorization {
+    /// Every Product query passes through Account's status, which also
+    /// re-arms a refresh whose timer is overdue.
+    fn metaskAuthorizationStatus(context: *anyopaque) control_ports.MetaskAuthorizationStatus {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
-        return .{ .generation = self.account.authorizationGeneration() orelse return null };
+        return switch (self.account.authorizationStatus()) {
+            .unavailable => .unavailable,
+            .available => |generation| .{ .available = .{ .generation = generation } },
+            .recovering => |epoch| .{ .recovering = epoch },
+        };
     }
 
     pub fn imageRunPreparation(self: *Coordinator) control_ports.ImageRunPreparation {
