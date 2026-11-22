@@ -238,9 +238,6 @@ pub const Owner = struct {
     shutting_down: bool = false,
     /// Every event the reader has put in the pump, for tests.
     events_received: std.atomic.Value(u64) = .init(0),
-    /// Processes started and then withheld from their caller because they
-    /// were lost during their MCP replay, for tests.
-    lost_before_use: std.atomic.Value(u64) = .init(0),
     /// Names for transports and connections, unique across processes.
     next_name: std.atomic.Value(u64) = .init(0),
 
@@ -342,34 +339,20 @@ pub const Owner = struct {
     }
 
     /// The running process, started if there is none. `null` when one could
-    /// not be started, or was lost before it could be used; the caller's
-    /// answer is then the link's lost answer.
-    ///
-    /// The spawn lock is held while a process is started and published, and
-    /// not across its MCP replay: the replay is a round trip that waits on
-    /// the process, and the Owner's shutdown, which takes the same lock, must
-    /// not wait behind it. Whoever asks meanwhile waits for the replay
-    /// instead, so a Session is still never opened in a process that does
-    /// not have its membership yet.
+    /// not be started; the caller's answer is then the link's lost answer.
     fn ensure(self: *Owner) ?*Generation {
-        // A running process that already has its membership: nothing about
-        // it is being decided, so no spawn lock.
-        if (self.liveReplayed()) |generation| return generation;
         self.spawn_mutex.lockUncancelable(self.io);
+        defer self.spawn_mutex.unlock(self.io);
         self.mutex.lockUncancelable(self.io);
         if (self.shutting_down) {
             self.mutex.unlock(self.io);
-            self.spawn_mutex.unlock(self.io);
             return null;
         }
         if (self.current) |generation| {
             if (!generation.lost.load(.acquire)) {
                 _ = generation.in_flight.fetchAdd(1, .acq_rel);
                 self.mutex.unlock(self.io);
-                self.spawn_mutex.unlock(self.io);
-                // Started by another caller, whose replay may still be under
-                // way.
-                return self.awaitReplay(generation);
+                return generation;
             }
             // Lost, with its `lose` not yet past this lock: no longer the
             // one to hand out, and `lose` unpublishes only itself.
@@ -378,7 +361,6 @@ pub const Owner = struct {
         // Held back: the answer is the one a process that died would give.
         if (now(self.io) < self.starts_held_until_ms) {
             self.mutex.unlock(self.io);
-            self.spawn_mutex.unlock(self.io);
             return null;
         }
         self.started += 1;
@@ -390,16 +372,16 @@ pub const Owner = struct {
             self.mutex.lockUncancelable(self.io);
             self.noteLossLocked(0);
             self.mutex.unlock(self.io);
-            self.spawn_mutex.unlock(self.io);
             return null;
         };
         if (builtin.is_test) if (self.options.after_start) |hook| hook.call_fn(hook.context, &generation.lost);
         self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         self.generations.append(self.allocator, generation) catch {
             self.mutex.unlock(self.io);
             generation.stop();
             generation.destroy();
-            self.spawn_mutex.unlock(self.io);
+            self.mutex.lockUncancelable(self.io);
             return null;
         };
         // A process already lost -- its watch could not start, or it ended
@@ -409,11 +391,7 @@ pub const Owner = struct {
         // would be current until the application restarts. Checked under the
         // lock `lose` takes after setting the flag, so one of the two always
         // sees the other.
-        if (generation.lost.load(.acquire)) {
-            self.mutex.unlock(self.io);
-            self.spawn_mutex.unlock(self.io);
-            return null;
-        }
+        if (generation.lost.load(.acquire)) return null;
         self.current = generation;
         // Room for what the pump can take now: events a dead process left
         // behind are still in it, and consuming them grants this one more.
@@ -425,34 +403,10 @@ pub const Owner = struct {
         self.sendCreditLocked(generation, true);
         _ = generation.in_flight.fetchAdd(1, .acq_rel);
         self.mutex.unlock(self.io);
-        self.spawn_mutex.unlock(self.io);
+        // Still under the spawn lock, so whatever opens a Session in this
+        // process finds the membership already there.
         self.replayMcp(generation);
-        generation.replayed.set(self.io);
-        return self.awaitReplay(generation);
-    }
-
-    /// The current process, if it is running and has its membership; counted
-    /// in flight.
-    fn liveReplayed(self: *Owner) ?*Generation {
         self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.shutting_down) return null;
-        const generation = self.current orelse return null;
-        if (generation.lost.load(.acquire) or !generation.replayed.isSet()) return null;
-        _ = generation.in_flight.fetchAdd(1, .acq_rel);
-        return generation;
-    }
-
-    /// `generation`, counted in flight, once its replay is over -- or `null`,
-    /// with the count given back, when it was lost first: a process that died
-    /// during its replay is never handed to a caller.
-    fn awaitReplay(self: *Owner, generation: *Generation) ?*Generation {
-        generation.replayed.waitUncancelable(self.io);
-        if (generation.lost.load(.acquire)) {
-            _ = self.lost_before_use.fetchAdd(1, .monotonic);
-            generation.release();
-            return null;
-        }
         return generation;
     }
 
@@ -545,9 +499,6 @@ const Generation = struct {
     lost: std.atomic.Value(bool) = .init(false),
     stopping: std.atomic.Value(bool) = .init(false),
     stopped: bool = false,
-    /// Set once the MCP membership has been given to it, or once it is lost;
-    /// until then nothing opens a Session in it.
-    replayed: std.Io.Event = .unset,
     /// Runtime calls still using this generation.
     in_flight: std.atomic.Value(u32) = .init(0),
     /// Sessions Product still holds, under `owner.mutex`.
@@ -668,8 +619,6 @@ const Generation = struct {
         if (!stopping) _ = self.host.terminate();
         self.pending.close();
         self.watch_stop.set(self.owner.io);
-        // Whoever waits for its replay finds it lost.
-        self.replayed.set(self.owner.io);
         // Whatever this process asked for is no longer wanted.
         self.calls_mutex.lockUncancelable(self.owner.io);
         var callbacks = self.callbacks.valueIterator();
@@ -2785,16 +2734,6 @@ pub const TestSupport = struct {
         defer owner.mutex.unlock(owner.io);
         const generation = owner.current orelse return null;
         return generation.host.child.id;
-    }
-
-    /// The current process's id, for a test that must be able to end it
-    /// itself after the Owner has let go of it -- a shutdown unpublishes the
-    /// process before it stops it.
-    pub fn currentPid(owner: *Owner) ?u32 {
-        owner.mutex.lockUncancelable(owner.io);
-        defer owner.mutex.unlock(owner.io);
-        const generation = owner.current orelse return null;
-        return generation.host.pid;
     }
 
     /// Ends the running execution process the way a crash would: the UI
