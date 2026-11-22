@@ -2787,6 +2787,16 @@ pub const TestSupport = struct {
         return generation.host.child.id;
     }
 
+    /// The current process's id, for a test that must be able to end it
+    /// itself after the Owner has let go of it -- a shutdown unpublishes the
+    /// process before it stops it.
+    pub fn currentPid(owner: *Owner) ?u32 {
+        owner.mutex.lockUncancelable(owner.io);
+        defer owner.mutex.unlock(owner.io);
+        const generation = owner.current orelse return null;
+        return generation.host.pid;
+    }
+
     /// Ends the running execution process the way a crash would: the UI
     /// half learns it from the end of the stream.
     pub fn killCurrent(owner: *Owner) void {

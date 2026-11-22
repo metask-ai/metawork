@@ -1224,12 +1224,24 @@ test "the owner's shutdown does not wait behind a new process's MCP replay, and 
         }
     };
     var opener: Opener = .{};
+    // The second process's id, held by the test: once the shutdown has
+    // unpublished the process, this is the only way left to end it.
+    var second_pid: ?u32 = null;
     const opening = try std.Thread.spawn(.{}, Opener.run, .{ &opener, port, root });
+    var opening_joined = false;
+    // Any failure from here ends the process the opener may be waiting on,
+    // then waits for the opener, before the Owner goes: the opener is inside
+    // the Owner until it returns.
+    errdefer if (!opening_joined) {
+        if (second_pid orelse execution_client.TestSupport.currentPid(&owner)) |pid| ForeignProcess.end(pid);
+        opening.join();
+    };
     waited = 0;
     while (owner.currentProcess() != 2) : (waited += wait_tick_ms) {
         if (waited >= wait_limit_ms) return error.SecondProcessNeverStarted;
         try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
     }
+    second_pid = execution_client.TestSupport.currentPid(&owner) orelse return error.SecondProcessNeverStarted;
 
     const Shutdown = struct {
         done: std.Io.Event = .unset,
@@ -1246,9 +1258,10 @@ test "the owner's shutdown does not wait behind a new process's MCP replay, and 
         .clock = .awake,
     } })) |_| true else |_| false;
     // Past the bound, end the process: its link ends, the replay with it.
-    if (!returned) execution_client.TestSupport.killCurrent(&owner);
+    if (!returned) ForeignProcess.end(second_pid.?);
     shutting.join();
     opening.join();
+    opening_joined = true;
     try std.testing.expect(returned);
 
     // The caller got the lost answer, and got it from the start itself: the

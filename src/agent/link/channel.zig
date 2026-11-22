@@ -957,25 +957,34 @@ test "a control frame queued mid-message travels between its fragments over a re
     const ends = try realPipe(&threaded);
     var write_open = true;
     defer if (write_open) ends.write.close(io);
-    defer ends.read.close(io);
 
     var outbound: Outbound = undefined;
     try outbound.start(io, allocator, ends.write, .{});
     var outbound_running = true;
     defer if (outbound_running) outbound.stop();
+    // Declared after the writer's stop, so on any failure below it runs
+    // first: with the read end closed the writer's blocked write fails, and
+    // the stop that joins it returns instead of waiting on a pipe nobody
+    // reads. Once the reader thread runs, it closes this end itself as soon
+    // as it stops reading.
+    var read_open = true;
+    defer if (read_open) ends.read.close(io);
 
     const payload = try allocator.alloc(u8, 3 * frame.max_fragment_payload_bytes);
     defer allocator.free(payload);
     for (payload, 0..) |*byte, index| byte.* = @truncate(index % 251);
     try testing.expectEqual(Submission.queued, try outbound.submitWaiting(.request, 1, payload));
-    // The writer has taken the message and is writing its first fragment.
-    while (true) {
+    // The writer has taken the message and is writing its first fragment --
+    // or has failed, which ends the wait too.
+    const writer_failed = while (true) {
         outbound.mutex.lockUncancelable(io);
         const queued = outbound.data.queued;
+        const failed = outbound.failed;
         outbound.mutex.unlock(io);
-        if (queued == 0) break;
+        if (queued == 0 or failed) break failed;
         std.Thread.yield() catch {};
-    }
+    };
+    try testing.expect(!writer_failed);
     try testing.expectEqual(Submission.queued, try outbound.trySubmit(.control, 0, "ping"));
 
     // Only now does anything read.
@@ -1014,12 +1023,17 @@ test "a control frame queued mid-message travels between its fragments over a re
     try inbound.init(io, allocator, &reader.interface, test_message_limits, checking.sink());
     defer inbound.deinit();
     const Reading = struct {
-        fn run(reading: *Inbound, stopped: *Stopped) void {
+        fn run(reading: *Inbound, stopped: *Stopped, end: std.Io.File, end_io: std.Io) void {
             stopped.* = reading.run();
+            // Whatever ended the read -- the end of the stream, or the sink
+            // giving up -- nothing reads any more, so a writer still writing
+            // must fail rather than wait.
+            end.close(end_io);
         }
     };
     var stopped: Stopped = .read_failed;
-    const thread = try std.Thread.spawn(.{}, Reading.run, .{ &inbound, &stopped });
+    const thread = try std.Thread.spawn(.{}, Reading.run, .{ &inbound, &stopped, ends.read, io });
+    read_open = false;
     // The writer finishes what is queued, and closing the end is the end of
     // the stream.
     outbound.stop();
