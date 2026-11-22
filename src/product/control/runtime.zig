@@ -23512,10 +23512,10 @@ test {
 }
 
 test "Save As keeps waiting for its decision through waits that end early" {
-    // The worker's wait for the decision can end before its deadline -- a
-    // spurious wakeup, or on Darwin any signal. A wake without a set is that
-    // early end on every platform: the staged save must still be waiting
-    // afterwards, and the decision must end the wait at once.
+    // The worker's wait for the main loop's decision can end before its
+    // deadline: std allows `Event.waitTimeout` to wake spuriously. A wake
+    // without a set is that early end on every platform: the staged save must
+    // still be waiting afterwards, and the decision must end the wait at once.
     var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     var control = try testRuntime();

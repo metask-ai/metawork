@@ -171,11 +171,17 @@ pub const Taken = struct { job: *Job, target: *const Target, completion_id: u64,
 /// Whether `event` is set before `deadline` passes on the awake clock.
 ///
 /// Not one call of `Event.waitTimeout`: that waits once and answers `Timeout`
-/// whenever the event is still unset afterwards, and the wait can end before
-/// its time -- a spurious wakeup, or on Darwin any signal, such as a child's
-/// exit. Read as the deadline passing, that answer discards a staged save the
-/// user still had time to approve. So this waits again until the clock says
-/// the deadline has passed.
+/// whenever the event is still unset afterwards, and std allows the wait to
+/// end spuriously, as it does the `futexWaitTimeout` under it, on every
+/// platform. Once the bytes are staged, the main loop rechecks the request and
+/// the target file and decides; read as the deadline passing, an early answer
+/// between the worker waking the main loop and that decision -- usually
+/// milliseconds, longer while the loop is busy -- discards a save that was
+/// still in time. So this waits again until the clock says the deadline has
+/// passed.
+///
+/// The wait's errors are dropped, `error.Canceled` included: the Lane's worker
+/// is a plain `std.Thread`, which `std.Io` cancelation does not reach.
 fn setBy(io: std.Io, event: *std.Io.Event, deadline: std.Io.Timestamp) bool {
     while (!event.isSet()) {
         if (std.Io.Timestamp.now(io, .awake).nanoseconds >= deadline.nanoseconds) return event.isSet();
