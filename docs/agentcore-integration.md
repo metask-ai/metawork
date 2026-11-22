@@ -204,15 +204,17 @@ profile 的 owned copy、子代理与 isolated Skill 继承、checkpoint 编码�
 
 ### Session 行为指引
 
-除产品身份外，Agent 还通过 `host:<name>` 段注入行为约束——约束模型在本机写出什么命令，而不是声明身份。两类段组合进同一个 `PromptProfileV1`：ABI 的模型是逐条独立编辑，组合即拼接。`src/agent/session/prompt.zig` 唯一持有该组合与 profile setter 调用，身份段与行为段各是独立模块；fresh create 与 restore 走同一个组合后的 profile。
+除产品身份外，Agent 还通过 `host:<name>` 段注入行为约束——约束模型在本机写出什么命令、把哪些文件作为结果交给用户，而不是声明身份。两类段组合进同一个 `PromptProfileV1`：ABI 的模型是逐条独立编辑，组合即拼接。`src/agent/session/prompt.zig` 唯一持有该组合与 profile setter 调用，身份段与行为段各是独立模块；fresh create 与 restore 走同一个组合后的 profile。
 
 - 只用 `PROMPT_OP_ADD`，不替换也不移除 AgentCore 的内核段。替换内核段会让 MetaWork 永久跟踪上游对那段文字的改动，而行为约束不需要改写内核规则；
-- `order` 决定渲染位置（ties 按 id）。收窄既有规则的段排在被收窄的内核段之后：`host:windows-downloads` 取 1100，落在 `metacodes:using-tools`(1000) 之后、`metacodes:tone`(2000) 之前，两侧留出后续 host 段的空位。身份段是 `PROMPT_OP_REPLACE`，`order` 为零并落在被替换内核段的原位，因此两类段之间没有次序关系需要协调；
-- 平台条件由 Host 侧决定，不写进段文字。`interpolate` 能替换 `{{platform}}` 却不能据此分支，所以按平台选段发生在组合处，非目标平台不携带该平台专有的建议；
+- `order` 决定渲染位置（ties 按 id）。收窄既有规则的段排在被收窄的内核段之后：`host:windows-downloads` 取 1100，落在 `metacodes:using-tools`(1000) 之后、`metacodes:tone`(2000) 之前，两侧留出后续 host 段的空位。`host:outputs` 取 1200，细化工具使用规则，排在 `host:windows-downloads` 之后；不靠近 `metacodes:validation`(300)，避免交付被读成检查步骤。身份段是 `PROMPT_OP_REPLACE`，`order` 为零并落在被替换内核段的原位，因此两类段之间没有次序关系需要协调；
+- 平台条件由 Host 侧决定，不写进段文字。`interpolate` 能替换 `{{platform}}` 却不能据此分支，所以按平台选段发生在组合处，非目标平台不携带该平台专有的建议，与平台无关的段在所有平台携带；
 - 这类注入改变的是模型倾向，不构成保证，也不是能力或权限控制的替代品。必须被阻止的事情由 built-in tool 选择与 Task-owned `PermissionProfile` 决定，不靠提示段；
 - 段文字进入每个 Session 的 system prompt，长度有真实成本：写成约束，不写成教程。
 
 首个段是 `host:windows-downloads`（仅 Windows 构建携带）：联网取字节优先 `curl.exe`（`curl` 是 PowerShell 的 `Invoke-WebRequest` 别名，必须带 `.exe`）；确需 `Invoke-WebRequest` / `Invoke-RestMethod` 时必须带 `-UseBasicParsing`；多个文件合并为单条命令。依据是 PowerShell 5.1 的 web cmdlet 默认走旧 Internet Explorer 解析路径，本机安全软件会在该路径上按命令粒度弹出模态框并阻塞命令，无人值守场景直接挂起。指引降低写出被拦命令的概率；拦截是否消失取决于本机安全软件，不在 MetaWork 可验证的范围内，验收只固定“段按平台到达 provider 的 system 内容”，见[验证规范](validation.md)。
+
+第二个段是 `host:outputs`（所有平台携带）：判断依据是用户要不要打开这个文件才能用上本轮结果，与文件怎样产生无关。要打开才能用的文件（网页、报告、表格、演示文稿、PDF、图表图片、视频，以及修改过的 Office 文档）用 `DeliverFile` 交付；回复正文已给出的结果、用户只需审查改动的代码/配置/文本修改、过程文件（脚本、中间稿、临时数据、日志）不交付；代码文件只在用户明确要求交付该文件时交付，网页属于成果；生成的图片或视频只在用户要的就是它本身时交付，当素材使用时交付用它做成的文件。交付的前提只有文件已是本轮最终版本，不要求也不表示内容经过检查，Skill 要求的检查各自进行；多个文件构成结果时全部交付，先交回答请求的那个文件。验收同样只固定“段到达 provider 的 system 内容且在所有平台出现”，模型据此交付哪些文件不在验收范围内。
 
 ## 6. Session 与 Runtime 生命周期
 

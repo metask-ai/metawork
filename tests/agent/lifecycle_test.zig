@@ -5962,9 +5962,10 @@ test "Session creation OOM leaves Runtime reusable and credential process-only" 
 }
 
 fn expectMetaWorkProfile(profile: fixture.FakePromptProfile) !void {
-    // Identity replacements first, then one host addition per Windows build.
-    const additions: usize = if (builtin.target.os.tag == .windows) 1 else 0;
-    try std.testing.expectEqual(@as(usize, 2) + additions, profile.count);
+    // Identity replacements first, then the host additions: the download
+    // constraints on Windows builds and the result guidance on every build.
+    const downloads: usize = if (builtin.target.os.tag == .windows) 1 else 0;
+    try std.testing.expectEqual(@as(usize, 2) + downloads + 1, profile.count);
     try std.testing.expectEqualStrings("metacodes:identity", profile.sectionId(0));
     try std.testing.expectEqualStrings("metacodes:subagent", profile.sectionId(1));
     for (0..2) |i| {
@@ -5977,16 +5978,23 @@ fn expectMetaWorkProfile(profile: fixture.FakePromptProfile) !void {
         try std.testing.expect(std.mem.indexOf(u8, text, "仅在用户明确询问相关技术信息时") != null);
         try std.testing.expect(std.unicode.utf8ValidateSlice(text));
     }
-    if (additions == 0) return;
-    // The Windows download constraints: an ADD placed between the kernel's
-    // using-tools (1000) and tone (2000) sections, not a kernel replacement.
-    const text = profile.sectionText(2);
-    try std.testing.expectEqualStrings("host:windows-downloads", profile.sectionId(2));
-    try std.testing.expectEqual(wire.PROMPT_OP_ADD, profile.ops[2]);
-    try std.testing.expectEqual(@as(i64, 1100), profile.orders[2]);
-    try std.testing.expect(std.mem.indexOf(u8, text, "curl.exe") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "-UseBasicParsing") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "WebFetch") == null);
+    if (downloads != 0) {
+        // The Windows download constraints: an ADD placed between the kernel's
+        // using-tools (1000) and tone (2000) sections, not a kernel replacement.
+        const text = profile.sectionText(2);
+        try std.testing.expectEqualStrings("host:windows-downloads", profile.sectionId(2));
+        try std.testing.expectEqual(wire.PROMPT_OP_ADD, profile.ops[2]);
+        try std.testing.expectEqual(@as(i64, 1100), profile.orders[2]);
+        try std.testing.expect(std.mem.indexOf(u8, text, "curl.exe") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "-UseBasicParsing") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "WebFetch") == null);
+    }
+    // The result guidance: an ADD after the download constraints, on every platform.
+    const outputs = 2 + downloads;
+    try std.testing.expectEqualStrings("host:outputs", profile.sectionId(outputs));
+    try std.testing.expectEqual(wire.PROMPT_OP_ADD, profile.ops[outputs]);
+    try std.testing.expectEqual(@as(i64, 1200), profile.orders[outputs]);
+    try std.testing.expect(std.mem.indexOf(u8, profile.sectionText(outputs), "DeliverFile") != null);
 }
 
 test "Agent identity survives borrowed create input and updates old or equal restore profiles" {

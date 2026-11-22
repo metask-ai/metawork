@@ -1,7 +1,8 @@
-//! Host behavior guidance: platform-conditional constraints on the commands the
-//! model writes. Added as `host:` sections, never replacing a kernel section, so
-//! upstream wording stays upstream's to change. Borrowed ABI views are comptime
-//! constants and outlive every synchronous call.
+//! Host behavior guidance: constraints on the commands the model writes and on
+//! the results it hands over. Added as `host:` sections, never replacing a
+//! kernel section, so upstream wording stays upstream's to change. Only some
+//! sections are platform-conditional. Borrowed ABI views are comptime constants
+//! and outlive every synchronous call.
 const std = @import("std");
 const builtin = @import("builtin");
 const sdk = @import("metask_agentcore");
@@ -29,18 +30,57 @@ const windows_downloads_text =
     "If one of them is unavoidable, pass `-UseBasicParsing`. " ++
     "Fetch several files in one command rather than one command per file.";
 
-const windows_sections = [_]wire.PromptSectionV1{
-    addition(windows_downloads_id, windows_downloads_order, windows_downloads_text),
+pub const outputs_id = "host:outputs";
+
+/// It refines when a Host tool is used, so it follows `metacodes:using-tools`
+/// (1000) and the Windows download constraints (1100) and stays before
+/// `metacodes:tone` (2000). It is kept away from `metacodes:validation` (300):
+/// handing a file over must not read as a step of checking the work.
+pub const outputs_order: i64 = 1200;
+
+/// The user opens a turn's result files from result cards, so the test is
+/// whether the user has to open the file to use the result, whatever made it.
+/// Delivery only hands the final version over; checks stay with whoever asks
+/// for them.
+const outputs_text =
+    "Results for the user: hand over with DeliverFile every file the user has to open to use this turn's result; " ++
+    "the product shows each one as a result card. Judge every file by that test alone, however it was made: " ++
+    "written directly, produced by a script or a Skill, generated with GenerateImage or GenerateVideo, or edited in place.\n" ++
+    "- Deliver files the user will read, view, play, present or pass on, for example a new web page, report, spreadsheet, " ++
+    "presentation, PDF, chart image or video, and a Word, Excel or PowerPoint file you edited.\n" ++
+    "- Do not deliver anything when your reply already gives the result: answers, analysis, plans, explanations of code.\n" ++
+    "- Do not deliver edits the user only needs to review as changes: changed code, configuration and text files " ++
+    "appear in the file changes the user reviews.\n" ++
+    "- Do not deliver process files, even ones created in this turn: scripts that produce the result, " ++
+    "intermediate drafts, temporary data, logs.\n" ++
+    "- Code files are not results unless the user asks for the file to be delivered. " ++
+    "A web page meant to be opened in a browser is a result.\n" ++
+    "- A generated image, video or other file is a result only when the user wanted it for itself. " ++
+    "When it is material for another file, such as a picture placed in a presentation, deliver that other file instead.\n" ++
+    "Deliver the final version, after your last change to the file in this turn. " ++
+    "Delivering only hands the file over: it neither requires nor implies a quality check, " ++
+    "and checks a Skill asks for stay separate. " ++
+    "When several files make up the result, deliver all of them once they are final, " ++
+    "starting with the file that answers the request (for example a report before the data behind it), " ++
+    "not in the order you created them.";
+
+const common_sections = [_]wire.PromptSectionV1{
+    addition(outputs_id, outputs_order, outputs_text),
 };
 
-/// The host platform decides this, because the guidance is about the commands
-/// the model writes for this host's shell. ABI interpolation substitutes
-/// `{{platform}}` but cannot branch on it, so the selection happens here and
-/// non-Windows Sessions carry no Windows-only advice at all.
+const windows_sections = [_]wire.PromptSectionV1{
+    addition(windows_downloads_id, windows_downloads_order, windows_downloads_text),
+} ++ common_sections;
+
+/// The host platform decides the command guidance, because it is about the
+/// commands the model writes for this host's shell. ABI interpolation
+/// substitutes `{{platform}}` but cannot branch on it, so the selection happens
+/// here and non-Windows Sessions carry no Windows-only advice at all. The
+/// result guidance holds on every platform.
 pub fn sectionsFor(os: std.Target.Os.Tag) []const wire.PromptSectionV1 {
     return switch (os) {
         .windows => &windows_sections,
-        else => &.{},
+        else => &common_sections,
     };
 }
 
@@ -56,19 +96,25 @@ fn addition(id: []const u8, order: i64, text: []const u8) wire.PromptSectionV1 {
     return value;
 }
 
-test "only Windows carries the download constraints, and they stay well-formed ADD sections" {
-    const windows = sectionsFor(.windows);
-    try std.testing.expectEqual(@as(usize, 1), windows.len);
-    const section = windows[0];
+fn expectWellFormed(section: wire.PromptSectionV1, id: []const u8, order: i64) ![]const u8 {
     try std.testing.expectEqual(wire.PROMPT_OP_ADD, section.op_code);
-    try std.testing.expectEqual(windows_downloads_order, section.order);
+    try std.testing.expectEqual(order, section.order);
     try std.testing.expectEqual(@as(u32, 0), section.interpolate);
-    const id = try sdk.borrowedBytes(section.id);
-    try std.testing.expectEqualStrings(windows_downloads_id, id);
-    try std.testing.expect(std.mem.startsWith(u8, id, "host:"));
+    const actual_id = try sdk.borrowedBytes(section.id);
+    try std.testing.expectEqualStrings(id, actual_id);
+    try std.testing.expect(std.mem.startsWith(u8, actual_id, "host:"));
     const text = try sdk.borrowedBytes(section.text);
     try std.testing.expect(std.unicode.utf8ValidateSlice(text));
     try std.testing.expect(text.len <= wire.MAX_PROMPT_SECTION_TEXT_BYTES_V1);
+    // A placeholder would make the whole profile depend on interpolation.
+    try std.testing.expect(std.mem.indexOf(u8, text, "{{") == null);
+    return text;
+}
+
+test "only Windows carries the download constraints, and they stay well-formed ADD sections" {
+    const windows = sectionsFor(.windows);
+    try std.testing.expectEqual(@as(usize, 2), windows.len);
+    const text = try expectWellFormed(windows[0], windows_downloads_id, windows_downloads_order);
     // The three constraints the Windows interception evidence asks for.
     try std.testing.expect(std.mem.indexOf(u8, text, "curl.exe") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "-UseBasicParsing") != null);
@@ -76,6 +122,28 @@ test "only Windows carries the download constraints, and they stay well-formed A
     // WebFetch cannot write bytes to a path, so it is never offered here.
     try std.testing.expect(std.mem.indexOf(u8, text, "WebFetch") == null);
 
-    for ([_]std.Target.Os.Tag{ .macos, .linux }) |os|
-        try std.testing.expectEqual(@as(usize, 0), sectionsFor(os).len);
+    for ([_]std.Target.Os.Tag{ .macos, .linux }) |os| {
+        for (sectionsFor(os)) |section|
+            try std.testing.expect(!std.mem.eql(u8, try sdk.borrowedBytes(section.id), windows_downloads_id));
+    }
+}
+
+test "every platform carries the result guidance after the download constraints" {
+    for ([_]std.Target.Os.Tag{ .windows, .macos, .linux }) |os| {
+        const list = sectionsFor(os);
+        try std.testing.expectEqual(@as(usize, if (os == .windows) 2 else 1), list.len);
+        // Windows renders the download constraints first; outputs is always last.
+        const text = try expectWellFormed(list[list.len - 1], outputs_id, outputs_order);
+        for ([_][]const u8{
+            "DeliverFile",
+            "has to open",
+            "final version",
+            "process files",
+            "neither requires nor implies a quality check",
+            "material for another file",
+            "starting with the file that answers the request",
+            "not in the order you created them",
+        }) |required| try std.testing.expect(std.mem.indexOf(u8, text, required) != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "most important") == null);
+    }
 }
