@@ -18,7 +18,27 @@ const summary_impl = @import("account_summary");
 
 const refresh_timer_id: u64 = 0x4d57_4143_4354_5246;
 const refresh_skew_seconds: i64 = 60;
-const refresh_retry_interval_ns: u64 = 30 * std.time.ns_per_s;
+const refresh_retry_interval_seconds: u64 = 30;
+const refresh_retry_interval_ns: u64 = refresh_retry_interval_seconds * std.time.ns_per_s;
+/// How long past its wall-clock due time an armed refresh timer may stay
+/// silent before an authorization query arms it again. The clock has
+/// whole-second resolution and the main loop can be busy for a moment, so
+/// anything under two seconds would re-arm timers that are about to fire;
+/// five seconds is still negligible against the 30 s retry and the token
+/// lifetime. Re-arming early is harmless: the platform replaces the timer
+/// with the same id and an active attempt rejects a second refresh.
+const refresh_overdue_grace_seconds: i64 = 5;
+
+/// The one Metask authorization fact consumers read. An authenticated
+/// identity is never `unavailable`: once its token has expired it is
+/// `recovering` until a refresh lands or the session signs out.
+pub const AuthorizationStatus = union(enum) {
+    unavailable,
+    /// Current authorization generation; the access token is unexpired.
+    available: u64,
+    /// Renewal epoch: the count of refresh attempts that have finished.
+    recovering: u64,
+};
 
 const SummaryJob = struct {
     allocator: std.mem.Allocator,
@@ -559,6 +579,11 @@ pub const Runtime = struct {
     summary: summary_impl.State = .{},
     summary_job: ?*SummaryJob = null,
     refresh_blocked: bool = false,
+    /// Wall-clock second the armed refresh timer is due. The platform timer
+    /// only wakes Account; this decides when a refresh is overdue.
+    refresh_due_at: ?i64 = null,
+    /// Advances each time a refresh attempt finishes, whatever its outcome.
+    renewal_epoch: u64 = 0,
     stopping: bool = false,
     request_binding: ?struct { attempt_id: u64, generation: u64, digest: [32]u8 } = null,
 
@@ -626,6 +651,9 @@ pub const Runtime = struct {
     pub fn prepareTimer(self: *Runtime, timer_id: u64) ?PrepareResult {
         self.assertMainThread();
         if (timer_id != refresh_timer_id) return null;
+        // The fire consumes the one armed timer, accepted or not; an
+        // authorization query re-arms a refresh this fire could not start.
+        self.refresh_due_at = null;
         return self.prepareTokenRefresh();
     }
 
@@ -736,7 +764,7 @@ pub const Runtime = struct {
                 if (!self.matchesRequestBinding(entry.attempt_id))
                     break :result .ignored_stale;
                 if (collision)
-                    break :result self.prepareFailure(entry.attempt_id, .account_operation_failed);
+                    break :result self.prepareRenewalFailure(entry.attempt_id, .account_operation_failed);
                 break :result self.prepareRefreshedTokens(entry.attempt_id, &entry.rotation);
             },
             .completion => |*completion| self.prepareWorkerCompletion(completion, collision),
@@ -873,6 +901,33 @@ pub const Runtime = struct {
         return self.authorization_generation;
     }
 
+    /// Admission and every Task blocker read this one fact. Observing it
+    /// also re-arms a refresh whose timer is overdue: late, voided by a
+    /// rejected fire, or started without ever firing.
+    pub fn authorizationStatus(self: *Runtime) AuthorizationStatus {
+        self.assertMainThread();
+        if (self.account.view().state != .authenticated or !self.credentials.available())
+            return .unavailable;
+        self.armOverdueRefresh();
+        if (self.authorizationGeneration()) |generation| return .{ .available = generation };
+        return .{ .recovering = self.renewal_epoch };
+    }
+
+    fn armOverdueRefresh(self: *Runtime) void {
+        if (self.stopping or self.refresh_blocked or self.account.activeAttempt() != null) return;
+        const platform = self.platform orelse return;
+        const now = platform.wall_clock.nowUnixSeconds() orelse return;
+        const overdue_at = if (self.refresh_due_at) |due_at|
+            due_at +| refresh_overdue_grace_seconds
+        else if (self.credentials.expiresAt()) |expires_at|
+            expires_at -| refresh_skew_seconds
+        else
+            return;
+        if (now < overdue_at) return;
+        // A failed arm leaves the due time unset; the next query tries again.
+        self.armRefreshTimer(platform, now, 0) catch {};
+    }
+
     pub fn acceptsAuthorizationGeneration(self: *Runtime, generation: u64) bool {
         self.assertMainThread();
         return generation != 0 and generation == self.authorization_generation and
@@ -965,11 +1020,13 @@ pub const Runtime = struct {
     pub fn commit(self: *Runtime, prepared: *Prepared) void {
         self.assertMainThread();
         const terminal = prepared.finishesAttempt();
+        const renewal_finished = terminal and self.account.refreshInFlight();
         prepared.transition.commit(&self.account);
         if (terminal) {
             if (self.request_binding) |*binding| std.crypto.secureZero(u8, &binding.digest);
             self.request_binding = null;
         }
+        if (renewal_finished) self.renewal_epoch +%= 1;
     }
 
     pub fn takeRefreshAfterCommit(
@@ -1000,8 +1057,23 @@ pub const Runtime = struct {
 
     pub fn cancelRefreshTimer(self: *Runtime) void {
         self.assertMainThread();
+        self.refresh_due_at = null;
         const platform = self.platform orelse return;
         platform.timer.cancel(refresh_timer_id) catch {};
+    }
+
+    /// Every refresh timer arm goes through here, so the wall-clock due time
+    /// always describes the one timer the platform holds for this id.
+    fn armRefreshTimer(
+        self: *Runtime,
+        platform: ports_impl.Platform,
+        now: i64,
+        delay_seconds: u64,
+    ) !void {
+        const interval_ns = std.math.mul(u64, delay_seconds, std.time.ns_per_s) catch
+            std.math.maxInt(u64);
+        try platform.timer.start(refresh_timer_id, @max(interval_ns, 1), false);
+        self.refresh_due_at = now +| @as(i64, @intCast(@min(delay_seconds, std.math.maxInt(i64))));
     }
 
     fn prepareWorkerCompletion(
@@ -1047,12 +1119,18 @@ pub const Runtime = struct {
                 completion.payload = .{ .failed = .fromCode(error_code) };
             };
         }
+        // Only a refresh proven unsent, whose marker is gone, can be sent
+        // again. An explicit request or client rejection was not consumed,
+        // but sending it again cannot succeed.
         const retry_unsent_refresh = refresh_attempt and !self.refresh_blocked and
             completion.payload == .failed and completion.payload.failed.refresh_not_consumed and
-            switch (completion.payload.failed.error_code) {
-                .metask_service_unavailable, .deadline_exceeded, .user_cancelled => true,
-                else => false,
-            };
+            completion.payload.failed.error_code != .token_refresh_failed;
+        if (completion.payload == .failed and refresh_attempt) {
+            if (retry_unsent_refresh)
+                completion.payload.failed.retryable = true
+            else
+                self.loseRenewal(&completion.payload.failed);
+        }
         const loaded_identity = completion.payload == .identity_loaded;
         const login_failed_with_identity = self.account.currentIdentity() != null and
             !refresh_attempt and completion.payload == .failed;
@@ -1066,6 +1144,30 @@ pub const Runtime = struct {
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
         };
+    }
+
+    /// A verified session's refresh ended in a way it cannot safely send
+    /// again. Sign out now, exactly as a restore from the same store would:
+    /// the durable token and blocking marker stay as they are, and the
+    /// in-memory credential goes, so this process never sends it again.
+    fn loseRenewal(self: *Runtime, failure: *state_impl.WorkerFailure) void {
+        if (self.account.currentIdentity() == null) return;
+        switch (failure.error_code) {
+            .metask_unauthorized, .credential_store_delete_failed => failure.retryable = false,
+            else => failure.* = .renewalLost(failure.error_code),
+        }
+        if (self.credentials.available()) self.clearCredentials();
+        self.cancelRefreshTimer();
+    }
+
+    fn prepareRenewalFailure(
+        self: *Runtime,
+        attempt_id: u64,
+        error_code: contract.ErrorCode,
+    ) PrepareResult {
+        var failure: state_impl.WorkerFailure = .fromCode(error_code);
+        self.loseRenewal(&failure);
+        return self.prepareFailureValue(attempt_id, failure);
     }
 
     fn deleteInvalidCredential(self: *Runtime) contract.ErrorCode {
@@ -1129,13 +1231,13 @@ pub const Runtime = struct {
         const identity = self.account.currentIdentity();
         if (identity) |current|
             rotation.bindAccountId(current.accountId()) catch
-                return self.prepareFailure(attempt_id, .metask_protocol_invalid);
+                return self.prepareRenewalFailure(attempt_id, .metask_protocol_invalid);
         const platform = self.platform orelse
-            return self.prepareFailure(attempt_id, .credential_store_write_failed);
+            return self.prepareRenewalFailure(attempt_id, .credential_store_write_failed);
         credential_store.commitRefresh(
             platform.credentials,
             &rotation.persistenceInput().refresh_token,
-        ) catch |err| return self.prepareFailure(attempt_id, accountStoreError(err));
+        ) catch |err| return self.prepareRenewalFailure(attempt_id, accountStoreError(err));
         self.credentials.replaceRotation(rotation);
         self.refresh_blocked = false;
         platform.credentials.clearRefreshMarker() catch {};
@@ -1216,15 +1318,16 @@ pub const Runtime = struct {
                     return;
                 };
                 const now = platform.wall_clock.nowUnixSeconds() orelse {
-                    self.publishFailure(attempt_id, .account_operation_failed);
+                    self.publishUnsentRefreshFailure(attempt_id, .account_operation_failed);
                     return;
                 };
                 if (self.refresh_blocked) {
                     self.publishFailure(attempt_id, .token_refresh_failed);
                     return;
                 }
+                // No marker means no HTTP: this failure is safely retryable.
                 platform.credentials.beginRefresh(self.credentials.refreshToken().?) catch |err| {
-                    self.publishFailure(attempt_id, accountStoreError(err));
+                    self.publishUnsentRefreshFailure(attempt_id, accountStoreError(err));
                     return;
                 };
                 self.captureRequestBinding(attempt_id);
@@ -1260,6 +1363,15 @@ pub const Runtime = struct {
         });
     }
 
+    /// A refresh that failed locally before writing its marker, so before
+    /// any HTTP: the retained refresh token is untouched.
+    fn publishUnsentRefreshFailure(self: *Runtime, attempt_id: u64, error_code: contract.ErrorCode) void {
+        self.effects.publishCompletion(.{
+            .attempt_id = attempt_id,
+            .payload = .{ .failed = .{ .error_code = error_code, .refresh_not_consumed = true } },
+        });
+    }
+
     fn persistSignedOut(self: *Runtime, attempt_id: u64) void {
         const platform = self.platform orelse {
             self.publishFailure(attempt_id, .credential_store_write_failed);
@@ -1290,6 +1402,7 @@ pub const Runtime = struct {
         const platform = self.platform orelse
             return self.prepareRefreshScheduleFailure();
         const expires_at = self.credentials.expiresAt() orelse {
+            self.refresh_due_at = null;
             platform.timer.cancel(refresh_timer_id) catch
                 return self.prepareRefreshScheduleFailure();
             return null;
@@ -1299,12 +1412,7 @@ pub const Runtime = struct {
         const refresh_at = expires_at -| refresh_skew_seconds;
         if (refresh_at <= now)
             return preparedFromState(self.account.prepareTokenRefresh());
-        const interval_ns = std.math.mul(
-            u64,
-            @intCast(refresh_at - now),
-            std.time.ns_per_s,
-        ) catch std.math.maxInt(u64);
-        platform.timer.start(refresh_timer_id, @max(interval_ns, 1), false) catch
+        self.armRefreshTimer(platform, now, @intCast(refresh_at - now)) catch
             return self.prepareRefreshScheduleFailure();
         return null;
     }
@@ -1314,9 +1422,11 @@ pub const Runtime = struct {
             self.account.view().state != .authenticated or
             self.account.activeAttempt() != null or !self.credentials.available()) return null;
         const platform = self.platform orelse return self.prepareRefreshScheduleFailure();
+        const now = platform.wall_clock.nowUnixSeconds() orelse
+            return self.prepareRefreshScheduleFailure();
         // One shot: another proven-unsent failure may arm the next retry.
         // Do not use scheduleRefresh here: inside the skew it would retry now.
-        platform.timer.start(refresh_timer_id, refresh_retry_interval_ns, false) catch
+        self.armRefreshTimer(platform, now, refresh_retry_interval_seconds) catch
             return self.prepareRefreshScheduleFailure();
         return null;
     }
@@ -2559,11 +2669,62 @@ test "marker write failure sends no refresh HTTP and remains safely retryable" {
         runtime.deinit();
     }
     try beginTestRefresh(&runtime, &platform);
-    try finishTestRefresh(&runtime);
+    runtime.effects.network_attempt.join();
+    var failed = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer failed.deinit();
+    runtime.commit(&failed);
+    try std.testing.expect(runtime.dispatchCommitted(&failed) == null);
     try std.testing.expectEqual(@as(usize, 0), transport.calls);
     try std.testing.expect(!runtime.refresh_blocked);
     try std.testing.expect(platform.refresh_marker == null);
+    try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
     try std.testing.expectEqual(contract.ErrorCode.credential_store_write_failed, runtime.view().error_code);
+    // Nothing was sent, so the session keeps its identity and retries.
+    try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
+    try std.testing.expectEqual(refresh_retry_interval_ns, platform.last_timer_interval_ns);
+    try std.testing.expect(runtime.credentials.available());
+}
+
+test "a refresh that cannot read the clock keeps the verified session" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{};
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    TestSupport.attachPlatform(&runtime, &platform);
+    var authenticated = try TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask", "access-token", "refresh-token", 200);
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+    var refresh = switch (runtime.prepareTokenRefresh()) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer refresh.deinit();
+    try std.testing.expect(runtime.admitEffect(&refresh));
+    runtime.commit(&refresh);
+    platform.now_unix_seconds = null;
+    try std.testing.expect(runtime.dispatchCommitted(&refresh) == null);
+    var failed = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer failed.deinit();
+    runtime.commit(&failed);
+    try std.testing.expectEqual(@as(usize, 0), transport.calls);
+    try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
+    try std.testing.expectEqual(contract.ErrorCode.account_operation_failed, runtime.view().error_code);
+    try std.testing.expect(platform.refresh_marker == null);
+    // Without a clock the retry cannot be armed either; that stays visible.
+    var schedule_failed = runtime.dispatchCommitted(&failed) orelse return error.TestUnexpectedResult;
+    defer schedule_failed.deinit();
+    runtime.commit(&schedule_failed);
+    try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
+    try std.testing.expectEqual(contract.ErrorCode.refresh_schedule_failed, runtime.view().error_code);
 }
 
 test "unknown transport result blocks timer retry cancelled reauthentication and restart" {
@@ -2581,8 +2742,18 @@ test "unknown transport result blocks timer retry cancelled reauthentication and
         try std.testing.expectEqual(@as(usize, 1), transport.calls);
         try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
         try std.testing.expect(runtime.refresh_blocked);
+        // The verified session ends now, as a restart would end it.
+        try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+        try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, runtime.view().error_code);
+        try std.testing.expect(!runtime.credentials.available());
+        try std.testing.expect(platform.refresh_marker != null);
         try std.testing.expect(runtime.prepareTimer(refresh_timer_id).? == .rejected);
         try std.testing.expect(runtime.prepareCommand(.retry_refresh) == .rejected);
+        for ([_]i64{ 150, 200, 4000 }) |now| {
+            platform.now_unix_seconds = now;
+            try std.testing.expect(runtime.authorizationStatus() == .unavailable);
+        }
+        try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
         _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
         var cancel = switch (runtime.prepareCommand(.cancel_operation)) {
             .prepared => |p| p,
@@ -2602,7 +2773,286 @@ test "unknown transport result blocks timer retry cancelled reauthentication and
         restarted.commit(&restored);
         try std.testing.expect(!restarted.takeRefreshAfterCommit(&restored));
         try std.testing.expectEqual(contract.AccountState.signed_out, restarted.view().state);
+        try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, restarted.view().error_code);
         try std.testing.expectEqual(@as(usize, 1), transport.calls);
+    }
+}
+
+const ResponseTestTransport = struct {
+    status: u16,
+    body: []const u8,
+    calls: usize = 0,
+
+    fn port(self: *@This()) metask_client.Transport {
+        return .{ .context = self, .perform_fn = perform, .retire_fn = metask_client.retireNothing };
+    }
+
+    fn perform(context: *anyopaque, request: metask_client.Request, output: []u8) metask_client.TransportError!metask_client.Response {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (request.kind != .refresh_token) return error.ProtocolFailed;
+        self.calls += 1;
+        @memcpy(output[0..self.body.len], self.body);
+        return .{ .status = self.status, .body = output[0..self.body.len] };
+    }
+};
+
+test "a refresh answered without a rotation signs out exactly as restore would" {
+    const Case = struct { status: u16, body: []const u8, cause: []const u8, blocks: bool };
+    for ([_]Case{
+        .{ .status = 429, .body = "{}", .cause = "metask_rate_limited", .blocks = true },
+        .{ .status = 500, .body = "{}", .cause = "metask_service_unavailable", .blocks = true },
+        .{ .status = 503, .body = "{\"error\":\"server_error\"}", .cause = "metask_service_unavailable", .blocks = true },
+        .{ .status = 404, .body = "{}", .cause = "metask_protocol_invalid", .blocks = true },
+        .{ .status = 200, .body = "{\"access_token\":", .cause = "metask_protocol_invalid", .blocks = true },
+        .{ .status = 400, .body = "{\"error\":\"invalid_request\"}", .cause = "", .blocks = false },
+        .{ .status = 400, .body = "{\"error\":\"invalid_scope\"}", .cause = "", .blocks = false },
+        .{ .status = 401, .body = "{\"error\":\"invalid_client\"}", .cause = "", .blocks = false },
+    }) |case| {
+        var transport: ResponseTestTransport = .{ .status = case.status, .body = case.body };
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &transport, .notify_fn = runtimeTestWake });
+        var platform: TestSupport.Platform = .{};
+        try platform.setStoredRefreshToken("refresh-token");
+        defer {
+            TestSupport.detachPlatform(&runtime);
+            runtime.deinit();
+        }
+        try beginTestRefresh(&runtime, &platform);
+        try finishTestRefresh(&runtime);
+        try std.testing.expectEqual(@as(usize, 1), transport.calls);
+        try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+        try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, runtime.view().error_code);
+        try std.testing.expectEqualStrings(case.cause, runtime.view().safe_diagnostic);
+        try std.testing.expect(!runtime.credentials.available());
+        try std.testing.expect(runtime.authorizationStatus() == .unavailable);
+        try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
+        try std.testing.expectEqualStrings("refresh-token", platform.refresh_token[0..platform.refresh_token_len.?]);
+        try std.testing.expectEqual(case.blocks, platform.refresh_marker != null);
+
+        // A restart from the same store reaches the same public state.
+        var restarted = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &transport, .notify_fn = runtimeTestWake });
+        defer {
+            TestSupport.detachPlatform(&restarted);
+            restarted.deinit();
+        }
+        var restored = restarted.prepareStart(platform.ports());
+        defer restored.deinit();
+        const restores = restarted.takeRefreshAfterCommit(&restored);
+        restarted.commit(&restored);
+        try std.testing.expectEqual(!case.blocks, restores);
+        if (restores) {
+            var restore_refresh = restarted.prepareRestoredRefresh();
+            defer restore_refresh.deinit();
+            try std.testing.expect(restarted.admitEffect(&restore_refresh));
+            restarted.commit(&restore_refresh);
+            try std.testing.expect(restarted.dispatchCommitted(&restore_refresh) == null);
+            try finishTestRefresh(&restarted);
+        }
+        try std.testing.expectEqual(contract.AccountState.signed_out, restarted.view().state);
+        try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, restarted.view().error_code);
+        try std.testing.expectEqual(@as(usize, if (case.blocks) 1 else 2), transport.calls);
+    }
+}
+
+test "the authorization status is unavailable exactly when no identity is verified" {
+    var transport: RotationTestTransport = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &transport, .notify_fn = runtimeTestWake });
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    try platform.setStoredRefreshToken("refresh-token");
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    // checking: a restore is underway but no identity is verified yet.
+    var start = runtime.prepareStart(platform.ports());
+    defer start.deinit();
+    runtime.commit(&start);
+    try std.testing.expectEqual(contract.AccountState.checking, runtime.view().state);
+    try std.testing.expect(runtime.authorizationStatus() == .unavailable);
+    var restore = runtime.prepareRestoredRefresh();
+    defer restore.deinit();
+    try std.testing.expect(runtime.admitEffect(&restore));
+    runtime.commit(&restore);
+    try std.testing.expect(runtime.authorizationStatus() == .unavailable);
+    TestSupport.clearEffectQueue(&runtime);
+
+    var signed_out_transport: RuntimeTestTransport = .{};
+    var verified = try initRuntimeForUnitTest(&signed_out_transport);
+    var verified_platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    TestSupport.attachPlatform(&verified, &verified_platform);
+    defer {
+        TestSupport.detachPlatform(&verified);
+        verified.deinit();
+    }
+    var authenticated = try TestSupport.prepareAuthenticated(&verified, "account-1", "Metask", "access-token", "refresh-token", 200);
+    defer authenticated.deinit();
+    verified.commit(&authenticated);
+    const generation = verified.authorization_generation;
+    try std.testing.expectEqual(AuthorizationStatus{ .available = generation }, verified.authorizationStatus());
+    verified_platform.now_unix_seconds = 200;
+    try std.testing.expectEqual(AuthorizationStatus{ .recovering = 0 }, verified.authorizationStatus());
+    // Nothing had armed a refresh, so observing the expiry arms one.
+    try std.testing.expectEqual(@as(usize, 1), verified_platform.timer_start_count);
+
+    // A login from the verified session publishes `authorizing`.
+    verified_platform.now_unix_seconds = 100;
+    const login = TestSupport.commitBeginLoginWithoutDispatch(&verified);
+    try std.testing.expect(verified.authorizationStatus() == .unavailable);
+    var cancel = switch (verified.prepareCommand(.cancel_operation)) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer cancel.deinit();
+    _ = cancel.transition.takeEffect();
+    verified.commit(&cancel);
+    _ = login;
+    try std.testing.expectEqual(AuthorizationStatus{ .available = generation }, verified.authorizationStatus());
+
+    // Logging out keeps `authenticated` until the credential is deleted.
+    var logout = switch (verified.prepareCommand(.logout)) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer logout.deinit();
+    _ = logout.transition.takeEffect();
+    verified.commit(&logout);
+    try std.testing.expectEqual(AuthorizationStatus{ .available = generation }, verified.authorizationStatus());
+    verified_platform.now_unix_seconds = 260;
+    try std.testing.expectEqual(AuthorizationStatus{ .recovering = 0 }, verified.authorizationStatus());
+    // No refresh is armed while another attempt owns the session.
+    try std.testing.expectEqual(@as(usize, 1), verified_platform.timer_start_count);
+}
+
+test "an overdue refresh timer is re-armed by the authorization query" {
+    var transport: RotationTestTransport = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &transport, .notify_fn = runtimeTestWake });
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    try platform.setStoredRefreshToken("refresh-token");
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    TestSupport.attachPlatform(&runtime, &platform);
+    var authenticated = try TestSupport.prepareAuthenticatedAndSchedule(&runtime, "account-1", "Metask", "access-token", "refresh-token", 200);
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+    try std.testing.expect(runtime.dispatchCommitted(&authenticated) == null);
+    try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
+    try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_s), platform.last_timer_interval_ns);
+    const generation = runtime.authorization_generation;
+
+    // Not yet overdue: the armed timer still has its grace period.
+    platform.now_unix_seconds = 144;
+    try std.testing.expectEqual(AuthorizationStatus{ .available = generation }, runtime.authorizationStatus());
+    try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
+
+    // The timer never fired: the query arms it again to fire at once.
+    platform.now_unix_seconds = 145;
+    try std.testing.expectEqual(AuthorizationStatus{ .available = generation }, runtime.authorizationStatus());
+    try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
+    try std.testing.expectEqual(refresh_timer_id, platform.last_timer_id.?);
+    try std.testing.expectEqual(@as(u64, 1), platform.last_timer_interval_ns);
+    for (0..3) |_| _ = runtime.authorizationStatus();
+    try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
+
+    // The re-armed timer started but stays silent too; it is armed again
+    // once its own grace has passed, and again after the token expired.
+    platform.now_unix_seconds = 149;
+    _ = runtime.authorizationStatus();
+    try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
+    platform.now_unix_seconds = 150;
+    _ = runtime.authorizationStatus();
+    try std.testing.expectEqual(@as(usize, 3), platform.timer_start_count);
+    platform.now_unix_seconds = 230;
+    try std.testing.expectEqual(AuthorizationStatus{ .recovering = 0 }, runtime.authorizationStatus());
+    try std.testing.expectEqual(@as(usize, 4), platform.timer_start_count);
+
+    var refresh = switch (runtime.prepareTimer(refresh_timer_id).?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer refresh.deinit();
+    try std.testing.expect(runtime.admitEffect(&refresh));
+    runtime.commit(&refresh);
+    try std.testing.expect(runtime.dispatchCommitted(&refresh) == null);
+    // An attempt in flight is recovery in motion; nothing more is armed.
+    try std.testing.expectEqual(AuthorizationStatus{ .recovering = 0 }, runtime.authorizationStatus());
+    try std.testing.expectEqual(@as(usize, 4), platform.timer_start_count);
+    runtime.effects.network_attempt.join();
+    var rotated = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer rotated.deinit();
+    runtime.commit(&rotated);
+    try std.testing.expect(runtime.dispatchCommitted(&rotated) == null);
+    try std.testing.expectEqual(AuthorizationStatus{ .available = runtime.authorization_generation }, runtime.authorizationStatus());
+    try std.testing.expect(runtime.authorization_generation != generation);
+    try std.testing.expectEqual(@as(u64, 1), runtime.renewal_epoch);
+    try std.testing.expectEqual(@as(usize, 1), transport.calls);
+}
+
+test "a refresh timer voided during a login is re-armed after the login ends" {
+    const Ending = enum { cancelled, callback_failed, deadline };
+    for ([_]Ending{ .cancelled, .callback_failed, .deadline }) |ending| {
+        var transport: RuntimeTestTransport = .{};
+        var runtime = try initRuntimeForUnitTest(&transport);
+        var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+        TestSupport.attachPlatform(&runtime, &platform);
+        defer {
+            TestSupport.detachPlatform(&runtime);
+            runtime.deinit();
+        }
+        var authenticated = try TestSupport.prepareAuthenticatedAndSchedule(&runtime, "account-1", "Metask", "access-token", "refresh-token", 200);
+        defer authenticated.deinit();
+        runtime.commit(&authenticated);
+        try std.testing.expect(runtime.dispatchCommitted(&authenticated) == null);
+        try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
+
+        const login = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+        platform.now_unix_seconds = 140;
+        // The one timer fires into the login and is rejected: it is spent.
+        try std.testing.expect(runtime.prepareTimer(refresh_timer_id).? == .rejected);
+        try std.testing.expect(runtime.authorizationStatus() == .unavailable);
+        try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
+
+        switch (ending) {
+            .cancelled => {
+                var cancel = switch (runtime.prepareCommand(.cancel_operation)) {
+                    .prepared => |prepared| prepared,
+                    else => return error.TestUnexpectedResult,
+                };
+                defer cancel.deinit();
+                _ = cancel.transition.takeEffect();
+                runtime.commit(&cancel);
+            },
+            .callback_failed, .deadline => {
+                var result: login_attempt.WorkerResult = .{ .failed = .fromCode(if (ending == .deadline)
+                    .deadline_exceeded
+                else
+                    .oauth_callback_rejected) };
+                runtime.effects.loginSink().publish(login, &result);
+                var failed = switch (runtime.prepareNextCompletion().?) {
+                    .prepared => |prepared| prepared,
+                    else => return error.TestUnexpectedResult,
+                };
+                defer failed.deinit();
+                runtime.commit(&failed);
+                try std.testing.expect(runtime.dispatchCommitted(&failed) == null);
+            },
+        }
+        try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
+        // Nothing re-armed the refresh when the login ended ...
+        try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
+        // ... so the first query does, before the token can expire unseen.
+        try std.testing.expect(runtime.authorizationStatus() == .available);
+        try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
+        try std.testing.expectEqual(@as(u64, 1), platform.last_timer_interval_ns);
+        var refresh = switch (runtime.prepareTimer(refresh_timer_id).?) {
+            .prepared => |prepared| prepared,
+            else => return error.TestUnexpectedResult,
+        };
+        defer refresh.deinit();
+        try std.testing.expect(refresh.transition.takeEffect().? == .refresh_token);
     }
 }
 
@@ -2643,7 +3093,10 @@ test "failed replacement save retains matching marker and forbids another attemp
     try beginTestRefresh(&runtime, &platform);
     try finishTestRefresh(&runtime);
     try std.testing.expect(runtime.refresh_blocked);
-    try std.testing.expectEqual(contract.ErrorCode.credential_store_write_failed, runtime.view().error_code);
+    try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, runtime.view().error_code);
+    try std.testing.expectEqualStrings("credential_store_write_failed", runtime.view().safe_diagnostic);
+    try std.testing.expect(!runtime.credentials.available());
     try std.testing.expectEqualStrings("refresh-token", platform.refresh_token[0..platform.refresh_token_len.?]);
     try std.testing.expect(runtime.prepareCommand(.retry_refresh) == .rejected);
     var restored = try credential_store.restore(std.testing.allocator, platform.ports().credentials);
@@ -2858,7 +3311,12 @@ test "unsent refresh retries through its timer and recovers after access expiry"
 
     for ([_]i64{ 170, 200 }) |now| {
         platform.now_unix_seconds = now;
-        if (now == 200) try std.testing.expect((try runtime.authorizationLease()) == null);
+        if (now == 200) {
+            try std.testing.expect((try runtime.authorizationLease()) == null);
+            // Two attempts finished; the armed retry is due, not overdue.
+            try std.testing.expectEqual(AuthorizationStatus{ .recovering = 2 }, runtime.authorizationStatus());
+            try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
+        }
         var retry = switch (runtime.prepareTimer(platform.last_timer_id.?).?) {
             .prepared => |prepared| prepared,
             else => return error.TestUnexpectedResult,

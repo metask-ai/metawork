@@ -1818,6 +1818,10 @@ export const enUS = {
     "The Metask model catalog failed to refresh.",
   "mutation.reason.metask_authorization_required":
     "Sign in to Metask to use this model.",
+  "mutation.reason.metask_authorization_recovering":
+    "Reconnecting to Metask. Messages run once the connection is back.",
+  "mutation.reason.metask_connection_unavailable":
+    "Can't reach Metask right now. The message was not run.",
   "mutation.reason.session_poisoned":
     "The current session can no longer continue.",
   "mutation.reason.checkpoint_unavailable":

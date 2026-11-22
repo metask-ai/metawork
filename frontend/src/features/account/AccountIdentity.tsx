@@ -90,10 +90,7 @@ export function AccountIdentity({
                     <Menu.Separator />
                   </>
                 )}
-                {(account.state === "signed_out" ||
-                  (authenticated &&
-                    account.errorCode !== "none" &&
-                    account.errorCode !== "refresh_schedule_failed")) && (
+                {account.state === "signed_out" && (
                   <Menu.Item
                     disabled={disabled}
                     onClick={() => choose(onBeginLogin)}
@@ -112,9 +109,6 @@ export function AccountIdentity({
                   </Menu.Item>
                 )}
                 {(account.state === "signed_out" ||
-                  (authenticated &&
-                    account.errorCode !== "none" &&
-                    account.errorCode !== "refresh_schedule_failed") ||
                   (account.state === "authorizing" && account.canCancel)) && (
                   <Menu.Separator />
                 )}

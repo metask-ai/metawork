@@ -4704,7 +4704,10 @@ pub const Runtime = struct {
             result.reason = .session_releasing;
             return result;
         }
-        if (self.taskMetaskInputBlocker(task_id)) |reason| if (reason != .models_catalog_loading) {
+        // A resend waits on a loading catalog or a renewal like any message.
+        if (self.taskMetaskInputBlocker(task_id)) |reason| if (reason != .models_catalog_loading and
+            reason != .metask_authorization_recovering)
+        {
             result.reason = reason;
             return result;
         };
@@ -7648,6 +7651,7 @@ pub const Runtime = struct {
             const authority = self.taskModelIntentAuthority(query.task_id) orelse break :intent false;
             break :intent self.custom_providers.sourceModelProtocol(facts.?.intent.?.target, authority.source_generation, authority.catalog_generation) != null;
         } else self.installedTaskModelAvailable(query.task_id);
+        const metask_input = self.taskMetaskInput(query.task_id);
         return .{
             .shutting_down = self.shutting_down,
             .task_persistence_ready = self.task_persistence_health.operational(),
@@ -7673,7 +7677,8 @@ pub const Runtime = struct {
                 self.canonical_user_home != null and workspace.exists,
             .model_selection_availability = self.taskModelSelectionAvailability(query),
             .model_rebind_required = model_rebind_required,
-            .model_input_blocker = self.taskMetaskInputBlocker(query.task_id),
+            .model_input_blocker = metask_input.blocker,
+            .metask_recovery_epoch = metask_input.recovery_epoch,
         };
     }
 
@@ -9860,21 +9865,38 @@ pub const Runtime = struct {
     }
 
     fn taskMetaskInputBlocker(self: *Runtime, task_id: u64) ?task_runtime.SendInputReason {
-        const facts = self.task_runtime.modelFacts(task_id) orelse return null;
+        return self.taskMetaskInput(task_id).blocker;
+    }
+
+    const MetaskInput = struct {
+        blocker: ?task_runtime.SendInputReason = null,
+        /// Account's renewal epoch while the blocker is a recovery.
+        recovery_epoch: ?u64 = null,
+    };
+
+    /// One Account status read yields both the blocker and its recovery
+    /// epoch, so a projection and an admission never see two facts.
+    fn taskMetaskInput(self: *Runtime, task_id: u64) MetaskInput {
+        const facts = self.task_runtime.modelFacts(task_id) orelse return .{};
         const uses_metask = if (facts.intent) |intent|
             std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id)
         else if (facts.installed) |installed| installed.is_metask else false;
-        if (!uses_metask) return null;
-        const check = self.metask_authorization_check orelse return if (builtin.is_test) null else .metask_authorization_required;
-        const current = check.current() orelse return .metask_authorization_required;
-        if (current.generation == 0) return .metask_authorization_required;
-        return switch (self.custom_providers.metaskInputCatalogState(current.generation)) {
+        if (!uses_metask) return .{};
+        const check = self.metask_authorization_check orelse
+            return .{ .blocker = if (builtin.is_test) null else .metask_authorization_required };
+        const current = switch (check.status()) {
+            .unavailable => return .{ .blocker = .metask_authorization_required },
+            .recovering => |epoch| return .{ .blocker = .metask_authorization_recovering, .recovery_epoch = epoch },
+            .available => |authorization| authorization,
+        };
+        if (current.generation == 0) return .{ .blocker = .metask_authorization_required };
+        return .{ .blocker = switch (self.custom_providers.metaskInputCatalogState(current.generation)) {
             .ready => null,
             .loading => .models_catalog_loading,
             .failed => .models_catalog_failed,
             .needs_authentication => .metask_authorization_required,
             else => .binding_unavailable,
-        };
+        } };
     }
 
     pub fn setImageRunPreparation(self: *Runtime, preparation: ?control_ports.ImageRunPreparation) void {
@@ -10306,6 +10328,12 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn retryTaskSessionClose(control: *Runtime, task_id: u64) !bool {
         return control.task_runtime.beginDetach(task_id, control.taskRuntimeOperationEffects());
+    }
+
+    /// The model blocker a Task projection publishes, from the same read
+    /// its waiting messages are advanced by.
+    pub fn taskModelInputBlocker(control: *Runtime, task_id: u64) ?task_runtime.SendInputReason {
+        return control.taskMetaskInputBlocker(task_id);
     }
 
     /// Exercises the writer while a test deliberately holds lifecycle reconciliation.

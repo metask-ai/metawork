@@ -640,6 +640,9 @@ pub const InputSubmission = struct {
     blocking_task_id: ?u64 = null,
     /// A required preparation is attempted once for this accepted message.
     preparation_attempted: bool = false,
+    /// Account's renewal epoch when this message began waiting on a Metask
+    /// renewal; it waits for that one attempt only. Runtime-only.
+    metask_recovery_epoch: ?u64 = null,
 };
 
 // Fixed message metadata is charged to the shared projection budget. Its
@@ -687,6 +690,11 @@ pub const SendInputReason = enum {
     models_catalog_loading,
     models_catalog_failed,
     metask_authorization_required,
+    /// Account is renewing an expired Metask token; a message waits for one
+    /// renewal attempt's outcome.
+    metask_authorization_recovering,
+    /// The renewal a message waited for failed and will be retried.
+    metask_connection_unavailable,
     session_poisoned,
     checkpoint_unavailable,
     execution_rebind_required,

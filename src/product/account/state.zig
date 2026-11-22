@@ -496,9 +496,7 @@ pub const Account = struct {
         else
             failure_value;
         const login_replaced = kind == .login and self.state.transaction == .loading_identity;
-        const authentication_invalid = kind == .refresh_token and
-            (failure.error_code == .metask_unauthorized or
-                failure.error_code == .credential_store_delete_failed);
+        const authentication_invalid = kind == .refresh_token and !failure.retryable;
         var next = self.state;
         next.session_state = switch (kind) {
             .login => if (login_replaced or next.account_id.len == 0)
@@ -643,10 +641,22 @@ pub const WorkerFailure = struct {
     safe_diagnostic: SafeDiagnostic = .{},
     /// Internal transport evidence only; never projected to the public Account wire.
     refresh_not_consumed: bool = false,
+    /// Account Runtime proved this refresh unsent and will retry it. Any
+    /// other refresh failure ends a verified session.
+    retryable: bool = false,
 
     pub fn fromCode(error_code: contract.ErrorCode) WorkerFailure {
         std.debug.assert(error_code != .none);
         return .{ .error_code = error_code };
+    }
+
+    /// A verified session's renewal is lost. It reads as the failure a
+    /// restore from the same store reports; the cause stays diagnosable.
+    pub fn renewalLost(cause: contract.ErrorCode) WorkerFailure {
+        var failure: WorkerFailure = .fromCode(.token_refresh_failed);
+        if (cause != .token_refresh_failed and cause != .none)
+            failure.safe_diagnostic.set(@tagName(cause)) catch {};
+        return failure;
     }
 };
 
@@ -983,22 +993,68 @@ test "refresh failure distinguishes retryable and invalid credentials" {
         try AccountIdentity.init("account-1", "Metask User", "m***@example.com", "", 5),
     );
     commitPrepared(&active, &active_restore);
-    var active_refresh = switch (active.prepareTokenRefresh()) {
+
+    // Only a failure the Runtime proved unsent keeps the verified identity.
+    var unsent_refresh = switch (active.prepareTokenRefresh()) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    commitPrepared(&active, &active_refresh);
-    var unauthorized: WorkerCompletion = .{
+    commitPrepared(&active, &unsent_refresh);
+    var unsent_failure: WorkerFailure = .fromCode(.metask_service_unavailable);
+    unsent_failure.retryable = true;
+    var unsent: WorkerCompletion = .{
         .attempt_id = active.activeAttempt().?,
-        .payload = .{ .failed = .fromCode(.metask_unauthorized) },
+        .payload = .{ .failed = unsent_failure },
     };
-    var invalid = switch (active.prepareCompletion(&unauthorized)) {
+    var kept = switch (active.prepareCompletion(&unsent)) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    commitPrepared(&active, &invalid);
+    commitPrepared(&active, &kept);
+    try std.testing.expectEqual(contract.AccountState.authenticated, active.view().state);
+    try std.testing.expectEqual(contract.ErrorCode.metask_service_unavailable, active.view().error_code);
+
+    var lost_refresh = switch (active.prepareTokenRefresh()) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&active, &lost_refresh);
+    var lost: WorkerCompletion = .{
+        .attempt_id = active.activeAttempt().?,
+        .payload = .{ .failed = .renewalLost(.metask_rate_limited) },
+    };
+    var signed_out = switch (active.prepareCompletion(&lost)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&active, &signed_out);
     try std.testing.expectEqual(contract.AccountState.signed_out, active.view().state);
     try std.testing.expectEqualStrings("", active.view().account_id);
+    try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, active.view().error_code);
+    try std.testing.expectEqualStrings("metask_rate_limited", active.view().safe_diagnostic);
+
+    var replaced = Account.initRestoring();
+    var replaced_restore = try TestSupport.prepareAuthenticated(
+        &replaced,
+        try AccountIdentity.init("account-1", "Metask User", "m***@example.com", "", 5),
+    );
+    commitPrepared(&replaced, &replaced_restore);
+    var replaced_refresh = switch (replaced.prepareTokenRefresh()) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&replaced, &replaced_refresh);
+    var unauthorized: WorkerCompletion = .{
+        .attempt_id = replaced.activeAttempt().?,
+        .payload = .{ .failed = .fromCode(.metask_unauthorized) },
+    };
+    var invalid = switch (replaced.prepareCompletion(&unauthorized)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&replaced, &invalid);
+    try std.testing.expectEqual(contract.AccountState.signed_out, replaced.view().state);
+    try std.testing.expectEqualStrings("", replaced.view().account_id);
 }
 
 test "shutdown invalidates an active authorization attempt" {
