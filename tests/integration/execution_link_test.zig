@@ -523,6 +523,69 @@ test "a Run crosses into the execution process and its events arrive ahead of it
     }
 }
 
+test "a shutdown whose Run's terminal waits behind events the window has not made room for still finishes" {
+    // The execution half sends a Run's terminal only after every event its
+    // Session queued, and sends an event only into room the window granted,
+    // which only the consuming thread grants. With room for one event, the
+    // Run's second event stays over there, and the terminal with it: a
+    // shutdown that joins its workers without consuming waits on itself.
+    // Bounded from outside; past the bound the test ends the process, which
+    // ends every wait on it, and fails.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try startOwner(&owner, &wake, &.{ fixture, "--with-runtime", "--text-events" }, fixture_message_limits, 1);
+    defer owner.deinit();
+    var control = try product_control.Runtime.init(allocator, io, owner.runtimePort(), product_limits, lifecycle.productControlConfiguration());
+    defer control.deinit();
+    const task_id = try createRunningTask(&control, "Say something short");
+    try waitEvents(&owner, 1);
+
+    // The Run has finished over there -- both its events produced, the
+    // second held for room -- once its Session is idle again. Asked
+    // directly: a snapshot is answered at once, not held behind events.
+    const session = control.testTask(task_id).?.runtime.attached().?.binding.owner.?.session;
+    var waited: u64 = 0;
+    while (session.snapshot().state != .idle) : (waited += wait_tick_ms) {
+        if (waited >= wait_limit_ms) return error.RunNeverFinished;
+        try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+    }
+    try std.testing.expectEqual(@as(u64, 1), owner.events_received.load(.acquire));
+
+    const Shutdown = struct {
+        done: std.Io.Event = .unset,
+
+        fn run(self: *@This(), shutting: *product_control.Runtime) void {
+            shutting.shutdownExecutor();
+            self.done.set(io);
+        }
+    };
+    var shutdown: Shutdown = .{};
+    const thread = try std.Thread.spawn(.{}, Shutdown.run, .{ &shutdown, &control });
+    const returned = if (shutdown.done.waitTimeout(io, .{ .duration = .{
+        .raw = .fromMilliseconds(10_000),
+        .clock = .awake,
+    } })) |_| true else |_| false;
+    if (!returned) execution_client.TestSupport.killCurrent(&owner);
+    thread.join();
+    try std.testing.expect(returned);
+
+    // Nothing was lost: the events held back reached Product after all, and
+    // the Run is sealed complete with no gap in its recording.
+    try std.testing.expect(owner.events_received.load(.acquire) > 1);
+    const run = control.testTask(task_id).?.durable.runs[0].?;
+    try std.testing.expect(run.event_projection_failure == null);
+    const output = try allocator.alloc(u8, 256 * 1024);
+    defer allocator.free(output);
+    const snapshot = try control.writeAggregateFixture(output);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"terminal\":{\"outcome\":\"completed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "typed event") != null);
+    owner.shutdown();
+    control.syncLifecycle();
+    control.relinquishAgentSessionsAfterRuntimeShutdown();
+}
+
 test "a Skill selected with attachments crosses into the execution process as the Run's Host block" {
     // The fake Core in the execution process streams the block it received
     // back as the Run's text, so what Core got is read from Product's view.

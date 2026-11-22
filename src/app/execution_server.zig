@@ -21,6 +21,9 @@
 //! sends one only when the UI half has made room for it (`Credit`), and it
 //! sends a Run's or compact's terminal only once every event of that Session
 //! is out, so the UI half receives the terminal after the events before it.
+//! The terminal therefore waits for the UI half's consumer too, including
+//! after event delivery is stopped: whoever waits there for a Run keeps
+//! consuming.
 //!
 //! ## Calling back
 //!

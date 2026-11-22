@@ -465,7 +465,7 @@ flowchart LR
 
 正常消费期间，关键事件在队列饱和时等待空间，不能因消费耗时返回 fatal；等待不持有阻止消费、abort 或 close 推进的 Session 锁。普通 Stop 保持消费，不主动制造缺口。超过整个可用队列字节容量的单事件无法靠等待接纳，仍须明确拒绝，不能永久挂起。
 
-消费者停止推进的 close/shutdown 必须在 join 前设置精确操作范围内粘性的停止等待状态并唤醒 callback；合法但未入队的事件标记本地缺口并返回 `EVENT_CONTINUE`，后续事件不重新等待，真实身份或协议违约仍拒绝。当前活动 Run 在 closing 中的合法事件仍完成接受校验，不能仅因 closing 返回 fatal。缺口沿有界 TerminalResult/terminal publication 交接，不依赖向饱和队列补写事件；已入队的所有权保持不变，新操作不继承旧状态。
+消费者停止推进的 close/shutdown 必须在 join 前设置精确操作范围内粘性的停止等待状态并唤醒 callback；合法但未入队的事件标记本地缺口并返回 `EVENT_CONTINUE`，后续事件不重新等待，真实身份或协议违约仍拒绝。当前活动 Run 在 closing 中的合法事件仍完成接受校验，不能仅因 closing 返回 fatal。缺口沿有界 TerminalResult/terminal publication 交接，不依赖向饱和队列补写事件；已入队的所有权保持不变，新操作不继承旧状态。跨进程时，执行侧只在本 Session 已入队的事件全部发出后才发出 Run/compact 的 terminal，而事件只能发进消费者让出的空间；停止等待状态只解除生产者，不解除 terminal 对消费者的依赖。所以等待 Run terminal 的一方（包括 shutdown join worker）在等待期间必须继续消费事件。
 
 Application 将 Agent 消费通知接入既有 RequiredWake，沿用非阻塞 request、pending 合并与交付；每轮预算耗尽仍有事件时请求后续 wake。通知 unavailable 表示消费路径关闭，解除队列等待并按既有控制路径请求取消，合法 `on_event` 返回 `EVENT_CONTINUE`；匹配 abort 可从 callback 调用。不要另建周期重试或通过 callback fatal 退出。RequiredWake 对底层通知合同违约的原失败处理保持不变。正文记录政策由 Product 合同拥有，本节不授权静默丢弃 text_chunk。
 

@@ -65,6 +65,13 @@
 //! leaves the pump able to take everything granted. Backpressure therefore
 //! lands on the execution half's own pump and its Core callbacks, which is
 //! where it lands in process.
+//!
+//! One consequence has no in-process counterpart. A Run's or compact's
+//! terminal is sent after every event its Session queued, so it too waits
+//! for the room the consumer makes. Stopping event delivery releases the
+//! producers, not that terminal. A thread that waits on a worker inside
+//! `run_execute` -- Product's shutdown joining its executor -- must keep
+//! consuming while it waits, or it waits on itself.
 
 const std = @import("std");
 const builtin = @import("builtin");
