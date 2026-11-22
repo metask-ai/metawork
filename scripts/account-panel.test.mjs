@@ -663,7 +663,7 @@ test("cold connection failure exposes reconnect and bounded diagnostics", () => 
   assert.match(markup, /transport unavailable/);
 });
 
-test("refresh errors retain identity and expose sign-in without claiming expiry or revocation", () => {
+test("refresh errors keep a verified identity without a sign-in action or a claim of expiry", () => {
   for (const errorCode of [
     "token_refresh_failed",
     "metask_service_unavailable",
@@ -674,10 +674,19 @@ test("refresh errors retain identity and expose sign-in without claiming expiry 
       initialSection: "account",
     });
     assert.match(markup, /Metask User/);
-    assert.match(markup, />Sign in with Metask</);
+    // Host signs the session out when it must be signed in again.
+    assert.doesNotMatch(markup, />Sign in with Metask</);
     assert.doesNotMatch(markup, />Retry sign-in refresh</);
     assert.doesNotMatch(markup, /Sign-in expired|removed from this device/);
   }
+  const lostRenewal = renderSettings(
+    { ...signedOut, errorCode: "token_refresh_failed" },
+    readyModels,
+    { initialSection: "account" },
+  );
+  assert.match(lostRenewal, />Sign in with Metask</);
+  assert.doesNotMatch(lostRenewal, />Retry sign-in refresh</);
+  assert.doesNotMatch(lostRenewal, /Sign-in expired|removed from this device/);
   assert.equal(
     accountErrorMessageId("token_refresh_failed"),
     "account.error.refresh",

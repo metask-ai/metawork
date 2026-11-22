@@ -337,7 +337,7 @@ test("authorization without cancellation keeps app actions available without an 
   );
 });
 
-test("account menu preserves keyboard sign-in after refresh failure or cancelled reauthorization", async () => {
+test("account menu offers keyboard sign-in once a lost renewal or cancelled sign-in leaves the account signed out", async () => {
   for (const errorCode of ["token_refresh_failed", "user_cancelled"]) {
     let loginCalls = 0;
     const user = userEvent.setup({ document: dom.window.document });
@@ -347,10 +347,16 @@ test("account menu preserves keyboard sign-in after refresh failure or cancelled
           loginCalls += 1;
         },
       },
-      { ...account, errorCode },
+      {
+        ...account,
+        state: "signed_out",
+        displayName: "",
+        emailHint: "",
+        errorCode,
+      },
     );
     const trigger = screen.getByRole("button", {
-      name: "Account and application menu",
+      name: "Sign in · Account and application menu",
     });
     await user.click(trigger);
     const loginItem = await screen.findByRole("menuitem", {
@@ -365,8 +371,17 @@ test("account menu preserves keyboard sign-in after refresh failure or cancelled
   }
 });
 
-test("healthy account and refresh scheduling failure do not offer reauthorization", async () => {
-  for (const errorCode of ["none", "refresh_schedule_failed"]) {
+test("a signed-in account never offers sign-in, whatever its recent error", async () => {
+  // Host signs a session out when it needs signing in again; an error on a
+  // verified identity is feedback, not a reason to sign in.
+  for (const errorCode of [
+    "none",
+    "refresh_schedule_failed",
+    "token_refresh_failed",
+    "metask_service_unavailable",
+    "credential_store_write_failed",
+    "user_cancelled",
+  ]) {
     const user = userEvent.setup({ document: dom.window.document });
     renderIdentity({}, { ...account, errorCode });
     await user.click(

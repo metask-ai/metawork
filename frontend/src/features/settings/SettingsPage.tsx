@@ -550,7 +550,8 @@ export function SettingsPage({
                     >
                       {t("common.cancel")}
                     </Button>
-                  ) : account.errorCode === "refresh_schedule_failed" ? (
+                  ) : authenticated &&
+                    account.errorCode === "refresh_schedule_failed" ? (
                     <Button
                       className="settings-identity-action"
                       variant="secondary"
@@ -560,7 +561,7 @@ export function SettingsPage({
                     >
                       {t("account.retry_refresh")}
                     </Button>
-                  ) : !authenticated || account.errorCode !== "none" ? (
+                  ) : account.state === "signed_out" ? (
                     <Button
                       className="settings-identity-action"
                       variant="secondary"
