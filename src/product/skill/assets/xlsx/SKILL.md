@@ -16,8 +16,8 @@ For a verification-only request, use the authorized existing workbook as the rea
 1. Map the user's necessary contents, formatting and preservation requirements to explicit checks or unsupported items before generating. Derive numeric expectations independently from the raw input. Preserve originals and work on a new candidate.
 2. Create or edit within the requested scope. Re-find totals by unique labels within their own tables, check expected coordinates, and cover every required data and total font/percentage range. A successful A1 check does not cover the rest of a workbook. For a matching CSV task, `examples/summary.py` is a runnable starting point.
 3. Run `scripts/verify.py candidate.xlsx new-report.json --checks checks.json` and read the report. Distinguish a failed assertion, invalid specification, unsupported necessary check and execution failure. Resolve the actual cause within the task's scope. Do not drop requirements or change expectations to match a defective file.
-4. After any edit, save and check again using a new report. Only report checks actually executed on the candidate's current bytes. Do not deliver an unfinished result as successful.
-5. Use `DeliverFile` and compare its actual committed size and SHA-256 to the report's candidate identity. If they differ, retain the delivery fact and clearly state the check does not cover those delivered bytes; follow the workflow's mismatch handling. Base the final statement on delivery, verified scope and any outstanding requirements.
+4. After any edit, save and check again using a new report. Only report checks actually executed on the candidate's current bytes. Never describe an unfinished or failing result as successful.
+5. When the workbook is final, deliver it with `DeliverFile`, also when a check still fails, and compare its actual committed size and SHA-256 to the report's candidate identity. If they differ, retain the delivery fact and clearly state the check does not cover those delivered bytes; follow the workflow's mismatch handling. Base the final statement on delivery, verified scope and any outstanding requirements.
 
 # Requirements for Outputs
 
