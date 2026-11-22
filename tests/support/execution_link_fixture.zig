@@ -47,6 +47,9 @@
 //!     identity, as a process stuck in its startup does.
 //!   * `--stop-reading` -- agree on identity, then never read the link
 //!     again and never leave: a wedged child whose pipe fills up.
+//!   * `--hang-mcp-replay` -- in every process after the first (floor not
+//!     zero), applying an MCP configuration never returns: the replay a new
+//!     process is given hangs, while the process keeps answering pings.
 //!   * `--exercise-mcp` -- before applying an MCP configuration, drive each
 //!     member's transport the way AgentCore drives a connector: open, an
 //!     exchange whose answer is echoed back, one carrying a secret, one its
@@ -81,6 +84,7 @@ pub const spawn_grandchild_flag = "--spawn-grandchild=";
 pub const linger_flag = "--linger";
 pub const hang_before_hello_flag = "--hang-before-hello=";
 pub const stop_reading_flag = "--stop-reading";
+pub const hang_mcp_replay_flag = "--hang-mcp-replay";
 
 /// The fault record identity this fixture installs with. The version is the
 /// link's own, so a test can tell this process's record from any other.
@@ -105,6 +109,7 @@ const Flags = struct {
     linger: bool = false,
     hang_before_hello_ms: u64 = 0,
     stop_reading: bool = false,
+    hang_mcp_replay: bool = false,
     session_id_floor: u64 = 0,
 };
 
@@ -127,6 +132,7 @@ fn readFlags(init: std.process.Init) Flags {
         if (std.mem.eql(u8, argument, crash_in_run_flag)) flags.crash_in_run = true;
         if (std.mem.eql(u8, argument, linger_flag)) flags.linger = true;
         if (std.mem.eql(u8, argument, stop_reading_flag)) flags.stop_reading = true;
+        if (std.mem.eql(u8, argument, hang_mcp_replay_flag)) flags.hang_mcp_replay = true;
         if (std.mem.startsWith(u8, argument, spawn_grandchild_flag))
             flags.grandchild_pid_path = init.gpa.dupe(u8, argument[spawn_grandchild_flag.len..]) catch null;
         if (std.mem.startsWith(u8, argument, hang_before_hello_flag))
@@ -195,9 +201,11 @@ const FakeRuntime = struct {
         }) catch return null;
         self.runtime = runtime;
         var runtime_port = runtime.runtimePort();
-        if (self.flags.exercise_mcp or self.flags.exercise_effects or self.flags.crash_in_run) {
+        const hang_mcp_apply = self.flags.hang_mcp_replay and self.flags.session_id_floor != 0;
+        if (self.flags.exercise_mcp or self.flags.exercise_effects or self.flags.crash_in_run or hang_mcp_apply) {
             exercising_vtable = runtime_port.vtable.*;
             if (self.flags.exercise_mcp) exercising_vtable.apply_mcp_configuration = applyExercised;
+            if (hang_mcp_apply) exercising_vtable.apply_mcp_configuration = applyHanging;
             if (self.flags.exercise_effects or self.flags.crash_in_run) exercising_vtable.create_session_route = createExercised;
             exercise_effects = self.flags.exercise_effects;
             crash_in_run = self.flags.crash_in_run;
@@ -373,6 +381,14 @@ const FakeRuntime = struct {
         const runtime: *agent.Runtime = @ptrCast(@alignCast(context.?));
         for (input.members()) |member| exercise(member.transport());
         return runtime.applyMcpConfiguration(input);
+    }
+
+    /// An apply that never returns. The process stays up and its reader keeps
+    /// answering pings; only the end of the link ends it.
+    fn applyHanging(_: ?*anyopaque, _: *agent.McpRuntimeInput) (agent.Error || std.mem.Allocator.Error)!agent.McpConfigurationApplyOutcome {
+        var never: std.Io.Event = .unset;
+        never.waitUncancelable(lifecycle_fixture.fixtureIo());
+        unreachable;
     }
 
     fn exercise(transport: agent.McpTransport) void {

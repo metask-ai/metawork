@@ -1138,6 +1138,100 @@ test "an MCP server's transport stays in the UI half, and the execution process 
     try std.testing.expect(recorder.destroyed);
 }
 
+test "the owner's shutdown does not wait behind a new process's MCP replay, and the caller gets no process lost during it" {
+    // A new process is given the MCP membership the last one held before
+    // anyone uses it. Here that replay never returns in any process after
+    // the first, while the process keeps answering pings: only the end of
+    // the link ends it. The shutdown, which takes the same spawn lock as a
+    // start, must not wait for it -- and the caller that started the process
+    // must not be handed one that was lost during its replay.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    var recorder: RecordingTransport = .{};
+    defer recorder.deinit();
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try startOwner(&owner, &wake, &.{ fixture, "--with-runtime", "--hang-mcp-replay" }, fixture_message_limits, null);
+    defer owner.deinit();
+    const port = owner.runtimePort();
+
+    // A membership in the first process, which applies normally.
+    var transport_owner = recorder.owner();
+    var additions = try agent.McpRuntimeInput.init(allocator, 1, &.{.{
+        .id = "fixture-server",
+        .transport_owner = &transport_owner,
+        .secrets = &.{},
+        .transport = .stdio,
+        .namespace = "fixture",
+        .client_name = "MetaWork",
+        .client_version = "1",
+        .timeout_ms = 1_000,
+        .configuration_fingerprint = @splat(1),
+        .allowed_tools = &.{"echo"},
+    }});
+    defer additions.deinit();
+    var membership = try port.prepareMcpMembership(1, &additions, &.{"fixture-server"});
+    defer membership.deinit();
+    try std.testing.expectEqual(agent.McpConfigurationApplyOutcome.applied, try port.applyMcpConfiguration(&membership));
+
+    execution_client.TestSupport.killCurrent(&owner);
+    var waited: u64 = 0;
+    while (owner.takeLoss() == null) : (waited += wait_tick_ms) {
+        if (waited >= wait_limit_ms) return error.LossNeverReported;
+        try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+    }
+    owner.sweep();
+
+    // Opening a Session starts the second process, which hangs in its replay.
+    const Opener = struct {
+        failure: ?anyerror = null,
+        opened: bool = false,
+
+        fn run(self: *@This(), opening: agent.RuntimePort, workspace: []const u8) void {
+            if (opening.createSessionRoute(plainSessionOptions(workspace))) |_| {
+                self.opened = true;
+            } else |err| self.failure = err;
+        }
+    };
+    var opener: Opener = .{};
+    const opening = try std.Thread.spawn(.{}, Opener.run, .{ &opener, port, root });
+    waited = 0;
+    while (owner.currentProcess() != 2) : (waited += wait_tick_ms) {
+        if (waited >= wait_limit_ms) return error.SecondProcessNeverStarted;
+        try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+    }
+
+    const Shutdown = struct {
+        done: std.Io.Event = .unset,
+
+        fn run(self: *@This(), shutting: *execution_client.Owner) void {
+            shutting.shutdown();
+            self.done.set(io);
+        }
+    };
+    var shutdown: Shutdown = .{};
+    const shutting = try std.Thread.spawn(.{}, Shutdown.run, .{ &shutdown, &owner });
+    const returned = if (shutdown.done.waitTimeout(io, .{ .duration = .{
+        .raw = .fromMilliseconds(@intCast(execution_host.stop_grace_ms + 5_000)),
+        .clock = .awake,
+    } })) |_| true else |_| false;
+    // Past the bound, end the process: its link ends, the replay with it.
+    if (!returned) execution_client.TestSupport.killCurrent(&owner);
+    shutting.join();
+    opening.join();
+    try std.testing.expect(returned);
+
+    // The caller got the lost answer, and got it from the start itself: the
+    // process it started was lost during its replay and never handed over.
+    try std.testing.expect(!opener.opened);
+    try std.testing.expectEqual(@as(?anyerror, error.DependencyUnreachable), opener.failure);
+    try std.testing.expectEqual(@as(u64, 1), owner.lost_before_use.load(.acquire));
+}
+
 test "a process that dies on every start is not started again on every ask" {
     // Whatever asks for a process -- a catalog refresh after a loss, a
     // schedule, a message -- asks the owner, so the bound has to be there.
