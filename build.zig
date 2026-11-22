@@ -157,6 +157,18 @@ pub fn build(b: *std.Build) void {
     const image_unit_run = b.addRunArtifact(image_tests);
     b.step("test-generate-image-unit", "Run GenerateImage codec and argument tests").dependOn(&image_unit_run.step);
     artifacts.tests.step.dependOn(&image_unit_run.step);
+    const video_unit = b.createModule(.{
+        .root_source_file = b.path("src/agent/generate_video.zig"),
+        .target = test_modules.agent.resolved_target,
+        .optimize = test_modules.agent.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    video_unit.addImport("agent_file_delivery", test_modules.agent_file_delivery);
+    video_unit.addImport("agent_http_transport", test_modules.agent_http_transport);
+    video_unit.addImport("image_container", test_modules.image_container);
+    const video_unit_run = b.addRunArtifact(b.addTest(.{ .name = "metawork-generate-video-unit", .root_module = video_unit }));
+    b.step("test-generate-video-unit", "Run GenerateVideo model-facing contract tests").dependOn(&video_unit_run.step);
+    artifacts.tests.step.dependOn(&video_unit_run.step);
     const mcp_install_unit = b.createModule(.{
         .root_source_file = b.path("src/agent/mcp_install.zig"),
         .target = test_modules.agent.resolved_target,
