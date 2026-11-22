@@ -228,6 +228,11 @@ pub const Host = struct {
         };
         child.stdin = null;
         child.stdout = null;
+        // Ours from here, so no longer closed by `child.kill`. A failure
+        // returned as a value releases them through `abandon`; one returned
+        // as an error releases them here.
+        errdefer to_child.close(io);
+        errdefer from_child.close(io);
 
         const read_buffer = try allocator.alloc(u8, 64 * 1024);
         // A returned failure is not an error return, so `errdefer` would not

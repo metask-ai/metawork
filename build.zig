@@ -751,6 +751,31 @@ pub fn build(b: *std.Build) void {
     execution_link_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_VERSION", "fixture-0");
     execution_link_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_DIGEST", "1");
     artifacts.tests.step.dependOn(&execution_link_tests_run.step);
+    // A process of its own: this test counts the process's open handles,
+    // which threads left by other execution-link tests would disturb.
+    const execution_host_start_module = b.createModule(.{
+        .root_source_file = b.path("tests/integration/execution_host_start_test.zig"),
+        .target = test_modules.app_execution_host.resolved_target,
+        .optimize = test_modules.app_execution_host.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    execution_host_start_module.addImport("app_execution_host", test_modules.app_execution_host);
+    execution_host_start_module.addImport("metawork_agent_link", test_modules.agent_link);
+    const execution_host_start_tests_run = b.addRunArtifact(b.addTest(.{
+        .name = "metawork-execution-host-start",
+        .root_module = execution_host_start_module,
+    }));
+    execution_host_start_tests_run.step.dependOn(&install_execution_link_fixture.step);
+    execution_host_start_tests_run.setEnvironmentVariable("METAWORK_EXECUTION_LINK_FIXTURE", b.getInstallPath(
+        .bin,
+        if (test_modules.app_execution_mode.resolved_target.?.result.os.tag == .windows)
+            "metawork-execution-link-fixture.exe"
+        else
+            "metawork-execution-link-fixture",
+    ));
+    execution_host_start_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_VERSION", "fixture-0");
+    execution_host_start_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_DIGEST", "1");
+    artifacts.tests.step.dependOn(&execution_host_start_tests_run.step);
     test_modules.app_execution_server.link_libc = bundle.link_libc;
     const execution_server_tests_run = b.addRunArtifact(b.addTest(.{
         .name = "metawork-app-execution-server",
@@ -768,6 +793,7 @@ pub fn build(b: *std.Build) void {
         "Run the execution process fork, identity exchange and stop tests",
     );
     execution_link_step.dependOn(&execution_link_tests_run.step);
+    execution_link_step.dependOn(&execution_host_start_tests_run.step);
     execution_link_step.dependOn(&execution_server_tests_run.step);
     execution_link_step.dependOn(&execution_client_tests_run.step);
     // Isolated, opt-in Stage A probes. Not part of the app or the default test graph.
