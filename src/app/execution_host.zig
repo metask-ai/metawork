@@ -196,8 +196,9 @@ pub const Host = struct {
         };
 
         // Through the window's one spawn boundary: an MCP server started at
-        // the same moment would otherwise inherit this child's pipe ends and
-        // keep the link open after the child is gone.
+        // the same moment would otherwise take this child's pipe ends with it
+        // -- inherited on Windows, forked before close-on-exec is set on
+        // Darwin -- and keep the link open after the child is gone.
         var child = process_spawn.spawn(io, .{
             .argv = argv,
             .stdin = .pipe,

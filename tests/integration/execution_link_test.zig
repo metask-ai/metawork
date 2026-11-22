@@ -103,7 +103,7 @@ test "the execution process is started through the window's one spawn boundary" 
     }
     defer host.deinit();
     try std.testing.expectEqual(@as(u32, 1), observer.calls);
-    try std.testing.expectEqual(builtin.os.tag == .windows, observer.held);
+    try std.testing.expect(observer.held);
 }
 
 /// Reads one whole frame the execution half sent. Only for the calls these

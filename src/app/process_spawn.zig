@@ -1,33 +1,40 @@
 //! The one boundary every process the window creates goes through.
 //!
-//! On Windows `std.process.spawn` creates the child's ends of its pipes as
-//! inheritable handles and calls `CreateProcessW` with handle inheritance on
-//! and no handle list, so the new process inherits every inheritable handle
-//! the window holds at that moment. Two spawns at once therefore hand each
-//! child the other child's pipe ends. A child that holds another process's
-//! pipe end keeps that pipe open after its owner dies: the reader of the
-//! execution link never sees end of stream, and a write to a terminated
-//! child never fails.
+//! A spawn creates the child's ends of its pipes in the window first, and
+//! for a moment they are ends any other process the window starts at the
+//! same time would take with it:
 //!
-//! The inheritable window opens and closes inside `std.process.spawn` -- the
-//! child-side handles are created at its start and closed before it returns
-//! -- so one lock around the whole call closes it. The lock covers nothing
-//! else: no activation, I/O or waiting on the child.
+//!   * On Windows `std.process.spawn` creates them inheritable and calls
+//!     `CreateProcessW` with handle inheritance on and no handle list, so the
+//!     new process inherits every inheritable handle the window holds.
+//!   * On POSIX std creates them close-on-exec, which is only safe if the
+//!     flag is there from the start. Darwin has no `pipe2`, so std makes the
+//!     pipe and then sets close-on-exec with a second call; a fork on another
+//!     thread between the two keeps both ends in its child.
+//!
+//! A child that holds another process's pipe end keeps that pipe open after
+//! its owner dies: the reader of the execution link never sees end of
+//! stream, and a write to a terminated child never fails.
+//!
+//! Every such window opens and closes inside `std.process.spawn` -- the
+//! child-side ends are made at its start and closed before it returns -- so
+//! one lock around the whole call closes it, on every platform. The lock
+//! covers nothing else: no activation, I/O or waiting on the child.
 //!
 //! It is one boundary only if every spawn the window makes takes it, which is
 //! why this is a module of its own: the MCP stdio transport and the execution
 //! host both import this one instance. It does not reach process creation the
-//! window does not make itself -- the Native SDK's WebView2 runtime, or
+//! window does not make itself -- the Native SDK's web view runtime, or
 //! AgentCore, which runs in the execution process.
 
 const builtin = @import("builtin");
 const std = @import("std");
 
-var windows_mutex: std.Io.Mutex = .init;
+var mutex: std.Io.Mutex = .init;
 
 pub fn spawn(io: std.Io, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-    if (builtin.os.tag == .windows) windows_mutex.lockUncancelable(io);
-    defer if (builtin.os.tag == .windows) windows_mutex.unlock(io);
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
     if (builtin.is_test) if (testing.observer) |hook| hook.call_fn(hook.context);
     return std.process.spawn(io, options);
 }
@@ -42,12 +49,10 @@ pub const testing = struct {
     /// site that bypasses this module never calls it.
     pub var observer: ?Hook = null;
 
-    /// Whether the boundary is held right now. Only meaningful on Windows,
-    /// where the boundary is a lock.
+    /// Whether the boundary is held right now.
     pub fn held() bool {
-        if (builtin.os.tag != .windows) return false;
-        if (windows_mutex.tryLock()) {
-            windows_mutex.unlock(std.testing.io);
+        if (mutex.tryLock()) {
+            mutex.unlock(std.testing.io);
             return false;
         }
         return true;
@@ -82,7 +87,7 @@ test "a spawn runs inside the boundary" {
         return error.TestUnexpectedResult;
     } else |_| {}
     try std.testing.expectEqual(@as(u32, 1), observer.calls);
-    try std.testing.expectEqual(builtin.os.tag == .windows, observer.held);
+    try std.testing.expect(observer.held);
     // And it is released afterwards.
     try std.testing.expect(!testing.held());
 }
