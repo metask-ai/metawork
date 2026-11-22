@@ -11,6 +11,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const execution_host = @import("app_execution_host");
+const process_spawn = @import("app_process_spawn");
 const execution_mode = @import("app_execution_mode");
 const execution_client = @import("app_execution_client");
 const agent_link = @import("metawork_agent_link");
@@ -72,6 +73,37 @@ test "the execution half starts, agrees on identity and exits on end of stream" 
         execution_host.Stopped{ .exited = @intFromEnum(execution_mode.Exit.link_closed) },
         stopped,
     );
+}
+
+test "the execution process is started through the window's one spawn boundary" {
+    // An MCP server started at the same moment as the execution process
+    // must not inherit the link's pipe ends, and the only thing keeping it
+    // from doing so is that both spawns take the same boundary.
+    const Observer = struct {
+        calls: u32 = 0,
+        held: bool = false,
+
+        fn call(context: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            self.held = process_spawn.testing.held();
+        }
+    };
+    var observer: Observer = .{};
+    process_spawn.testing.observer = .{ .context = &observer, .call_fn = Observer.call };
+    defer process_spawn.testing.observer = null;
+
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var host: execution_host.Host = undefined;
+    const failure = try host.start(io, allocator, matching_identity, .{}, .{ .explicit = &.{fixture} }, test_handshake_deadline_ms);
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer host.deinit();
+    try std.testing.expectEqual(@as(u32, 1), observer.calls);
+    try std.testing.expectEqual(builtin.os.tag == .windows, observer.held);
 }
 
 /// Reads one whole frame the execution half sent. Only for the calls these

@@ -25,6 +25,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 
 const agent_link = @import("metawork_agent_link");
+const process_spawn = @import("app_process_spawn");
 
 pub const mode_flag = "--execution-host";
 
@@ -32,12 +33,6 @@ pub const mode_flag = "--execution-host";
 /// write end gives the child end-of-stream, which is its own exit signal, so
 /// this bound is only reached by a child that is already wedged.
 pub const stop_grace_ms: u64 = 5_000;
-
-/// Serializes `std.process.spawn` on Windows the way the MCP stdio transport
-/// does, because the inherited-handle window is process-wide. Two spawns at
-/// once can leak each other's temporary child-side handles, which is the open
-/// Windows handle-isolation gap the validation spec already records.
-var windows_spawn_mutex: std.Io.Mutex = .init;
 
 pub const StartFailure = union(enum) {
     /// The executable's own path could not be resolved, so there is nothing to
@@ -199,18 +194,16 @@ pub const Host = struct {
             .explicit => |values| values,
         };
 
-        if (builtin.os.tag == .windows) windows_spawn_mutex.lockUncancelable(io);
-        var child = std.process.spawn(io, .{
+        // Through the window's one spawn boundary: an MCP server started at
+        // the same moment would otherwise inherit this child's pipe ends and
+        // keep the link open after the child is gone.
+        var child = process_spawn.spawn(io, .{
             .argv = argv,
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .inherit,
             .create_no_window = true,
-        }) catch {
-            if (builtin.os.tag == .windows) windows_spawn_mutex.unlock(io);
-            return .spawn_failed;
-        };
-        if (builtin.os.tag == .windows) windows_spawn_mutex.unlock(io);
+        }) catch return .spawn_failed;
         errdefer child.kill(io);
 
         // A host that could not end its child is not handed out: its stop

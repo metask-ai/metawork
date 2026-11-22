@@ -15,12 +15,11 @@ const process_compat = @import("metawork_mcp_process_compat");
 const quarantine_compat = @import("metawork_mcp_quarantine_compat");
 const catalog_budget = @import("mcp_catalog_budget.zig");
 const process_observation = @import("mcp_process_observation.zig");
+// The window's one spawn boundary, shared with the execution host. Formal
+// connections and disposable test Runtime connections both go through it.
+const process_spawn = @import("app_process_spawn");
 pub const StdioObservations = process_observation.Collection;
 pub const CatalogBudget = catalog_budget.Budget;
-
-// Shared by formal connections and disposable test Runtime connections.
-// Core-internal process creation cannot participate in this lock.
-var windows_spawn_mutex: std.Io.Mutex = .init;
 
 pub const credential_service = product_identity.mcpCredentialService();
 pub const max_credential_secret_bytes = native_sdk.platform.max_credential_secret_bytes;
@@ -1295,10 +1294,10 @@ const StdioContext = struct {
             process_compat.Job.init() catch return error.ResourceUnavailable
         else {};
         errdefer if (builtin.os.tag == .windows) job.deinit();
-        // std closes temporary child-side handles before spawn returns.
-        // The lock must not extend to activation, I/O, or process waiting.
-        if (builtin.os.tag == .windows) windows_spawn_mutex.lockUncancelable(self.io);
-        var child = std.process.spawn(self.io, .{
+        // std closes temporary child-side handles before spawn returns, and
+        // the boundary covers exactly that call: not activation, I/O, or
+        // process waiting.
+        var child = process_spawn.spawn(self.io, .{
             .argv = self.argv,
             .cwd = self.cwd,
             .environ_map = &self.environment,
@@ -1309,7 +1308,6 @@ const StdioContext = struct {
             .create_no_window = true,
             .start_suspended = builtin.os.tag == .windows,
         }) catch |err| {
-            if (builtin.os.tag == .windows) windows_spawn_mutex.unlock(self.io);
             if (self.observation) |slot| slot.record(switch (err) {
                 error.FileNotFound => .executable_missing,
                 error.AccessDenied => .access_denied,
@@ -1318,7 +1316,6 @@ const StdioContext = struct {
             });
             return error.SpawnFailed;
         };
-        if (builtin.os.tag == .windows) windows_spawn_mutex.unlock(self.io);
         if (self.observation) |slot| slot.record(.spawned);
         errdefer child.kill(self.io);
         if (builtin.os.tag == .windows)
@@ -3026,8 +3023,20 @@ test "MCP real process exchange and notify progress without async capacity" {
     var context = try ProcessFixture.context(threaded.io(), &argv);
     defer context.arena.deinit();
     defer context.environment.deinit();
+    // The server is started through the window's one spawn boundary, the
+    // one the execution host takes too.
+    const Observer = struct {
+        fn call(counter: ?*anyopaque) void {
+            const calls: *u32 = @ptrCast(@alignCast(counter.?));
+            calls.* += 1;
+        }
+    };
+    var spawns: u32 = 0;
+    process_spawn.testing.observer = .{ .context = &spawns, .call_fn = Observer.call };
+    defer process_spawn.testing.observer = null;
     const connection = try context.openConnection();
     defer connection.deinit();
+    try std.testing.expectEqual(@as(u32, 1), spawns);
     var sink: agent.McpStdioResponseSink = .{ .context = &context, .feed_fn = ProcessFixture.feed, .finish_fn = ProcessFixture.finish };
     const write: agent.McpStdioWrite = .{ .fragments = &.{"{}\n"}, .timeout_ms = 5000, .cancellation = .{} };
     try std.testing.expect(StdioContext.exchange(&context, connection, write, &sink) == .completed);
