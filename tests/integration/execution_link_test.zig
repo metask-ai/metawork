@@ -211,6 +211,55 @@ test "a child that ignores end of stream is ended, and the stop returns" {
     try std.testing.expect(host.term != null);
 }
 
+test "a child that stops reading with its pipe full is ended within the grace, and the stop returns" {
+    // The writer finishes what is queued before it leaves, and this child
+    // never reads: the writer sits in a write on a full pipe, so a stop whose
+    // grace period started only after joining the writer would never end.
+    // Bounded from outside, so a regression fails here instead of hanging
+    // the test process: past the bound the test ends the child itself.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var host: execution_host.Host = undefined;
+    const failure = try host.start(io, allocator, matching_identity, .{}, .{
+        .explicit = &.{ fixture, "--stop-reading" },
+    }, test_handshake_deadline_ms);
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer host.deinit();
+
+    // Far more than any pipe holds (Windows 4 KiB, POSIX at most 64 KiB).
+    const payload = try allocator.alloc(u8, 2 * 1024 * 1024);
+    defer allocator.free(payload);
+    @memset(payload, 0x42);
+    try std.testing.expectEqual(agent_link.channel.Submission.queued, try host.outbound.submitWaiting(.request, 1, payload));
+
+    const Stop = struct {
+        done: std.Io.Event = .unset,
+        result: execution_host.Stopped = .gone,
+
+        fn run(self: *@This(), stopping: *execution_host.Host) void {
+            self.result = stopping.stop();
+            self.done.set(io);
+        }
+    };
+    var stop: Stop = .{};
+    const started = std.Io.Timestamp.now(io, .awake);
+    const thread = try std.Thread.spawn(.{}, Stop.run, .{ &stop, &host });
+    const bound_ms = execution_host.stop_grace_ms + 10_000;
+    const returned = if (stop.done.waitTimeout(io, .{ .duration = .{
+        .raw = .fromMilliseconds(@intCast(bound_ms)),
+        .clock = .awake,
+    } })) |_| true else |_| false;
+    if (!returned) _ = host.terminate();
+    thread.join();
+    const elapsed_ms = started.durationTo(.now(io, .awake)).toMilliseconds();
+    try std.testing.expect(returned);
+    try std.testing.expectEqual(execution_host.Stopped.killed, stop.result);
+    try std.testing.expect(elapsed_ms < @as(i64, @intCast(execution_host.stop_grace_ms + 3_000)));
+}
+
 test "a peer built from other sources is refused, and does not keep running" {
     const fixture = try fixturePath();
     defer allocator.free(fixture);

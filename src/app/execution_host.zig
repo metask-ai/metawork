@@ -29,9 +29,10 @@ const process_spawn = @import("app_process_spawn");
 
 pub const mode_flag = "--execution-host";
 
-/// How long a graceful stop waits before the child is killed. Closing our
-/// write end gives the child end-of-stream, which is its own exit signal, so
-/// this bound is only reached by a child that is already wedged.
+/// How long a graceful stop waits, counted from the moment it begins, before
+/// the child is killed. Closing our write end gives the child end-of-stream,
+/// which is its own exit signal, so this bound is only reached by a child
+/// that is already wedged.
 pub const stop_grace_ms: u64 = 5_000;
 
 pub const StartFailure = union(enum) {
@@ -252,10 +253,10 @@ pub const Host = struct {
 
         // Ending the child is what bounds the exchange: its end of the
         // stream ends the read the exchange is waiting in.
-        var watch: HandshakeWatch = .{ .host = self, .deadline_ms = handshake_deadline_ms };
+        var watch: Watch = .{ .host = self, .deadline_ms = handshake_deadline_ms };
         const watcher = std.Thread.spawn(
-            .{ .stack_size = 64 * 1024 },
-            HandshakeWatch.run,
+            .{ .stack_size = Watch.stack_bytes },
+            Watch.run,
             .{&watch},
         ) catch {
             self.abandon();
@@ -353,13 +354,19 @@ pub const Host = struct {
         }
     }
 
-    const HandshakeWatch = struct {
+    /// A deadline on a stretch of waiting: at the deadline the child is
+    /// ended, and ending it is what makes every wait on it return -- its end
+    /// of the stream ends a read, its exit fails a write, the reaper collects
+    /// it. The identity exchange and a stop are each bounded by one.
+    const Watch = struct {
         host: *Host,
         deadline_ms: u64,
         finished: std.Io.Event = .unset,
         expired: std.atomic.Value(bool) = .init(false),
 
-        fn run(self: *HandshakeWatch) void {
+        const stack_bytes: usize = 64 * 1024;
+
+        fn run(self: *Watch) void {
             self.finished.waitTimeout(self.host.io, .{ .duration = .{
                 .raw = .fromMilliseconds(@intCast(self.deadline_ms)),
                 .clock = .awake,
@@ -375,12 +382,29 @@ pub const Host = struct {
         self.reaped.set(self.io);
     }
 
-    /// Stops accepting, lets the child see end-of-stream, and waits out the
-    /// grace period before ending it. Ending it is the bound, not the plan: a
-    /// forced exit is what the design reserves for a wedged child.
+    /// Stops accepting, lets the child see end-of-stream, and waits for it to
+    /// leave. The grace period runs from here and covers every wait below --
+    /// the writer finishing what is queued, the child exiting, the reader
+    /// seeing the end of the stream -- because a child that has stopped
+    /// reading leaves the writer blocked on a full pipe before any of the
+    /// others begin. At the deadline the child is ended, which is the bound,
+    /// not the plan: a forced exit is what the design reserves for a wedged
+    /// child.
     pub fn stop(self: *Host) Stopped {
         if (self.stopped) return .gone;
         self.stopped = true;
+        var watch: Watch = .{ .host = self, .deadline_ms = stop_grace_ms };
+        const watcher: ?std.Thread = std.Thread.spawn(
+            .{ .stack_size = Watch.stack_bytes },
+            Watch.run,
+            .{&watch},
+        ) catch nothing: {
+            // No thread to keep the deadline means no deadline: end the child
+            // now rather than wait on it unbounded.
+            watch.expired.store(true, .release);
+            _ = self.terminate();
+            break :nothing null;
+        };
         // Best effort: a child that has already gone makes this fail, and that
         // is not a reason to skip the reap below.
         _ = self.outbound.trySubmit(.goodbye, 0, &.{}) catch {};
@@ -389,22 +413,17 @@ pub const Host = struct {
 
         // A started host always has a reaper: a start that could not spawn
         // one abandoned the child and set `stopped`, which returned above.
+        // The watch bounds this wait: ending the child is what the reaper
+        // waits for.
         std.debug.assert(self.reaper != null);
-        const graceful = graceful: {
-            self.reaped.waitTimeout(self.io, .{ .duration = .{
-                .raw = .fromMilliseconds(@intCast(stop_grace_ms)),
-                .clock = .awake,
-            } }) catch break :graceful false;
-            break :graceful true;
-        };
-        // The signal only. The join below is what waits for the child to be
-        // gone, because the reaper is the one holding the wait.
-        if (!graceful) _ = self.terminate();
+        self.reaped.waitUncancelable(self.io);
         if (self.reaper) |thread| thread.join();
         self.reaper = null;
         if (self.settle) |settle| settle.settle_fn(settle.context);
         self.from_child.close(self.io);
-        if (!graceful) return .killed;
+        watch.finished.set(self.io);
+        if (watcher) |thread| thread.join();
+        if (watch.expired.load(.acquire)) return .killed;
         const term = self.term orelse return .gone;
         return switch (term) {
             .exited => |code| .{ .exited = code },

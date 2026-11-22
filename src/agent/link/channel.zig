@@ -147,9 +147,12 @@ pub const Outbound = struct {
         self.writer = try std.Thread.spawn(.{ .stack_size = io_thread_stack_bytes }, writerMain, .{self});
     }
 
-    /// Wakes every waiter, stops accepting, and joins the writer. Queued
-    /// messages are released without being written: the link is gone, and
-    /// pretending otherwise would make the caller believe bytes were sent.
+    /// Wakes every waiter, stops accepting, and joins the writer. The writer
+    /// finishes what is already queued before it leaves, so this waits for
+    /// as long as the peer takes to read it; bounding that is the caller's,
+    /// which on the UI half is the host's stop deadline -- ending the child
+    /// fails the write. Whatever a failed writer left queued is released
+    /// here without being written.
     pub fn stop(self: *Outbound) void {
         self.mutex.lockUncancelable(self.io);
         self.closing = true;
