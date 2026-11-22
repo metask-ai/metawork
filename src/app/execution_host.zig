@@ -423,13 +423,17 @@ pub const Host = struct {
         // waits for.
         std.debug.assert(self.reaper != null);
         self.reaped.waitUncancelable(self.io);
+        // Whether the child was ended is decided here, as it is collected.
+        // The deadline can still pass during the waits below; by then the
+        // child has gone by itself, and what it exited with is the answer.
+        const ended = watch.expired.load(.acquire);
         if (self.reaper) |thread| thread.join();
         self.reaper = null;
         if (self.settle) |settle| settle.settle_fn(settle.context);
         self.from_child.close(self.io);
         watch.finished.set(self.io);
         if (watcher) |thread| thread.join();
-        if (watch.expired.load(.acquire)) return .killed;
+        if (ended) return .killed;
         const term = self.term orelse return .gone;
         return switch (term) {
             .exited => |code| .{ .exited = code },

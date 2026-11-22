@@ -260,6 +260,32 @@ test "a child that stops reading with its pipe full is ended within the grace, a
     try std.testing.expect(elapsed_ms < @as(i64, @intCast(execution_host.stop_grace_ms + 3_000)));
 }
 
+test "a child that leaves by itself is reported as exited even when the deadline passes after it is collected" {
+    // The stop's deadline keeps running through the waits after the reap.
+    // A settle that outlasts it -- here on purpose, under load by accident --
+    // must not turn a child that had already left on its own into a killed
+    // one: what it exited with is decided when it is collected.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var host: execution_host.Host = undefined;
+    const failure = try host.start(io, allocator, matching_identity, .{}, .{ .explicit = &.{fixture} }, test_handshake_deadline_ms);
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer host.deinit();
+    const SlowSettle = struct {
+        fn settle(_: ?*anyopaque) void {
+            std.Io.sleep(io, .fromMilliseconds(@intCast(execution_host.stop_grace_ms + 500)), .awake) catch {};
+        }
+    };
+    host.settle = .{ .context = null, .settle_fn = SlowSettle.settle };
+    try std.testing.expectEqual(
+        execution_host.Stopped{ .exited = @intFromEnum(execution_mode.Exit.link_closed) },
+        host.stop(),
+    );
+}
+
 test "a peer built from other sources is refused, and does not keep running" {
     const fixture = try fixturePath();
     defer allocator.free(fixture);
