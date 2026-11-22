@@ -912,6 +912,133 @@ test "control overtakes a fragmented data message instead of waiting for it" {
     try testing.expectEqual(frame.Kind.event, kinds[4]);
 }
 
+/// An anonymous pipe made the way the link's own are: on Windows by the same
+/// std function a spawn uses, with the same synchronous ends as a child's
+/// stdin; on POSIX by `pipe2`.
+fn realPipe(threaded: *std.Io.Threaded) !struct { read: std.Io.File, write: std.Io.File } {
+    switch (@import("builtin").os.tag) {
+        .windows => {
+            const ends = try threaded.windowsCreatePipe(.{
+                .server = .{ .attributes = .{ .INHERIT = false }, .mode = .{ .IO = .SYNCHRONOUS_NONALERT } },
+                .client = .{ .attributes = .{ .INHERIT = false }, .mode = .{ .IO = .SYNCHRONOUS_NONALERT } },
+                .outbound = true,
+            });
+            return .{
+                .read = .{ .handle = ends[1], .flags = .{ .nonblocking = false } },
+                .write = .{ .handle = ends[0], .flags = .{ .nonblocking = false } },
+            };
+        },
+        else => {
+            const ends = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
+            return .{
+                .read = .{ .handle = ends[0], .flags = .{ .nonblocking = false } },
+                .write = .{ .handle = ends[1], .flags = .{ .nonblocking = false } },
+            };
+        },
+    }
+}
+
+test "a control frame queued mid-message travels between its fragments over a real pipe" {
+    // The other tests check the order the writer writes in, and how the
+    // reassembler reads hand-built frames. This one runs both, the writer
+    // thread and the reader, on the two ends of a real pipe, so the
+    // interleaving has to survive the operating system's chunking too.
+    //
+    // It is made deterministic by the pipe's size. Nothing reads until the
+    // control frame is queued, and the message's first fragment -- 64 KiB
+    // and a header -- is more than any pipe holds (4 KiB on Windows, at most
+    // 64 KiB on POSIX), so the writer is still inside that fragment when the
+    // control frame arrives in its queue. A writer that only looked for
+    // control between messages would send it after the whole message.
+    const allocator = testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const ends = try realPipe(&threaded);
+    var write_open = true;
+    defer if (write_open) ends.write.close(io);
+    defer ends.read.close(io);
+
+    var outbound: Outbound = undefined;
+    try outbound.start(io, allocator, ends.write, .{});
+    var outbound_running = true;
+    defer if (outbound_running) outbound.stop();
+
+    const payload = try allocator.alloc(u8, 3 * frame.max_fragment_payload_bytes);
+    defer allocator.free(payload);
+    for (payload, 0..) |*byte, index| byte.* = @truncate(index % 251);
+    try testing.expectEqual(Submission.queued, try outbound.submitWaiting(.request, 1, payload));
+    // The writer has taken the message and is writing its first fragment.
+    while (true) {
+        outbound.mutex.lockUncancelable(io);
+        const queued = outbound.data.queued;
+        outbound.mutex.unlock(io);
+        if (queued == 0) break;
+        std.Thread.yield() catch {};
+    }
+    try testing.expectEqual(Submission.queued, try outbound.trySubmit(.control, 0, "ping"));
+
+    // Only now does anything read.
+    const Checking = struct {
+        allocator: std.mem.Allocator,
+        records: std.ArrayList(Collector.Record) = .empty,
+        intact: bool = false,
+
+        fn sink(self: *@This()) Sink {
+            return .{ .context = self, .deliver_fn = deliver };
+        }
+
+        fn deliver(context: ?*anyopaque, kind: frame.Kind, correlation: u64, bytes: []const u8) Flow {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (kind == .request) {
+                self.intact = true;
+                for (bytes, 0..) |byte, index| {
+                    if (byte != @as(u8, @truncate(index % 251))) self.intact = false;
+                }
+            }
+            self.records.append(self.allocator, .{
+                .kind = kind,
+                .correlation = correlation,
+                .len = bytes.len,
+                .first = if (bytes.len == 0) 0 else bytes[0],
+            }) catch return .stop;
+            return .ok;
+        }
+    };
+    var checking: Checking = .{ .allocator = allocator };
+    defer checking.records.deinit(allocator);
+    const read_buffer = try allocator.alloc(u8, 4096);
+    defer allocator.free(read_buffer);
+    var reader = ends.read.readerStreaming(io, read_buffer);
+    var inbound: Inbound = undefined;
+    try inbound.init(io, allocator, &reader.interface, test_message_limits, checking.sink());
+    defer inbound.deinit();
+    const Reading = struct {
+        fn run(reading: *Inbound, stopped: *Stopped) void {
+            stopped.* = reading.run();
+        }
+    };
+    var stopped: Stopped = .read_failed;
+    const thread = try std.Thread.spawn(.{}, Reading.run, .{ &inbound, &stopped });
+    // The writer finishes what is queued, and closing the end is the end of
+    // the stream.
+    outbound.stop();
+    outbound_running = false;
+    ends.write.close(io);
+    write_open = false;
+    thread.join();
+
+    try testing.expectEqual(Stopped.peer_closed, stopped);
+    try testing.expectEqual(@as(usize, 2), checking.records.items.len);
+    try testing.expectEqual(frame.Kind.control, checking.records.items[0].kind);
+    try testing.expectEqual(@as(usize, 4), checking.records.items[0].len);
+    try testing.expectEqual(@as(u8, 'p'), checking.records.items[0].first);
+    try testing.expectEqual(frame.Kind.request, checking.records.items[1].kind);
+    try testing.expectEqual(@as(u64, 1), checking.records.items[1].correlation);
+    try testing.expectEqual(payload.len, checking.records.items[1].len);
+    try testing.expect(checking.intact);
+}
+
 /// Feeds hand-built frames to an `Inbound` and returns why it stopped.
 fn replayFrames(allocator: std.mem.Allocator, bytes: []const u8) !Stopped {
     const io = testing.io;
