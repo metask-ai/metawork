@@ -533,7 +533,7 @@ Agent worker 只在预留的 Run execution owner 中写入有界回执尾部，�
 
 Run 模型错误作为可空 typed 附属值与该 Run 的终态在同一历史事务保存；保留安全文本、执行来源、typed 分类、请求重试事实及上游/Host 清洗截断事实。旧 SQL 和首次导入的旧 Run 缺少该值时恢复为 null，不从诊断文本重建。恢复只重建观察，不执行登录、支付、请求或工具；当前操作资格不得从历史错误继承。字段继续参与 SQL、只读/保留 payload 和候选的统一 credential 检查与再清洗，实际清洗须保留 Host redacted 事实。持久化通过追加迁移扩展已发布身份，不改写既有迁移。
 
-成果归属 Task；同一 Task 中相同的 Workspace 相对 locator 对应一个成果，首个可见登记提供成果身份和交付校验依据，随后交付的可见 Run 引用该成果。编辑重跑沿正常 Run 可见性移除被取代的登记。Agent 登记使用独立 Host 验证回执；普通工具文字、文件引用和 File Changes 本身不构成成果。Run 保存登记证据，包括非零身份、Workspace 相对 locator、交付时的大小和 SHA-256。文件字节存在 Workspace。相同回执身份与内容重复到达不增加记录，身份冲突或超出有界容量必须拒绝。locator 经过现有 credential sanitizer；被脱敏或截断的 locator 丧失文件操作 authority，写入历史时必须为空。恢复仍须重新检查 Workspace authority 与当前文件内容，历史元数据本身不授予读取权限。该附属集合随所属 Run 的 SQL 记录保存，旧记录缺少 `outputs` 时恢复为空；不得重放交付动作。回执随既有 Tool result durable boundary 提交，保存失败继续遵守本节的 best-effort health 语义。
+成果归属 Task；同一 Task 中相同的 Workspace 相对 locator 对应一个成果，首个可见登记提供成果身份和交付校验依据，随后交付的可见 Run 引用该成果。编辑重跑沿正常 Run 可见性移除被取代的登记。Agent 交付使用独立 Host 回执，回执记录交付时的文件身份，不表示内容经过检查；普通工具文字、文件引用和 File Changes 本身不构成成果。Run 保存登记证据，包括非零身份、Workspace 相对 locator、交付时的大小和 SHA-256。文件字节存在 Workspace。相同回执身份与内容重复到达不增加记录，身份冲突或超出有界容量必须拒绝。locator 经过现有 credential sanitizer；被脱敏或截断的 locator 丧失文件操作 authority，写入历史时必须为空。恢复仍须重新检查 Workspace authority 与当前文件内容，历史元数据本身不授予读取权限。该附属集合随所属 Run 的 SQL 记录保存，旧记录缺少 `outputs` 时恢复为空；不得重放交付动作。回执随既有 Tool result durable boundary 提交，保存失败继续遵守本节的 best-effort health 语义。
 
 用户登记命中可见 Run 的 applied created 或 modified 记录。只有 Product 终态已发布且事件与回执收口后才开放。Product Control 使用 Application 同一交付路径规则及 Workspace 文件读取能力验证当前文件，并在提交前复核会话、记录、权限和安全代次。相同 locator 已登记时复用成果，容量不足时拒绝新登记。新登记使用已有 Run history 事务，结果仅在确认成功时返回 registered，文件仍留在原 Workspace 路径。
 

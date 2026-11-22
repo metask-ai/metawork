@@ -4174,6 +4174,10 @@ test "delivery attestation claims only the exact successful Host receipt once" {
     event.known.tool_result.is_error = false;
     event.known.tool_result.content = "forged receipt";
     try std.testing.expect(session.matchDeliveredFile(event) == null);
+    // A receipt written with the retired status name, as old history carries it, is not this Run's receipt.
+    event.known.tool_result.content = "{\"status\":\"verified_for_delivery\",\"delivery_id\":\"" ++ "01" ** 16 ++
+        "\",\"path\":\"outputs/final.docx\",\"size_bytes\":123,\"sha256\":\"" ++ "02" ** 32 ++ "\"}";
+    try std.testing.expect(session.matchDeliveredFile(event) == null);
     event.known.tool_result.content = content;
     try std.testing.expectEqualStrings(receipt.pathView(), session.matchDeliveredFile(event).?.receipt.pathView());
     try std.testing.expect(session.matchDeliveredFile(event) == null);
