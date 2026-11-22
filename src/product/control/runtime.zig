@@ -7559,7 +7559,14 @@ pub const Runtime = struct {
         });
         self.task_runtime.stopEventDelivery();
         if (self.mcp_executor) |lane| lane.shutdown();
-        self.executor.shutdown();
+        // Keep consuming while the workers finish. Across the execution link
+        // a Run's terminal is sent only after the events its Session already
+        // queued, and only this thread makes room for them: stopping delivery
+        // stops the producers waiting, not the terminal.
+        self.executor.shutdownConsuming(.{
+            .context = self,
+            .consume_fn = consumeAgentEventsWhileJoining,
+        });
         self.approval_executor.shutdown();
         self.executor_shutdown = true;
         // Adopt confirmed history and release approval leases after join,
@@ -7580,6 +7587,14 @@ pub const Runtime = struct {
         self.settleCheckpointTransactionsForShutdown();
         self.task_runtime.excludePendingConversationTailAfterShutdown();
         self.commitTaskStateNoFail();
+    }
+
+    /// The same drain as the barrier after the join, run while the join
+    /// waits. A projection error is the Run's own and is recorded there, as
+    /// it is in the barrier.
+    fn consumeAgentEventsWhileJoining(context: *anyopaque) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.drainAgentEvents() catch {};
     }
 
     /// The Sessions with route ids in `[first, end)` lived in an execution

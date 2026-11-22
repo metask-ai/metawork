@@ -307,6 +307,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-link", .root_module = test_modules.agent_link },
         .{ .name = "metawork-app-execution-mode", .root_module = test_modules.app_execution_mode },
         .{ .name = "metawork-app-execution-host", .root_module = test_modules.app_execution_host },
+        .{ .name = "metawork-app-process-spawn", .root_module = test_modules.app_process_spawn },
         .{ .name = "metawork-agent-file-delivery", .root_module = test_modules.agent_file_delivery },
         .{ .name = "metawork-product-attachment", .root_module = test_modules.product_attachment },
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
@@ -729,6 +730,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = bundle.link_libc,
     });
     execution_link_module.addImport("app_execution_host", test_modules.app_execution_host);
+    execution_link_module.addImport("app_process_spawn", test_modules.app_process_spawn);
     execution_link_module.addImport("app_execution_mode", test_modules.app_execution_mode);
     execution_link_module.addImport("app_execution_client", test_modules.app_execution_client);
     execution_link_module.addImport("metawork_agent_link", test_modules.agent_link);
@@ -749,6 +751,31 @@ pub fn build(b: *std.Build) void {
     execution_link_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_VERSION", "fixture-0");
     execution_link_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_DIGEST", "1");
     artifacts.tests.step.dependOn(&execution_link_tests_run.step);
+    // A process of its own: this test counts the process's open handles,
+    // which threads left by other execution-link tests would disturb.
+    const execution_host_start_module = b.createModule(.{
+        .root_source_file = b.path("tests/integration/execution_host_start_test.zig"),
+        .target = test_modules.app_execution_host.resolved_target,
+        .optimize = test_modules.app_execution_host.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    execution_host_start_module.addImport("app_execution_host", test_modules.app_execution_host);
+    execution_host_start_module.addImport("metawork_agent_link", test_modules.agent_link);
+    const execution_host_start_tests_run = b.addRunArtifact(b.addTest(.{
+        .name = "metawork-execution-host-start",
+        .root_module = execution_host_start_module,
+    }));
+    execution_host_start_tests_run.step.dependOn(&install_execution_link_fixture.step);
+    execution_host_start_tests_run.setEnvironmentVariable("METAWORK_EXECUTION_LINK_FIXTURE", b.getInstallPath(
+        .bin,
+        if (test_modules.app_execution_mode.resolved_target.?.result.os.tag == .windows)
+            "metawork-execution-link-fixture.exe"
+        else
+            "metawork-execution-link-fixture",
+    ));
+    execution_host_start_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_VERSION", "fixture-0");
+    execution_host_start_tests_run.setEnvironmentVariable("METAWORK_EXEC_LINK_DIGEST", "1");
+    artifacts.tests.step.dependOn(&execution_host_start_tests_run.step);
     test_modules.app_execution_server.link_libc = bundle.link_libc;
     const execution_server_tests_run = b.addRunArtifact(b.addTest(.{
         .name = "metawork-app-execution-server",
@@ -766,6 +793,7 @@ pub fn build(b: *std.Build) void {
         "Run the execution process fork, identity exchange and stop tests",
     );
     execution_link_step.dependOn(&execution_link_tests_run.step);
+    execution_link_step.dependOn(&execution_host_start_tests_run.step);
     execution_link_step.dependOn(&execution_server_tests_run.step);
     execution_link_step.dependOn(&execution_client_tests_run.step);
     // Isolated, opt-in Stage A probes. Not part of the app or the default test graph.
@@ -982,6 +1010,7 @@ const WiredModules = struct {
     agent_contract: *std.Build.Module,
     agent_link: *std.Build.Module,
     app_execution_host: *std.Build.Module,
+    app_process_spawn: *std.Build.Module,
     app_execution_mode: *std.Build.Module,
     app_execution_server: *std.Build.Module,
     app_execution_client: *std.Build.Module,
@@ -1735,12 +1764,20 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     app_execution_mode.addImport("metawork_agent_link", agent_link);
+    // The window's one spawn boundary. One instance, imported by every module
+    // that starts a process: two instances would be two locks.
+    const app_process_spawn = b.createModule(.{
+        .root_source_file = b.path("src/app/process_spawn.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const app_execution_host = b.createModule(.{
         .root_source_file = b.path("src/app/execution_host.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     app_execution_host.addImport("metawork_agent_link", agent_link);
+    app_execution_host.addImport("app_process_spawn", app_process_spawn);
     // The execution half's server. Only a build that carries the development
     // switch imports it into the application; every other build's
     // `--execution-host` keeps answering the handshake and dropping frames.
@@ -2777,6 +2814,7 @@ fn wireAgentCore(
     mcp_platform.addImport("metawork_agent", agent);
     mcp_platform.addImport("metawork_select_start", metawork_select_start);
     mcp_platform.addImport("metawork_http_transport", metawork_http_transport);
+    mcp_platform.addImport("app_process_spawn", app_process_spawn);
     const mcp_process_compat = b.createModule(.{
         .root_source_file = b.path("src/native_sdk_compat/mcp_process.zig"),
         .target = target,
@@ -2939,6 +2977,7 @@ fn wireAgentCore(
         .agent_contract = agent_contract,
         .agent_link = agent_link,
         .app_execution_host = app_execution_host,
+        .app_process_spawn = app_process_spawn,
         .app_execution_mode = app_execution_mode,
         .app_execution_server = app_execution_server,
         .app_execution_client = app_execution_client,

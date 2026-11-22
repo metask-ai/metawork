@@ -25,19 +25,15 @@ const builtin = @import("builtin");
 const std = @import("std");
 
 const agent_link = @import("metawork_agent_link");
+const process_spawn = @import("app_process_spawn");
 
 pub const mode_flag = "--execution-host";
 
-/// How long a graceful stop waits before the child is killed. Closing our
-/// write end gives the child end-of-stream, which is its own exit signal, so
-/// this bound is only reached by a child that is already wedged.
+/// How long a graceful stop waits, counted from the moment it begins, before
+/// the child is killed. Closing our write end gives the child end-of-stream,
+/// which is its own exit signal, so this bound is only reached by a child
+/// that is already wedged.
 pub const stop_grace_ms: u64 = 5_000;
-
-/// Serializes `std.process.spawn` on Windows the way the MCP stdio transport
-/// does, because the inherited-handle window is process-wide. Two spawns at
-/// once can leak each other's temporary child-side handles, which is the open
-/// Windows handle-isolation gap the validation spec already records.
-var windows_spawn_mutex: std.Io.Mutex = .init;
 
 pub const StartFailure = union(enum) {
     /// The executable's own path could not be resolved, so there is nothing to
@@ -199,18 +195,17 @@ pub const Host = struct {
             .explicit => |values| values,
         };
 
-        if (builtin.os.tag == .windows) windows_spawn_mutex.lockUncancelable(io);
-        var child = std.process.spawn(io, .{
+        // Through the window's one spawn boundary: an MCP server started at
+        // the same moment would otherwise take this child's pipe ends with it
+        // -- inherited on Windows, forked before close-on-exec is set on
+        // Darwin -- and keep the link open after the child is gone.
+        var child = process_spawn.spawn(io, .{
             .argv = argv,
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .inherit,
             .create_no_window = true,
-        }) catch {
-            if (builtin.os.tag == .windows) windows_spawn_mutex.unlock(io);
-            return .spawn_failed;
-        };
-        if (builtin.os.tag == .windows) windows_spawn_mutex.unlock(io);
+        }) catch return .spawn_failed;
         errdefer child.kill(io);
 
         // A host that could not end its child is not handed out: its stop
@@ -234,6 +229,11 @@ pub const Host = struct {
         };
         child.stdin = null;
         child.stdout = null;
+        // Ours from here, so no longer closed by `child.kill`. A failure
+        // returned as a value releases them through `abandon`; one returned
+        // as an error releases them here.
+        errdefer to_child.close(io);
+        errdefer from_child.close(io);
 
         const read_buffer = try allocator.alloc(u8, 64 * 1024);
         // A returned failure is not an error return, so `errdefer` would not
@@ -259,10 +259,10 @@ pub const Host = struct {
 
         // Ending the child is what bounds the exchange: its end of the
         // stream ends the read the exchange is waiting in.
-        var watch: HandshakeWatch = .{ .host = self, .deadline_ms = handshake_deadline_ms };
+        var watch: Watch = .{ .host = self, .deadline_ms = handshake_deadline_ms };
         const watcher = std.Thread.spawn(
-            .{ .stack_size = 64 * 1024 },
-            HandshakeWatch.run,
+            .{ .stack_size = Watch.stack_bytes },
+            Watch.run,
             .{&watch},
         ) catch {
             self.abandon();
@@ -360,20 +360,22 @@ pub const Host = struct {
         }
     }
 
-    const HandshakeWatch = struct {
+    /// A deadline on a stretch of waiting: at the deadline the child is
+    /// ended, and ending it is what makes every wait on it return -- its end
+    /// of the stream ends a read, its exit fails a write, the reaper collects
+    /// it. The identity exchange and a stop are each bounded by one.
+    const Watch = struct {
         host: *Host,
         deadline_ms: u64,
         finished: std.Io.Event = .unset,
         expired: std.atomic.Value(bool) = .init(false),
 
-        fn run(self: *HandshakeWatch) void {
-            self.finished.waitTimeout(self.host.io, .{ .duration = .{
-                .raw = .fromMilliseconds(@intCast(self.deadline_ms)),
-                .clock = .awake,
-            } }) catch {
-                self.expired.store(true, .release);
-                _ = self.host.terminate();
-            };
+        const stack_bytes: usize = 64 * 1024;
+
+        fn run(self: *Watch) void {
+            if (setWithin(self.host.io, &self.finished, self.deadline_ms)) return;
+            self.expired.store(true, .release);
+            _ = self.host.terminate();
         }
     };
 
@@ -382,12 +384,29 @@ pub const Host = struct {
         self.reaped.set(self.io);
     }
 
-    /// Stops accepting, lets the child see end-of-stream, and waits out the
-    /// grace period before ending it. Ending it is the bound, not the plan: a
-    /// forced exit is what the design reserves for a wedged child.
+    /// Stops accepting, lets the child see end-of-stream, and waits for it to
+    /// leave. The grace period runs from here and covers every wait below --
+    /// the writer finishing what is queued, the child exiting, the reader
+    /// seeing the end of the stream -- because a child that has stopped
+    /// reading leaves the writer blocked on a full pipe before any of the
+    /// others begin. At the deadline the child is ended, which is the bound,
+    /// not the plan: a forced exit is what the design reserves for a wedged
+    /// child.
     pub fn stop(self: *Host) Stopped {
         if (self.stopped) return .gone;
         self.stopped = true;
+        var watch: Watch = .{ .host = self, .deadline_ms = stop_grace_ms };
+        const watcher: ?std.Thread = std.Thread.spawn(
+            .{ .stack_size = Watch.stack_bytes },
+            Watch.run,
+            .{&watch},
+        ) catch nothing: {
+            // No thread to keep the deadline means no deadline: end the child
+            // now rather than wait on it unbounded.
+            watch.expired.store(true, .release);
+            _ = self.terminate();
+            break :nothing null;
+        };
         // Best effort: a child that has already gone makes this fail, and that
         // is not a reason to skip the reap below.
         _ = self.outbound.trySubmit(.goodbye, 0, &.{}) catch {};
@@ -396,22 +415,21 @@ pub const Host = struct {
 
         // A started host always has a reaper: a start that could not spawn
         // one abandoned the child and set `stopped`, which returned above.
+        // The watch bounds this wait: ending the child is what the reaper
+        // waits for.
         std.debug.assert(self.reaper != null);
-        const graceful = graceful: {
-            self.reaped.waitTimeout(self.io, .{ .duration = .{
-                .raw = .fromMilliseconds(@intCast(stop_grace_ms)),
-                .clock = .awake,
-            } }) catch break :graceful false;
-            break :graceful true;
-        };
-        // The signal only. The join below is what waits for the child to be
-        // gone, because the reaper is the one holding the wait.
-        if (!graceful) _ = self.terminate();
+        self.reaped.waitUncancelable(self.io);
+        // Whether the child was ended is decided here, as it is collected.
+        // The deadline can still pass during the waits below; by then the
+        // child has gone by itself, and what it exited with is the answer.
+        const ended = watch.expired.load(.acquire);
         if (self.reaper) |thread| thread.join();
         self.reaper = null;
         if (self.settle) |settle| settle.settle_fn(settle.context);
         self.from_child.close(self.io);
-        if (!graceful) return .killed;
+        watch.finished.set(self.io);
+        if (watcher) |thread| thread.join();
+        if (ended) return .killed;
         const term = self.term orelse return .gone;
         return switch (term) {
             .exited => |code| .{ .exited = code },
@@ -434,6 +452,28 @@ pub const Host = struct {
         self.* = undefined;
     }
 };
+
+/// Whether `event` is set within `bound_ms` on the awake clock.
+///
+/// Not one call of `Event.waitTimeout`: that waits once and answers `Timeout`
+/// whenever the event is still unset afterwards, and the wait can end before
+/// its time -- on Darwin a signal ends it, which is what a child's exit
+/// brings. A deadline read off that answer passes early, and a watch that
+/// acts on it ends a child that still had time. So this waits again for what
+/// is left until the clock says the bound has passed.
+pub fn setWithin(io: std.Io, event: *std.Io.Event, bound_ms: u64) bool {
+    const started = std.Io.Timestamp.now(io, .awake);
+    const bound: i64 = @intCast(bound_ms);
+    while (!event.isSet()) {
+        const elapsed: i64 = started.durationTo(.now(io, .awake)).toMilliseconds();
+        if (elapsed >= bound) return event.isSet();
+        event.waitTimeout(io, .{ .duration = .{
+            .raw = .fromMilliseconds(bound - elapsed),
+            .clock = .awake,
+        } }) catch {};
+    }
+    return true;
+}
 
 /// Whether this process was started as the execution half. Read from the real
 /// argument vector: the mode is never inferred from an environment variable,

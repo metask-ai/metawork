@@ -437,8 +437,8 @@ Application 关闭 Product 路径时必须遵守以下顺序：
 
 1. 停止 Bridge ingress、新 Product admission、Schedule/MCP timer 与会产生新工作的 coordinator；
 2. 停止独立 execution lane，并在主线程 drain completion、重新授权、脱敏且 settle responder 恰好一次；
-3. 取消 queued/running Product jobs，join Executor，并等待 Task access、worker reference 与 aggregate completion quiescent；
-4. 停止 Product 对 Agent 的新调用，再结束与执行进程的链路：执行进程据此执行完整的 Agent Runtime shutdown 后退出，宿主的宽限期限界住不退出的进程；
+3. 取消 queued/running Product jobs，join Executor，并等待 Task access、worker reference 与 aggregate completion quiescent；join 期间主线程持续按最终屏障的同一方式消费 Agent 事件，因为跨进程的 Run terminal 排在其 Session 已入队事件之后，靠消费者让出的空间才能送达；
+4. 停止 Product 对 Agent 的新调用，再结束与执行进程的链路：执行进程据此执行完整的 Agent Runtime shutdown 后退出，宿主的宽限期限界住不退出的进程；宽限期从开始停止时计，覆盖写完已排队消息、等子进程退出和等读线程三段，到期结束子进程；
 5. 完成最终 event drain 与 lifecycle sync，才释放残留 attachment、execution authority、aggregate 和 Product Control；
 6. Models 停止新管理命令，cancel/join Metask catalog与模型测试 worker并释放 credential vault port；Account committed shutdown effect取消自身 timer、join attempt worker并清空 Account 平台 port；随后 Application 才释放两个彼此独立的平台 binding。
 
@@ -644,7 +644,7 @@ Skill 的原 pinned 投影留在 Task attachment，由主线程管理；worker �
 
 历史 Task 不占用永久 Session 名额。Session 容量不足时，Product 可以按近期使用顺序选择可恢复且完全静止的 attachment，沿既有异步 close/release owner 释放；不得取消 active operation、输入接续、权限事务、尚未消费的事件或 worker/artifact 引用来腾出名额。释放前保留同进程的 Skill/MCP 能力上限与目录投影，恢复沿现有 authority 收窄和候选提交边界，不保留执行 credential、SDK Session handle 或额外的持久化恢复事实。关闭待决只拒绝本次 admission，调用方显式重试，不接纳虚假的 Task/attempt，也不把 Session 压力映射为历史 Task 容量；关闭失败不得自动重试。未具备精确 checkpoint 或合法空 Conversation 恢复条件的 attachment 不参与压力回收。
 
-graceful close/shutdown 必须先停止 admission，对已进入 AgentCore 的 operation 请求终止并等待真实 terminal/event drain，再等待 checkpoint postprocess 与全部 worker lease settled；只有此后才能把剩余 pending 标为 excluded、持久化最终历史并开始 Session close/release。checkpoint commit 与 pending exclusion 不得并发交错。已提交 history 但尚未进入 Core 的失败直接归为 excluded；尚未提交 history 的 prepared operation 不产生可排除记录。
+graceful close/shutdown 必须先停止 admission，对已进入 AgentCore 的 operation 请求终止并等待真实 terminal/event drain（等待期间持续消费事件，terminal 可能排在尚未获得空间的事件之后），再等待 checkpoint postprocess 与全部 worker lease settled；只有此后才能把剩余 pending 标为 excluded、持久化最终历史并开始 Session close/release。checkpoint commit 与 pending exclusion 不得并发交错。已提交 history 但尚未进入 Core 的失败直接归为 excluded；尚未提交 history 的 prepared operation 不产生可排除记录。
 
 Agent terminal fact 将当前 attachment 标记为 poisoned 后，Product 必须停止该 Session 的新 admission，并在 terminal event、checkpoint postprocess、Session access 与全部 worker lease 收口后自动进入同一 close/release 路径。只有 Session 已成功 close、Agent Runtime slot 已 release 且 Product 仍持有完整 owner 事实时，Task 才能 detach，并按本节的 checkpoint restore 或 fresh attach 规则继续；close 失败必须保留真实的 attached/closing attachment、execution authority 与资源 owner，不得伪装 detached、开放 recovery 或自动形成无界重试循环。已获接纳 attachment 的可复用 close failure 可以恢复原 admission；poisoned/closing failure 继续不可用，直到已有显式生命周期动作安全重试。
 

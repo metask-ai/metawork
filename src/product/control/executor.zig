@@ -95,6 +95,21 @@ pub const Executor = struct {
     stopping: bool = false,
     shutdown_running: bool = false,
     joined: bool = false,
+    /// Workers that have left their loop, under `mutex`.
+    exited: usize = 0,
+    /// Set by the last worker to leave.
+    all_exited: std.Io.Event = .unset,
+
+    /// What a shutdown does while it waits for workers to leave, for a caller
+    /// whose workers wait on something only that caller can move along.
+    pub const Consumer = struct {
+        context: *anyopaque,
+        consume_fn: *const fn (*anyopaque) void,
+    };
+
+    /// The longest a consuming shutdown waits between two consumptions; the
+    /// last worker leaving ends the wait at once.
+    pub const consume_interval_ms: u64 = 10;
 
     pub fn create(
         io: std.Io,
@@ -176,6 +191,15 @@ pub const Executor = struct {
     /// Concurrent shutdown callers serialize here. `deinit` still requires all
     /// external callers to be quiescent before destroying the Executor object.
     pub fn shutdown(self: *Executor) void {
+        self.shutdownConsuming(null);
+    }
+
+    /// `shutdown`, calling `consumer` repeatedly while it waits for the
+    /// workers to leave. For a caller that is also the only consumer of
+    /// something a running job waits on: joining without consuming would
+    /// wait on itself. Only the caller that starts the shutdown consumes; a
+    /// concurrent one waits for it as with `shutdown`.
+    pub fn shutdownConsuming(self: *Executor, consumer: ?Consumer) void {
         self.lock();
         if (self.joined) {
             self.unlock();
@@ -196,6 +220,17 @@ pub const Executor = struct {
             self.lock();
         }
         self.unlock();
+        if (consumer) |value| while (true) {
+            self.all_exited.waitTimeout(self.io, .{ .duration = .{
+                .raw = .fromMilliseconds(@intCast(consume_interval_ms)),
+                .clock = .awake,
+            } }) catch {
+                value.consume_fn(value.context);
+                continue;
+            };
+            break;
+        };
+        // Immediate once every worker has left.
         for (self.workers) |thread| thread.join();
         self.allocator.free(self.workers);
         self.allocator.free(self.queue);
@@ -209,6 +244,12 @@ pub const Executor = struct {
     }
 
     fn workerMain(self: *Executor) void {
+        defer {
+            self.lock();
+            self.exited += 1;
+            if (self.exited == self.workers.len) self.all_exited.set(self.io);
+            self.unlock();
+        }
         while (true) {
             self.lock();
             while (self.queued == 0 and !self.stopping)
@@ -308,6 +349,57 @@ test "shutdown cancels queued jobs and joins the active worker" {
 
     try std.testing.expectEqual(@as(usize, 1), harness.executed.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), harness.cancelled.load(.acquire));
+}
+
+test "a consuming shutdown keeps consuming while a running job waits on what it consumes" {
+    // The running job can only finish once the shutting-down thread has
+    // consumed: a shutdown that just joins would wait on itself. The job's
+    // own wait is bounded, so a regression fails the assertion below
+    // instead of hanging the test.
+    const Harness = struct {
+        started: std.atomic.Value(bool) = .init(false),
+        consumed: std.Io.Event = .unset,
+        consumptions: std.atomic.Value(usize) = .init(0),
+        released_by_consumer: bool = false,
+
+        fn execute(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.started.store(true, .release);
+            self.consumed.waitTimeout(std.testing.io, .{ .duration = .{
+                .raw = .fromMilliseconds(5_000),
+                .clock = .awake,
+            } }) catch return;
+            self.released_by_consumer = true;
+        }
+
+        fn cancel(_: *anyopaque) void {
+            unreachable;
+        }
+
+        fn consume(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            _ = self.consumptions.fetchAdd(1, .acq_rel);
+            self.consumed.set(std.testing.io);
+        }
+    };
+
+    var harness = Harness{};
+    const executor = try Executor.create(std.testing.io, std.testing.allocator, .{
+        .worker_count = 2,
+        .queue_capacity = 1,
+    });
+    defer executor.deinit();
+    try executor.enqueue(.{
+        .identity = &harness,
+        .context = &harness,
+        .execute_fn = Harness.execute,
+        .cancel_fn = Harness.cancel,
+    });
+    while (!harness.started.load(.acquire)) std.Thread.yield() catch {};
+    executor.shutdownConsuming(.{ .context = &harness, .consume_fn = Harness.consume });
+
+    try std.testing.expect(harness.released_by_consumer);
+    try std.testing.expect(harness.consumptions.load(.acquire) >= 1);
 }
 
 test "ring queue preserves FIFO when a freed head slot is reused" {

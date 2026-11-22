@@ -1,14 +1,23 @@
 //! The execution link's two directions of flow.
 //!
-//! `Outbound` is a bounded queue plus one writer thread. It exists for one
-//! reason: the UI main thread must never block on a pipe write. The main
-//! thread owns the projection budget, and a blocking write into a full pipe
-//! buffer is the one way to park it for an unbounded time. So the main thread
-//! only ever calls `trySubmit`, which returns `busy` instead of waiting, and
-//! the Product maps that onto the admission and retry results it already has.
-//! Threads that are allowed to be slowed down -- a worker, or on the exec side
-//! a Core callback thread -- call `submitWaiting`, where blocking *is* the
-//! backpressure and matches what a full event pump does today.
+//! `Outbound` is a bounded queue plus one writer thread. It exists so that no
+//! caller ever writes the pipe itself: only the writer does, and a peer that
+//! stops reading parks the writer, not the caller.
+//!
+//! A caller may still wait -- for room in the queue (`submitWaiting`), and in
+//! the correlation table for its answer -- and on the UI half that includes
+//! the main thread, whose synchronous calls into the Agent are synchronous
+//! here too. Those waits end when the writer moves on, which it does as long
+//! as the peer reads, or when the peer is given up: the UI half's liveness
+//! deadline ends the process, which fails the writer's write and closes the
+//! table. A peer that is alive and slow to answer is waited for, as the same
+//! call is in process. What keeps such a wait from waiting on itself is the
+//! UI half's rule, in `execution_client.zig`: the main thread never calls a
+//! method whose answer needs the main thread to consume first.
+//!
+//! `trySubmit` never waits, and is for what may not: a frame sent under a lock
+//! the writer's progress could need, or from a thread that must keep its
+//! cadence -- the credit and ping frames.
 //!
 //! Control messages have their own queue and their own reserved capacity, and
 //! the writer drains it between fragments rather than between messages. That
@@ -147,9 +156,12 @@ pub const Outbound = struct {
         self.writer = try std.Thread.spawn(.{ .stack_size = io_thread_stack_bytes }, writerMain, .{self});
     }
 
-    /// Wakes every waiter, stops accepting, and joins the writer. Queued
-    /// messages are released without being written: the link is gone, and
-    /// pretending otherwise would make the caller believe bytes were sent.
+    /// Wakes every waiter, stops accepting, and joins the writer. The writer
+    /// finishes what is already queued before it leaves, so this waits for
+    /// as long as the peer takes to read it; bounding that is the caller's,
+    /// which on the UI half is the host's stop deadline -- ending the child
+    /// fails the write. Whatever a failed writer left queued is released
+    /// here without being written.
     pub fn stop(self: *Outbound) void {
         self.mutex.lockUncancelable(self.io);
         self.closing = true;
@@ -185,7 +197,8 @@ pub const Outbound = struct {
         return target.queued < count and target.queued_bytes + len <= bytes;
     }
 
-    /// Never blocks. This is the only entry the UI main thread may use.
+    /// Never blocks: `busy` when there is no room now. For a frame that must
+    /// not wait for the writer -- one sent under a lock, or on a clock.
     pub fn trySubmit(
         self: *Outbound,
         kind: frame.Kind,
@@ -196,7 +209,8 @@ pub const Outbound = struct {
     }
 
     /// Blocks until there is room, the link closes, or the message cannot be
-    /// admitted at all. Only for threads whose slowdown is the backpressure.
+    /// admitted at all. Room comes as the writer moves on; a link that fails
+    /// wakes every waiter with `closed`.
     pub fn submitWaiting(
         self: *Outbound,
         kind: frame.Kind,
@@ -896,6 +910,147 @@ test "control overtakes a fragmented data message instead of waiting for it" {
     try testing.expectEqual(frame.Kind.event, kinds[2]);
     try testing.expectEqual(frame.Kind.event, kinds[3]);
     try testing.expectEqual(frame.Kind.event, kinds[4]);
+}
+
+/// An anonymous pipe made the way the link's own are: on Windows by the same
+/// std function a spawn uses, with the same synchronous ends as a child's
+/// stdin; on POSIX by `pipe2`.
+fn realPipe(threaded: *std.Io.Threaded) !struct { read: std.Io.File, write: std.Io.File } {
+    switch (@import("builtin").os.tag) {
+        .windows => {
+            const ends = try threaded.windowsCreatePipe(.{
+                .server = .{ .attributes = .{ .INHERIT = false }, .mode = .{ .IO = .SYNCHRONOUS_NONALERT } },
+                .client = .{ .attributes = .{ .INHERIT = false }, .mode = .{ .IO = .SYNCHRONOUS_NONALERT } },
+                .outbound = true,
+            });
+            return .{
+                .read = .{ .handle = ends[1], .flags = .{ .nonblocking = false } },
+                .write = .{ .handle = ends[0], .flags = .{ .nonblocking = false } },
+            };
+        },
+        else => {
+            const ends = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
+            return .{
+                .read = .{ .handle = ends[0], .flags = .{ .nonblocking = false } },
+                .write = .{ .handle = ends[1], .flags = .{ .nonblocking = false } },
+            };
+        },
+    }
+}
+
+test "a control frame queued mid-message travels between its fragments over a real pipe" {
+    // The other tests check the order the writer writes in, and how the
+    // reassembler reads hand-built frames. This one runs both, the writer
+    // thread and the reader, on the two ends of a real pipe, so the
+    // interleaving has to survive the operating system's chunking too.
+    //
+    // It is made deterministic by the pipe's size. Nothing reads until the
+    // control frame is queued, and the message's first fragment -- 64 KiB
+    // and a header -- is more than any pipe holds (4 KiB on Windows, at most
+    // 64 KiB on POSIX), so the writer is still inside that fragment when the
+    // control frame arrives in its queue. A writer that only looked for
+    // control between messages would send it after the whole message.
+    const allocator = testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const ends = try realPipe(&threaded);
+    var write_open = true;
+    defer if (write_open) ends.write.close(io);
+
+    var outbound: Outbound = undefined;
+    try outbound.start(io, allocator, ends.write, .{});
+    var outbound_running = true;
+    defer if (outbound_running) outbound.stop();
+    // Declared after the writer's stop, so on any failure below it runs
+    // first: with the read end closed the writer's blocked write fails, and
+    // the stop that joins it returns instead of waiting on a pipe nobody
+    // reads. Once the reader thread runs, it closes this end itself as soon
+    // as it stops reading.
+    var read_open = true;
+    defer if (read_open) ends.read.close(io);
+
+    const payload = try allocator.alloc(u8, 3 * frame.max_fragment_payload_bytes);
+    defer allocator.free(payload);
+    for (payload, 0..) |*byte, index| byte.* = @truncate(index % 251);
+    try testing.expectEqual(Submission.queued, try outbound.submitWaiting(.request, 1, payload));
+    // The writer has taken the message and is writing its first fragment --
+    // or has failed, which ends the wait too.
+    const writer_failed = while (true) {
+        outbound.mutex.lockUncancelable(io);
+        const queued = outbound.data.queued;
+        const failed = outbound.failed;
+        outbound.mutex.unlock(io);
+        if (queued == 0 or failed) break failed;
+        std.Thread.yield() catch {};
+    };
+    try testing.expect(!writer_failed);
+    try testing.expectEqual(Submission.queued, try outbound.trySubmit(.control, 0, "ping"));
+
+    // Only now does anything read.
+    const Checking = struct {
+        allocator: std.mem.Allocator,
+        records: std.ArrayList(Collector.Record) = .empty,
+        intact: bool = false,
+
+        fn sink(self: *@This()) Sink {
+            return .{ .context = self, .deliver_fn = deliver };
+        }
+
+        fn deliver(context: ?*anyopaque, kind: frame.Kind, correlation: u64, bytes: []const u8) Flow {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (kind == .request) {
+                self.intact = true;
+                for (bytes, 0..) |byte, index| {
+                    if (byte != @as(u8, @truncate(index % 251))) self.intact = false;
+                }
+            }
+            self.records.append(self.allocator, .{
+                .kind = kind,
+                .correlation = correlation,
+                .len = bytes.len,
+                .first = if (bytes.len == 0) 0 else bytes[0],
+            }) catch return .stop;
+            return .ok;
+        }
+    };
+    var checking: Checking = .{ .allocator = allocator };
+    defer checking.records.deinit(allocator);
+    const read_buffer = try allocator.alloc(u8, 4096);
+    defer allocator.free(read_buffer);
+    var reader = ends.read.readerStreaming(io, read_buffer);
+    var inbound: Inbound = undefined;
+    try inbound.init(io, allocator, &reader.interface, test_message_limits, checking.sink());
+    defer inbound.deinit();
+    const Reading = struct {
+        fn run(reading: *Inbound, stopped: *Stopped, end: std.Io.File, end_io: std.Io) void {
+            stopped.* = reading.run();
+            // Whatever ended the read -- the end of the stream, or the sink
+            // giving up -- nothing reads any more, so a writer still writing
+            // must fail rather than wait.
+            end.close(end_io);
+        }
+    };
+    var stopped: Stopped = .read_failed;
+    const thread = try std.Thread.spawn(.{}, Reading.run, .{ &inbound, &stopped, ends.read, io });
+    read_open = false;
+    // The writer finishes what is queued, and closing the end is the end of
+    // the stream.
+    outbound.stop();
+    outbound_running = false;
+    ends.write.close(io);
+    write_open = false;
+    thread.join();
+
+    try testing.expectEqual(Stopped.peer_closed, stopped);
+    try testing.expectEqual(@as(usize, 2), checking.records.items.len);
+    try testing.expectEqual(frame.Kind.control, checking.records.items[0].kind);
+    try testing.expectEqual(@as(usize, 4), checking.records.items[0].len);
+    try testing.expectEqual(@as(u8, 'p'), checking.records.items[0].first);
+    try testing.expectEqual(frame.Kind.request, checking.records.items[1].kind);
+    try testing.expectEqual(@as(u64, 1), checking.records.items[1].correlation);
+    try testing.expectEqual(payload.len, checking.records.items[1].len);
+    try testing.expect(checking.intact);
 }
 
 /// Feeds hand-built frames to an `Inbound` and returns why it stopped.

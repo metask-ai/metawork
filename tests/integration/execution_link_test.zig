@@ -11,6 +11,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const execution_host = @import("app_execution_host");
+const process_spawn = @import("app_process_spawn");
 const execution_mode = @import("app_execution_mode");
 const execution_client = @import("app_execution_client");
 const agent_link = @import("metawork_agent_link");
@@ -37,6 +38,38 @@ const test_handshake_deadline_ms: u64 = 10_000;
 /// A missing fixture is a misconfigured build entry, never a reason to pass.
 fn fixturePath() ![]u8 {
     return std.process.Environ.getAlloc(std.testing.environ, allocator, fixture_variable);
+}
+
+test "a bound on an event holds through waits that end early" {
+    // `Event.waitTimeout` answers `Timeout` whenever its one wait ends with
+    // the event unset, and on Darwin a signal -- a child's exit -- ends it
+    // early. A wake without a set is the same thing on every platform, so
+    // this wakes the waiter repeatedly and requires the bound to hold anyway.
+    const Waker = struct {
+        stop: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This(), event: *std.Io.Event) void {
+            while (!self.stop.load(.acquire)) {
+                std.Io.sleep(io, .fromMilliseconds(20), .awake) catch {};
+                io.futexWake(std.Io.Event, event, 1);
+            }
+        }
+    };
+    var event: std.Io.Event = .unset;
+    var waker: Waker = .{};
+    const thread = try std.Thread.spawn(.{}, Waker.run, .{ &waker, &event });
+    const started = std.Io.Timestamp.now(io, .awake);
+    const set = execution_host.setWithin(io, &event, 400);
+    const elapsed_ms = started.durationTo(.now(io, .awake)).toMilliseconds();
+    waker.stop.store(true, .release);
+    thread.join();
+    try std.testing.expect(!set);
+    try std.testing.expect(elapsed_ms >= 400);
+
+    // And a set still ends the wait at once.
+    var later: std.Io.Event = .unset;
+    later.set(io);
+    try std.testing.expect(execution_host.setWithin(io, &later, 10_000));
 }
 
 test "the execution half starts, agrees on identity and exits on end of stream" {
@@ -72,6 +105,37 @@ test "the execution half starts, agrees on identity and exits on end of stream" 
         execution_host.Stopped{ .exited = @intFromEnum(execution_mode.Exit.link_closed) },
         stopped,
     );
+}
+
+test "the execution process is started through the window's one spawn boundary" {
+    // An MCP server started at the same moment as the execution process
+    // must not inherit the link's pipe ends, and the only thing keeping it
+    // from doing so is that both spawns take the same boundary.
+    const Observer = struct {
+        calls: u32 = 0,
+        held: bool = false,
+
+        fn call(context: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            self.held = process_spawn.testing.held();
+        }
+    };
+    var observer: Observer = .{};
+    process_spawn.testing.observer = .{ .context = &observer, .call_fn = Observer.call };
+    defer process_spawn.testing.observer = null;
+
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var host: execution_host.Host = undefined;
+    const failure = try host.start(io, allocator, matching_identity, .{}, .{ .explicit = &.{fixture} }, test_handshake_deadline_ms);
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer host.deinit();
+    try std.testing.expectEqual(@as(u32, 1), observer.calls);
+    try std.testing.expect(observer.held);
 }
 
 /// Reads one whole frame the execution half sent. Only for the calls these
@@ -177,6 +241,77 @@ test "a child that ignores end of stream is ended, and the stop returns" {
     try std.testing.expectEqual(execution_host.Stopped.killed, host.stop());
     // The reaper has collected it: the stop joined the thread that waits.
     try std.testing.expect(host.term != null);
+}
+
+test "a child that stops reading with its pipe full is ended within the grace, and the stop returns" {
+    // The writer finishes what is queued before it leaves, and this child
+    // never reads: the writer sits in a write on a full pipe, so a stop whose
+    // grace period started only after joining the writer would never end.
+    // Bounded from outside, so a regression fails here instead of hanging
+    // the test process: past the bound the test ends the child itself.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var host: execution_host.Host = undefined;
+    const failure = try host.start(io, allocator, matching_identity, .{}, .{
+        .explicit = &.{ fixture, "--stop-reading" },
+    }, test_handshake_deadline_ms);
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer host.deinit();
+
+    // Far more than any pipe holds (Windows 4 KiB, POSIX at most 64 KiB).
+    const payload = try allocator.alloc(u8, 2 * 1024 * 1024);
+    defer allocator.free(payload);
+    @memset(payload, 0x42);
+    try std.testing.expectEqual(agent_link.channel.Submission.queued, try host.outbound.submitWaiting(.request, 1, payload));
+
+    const Stop = struct {
+        done: std.Io.Event = .unset,
+        result: execution_host.Stopped = .gone,
+
+        fn run(self: *@This(), stopping: *execution_host.Host) void {
+            self.result = stopping.stop();
+            self.done.set(io);
+        }
+    };
+    var stop: Stop = .{};
+    const started = std.Io.Timestamp.now(io, .awake);
+    const thread = try std.Thread.spawn(.{}, Stop.run, .{ &stop, &host });
+    const returned = execution_host.setWithin(io, &stop.done, execution_host.stop_grace_ms + 10_000);
+    if (!returned) _ = host.terminate();
+    thread.join();
+    const elapsed_ms = started.durationTo(.now(io, .awake)).toMilliseconds();
+    try std.testing.expect(returned);
+    try std.testing.expectEqual(execution_host.Stopped.killed, stop.result);
+    try std.testing.expect(elapsed_ms < @as(i64, @intCast(execution_host.stop_grace_ms + 3_000)));
+}
+
+test "a child that leaves by itself is reported as exited even when the deadline passes after it is collected" {
+    // The stop's deadline keeps running through the waits after the reap.
+    // A settle that outlasts it -- here on purpose, under load by accident --
+    // must not turn a child that had already left on its own into a killed
+    // one: what it exited with is decided when it is collected.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var host: execution_host.Host = undefined;
+    const failure = try host.start(io, allocator, matching_identity, .{}, .{ .explicit = &.{fixture} }, test_handshake_deadline_ms);
+    if (failure) |value| {
+        std.debug.print("start failed: {any}\n", .{value});
+        return error.StartFailed;
+    }
+    defer host.deinit();
+    const SlowSettle = struct {
+        fn settle(_: ?*anyopaque) void {
+            std.Io.sleep(io, .fromMilliseconds(@intCast(execution_host.stop_grace_ms + 500)), .awake) catch {};
+        }
+    };
+    host.settle = .{ .context = null, .settle_fn = SlowSettle.settle };
+    try std.testing.expectEqual(
+        execution_host.Stopped{ .exited = @intFromEnum(execution_mode.Exit.link_closed) },
+        host.stop(),
+    );
 }
 
 test "a peer built from other sources is refused, and does not keep running" {
@@ -440,6 +575,66 @@ test "a Run crosses into the execution process and its events arrive ahead of it
         try std.testing.expect(std.mem.indexOf(u8, snapshot, "typed event") != null);
         try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"recordingIncomplete\":true") == null);
     }
+}
+
+test "a shutdown whose Run's terminal waits behind events the window has not made room for still finishes" {
+    // The execution half sends a Run's terminal only after every event its
+    // Session queued, and sends an event only into room the window granted,
+    // which only the consuming thread grants. With room for one event, the
+    // Run's second event stays over there, and the terminal with it: a
+    // shutdown that joins its workers without consuming waits on itself.
+    // Bounded from outside; past the bound the test ends the process, which
+    // ends every wait on it, and fails.
+    const fixture = try fixturePath();
+    defer allocator.free(fixture);
+    var wake: Wake = .{};
+    var owner: execution_client.Owner = undefined;
+    try startOwner(&owner, &wake, &.{ fixture, "--with-runtime", "--text-events" }, fixture_message_limits, 1);
+    defer owner.deinit();
+    var control = try product_control.Runtime.init(allocator, io, owner.runtimePort(), product_limits, lifecycle.productControlConfiguration());
+    defer control.deinit();
+    const task_id = try createRunningTask(&control, "Say something short");
+    try waitEvents(&owner, 1);
+
+    // The Run has finished over there -- both its events produced, the
+    // second held for room -- once its Session is idle again. Asked
+    // directly: a snapshot is answered at once, not held behind events.
+    const session = control.testTask(task_id).?.runtime.attached().?.binding.owner.?.session;
+    var waited: u64 = 0;
+    while (session.snapshot().state != .idle) : (waited += wait_tick_ms) {
+        if (waited >= wait_limit_ms) return error.RunNeverFinished;
+        try std.Io.sleep(io, .fromMilliseconds(wait_tick_ms), .awake);
+    }
+    try std.testing.expectEqual(@as(u64, 1), owner.events_received.load(.acquire));
+
+    const Shutdown = struct {
+        done: std.Io.Event = .unset,
+
+        fn run(self: *@This(), shutting: *product_control.Runtime) void {
+            shutting.shutdownExecutor();
+            self.done.set(io);
+        }
+    };
+    var shutdown: Shutdown = .{};
+    const thread = try std.Thread.spawn(.{}, Shutdown.run, .{ &shutdown, &control });
+    const returned = execution_host.setWithin(io, &shutdown.done, 10_000);
+    if (!returned) execution_client.TestSupport.killCurrent(&owner);
+    thread.join();
+    try std.testing.expect(returned);
+
+    // Nothing was lost: the events held back reached Product after all, and
+    // the Run is sealed complete with no gap in its recording.
+    try std.testing.expect(owner.events_received.load(.acquire) > 1);
+    const run = control.testTask(task_id).?.durable.runs[0].?;
+    try std.testing.expect(run.event_projection_failure == null);
+    const output = try allocator.alloc(u8, 256 * 1024);
+    defer allocator.free(output);
+    const snapshot = try control.writeAggregateFixture(output);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"terminal\":{\"outcome\":\"completed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "typed event") != null);
+    owner.shutdown();
+    control.syncLifecycle();
+    control.relinquishAgentSessionsAfterRuntimeShutdown();
 }
 
 test "a Skill selected with attachments crosses into the execution process as the Run's Host block" {

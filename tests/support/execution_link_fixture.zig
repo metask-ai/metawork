@@ -45,6 +45,8 @@
 //!   * `--linger` -- do nothing for a minute and exit: the grandchild.
 //!   * `--hang-before-hello=<ms>` -- wait this long before agreeing on
 //!     identity, as a process stuck in its startup does.
+//!   * `--stop-reading` -- agree on identity, then never read the link
+//!     again and never leave: a wedged child whose pipe fills up.
 //!   * `--exercise-mcp` -- before applying an MCP configuration, drive each
 //!     member's transport the way AgentCore drives a connector: open, an
 //!     exchange whose answer is echoed back, one carrying a secret, one its
@@ -78,6 +80,7 @@ pub const crash_in_run_flag = "--crash-in-run";
 pub const spawn_grandchild_flag = "--spawn-grandchild=";
 pub const linger_flag = "--linger";
 pub const hang_before_hello_flag = "--hang-before-hello=";
+pub const stop_reading_flag = "--stop-reading";
 
 /// The fault record identity this fixture installs with. The version is the
 /// link's own, so a test can tell this process's record from any other.
@@ -101,6 +104,7 @@ const Flags = struct {
     grandchild_pid_path: ?[]u8 = null,
     linger: bool = false,
     hang_before_hello_ms: u64 = 0,
+    stop_reading: bool = false,
     session_id_floor: u64 = 0,
 };
 
@@ -122,6 +126,7 @@ fn readFlags(init: std.process.Init) Flags {
         if (std.mem.eql(u8, argument, exercise_effects_flag)) flags.exercise_effects = true;
         if (std.mem.eql(u8, argument, crash_in_run_flag)) flags.crash_in_run = true;
         if (std.mem.eql(u8, argument, linger_flag)) flags.linger = true;
+        if (std.mem.eql(u8, argument, stop_reading_flag)) flags.stop_reading = true;
         if (std.mem.startsWith(u8, argument, spawn_grandchild_flag))
             flags.grandchild_pid_path = init.gpa.dupe(u8, argument[spawn_grandchild_flag.len..]) catch null;
         if (std.mem.startsWith(u8, argument, hang_before_hello_flag))
@@ -429,6 +434,14 @@ const FakeRuntime = struct {
     }
 };
 
+/// Serves the link by never reading it again: whatever the UI half writes
+/// stays in the pipe until it is full.
+const StopReading = struct {
+    fn serve(_: ?*anyopaque, link: execution_mode.Link) execution_mode.Exit {
+        while (true) std.Io.sleep(link.io, .fromSeconds(60), .awake) catch {};
+    }
+};
+
 extern "kernel32" fn GetProcessId(process: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.DWORD;
 
 /// A process started the way a tool process is, standard handles inherited,
@@ -493,7 +506,12 @@ pub fn main(init: std.process.Init) !void {
         },
         .message_limits = if (flags.large_messages) large_message_limits else message_limits,
         .queue_limits = .{},
-        .server = if (flags.with_runtime) execution_server.server(&server_options) else null,
+        .server = if (flags.stop_reading)
+            .{ .context = null, .serve_fn = StopReading.serve }
+        else if (flags.with_runtime)
+            execution_server.server(&server_options)
+        else
+            null,
     });
     if (flags.ignore_eof) while (true) {
         std.Io.sleep(init.io, .fromSeconds(1), .awake) catch {};
