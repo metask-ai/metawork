@@ -23507,6 +23507,40 @@ test "Save As picker cancellation deadline and shutdown preserve the pre-publica
     try std.testing.expectEqual(@as(usize, 2), save.releases);
 }
 
+test {
+    _ = output_check;
+}
+
+test "Save As keeps waiting for its decision through waits that end early" {
+    // The worker's wait for the decision can end before its deadline -- a
+    // spurious wakeup, or on Darwin any signal. A wake without a set is that
+    // early end on every platform: the staged save must still be waiting
+    // afterwards, and the decision must end the wait at once.
+    var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
+    save.bind(&control);
+    try std.testing.expect((try save.begin(&control, 1)) == .queued);
+    try OutputSaveHarness.waitApproval(&control);
+    const job = control.output_checks.jobs[0].?;
+    for (0..20) |_| {
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake);
+        std.testing.io.futexWake(std.Io.Event, &job.decided, 1);
+    }
+    try std.testing.expect(control.output_checks.awaitingPublication() != null);
+    try std.testing.expect(!job.done.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), save.discarded.load(.acquire));
+    const decided_at = std.Io.Timestamp.now(std.testing.io, .awake);
+    try requester.drainAll(&control);
+    const elapsed = decided_at.durationTo(.now(std.testing.io, .awake));
+    try std.testing.expectEqual(OutputCheckState.saved, requester.results[0].?.state);
+    try std.testing.expectEqual(@as(usize, 1), save.published.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), save.discarded.load(.acquire));
+    try std.testing.expect(elapsed.toSeconds() < 10);
+}
+
 test "Product view bounded Host search matches the independent Renderer fixture and freezes query ownership" {
     var control = try testRuntime();
     defer control.deinit();

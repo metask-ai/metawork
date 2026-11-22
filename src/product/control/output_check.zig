@@ -113,9 +113,8 @@ const Job = struct {
         };
         self.awaiting_publication.store(true, .release);
         _ = self.notifier.wake_fn(self.notifier.context);
-        self.decided.waitTimeout(self.io, .{ .deadline = self.created_at.addDuration(.fromMilliseconds(30000)).withClock(.awake) }) catch {
+        if (!setBy(self.io, &self.decided, self.created_at.addDuration(.fromNanoseconds(timeout_ns))))
             _ = self.decision.cmpxchgStrong(.waiting, .timed_out, .acq_rel, .acquire);
-        };
         const decision = self.decision.load(.acquire);
         if (decision == .commit) {
             save.publish_fn(save.context) catch |err| {
@@ -168,6 +167,22 @@ pub fn openFailure(err: anyerror) State {
 }
 
 pub const Taken = struct { job: *Job, target: *const Target, completion_id: u64, kind: Kind, state: State, committed: bool };
+
+/// Whether `event` is set before `deadline` passes on the awake clock.
+///
+/// Not one call of `Event.waitTimeout`: that waits once and answers `Timeout`
+/// whenever the event is still unset afterwards, and the wait can end before
+/// its time -- a spurious wakeup, or on Darwin any signal, such as a child's
+/// exit. Read as the deadline passing, that answer discards a staged save the
+/// user still had time to approve. So this waits again until the clock says
+/// the deadline has passed.
+fn setBy(io: std.Io, event: *std.Io.Event, deadline: std.Io.Timestamp) bool {
+    while (!event.isSet()) {
+        if (std.Io.Timestamp.now(io, .awake).nanoseconds >= deadline.nanoseconds) return event.isSet();
+        event.waitTimeout(io, .{ .deadline = deadline.withClock(.awake) }) catch {};
+    }
+    return true;
+}
 
 fn deniedState(decision: Decision) ?State {
     return switch (decision) {
@@ -323,3 +338,43 @@ pub const Lane = struct {
         self.* = undefined;
     }
 };
+
+test "a decision deadline holds through waits that end early" {
+    // A wake without a set is what an early end of `Event.waitTimeout` is, on
+    // every platform. Woken again and again, the wait must still last until
+    // the clock passes the deadline, and a set must still end it at once.
+    const io = std.testing.io;
+    const Waker = struct {
+        event: *std.Io.Event,
+        wakes: usize,
+        set: bool,
+
+        fn run(self: *@This()) void {
+            for (0..self.wakes) |_| {
+                std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+                io.futexWake(std.Io.Event, self.event, 1);
+            }
+            if (self.set) self.event.set(io);
+        }
+    };
+
+    var never: std.Io.Event = .unset;
+    var early: Waker = .{ .event = &never, .wakes = 40, .set = false };
+    const deadline = std.Io.Timestamp.now(io, .awake).addDuration(.fromMilliseconds(150));
+    const early_thread = try std.Thread.spawn(.{}, Waker.run, .{&early});
+    const never_set = setBy(io, &never, deadline);
+    const returned_at = std.Io.Timestamp.now(io, .awake);
+    early_thread.join();
+    try std.testing.expect(!never_set);
+    try std.testing.expect(returned_at.nanoseconds >= deadline.nanoseconds);
+
+    var decided: std.Io.Event = .unset;
+    var late: Waker = .{ .event = &decided, .wakes = 10, .set = true };
+    const started = std.Io.Timestamp.now(io, .awake);
+    const late_thread = try std.Thread.spawn(.{}, Waker.run, .{&late});
+    const set = setBy(io, &decided, started.addDuration(.fromNanoseconds(timeout_ns)));
+    const elapsed = started.durationTo(.now(io, .awake));
+    late_thread.join();
+    try std.testing.expect(set);
+    try std.testing.expect(elapsed.nanoseconds < timeout_ns / 3);
+}
