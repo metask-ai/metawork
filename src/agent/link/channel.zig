@@ -1,14 +1,23 @@
 //! The execution link's two directions of flow.
 //!
-//! `Outbound` is a bounded queue plus one writer thread. It exists for one
-//! reason: the UI main thread must never block on a pipe write. The main
-//! thread owns the projection budget, and a blocking write into a full pipe
-//! buffer is the one way to park it for an unbounded time. So the main thread
-//! only ever calls `trySubmit`, which returns `busy` instead of waiting, and
-//! the Product maps that onto the admission and retry results it already has.
-//! Threads that are allowed to be slowed down -- a worker, or on the exec side
-//! a Core callback thread -- call `submitWaiting`, where blocking *is* the
-//! backpressure and matches what a full event pump does today.
+//! `Outbound` is a bounded queue plus one writer thread. It exists so that no
+//! caller ever writes the pipe itself: only the writer does, and a peer that
+//! stops reading parks the writer, not the caller.
+//!
+//! A caller may still wait -- for room in the queue (`submitWaiting`), and in
+//! the correlation table for its answer -- and on the UI half that includes
+//! the main thread, whose synchronous calls into the Agent are synchronous
+//! here too. Those waits end when the writer moves on, which it does as long
+//! as the peer reads, or when the peer is given up: the UI half's liveness
+//! deadline ends the process, which fails the writer's write and closes the
+//! table. A peer that is alive and slow to answer is waited for, as the same
+//! call is in process. What keeps such a wait from waiting on itself is the
+//! UI half's rule, in `execution_client.zig`: the main thread never calls a
+//! method whose answer needs the main thread to consume first.
+//!
+//! `trySubmit` never waits, and is for what may not: a frame sent under a lock
+//! the writer's progress could need, or from a thread that must keep its
+//! cadence -- the credit and ping frames.
 //!
 //! Control messages have their own queue and their own reserved capacity, and
 //! the writer drains it between fragments rather than between messages. That
@@ -188,7 +197,8 @@ pub const Outbound = struct {
         return target.queued < count and target.queued_bytes + len <= bytes;
     }
 
-    /// Never blocks. This is the only entry the UI main thread may use.
+    /// Never blocks: `busy` when there is no room now. For a frame that must
+    /// not wait for the writer -- one sent under a lock, or on a clock.
     pub fn trySubmit(
         self: *Outbound,
         kind: frame.Kind,
@@ -199,7 +209,8 @@ pub const Outbound = struct {
     }
 
     /// Blocks until there is room, the link closes, or the message cannot be
-    /// admitted at all. Only for threads whose slowdown is the backpressure.
+    /// admitted at all. Room comes as the writer moves on; a link that fails
+    /// wakes every waiter with `closed`.
     pub fn submitWaiting(
         self: *Outbound,
         kind: frame.Kind,

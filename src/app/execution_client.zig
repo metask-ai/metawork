@@ -55,6 +55,22 @@
 //! answer; no call has a timeout of its own, because some calls legitimately
 //! last a whole Run.
 //!
+//! The main thread is one of those UI threads: Product calls into the Agent
+//! synchronously from it -- on every projection and every lifecycle sync, as
+//! well as on user actions -- and here each such call waits for room, a
+//! correlation slot and its answer. A process that is gone or no longer
+//! reading is given up within the deadline; one that is alive and slow is
+//! waited for, as the same call is in process. Two things would make such a
+//! wait wait on itself, and neither is allowed:
+//!
+//!   * calling a terminal method -- a Run's `execute` or a compact's -- from
+//!     the thread that consumes events: its answer comes only after events
+//!     that need that thread's room (see "Events and credit"). Checked in
+//!     Debug builds;
+//!   * waiting on a thread that is inside a terminal method without
+//!     consuming meanwhile, which is what Product's shutdown does when it
+//!     joins its executor, and why it consumes while it joins.
+//!
 //! ## Events and credit
 //!
 //! Events arrive on the reader thread and go into a pump of the same type the
@@ -1686,8 +1702,25 @@ fn runtimeReleaseClosedSession(_: ?*anyopaque, session: port.SessionPort) Error!
     forget(remote);
 }
 
+/// Whether this thread has taken events. Per thread rather than by thread
+/// id, because Windows hands a new thread the id of one that has exited.
+threadlocal var consumes_events: bool = false;
+
+/// Whether the calling thread takes events. A terminal method called there
+/// would wait for room only this thread can make.
+fn onConsumerThread() bool {
+    return consumes_events;
+}
+
+/// Debug builds only: a shipped build is ReleaseSafe, where an assertion is
+/// a crash, and a crash is worse than the wait it would have caught.
+fn assertNotOnConsumerThread() void {
+    if (builtin.mode == .Debug) std.debug.assert(!onConsumerThread());
+}
+
 fn runtimeTakeEvent(context: ?*anyopaque) ?contract.OwnedCoreEvent {
     const owner = ownerOf(context);
+    consumes_events = true;
     owner.mutex.lockUncancelable(owner.io);
     defer owner.mutex.unlock(owner.io);
     // Taken and granted under one lock, so a process started meanwhile is
@@ -2462,6 +2495,7 @@ fn sessionCancelPreparedCompact(context: ?*anyopaque, operation_id: u64) Error!v
 
 fn sessionExecutePreparedCompact(context: ?*anyopaque, operation_id: u64) Error!control.CompactTerminalResult {
     const remote = remoteOf(context);
+    assertNotOnConsumerThread();
     const value = try sessionCall(remote, .execute_prepared_compact, Error, .{ .operation_id = operation_id });
     return value.into(remote.generation.owner.allocator) catch error.DependencyUnreachable;
 }
@@ -2619,6 +2653,7 @@ fn goneTerminal(allocator: std.mem.Allocator) control.TerminalResult {
 
 fn runExecute(context: ?*anyopaque, run_id: u64, generation: u64) control.TerminalResult {
     const remote = remoteOf(context);
+    assertNotOnConsumerThread();
     const allocator = remote.generation.owner.allocator;
     // Whatever the outcome, the Run is over when this returns, and Product
     // releases the effects it was given.
@@ -2713,6 +2748,57 @@ pub const TestSupport = struct {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "the thread that takes events is the one a terminal method may not run on" {
+    // Run on threads of their own: the mark is per thread, and the test
+    // runner's thread runs every other test too.
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const Quiet = struct {
+        fn notify(_: ?*anyopaque) control.EventReadyNotification {
+            return .scheduled;
+        }
+    };
+    var owner: Owner = undefined;
+    try owner.init(io, allocator, .{
+        .identity = .{ .version = "unit", .core_manifest_sha256 = @splat(0), .core_abi_revision = 1 },
+        .message_limits = .{ .event = 1024, .request = 1024, .response = 1024, .ui_request = 1024, .ui_response = 1024 },
+        .queue_limits = .{},
+        .spawn = .{ .explicit = &.{"never-started"} },
+        .wake = .{ .context = null, .notify_fn = Quiet.notify },
+    });
+    defer owner.deinit();
+
+    const Probe = struct {
+        before: bool = true,
+        after: bool = false,
+
+        fn consume(self: *@This(), consuming: *Owner) void {
+            self.before = onConsumerThread();
+            if (consuming.runtimePort().takeEvent()) |value| {
+                var event = value;
+                event.deinit();
+            }
+            self.after = onConsumerThread();
+        }
+
+        fn look(self: *@This()) void {
+            self.after = onConsumerThread();
+        }
+    };
+    var consumer: Probe = .{};
+    const consuming = try std.Thread.spawn(.{}, Probe.consume, .{ &consumer, &owner });
+    consuming.join();
+    try std.testing.expect(!consumer.before);
+    try std.testing.expect(consumer.after);
+
+    // Another thread, never having taken an event -- a worker -- is not it,
+    // even if the system gives it the id the consumer had.
+    var worker: Probe = .{};
+    const working = try std.Thread.spawn(.{}, Probe.look, .{&worker});
+    working.join();
+    try std.testing.expect(!worker.after);
+}
 
 test "a finishing callback reads nothing of a generation a sweep may already have freed" {
     const allocator = std.testing.allocator;
