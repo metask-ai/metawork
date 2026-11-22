@@ -3,7 +3,7 @@ const std = @import("std");
 const image = @import("image_generation.zig");
 
 pub const name = "GenerateImage";
-pub const description = "Generate one new image (PNG, JPEG, or WebP) from a prompt and save it in the current workspace. Every invocation is a new generation intent and may be charged, including identical prompts. Available only when the host supplies image execution configuration. A failed or interrupted call may already have generated or charged for an image; do not automatically retry. Make another call only for an explicit new generation intent. The result is a saved file reference, not a claim that you have viewed the image.";
+pub const description = "Generate one new image (PNG, JPEG, or WebP) from a prompt and save it in the current workspace. Every invocation is a new generation intent and may be charged, including identical prompts. Available only when the host supplies image execution configuration. A failed or interrupted call may already have generated or charged for an image; do not automatically retry. Make another call only for an explicit new generation intent. The result is a saved file reference, not a claim that you have viewed the image. If the user wanted the image itself, hand the saved file over with DeliverFile; if it is material for another file, such as a picture in a presentation, deliver that file instead.";
 pub const schema =
     \\{"type":"object","properties":{"prompt":{"type":"string","description":"Describe the requested image."}},"required":["prompt"],"additionalProperties":false}
 ;
@@ -67,4 +67,9 @@ test "GenerateImage every valid receipt fits the minimum result budget including
     var limits: image.Limits = .{};
     limits.memory_bytes = limits.workingBytes();
     try std.testing.expect(limits.validate());
+}
+
+test "GenerateImage hands the image over only when the user wanted the image itself" {
+    for ([_][]const u8{ "wanted the image itself", "DeliverFile", "material for another file", "may be charged", "do not automatically retry" }) |required|
+        try std.testing.expect(std.mem.indexOf(u8, description, required) != null);
 }
