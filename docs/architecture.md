@@ -94,7 +94,7 @@ Account 与 Product Control 是 Product 的两个 named owner。Models、Workspa
 
 Agent 拥有 MetaWork 对 AgentCore Runtime、Session、Conversation、callback、event pump、typed terminal fact、built-in tool selection 和独立 Completion 的集成边界。Agent Runtime 运行在窗口之外的执行进程里（§5）；Application 持有该进程的 owner，经它创建并关闭 Agent、注入窄 effect capability并安排主线程 wake；Product Control 调用 Agent 公共执行表面，但不管理 Agent Runtime、不读取 Session 内部字段，也不借 Agent 获取通用 I/O。
 
-Agent 还拥有 MetaWork 对模型行为的塑造边界：除固定产品身份外，它通过 Session prompt profile 的 `host:` 段注入行为约束，只新增、不改写 AgentCore 的内核段。该注入改变模型倾向而不构成保证，因此不替代 built-in tool 选择与 PermissionProfile 这类能力与权限控制；Product、Bridge 与 Renderer 不因此取得配置 profile 的接口。
+Agent 还拥有 MetaWork 对模型行为的塑造边界：除固定产品身份外，它通过 Session prompt profile 的 `host:` 段注入行为约束（模型在本机写出什么命令、把哪些文件作为结果交给用户），只新增、不改写 AgentCore 的内核段。该注入改变模型倾向而不构成保证，因此不替代 built-in tool 选择与 PermissionProfile 这类能力与权限控制；Product、Bridge 与 Renderer 不因此取得配置 profile 的接口。
 
 AgentCore 拥有 provider 调用、agent loop、Conversation、Session、CoreEvent、UI request、RunResult 与官方工具协议；它不拥有 MetaWork Workspace、Task、产品 Run、Executor、projection 或持久化。正式产品只有 Agent 可以消费 AgentCore typed SDK 与 binary ABI；Product 可通过 Agent 公共入口受控复用 SDK 的 data-only 类型，不建立平行事件模型；其他 owner 不直接导入 SDK，不接触 ABI handle、callback 借用存储或原始返回码解释。Application、Bridge 和 Renderer 只消费各自允许的 MetaWork 公共类型。精确生命周期、线程、callback、错误映射与 shutdown 见[AgentCore 集成契约](agentcore-integration.md)。
 

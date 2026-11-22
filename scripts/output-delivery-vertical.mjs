@@ -312,7 +312,7 @@ export async function runOutputDeliveryVertical({
               ? value
               : value.map((block) => block.text ?? "").join("");
           receipt = JSON.parse(text);
-          assert.equal(receipt.status, "verified_for_delivery");
+          assert.equal(receipt.status, "delivered");
           assert.equal(receipt.sha256, digest);
           assert.equal(receipt.size_bytes, bytes.length);
           assert.equal(receipt.path, relative);
@@ -878,7 +878,7 @@ export async function runOfficeDeliveryHostProbe({
           ? content
           : content.map((b) => b.text ?? "").join(""),
       );
-      assert.equal(receipt.status, "verified_for_delivery");
+      assert.equal(receipt.status, "delivered");
       assert.equal(receipt.path, relative);
       assert.equal(receipt.sha256, digest);
       assert.equal(receipt.size_bytes, bytes.length);

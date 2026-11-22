@@ -22749,7 +22749,7 @@ test "Product view partial encoded cache fill is discarded on cancellation inval
 test "Outputs require trusted delivery sideband and reject conflicting or excessive receipts" {
     var control = try testRuntime();
     defer control.deinit();
-    const encoded = "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}";
+    const encoded = "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"delivered\",\"is_error\":false,\"elapsed_ms\":1}}";
     var envelope = try testEnvelope(3, 7, encoded);
     defer envelope.deinit();
     try control.applyEvent(&envelope);
@@ -22894,7 +22894,7 @@ test "Outputs persist through real history restore and sanitized locators lose f
     {
         var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
         defer control.deinit();
-        var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
+        var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"delivered\",\"is_error\":false,\"elapsed_ms\":1}}");
         defer envelope.deinit();
         envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(1), "成果/final.docx", 42, @splat(2));
         try control.applyEvent(&envelope);
@@ -22935,7 +22935,7 @@ test "late credential discovery revokes Output locators in current and durable p
     var history = TestTaskPersistence{ .storage = &storage };
     var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
     defer control.deinit();
-    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
+    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"delivered\",\"is_error\":false,\"elapsed_ms\":1}}");
     defer envelope.deinit();
     envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(1), "late-secret/report.docx", 42, @splat(2));
     try control.applyEvent(&envelope);
@@ -22958,7 +22958,7 @@ test "delivered Output projection matches the strict Renderer fixture without ex
     const row = expected.value.object;
     var id: [16]u8 = undefined;
     _ = try std.fmt.hexToBytes(&id, row.get("id").?.string);
-    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
+    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-1\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"delivered\",\"is_error\":false,\"elapsed_ms\":1}}");
     defer envelope.deinit();
     envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(id, row.get("displayPath").?.string, 42, @splat(2));
     try control.applyEvent(&envelope);
@@ -22986,7 +22986,7 @@ test "delivered Output projection matches the strict Renderer fixture without ex
 }
 
 fn recordTestOutput(control: *Runtime, id: [16]u8, path: []const u8) !void {
-    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-authority\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"verified_for_delivery\",\"is_error\":false,\"elapsed_ms\":1}}");
+    var envelope = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"deliver-authority\",\"name\":\"DeliverFile\",\"input\":\"{}\",\"content\":\"delivered\",\"is_error\":false,\"elapsed_ms\":1}}");
     defer envelope.deinit();
     envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(id, path, 42, @splat(2));
     try control.applyEvent(&envelope);

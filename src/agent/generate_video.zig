@@ -5,7 +5,7 @@ const http = @import("agent_http_transport");
 const images = @import("image_generation.zig");
 
 pub const name = "GenerateVideo";
-pub const description = "Generate one new MP4 video from a prompt and save it in the current workspace. The video appears in the conversation after a successful save. Call DeliverFile for this video only if the user explicitly requests a separate file delivery. After submission, the remote job may complete and be charged even if the local call fails or stops. Do not automatically submit another generation after a failure.";
+pub const description = "Generate one new MP4 video from a prompt and save it in the current workspace. The video appears in the conversation after a successful save. If the user wanted the video itself, hand the saved file over with DeliverFile; if it is material for another file, deliver that file instead. After submission, the remote job may complete and be charged even if the local call fails or stops. Do not automatically submit another generation after a failure.";
 pub const schema =
     \\{"type":"object","properties":{"prompt":{"type":"string","description":"Describe the requested video."}},"required":["prompt"],"additionalProperties":false}
 ;
@@ -262,3 +262,9 @@ const Download = struct {
         self.outcome = self.output.commit_fn(self.output.context, reader, length, self.cancellation);
     }
 };
+
+test "GenerateVideo hands the video over only when the user wanted the video itself" {
+    for ([_][]const u8{ "wanted the video itself", "DeliverFile", "material for another file", "charged even if", "Do not automatically submit" }) |required|
+        try std.testing.expect(std.mem.indexOf(u8, description, required) != null);
+    try std.testing.expect(std.mem.indexOf(u8, description, "only if the user explicitly requests") == null);
+}

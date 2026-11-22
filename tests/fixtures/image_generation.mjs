@@ -340,8 +340,7 @@ const server = createServer(async (request, response) => {
             ),
           );
         }
-        if (value.status !== "verified_for_delivery")
-          throw Error("video delivery receipt");
+        if (value.status !== "delivered") throw Error("video delivery receipt");
       }
       response.writeHead(200, { "content-type": "text/event-stream" });
       return response.end(

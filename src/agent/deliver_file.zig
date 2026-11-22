@@ -3,7 +3,7 @@
 const std = @import("std");
 
 pub const name = "DeliverFile";
-pub const description = "Submit an existing file in the current workspace for explicit delivery to the user. Use only for a finished file after checking it, not for ordinary file references. Supply a workspace-relative path using forward slashes. This does not create, edit or convert a file. verified_for_delivery confirms that the Host checked the file bytes and submitted a receipt; the Task Outputs record is the authority for registration.";
+pub const description = "Hand an existing file in the current workspace to the user as a result of this turn. The user gets a result card and opens the file from it. Call this for every file the user has to open to use what you produced, such as a document, web page, spreadsheet, presentation, PDF, image or video, including an existing document you edited. Do not call it when your reply already gives the result, for code, configuration or text edits the user reviews as file changes, or for process files such as scripts, drafts, temporary data and logs. Deliver only the final version, after your last change to the file in this turn; call once per file. Supply a workspace-relative path using forward slashes. The Host reads the file and records its path, size and SHA-256 for this Task; it does not create, edit, convert, check, upload or send the file. The status delivered confirms that record, not the file's quality.";
 pub const schema =
     \\{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path of the finished file, using forward slashes."}},"required":["path"],"additionalProperties":false}
 ;
@@ -87,7 +87,7 @@ pub fn result(buffer: []u8, outcome: Outcome) ![]const u8 {
     switch (outcome) {
         .failed => |code| try std.json.Stringify.value(.{ .status = @tagName(code) }, .{}, &writer),
         .verified => |*receipt| try std.json.Stringify.value(.{
-            .status = "verified_for_delivery",
+            .status = "delivered",
             .delivery_id = &std.fmt.bytesToHex(receipt.id, .lower),
             .path = receipt.pathView(),
             .size_bytes = receipt.size_bytes,
@@ -105,7 +105,20 @@ test "delivery arguments cannot supply authority, a receipt, absolute paths or a
     try std.testing.expectEqualStrings("成果/final report.docx", path);
 }
 
-test "delivery receipts are bounded values and success promises verification rather than Product commit" {
+test "the delivery description states the result test, the final-version precondition and the effects" {
+    for ([_][]const u8{
+        "result of this turn",
+        "has to open",
+        "final version",
+        "process files",
+        "does not create, edit, convert, check, upload or send",
+    }) |required| try std.testing.expect(std.mem.indexOf(u8, description, required) != null);
+    // No delivery order: a model delivers in creation order whatever the wording asks.
+    for ([_][]const u8{ "explicit delivery", "after checking", "verified", "most important", "answers the request", " first" }) |retired|
+        try std.testing.expect(std.mem.indexOf(u8, description, retired) == null);
+}
+
+test "delivery receipts are bounded values and success records delivery rather than Product commit" {
     var path = [_]u8{'a'} ** Receipt.max_path_bytes;
     // A valid path of maximum byte size, not one overlong filesystem component.
     path[255] = '/';
@@ -113,7 +126,10 @@ test "delivery receipts are bounded values and success promises verification rat
     const receipt = try Receipt.init(@splat(1), &path, std.math.maxInt(u64), @splat(2));
     var storage: [result_bytes]u8 = undefined;
     const bytes = try result(&storage, .{ .verified = receipt });
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "verified_for_delivery") != null);
+    const parsed = try std.json.parseFromSlice(struct { status: []const u8 }, std.testing.allocator, bytes, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("delivered", parsed.value.status);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "verified") == null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "18446744073709551615") != null);
     try std.testing.expectError(error.InvalidReceipt, Receipt.init(@splat(0), "file", 0, @splat(0)));
 }

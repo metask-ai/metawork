@@ -2094,7 +2094,7 @@ test "DeliverFile canonical Core checks actual Workspace bytes and sends one tru
                 const result = event.event.value.known.tool_result;
                 try std.testing.expectEqual(index != 0, result.is_error);
                 try std.testing.expect(std.mem.indexOf(u8, result.content, switch (index) {
-                    0 => "verified_for_delivery",
+                    0 => "\"status\":\"delivered\"",
                     1 => "unavailable",
                     else => "missing",
                 }) != null);
@@ -2347,7 +2347,8 @@ test "GenerateVideo canonical Product prepares an ordinary Run and delivers its 
     try std.testing.expect(std.mem.indexOf(u8, saved, "\"generated_video\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, saved, "video_execution") == null);
     try std.testing.expectEqual(@as(usize, 1), effects.catalog_calls.load(.acquire));
-    try h.evidence(0, 0, "verified_for_delivery");
+    // The trace stores the receipt as an escaped JSON string.
+    try h.evidence(0, 0, "\\\"status\\\":\\\"delivered\\\"");
     const trace = try h.trace();
     defer std.testing.allocator.free(trace);
     try std.testing.expectEqual(@as(usize, 1), count(trace, "video_create"));

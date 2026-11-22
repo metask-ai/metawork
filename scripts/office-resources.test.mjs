@@ -348,10 +348,11 @@ test("Office manifest rejects missing targets, wrong architecture and stale targ
   );
 });
 
-test("each packed Office Skill contains the shared platform and consent instructions", async () => {
-  const { gunzipSync } = await import("node:zlib");
+// Packed entries by name. Entries this suite reads have short names, so the
+// USTAR prefix field is not needed.
+function packedOfficeFiles() {
   const bytes = gunzipSync(readFileSync("src/app/office-skills.tar.gz"));
-  const definitions = [];
+  const files = new Map();
   for (let offset = 0; offset + 512 <= bytes.length;) {
     const header = bytes.subarray(offset, offset + 512);
     if (header.every((b) => b === 0)) break;
@@ -360,12 +361,19 @@ test("each packed Office Skill contains the shared platform and consent instruct
       header.subarray(124, 136).toString().replace(/\0.*$/, ""),
       8,
     );
-    if (/^(docx|xlsx|pptx)\/SKILL\.md$/.test(name))
-      definitions.push(
-        bytes.subarray(offset + 512, offset + 512 + size).toString(),
-      );
+    files.set(
+      name,
+      bytes.subarray(offset + 512, offset + 512 + size).toString(),
+    );
     offset += 512 + Math.ceil(size / 512) * 512;
   }
+  return files;
+}
+
+test("each packed Office Skill contains the shared platform and consent instructions", () => {
+  const definitions = [...packedOfficeFiles()]
+    .filter(([name]) => /^(docx|xlsx|pptx)\/SKILL\.md$/.test(name))
+    .map(([, text]) => text);
   assert.equal(definitions.length, 3);
   for (const text of definitions) {
     assert.doesNotMatch(text, /\{\{OFFICE_[A-Z_]+\}\}/);
@@ -379,4 +387,33 @@ test("each packed Office Skill contains the shared platform and consent instruct
     ])
       assert.ok(text.includes(required), required);
   }
+});
+
+test("packed Office Skills deliver the final file apart from their checks", () => {
+  const files = packedOfficeFiles();
+  for (const skill of ["docx", "xlsx", "pptx"]) {
+    const text = files.get(`${skill}/SKILL.md`);
+    for (const required of [
+      "When the document is final",
+      "including an edited copy of an existing file",
+      "does not replace or certify the checks",
+    ])
+      assert.ok(text.includes(required), `${skill}: ${required}`);
+    assert.ok(!text.includes("Deliver finished requested files"), skill);
+  }
+  const workbook = files.get("xlsx/SKILL.md");
+  assert.ok(workbook.includes("also when a check still fails"));
+  assert.ok(
+    !workbook.includes("Do not deliver an unfinished result as successful"),
+  );
+  assert.ok(
+    files
+      .get("pptx/creation-checks.md")
+      .includes("not the generated intermediate"),
+  );
+  assert.ok(
+    files
+      .get("pptx/editing.md")
+      .includes("deliver only the final presentation through DeliverFile"),
+  );
 });

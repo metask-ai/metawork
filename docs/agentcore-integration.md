@@ -176,9 +176,9 @@ UI callback 的 answered bytes 由官方 encoder 构造并按 SDK ownership 释�
 
 当前 Host Tool ABI 只返回文本，Agent 不改写 Core event 或伪造 `file_refs`。GenerateImage 保存成功后，Agent 在当前 Session/Run 的有界 receipt 表中保留已提交路径；仅当同一 Run 的真实成功 `GenerateImage tool_result` 与该 receipt 的完整返回内容精确匹配时，才随 owning event 交付独立的 Host 文件凭据，匹配后标为待交付；owning event 成功入队后才移除 Agent 槽。消费者关闭导致未入队时，已合法匹配的引用通过有界 TerminalResult 尾部交接，下一 Run 不继承槽位。队列把凭据内存计入既有预算，保留原 JSON 长度校验。Product 将凭据投影并持久化为既有 file reference，标记 Host 生成图片来源；普通工具文本、失败结果、模型回复及未经匹配的结果都不能授予此来源。该表不缓存生成结果、不去重、不重试，也不表示模型已经看过图片。
 
-`DeliverFile` 只接收完成文件的 Workspace 相对 `path`，不创建、编辑或转换文件。Product 在 Run admission 后把 Application-owned 文件校验 capability 与 Workspace 身份一起冻结；Agent callback 不持有 Product aggregate 指针。文件读取只能在 worker 上执行，须拒绝链接和路径逃逸、约束大小、流式计算 SHA-256，并验证实际读出的文件身份保持稳定；取消必须通知在途校验并等待 callback quiescence。缺少本 Run capability 时明确不可用，不能复用上轮或恢复历史中的能力。
+`DeliverFile` 只接收本轮最终版本文件的 Workspace 相对 `path`，不创建、编辑或转换文件，也不检查文件内容。Product 在 Run admission 后把 Application-owned 文件校验 capability 与 Workspace 身份一起冻结；Agent callback 不持有 Product aggregate 指针。文件读取只能在 worker 上执行，须拒绝链接和路径逃逸、约束大小、流式计算 SHA-256，并验证实际读出的文件身份保持稳定；取消必须通知在途校验并等待 callback quiescence。缺少本 Run capability 时明确不可用，不能复用上轮或恢复历史中的能力。
 
-Agent 对校验成功的文件生成非零随机回执身份，并在当前 Run 的有界表中保存 locator、大小与摘要。结果 `verified_for_delivery` 只表示 Host 校验与回执提交，不承诺 Product 已可靠保存历史。只有成功的 `DeliverFile tool_result` 与完整返回内容精确匹配，才标为待交付，以独立 sideband 交给 Product 的成果登记入口；入队成功后才移除，关闭时未入队的匹配回执通过有界 TerminalResult 尾部交接；原始 JSON 保持不变，sideband 与 owned result 内存均有界。普通文本、失败结果、同名其他工具和前一 Run 的结果不能产生该凭据。Product 先登记可信回执，再处理可降级的 Tool 详情。未匹配的槽不能仅因文件存在或 Run 终态而登记；队列和终态尾部按可信 identity 去重，生图同时保留 Tool 关联。冻结的文件 effect 由 Product Run 持有到 worker 与 canonical event drain 均结束，且不写入 checkpoint 或历史；成果元数据语义由 [Product 架构](product-architecture.md#43-workbench-historystore)拥有。
+Agent 对校验成功的文件生成非零随机回执身份，并在当前 Run 的有界表中保存 locator、大小与摘要。结果 `delivered` 只表示 Host 已读取并记录文件身份、提交回执，不承诺 Product 已可靠保存历史。只有成功的 `DeliverFile tool_result` 与完整返回内容精确匹配，才标为待交付，以独立 sideband 交给 Product 的成果登记入口；入队成功后才移除，关闭时未入队的匹配回执通过有界 TerminalResult 尾部交接；原始 JSON 保持不变，sideband 与 owned result 内存均有界。普通文本、失败结果、同名其他工具和前一 Run 的结果不能产生该凭据。Product 先登记可信回执，再处理可降级的 Tool 详情。未匹配的槽不能仅因文件存在或 Run 终态而登记；队列和终态尾部按可信 identity 去重，生图同时保留 Tool 关联。冻结的文件 effect 由 Product Run 持有到 worker 与 canonical event drain 均结束，且不写入 checkpoint 或历史；成果元数据语义由 [Product 架构](product-architecture.md#43-workbench-historystore)拥有。
 
 Run 没有可用图片配置时仍可执行普通对话；若模型调用图片工具，Core 可以先询问权限，允许后返回 `unavailable`，不发送图片请求或创建文件。`accept_edits` 下使用当次合法审批，Host 不伪造 `allow_session`；`full_access` 和 noninteractive 继续遵循既有 Core 与 Product 合同。Host 解析默认或目录回退模型不构成生成授权；每次调用都是可能收费的新生成意图，工具必须说明失败或取消也可能已生成，禁止自动重试。
 
@@ -204,15 +204,17 @@ profile 的 owned copy、子代理与 isolated Skill 继承、checkpoint 编码�
 
 ### Session 行为指引
 
-除产品身份外，Agent 还通过 `host:<name>` 段注入行为约束——约束模型在本机写出什么命令，而不是声明身份。两类段组合进同一个 `PromptProfileV1`：ABI 的模型是逐条独立编辑，组合即拼接。`src/agent/session/prompt.zig` 唯一持有该组合与 profile setter 调用，身份段与行为段各是独立模块；fresh create 与 restore 走同一个组合后的 profile。
+除产品身份外，Agent 还通过 `host:<name>` 段注入行为约束——约束模型在本机写出什么命令、把哪些文件作为结果交给用户，而不是声明身份。两类段组合进同一个 `PromptProfileV1`：ABI 的模型是逐条独立编辑，组合即拼接。`src/agent/session/prompt.zig` 唯一持有该组合与 profile setter 调用，身份段与行为段各是独立模块；fresh create 与 restore 走同一个组合后的 profile。
 
 - 只用 `PROMPT_OP_ADD`，不替换也不移除 AgentCore 的内核段。替换内核段会让 MetaWork 永久跟踪上游对那段文字的改动，而行为约束不需要改写内核规则；
-- `order` 决定渲染位置（ties 按 id）。收窄既有规则的段排在被收窄的内核段之后：`host:windows-downloads` 取 1100，落在 `metacodes:using-tools`(1000) 之后、`metacodes:tone`(2000) 之前，两侧留出后续 host 段的空位。身份段是 `PROMPT_OP_REPLACE`，`order` 为零并落在被替换内核段的原位，因此两类段之间没有次序关系需要协调；
-- 平台条件由 Host 侧决定，不写进段文字。`interpolate` 能替换 `{{platform}}` 却不能据此分支，所以按平台选段发生在组合处，非目标平台不携带该平台专有的建议；
+- `order` 决定渲染位置（ties 按 id）。收窄既有规则的段排在被收窄的内核段之后：`host:windows-downloads` 取 1100，落在 `metacodes:using-tools`(1000) 之后、`metacodes:tone`(2000) 之前，两侧留出后续 host 段的空位。`host:outputs` 取 1200，细化工具使用规则，排在 `host:windows-downloads` 之后；不靠近 `metacodes:validation`(300)，避免交付被读成检查步骤。身份段是 `PROMPT_OP_REPLACE`，`order` 为零并落在被替换内核段的原位，因此两类段之间没有次序关系需要协调；
+- 平台条件由 Host 侧决定，不写进段文字。`interpolate` 能替换 `{{platform}}` 却不能据此分支，所以按平台选段发生在组合处，非目标平台不携带该平台专有的建议，与平台无关的段在所有平台携带；
 - 这类注入改变的是模型倾向，不构成保证，也不是能力或权限控制的替代品。必须被阻止的事情由 built-in tool 选择与 Task-owned `PermissionProfile` 决定，不靠提示段；
 - 段文字进入每个 Session 的 system prompt，长度有真实成本：写成约束，不写成教程。
 
 首个段是 `host:windows-downloads`（仅 Windows 构建携带）：联网取字节优先 `curl.exe`（`curl` 是 PowerShell 的 `Invoke-WebRequest` 别名，必须带 `.exe`）；确需 `Invoke-WebRequest` / `Invoke-RestMethod` 时必须带 `-UseBasicParsing`；多个文件合并为单条命令。依据是 PowerShell 5.1 的 web cmdlet 默认走旧 Internet Explorer 解析路径，本机安全软件会在该路径上按命令粒度弹出模态框并阻塞命令，无人值守场景直接挂起。指引降低写出被拦命令的概率；拦截是否消失取决于本机安全软件，不在 MetaWork 可验证的范围内，验收只固定“段按平台到达 provider 的 system 内容”，见[验证规范](validation.md)。
+
+第二个段是 `host:outputs`（所有平台携带）：判断依据是用户要不要打开这个文件才能用上本轮结果，与文件怎样产生无关。要打开才能用的文件（网页、报告、表格、演示文稿、PDF、图表图片、视频，以及修改过的 Office 文档）用 `DeliverFile` 交付；回复正文已给出的结果、用户只需审查改动的代码/配置/文本修改、过程文件（脚本、中间稿、临时数据、日志）不交付；代码文件只在用户明确要求交付该文件时交付，网页属于成果；生成的图片或视频只在用户要的就是它本身时交付，当素材使用时交付用它做成的文件。交付的前提只有文件已是本轮最终版本，不要求也不表示内容经过检查，Skill 要求的检查各自进行；多个文件构成结果时全部交付，不规定交付顺序。验收同样只固定“段到达 provider 的 system 内容且在所有平台出现”，模型据此交付哪些文件不在验收范围内。
 
 ## 6. Session 与 Runtime 生命周期
 

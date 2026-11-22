@@ -289,6 +289,7 @@ fn validateManifest(manifest: anytype, child: bool) !void {
     // the declared order value.
     var using_tools_index: ?usize = null;
     var downloads_index: ?usize = null;
+    var outputs_index: ?usize = null;
     for (manifest.sections, 0..) |section, index| {
         if (std.mem.eql(u8, section.id, if (child) "metacodes:subagent" else "metacodes:identity")) identity_seen = section.origin == .host;
         if (std.mem.eql(u8, section.id, "metacodes:env")) env_seen = section.class == .generated;
@@ -300,6 +301,10 @@ fn validateManifest(manifest: anytype, child: bool) !void {
             // upstream.
             if (section.origin != .host or section.order != 1100) return error.InvalidPromptManifest;
             downloads_index = index;
+        }
+        if (std.mem.eql(u8, section.id, "host:outputs")) {
+            if (section.origin != .host or section.order != 1200) return error.InvalidPromptManifest;
+            outputs_index = index;
         }
     }
     if (!identity_seen or !env_seen or (!child and (!safety_seen or !system_seen))) return error.InvalidPromptManifest;
@@ -313,6 +318,15 @@ fn validateManifest(manifest: anytype, child: bool) !void {
         if (using_tools_index) |using_tools|
             if (downloads < using_tools) return error.InvalidPromptManifest;
     }
+    // The result guidance holds on every platform, child Sessions included,
+    // and refines the tool rules: it renders after them and after the
+    // Windows download constraints.
+    const outputs = outputs_index orelse return error.InvalidPromptManifest;
+    if (!child and using_tools_index == null) return error.InvalidPromptManifest;
+    if (using_tools_index) |using_tools|
+        if (outputs < using_tools) return error.InvalidPromptManifest;
+    if (downloads_index) |downloads|
+        if (outputs < downloads) return error.InvalidPromptManifest;
 }
 
 // Simulate a historical unprofiled Session using the existing internal Runtime
