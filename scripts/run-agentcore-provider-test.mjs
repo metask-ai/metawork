@@ -356,13 +356,17 @@ function assertHostOutputsGuidance(prompt) {
     "Results for the user: hand over with DeliverFile every file the user has to open to use this turn's result",
     "Do not deliver process files, even ones created in this turn",
     "it neither requires nor implies a quality check",
-    "starting with the file that answers the request",
+    "When several files make up the result, deliver all of them once they are final.",
   ];
   for (const fragment of expected)
     assert.ok(
       prompt.includes(fragment),
       `Result guidance must reach the provider: ${fragment}`,
     );
+  assert.ok(
+    !prompt.includes("answers the request"),
+    "Result guidance must not ask for a delivery order",
+  );
   if (process.platform === "win32")
     assert.ok(
       prompt.indexOf("Windows network downloads:") <

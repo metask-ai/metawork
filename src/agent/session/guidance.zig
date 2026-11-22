@@ -60,9 +60,7 @@ const outputs_text =
     "Deliver the final version, after your last change to the file in this turn. " ++
     "Delivering only hands the file over: it neither requires nor implies a quality check, " ++
     "and checks a Skill asks for stay separate. " ++
-    "When several files make up the result, deliver all of them once they are final, " ++
-    "starting with the file that answers the request (for example a report before the data behind it), " ++
-    "not in the order you created them.";
+    "When several files make up the result, deliver all of them once they are final.";
 
 const common_sections = [_]wire.PromptSectionV1{
     addition(outputs_id, outputs_order, outputs_text),
@@ -141,9 +139,10 @@ test "every platform carries the result guidance after the download constraints"
             "process files",
             "neither requires nor implies a quality check",
             "material for another file",
-            "starting with the file that answers the request",
-            "not in the order you created them",
+            "deliver all of them once they are final",
         }) |required| try std.testing.expect(std.mem.indexOf(u8, text, required) != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "most important") == null);
+        // No delivery order: a model delivers in creation order whatever the wording asks.
+        for ([_][]const u8{ "most important", "answers the request", " first", " order" }) |retired|
+            try std.testing.expect(std.mem.indexOf(u8, text, retired) == null);
     }
 }

@@ -3,7 +3,7 @@
 const std = @import("std");
 
 pub const name = "DeliverFile";
-pub const description = "Hand an existing file in the current workspace to the user as a result of this turn. The user gets a result card and opens the file from it. Call this for every file the user has to open to use what you produced, such as a document, web page, spreadsheet, presentation, PDF, image or video, including an existing document you edited. Do not call it when your reply already gives the result, for code, configuration or text edits the user reviews as file changes, or for process files such as scripts, drafts, temporary data and logs. Deliver only the final version, after your last change to the file in this turn; call once per file, the file that answers the request first. Supply a workspace-relative path using forward slashes. The Host reads the file and records its path, size and SHA-256 for this Task; it does not create, edit, convert, check, upload or send the file. The status delivered confirms that record, not the file's quality.";
+pub const description = "Hand an existing file in the current workspace to the user as a result of this turn. The user gets a result card and opens the file from it. Call this for every file the user has to open to use what you produced, such as a document, web page, spreadsheet, presentation, PDF, image or video, including an existing document you edited. Do not call it when your reply already gives the result, for code, configuration or text edits the user reviews as file changes, or for process files such as scripts, drafts, temporary data and logs. Deliver only the final version, after your last change to the file in this turn; call once per file. Supply a workspace-relative path using forward slashes. The Host reads the file and records its path, size and SHA-256 for this Task; it does not create, edit, convert, check, upload or send the file. The status delivered confirms that record, not the file's quality.";
 pub const schema =
     \\{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path of the finished file, using forward slashes."}},"required":["path"],"additionalProperties":false}
 ;
@@ -111,10 +111,10 @@ test "the delivery description states the result test, the final-version precond
         "has to open",
         "final version",
         "process files",
-        "the file that answers the request first",
         "does not create, edit, convert, check, upload or send",
     }) |required| try std.testing.expect(std.mem.indexOf(u8, description, required) != null);
-    for ([_][]const u8{ "explicit delivery", "after checking", "verified", "most important" }) |retired|
+    // No delivery order: a model delivers in creation order whatever the wording asks.
+    for ([_][]const u8{ "explicit delivery", "after checking", "verified", "most important", "answers the request", " first" }) |retired|
         try std.testing.expect(std.mem.indexOf(u8, description, retired) == null);
 }
 
