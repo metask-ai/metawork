@@ -1,17 +1,12 @@
-import type {
-  FileReferenceView,
-  RunView,
-  ToolView,
-} from "../bridge/contracts.ts";
+import type { FileReferenceView, RunView } from "../bridge/contracts.ts";
 
 /**
- * A reference the Run's page carries, or one on a Tool page already read.
- * Records that were never read are not searched; the Host owns the rest.
+ * A reference the Run's page carries. References only on Tool records are
+ * not searched; the Host resolves those when they are opened.
  */
 export function findRunFileReference(
   run: RunView,
   referenceId: string,
-  loadedTools: readonly ToolView[] = [],
 ): FileReferenceView | undefined {
   const references = run.fileReferences;
   for (const reference of [
@@ -19,10 +14,6 @@ export function findRunFileReference(
     ...(references?.links ?? []),
   ])
     if (reference.id === referenceId) return reference;
-  for (const tool of loadedTools) {
-    const reference = tool.fileRefs.find((entry) => entry.id === referenceId);
-    if (reference) return reference;
-  }
 }
 
 // This is a Run-local presentation lookup, not filesystem identity. The Host
@@ -50,7 +41,7 @@ export function runFileReferenceLinks(
   for (const [path, reference] of paths) {
     add(path, reference);
     add(`./${path}`, reference);
-    add(path.split(/[\/]/).at(-1) ?? "", reference);
+    add(path.split(/[\\/]/).at(-1) ?? "", reference);
   }
   return new Map(
     [...candidates].filter(
