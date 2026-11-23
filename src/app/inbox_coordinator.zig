@@ -827,7 +827,12 @@ fn messageViews(allocator: std.mem.Allocator, messages: []const inbox.Message) !
     const views = try allocator.alloc(inbox.MessageView, messages.len);
     for (messages, views) |*message, *view| {
         const recipients = try allocator.alloc(inbox.RecipientView, message.recipients.len);
-        for (message.recipients, recipients) |*peer, *recipient| recipient.* = .{ .peerId = peer.id.slice(), .name = peer.name.slice() };
+        for (message.recipients, recipients) |*entry, *recipient| recipient.* = .{
+            .peerId = entry.peer.id.slice(),
+            .name = entry.peer.name.slice(),
+            .read = entry.read,
+            .readAtMs = if (entry.read_at_ms) |at| .{ .value = at } else null,
+        };
         const tasks = try allocator.alloc([]const u8, message.task_ids.len);
         for (message.task_ids, tasks) |*id, *task| task.* = id.slice();
         view.* = .{
@@ -835,6 +840,8 @@ fn messageViews(allocator: std.mem.Allocator, messages: []const inbox.Message) !
             .direction = message.direction,
             .fromPeerId = message.from.id.slice(),
             .fromName = message.from.name.slice(),
+            .fromAgent = if (message.from_agent) |*agent| agent.slice() else null,
+            .isNew = message.is_new,
             .recipients = recipients,
             .text = message.text,
             .truncated = false,

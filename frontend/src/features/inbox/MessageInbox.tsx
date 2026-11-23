@@ -370,7 +370,10 @@ function ConversationRow({
   const unread = Number(conversation.unread);
   const latest = conversation.latest;
   const name = conversationName(conversation.peerId, conversation.name, t);
-  const sentAt = latest ? new Date(Number(latest.sentAtMs)) : null;
+  // An unread member without a message in the list yet shows when their
+  // latest unread message came.
+  const shownAt = latest?.sentAtMs ?? conversation.lastAtMs;
+  const sentAt = shownAt === null ? null : new Date(Number(shownAt));
   const today = new Date().toDateString();
   const preview = latest
     ? latest.direction !== "in"
@@ -692,6 +695,56 @@ function InboxTaskDialog({
   );
 }
 
+/**
+ * Whether each recipient of something the user sent has read it: one
+ * status for a single recipient, every recipient by name for a group.
+ */
+function ReadReceipts({
+  recipients,
+}: {
+  recipients: InboxMessage["recipients"];
+}) {
+  const { t } = useI18n();
+  const formats = useTimeFormats();
+  if (recipients.length === 0) return null;
+  const status = (recipient: InboxMessage["recipients"][number]) =>
+    recipient.read ? t("inbox.read") : t("inbox.not_read");
+  const title = (recipient: InboxMessage["recipients"][number]) =>
+    recipient.readAtMs === null
+      ? undefined
+      : t("inbox.read_at", {
+          time: formats.dateTime.format(new Date(Number(recipient.readAtMs))),
+        });
+  if (recipients.length === 1) {
+    const [only] = recipients;
+    return (
+      <p
+        className="inbox-message-receipt"
+        data-read={only.read}
+        title={title(only)}
+      >
+        {status(only)}
+      </p>
+    );
+  }
+  return (
+    <ul className="inbox-message-receipts" aria-label={t("inbox.receipts")}>
+      {recipients.map((recipient) => (
+        <li
+          key={recipient.peerId}
+          data-read={recipient.read}
+          title={title(recipient)}
+        >
+          {t("inbox.receipt", {
+            name: recipient.name,
+            status: status(recipient),
+          })}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function InboxConversationView({
   name,
   conversation,
@@ -766,11 +819,11 @@ function InboxConversationView({
                 new Date(Number(previous.sentAtMs)).toDateString();
             // What the user sent, to others or to themself.
             const outgoing = message.direction !== "in";
-            const others = message.recipients.filter(
-              (recipient) =>
-                recipient.peerId !== conversation.peerId &&
-                recipient.peerId !== message.fromPeerId,
-            );
+            const receipts = outgoing
+              ? message.recipients.filter(
+                  (recipient) => recipient.peerId !== message.fromPeerId,
+                )
+              : [];
             return (
               <li className="inbox-transcript-entry" key={message.id}>
                 {startsDay && (
@@ -789,22 +842,26 @@ function InboxConversationView({
                     <span>
                       {outgoing ? t("inbox.sender_self") : message.fromName}
                     </span>
+                    {message.fromAgent !== null && (
+                      <small>
+                        {t("inbox.sent_by_agent", {
+                          agent: message.fromAgent,
+                        })}
+                      </small>
+                    )}
                     <time dateTime={sentAt.toISOString()}>
                       {formats.time.format(sentAt)}
                     </time>
+                    {message.isNew && (
+                      <Badge className="inbox-new-badge">
+                        {t("inbox.new_message")}
+                      </Badge>
+                    )}
                   </div>
-                  {outgoing && others.length > 0 && (
-                    <div className="inbox-message-recipients">
-                      {t("inbox.also_sent_to", {
-                        names: others
-                          .map((recipient) => recipient.name)
-                          .join(t("inbox.list_separator")),
-                      })}
-                    </div>
-                  )}
                   <div className="inbox-bubble">
                     <p>{message.text}</p>
                   </div>
+                  <ReadReceipts recipients={receipts} />
                   {message.truncated && (
                     <p className="inbox-message-note">
                       {t("inbox.message_truncated")}

@@ -249,6 +249,7 @@ export type InboxViewWire = {
       preview: string;
       sentAtMs: string;
     } | null;
+    lastAtMs: string | null;
   }[];
   conversationsLoaded: boolean;
   loadingConversations: boolean;
@@ -320,6 +321,7 @@ export function decodeInboxViewWire(
             "name",
             "unread",
             "latest",
+            "lastAtMs",
           ]);
           return {
             peerId: stringValue(item.peerId, path + ".peerId"),
@@ -349,6 +351,10 @@ export function decodeInboxViewWire(
                       ),
                     };
                   })(item.latest, path + ".latest"),
+            lastAtMs:
+              item.lastAtMs === null
+                ? null
+                : u64WireInteger(item.lastAtMs, path + ".lastAtMs"),
           };
         })(entry, entryPath),
     ),
@@ -418,9 +424,13 @@ export type InboxConversationPageWire = {
     direction: "in" | "out" | "self";
     fromPeerId: string;
     fromName: string;
+    fromAgent: string | null;
+    isNew: boolean;
     recipients: readonly {
       peerId: string;
       name: string;
+      read: boolean;
+      readAtMs: string | null;
     }[];
     text: string;
     truncated: boolean;
@@ -467,6 +477,8 @@ export function decodeInboxConversationPageWire(
             "direction",
             "fromPeerId",
             "fromName",
+            "fromAgent",
+            "isNew",
             "recipients",
             "text",
             "truncated",
@@ -482,15 +494,30 @@ export function decodeInboxConversationPageWire(
             ] as const),
             fromPeerId: stringValue(item.fromPeerId, path + ".fromPeerId"),
             fromName: stringValue(item.fromName, path + ".fromName"),
+            fromAgent:
+              item.fromAgent === null
+                ? null
+                : stringValue(item.fromAgent, path + ".fromAgent"),
+            isNew: booleanValue(item.isNew, path + ".isNew"),
             recipients: arrayValue(
               item.recipients,
               path + ".recipients",
               (entry: unknown, entryPath: string) =>
                 ((value: unknown, path: string) => {
-                  const item = object(value, path, ["peerId", "name"]);
+                  const item = object(value, path, [
+                    "peerId",
+                    "name",
+                    "read",
+                    "readAtMs",
+                  ]);
                   return {
                     peerId: stringValue(item.peerId, path + ".peerId"),
                     name: stringValue(item.name, path + ".name"),
+                    read: booleanValue(item.read, path + ".read"),
+                    readAtMs:
+                      item.readAtMs === null
+                        ? null
+                        : u64WireInteger(item.readAtMs, path + ".readAtMs"),
                   };
                 })(entry, entryPath),
             ),

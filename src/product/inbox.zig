@@ -256,11 +256,24 @@ pub const self_peer_id = "me";
 pub const Peer = struct {
     id: Id,
     name: Name,
+    /// The only name MetaTeam addresses a message to exactly; absent when
+    /// the service did not report it or it does not fit.
+    username: ?Name = null,
 };
 
 pub const PeerUnread = struct {
     peer: Peer,
     unread: u64,
+    /// When their latest unread message arrived.
+    last_at_ms: ?u64 = null,
+};
+
+/// One recipient of a message the user sent, and whether they read it.
+pub const Recipient = struct {
+    peer: Peer,
+    read: bool,
+    /// Null when unread, or read at a time this client cannot parse.
+    read_at_ms: ?u64,
 };
 
 pub const Unread = struct {
@@ -278,9 +291,13 @@ pub const Message = struct {
     sent_at_ms: u64,
     direction: Direction,
     from: Peer,
-    recipients: []const Peer,
+    recipients: []const Recipient,
     text: []const u8,
     task_ids: []const Id,
+    /// A received message the user had not read before this answer.
+    is_new: bool = false,
+    /// The agent that sent it, as MetaTeam names it ("client@host").
+    from_agent: ?Name = null,
     /// The conversations this message belongs to, seen from this user: what
     /// came in belongs to its sender, what went out to every recipient, and
     /// what went to the user themself to `me` and every other recipient.
@@ -420,9 +437,16 @@ fn peerValue(value: std.json.Value) error{InvalidResponse}!Peer {
     if (value != .object) return error.InvalidResponse;
     const id = try idValue(value.object.get("id") orelse return error.InvalidResponse);
     // The development client showed `name`, then `username`.
-    const name = nonEmptyString(field(value.object, "name")) orelse
-        nonEmptyString(field(value.object, "username")) orelse id.slice();
-    return .{ .id = id, .name = .truncated(name) };
+    const username = nonEmptyString(field(value.object, "username"));
+    const name = nonEmptyString(field(value.object, "name")) orelse username orelse id.slice();
+    // A username is an address: kept exactly or not at all.
+    return .{ .id = id, .name = .truncated(name), .username = if (username) |text| Name.init(text) catch null else null };
+}
+
+/// An optional instant: absent, null or unreadable is no time at all.
+fn optionalTime(object: std.json.ObjectMap, names: []const []const u8) ?u64 {
+    for (names) |name| if (field(object, name)) |value| return timeValue(value) catch null;
+    return null;
 }
 
 fn timeValue(value: std.json.Value) error{InvalidResponse}!u64 {
@@ -455,14 +479,16 @@ pub fn parseUnread(allocator: std.mem.Allocator, bytes: []const u8) ParseError!U
         if (item != .object) return error.InvalidResponse;
         const peer = try peerValue(item.object.get("peer") orelse return error.InvalidResponse);
         const unread = try countValue(item.object.get("unread") orelse return error.InvalidResponse);
+        const last_at = optionalTime(item.object, &.{ "lastAt", "lastTime" });
         // Ids are compared as text, so `7` and `"7"` are one member: one row,
         // its counts added, rather than two rows with the same key.
         for (by_peer.items) |*existing| {
             if (existing.peer.id.eql(peer.id.slice())) {
                 existing.unread +|= unread;
+                if (last_at) |at| existing.last_at_ms = @max(at, existing.last_at_ms orelse 0);
                 break;
             }
-        } else by_peer.appendAssumeCapacity(.{ .peer = peer, .unread = unread });
+        } else by_peer.appendAssumeCapacity(.{ .peer = peer, .unread = unread, .last_at_ms = last_at });
     }
     return .{ .total = total, .by_peer = try by_peer.toOwnedSlice(allocator) };
 }
@@ -495,13 +521,23 @@ pub fn parseMessages(allocator: std.mem.Allocator, bytes: []const u8) ParseError
         // Repeated recipients, task ids or messages are kept once: each is a
         // key on the Renderer side.
         const peer_list = try arena.alloc(Peer, recipients.len);
+        const recipient_list = try arena.alloc(Recipient, recipients.len);
         var peers: usize = 0;
         for (recipients) |entry| {
             const peer = try peerValue(entry);
-            for (peer_list[0..peers]) |*seen| {
-                if (seen.id.eql(peer.id.slice())) break;
+            // `readAt` null is unread; any other value says it was read.
+            const read_at = entry.object.get("readAt");
+            const read = read_at != null and read_at.? != .null;
+            const at = if (read) timeValue(read_at.?) catch null else null;
+            for (recipient_list[0..peers]) |*seen| {
+                if (seen.peer.id.eql(peer.id.slice())) {
+                    // The same member twice: read if either says so.
+                    if (read and !seen.read) seen.* = .{ .peer = seen.peer, .read = true, .read_at_ms = at };
+                    break;
+                }
             } else {
                 peer_list[peers] = peer;
+                recipient_list[peers] = .{ .peer = peer, .read = read, .read_at_ms = at };
                 peers += 1;
             }
         }
@@ -540,9 +576,16 @@ pub fn parseMessages(allocator: std.mem.Allocator, bytes: []const u8) ParseError
             .sent_at_ms = try timeValue(object.get("time") orelse return error.InvalidResponse),
             .direction = kind,
             .from = from,
-            .recipients = peer_list[0..peers],
+            .recipients = recipient_list[0..peers],
             .text = text.string,
             .task_ids = task_list[0..task_count],
+            // Only a literal `true` is new; anything else was seen before.
+            .is_new = if (field(object, "new")) |value| value == .bool and value.bool else false,
+            // Present means an agent sent it; its value only names which.
+            .from_agent = if (field(object, "fromAgent")) |value| switch (value) {
+                .string => |agent| Name.truncated(if (agent.len == 0) "agent" else agent),
+                else => Name.truncated("agent"),
+            } else null,
             .conversations = conversations,
         };
         // An outgoing message without recipients belongs to no conversation.
@@ -788,6 +831,8 @@ pub const ConversationView = struct {
     name: []const u8,
     unread: U64,
     latest: ?LatestView,
+    /// When their latest unread message arrived, from the unread facts.
+    lastAtMs: ?U64,
 };
 
 /// Borrowed, key-free and URL-free projection; serialize from the main thread.
@@ -1128,10 +1173,10 @@ pub const Runtime = struct {
         return null;
     }
 
-    fn unreadOf(self: *const Runtime, peer: []const u8) u64 {
+    fn unreadOf(self: *const Runtime, peer: []const u8) ?*const PeerUnread {
         for (self.by_peer.items) |*entry|
-            if (entry.peer.id.eql(peer)) return entry.unread;
-        return 0;
+            if (entry.peer.id.eql(peer)) return entry;
+        return null;
     }
 
     /// Whether a Renderer request about this conversation may run now.
@@ -1166,15 +1211,25 @@ pub const Runtime = struct {
         if (!self.bound) return;
         for (self.by_peer.items) |*entry| {
             if (entry.unread == 0 or self.summaryIndex(entry.peer.id.slice()) != null) continue;
-            try self.rows.append(self.allocator, .{ .peerId = entry.peer.id.slice(), .name = entry.peer.name.slice(), .unread = .{ .value = entry.unread }, .latest = null });
+            try self.rows.append(self.allocator, .{
+                .peerId = entry.peer.id.slice(),
+                .name = entry.peer.name.slice(),
+                .unread = .{ .value = entry.unread },
+                .latest = null,
+                .lastAtMs = if (entry.last_at_ms) |at| .{ .value = at } else null,
+            });
         }
         const pending = self.rows.items.len;
-        for (self.summaries.items) |*summary| try self.rows.append(self.allocator, .{
-            .peerId = summary.peer.id.slice(),
-            .name = summary.peer.name.slice(),
-            .unread = .{ .value = self.unreadOf(summary.peer.id.slice()) },
-            .latest = .{ .id = summary.latest.id.slice(), .direction = summary.latest.direction, .preview = summary.latest.preview.slice(), .sentAtMs = .{ .value = summary.latest.sent_at_ms } },
-        });
+        for (self.summaries.items) |*summary| {
+            const unread = self.unreadOf(summary.peer.id.slice());
+            try self.rows.append(self.allocator, .{
+                .peerId = summary.peer.id.slice(),
+                .name = summary.peer.name.slice(),
+                .unread = .{ .value = if (unread) |entry| entry.unread else 0 },
+                .latest = .{ .id = summary.latest.id.slice(), .direction = summary.latest.direction, .preview = summary.latest.preview.slice(), .sentAtMs = .{ .value = summary.latest.sent_at_ms } },
+                .lastAtMs = if (unread) |entry| if (entry.last_at_ms) |at| U64{ .value = at } else null else null,
+            });
+        }
         std.mem.sort(ConversationView, self.rows.items[0..pending], {}, struct {
             fn less(_: void, a: ConversationView, b: ConversationView) bool {
                 return a.unread.value > b.unread.value;
@@ -1212,6 +1267,8 @@ pub const Runtime = struct {
 pub const RecipientView = struct {
     peerId: []const u8,
     name: []const u8,
+    read: bool,
+    readAtMs: ?U64,
 };
 
 pub const MessageView = struct {
@@ -1219,6 +1276,10 @@ pub const MessageView = struct {
     direction: Direction,
     fromPeerId: []const u8,
     fromName: []const u8,
+    /// The agent that sent it ("client@host"), when an agent did.
+    fromAgent: ?[]const u8,
+    /// Received and not read before this answer.
+    isNew: bool,
     recipients: []const RecipientView,
     text: []const u8,
     /// The text was cut to fit one Bridge result; only for a single message
@@ -1427,6 +1488,12 @@ fn testPeers(comptime id: []const u8) []const Peer {
     }.value;
 }
 
+fn testRecipients(comptime id: []const u8) []const Recipient {
+    return &struct {
+        const value = [1]Recipient{.{ .peer = testPeers(id)[0], .read = false, .read_at_ms = null }};
+    }.value;
+}
+
 fn testMessage(id: []const u8, at: u64, direction: Direction, comptime peer: []const u8, text: []const u8) Message {
     const person = testPeers(peer);
     const user: Peer = .{ .id = Id.init("u-self") catch unreachable, .name = .truncated("Me") };
@@ -1435,7 +1502,7 @@ fn testMessage(id: []const u8, at: u64, direction: Direction, comptime peer: []c
         .sent_at_ms = at,
         .direction = direction,
         .from = if (direction == .in) person[0] else user,
-        .recipients = if (direction == .in) &.{} else person,
+        .recipients = if (direction == .in) &.{} else testRecipients(peer),
         .text = text,
         .task_ids = &.{},
         .conversations = person,
@@ -1539,10 +1606,7 @@ test "the conversation list grows from pages and closes gaps by starting over" {
         testMessage("2", 20, .in, "ann", "first"),
         testMessage("3", 30, .out, "ann", "reply"),
     };
-    var reply = page[2];
-    const ann = [_]Peer{page[1].from};
-    reply.recipients = &ann;
-    const window = [_]Message{ page[0], page[1], reply };
+    const window = [_]Message{ page[0], page[1], page[2] };
     try testing.expect(try runtime.completeList(0, first.id, .initial, .{ .page = .{ .messages = &window, .limit = Limits.list_page } }));
     var view = runtime.view();
     try testing.expect(view.conversationsLoaded and !view.hasEarlier);
@@ -1691,6 +1755,54 @@ test "a member listed twice is one row" {
     try testing.expectEqual(@as(usize, 1), messages.items.len);
     try testing.expectEqual(@as(usize, 1), messages.items[0].recipients.len);
     try testing.expectEqual(@as(usize, 1), messages.items[0].task_ids.len);
+}
+
+test "new marks, sending agents, read receipts and unread times are read when present" {
+    var messages = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[
+        \\ {"id":1,"time":"2026-11-21T03:06:40.000Z","at":1795240000000,"direction":"out","from":{"id":"me-1","username":"wenlin","name":"Lin"},"text":"group","taskIds":[],
+        \\  "recipients":[{"id":"a","username":"ann","name":"Ann","readAt":1795240100000},{"id":"b","name":"Bob","readAt":null},{"id":"c","name":"Cy","readAt":"yesterday"},{"id":"a","readAt":null}]},
+        \\ {"id":2,"time":2,"direction":"in","from":{"id":"a","username":"ann","name":"Ann"},"text":"by agent","new":true,"readAt":5,"fromAgent":"claude-code@box"},
+        \\ {"id":3,"time":3,"direction":"in","from":{"id":"a","name":"Ann"},"text":"seen","new":"yes","fromAgent":null}
+        \\]}}
+    );
+    defer messages.deinit();
+    const group = messages.items[0];
+    try testing.expectEqual(@as(usize, 3), group.recipients.len);
+    try testing.expect(group.recipients[0].read);
+    try testing.expectEqual(@as(?u64, 1795240100000), group.recipients[0].read_at_ms);
+    try testing.expect(!group.recipients[1].read);
+    // Read at a time this client cannot parse is still read.
+    try testing.expect(group.recipients[2].read and group.recipients[2].read_at_ms == null);
+    try testing.expectEqualStrings("wenlin", group.from.username.?.slice());
+    try testing.expect(group.recipients[1].peer.username == null);
+    try testing.expect(!group.is_new);
+    try testing.expect(messages.items[1].is_new);
+    try testing.expectEqualStrings("claude-code@box", messages.items[1].from_agent.?.slice());
+    try testing.expect(!messages.items[2].is_new);
+    try testing.expect(messages.items[2].from_agent == null);
+
+    var unread = try parseUnread(testing.allocator,
+        \\{"data":{"unread":3,"byPeer":[{"peer":{"id":"a","username":"ann","name":"Ann"},"unread":2,"lastAt":1795241730816,"lastTime":"2026-11-21T03:35:30.816Z"},
+        \\ {"peer":{"id":"b"},"unread":1,"lastTime":"2026-11-21T01:10:48.681Z"},{"peer":{"id":"c"},"unread":1,"lastAt":"soon"},{"peer":{"id":"a"},"unread":1,"lastAt":1}]}}
+    );
+    defer unread.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u64, 1795241730816), unread.by_peer[0].last_at_ms);
+    try testing.expectEqual(@as(u64, 3), unread.by_peer[0].unread);
+    try testing.expectEqual(parseIsoMilliseconds("2026-11-21T01:10:48.681Z"), unread.by_peer[1].last_at_ms);
+    try testing.expect(unread.by_peer[2].last_at_ms == null);
+
+    var runtime: Runtime = .init(testing.allocator);
+    defer runtime.deinit();
+    runtime.start(true);
+    _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
+    _ = try runtime.completePoll(0, 1, runtime.beginPoll().?, .{ .unread = &unread });
+    const rows = runtime.view().conversations;
+    try testing.expectEqual(@as(usize, 3), rows.len);
+    for (rows) |row| if (std.mem.eql(u8, row.peerId, "a")) {
+        try testing.expect(row.latest == null);
+        try testing.expectEqual(@as(u64, 1795241730816), row.lastAtMs.?.value);
+    };
 }
 
 test "messages to oneself belong to the me conversation and never break the page" {

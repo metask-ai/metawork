@@ -91,6 +91,7 @@ function view(patch = {}) {
           preview: "Can you review?",
           sentAtMs: at("2026-11-23T08:00:00Z"),
         },
+        lastAtMs: at("2026-11-23T08:00:00Z"),
       },
       {
         peerId: "bob",
@@ -102,6 +103,7 @@ function view(patch = {}) {
           preview: "Done",
           sentAtMs: at("2026-11-22T08:00:00Z"),
         },
+        lastAtMs: null,
       },
     ],
     conversationsLoaded: true,
@@ -118,7 +120,12 @@ function message(id, direction, text, taskIds = []) {
     direction,
     fromPeerId: direction === "in" ? "ann" : "me",
     fromName: direction === "in" ? "Ann" : "Me",
-    recipients: direction === "in" ? [] : [{ peerId: "ann", name: "Ann" }],
+    fromAgent: null,
+    isNew: false,
+    recipients:
+      direction === "in"
+        ? []
+        : [{ peerId: "ann", name: "Ann", read: false, readAtMs: null }],
     text,
     truncated: false,
     sentAtMs: at("2026-11-23T07:00:00Z"),
@@ -430,6 +437,7 @@ test("what the user sent to themself is the Me conversation", async () => {
               preview: "Remember the demo",
               sentAtMs: at("2026-11-23T09:00:00Z"),
             },
+            lastAtMs: null,
           },
         ],
       }),
@@ -447,6 +455,74 @@ test("what the user sent to themself is the Me conversation", async () => {
       document.querySelector(".inbox-message").dataset.direction,
       "outgoing",
     ),
+  );
+});
+
+test("messages show new marks, sending agents and read receipts; unread rows show their time", async () => {
+  const user = userEvent.setup({ document });
+  const group = {
+    ...message("30", "out", "Shipped"),
+    recipients: [
+      {
+        peerId: "ann",
+        name: "Ann",
+        read: true,
+        readAtMs: at("2026-11-23T07:30:00Z"),
+      },
+      { peerId: "bob", name: "Bob", read: false, readAtMs: null },
+    ],
+  };
+  const client = fakeClient({
+    pages: {
+      "ann:latest:null": {
+        messages: [
+          { ...message("31", "in", "From my agent"), isNew: true },
+          {
+            ...message("32", "in", "Automated"),
+            fromAgent: "claude-code@box",
+          },
+          message("33", "out", "Thanks"),
+          group,
+        ],
+      },
+    },
+  });
+  const base = view();
+  render(
+    element(
+      client,
+      view({
+        conversations: [
+          ...base.conversations,
+          {
+            peerId: "cy",
+            name: "Cy",
+            unread: "1",
+            latest: null,
+            lastAtMs: at("2026-11-20T10:00:00Z"),
+          },
+        ],
+      }),
+    ),
+  );
+  const cy = screen.getByRole("button", { name: "Cy, 1 unread" });
+  assert.equal(
+    cy.querySelector("time").getAttribute("datetime"),
+    "2026-11-20T10:00:00.000Z",
+  );
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await waitFor(() => assert.ok(screen.getByText("Shipped")));
+  assert.equal(document.querySelectorAll(".inbox-new-badge").length, 1);
+  assert.ok(screen.getByText("Sent by claude-code@box"));
+  // One recipient: one status. A group: every recipient by name.
+  assert.equal(
+    document.querySelector(".inbox-message-receipt").textContent,
+    "Unread",
+  );
+  const receipts = screen.getByRole("list", { name: "Read status" });
+  assert.deepEqual(
+    [...receipts.querySelectorAll("li")].map((item) => item.textContent),
+    ["Ann: Read", "Bob: Unread"],
   );
 });
 

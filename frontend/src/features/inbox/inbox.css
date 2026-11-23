@@ -387,7 +387,45 @@
   padding-top: 12px;
 }
 
-.inbox-message-recipients,
+.inbox-message-meta {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.inbox-message-meta > small {
+  overflow-wrap: anywhere;
+}
+
+.inbox-new-badge {
+  height: 18px;
+  padding-inline: 6px;
+  font-size: var(--text-micro);
+}
+
+.inbox-message-receipt,
+.inbox-message-receipts {
+  margin: 4px 2px 0;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+}
+
+.inbox-message[data-direction="outgoing"] .inbox-message-receipt,
+.inbox-message[data-direction="outgoing"] .inbox-message-receipts {
+  text-align: end;
+}
+
+.inbox-message-receipts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px 10px;
+}
+
+.inbox-message-receipt[data-read="false"],
+.inbox-message-receipts > li[data-read="false"] {
+  color: var(--ui-content-primary);
+}
+
 .inbox-message-note {
   color: var(--ui-content-muted);
   font-size: var(--text-label);
