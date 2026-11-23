@@ -1067,6 +1067,11 @@ export default function App() {
       });
     });
   }
+  const loadRunTools = useCallback(
+    (taskId: string, runId: string, afterOrder: string) =>
+      client.readRunTools(taskId, runId, afterOrder),
+    [client],
+  );
   function openFilePreview(
     taskId: string,
     runId: string,
@@ -1076,8 +1081,9 @@ export default function App() {
     const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
     const run = task?.runs.find((candidate) => candidate.id === runId);
     if (!task || !run || activeTaskIdRef.current !== taskId) return;
-    const selected = findRunFileReference(run, reference.id);
-    if (!selected) return;
+    // The reference may come from a Tool page rather than the snapshot; the
+    // Host resolves it within this Task and Run either way.
+    const selected = findRunFileReference(run, reference.id) ?? reference;
     const tab = createTaskPanelPreviewTab(taskId, runId, selected);
     setRightPanelOpen(true);
     taskPanelOpeners.current.set(tab.tabId, opener);
@@ -6335,6 +6341,8 @@ export default function App() {
                   onOpen: () => void openAccountRecharge(),
                 }}
                 onPreviewFile={openFilePreview}
+                loadRunTools={loadRunTools}
+                securityEpoch={snapshot.securityEpoch}
                 workspaceRoot={
                   panelWorkspace && !panelWorkspace.redacted
                     ? panelWorkspace.canonicalRoot || null

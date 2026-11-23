@@ -107,7 +107,6 @@ pub const ModelSelectionAvailability = enum {
 /// The callbacks expose neither credential bytes nor the composition object.
 pub const TextProjection = struct {
     context: *const anyopaque,
-    capture_tool_fn: ?*const fn (*const anyopaque, *std.Io.Writer, *const ToolProjection) Error!void = null,
     contains_sensitive_fn: *const fn (*const anyopaque, []const u8) bool,
     write_json_fn: *const fn (*const anyopaque, *std.Io.Writer, []const u8) Error!void,
     write_json_output_fn: *const fn (
@@ -228,6 +227,9 @@ pub const Input = struct {
     /// The Task header and its authority are independent of loaded history.
     run_start: usize = 0,
     run_end: usize = std.math.maxInt(usize),
+    /// Set by range pages: each projected Run then carries its file
+    /// reference index, built with this scratch allocator.
+    file_references: ?std.mem.Allocator = null,
 };
 
 /// Navigation facts deliberately contain no Run text, Tool data, catalog,
@@ -697,6 +699,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
             editAdmitted(task, run, input.shutting_down),
             input.now_ms,
             input.output_path_validator,
+            input.file_references,
         );
     }
     writer.writeAll("],\"compacts\":[") catch return error.SnapshotTooLarge;
@@ -1004,6 +1007,9 @@ pub fn writeRun(
     edit_admitted: bool,
     now_ms: ?u64,
     output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void,
+    /// Range pages pass a scratch allocator and carry the Run's file
+    /// reference index; whole-history projections leave it out.
+    file_references: ?std.mem.Allocator,
 ) Error!void {
     const terminal = projection.terminal;
     writer.print("{{\"id\":\"{d}\",\"conversationCoverage\":\"{s}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"editAdmitted\":{},\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
@@ -1075,22 +1081,15 @@ pub fn writeRun(
     if (terminal) |value| {
         try writeTerminal(writer, text_projection, run, value);
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.print(",\"usage\":{{\"input\":\"{d}\",\"output\":\"{d}\",\"cacheRead\":\"{d}\",\"cacheCreation\":\"{d}\"}},\"tools\":[", .{
+    writer.print(",\"usage\":{{\"input\":\"{d}\",\"output\":\"{d}\",\"cacheRead\":\"{d}\",\"cacheCreation\":\"{d}\"}}", .{
         run.usage.input_tokens,
         run.usage.output_tokens,
         run.usage.cache_read_input_tokens,
         run.usage.cache_creation_input_tokens,
     }) catch return error.SnapshotTooLarge;
-    var tool_count: usize = 0;
-    for (run.tools) |*entry| {
-        const tool = &(entry.* orelse continue);
-        if (tool_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-        tool_count += 1;
-        if (text_projection.capture_tool_fn) |capture| {
-            try capture(text_projection.context, writer, tool);
-        } else try writeToolProjection(writer, text_projection, tool);
-    }
-    writer.writeAll("],\"fileChanges\":") catch return error.SnapshotTooLarge;
+    try writeRunToolLog(writer, text_projection, run);
+    if (file_references) |scratch| try writeRunFileReferences(writer, text_projection, run, scratch);
+    writer.writeAll(",\"fileChanges\":") catch return error.SnapshotTooLarge;
     try writeFileChanges(writer, text_projection, task, run, output_path_validator);
     writer.writeAll(",\"outputs\":") catch return error.SnapshotTooLarge;
     try writeRunOutputs(writer, text_projection, task, run);
@@ -1172,6 +1171,106 @@ pub fn writeToolProjection(writer: *std.Io.Writer, text_projection: TextProjecti
     while (state.stage != .done) try writeToolStage(writer, text_projection, tool, &state);
 }
 
+fn writeFileReferenceEntry(writer: *std.Io.Writer, text: TextProjection, reference: *const task_state.FileReferenceView) Error!void {
+    writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, reference.id);
+    writer.writeAll(",\"title\":") catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, reference.title);
+    writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, reference.display_path);
+    if (reference.generated()) {
+        writer.writeAll(if (reference.generated_video) ",\"generatedVideo\":true,\"presentationAnchor\":" else ",\"generatedImage\":true,\"presentationAnchor\":") catch return error.SnapshotTooLarge;
+        if (reference.presentation_anchor) |anchor| {
+            writer.print("{{\"afterOutputCount\":{d},\"presentationOrder\":\"{d}\"}}", .{ anchor.after_output_count, anchor.presentation_order }) catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    }
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+/// Source bytes of the distinct file links one Run carries in a range page.
+/// Generated media are written in full beside them and never cut.
+pub const run_file_link_source_bytes: usize = 256 * 1024;
+/// Charged per link for its keys and markers on top of its text.
+const file_link_entry_bytes: usize = 64;
+
+/// The Run's Tool records stay out of the task page. What the page still
+/// needs is their count, a revision that makes paged reads stale, and the
+/// name of the one record in flight for the live status line.
+fn writeRunToolLog(writer: *std.Io.Writer, text: TextProjection, run: *const task_state.RunRecord) Error!void {
+    var count: u64 = 0;
+    var running: ?*const task_state.ToolView = null;
+    var running_count: usize = 0;
+    for (run.tools) |*entry| if (entry.*) |*tool| {
+        count += 1;
+        if (tool.state == .running) {
+            running_count += 1;
+            running = tool;
+        }
+    };
+    writer.print(",\"toolLog\":{{\"count\":\"{d}\",\"revision\":\"{d}\",\"runningName\":", .{ count, run.tool_revision }) catch return error.SnapshotTooLarge;
+    if (running_count == 1) try text.writeJson(writer, running.?.name) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+/// The reading flow anchors every generated image and video, so `media`
+/// carries all of them. `links` lets body text open the files the Run
+/// referenced: one reference per display path, the newest kept, newest first,
+/// until the source budget is spent; `linksComplete` says whether any were left.
+fn writeRunFileReferences(writer: *std.Io.Writer, text: TextProjection, run: *const task_state.RunRecord, scratch: std.mem.Allocator) Error!void {
+    writer.writeAll(",\"fileReferences\":{\"media\":[") catch return error.SnapshotTooLarge;
+    var media_count: usize = 0;
+    for (run.tools) |*entry| {
+        const tool = &(entry.* orelse continue);
+        const refs = tool.file_refs orelse continue;
+        for (refs) |*reference_entry| {
+            const reference = &(reference_entry.* orelse continue);
+            if (!reference.generated()) continue;
+            if (media_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            media_count += 1;
+            try writeFileReferenceEntry(writer, text, reference);
+        }
+    }
+    writer.writeAll("],\"links\":[") catch return error.SnapshotTooLarge;
+    const Candidate = struct { order: u64, index: usize, reference: *const task_state.FileReferenceView };
+    var candidates: std.ArrayList(Candidate) = .empty;
+    defer candidates.deinit(scratch);
+    for (run.tools) |*entry| {
+        const tool = &(entry.* orelse continue);
+        const refs = tool.file_refs orelse continue;
+        for (refs, 0..) |*reference_entry, index| {
+            const reference = &(reference_entry.* orelse continue);
+            if (reference.generated_video or reference.display_path.len == 0) continue;
+            try candidates.append(scratch, .{ .order = tool.order, .index = index, .reference = reference });
+        }
+    }
+    const Newest = struct {
+        fn first(_: void, left: Candidate, right: Candidate) bool {
+            return left.order > right.order or (left.order == right.order and left.index > right.index);
+        }
+    };
+    std.mem.sort(Candidate, candidates.items, {}, Newest.first);
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(scratch);
+    var source_bytes: usize = 0;
+    var link_count: usize = 0;
+    var complete = true;
+    for (candidates.items) |candidate| {
+        const reference = candidate.reference;
+        const known = try seen.getOrPut(scratch, reference.display_path);
+        if (known.found_existing) continue;
+        const bytes = reference.id.len + reference.title.len + reference.display_path.len + file_link_entry_bytes;
+        if (bytes > run_file_link_source_bytes - source_bytes) {
+            complete = false;
+            break;
+        }
+        source_bytes += bytes;
+        if (link_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+        link_count += 1;
+        try writeFileReferenceEntry(writer, text, reference);
+    }
+    writer.print("],\"linksComplete\":{}}}", .{complete}) catch return error.SnapshotTooLarge;
+}
+
 /// One entry of a paged Tool read: the same shape as a snapshot Tool, marked
 /// when its text fields were left out so the entry fits one response.
 pub fn writeToolPageEntry(writer: *std.Io.Writer, text_projection: TextProjection, tool: *const ToolProjection, transport_truncated: bool) Error!void {
@@ -1219,23 +1318,11 @@ fn writeToolStage(writer: *std.Io.Writer, text_projection: TextProjection, tool:
             writer.writeAll(",\"fileRefs\":[") catch return error.SnapshotTooLarge;
             var file_ref_count: usize = 0;
             if (tool.file_refs) |refs| for (refs) |*file_ref_entry| {
-                const reference = file_ref_entry.* orelse continue;
+                const reference = &(file_ref_entry.* orelse continue);
                 if (file_ref_count != 0) writer.writeByte(',') catch
                     return error.SnapshotTooLarge;
                 file_ref_count += 1;
-                writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-                try text_projection.writeJson(writer, reference.id);
-                writer.writeAll(",\"title\":") catch return error.SnapshotTooLarge;
-                try text_projection.writeJson(writer, reference.title);
-                writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
-                try text_projection.writeJson(writer, reference.display_path);
-                if (reference.generated()) {
-                    writer.writeAll(if (reference.generated_video) ",\"generatedVideo\":true,\"presentationAnchor\":" else ",\"generatedImage\":true,\"presentationAnchor\":") catch return error.SnapshotTooLarge;
-                    if (reference.presentation_anchor) |anchor| {
-                        writer.print("{{\"afterOutputCount\":{d},\"presentationOrder\":\"{d}\"}}", .{ anchor.after_output_count, anchor.presentation_order }) catch return error.SnapshotTooLarge;
-                    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-                }
-                writer.writeByte('}') catch return error.SnapshotTooLarge;
+                try writeFileReferenceEntry(writer, text_projection, reference);
             };
             writer.writeAll("]}") catch return error.SnapshotTooLarge;
         },
@@ -1243,69 +1330,6 @@ fn writeToolStage(writer: *std.Io.Writer, text_projection: TextProjection, tool:
     }
     state.stage = @enumFromInt(@intFromEnum(state.stage) + 1);
 }
-
-/// Host-only temporary source for a single bounded preparation step. Raw JSON
-/// can contain escaped sensitive text, so this source is never a delivery/cache
-/// payload or a worker input. The canonical formatter sanitizes before sealing.
-pub const OwnedToolProjection = struct {
-    storage: []u8,
-    references: ?[]?task_state.FileReferenceView,
-    value: ToolProjection,
-
-    pub fn capture(allocator: std.mem.Allocator, tool: *const ToolProjection, budget: usize) Error!OwnedToolProjection {
-        var size = tool.id.len + tool.name.len + tool.input.len + tool.progress.len + tool.content.len;
-        if (tool.file_refs) |refs| for (refs) |entry| if (entry) |ref| {
-            size += ref.id.len + ref.title.len + ref.display_path.len;
-        };
-        const ref_bytes = if (tool.file_refs) |refs| refs.len * @sizeOf(?task_state.FileReferenceView) else 0;
-        if (size > budget or ref_bytes > budget - size) return error.SnapshotTooLarge;
-        const storage = try allocator.alloc(u8, size);
-        errdefer {
-            std.crypto.secureZero(u8, storage);
-            allocator.free(storage);
-        }
-        const references = if (tool.file_refs) |refs| try allocator.alloc(?task_state.FileReferenceView, refs.len) else null;
-        errdefer if (references) |refs| allocator.free(refs);
-        var offset: usize = 0;
-        var value = tool.*;
-        inline for (.{ "id", "name", "input", "progress", "content" }) |field| @field(value, field) = copy(storage, &offset, @field(tool, field));
-        if (references) |refs| for (tool.file_refs.?, refs) |entry, *target| {
-            target.* = if (entry) |ref| .{
-                .id = copy(storage, &offset, ref.id),
-                .title = copy(storage, &offset, ref.title),
-                .display_path = copy(storage, &offset, ref.display_path),
-                .kind = &.{},
-                .locator_kind = .workspace_path,
-                .locator = &.{},
-                .generated_image = ref.generated_image,
-                .generated_video = ref.generated_video,
-                .presentation_anchor = ref.presentation_anchor,
-            } else null;
-        };
-        value.file_refs = references;
-        value.route_digest = @splat(0);
-        return .{ .storage = storage, .references = references, .value = value };
-    }
-    fn copy(storage: []u8, offset: *usize, source: []const u8) []u8 {
-        const result = storage[offset.*..][0..source.len];
-        @memcpy(result, source);
-        offset.* += source.len;
-        return result;
-    }
-    pub fn ownedBytes(self: *const OwnedToolProjection) usize {
-        return self.storage.len + if (self.references) |refs| refs.len * @sizeOf(?task_state.FileReferenceView) else 0;
-    }
-    pub fn deinit(self: *OwnedToolProjection, allocator: std.mem.Allocator) void {
-        std.crypto.secureZero(u8, self.storage);
-        allocator.free(self.storage);
-        if (self.references) |refs| allocator.free(refs);
-        self.* = undefined;
-    }
-    pub const State = ToolWritingState;
-    pub fn writeStage(self: *const OwnedToolProjection, writer: *std.Io.Writer, text: TextProjection, state: *State) Error!void {
-        try writeToolStage(writer, text, &self.value, state);
-    }
-};
 
 const BashInput = struct {
     command: []const u8,
@@ -2109,25 +2133,6 @@ test "a multimodal input with a selected Skill matches the independent Renderer 
     writer = std.Io.Writer.fixed(&storage);
     try writeInput(&writer, text, plain, null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), ",\"skill\":null,\"redacted\":false}") != null);
-}
-
-test "Product view owned Tool preparation copies facts and releases every allocation failure" {
-    const Harness = struct {
-        fn capture(allocator: std.mem.Allocator) !void {
-            var input = [_]u8{ 'o', 'l', 'd' };
-            var refs = [_]?task_state.FileReferenceView{.{ .id = @constCast("ref"), .title = @constCast("title"), .display_path = @constCast("path"), .kind = @constCast("file"), .locator_kind = .workspace_path, .locator = @constCast("private") }};
-            const tool: ToolProjection = .{ .route_digest = @splat(7), .id = @constCast("tool"), .order = 1, .name = @constCast("Bash"), .input = &input, .progress = @constCast(""), .content = @constCast("result"), .state = .completed, .file_refs = &refs };
-            var owned = try OwnedToolProjection.capture(allocator, &tool, 1024);
-            defer owned.deinit(allocator);
-            @memset(&input, 'x');
-            refs[0] = null;
-            try std.testing.expectEqualStrings("old", owned.value.input);
-            try std.testing.expectEqualStrings("path", owned.value.file_refs.?[0].?.display_path);
-            try std.testing.expectEqualStrings("", owned.value.file_refs.?[0].?.locator);
-            try std.testing.expectError(error.SnapshotTooLarge, OwnedToolProjection.capture(allocator, &tool, 1));
-        }
-    };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.capture, .{});
 }
 
 test "a Run whose input readiness cannot be observed offers no input box" {

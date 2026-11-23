@@ -8,6 +8,7 @@ import {
   observeRunProcessDisclosure,
   toggleRunProcessDisclosure,
 } from "../frontend/src/features/tasks/run-presentation.ts";
+import { withToolSummary } from "./test-support/run-tools-fixture.mjs";
 
 function terminal(outcome, cause = null) {
   return {
@@ -55,7 +56,7 @@ test("finished time uses a locale-aware relative label with an absolute value", 
 });
 
 function run(overrides = {}) {
-  return {
+  return withToolSummary({
     id: "7",
     conversationCoverage: "included",
     editAdmitted: false,
@@ -85,7 +86,7 @@ function run(overrides = {}) {
     tools: [],
     fileChanges: null,
     ...overrides,
-  };
+  });
 }
 
 function tool(id, order, state = "completed") {
@@ -136,17 +137,15 @@ test("commentary remains narrative content instead of technical process evidence
   assert.deepEqual(presentation.activity, { kind: "thinking" });
 });
 
-test("presentation orders Tool evidence without deriving activity from records", () => {
+test("presentation reads the Tool summary without deriving activity from records", () => {
   const presentation = deriveRunPresentation(
     run({
       activity: { kind: "executing_tools", inFlight: "1" },
       tools: [tool("later", "2"), tool("current", "1", "running")],
     }),
   );
-  assert.deepEqual(
-    presentation.tools.map((item) => item.id),
-    ["current", "later"],
-  );
+  assert.equal(presentation.processCanCollapse, true);
+  assert.equal("tools" in presentation, false);
   assert.deepEqual(presentation.activity, {
     kind: "executing_tools",
     inFlight: "1",
@@ -348,8 +347,4 @@ test("adoption facts do not create user message entries in the technical process
   assert.equal(withoutTools.processCanCollapse, false);
   assert.equal(withoutTools.processVisible, false);
   assert.equal(presentation.processCanCollapse, true);
-  assert.deepEqual(
-    presentation.tools.map((tool) => tool.order),
-    ["1", "3"],
-  );
 });

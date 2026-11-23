@@ -7,6 +7,10 @@ import {
 } from "../../frontend/src/features/tasks/TaskContent.tsx";
 import { I18nContext } from "../../frontend/src/i18n/context.ts";
 import { translate } from "../../frontend/src/i18n/runtime.ts";
+import {
+  runToolsCacheFor,
+  withToolSummaries,
+} from "../test-support/run-tools-fixture.mjs";
 
 const canvas = document.createElement("canvas");
 canvas.width = 320;
@@ -172,6 +176,8 @@ const next = {
   },
 };
 let revision = 0;
+// One view keeps the Tool pages it read across these renders.
+const runToolsCache = runToolsCacheFor([base, done, next]);
 function render(stage: string) {
   const runs =
     stage === "paged"
@@ -224,7 +230,8 @@ function render(stage: string) {
         }}
       >
         <TaskContent
-          task={task as never}
+          task={withToolSummaries(task) as never}
+          runToolsCache={runToolsCache}
           memory={memory}
           revision={String(++revision)}
           snapshotReceivedAt={null}

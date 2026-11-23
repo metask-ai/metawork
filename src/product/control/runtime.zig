@@ -609,8 +609,10 @@ const catalog_snapshot_overhead: usize = 256;
 const catalog_skill_snapshot_overhead = skill_snapshot_structure.catalog_skill;
 const catalog_argument_snapshot_overhead = skill_snapshot_structure.argument;
 const catalog_issue_snapshot_overhead: usize = 128;
+/// Keys, decimal count and revision of a Run's Tool summary.
+const tool_log_snapshot_overhead: usize = 128;
+/// Non-text JSON of one Tool page entry: keys, flags, order and elapsed time.
 const tool_snapshot_overhead: usize = 512;
-const tool_min_projection_bytes: usize = "tool-1".len + 1;
 // writeFileChanges emits at most this much non-projected JSON per collection
 // and record. The global projection allowance below already pays six bytes for
 // every retained text byte, so the record allowance only adds structure after
@@ -6950,7 +6952,7 @@ pub const Runtime = struct {
         try request_input.validate();
         if (self.projection_security_epoch == 0 or self.projection_history_epoch == 0 or self.task_runtime.searchRevision() == 0) return error.InvalidViewRequest;
         const storage = self.snapshotStorage();
-        const request = try self.snapshot.begin(self.allocator, request_input, self.projection_security_epoch, self.limits.max_tools_per_run);
+        const request = try self.snapshot.begin(self.allocator, request_input, self.projection_security_epoch);
         const credentials = self.snapshot.credentialCollector();
         if (self.account_credentials) |source| try source.visit(credentials, ProjectionCredentials.visit);
         try self.task_runtime.visitExecutionCredentials(credentials, ProjectionCredentials.visit);
@@ -10106,7 +10108,12 @@ pub const Runtime = struct {
     /// One page of a Run's Tool records for the Renderer, sanitized with the
     /// live credential set. Main-thread only; the output is borrowed.
     pub fn writeToolPage(self: *Runtime, output: []u8, task_id: u64, run_id: u64, after_order: u64) Error!ToolPage {
-        const text = self.liveViewText();
+        // The same credential set a snapshot read collects at begin.
+        var credentials: ProjectionCredentials = .{ .allocator = self.allocator };
+        defer credentials.deinit();
+        if (self.account_credentials) |source| try source.visit(&credentials, ProjectionCredentials.visit);
+        try self.task_runtime.visitExecutionCredentials(&credentials, ProjectionCredentials.visit);
+        const text = credentials.text(self.allocator);
         return self.task_runtime.writeToolPage(self.allocator, output, text.task(), task_id, run_id, after_order, tool_page_source_bytes) catch |err| return @errorCast(err);
     }
 };
@@ -11175,23 +11182,9 @@ fn fileChangeSnapshotAdditionalBytes(limits: Limits) ?usize {
         runs,
         limits.max_file_changes_per_run,
     ) catch return null;
-    const tools = std.math.mul(
-        usize,
-        runs,
-        limits.max_tools_per_run,
-    ) catch return null;
-    const tool_projection_floor = std.math.mul(
-        usize,
-        tools,
-        tool_min_projection_bytes,
-    ) catch return null;
-    // The structural bound below already reserves 512 bytes for every Tool.
-    // A present Tool necessarily retains at least `tool-1` and a non-empty
-    // name. If a Tool slot is absent, its 512-byte structural reservation is
-    // larger than the File Change structure that those seven released text
-    // bytes could admit, so retaining the floor is still conservative.
-    var remaining_projection = limits.max_projection_bytes -|
-        @min(limits.max_projection_bytes, tool_projection_floor);
+    // Tool records no longer enter any snapshot, so no Tool text is set aside
+    // here; every projected byte may belong to a File Change instead.
+    var remaining_projection = limits.max_projection_bytes;
     var total = std.math.mul(
         usize,
         runs,
@@ -11428,11 +11421,13 @@ fn admittedSnapshotBudgetBytes(limits: Limits) ?usize {
         total,
         std.math.mul(usize, compacts, compact_snapshot_overhead) catch return null,
     ) catch return null;
-    const tools = std.math.mul(usize, runs, limits.max_tools_per_run) catch return null;
+    // A Run carries only its fixed-size Tool summary; the running Tool name is
+    // projected text already paid for above. Range pages add each Run's file
+    // reference index, bounded per page by the block limit, never here.
     total = std.math.add(
         usize,
         total,
-        std.math.mul(usize, tools, tool_snapshot_overhead) catch return null,
+        std.math.mul(usize, runs, tool_log_snapshot_overhead) catch return null,
     ) catch return null;
     const pending_ui = pendingUiSnapshotBytes(limits) orelse return null;
     total = std.math.add(
@@ -18716,10 +18711,10 @@ test "Bash presentation interprets only bounded known evidence and sanitizes dec
         tool.input_truncated = case.input_truncated;
         tool.content_truncated = case.content_truncated;
         var storage: [96 * 1024]u8 = undefined;
-        const snapshot = try control.writeViewFixture(&storage, .{ .task_id = 3 });
-        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+        const page = try control.writeToolPage(&storage, 3, 7, 0);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page.json, .{});
         defer parsed.deinit();
-        const projected = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("tools").?.array.items[0];
+        const projected = parsed.value.array.items[0];
         const bash = projected.object.get("bash").?;
         const tool_json = try std.json.Stringify.valueAlloc(std.testing.allocator, projected, .{});
         defer std.testing.allocator.free(tool_json);
@@ -18770,10 +18765,10 @@ test "built-in Tool presentation projects readable parameters and failures" {
     }
 
     var storage: [128 * 1024]u8 = undefined;
-    const snapshot = try control.writeAggregateFixture(&storage);
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+    const page = try control.writeToolPage(&storage, 3, 7, 0);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page.json, .{});
     defer parsed.deinit();
-    const tools = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("tools").?.array.items;
+    const tools = parsed.value.array.items;
     try std.testing.expectEqual(@as(usize, events.len), tools.len);
     try std.testing.expectEqualStrings("read", tools[0].object.get("presentation").?.object.get("kind").?.string);
     try std.testing.expectEqualStrings("12", tools[0].object.get("presentation").?.object.get("offset").?.string);
@@ -18804,10 +18799,13 @@ test "Runtime projects tools and full-width usage without parsing protocol in Re
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"name\":\"Bash\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "stdout\\nexit 0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"elapsedMs\":\"18446744073709551615\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"toolLog\":{\"count\":\"1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"input\":\"18446744073709551615\"") != null);
+    var page_storage: [16 * 1024]u8 = undefined;
+    const page = (try control.writeToolPage(&page_storage, 3, 7, 0)).json;
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"name\":\"Bash\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "stdout\\nexit 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"elapsedMs\":\"18446744073709551615\"") != null);
 }
 
 fn applyTestToolResult(control: *Runtime, id: []const u8, content: []const u8) !void {
@@ -18820,6 +18818,104 @@ fn applyTestToolResult(control: *Runtime, id: []const u8, content: []const u8) !
     var result = try testEnvelope(3, 7, encoded);
     defer result.deinit();
     try control.applyEvent(&result);
+}
+
+test "task page carries the Tool summary and file references, never the records" {
+    var limits = testLimits();
+    limits.max_tools_per_run = 6;
+    var control = try testRuntimeWithLimits(limits, .{});
+    defer control.deinit();
+    const refs = "{{\"tool_result\":{{\"id\":\"{s}\",\"name\":\"Read\",\"input\":\"{{}}\",\"content\":\"marker-{s}\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[{s}]}}}}";
+    const old_a = "{\"locator\":{\"workspace_path\":\"src/a.zig\"},\"title\":\"old a\",\"kind\":\"read\"}";
+    const new_a = "{\"locator\":{\"workspace_path\":\"src/a.zig\"},\"title\":\"new a\",\"kind\":\"read\"}";
+    const b = "{\"locator\":{\"workspace_path\":\"src/b.zig\"},\"title\":\"b\",\"kind\":\"read\"}";
+    for ([_][2][]const u8{ .{ "first", old_a }, .{ "second", new_a ++ "," ++ b } }) |entry| {
+        const encoded = try std.fmt.allocPrint(std.testing.allocator, refs, .{ entry[0], entry[0], entry[1] });
+        defer std.testing.allocator.free(encoded);
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    var image = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"image\",\"name\":\"GenerateImage\",\"input\":\"\",\"content\":\"\",\"is_error\":false}}");
+    defer image.deinit();
+    image.generated_image_path = try std.testing.allocator.dupe(u8, "generated-images/one.png");
+    try control.applyEvent(&image);
+    var running = try testEnvelope(3, 7, "{\"tool_start\":{\"id\":\"live\",\"name\":\"Bash\",\"input\":\"{}\"}}");
+    defer running.deinit();
+    try control.applyEvent(&running);
+
+    var storage: [96 * 1024]u8 = undefined;
+    const view = try control.writeViewFixture(&storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, view, "marker-") == null);
+    try std.testing.expect(std.mem.indexOf(u8, view, "\"tools\":") == null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, view, .{});
+    defer parsed.deinit();
+    const run = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object;
+    const log = run.get("toolLog").?.object;
+    try std.testing.expectEqualStrings("4", log.get("count").?.string);
+    try std.testing.expectEqualStrings("Bash", log.get("runningName").?.string);
+    const references = run.get("fileReferences").?.object;
+    const media = references.get("media").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), media.len);
+    try std.testing.expect(media[0].object.get("generatedImage").?.bool);
+    // One link per display path, the newest kept, newest first.
+    const links = references.get("links").?.array.items;
+    try std.testing.expect(references.get("linksComplete").?.bool);
+    try std.testing.expectEqualStrings("generated-images/one.png", links[0].object.get("displayPath").?.string);
+    try std.testing.expectEqualStrings("src/b.zig", links[1].object.get("displayPath").?.string);
+    try std.testing.expectEqualStrings("new a", links[2].object.get("title").?.string);
+    try std.testing.expectEqual(@as(usize, 3), links.len);
+
+    // A second running record leaves the live status without a single name.
+    var second = try testEnvelope(3, 7, "{\"tool_start\":{\"id\":\"live-2\",\"name\":\"Read\",\"input\":\"{}\"}}");
+    defer second.deinit();
+    try control.applyEvent(&second);
+    const busy = try control.writeViewFixture(&storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, busy, "\"toolLog\":{\"count\":\"5\",\"revision\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, busy, "\"runningName\":null") != null);
+    // Whole-history projections carry only the summary.
+    const aggregate = try control.writeAggregateFixture(&storage);
+    try std.testing.expect(std.mem.indexOf(u8, aggregate, "\"fileReferences\"") == null);
+}
+
+test "a Run's file links stop at their source budget, newest first" {
+    var limits = testLimits();
+    limits.max_tools_per_run = 3;
+    limits.max_projection_bytes = 1024 * 1024;
+    limits.max_snapshot_bytes = (Limits{}).max_snapshot_bytes;
+    limits.max_file_ref_field_bytes = 8192;
+    var control = try testRuntimeWithLimits(limits, .{});
+    defer control.deinit();
+    // Three records of twenty-four distinct four-kilobyte paths exceed the
+    // link budget; the newest records' paths are kept first.
+    const long_name = "d" ** 4000;
+    for ([_][]const u8{ "one", "two", "three" }) |id| {
+        var entries: std.ArrayList(u8) = .empty;
+        defer entries.deinit(std.testing.allocator);
+        for (0..24) |index| {
+            if (index != 0) try entries.append(std.testing.allocator, ',');
+            try entries.print(std.testing.allocator, "{{\"locator\":{{\"workspace_path\":\"{s}/{s}-{d}.zig\"}},\"title\":\"\",\"kind\":\"read\"}}", .{ long_name, id, index });
+        }
+        const encoded = try std.fmt.allocPrint(std.testing.allocator, "{{\"tool_result\":{{\"id\":\"{s}\",\"name\":\"Read\",\"input\":\"{{}}\",\"content\":\"\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[{s}]}}}}", .{ id, entries.items });
+        defer std.testing.allocator.free(encoded);
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    const storage = try std.testing.allocator.alloc(u8, 4 * 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    const view = try control.writeViewFixture(storage, .{ .task_id = 3 });
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, view, .{});
+    defer parsed.deinit();
+    const references = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("fileReferences").?.object;
+    const links = references.get("links").?.array.items;
+    try std.testing.expect(!references.get("linksComplete").?.bool);
+    try std.testing.expect(links.len > 24 and links.len < 72);
+    var source: usize = 0;
+    for (links) |link| source += link.object.get("displayPath").?.string.len;
+    try std.testing.expect(source <= task_test_view.run_file_link_source_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, links[0].object.get("displayPath").?.string, "/three-23.zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, links[links.len - 1].object.get("displayPath").?.string, "/one-") != null);
 }
 
 fn testToolPageOrders(control: *Runtime, output: []u8, source_budget: usize, orders: *std.ArrayList(u64)) !u64 {
@@ -18949,12 +19045,16 @@ test "Runtime projects typed AgentCore file references into bounded tool entries
     try control.applyEvent(&envelope);
     try std.testing.expectEqual(@as(usize, 1), control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?.file_refs.?.len);
 
-    var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"fileRefs\":[{\"id\":\"file-3-1-1-1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"displayPath\":\"src/main.zig\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"kind\":\"read\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"range\":") == null);
+    var page_storage: [16 * 1024]u8 = undefined;
+    const page = (try control.writeToolPage(&page_storage, 3, 7, 0)).json;
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"fileRefs\":[{\"id\":\"file-3-1-1-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"displayPath\":\"src/main.zig\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"kind\":\"read\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"range\":") == null);
+    // The task page links body text to the same reference.
+    var view_storage: [96 * 1024]u8 = undefined;
+    const view = try control.writeViewFixture(&view_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, view, "\"links\":[{\"id\":\"file-3-1-1-1\",\"title\":\"main.zig\",\"displayPath\":\"src/main.zig\"}],\"linksComplete\":true") != null);
     try std.testing.expect(control.task_runtime.fileReference(
         3,
         7,
@@ -20353,14 +20453,19 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "\"redacted\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "prefix *** suffix") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"id\":\"tool-1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"name\":\"Bash ***\"") != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
         "\"redacted\":false,\"provisionalRedacted\":true",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"redacted\":true") != null);
+    // The running record's name reaches the page through the Tool summary.
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"runningName\":null") != null);
+    var page_storage: [16 * 1024]u8 = undefined;
+    const page = (try control.writeToolPage(&page_storage, 3, 7, 0)).json;
+    try std.testing.expect(std.mem.indexOf(u8, page, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"id\":\"tool-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"name\":\"Bash ***\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"redacted\":true") != null);
 }
 
 test "Runtime product tool identities remain unique after raw ID redaction" {
@@ -22425,9 +22530,12 @@ test "Product view cold assembly uses the frozen writer through nested catalogs 
         try std.testing.expectEqualStrings(@tagName(management), root.get("management").?.object.get("kind").?.string);
         try std.testing.expect(std.mem.count(u8, snapshot, "builtin.review") >= 3);
         try std.testing.expect(std.mem.indexOf(u8, snapshot, "title ***") != null);
-        try std.testing.expect(std.mem.indexOf(u8, snapshot, "progress ***") != null);
         try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     }
+    // Tool progress is read in pages, with the same credential set.
+    const page = (try control.writeToolPage(&output, 3, 7, 0)).json;
+    try std.testing.expect(std.mem.indexOf(u8, page, "progress ***") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "SECRET-KEY") == null);
 }
 
 test "Product view cached delivery confirms versions without rebuilding stable blocks" {
@@ -22546,66 +22654,49 @@ test "Product view history versions ignore unrelated revisions and observe termi
     try std.testing.expectEqual(task_test_state.FileChangeObservation.incomplete, run.file_change_observation.?);
 }
 
-test "Product view preparation owns frozen tools and cannot clean a changed cache" {
+test "Product view preparation keeps its frozen scope and cannot clean a changed cache" {
     var control = try testRuntime();
     defer control.deinit();
-    var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"prepared\",\"name\":\"Bash\",\"input\":\"{\\\"command\\\":\\\"echo original\\\"}\",\"content\":\"old result\",\"is_error\":false,\"elapsed_ms\":1}}");
-    defer event.deinit();
-    try control.applyEvent(&event);
+    try applyTestToolResult(&control, "prepared", "old result");
     var output: [96 * 1024]u8 = undefined;
     var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
     try std.testing.expectEqual(@as(usize, 0), read.bytes);
-    try std.testing.expectEqual(@as(usize, 1), control.snapshot.preparation.tools.items.len);
     try std.testing.expect(control.snapshot.preparation.credentials != null);
     try std.testing.expectError(error.InvalidOffset, control.writeSnapshotRange(read.id, &output, 0, 1));
-    const tool = &control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?;
-    try control.replaceTracked(&tool.content, "new result", control.limits.max_tool_field_bytes);
-    control.bumpRevision();
+    try applyTestToolResult(&control, "later", "new result");
     while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
     try std.testing.expect(control.snapshot.preparation.credentials == null);
-    try std.testing.expectEqual(@as(usize, 0), control.snapshot.preparation.tools.items.len);
     var offset: usize = 0;
     while (offset < read.bytes) : (offset += 31) try control.writeSnapshotRange(read.id, &output, offset, @min(@as(usize, 31), read.bytes - offset));
-    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "old result") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "new result") == null);
+    // Tool records never enter the page; its summary is the one frozen at begin.
+    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "old result") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "\"toolLog\":{\"count\":\"1\"") != null);
     try std.testing.expect(control.encoded_views.get(view_read.Read.keyFor(.{ .task_id = 3 }, .taskPage)) == null);
     const current = try control.writeViewFixture(&output, .{ .task_id = 3 });
-    try std.testing.expect(std.mem.indexOf(u8, current, "new result") != null);
+    try std.testing.expect(std.mem.indexOf(u8, current, "\"toolLog\":{\"count\":\"2\"") != null);
     control.encoded_views.invalidateAll();
     read = try control.writeSnapshot(&output, .{ .task_id = 3 });
     try std.testing.expectEqual(@as(usize, 0), read.bytes);
     control.learnProjectionCredential("new preparation boundary");
     try std.testing.expectError(error.StaleSnapshot, control.continueSnapshot(read.id, &output));
     try std.testing.expect(control.snapshot.preparation.credentials == null);
-    try std.testing.expectEqual(@as(usize, 0), control.snapshot.preparation.tools.items.len);
 }
 
-test "Product view failed formatter stage releases partially prepared source and credentials" {
+test "Product view failed preparation step releases its source and credentials" {
     var control = try testRuntimeWithLimits(.{}, .{});
     defer control.deinit();
-    var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"partial\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":\"result\",\"is_error\":false,\"elapsed_ms\":1}}");
-    defer event.deinit();
-    try control.applyEvent(&event);
-    const command = try std.testing.allocator.alloc(u8, 20_000);
-    defer std.testing.allocator.free(command);
-    @memset(command, '\n');
-    const input = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .command = command }, .{});
-    defer std.testing.allocator.free(input);
-    try control.replaceTracked(&control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?.input, input, control.limits.max_tool_field_bytes);
+    try applyTestToolResult(&control, "partial", "result");
     var output: [96 * 1024]u8 = undefined;
-    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
-    read = try control.continueSnapshot(read.id, &output);
+    const read = try control.writeSnapshot(&output, .{ .task_id = 3 });
     try std.testing.expectEqual(@as(usize, 0), read.bytes);
-    try std.testing.expect(control.snapshot.preparation.tools.items[0].state.stage == .bash_input);
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     const original_allocator = control.allocator;
     control.allocator = failing.allocator();
     defer control.allocator = original_allocator;
-    try std.testing.expectError(error.SnapshotTooLarge, control.continueSnapshot(read.id, &output));
+    if (control.continueSnapshot(read.id, &output)) |_| return error.TestUnexpectedResult else |_| {}
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqual(@as(u64, 0), control.snapshot.plan.id);
     try std.testing.expect(control.snapshot.preparation.credentials == null);
-    try std.testing.expectEqual(@as(usize, 0), control.snapshot.preparation.tools.items.len);
 }
 
 test "Account image token protects Task views between Runs and rotation revokes reads" {
@@ -22640,10 +22731,11 @@ test "Account image token protects Task views between Runs and rotation revokes 
         try control.writeSnapshotRange(read.id, &output, offset, len);
         offset += len;
     }
-    const projected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output[0..read.bytes], .{});
-    defer projected.deinit();
-    const tool = projected.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("tools").?.array.items[0];
-    try std.testing.expectEqualStrings("echo ***", tool.object.get("bash").?.object.get("command").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "account-image-token") == null);
+    var page_storage: [16 * 1024]u8 = undefined;
+    const page = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, (try control.writeToolPage(&page_storage, 3, 7, 0)).json, .{});
+    defer page.deinit();
+    try std.testing.expectEqualStrings("echo ***", page.value.array.items[0].object.get("bash").?.object.get("command").?.string);
     const duplicate = try control.allocator.dupe(u8, account.token);
     defer control.allocator.free(duplicate);
     control.learnProjectionCredential(duplicate);
@@ -22734,7 +22826,7 @@ test "Product view cached large body moves into frozen read without a body-sized
     defer std.testing.allocator.destroy(control);
     try TestSupport.maximumSmallFixture(control);
     defer control.deinit();
-    try TestSupport.installResultFixture(control, true);
+    // The fixture's escaped response alone makes the task page a large body.
     const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(output);
     const request: ViewRequest = .{ .task_id = 1 };
@@ -22759,7 +22851,7 @@ test "Product view cached large body moves into frozen read without a body-sized
     const key = view_read.Read.keyFor(request, .taskPage);
     const version = control.encoded_views.get(key).?.version;
     const pointer = control.encoded_views.get(key).?.bytes.ptr;
-    try std.testing.expect(control.encoded_views.get(key).?.bytes.len > 4 * 1024 * 1024);
+    try std.testing.expect(control.encoded_views.get(key).?.bytes.len > 1024 * 1024);
     // Include revalidation after a dirty mark with identical facts: this must
     // attach the owned encoded body rather than copy it through replaceSpan.
     for ([_]bool{ false, true }) |revalidate| {

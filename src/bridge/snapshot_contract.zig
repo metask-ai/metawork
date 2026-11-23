@@ -2,8 +2,10 @@
 const encoding = @import("product_view_encoding");
 
 pub const max_snapshot_bytes = 64 * 1024 * 1024;
-// At most 8 Runs x 32 Tools x 7 formatter stages, plus block preparation.
-pub const max_preparation_steps = 2048;
+// A cold read answers `preparing` once from begin and once per block
+// comparison, one for each of the seven snapshot block kinds; the next
+// continuation returns the descriptor. Tool records never enter a snapshot.
+pub const max_preparation_steps = 8;
 pub const chunk_bytes = 256 * 1024;
 
 pub const SnapshotPreparing = struct {

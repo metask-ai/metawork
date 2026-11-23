@@ -12,13 +12,58 @@ const fixture = JSON.parse(
     "utf8",
   ),
 );
-function host(state) {
+function tool(order, overrides = {}) {
+  return {
+    bash: null,
+    presentation: null,
+    errorDetail: null,
+    id: `tool-${order}`,
+    order: String(order),
+    name: "Read",
+    input: "",
+    progress: "",
+    content: "",
+    state: "completed",
+    isError: false,
+    elapsedMs: "1",
+    inputTruncated: false,
+    progressTruncated: false,
+    contentTruncated: false,
+    redacted: false,
+    fileRefs: [],
+    ...overrides,
+  };
+}
+function host(state, { toolPageSize = 64, toolRevision = () => "1" } = {}) {
   let encoded;
   let id = 0;
   const scopes = [];
+  const toolRequests = [];
   return {
     scopes,
+    toolRequests,
     async invoke(command, payload) {
+      if (command === "metawork.tasks.tools") {
+        toolRequests.push(payload);
+        const run = state.tasks
+          .find((task) => task.id === payload.taskId)
+          ?.runs.find((entry) => entry.id === payload.runId);
+        const after = (run?.tools ?? []).filter(
+          (entry) => BigInt(entry.order) > BigInt(payload.afterOrder),
+        );
+        const tools = after.slice(0, toolPageSize);
+        return {
+          generation: payload.generation,
+          requestId: payload.requestId,
+          state: run ? "ready" : "missing",
+          securityEpoch: "1",
+          revision: toolRevision(),
+          total: String(run?.tools?.length ?? 0),
+          tools,
+          nextAfterOrder:
+            after.length > tools.length ? tools.at(-1).order : null,
+        };
+      }
       if (command === "metawork.workbench.snapshot") {
         const { known, ...scope } = payload;
         assert.equal(known.securityEpoch, "0");
@@ -111,6 +156,59 @@ test("desktop verification rejects credentials and unavailable transport instead
   await assert.rejects(
     readProbeProductState(async () => null),
     (error) => error.retryableSnapshotRead === true,
+  );
+});
+
+test("desktop verification reads every Tool record of a Run through its pages", async () => {
+  const state = structuredClone(fixture);
+  const run = state.tasks[0].runs[0];
+  delete run.toolLog;
+  delete run.fileReferences;
+  run.tools = [tool(1), tool(2, { name: "Bash" }), tool(3)];
+  const bridge = host(state, { toolPageSize: 2 });
+  const result = await readProbeProductState(bridge.invoke, {
+    taskId: state.tasks[0].id,
+    includeManagement: false,
+  });
+  assert.deepEqual(
+    result.tasks[0].runs[0].tools.map((entry) => entry.name),
+    ["Read", "Bash", "Read"],
+  );
+  assert.deepEqual(
+    bridge.toolRequests.map((request) => request.afterOrder),
+    ["0", "2"],
+  );
+  assert.equal(
+    BigInt(bridge.toolRequests[1].requestId) >
+      BigInt(bridge.toolRequests[0].requestId),
+    true,
+  );
+  assert.ok(bridge.toolRequests.every((request) => request.generation === "1"));
+
+  // Records that change between pages are read again from the start.
+  let revision = 0;
+  const changing = host(state, {
+    toolPageSize: 2,
+    toolRevision: () => String(revision++ < 1 ? 1 : 2),
+  });
+  const reread = await readProbeProductState(changing.invoke, {
+    taskId: state.tasks[0].id,
+    includeManagement: false,
+  });
+  assert.equal(reread.tasks[0].runs[0].tools.length, 3);
+  assert.deepEqual(
+    changing.toolRequests.map((request) => request.afterOrder),
+    ["0", "2", "0", "2"],
+  );
+
+  run.tools[1].content = "probe-credential";
+  await assert.rejects(
+    readProbeProductState(host(state).invoke, {
+      forbidden: ["probe-credential"],
+      taskId: state.tasks[0].id,
+      includeManagement: false,
+    }),
+    /credential reached/,
   );
 });
 

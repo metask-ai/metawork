@@ -2966,6 +2966,27 @@ button.run-process-header:hover {
   list-style: none;
 }
 
+.run-process-tools-status {
+  margin: 8px 2px 0;
+  color: var(--ui-content-muted);
+}
+
+.run-process-tools-action {
+  min-height: 44px;
+  margin-top: 4px;
+  padding: 0 2px;
+  border: 0;
+  color: var(--ui-action-primary);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.run-process-tools-action:disabled {
+  color: var(--ui-content-muted);
+  cursor: default;
+}
+
 .run-process-tools li + li {
   border-top: 1px solid color-mix(in srgb, var(--ui-border) 72%, transparent);
 }

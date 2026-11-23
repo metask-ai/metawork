@@ -7182,6 +7182,7 @@ pub const Runtime = struct {
                 task_view.editAdmitted(task, run, external.shutting_down),
                 effects.now_ms,
                 if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
+                self.allocator,
             );
         }
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
@@ -7233,6 +7234,7 @@ pub const Runtime = struct {
             .pending_ui = .{ .context = &pending_ui_context, .write_fn = writePendingUiProjection },
             .run_start = start,
             .run_end = end,
+            .file_references = self.allocator,
         });
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }

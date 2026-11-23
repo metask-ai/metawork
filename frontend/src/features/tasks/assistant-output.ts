@@ -54,12 +54,8 @@ export function localReadingAnchor(
     frontier = maxOrder(frontier, record.submission?.presentationOrder);
     for (const input of record.additionalInputs)
       frontier = maxOrder(frontier, input.submission?.presentationOrder);
-    for (const tool of record.tools)
-      for (const ref of tool.fileRefs)
-        frontier = maxOrder(
-          frontier,
-          ref.presentationAnchor?.presentationOrder,
-        );
+    for (const ref of record.fileReferences?.media ?? [])
+      frontier = maxOrder(frontier, ref.presentationAnchor?.presentationOrder);
   }
   return {
     anchorRunId: run?.id ?? null,
@@ -163,9 +159,7 @@ export function deriveTaskReadingPlan(
       run.output,
       run.additionalInputs,
       submissions.filter((input) => input.submission.anchorRunId === run.id),
-      run.tools
-        .flatMap((tool) => tool.fileRefs)
-        .filter((ref) => ref.generatedImage || ref.generatedVideo),
+      run.fileReferences?.media ?? [],
       pending.filter(
         (input) =>
           input.anchor.anchorRunId === run.id ||

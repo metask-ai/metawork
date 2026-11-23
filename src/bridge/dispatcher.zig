@@ -9707,6 +9707,8 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
         result = descriptor.value.object.get("result").?.object;
         try std.testing.expectEqual(id, try std.fmt.parseInt(u64, result.get("snapshotId").?.string, 10));
     }
+    // A cold read with every block uncached uses exactly the published bound.
+    try std.testing.expectEqual(@as(usize, @import("snapshot_contract.zig").max_preparation_steps), preparation_steps);
     const bytes: usize = @intCast(result.get("bytes").?.integer);
     try std.testing.expect(bytes > product_delivery.snapshot_chunk_bytes);
     try std.testing.expectEqual(@as(usize, 0), product_control.TestSupport.snapshotProgress(control).produced);

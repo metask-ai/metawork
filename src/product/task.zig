@@ -110,7 +110,6 @@ pub const ProjectionError = view.Error;
 pub const max_permission_presentation_bytes = view.max_permission_presentation_bytes;
 pub const ProjectionText = view.TextProjection;
 pub const ToolProjection = view.ToolProjection;
-pub const OwnedToolProjection = view.OwnedToolProjection;
 pub const writeInput = view.writeInput;
 pub const writeSendInputResult = view.writeSendInputResult;
 pub const writeInputAcceptance = view.writeInputAcceptance;

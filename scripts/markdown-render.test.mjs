@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { withToolSummary } from "./test-support/run-tools-fixture.mjs";
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -178,16 +179,16 @@ test("Run link aliases retain exact references and reject ambiguous basenames", 
       { order: "2", fileRefs: [old] },
     ],
   };
-  let links = runFileReferenceLinks(run);
+  let links = runFileReferenceLinks(withToolSummary(run));
   assert.equal(links.get("index.html"), latest);
   assert.equal(links.get("a/index.html"), latest);
   assert.equal(links.get("./a/index.html"), latest);
   run.tools.push({ order: "11", fileRefs: [other] });
-  links = runFileReferenceLinks(run);
+  links = runFileReferenceLinks(withToolSummary(run));
   assert.equal(links.has("index.html"), false);
   assert.equal(links.get("b/index.html"), other);
   assert.equal(links.get("a/index.html"), latest);
-  assert.equal(runFileReferenceLinks({ tools: [] }).size, 0);
+  assert.equal(runFileReferenceLinks(withToolSummary({ tools: [] })).size, 0);
   assert.equal(run.tools[0].fileRefs[0], latest);
 });
 

@@ -11,7 +11,7 @@ import {
 } from "./wire-codec.ts";
 export const maxSnapshotBytes = 67108864;
 export const maxSnapshotChunkBytes = 262144;
-export const maxSnapshotPreparationSteps = 2048;
+export const maxSnapshotPreparationSteps = 8;
 export const approvalFailureReasons = [
   "cancelled",
   "busy",
