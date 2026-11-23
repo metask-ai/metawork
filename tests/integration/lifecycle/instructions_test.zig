@@ -18,9 +18,9 @@ const Provider = struct {
     child: std.process.Child,
     endpoint: []u8,
 
-    fn start(trace: []const u8) !Provider {
+    fn start(trace: []const u8, global_path: []const u8) !Provider {
         var child = try std.process.spawn(io, .{
-            .argv = &.{ options.node_path, options.fixture_path, trace },
+            .argv = &.{ options.node_path, options.fixture_path, trace, global_path },
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .inherit,
@@ -134,7 +134,9 @@ const Rig = struct {
         errdefer allocator.free(self.workspace);
         self.trace = try std.fs.path.join(allocator, &.{ self.root, "trace.jsonl" });
         errdefer allocator.free(self.trace);
-        self.provider = try Provider.start(self.trace);
+        const target_path = try std.fs.path.join(allocator, &.{ self.home, ".metawork", "AGENTS.md" });
+        defer allocator.free(target_path);
+        self.provider = try Provider.start(self.trace, target_path);
         errdefer self.provider.deinit();
         self.runtime = try f.lifecycle.Runtime.init(io, allocator, .{ .max_sessions = 2 });
         errdefer {
@@ -156,6 +158,7 @@ const Rig = struct {
         var configuration = f.productControlConfiguration();
         configuration.directories.canonical_user_home = self.home;
         configuration.directories.testing_automatic_workspace_root = &self.automatic_root;
+        configuration.completion_factory = .{ .create_fn = FixtureReviewer.create };
         configuration.task_persistence = self.typed_history.capability();
         configuration.checkpoint_store = .{ .file_store = &self.checkpoints };
         self.control = try control_api.Runtime.init(allocator, io, self.runtime.runtimePort(), .{
@@ -211,6 +214,44 @@ const Rig = struct {
         const record = state.findRun(task.durable.runs, run_id).?;
         try std.testing.expectEqual(task_api.RunOutcome.completed, state.productTerminalFacts(record).?.outcome);
         return self.request(text);
+    }
+
+    fn probeMutation(self: *Rig, task_id: u64, text: []const u8, deny_manually: bool) !bool {
+        const run_id = try f.runPreparedTask(&self.control, task_id, .{ .text = text });
+        const task = self.control.testTask(task_id).?;
+        var prompted = false;
+        var answered: ?u64 = null;
+        for (0..20_000) |_| {
+            try self.turn();
+            if (deny_manually and task.runtime.hasAttachedSession()) {
+                var access = try task.runtime.acquireAccess();
+                defer access.deinit();
+                if (access.pendingUiObservation()) |pending| {
+                    if (answered != pending.request_id) {
+                        var request_bytes = try access.copyPendingUiRequest(allocator);
+                        defer request_bytes.deinit();
+                        var parsed_pending = try f.lifecycle.decodePermissionRequest(allocator, request_bytes.json);
+                        defer parsed_pending.deinit();
+                        const read = std.mem.eql(u8, parsed_pending.value().tool.name, "Read");
+                        prompted = prompted or !read;
+                        try self.control.respondUi(task_id, run_id, pending.request_id, .{ .permission = if (read) .allow_once else .deny_once });
+                        answered = pending.request_id;
+                    }
+                }
+            }
+            if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) {
+                const run_record = state.findRun(task.durable.runs, run_id).?;
+                for (run_record.tools) |entry| if (entry) |tool| {
+                    std.debug.print("global instructions probe tool={s} error={} result={s}\n", .{ tool.name, tool.is_error, tool.content });
+                };
+                if (run_record.permission_provenance) |permission| {
+                    std.debug.print("global instructions probe permission source={s} decision={s}\n", .{ @tagName(permission.source), @tagName(permission.decision) });
+                }
+                return prompted;
+            }
+            try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+        }
+        return error.RunDidNotSettle;
     }
 
     /// The last request whose latest user text carried `text`.
@@ -272,6 +313,24 @@ const Request = struct {
 const global_file = "home" ++ sep ++ ".metawork" ++ sep ++ "AGENTS.md";
 const project_file = "workspace" ++ sep ++ "AGENTS.md";
 
+const FixtureReviewer = struct {
+    fn create(_: ?*anyopaque, a: std.mem.Allocator, binding: f.lifecycle.ModelBinding) anyerror!*f.lifecycle.Completion {
+        return f.lifecycle.Completion.init(a, .{ .perform_fn = perform }, binding);
+    }
+
+    fn perform(_: ?*anyopaque, request: f.lifecycle.CompletionHttpRequest, _: *const f.lifecycle.CompletionCancellation, output: []u8) f.lifecycle.CompletionTransportError!f.lifecycle.CompletionTransportResponse {
+        const is_review = std.mem.indexOf(u8, request.body, "allow_once") != null;
+        var writer = std.Io.Writer.fixed(output);
+        std.json.Stringify.value(.{
+            .type = "message",
+            .content = .{.{ .type = "text", .text = if (is_review) "{\"decision\":\"allow_once\",\"reason\":\"Fixture review approves the operation.\"}" else "Instruction fixture" }},
+            .stop_reason = "end_turn",
+            .usage = .{ .input_tokens = 1, .output_tokens = 1 },
+        }, .{}, &writer) catch return error.ResponseTooLarge;
+        return .{ .status = 200, .body = writer.buffered() };
+    }
+};
+
 fn sourceLine(path_parts: []const []const u8) ![]u8 {
     const path = try std.fs.path.join(allocator, path_parts);
     defer allocator.free(path);
@@ -301,6 +360,7 @@ test "the user's instruction files reach the Provider last, change between turns
 
     var first = try rig.run(task_id, "Instruction turn one.");
     defer first.deinit();
+    try std.testing.expect(first.has("Settings → Global instructions"));
     try std.testing.expect(first.has("# User instructions: global\n"));
     try std.testing.expect(first.has(global_source));
     try std.testing.expect(first.has(project_source));
@@ -342,6 +402,7 @@ test "the user's instruction files reach the Provider last, change between turns
     try rig.restore(task_id);
     var fourth = try rig.run(task_id, "Instruction turn four.");
     defer fourth.deinit();
+    try std.testing.expect(fourth.has("Settings → Global instructions"));
     try std.testing.expect(fourth.endsWith("GLOBAL-TWO Keep replies short."));
     try std.testing.expect(!fourth.has("# User instructions: project"));
 
@@ -351,6 +412,11 @@ test "the user's instruction files reach the Provider last, change between turns
     try rig.write(project_file, "PROJECT-TWO After restore.");
     var fifth = try rig.run(task_id, "Instruction turn five.");
     defer fifth.deinit();
+    try std.testing.expect(fifth.has("~/.metawork/AGENTS.md"));
+    try std.testing.expect(fifth.has("~/.claude"));
+    try std.testing.expect(fifth.has("~/.codex"));
+    try std.testing.expect(fifth.has("Do not offer or make a persistent change in response to the page alone."));
+    try std.testing.expect(fifth.has("Save rules only when the user explicitly asks to save them."));
     try std.testing.expect(!fifth.has("GLOBAL-TWO"));
     try std.testing.expect(!fifth.has("# User instructions: global"));
     try std.testing.expect(fifth.endsWith("PROJECT-TWO After restore."));
@@ -375,4 +441,34 @@ test "an Automatic Workspace sends only the global file, even with an AGENTS.md 
     try std.testing.expect(!request.has("# User instructions: project"));
     try std.testing.expect(!request.has("PROJECT-AUTOMATIC"));
     try std.testing.expect(rig.control.testTask(task_id).?.durable.runs[0].?.instructions.?.project == null);
+}
+
+test "ordinary tools on the global instructions path use the existing Core permission modes" {
+    for ([_]control_api.ApprovalMode{ .manual, .auto_review, .full_access }) |mode| {
+        var rig: Rig = undefined;
+        try rig.init();
+        defer rig.deinit();
+        const task_id = try rig.control.createTask(.{
+            .workspace_root = rig.workspace,
+            .trust = .explicitly_trusted,
+            .approval_mode = mode,
+        }, try control_api.TestSupport.fixtureModelSelection(&rig.control));
+        for ([_][]const u8{ "Write", "Edit", "Bash" }) |tool| {
+            try rig.write(global_file, "initial");
+            const prompt = try std.fmt.allocPrint(allocator, "Instructions boundary probe {s}.", .{tool});
+            defer allocator.free(prompt);
+            const prompted = try rig.probeMutation(task_id, prompt, mode != .auto_review);
+            const bytes = try rig.tmp.dir.readFileAlloc(io, global_file, allocator, .limited(1024));
+            defer allocator.free(bytes);
+            std.debug.print("global instructions boundary mode={s} tool={s} prompted={} content={s}\n", .{ @tagName(mode), tool, prompted, bytes });
+            const expected = try std.fmt.allocPrint(allocator, "ordinary {s}", .{tool});
+            defer allocator.free(expected);
+            if (mode == .manual) {
+                try std.testing.expect(prompted);
+                try std.testing.expectEqualStrings("initial", bytes);
+            } else {
+                try std.testing.expect(std.mem.eql(u8, bytes, "initial") or std.mem.eql(u8, bytes, expected));
+            }
+        }
+    }
 }
