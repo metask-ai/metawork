@@ -142,6 +142,7 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
   - `outcome = saved | conflict | too_large | invalid_text | contains_credential | write_failed | unavailable`；
   - `revision` 只在 `saved`（新文件的摘要）与 `conflict`（当前文件的摘要，文件已被删除时为 `absent`）时非空。
   - 冲突时不写入；Renderer 只能在用户确认后以返回的 `revision` 重新保存，不自动重放。
+  - `text` 是要写入的字节：载入的正文用 CRLF 换行时，Renderer 按 CRLF 提交编辑后的正文（textarea 只报告 LF），字节计数也按提交的正文算；判断是否有改动时比较统一换行后的正文。
 - 两条命令都不发布 Snapshot revision：保存的效果由下一轮准入读取文件时体现。
 
 ## Delivered file actions

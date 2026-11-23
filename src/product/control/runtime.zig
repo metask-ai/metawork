@@ -3783,26 +3783,17 @@ pub const Runtime = struct {
         var paths = try product_instructions.resolvePaths(self.allocator, self.canonical_user_home, null);
         defer paths.deinit(self.allocator);
         const path = paths.global orelse return null;
-        return instructions_file.save(self.io, path, expected, text, self.instructionCredentialCheck());
+        return try instructions_file.save(self.io, self.allocator, path, expected, text, self.instructionCredentialCheck());
     }
 
     fn instructionCredentialCheck(self: *Runtime) instructions_file.CredentialCheck {
         return .{ .context = self, .contains_fn = containsKnownCredentialText };
     }
 
-    /// The same known credentials history writes are checked against. A
-    /// credential source that cannot be read counts as a match: the text
-    /// stays in the Host rather than risk carrying one out.
+    /// The one known-credential match every Host projection uses.
     fn containsKnownCredentialText(context: *anyopaque, text: []const u8) bool {
-        const self: *Runtime = @ptrCast(@alignCast(context));
-        var credentials: ProjectionCredentials = .{ .allocator = self.allocator };
-        defer credentials.deinit();
-        if (self.account_credentials) |source| source.visit(&credentials, ProjectionCredentials.visit) catch return true;
-        self.task_runtime.visitExecutionCredentials(&credentials, ProjectionCredentials.visit) catch return true;
-        for (credentials.values.items) |secret| {
-            if (secret.len != 0 and std.mem.indexOf(u8, text, secret) != null) return true;
-        }
-        return false;
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        return self.containsKnownCredential(text);
     }
 
     pub fn workspaceEpoch(self: *const Runtime, workspace_id: u64) Error!u64 {

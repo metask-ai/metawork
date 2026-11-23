@@ -125,6 +125,37 @@ test("the editor shows the Host's path and text and saves against the loaded rev
   assert.equal(host.calls.saves[1].expectedRevision, digest("b"));
 });
 
+test("a file with CRLF line breaks keeps them, and only an edit counts as a change", async () => {
+  const host = actions(view({ text: "one\r\ntwo\r\n", byteLength: "10" }));
+  editor(host);
+  const box = await screen.findByRole("textbox", {
+    name: "Instructions for every task",
+  });
+  // The textarea reports every break as LF; the text is unchanged all the same.
+  fireEvent.change(box, { target: { value: "one\ntwo\n" } });
+  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, true);
+  // Counted as it will be written, CRLF included.
+  assert.match(screen.getByText(/bytes$/u).textContent, /^10 \/ 32768 bytes$/u);
+  fireEvent.change(box, { target: { value: "one\ntwo\nthree\n" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => assert.equal(host.calls.saves.length, 1));
+  assert.equal(host.calls.saves[0].text, "one\r\ntwo\r\nthree\r\n");
+  await screen.findByText(/^Saved\./u);
+  assert.equal(screen.getByRole("button", { name: "Save" }).disabled, true);
+  cleanup();
+
+  // A file with LF breaks stays LF.
+  const plain = actions(view({ text: "one\ntwo" }));
+  editor(plain);
+  const lf = await screen.findByRole("textbox", {
+    name: "Instructions for every task",
+  });
+  fireEvent.change(lf, { target: { value: "one\ntwo\nthree" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => assert.equal(plain.calls.saves.length, 1));
+  assert.equal(plain.calls.saves[0].text, "one\ntwo\nthree");
+});
+
 test("a missing file is created by the first save, against the absent revision", async () => {
   const host = actions(
     view({ state: "absent", text: null, revision: "absent", byteLength: null }),

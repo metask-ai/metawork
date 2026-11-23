@@ -4,9 +4,15 @@
 //!
 //! Neither the directory nor the file exists until the first save. Loading
 //! creates nothing; saving creates `~/.metawork` only when it is missing.
+//!
+//! The file is opened before anything is decided about it, and its handle
+//! answers every question: what it is, what it holds, and where it really
+//! lives. A link at the path is the user's choice, so a save replaces the
+//! file the link points to and keeps the link.
 const std = @import("std");
 const builtin = @import("builtin");
 const source = @import("source.zig");
+const handle = @import("handle.zig");
 
 pub const max_text_bytes = source.max_text_bytes;
 
@@ -98,18 +104,20 @@ pub const Loaded = struct {
 };
 
 pub fn load(io: std.Io, allocator: std.mem.Allocator, path: []const u8, credentials: CredentialCheck) std.mem.Allocator.Error!Loaded {
-    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| return switch (err) {
-        error.FileNotFound, error.NotDir => .{ .state = .absent },
-        error.AccessDenied, error.PermissionDenied => .{ .state = .unreadable, .reason = .access_denied },
-        else => .{ .state = .unreadable, .reason = .io_error },
+    const opened = handle.openRegular(io, path) catch |err| return switch (err) {
+        error.FileNotFound => .{ .state = .absent },
+        error.AccessDenied => .{ .state = .unreadable, .reason = .access_denied },
+        error.NotRegularFile => .{ .state = .unreadable, .reason = .not_regular_file },
+        error.InputOutput => .{ .state = .unreadable, .reason = .io_error },
     };
-    if (stat.kind != .file) return .{ .state = .unreadable, .reason = .not_regular_file };
-    if (stat.size > max_load_bytes) return .{ .state = .too_large, .byte_length = stat.size };
-    const bytes = readWhole(io, allocator, path, @intCast(stat.size)) catch |err| return switch (err) {
+    defer opened.file.close(io);
+    const size = opened.stat.size;
+    if (size > max_load_bytes) return .{ .state = .too_large, .byte_length = size };
+    const bytes = readWhole(io, allocator, opened.file, @intCast(size)) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.AccessDenied => .{ .state = .unreadable, .reason = .access_denied },
         error.ReadFailed => .{ .state = .unreadable, .reason = .io_error },
-        error.FileTooLarge => .{ .state = .too_large, .byte_length = stat.size },
+        error.FileTooLarge => .{ .state = .too_large, .byte_length = size },
     };
     defer allocator.free(bytes);
     const revision = Revision.of(bytes);
@@ -123,40 +131,58 @@ pub fn load(io: std.Io, allocator: std.mem.Allocator, path: []const u8, credenti
 
 const bom = "\xef\xbb\xbf";
 
-fn readWhole(io: std.Io, allocator: std.mem.Allocator, path: []const u8, size: usize) (std.mem.Allocator.Error || error{ AccessDenied, ReadFailed, FileTooLarge })![]u8 {
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch |err| return switch (err) {
-        error.AccessDenied, error.PermissionDenied => error.AccessDenied,
-        else => error.ReadFailed,
-    };
-    defer file.close(io);
-    // One byte past the observed size says whether the file grew meanwhile.
+fn readWhole(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, size: usize) (std.mem.Allocator.Error || error{ AccessDenied, ReadFailed, FileTooLarge })![]u8 {
+    // One byte past the handle's size says whether the file grew meanwhile.
     const buffer = try allocator.alloc(u8, @min(size, max_load_bytes) + 1);
     errdefer allocator.free(buffer);
-    const count = file.readPositionalAll(io, buffer, 0) catch return error.ReadFailed;
+    const count = file.readPositionalAll(io, buffer, 0) catch |err| return switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        else => error.ReadFailed,
+    };
     if (count > max_load_bytes) return error.FileTooLarge;
     return allocator.realloc(buffer, count);
 }
 
-/// The revision of whatever is at `path` now, read in bounded chunks so a
-/// file of any size can still be told apart from what the editor loaded.
-fn currentRevision(io: std.Io, path: []const u8) error{ReadFailed}!Revision {
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch |err| return switch (err) {
-        error.FileNotFound => .absent,
-        else => error.ReadFailed,
+/// What a save replaces: the file's revision now, where its bytes really
+/// live, and its permissions to carry over.
+const Target = struct {
+    revision: Revision,
+    /// The file a link at the path resolves to, or the path itself when
+    /// nothing is there yet. Borrowed from the caller's buffer or path.
+    path: []const u8,
+    permissions: ?std.Io.File.Permissions,
+};
+
+/// Opens whatever is at `path` once and answers from that handle: the
+/// revision, read in bounded chunks so a file of any size can still be told
+/// apart from what the editor loaded, and the real path a save must replace.
+fn inspect(io: std.Io, path: []const u8, real_path: []u8) error{ReadFailed}!Target {
+    const opened = handle.openRegular(io, path) catch |err| switch (err) {
+        error.FileNotFound => {
+            // Nothing to read. Something still there when links are not
+            // followed is a link that points nowhere: it is the user's link,
+            // and writing a file in its place would cut it.
+            if (std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false })) |_|
+                return error.ReadFailed
+            else |_|
+                return .{ .revision = .absent, .path = path, .permissions = null };
+        },
+        else => return error.ReadFailed,
     };
-    defer file.close(io);
+    defer opened.file.close(io);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var chunk: [16 * 1024]u8 = undefined;
     var offset: u64 = 0;
     while (true) {
-        const count = file.readPositionalAll(io, &chunk, offset) catch return error.ReadFailed;
+        const count = opened.file.readPositionalAll(io, &chunk, offset) catch return error.ReadFailed;
         hasher.update(chunk[0..count]);
         offset += count;
         if (count < chunk.len) break;
     }
-    var value: Revision = .{ .present = true, .digest = undefined };
-    hasher.final(&value.digest);
-    return value;
+    var revision: Revision = .{ .present = true, .digest = undefined };
+    hasher.final(&revision.digest);
+    const length = opened.file.realPath(io, real_path) catch return error.ReadFailed;
+    return .{ .revision = revision, .path = real_path[0..length], .permissions = opened.stat.permissions };
 }
 
 pub const SaveOutcome = union(enum) {
@@ -172,25 +198,35 @@ pub const SaveOutcome = union(enum) {
 };
 
 /// Replaces the file with `text` when it still has the `expected` revision.
-/// An empty text is saved as an empty file: no instructions.
-pub fn save(io: std.Io, path: []const u8, expected: Revision, text: []const u8, credentials: CredentialCheck) SaveOutcome {
+/// An empty text is saved as an empty file: no instructions. Where the path
+/// is a link, the file it points to is replaced, in its own directory and
+/// with its own permissions, and the link stays.
+pub fn save(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    expected: Revision,
+    text: []const u8,
+    credentials: CredentialCheck,
+) std.mem.Allocator.Error!SaveOutcome {
     if (text.len > max_text_bytes) return .too_large;
     if (!std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null) return .invalid_text;
     if (credentials.contains(text)) return .contains_credential;
-    const current = currentRevision(io, path) catch return .write_failed;
-    if (!current.eql(expected)) return .{ .conflict = current };
-    const directory_path = std.fs.path.dirname(path) orelse return .write_failed;
+    const real_path = try allocator.alloc(u8, std.fs.max_path_bytes);
+    defer allocator.free(real_path);
+    const target = inspect(io, path, real_path) catch return .write_failed;
+    if (!target.revision.eql(expected)) return .{ .conflict = target.revision };
+    const directory_path = std.fs.path.dirname(target.path) orelse return .write_failed;
     // The first save is the only one that finds no directory.
     var directory = std.Io.Dir.cwd().createDirPathOpen(io, directory_path, .{
         .permissions = directoryPermissions(),
     }) catch return .write_failed;
     defer directory.close(io);
-    const name = std.fs.path.basename(path);
+    const name = std.fs.path.basename(target.path);
     var random: [8]u8 = undefined;
     std.Io.randomSecure(io, &random) catch return .write_failed;
-    var temp_storage: [64]u8 = undefined;
-    const temp_name = std.fmt.bufPrint(&temp_storage, ".{s}.{s}.tmp", .{ name, std.fmt.bytesToHex(random, .lower) }) catch
-        return .write_failed;
+    const temp_name = try std.fmt.allocPrint(allocator, ".{s}.{s}.tmp", .{ name, std.fmt.bytesToHex(random, .lower) });
+    defer allocator.free(temp_name);
     const file = directory.createFile(io, temp_name, .{ .exclusive = true }) catch return .write_failed;
     var file_open = true;
     var temp_exists = true;
@@ -199,6 +235,9 @@ pub fn save(io: std.Io, path: []const u8, expected: Revision, text: []const u8, 
         if (temp_exists) directory.deleteFile(io, temp_name) catch {};
     }
     file.writeStreamingAll(io, text) catch return .write_failed;
+    // The replacement keeps what the user allowed of the file it replaces.
+    if (keptPermissions(target.permissions)) |permissions|
+        file.setPermissions(io, permissions) catch return .write_failed;
     file.sync(io) catch return .write_failed;
     file.close(io);
     file_open = false;
@@ -209,14 +248,21 @@ pub fn save(io: std.Io, path: []const u8, expected: Revision, text: []const u8, 
     return .{ .saved = Revision.of(text) };
 }
 
+/// POSIX modes carry over; Windows attributes do not, since a read-only one
+/// would refuse the rename that installs the file.
+fn keptPermissions(permissions: ?std.Io.File.Permissions) ?std.Io.File.Permissions {
+    if (builtin.os.tag == .windows) return null;
+    return permissions;
+}
+
 fn directoryPermissions() std.Io.File.Permissions {
     return if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700);
 }
 
 fn syncDirectory(io: std.Io, directory: std.Io.Dir) void {
     if (builtin.os.tag == .windows) return;
-    const handle: std.Io.File = .{ .handle = directory.handle, .flags = .{ .nonblocking = false } };
-    handle.sync(io) catch {};
+    const as_file: std.Io.File = .{ .handle = directory.handle, .flags = .{ .nonblocking = false } };
+    as_file.sync(io) catch {};
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +285,11 @@ const NoCredentials = struct {
     }
 };
 
+/// The testing allocator does not run out, so a save's only error is moot.
+fn testSave(path: []const u8, expected: Revision, text: []const u8, credentials: CredentialCheck) SaveOutcome {
+    return save(testing.io, testing.allocator, path, expected, text, credentials) catch unreachable;
+}
+
 fn globalPath(tmp: std.testing.TmpDir) ![]u8 {
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(root);
@@ -257,7 +308,7 @@ test "loading creates nothing, and the first save creates the directory and the 
     try testing.expect(nothing.revision.eql(.absent));
     try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, source.global_directory, .{}));
 
-    const saved = save(testing.io, path, .absent, "Answer in English.", credentials.check());
+    const saved = testSave(path, .absent, "Answer in English.", credentials.check());
     try testing.expect(saved.saved.eql(Revision.of("Answer in English.")));
     var loaded = try load(testing.io, testing.allocator, path, credentials.check());
     defer loaded.deinit(testing.allocator);
@@ -267,7 +318,7 @@ test "loading creates nothing, and the first save creates the directory and the 
 
     // A second save against the loaded revision replaces the file; no
     // temporary file is left beside it.
-    const again = save(testing.io, path, loaded.revision, "Answer in Chinese.", credentials.check());
+    const again = testSave(path, loaded.revision, "Answer in Chinese.", credentials.check());
     try testing.expect(again == .saved);
     var directory = try tmp.dir.openDir(testing.io, source.global_directory, .{ .iterate = true });
     defer directory.close(testing.io);
@@ -286,16 +337,16 @@ test "a change made outside the editor is a conflict, and the file stays as it w
     const path = try globalPath(tmp);
     defer testing.allocator.free(path);
     var credentials: NoCredentials = .{};
-    const first = save(testing.io, path, .absent, "first", credentials.check()).saved;
+    const first = testSave(path, .absent, "first", credentials.check()).saved;
     // Someone else writes the file after the editor loaded `first`.
     try tmp.dir.writeFile(testing.io, .{ .sub_path = source.global_directory ++ std.fs.path.sep_str ++ source.file_name, .data = "outside" });
-    const outcome = save(testing.io, path, first, "mine", credentials.check());
+    const outcome = testSave(path, first, "mine", credentials.check());
     try testing.expect(outcome.conflict.eql(Revision.of("outside")));
     var loaded = try load(testing.io, testing.allocator, path, credentials.check());
     defer loaded.deinit(testing.allocator);
     try testing.expectEqualStrings("outside", loaded.text.?);
     // Saving over it once the user has seen it is allowed.
-    try testing.expect(save(testing.io, path, outcome.conflict, "mine", credentials.check()) == .saved);
+    try testing.expect(testSave(path, outcome.conflict, "mine", credentials.check()) == .saved);
     // A file created outside after the editor found none conflicts too.
     var tmp_other = testing.tmpDir(.{});
     defer tmp_other.cleanup();
@@ -303,7 +354,7 @@ test "a change made outside the editor is a conflict, and the file stays as it w
     defer testing.allocator.free(other_path);
     try tmp_other.dir.createDirPath(testing.io, source.global_directory);
     try tmp_other.dir.writeFile(testing.io, .{ .sub_path = source.global_directory ++ std.fs.path.sep_str ++ source.file_name, .data = "created outside" });
-    try testing.expect(save(testing.io, other_path, .absent, "mine", credentials.check()) == .conflict);
+    try testing.expect(testSave(other_path, .absent, "mine", credentials.check()) == .conflict);
 }
 
 test "the limit, non-text and credentials are refused before anything is written" {
@@ -315,13 +366,13 @@ test "the limit, non-text and credentials are refused before anything is written
     const over = try testing.allocator.alloc(u8, max_text_bytes + 1);
     defer testing.allocator.free(over);
     @memset(over, 'a');
-    try testing.expect(save(testing.io, path, .absent, over, credentials.check()) == .too_large);
-    try testing.expect(save(testing.io, path, .absent, over[0..max_text_bytes], credentials.check()) == .saved);
+    try testing.expect(testSave(path, .absent, over, credentials.check()) == .too_large);
+    try testing.expect(testSave(path, .absent, over[0..max_text_bytes], credentials.check()) == .saved);
     var loaded = try load(testing.io, testing.allocator, path, credentials.check());
     defer loaded.deinit(testing.allocator);
-    try testing.expect(save(testing.io, path, loaded.revision, "bad\xff", credentials.check()) == .invalid_text);
-    try testing.expect(save(testing.io, path, loaded.revision, "nul\x00", credentials.check()) == .invalid_text);
-    try testing.expect(save(testing.io, path, loaded.revision, "key sk-secret here", credentials.check()) == .contains_credential);
+    try testing.expect(testSave(path, loaded.revision, "bad\xff", credentials.check()) == .invalid_text);
+    try testing.expect(testSave(path, loaded.revision, "nul\x00", credentials.check()) == .invalid_text);
+    try testing.expect(testSave(path, loaded.revision, "key sk-secret here", credentials.check()) == .contains_credential);
     // Every refusal left the saved file alone.
     var again = try load(testing.io, testing.allocator, path, credentials.check());
     defer again.deinit(testing.allocator);
@@ -352,7 +403,7 @@ test "a file larger than the editor loads is shown by size, and non-text as unre
     try testing.expectEqual(LoadState.too_large, large.state);
     try testing.expectEqual(@as(u64, max_load_bytes + 1), large.byte_length.?);
     // Its revision is still known to a save, which conflicts.
-    try testing.expect(save(testing.io, path, .absent, "replace", credentials.check()) == .conflict);
+    try testing.expect(testSave(path, .absent, "replace", credentials.check()) == .conflict);
     // Between the instruction limit and the load limit the editor shows it.
     try tmp.dir.writeFile(testing.io, .{ .sub_path = relative, .data = huge[0 .. max_text_bytes + 10] });
     var over = try load(testing.io, testing.allocator, path, credentials.check());
@@ -364,6 +415,82 @@ test "a file larger than the editor loads is shown by size, and non-text as unre
     defer binary.deinit(testing.allocator);
     try testing.expectEqual(LoadState.unreadable, binary.state);
     try testing.expectEqual(source.Unreadable.not_utf8, binary.reason.?);
+}
+
+/// Creating a link needs a privilege some Windows accounts lack; without one
+/// there is nothing to save through, so that platform proves nothing here.
+fn linkOrSkip(dir: std.Io.Dir, target: []const u8, name: []const u8) !void {
+    dir.symLink(testing.io, target, name, .{}) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+}
+
+test "a save through a link replaces the file it points to and keeps the link" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try globalPath(tmp);
+    defer testing.allocator.free(path);
+    var credentials: NoCredentials = .{};
+    // The user keeps the real file elsewhere, as in a dotfiles checkout.
+    try tmp.dir.createDirPath(testing.io, "dotfiles");
+    try tmp.dir.createDirPath(testing.io, source.global_directory);
+    const target_relative = "dotfiles" ++ std.fs.path.sep_str ++ "AGENTS.md";
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = target_relative, .data = "Linked rules." });
+    if (builtin.os.tag != .windows)
+        try tmp.dir.setFilePermissions(testing.io, target_relative, .fromMode(0o640), .{});
+    const target = try tmp.dir.realPathFileAlloc(testing.io, target_relative, testing.allocator);
+    defer testing.allocator.free(target);
+    var metawork = try tmp.dir.openDir(testing.io, source.global_directory, .{});
+    defer metawork.close(testing.io);
+    try linkOrSkip(metawork, target, source.file_name);
+
+    var loaded = try load(testing.io, testing.allocator, path, credentials.check());
+    defer loaded.deinit(testing.allocator);
+    try testing.expectEqualStrings("Linked rules.", loaded.text.?);
+    try testing.expect(testSave(path, loaded.revision, "Linked rules, revised.", credentials.check()) == .saved);
+
+    // The link is still a link, and the file it names holds the new text
+    // with the permissions it had.
+    const link = try metawork.statFile(testing.io, source.file_name, .{ .follow_symlinks = false });
+    try testing.expectEqual(std.Io.File.Kind.sym_link, link.kind);
+    const replaced = try tmp.dir.readFileAlloc(testing.io, target_relative, testing.allocator, .limited(1024));
+    defer testing.allocator.free(replaced);
+    try testing.expectEqualStrings("Linked rules, revised.", replaced);
+    if (builtin.os.tag != .windows) {
+        const stat = try tmp.dir.statFile(testing.io, target_relative, .{});
+        try testing.expectEqual(@as(std.posix.mode_t, 0o640), stat.permissions.toMode() & 0o777);
+    }
+    // Nothing was left beside the link or beside the file.
+    var dotfiles = try tmp.dir.openDir(testing.io, "dotfiles", .{ .iterate = true });
+    defer dotfiles.close(testing.io);
+    var entries = dotfiles.iterate();
+    var count: usize = 0;
+    while (try entries.next(testing.io)) |_| count += 1;
+    try testing.expectEqual(@as(usize, 1), count);
+}
+
+test "a link that points nowhere is not replaced by a file" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try globalPath(tmp);
+    defer testing.allocator.free(path);
+    var credentials: NoCredentials = .{};
+    try tmp.dir.createDirPath(testing.io, source.global_directory);
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const missing = try std.fs.path.join(testing.allocator, &.{ root, "gone.md" });
+    defer testing.allocator.free(missing);
+    var metawork = try tmp.dir.openDir(testing.io, source.global_directory, .{});
+    defer metawork.close(testing.io);
+    try linkOrSkip(metawork, missing, source.file_name);
+
+    var loaded = try load(testing.io, testing.allocator, path, credentials.check());
+    defer loaded.deinit(testing.allocator);
+    try testing.expectEqual(LoadState.absent, loaded.state);
+    try testing.expect(testSave(path, loaded.revision, "New rules.", credentials.check()) == .write_failed);
+    const link = try metawork.statFile(testing.io, source.file_name, .{ .follow_symlinks = false });
+    try testing.expectEqual(std.Io.File.Kind.sym_link, link.kind);
 }
 
 test "revisions cross the wire as hex or absent, and nothing else parses" {

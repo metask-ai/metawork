@@ -27,6 +27,20 @@ type Notice =
 
 const encoder = new TextEncoder();
 
+/** A textarea reports every line break as LF, whatever the file held. */
+function normalizeLineBreaks(text: string) {
+  return text.replace(/\r\n?/g, "\n");
+}
+
+/**
+ * The file's own line break: CRLF when the loaded text used it, LF
+ * otherwise. A save writes the edited text back in that style, so editing
+ * a CRLF file in MetaWork does not rewrite every line of it.
+ */
+function lineBreakOf(text: string) {
+  return text.includes("\r\n") ? "\r\n" : "\n";
+}
+
 const stateMessages: Partial<
   Record<GlobalInstructionsView["state"], MessageId>
 > = {
@@ -99,27 +113,33 @@ export function GlobalInstructionsSettings({
   const view = load.status === "loaded" ? load.view : null;
   const editable =
     view !== null && (view.state === "ready" || view.state === "absent");
-  const bytes = encoder.encode(draft).length;
+  // What a save would write: the edited text in the file's own line breaks.
+  const outgoing = normalizeLineBreaks(draft).replaceAll(
+    "\n",
+    lineBreakOf(saved),
+  );
+  const bytes = encoder.encode(outgoing).length;
   const overLimit = view !== null && bytes > view.limitBytes;
-  const changed = draft !== saved;
+  const changed = normalizeLineBreaks(draft) !== normalizeLineBreaks(saved);
 
   async function save(expectedRevision: string) {
     if (view === null) return;
     setSaving(true);
     setNotice(null);
+    const text = outgoing;
     try {
-      const result = await actions.save(expectedRevision, draft);
+      const result = await actions.save(expectedRevision, text);
       if (result.outcome === "saved") {
         setLoad({
           status: "loaded",
           view: {
             ...view,
             state: "ready",
-            text: draft,
+            text,
             revision: result.revision,
           },
         });
-        setSaved(draft);
+        setSaved(text);
         setNotice({ kind: "saved" });
       } else if (result.outcome === "conflict") {
         setNotice({ kind: "conflict", revision: result.revision ?? "absent" });
