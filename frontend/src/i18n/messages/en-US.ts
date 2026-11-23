@@ -226,6 +226,7 @@ export const enUS = {
     "Select a conversation to read its messages and linked tasks.",
   "inbox.preview_self": "You: {text}",
   "inbox.sender_self": "You",
+  "inbox.self_conversation": "Me",
   "inbox.also_sent_to": "Also sent to {names}",
   "inbox.list_separator": ", ",
   "inbox.message_truncated":

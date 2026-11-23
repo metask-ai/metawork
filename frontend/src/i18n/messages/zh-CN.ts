@@ -185,6 +185,7 @@ export const zhCN: Record<MessageId, string> = {
   "inbox.pick_hint": "选择会话后即可查看消息和关联任务。",
   "inbox.preview_self": "你：{text}",
   "inbox.sender_self": "你",
+  "inbox.self_conversation": "我自己",
   "inbox.also_sent_to": "同时发给 {names}",
   "inbox.list_separator": "、",
   "inbox.message_truncated": "这条消息太长，只显示了开头一部分。",

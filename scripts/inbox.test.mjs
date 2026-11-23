@@ -405,6 +405,51 @@ test("the conversation list asks for earlier conversations at its end", async ()
   assert.ok(screen.getByText("Loading conversations…"));
 });
 
+test("what the user sent to themself is the Me conversation", async () => {
+  const user = userEvent.setup({ document });
+  const note = {
+    ...message("20", "self", "Remember the demo"),
+    fromPeerId: "u-me",
+    recipients: [],
+  };
+  const client = fakeClient({
+    pages: { "me:latest:null": { messages: [note] } },
+  });
+  render(
+    element(
+      client,
+      view({
+        conversations: [
+          {
+            peerId: "me",
+            name: "Zhu",
+            unread: "0",
+            latest: {
+              id: "20",
+              direction: "self",
+              preview: "Remember the demo",
+              sentAtMs: at("2026-11-23T09:00:00Z"),
+            },
+          },
+        ],
+      }),
+    ),
+  );
+  assert.ok(screen.getByText("You: Remember the demo"));
+  await user.click(screen.getByRole("button", { name: "Me" }));
+  await waitFor(() => assert.ok(screen.getByRole("heading", { name: "Me" })));
+  assert.deepEqual(
+    client.calls.find(([kind]) => kind === "read"),
+    ["read", "1", "me", "latest", null],
+  );
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".inbox-message").dataset.direction,
+      "outgoing",
+    ),
+  );
+});
+
 test("a refused task or a missing conversation is shown where it was asked for", async () => {
   const user = userEvent.setup({ document });
   const client = fakeClient({

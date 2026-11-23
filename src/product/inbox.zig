@@ -245,7 +245,13 @@ pub fn statusFailure(status: u16) ?Failure {
 // service, and unknown fields are ignored. A missing or mistyped required
 // field makes the whole response unusable.
 
-pub const Direction = enum { in, out };
+/// `self` is a message the user sent to themself: from one of their own
+/// agents to another, or a group message that also went to them.
+pub const Direction = enum { in, out, self };
+
+/// The conversation of what the user sent to themself. MetaTeam's own name
+/// for it as a `peer`; never a member id.
+pub const self_peer_id = "me";
 
 pub const Peer = struct {
     id: Id,
@@ -275,13 +281,20 @@ pub const Message = struct {
     recipients: []const Peer,
     text: []const u8,
     task_ids: []const Id,
-
     /// The conversations this message belongs to, seen from this user: what
-    /// came in belongs to its sender, what went out to every recipient.
+    /// came in belongs to its sender, what went out to every recipient, and
+    /// what went to the user themself to `me` and every other recipient.
+    conversations: []const Peer,
+
     pub fn peers(self: *const Message) []const Peer {
-        return if (self.direction == .in) @as(*const [1]Peer, &self.from) else self.recipients;
+        return self.conversations;
     }
 };
+
+/// The `me` conversation, named after the user as MetaTeam reports them.
+pub fn selfPeer(from: Peer) Peer {
+    return .{ .id = Id.init(self_peer_id) catch unreachable, .name = from.name };
+}
 
 pub const Messages = struct {
     arena: std.heap.ArenaAllocator,
@@ -503,14 +516,34 @@ pub fn parseMessages(allocator: std.mem.Allocator, bytes: []const u8) ParseError
                 task_count += 1;
             }
         }
+        const from = try peerValue(object.get("from") orelse return error.InvalidResponse);
+        const kind = std.meta.stringToEnum(Direction, direction) orelse return error.InvalidResponse;
+        const conversations: []const Peer = switch (kind) {
+            .in => (try arena.dupe(Peer, &.{from})),
+            .out => peer_list[0..peers],
+            .self => self: {
+                // A group message that also went to the user is theirs and
+                // every other recipient's.
+                const mine = try arena.alloc(Peer, peers + 1);
+                mine[0] = selfPeer(from);
+                var count_self: usize = 1;
+                for (peer_list[0..peers]) |peer| {
+                    if (peer.id.eql(from.id.slice()) or peer.id.eql(self_peer_id)) continue;
+                    mine[count_self] = peer;
+                    count_self += 1;
+                }
+                break :self mine[0..count_self];
+            },
+        };
         message.* = .{
             .id = try idValue(object.get("id") orelse return error.InvalidResponse),
             .sent_at_ms = try timeValue(object.get("time") orelse return error.InvalidResponse),
-            .direction = std.meta.stringToEnum(Direction, direction) orelse return error.InvalidResponse,
-            .from = try peerValue(object.get("from") orelse return error.InvalidResponse),
+            .direction = kind,
+            .from = from,
             .recipients = peer_list[0..peers],
             .text = text.string,
             .task_ids = task_list[0..task_count],
+            .conversations = conversations,
         };
         // An outgoing message without recipients belongs to no conversation.
         if (message.direction == .out and peers == 0) return error.InvalidResponse;
@@ -1388,16 +1421,24 @@ test "the preview is the first line, cut on a character boundary" {
     try testing.expect(std.unicode.utf8ValidateSlice(cut.slice()));
 }
 
-fn testMessage(id: []const u8, at: u64, direction: Direction, peer: []const u8, text: []const u8) Message {
-    const person: Peer = .{ .id = Id.init(peer) catch unreachable, .name = .truncated(peer) };
+fn testPeers(comptime id: []const u8) []const Peer {
+    return &struct {
+        const value = [1]Peer{.{ .id = Id.init(id) catch unreachable, .name = .truncated(id) }};
+    }.value;
+}
+
+fn testMessage(id: []const u8, at: u64, direction: Direction, comptime peer: []const u8, text: []const u8) Message {
+    const person = testPeers(peer);
+    const user: Peer = .{ .id = Id.init("u-self") catch unreachable, .name = .truncated("Me") };
     return .{
         .id = Id.init(id) catch unreachable,
         .sent_at_ms = at,
         .direction = direction,
-        .from = if (direction == .in) person else .{ .id = Id.init("me") catch unreachable, .name = .truncated("me") },
-        .recipients = &.{},
+        .from = if (direction == .in) person[0] else user,
+        .recipients = if (direction == .in) &.{} else person,
         .text = text,
         .task_ids = &.{},
+        .conversations = person,
     };
 }
 
@@ -1650,4 +1691,38 @@ test "a member listed twice is one row" {
     try testing.expectEqual(@as(usize, 1), messages.items.len);
     try testing.expectEqual(@as(usize, 1), messages.items[0].recipients.len);
     try testing.expectEqual(@as(usize, 1), messages.items[0].task_ids.len);
+}
+
+test "messages to oneself belong to the me conversation and never break the page" {
+    var messages = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[
+        \\ {"id":1,"time":1,"direction":"self","from":{"id":"u-me","username":"zj","name":"Zhu"},"text":"note to self","taskIds":[]},
+        \\ {"id":2,"time":2,"direction":"self","from":{"id":"u-me","name":"Zhu"},"recipients":[{"id":"u-me","name":"Zhu","readAt":null},{"id":"ann","name":"Ann","readAt":null}],"text":"group with me"},
+        \\ {"id":3,"time":3,"direction":"in","from":{"id":"ann","name":"Ann"},"text":"hi"}
+        \\]}}
+    );
+    defer messages.deinit();
+    try testing.expectEqual(@as(usize, 3), messages.items.len);
+    try testing.expectEqual(Direction.self, messages.items[0].direction);
+    try testing.expectEqual(@as(usize, 1), messages.items[0].peers().len);
+    try testing.expectEqualStrings(self_peer_id, messages.items[0].peers()[0].id.slice());
+    // A group message that also went to the user: `me` and every other
+    // recipient, never the user's own member id.
+    try testing.expectEqual(@as(usize, 2), messages.items[1].peers().len);
+    try testing.expectEqualStrings(self_peer_id, messages.items[1].peers()[0].id.slice());
+    try testing.expectEqualStrings("ann", messages.items[1].peers()[1].id.slice());
+
+    var runtime: Runtime = .init(testing.allocator);
+    defer runtime.deinit();
+    runtime.start(true);
+    _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
+    _ = runtime.requestRefresh(0, runtime.binding, false);
+    const first = runtime.beginList().?;
+    _ = try runtime.completeList(0, first.id, .initial, .{ .page = .{ .messages = messages.items, .limit = Limits.list_page } });
+    const view = runtime.view();
+    try testing.expectEqual(@as(usize, 2), view.conversations.len);
+    try testing.expectEqualStrings("ann", view.conversations[0].peerId);
+    try testing.expectEqualStrings(self_peer_id, view.conversations[1].peerId);
+    try testing.expectEqual(Direction.self, view.conversations[1].latest.?.direction);
+    try testing.expect(runtime.knowsPeer(runtime.binding, self_peer_id));
 }

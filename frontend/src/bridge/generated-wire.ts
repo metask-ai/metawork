@@ -245,7 +245,7 @@ export type InboxViewWire = {
     unread: string;
     latest: {
       id: string;
-      direction: "in" | "out";
+      direction: "in" | "out" | "self";
       preview: string;
       sentAtMs: string;
     } | null;
@@ -340,7 +340,7 @@ export function decodeInboxViewWire(
                       direction: enumValue(
                         item.direction,
                         path + ".direction",
-                        ["in", "out"] as const,
+                        ["in", "out", "self"] as const,
                       ),
                       preview: stringValue(item.preview, path + ".preview"),
                       sentAtMs: u64WireInteger(
@@ -415,7 +415,7 @@ export type InboxConversationPageWire = {
   peerId: string;
   messages: readonly {
     id: string;
-    direction: "in" | "out";
+    direction: "in" | "out" | "self";
     fromPeerId: string;
     fromName: string;
     recipients: readonly {
@@ -478,6 +478,7 @@ export function decodeInboxConversationPageWire(
             direction: enumValue(item.direction, path + ".direction", [
               "in",
               "out",
+              "self",
             ] as const),
             fromPeerId: stringValue(item.fromPeerId, path + ".fromPeerId"),
             fromName: stringValue(item.fromName, path + ".fromName"),

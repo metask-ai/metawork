@@ -60,6 +60,17 @@ function mergeMessages(
   return [...older.filter((message) => !seen.has(message.id)), ...newer];
 }
 
+/** MetaTeam's conversation of what the user sent to themself. */
+export const selfPeerId = "me";
+
+function conversationName(
+  peerId: string,
+  name: string,
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return peerId === selfPeerId ? t("inbox.self_conversation") : name;
+}
+
 function countLabel(value: string) {
   const count = Number(value);
   return count > 99 ? "99+" : String(count);
@@ -358,10 +369,11 @@ function ConversationRow({
   const formats = useTimeFormats();
   const unread = Number(conversation.unread);
   const latest = conversation.latest;
+  const name = conversationName(conversation.peerId, conversation.name, t);
   const sentAt = latest ? new Date(Number(latest.sentAtMs)) : null;
   const today = new Date().toDateString();
   const preview = latest
-    ? latest.direction === "out"
+    ? latest.direction !== "in"
       ? t("inbox.preview_self", { text: latest.preview })
       : latest.preview
     : "";
@@ -373,18 +385,18 @@ function ConversationRow({
         aria-label={
           unread > 0
             ? t("inbox.conversation_unread", {
-                name: conversation.name,
+                name,
                 count: unread,
               })
-            : conversation.name
+            : name
         }
         aria-current={selected ? "true" : undefined}
         data-unread={unread > 0}
         onClick={onSelect}
       >
-        <InboxAvatar name={conversation.name} />
+        <InboxAvatar name={name} />
         <span className="inbox-row-copy">
-          <strong>{conversation.name}</strong>
+          <strong>{name}</strong>
           <span>{preview}</span>
         </span>
         <span className="inbox-row-meta">
@@ -501,7 +513,10 @@ export function InboxSidebar({
               conversation={conversation}
               selected={controller.selectedId === conversation.peerId}
               onSelect={() => {
-                controller.select(conversation.peerId, conversation.name);
+                controller.select(
+                  conversation.peerId,
+                  conversationName(conversation.peerId, conversation.name, t),
+                );
                 onSelected?.();
               }}
             />
@@ -749,9 +764,12 @@ function InboxConversationView({
               !previous ||
               sentAt.toDateString() !==
                 new Date(Number(previous.sentAtMs)).toDateString();
-            const outgoing = message.direction === "out";
+            // What the user sent, to others or to themself.
+            const outgoing = message.direction !== "in";
             const others = message.recipients.filter(
-              (recipient) => recipient.peerId !== conversation.peerId,
+              (recipient) =>
+                recipient.peerId !== conversation.peerId &&
+                recipient.peerId !== message.fromPeerId,
             );
             return (
               <li className="inbox-transcript-entry" key={message.id}>
