@@ -3,13 +3,29 @@ import { useEffect, useId, useState, type ReactNode } from "react";
 import type {
   RunActivity,
   RunFileChanges,
+  RunToolLog,
   ToolView,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n, type I18nValue, type MessageId } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
 import { runElapsedSeconds, type RunPresentation } from "./run-presentation.ts";
+import {
+  useRunTools,
+  type RunToolsCache,
+  type RunToolsLoader,
+} from "./run-tools.ts";
 import { ToolDetailView } from "./ToolDetailView.tsx";
+
+/** Where a Run's paged Tool records come from. */
+export type RunToolSource = {
+  loader?: RunToolsLoader;
+  taskId: string;
+  runId: string;
+  securityEpoch?: string;
+  toolLog: RunToolLog;
+  cache?: RunToolsCache;
+};
 
 const emptyExpandedToolIds: ReadonlySet<string> = new Set();
 
@@ -383,6 +399,7 @@ function ProcessTool({
 
 export function RunProcess({
   presentation,
+  toolSource,
   reviewingPermission,
   approvalHistory = null,
   deliveryActions = null,
@@ -398,6 +415,7 @@ export function RunProcess({
   onReviewFileChanges,
 }: {
   presentation: RunPresentation;
+  toolSource: RunToolSource;
   reviewingPermission: boolean;
   approvalHistory?: ReactNode;
   deliveryActions?: ReactNode;
@@ -417,6 +435,17 @@ export function RunProcess({
 }) {
   const { locale, t } = useI18n();
   const bodyId = useId();
+  // Only the open details read records, and only the pages read are shown.
+  const runTools = useRunTools(
+    toolSource.loader,
+    toolSource.taskId,
+    toolSource.runId,
+    toolSource.securityEpoch,
+    toolSource.toolLog,
+    expanded && presentation.processCanCollapse,
+    presentation.active,
+    toolSource.cache,
+  );
   if (!presentation.processVisible && !approvalHistory && !deliveryActions)
     return null;
 
@@ -486,9 +515,9 @@ export function RunProcess({
       />
       {showBody && (
         <div className="run-process-body" id={bodyId}>
-          {presentation.tools.length > 0 && (
+          {runTools.tools.length > 0 && (
             <ul className="run-process-tools">
-              {presentation.tools.map((tool) => (
+              {runTools.tools.map((tool) => (
                 <ProcessTool
                   key={`tool-${tool.id}`}
                   tool={tool}
@@ -501,6 +530,35 @@ export function RunProcess({
                 />
               ))}
             </ul>
+          )}
+          {runTools.status === "loading" && runTools.tools.length === 0 && (
+            <p className="run-process-tools-status" role="status">
+              {t("run.process.tools_loading")}
+            </p>
+          )}
+          {runTools.status === "error" && (
+            <p className="run-process-tools-status" role="alert">
+              {t("run.process.tools_failed")}{" "}
+              <button
+                type="button"
+                className="run-process-tools-action"
+                onClick={runTools.retry}
+              >
+                {t("run.process.tools_retry")}
+              </button>
+            </p>
+          )}
+          {runTools.hasMore && runTools.status !== "error" && (
+            <button
+              type="button"
+              className="run-process-tools-action"
+              disabled={runTools.status === "loading"}
+              onClick={runTools.loadMore}
+            >
+              {t("run.process.tools_more", {
+                count: formatInteger(locale, runTools.remaining),
+              })}
+            </button>
           )}
           {approvalHistory}
           {deliveryActions}

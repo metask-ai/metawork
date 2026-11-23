@@ -28,6 +28,29 @@ pub const Credentials = struct {
         try self.add(value);
     }
 
+    fn containsCallback(context: *const anyopaque, value: []const u8) bool {
+        const self: *const Credentials = @ptrCast(@alignCast(context));
+        for (self.values.items) |known| if (std.mem.indexOf(u8, value, known) != null) return true;
+        return false;
+    }
+
+    fn matchEndCallback(context: *const anyopaque, value: []const u8, start: usize) ?usize {
+        const self: *const Credentials = @ptrCast(@alignCast(context));
+        var end: usize = 0;
+        for (self.values.items) |known| end = @max(end, credential_match.matchEnd(value, start, known) orelse 0);
+        return if (end == 0) null else end;
+    }
+
+    /// Writes directly with this collected set, matching it exactly as a
+    /// frozen snapshot read does.
+    pub fn text(self: *const Credentials, allocator: std.mem.Allocator) Text {
+        return .{ .allocator = allocator, .source = .{ .live = .{
+            .context = self,
+            .contains_fn = containsCallback,
+            .match_end_fn = matchEndCallback,
+        } } };
+    }
+
     pub fn deinit(self: *Credentials) void {
         for (self.values.items) |value| {
             std.crypto.secureZero(u8, @constCast(value));
@@ -39,13 +62,8 @@ pub const Credentials = struct {
 
 const Preparation = struct {
     const Block = struct { key: view_cache.Key, start: usize, end: usize, known: u64, version: u64 = 0, current: bool = true };
-    const Tool = struct { source: ?product_task.OwnedToolProjection, child: *view_plan.Plan, state: product_task.OwnedToolProjection.State = .{} };
     credentials: ?Credentials = null,
-    tools: std.ArrayList(Tool) = .empty,
-    raw_bytes: usize = 0,
     search_query: [product_task.search_query_bytes]u8 = @splat(0),
-    tool_limit: usize = 0,
-    next_tool: usize = 0,
     blocks: [7]Block = undefined,
     next_block: usize = 0,
     versions: view_cache.Versions = .{},
@@ -56,8 +74,6 @@ const Preparation = struct {
     ready: bool = false,
 
     fn clear(self: *Preparation, allocator: std.mem.Allocator) void {
-        for (self.tools.items) |*tool| if (tool.source) |*source| source.deinit(allocator);
-        self.tools.deinit(allocator);
         std.crypto.secureZero(u8, &self.search_query);
         if (self.credentials) |*credentials| credentials.deinit();
         self.tail.clear(allocator);
@@ -81,7 +97,7 @@ pub const Read = struct {
     cached_blocks: [7]?struct { key: view_cache.Key, version: u64, child: *view_plan.Plan } = @splat(null),
     step_timing: if (builtin.is_test) struct { encode_ns: i96 = 0, cache_copy_ns: i96 = 0 } else void = if (builtin.is_test) .{} else {},
 
-    pub fn begin(self: *Read, allocator: std.mem.Allocator, request_input: ViewRequest, security_epoch: u64, max_tools_per_run: usize) error{ViewVersionExhausted}!ViewRequest {
+    pub fn begin(self: *Read, allocator: std.mem.Allocator, request_input: ViewRequest, security_epoch: u64) error{ViewVersionExhausted}!ViewRequest {
         if (builtin.is_test) self.step_timing = .{};
         var request = request_input;
         @memcpy(self.preparation.search_query[0..request.search_query.len], request.search_query);
@@ -91,24 +107,22 @@ pub const Read = struct {
         self.plan.security_epoch = security_epoch;
         self.preparation.credentials = .{ .allocator = allocator };
         self.preparation.known_epoch = request.known_epoch;
-        self.preparation.tool_limit = max_tools_per_run * request.run_limit * @as(usize, if (request.before_run_id == null) 1 else 2);
         return request;
     }
 
-    fn frozenText(self: *Read, storage: Storage, plan: *view_plan.Plan, capture_tools: bool) Text {
+    fn frozenText(self: *Read, storage: Storage, plan: *view_plan.Plan) Text {
         return .{
             .allocator = storage.allocator,
             .source = .{ .frozen = .{
                 .plan = plan,
                 .credentials = self.preparation.credentials.?.values.items,
                 .max_bytes = storage.max_bytes,
-                .capture_tools = if (capture_tools) self else null,
             } },
         };
     }
 
     pub fn rootText(self: *Read, storage: Storage) Text {
-        return self.frozenText(storage, &self.plan, true);
+        return self.frozenText(storage, &self.plan);
     }
 
     pub fn credentialCollector(self: *Read) *Credentials {
@@ -118,7 +132,7 @@ pub const Read = struct {
     pub fn tailText(self: *Read, storage: Storage) Text {
         self.preparation.tail.id = self.plan.id;
         self.preparation.tail.security_epoch = self.plan.security_epoch;
-        return self.frozenText(storage, &self.preparation.tail, false);
+        return self.frozenText(storage, &self.preparation.tail);
     }
 
     pub fn captureBlocks(
@@ -187,40 +201,12 @@ pub const Read = struct {
         return .{ .id = self.plan.id, .bytes = if (self.preparation.ready) self.plan.total else 0, .scratch_bytes = self.preparation.scratch_bytes };
     }
 
-    /// Each continuation performs bounded formatter stages, one block comparison,
-    /// or final metadata assembly. It never advances execution or samples new facts.
+    /// Each continuation performs one block comparison or final metadata
+    /// assembly. It never advances execution or samples new facts.
     pub fn prepareNext(self: *Read, storage: Storage, security_epoch: u64, read_id: u64, output: []u8) Error!Status {
         if (read_id == 0 or read_id != self.plan.id or self.plan.security_epoch != security_epoch or @intFromPtr(output.ptr) != self.plan.storage_identity) return error.StaleSnapshot;
         if (self.preparation.ready) return self.status();
         errdefer self.cancel(storage);
-        if (self.preparation.next_tool < self.preparation.tools.items.len) {
-            var stages: usize = 0;
-            var charged: usize = 0;
-            var finished: usize = 0;
-            while (self.preparation.next_tool < self.preparation.tools.items.len and finished < 4) {
-                const work = &self.preparation.tools.items[self.preparation.next_tool];
-                const text = self.frozenText(storage, work.child, false);
-                const size = work.source.?.ownedBytes();
-                if (stages != 0 and size > 32 * 1024 -| charged) break;
-                const first_string = work.child.strings.items.len;
-                var writer = std.Io.Writer.fixed(output);
-                try work.source.?.writeStage(&writer, text.task(), &work.state);
-                for (work.child.strings.items[first_string..]) |*item| item.at += work.child.skeleton.len;
-                try work.child.appendSkeleton(storage.allocator, storage.max_bytes, writer.buffered());
-                self.preparation.scratch_bytes = @max(self.preparation.scratch_bytes, writer.end);
-                if (work.state.stage == .done) {
-                    try work.child.finalize(storage.max_bytes);
-                    work.source.?.deinit(storage.allocator);
-                    work.source = null;
-                    self.preparation.raw_bytes -= size;
-                    self.preparation.next_tool += 1;
-                    finished += 1;
-                }
-                stages += 1;
-                charged += size;
-            }
-            return self.status();
-        }
         // Cached metadata is already frozen. Skip these constant-size slots;
         // each invoke is reserved for actual preparation rather than empty turns.
         while (self.preparation.next_block < self.preparation.blocks.len and self.preparation.blocks[self.preparation.next_block].version != 0) self.preparation.next_block += 1;
@@ -298,23 +284,7 @@ pub const Read = struct {
         if (self.plan.total - block_bytes > 768 * 1024) return error.SnapshotTooLarge;
         if (self.preparation.credentials) |*credentials| credentials.deinit();
         self.preparation.credentials = null;
-        self.preparation.tools.deinit(storage.allocator);
-        self.preparation.tools = .empty;
         self.preparation.ready = true;
-    }
-
-    fn captureTool(self: *Read, allocator: std.mem.Allocator, max_bytes: usize, writer: *std.Io.Writer, tool: *const product_task.ToolProjection) product_task.ProjectionError!void {
-        if (self.preparation.tools.items.len >= self.preparation.tool_limit) return error.SnapshotTooLarge;
-        const owned = self.plan.ownedBytes() + self.preparation.raw_bytes;
-        var source = try product_task.OwnedToolProjection.capture(allocator, tool, max_bytes -| owned);
-        errdefer source.deinit(allocator);
-        const child = self.plan.appendChild(allocator, writer) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.SnapshotTooLarge,
-        };
-        const size = source.ownedBytes();
-        try self.preparation.tools.append(allocator, .{ .source = source, .child = child });
-        self.preparation.raw_bytes += size;
     }
 
     fn takeCachedViewBlock(self: *Read, storage: Storage, index: usize, key: view_cache.Key, version: u64, child: *view_plan.Plan) Error!void {
@@ -416,7 +386,6 @@ pub const Text = struct {
             plan: *view_plan.Plan,
             credentials: []const []const u8,
             max_bytes: usize,
-            capture_tools: ?*Read = null,
         },
     },
 
@@ -470,9 +439,12 @@ pub const Text = struct {
     fn writeLiveJson(self: *const Text, writer: *std.Io.Writer, value: []const u8) Error!void {
         const hex = "0123456789abcdef";
         writer.writeByte('"') catch return error.SnapshotTooLarge;
+        // Matches are whole credentials, so text containing none needs no
+        // per-position search.
+        const sensitive = self.contains(value);
         var index: usize = 0;
         while (index < value.len) {
-            if (self.matchEnd(value, index)) |redaction_end| {
+            if (if (sensitive) self.matchEnd(value, index) else null) |redaction_end| {
                 _ = writer.splatByte('*', @min(redaction_end - index, 3)) catch
                     return error.SnapshotTooLarge;
                 index = redaction_end;
@@ -509,12 +481,6 @@ pub const Text = struct {
         self.writeJson(writer, value) catch return error.SnapshotTooLarge;
     }
 
-    fn captureToolCallback(context: *const anyopaque, writer: *std.Io.Writer, tool: *const product_task.ToolProjection) product_task.ProjectionError!void {
-        const self: *const Text = @ptrCast(@alignCast(context));
-        const frozen = self.source.frozen;
-        return frozen.capture_tools.?.captureTool(self.allocator, frozen.max_bytes, writer, tool);
-    }
-
     pub fn task(self: *const Text) product_task.ProjectionText {
         return .{
             .context = self,
@@ -522,7 +488,6 @@ pub const Text = struct {
             .write_json_fn = writeCallback,
             .write_json_output_fn = writeTaskViewJsonOutput,
             .write_json_parts_fn = writeTaskViewJsonParts,
-            .capture_tool_fn = if (self.source == .frozen and self.source.frozen.capture_tools != null) captureToolCallback else null,
         };
     }
 

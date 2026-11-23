@@ -21,10 +21,12 @@ const attachment_grant = @import("attachment_grant.zig");
 const notification_text = @import("notification_text.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 21;
+const async_product_handler_count = 22;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
+/// The identity fields and the success envelope fit in the remainder.
+const run_tools_page_bytes: usize = native_sdk.bridge.max_result_bytes - 4 * 1024;
 const max_preview_in_flight: usize = 8;
 const max_diff_in_flight: usize = 8;
 const max_attachment_in_flight: usize = 4;
@@ -566,6 +568,7 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[18] = .{ .name = commands.mcp_verify_add_http_draft, .context = self, .invoke_fn = verifyAndAddMcpHttpDraft };
         self.registered_async_handlers[19] = .{ .name = commands.media_preview, .context = self, .invoke_fn = mediaPreview };
         self.registered_async_handlers[20] = .{ .name = commands.add_project, .context = self, .invoke_fn = chooseWorkspace };
+        self.registered_async_handlers[21] = .{ .name = commands.read_run_tools, .context = self, .invoke_fn = readRunTools };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -1353,6 +1356,55 @@ pub const Dispatcher = struct {
         if (preview_id == 0) return error.InvalidBridgeId;
         try self.delivery.validateConnection(generation, invocation.source.window_id);
         return .{ .generation = generation, .preview_id = preview_id };
+    }
+
+    fn readRunTools(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.respondRunTools(invocation, responder) catch {
+            // A malformed, stale or unauthorized request learns nothing about history.
+            responder.fail(invocation.request.id, .handler_failed, "Tool records are unavailable") catch {};
+        };
+    }
+    /// One page is formatted synchronously and bounded by its source budget;
+    /// the encoded page leaves room for the identity fields and the envelope.
+    fn respondRunTools(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.RunToolsRequest, invocation.request.payload);
+        defer parsed.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        const generation = try handlers.parseWireId(parsed.value.generation);
+        const request_id = try handlers.parseWireId(parsed.value.requestId);
+        // The identity only pairs a response with its request: a read is
+        // idempotent, and callers sharing a connection keep their own count.
+        if (request_id == 0) return error.InvalidBridgePayload;
+        try self.delivery.validateConnection(generation, invocation.source.window_id);
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const run_id = try handlers.parseWireId(parsed.value.runId);
+        const after_order = try handlers.parseWireId(parsed.value.afterOrder);
+        if (task_id == 0 or run_id == 0) return error.InvalidBridgePayload;
+        const control = try self.requireProductControl();
+        const page_buffer = try self.allocator.alloc(u8, run_tools_page_bytes);
+        defer self.allocator.free(page_buffer);
+        const page = try control.writeToolPage(page_buffer, task_id, run_id, after_order);
+        const result = try self.allocator.alloc(u8, native_sdk.bridge.max_result_bytes);
+        defer self.allocator.free(result);
+        var writer = std.Io.Writer.fixed(result);
+        try writer.print("{{\"generation\":\"{d}\",\"requestId\":\"{d}\",\"state\":\"{s}\",\"securityEpoch\":\"{d}\",\"revision\":\"{d}\",\"total\":\"{d}\",\"tools\":", .{
+            generation,
+            request_id,
+            @tagName(page.state),
+            control.projectionSecurityEpoch(),
+            page.revision,
+            page.total,
+        });
+        try writer.writeAll(if (page.state == .ready) page.json else "[]");
+        if (page.next_after_order) |order|
+            try writer.print(",\"nextAfterOrder\":\"{d}\"}}", .{order})
+        else
+            try writer.writeAll(",\"nextAfterOrder\":null}");
+        try responder.success(invocation.request.id, writer.buffered());
     }
 
     fn previewFile(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
@@ -7131,6 +7183,117 @@ test "file preview native grants bind authority and cancellation and expire with
     boundary.assertQuiescent();
 }
 
+test "Tool page command answers the bound connection with one bounded page" {
+    const Host = struct {
+        fn wake(_: ?*anyopaque) !void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn random(_: ?*anyopaque, bytes: []u8) bool {
+            @memset(bytes, 7);
+            return true;
+        }
+    };
+    const Capture = struct {
+        response: ?[]u8 = null,
+        fn receive(context: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.response) |old| std.testing.allocator.free(old);
+            self.response = try std.testing.allocator.dupe(u8, bytes);
+        }
+        fn deinit(self: *@This()) void {
+            if (self.response) |bytes| std.testing.allocator.free(bytes);
+        }
+        fn invoke(self: *@This(), native: native_sdk.bridge.Dispatcher, payload: []const u8, window_id: u64) !void {
+            const handler = native.async_registry.find(commands.read_run_tools).?;
+            const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = window_id };
+            try handler.invoke_fn(handler.context, .{ .request = .{ .id = "tools-test", .command = commands.read_run_tools, .payload = payload }, .source = source }, .{ .context = self, .source = source, .respond_fn = receive });
+        }
+        fn result(self: *@This()) !std.json.Parsed(std.json.Value) {
+            return std.json.parseFromSlice(std.json.Value, std.testing.allocator, self.response.?, .{});
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const control = try std.testing.allocator.create(product_control.Runtime);
+    defer std.testing.allocator.destroy(control);
+    try product_control.TestSupport.filePreviewFixture(control, root);
+    defer control.deinit();
+    var boundary = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{
+        .context = null,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .random_fn = Host.random,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_control_fn = undefined,
+    }, .{}, 3);
+    defer boundary.deinit();
+    _ = try boundary.delivery.connect(3, boundary.transport());
+    const native = boundary.register(@import("policy.zig").product(.release));
+    var capture: Capture = .{};
+    defer capture.deinit();
+
+    try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"0\"}", 3);
+    {
+        var parsed = try capture.result();
+        defer parsed.deinit();
+        const value = parsed.value.object.get("result").?.object;
+        try std.testing.expectEqual(@as(usize, 8), value.count());
+        try std.testing.expectEqualStrings("1", value.get("generation").?.string);
+        try std.testing.expectEqualStrings("1", value.get("requestId").?.string);
+        try std.testing.expectEqualStrings("ready", value.get("state").?.string);
+        var epoch: [20]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&epoch, "{d}", .{control.projectionSecurityEpoch()}), value.get("securityEpoch").?.string);
+        try std.testing.expectEqualStrings("1", value.get("total").?.string);
+        try std.testing.expect(value.get("nextAfterOrder").? == .null);
+        const tools = value.get("tools").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), tools.len);
+        try std.testing.expectEqualStrings("file-3-1-1-1", tools[0].object.get("fileRefs").?.array.items[0].object.get("id").?.string);
+    }
+    // Another caller on the same connection keeps its own count: the same
+    // identity reads again and is echoed back, and zero is never one.
+    try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"0\"}", 3);
+    {
+        var parsed = try capture.result();
+        defer parsed.deinit();
+        const value = parsed.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("1", value.get("requestId").?.string);
+        try std.testing.expectEqualStrings("ready", value.get("state").?.string);
+    }
+    try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"0\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"0\"}", 3);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"ok\":false") != null);
+    // A Run outside this Task reveals nothing but that it is missing.
+    try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"2\",\"taskId\":\"3\",\"runId\":\"8\",\"afterOrder\":\"0\"}", 3);
+    {
+        var parsed = try capture.result();
+        defer parsed.deinit();
+        const value = parsed.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("missing", value.get("state").?.string);
+        try std.testing.expectEqual(@as(usize, 0), value.get("tools").?.array.items.len);
+    }
+    // Another window or a stale generation is not the bound connection.
+    try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"3\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"0\"}", 4);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"ok\":false") != null);
+    try capture.invoke(native, "{\"generation\":\"2\",\"requestId\":\"4\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"0\"}", 3);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"ok\":false") != null);
+    try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"5\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"x\"}", 3);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"ok\":false") != null);
+}
+
 test "file preview async response preserves the exact bounded wire shape" {
     const Capture = struct {
         allocator: std.mem.Allocator,
@@ -7627,7 +7790,7 @@ test "file receive dispatch scopes cancellation, response loss and generation cl
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
     var configuration = fixture.productControlConfiguration();
     configuration.attachment_store = &store;
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 1, .max_runs_per_task = 1 }, configuration);
     var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
         .attachment_input = .file_bytes,
         .context = null,
@@ -7753,7 +7916,7 @@ test "global instructions cross the Bridge only as the editor's own load and rev
         std.testing.allocator,
         std.testing.io,
         runtime.runtimePort(),
-        .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        .{ .max_tasks = 1, .max_runs_per_task = 1 },
         configuration,
     );
     var harness: Harness = .{};
@@ -7901,7 +8064,7 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
         std.testing.allocator,
         std.testing.io,
         runtime.runtimePort(),
-        .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        .{ .max_tasks = 1, .max_runs_per_task = 1 },
         configuration,
     );
     var harness: Harness = .{
@@ -8203,7 +8366,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         std.testing.allocator,
         std.testing.io,
         runtime.runtimePort(),
-        .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        .{ .max_tasks = 1, .max_runs_per_task = 1 },
         fixture.productControlConfiguration(),
     );
     try fixture.installProductControlExecution(&workbench);
@@ -8929,7 +9092,7 @@ test "a dropped path stages a whole original without a byte round trip" {
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
     var configuration = fixture.productControlConfiguration();
     configuration.attachment_store = &store;
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 1, .max_runs_per_task = 1 }, configuration);
     var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
         .attachment_input = .native_paths,
         .context = null,
@@ -9082,7 +9245,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
     var configuration = fixture.productControlConfiguration();
     configuration.attachment_store = &store;
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 1, .max_runs_per_task = 1 }, configuration);
     var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
         .attachment_input = .native_paths,
         .context = null,
@@ -9480,7 +9643,7 @@ test "active input dispatch accepts FIFO without waiting for responses and scope
         fixture.shutdownTestComposition(runtime) catch unreachable;
         fixture.deinitTestComposition(runtime);
     }
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, fixture.productControlConfiguration());
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2 }, fixture.productControlConfiguration());
     defer control.deinit();
     try fixture.installProductControlExecution(&control);
     var input = fixture.productControlTaskInput();
@@ -9733,6 +9896,8 @@ test "Product view Dispatcher freezes and transports a complete multi-chunk snap
         result = descriptor.value.object.get("result").?.object;
         try std.testing.expectEqual(id, try std.fmt.parseInt(u64, result.get("snapshotId").?.string, 10));
     }
+    // A cold read with every block uncached uses exactly the published bound.
+    try std.testing.expectEqual(@as(usize, @import("snapshot_contract.zig").max_preparation_steps), preparation_steps);
     const bytes: usize = @intCast(result.get("bytes").?.integer);
     try std.testing.expect(bytes > product_delivery.snapshot_chunk_bytes);
     try std.testing.expectEqual(@as(usize, 0), product_control.TestSupport.snapshotProgress(control).produced);
@@ -10219,7 +10384,7 @@ test "Workspace opening and removal Bridge validate authority and preserve files
     Host.outcome = .opened;
     fixture.fake_core.reset();
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, fixture.productControlConfiguration());
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 1, .max_runs_per_task = 1 }, fixture.productControlConfiguration());
     var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
         .context = null,
         .wake_fn = Host.wake,

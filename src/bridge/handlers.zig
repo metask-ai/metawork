@@ -599,6 +599,13 @@ fn mediaTargetIndex(object: std.json.ObjectMap) !u32 {
 pub const MediaThumbnailRequest = struct { generation: []const u8, target: MediaTarget };
 pub const MediaPreviewRequest = struct { generation: []const u8, previewId: []const u8, target: MediaTarget };
 pub const FilePreviewChunkRequest = struct { generation: []const u8, previewId: []const u8, token: []const u8, offset: []const u8, securityEpoch: []const u8 };
+pub const RunToolsRequest = struct {
+    generation: []const u8,
+    requestId: []const u8,
+    taskId: []const u8,
+    runId: []const u8,
+    afterOrder: []const u8,
+};
 pub const FilePreviewRequest = struct {
     generation: []const u8,
     previewId: []const u8,

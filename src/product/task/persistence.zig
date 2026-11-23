@@ -605,7 +605,6 @@ pub const Limits = struct {
     max_tasks: usize,
     max_runs_per_task: usize,
     max_compacts_per_task: usize,
-    max_tools_per_run: usize,
     max_commentary_segments_per_run: usize,
     max_file_refs_per_tool: usize,
     max_file_changes_per_run: usize = 256,
@@ -1892,6 +1891,7 @@ pub const RestoreProjection = struct {
 /// Runs the real restore checks without adopting its interrupted projection.
 /// Used by framed recovery and strict SQL validation; input facts stay intact.
 pub fn validateRestorableTask(allocator: std.mem.Allocator, value: TaskWire, limits: Limits) RestoreError!void {
+    try validateActivityIdentities(allocator, value);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     var restore = Restore{ .allocator = arena.allocator() };
@@ -1908,6 +1908,37 @@ pub fn validateRestorableTask(allocator: std.mem.Allocator, value: TaskWire, lim
         .reserve_bytes_fn = Restore.reserveBytes,
         .release_bytes_fn = Restore.releaseBytes,
     }, value);
+}
+
+/// A Run's Tool records carry unique ids and activity orders, and no File
+/// Change or approval of that Run reuses a Tool order. Sets keep this linear in
+/// the size of the Run; allocation failure stays OutOfMemory and is never
+/// reported as an invalid store. Order collisions between File Changes and
+/// approvals have never been part of the stored contract and are not checked.
+fn validateActivityIdentities(allocator: std.mem.Allocator, task: TaskWire) (Error || std.mem.Allocator.Error)!void {
+    var ids: std.StringHashMapUnmanaged(void) = .empty;
+    defer ids.deinit(allocator);
+    var orders: std.AutoHashMapUnmanaged(u64, void) = .empty;
+    defer orders.deinit(allocator);
+    for (task.runs) |run| {
+        ids.clearRetainingCapacity();
+        orders.clearRetainingCapacity();
+        const count = std.math.cast(u32, run.tools.len) orelse return error.TaskStoreCorrupt;
+        try ids.ensureTotalCapacity(allocator, count);
+        try orders.ensureTotalCapacity(allocator, count);
+        for (run.tools) |tool| {
+            if (ids.getOrPutAssumeCapacity(tool.id).found_existing or
+                orders.getOrPutAssumeCapacity(tool.order).found_existing)
+                return error.TaskStoreCorrupt;
+        }
+        if (run.file_changes) |changes| for (changes) |change| {
+            if (orders.contains(change.order)) return error.TaskStoreCorrupt;
+        };
+        for (task.ui_history) |record| {
+            if (record.run_id == run.id and orders.contains(record.order))
+                return error.TaskStoreCorrupt;
+        }
+    }
 }
 
 const Restore = struct {
@@ -2175,7 +2206,7 @@ fn restoreCheckpointRecord(
 }
 
 fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_state.RunRecord {
-    if (wire.additional_inputs.len > agent.max_submitted_inputs or wire.tools.len > projection.limits.max_tools_per_run) return error.TaskStoreCorrupt;
+    if (wire.additional_inputs.len > agent.max_submitted_inputs) return error.TaskStoreCorrupt;
     const additional = try projection.allocator.alloc(?task_state.AdditionalInput, wire.additional_inputs.len);
     errdefer projection.allocator.free(additional);
     @memset(additional, null);
@@ -3063,6 +3094,10 @@ pub fn diagnoseCandidate(allocator: std.mem.Allocator, state: *const StateWire, 
 
 pub fn encodeAlloc(allocator: std.mem.Allocator, state: StateWire, preserved: PreservedFrames, limits: Limits) (Error || std.mem.Allocator.Error)![]u8 {
     if (validateCandidate(&state, limits) != null) return error.TaskStoreEncodeFailed;
+    for (state.tasks) |task| validateActivityIdentities(allocator, task) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.TaskStoreEncodeFailed,
+    };
     if (state.failures.len > max_failure_records) return error.TaskStoreTooLarge;
     var capacity: usize = 64 * 1024;
     while (true) {
@@ -3947,7 +3982,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             ((!terminalRunPhase(run.phase) or run.execution_generation == task.binding.execution_generation) and !std.mem.eql(u8, run.execution_protocol, task.binding.protocol)) or
             !validText(run.assistant, limits.max_assistant_message_bytes, true) or
             !validText(run.diagnostic, limits.max_terminal_diagnostic_bytes, true) or
-            run.tools.len > limits.max_tools_per_run or run.next_activity_order == 0)
+            run.next_activity_order == 0)
             return error.Invalid;
         if (run.additional_inputs.len > agent.max_submitted_inputs) return error.Invalid;
         if (run.model_error) |value| {
@@ -4020,7 +4055,9 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                 (previous.execution_generation == run.execution_generation and !std.mem.eql(u8, previous.execution_protocol, run.execution_protocol)))
                 return error.Invalid;
         try validateRunInput(run.input, limits);
-        for (run.tools, 0..) |tool, tool_index| {
+        // Identity and activity order collisions are checked with sets in
+        // validateActivityIdentities, which can allocate and report memory.
+        for (run.tools) |tool| {
             if (!validText(tool.id, limits.max_tool_field_bytes, false) or
                 tool.order == 0 or
                 !validText(tool.name, limits.max_tool_field_bytes, false) or
@@ -4049,9 +4086,6 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                     }
                 }
             }
-            for (run.tools[0..tool_index]) |previous|
-                if (std.mem.eql(u8, previous.id, tool.id) or previous.order == tool.order)
-                    return error.Invalid;
         }
         try validateOutputs(run.outputs);
         try validateUpdatedOutputIds(run.updated_output_ids);
@@ -4091,8 +4125,6 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                     if (std.mem.eql(u8, previous.id, change.id) or
                         previous.order == change.order)
                         return error.Invalid;
-                for (run.tools) |tool|
-                    if (tool.order == change.order) return error.Invalid;
             }
         }
         const terminal = terminalRunPhase(run.phase);
@@ -4217,9 +4249,6 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             if (previous.request_id == record.request_id or
                 (previous.run_id == record.run_id and previous.order == record.order))
                 return error.Invalid;
-        const run = findRun(task.runs, record.run_id) orelse unreachable;
-        for (run.tools) |tool| if (tool.order == record.order)
-            return error.Invalid;
     }
     for (task.runs) |run| {
         var max_activity_order: u64 = 0;
@@ -5506,8 +5535,109 @@ test "task store rejects states that would violate the product contract" {
     try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
     compacts[0].cause = null;
 
+    // An approval reusing a Tool order is an activity identity collision.
     ui_history[0].order = 1;
-    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    try validate(&state, testLimits());
+    try std.testing.expectError(error.TaskStoreCorrupt, validateActivityIdentities(std.testing.allocator, tasks[0]));
+    try std.testing.expectError(error.TaskStoreCorrupt, validateRestorableTask(std.testing.allocator, tasks[0], testLimits()));
+    ui_history[0].order = 2;
+    try validateActivityIdentities(std.testing.allocator, tasks[0]);
+}
+
+test "activity identities are checked with sets and never report memory as corruption" {
+    const tool = ToolWire{
+        .id = "tool-1",
+        .order = 1,
+        .name = "Read",
+        .input = "",
+        .progress = "",
+        .content = "",
+        .state = "completed",
+        .is_error = false,
+        .elapsed_ms = 1,
+        .input_truncated = false,
+        .progress_truncated = false,
+        .content_truncated = false,
+        .redacted = false,
+    };
+    var tools: [3]ToolWire = .{ tool, tool, tool };
+    tools[1].id = "tool-2";
+    tools[1].order = 2;
+    tools[2].id = "tool-3";
+    tools[2].order = 3;
+    var changes = [_]FileChangeWire{.{ .id = "change-1-1-4", .order = 4, .kind = "modified", .status = "applied", .display_path = "a.txt", .from_display_path = null, .before_bytes = 1, .after_bytes = 2, .artifact = null, .diff_complete = false, .redacted = false }};
+    var runs = [_]RunWire{.{
+        .id = 1,
+        .generation = 1,
+        .coverage = "covered",
+        .execution_generation = 1,
+        .execution_protocol = "anthropic_messages",
+        .execution_model = "model",
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
+        .input = .{ .kind = "text", .text = "", .skill_id = null, .catalog_revision = null, .invocation_name = null, .display_name = null, .argument_values = null, .redacted = false },
+        .assistant = "",
+        .assistant_redacted = false,
+        .commentary_ends = &.{},
+        .assistant_output_kind = "final",
+        .assistant_output_start = 0,
+        .phase = "completed",
+        .outcome = "completed",
+        .cause = null,
+        .usage = .{ .input_tokens = 0, .output_tokens = 0, .cache_read_input_tokens = 0, .cache_creation_input_tokens = 0 },
+        .tools = &tools,
+        .file_change_observation = "complete",
+        .file_changes = &changes,
+        .diagnostic = "",
+        .diagnostic_truncated = false,
+        .diagnostic_redacted = false,
+        .event_projection_failure = null,
+        .next_activity_order = 5,
+    }};
+    var ui_history = [_]UiRecordWire{.{ .request_id = 9, .run_id = 1, .order = 5, .kind = "permission", .state = "allowed_once", .detail = "", .item_count = 0, .detail_truncated = false, .redacted = false }};
+    const task = TaskWire{
+        .id = 1,
+        .recent_order = 1,
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "/tmp/repo",
+        .title = "",
+        .title_redacted = false,
+        .archived = false,
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
+        .binding = .{ .epoch = 1, .execution_generation = 1, .protocol = "anthropic_messages", .model = "model" },
+        .next_run_generation = 2,
+        .active_operation = null,
+        .runs = &runs,
+        .compacts = &.{},
+        .ui_history = &ui_history,
+    };
+    try validateActivityIdentities(std.testing.allocator, task);
+
+    // Each collision is found wherever it sits in the Run.
+    tools[2].id = "tool-1";
+    try std.testing.expectError(error.TaskStoreCorrupt, validateActivityIdentities(std.testing.allocator, task));
+    tools[2].id = "tool-3";
+    tools[2].order = 1;
+    try std.testing.expectError(error.TaskStoreCorrupt, validateActivityIdentities(std.testing.allocator, task));
+    tools[2].order = 3;
+    changes[0].order = 2;
+    try std.testing.expectError(error.TaskStoreCorrupt, validateActivityIdentities(std.testing.allocator, task));
+    changes[0].order = 4;
+    ui_history[0].order = 3;
+    try std.testing.expectError(error.TaskStoreCorrupt, validateActivityIdentities(std.testing.allocator, task));
+    // A File Change and an approval sharing an order was never checked.
+    ui_history[0].order = 4;
+    try validateActivityIdentities(std.testing.allocator, task);
+
+    // Allocation failure is reported as memory, not as an invalid store.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, validateActivityIdentities(failing.allocator(), task));
+    try std.testing.expectError(error.OutOfMemory, validateRestorableTask(failing.allocator(), task, testLimits()));
+    tools[2].id = "tool-1";
+    failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, validateActivityIdentities(failing.allocator(), task));
 }
 
 test "task file store holds one writer and atomically replaces bytes" {
@@ -6090,7 +6220,6 @@ fn testLimits() Limits {
         .max_tasks = 4,
         .max_runs_per_task = 4,
         .max_compacts_per_task = 4,
-        .max_tools_per_run = 4,
         .max_commentary_segments_per_run = 16,
         .max_file_refs_per_tool = 4,
         .max_ui_history_per_task = 4,

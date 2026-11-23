@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { withToolSummary } from "./test-support/run-tools-fixture.mjs";
 
 import {
   deriveAssistantOutputParts,
@@ -233,7 +234,7 @@ function flowLabels(flow) {
   );
 }
 function projectedRun(id, overrides = {}) {
-  return {
+  return withToolSummary({
     id,
     submission: null,
     phase: "completed",
@@ -244,7 +245,7 @@ function projectedRun(id, overrides = {}) {
     input: { kind: "text", text: `root ${id}`, redacted: false },
     output: output({ response: "done", responseKind: "final" }),
     ...overrides,
-  };
+  });
 }
 
 test("an accepted image stays before the interjection when later output arrives, without adoption order", () => {

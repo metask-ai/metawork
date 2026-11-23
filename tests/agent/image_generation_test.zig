@@ -1685,8 +1685,10 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
     const chunk = try control.readFilePreviewMedia(capture.image_id, 0);
     try std.testing.expect(chunk.len > 0);
     try std.testing.expect(control.releaseFilePreview(capture.image_id));
+    // Generated references reach the Renderer in the task page's file
+    // references; whole-history projections carry only the Tool summary.
     var snapshot: [256 * 1024]u8 = undefined;
-    const json = try control.writeAggregateFixture(&snapshot);
+    const json = try control.writeViewFixture(&snapshot, .{ .task_id = task_id });
     try std.testing.expect(std.mem.indexOf(u8, json, "\"generatedImage\":true") != null);
 }
 
@@ -2297,8 +2299,8 @@ test "GenerateVideo canonical Product prepares an ordinary Run and delivers its 
                 1 => {
                     saved_path = try onlyVideoPath(&h);
                     try std.testing.expectEqual(bytes.len, (try h.tmp.dir.statFile(std.testing.io, saved_path.?, .{})).size);
-                    var inline_storage: [64 * 1024]u8 = undefined;
-                    const inline_snapshot = try control.writeAggregateFixture(&inline_storage);
+                    var inline_storage: [256 * 1024]u8 = undefined;
+                    const inline_snapshot = try control.writeViewFixture(&inline_storage, .{ .task_id = task_id });
                     try std.testing.expect(std.mem.indexOf(u8, inline_snapshot, "\"generatedVideo\":true,\"presentationAnchor\":{") != null);
                 },
                 else => return error.TestUnexpectedResult,

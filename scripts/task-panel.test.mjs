@@ -1,4 +1,10 @@
 import { productStateFixture } from "./test-support/product-view-fixture.mjs";
+import {
+  runToolsCacheFor,
+  runToolsLoaderFor,
+  withToolSummaries,
+  withToolSummary,
+} from "./test-support/run-tools-fixture.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -201,6 +207,20 @@ function run(overrides = {}) {
   };
 }
 
+/** RunProcess props for a fixture Run whose records are already read. */
+function runProcessProps(value) {
+  const shaped = withToolSummary(value);
+  return {
+    presentation: deriveRunPresentation(shaped),
+    toolSource: {
+      taskId: "1",
+      runId: value.id,
+      toolLog: shaped.toolLog,
+      cache: runToolsCacheFor({ id: "1", runs: [value] }),
+    },
+  };
+}
+
 function technicalTool(overrides = {}) {
   return {
     id: "tool-1",
@@ -385,7 +405,7 @@ test("expanded process keeps each Tool summary to one bounded line", async () =>
   const view = render(
     localizedView(
       createElement(RunProcess, {
-        presentation: deriveRunPresentation(value),
+        ...runProcessProps(value),
         expanded: true,
         onExpandedChange() {},
       }),
@@ -710,6 +730,7 @@ function task(overrides = {}) {
     pendingUi: null,
     uiHistory: [],
     ...overrides,
+    runs: (overrides.runs ?? []).map(withToolSummary),
   };
 }
 
@@ -725,7 +746,8 @@ function renderTaskContent(value, locale = "en-US", props = {}) {
         },
       },
       createElement(TaskContent, {
-        task: value,
+        task: withToolSummaries(value),
+        runToolsCache: runToolsCacheFor(value),
         revision: "1",
         composerHasDraft: false,
         retryAvailable: false,
@@ -982,7 +1004,9 @@ function taskContentElement(
 ) {
   return localizedView(
     createElement(TaskContent, {
-      task: value,
+      task: value && withToolSummaries(value),
+      runToolsCache: runToolsCacheFor(value),
+      loadRunTools: runToolsLoaderFor(value?.runs ?? []),
       snapshotReceivedAt: null,
       revision,
       composerHasDraft: false,
@@ -1060,7 +1084,7 @@ function runProcessElement(
   function Harness() {
     const [expandedToolIds, setExpandedToolIds] = useState(new Set());
     return createElement(RunProcess, {
-      presentation: deriveRunPresentation(value),
+      ...runProcessProps(value),
       reviewingPermission: false,
       fileChanges: value.fileChanges ?? null,
       elapsedMs: value.elapsedMs,
@@ -1096,7 +1120,7 @@ test("elapsed display advances without snapshots, rebases on receipt and disappe
   const element = (value, elapsedMs, snapshotReceivedAt) =>
     localizedView(
       createElement(RunProcess, {
-        presentation: deriveRunPresentation(value),
+        ...runProcessProps(value),
         elapsedMs,
         snapshotReceivedAt,
         expanded: false,
@@ -1166,7 +1190,7 @@ test("unsynchronized status pauses elapsed and resumes only from the received Ho
   ) =>
     localizedView(
       createElement(RunProcess, {
-        presentation: deriveRunPresentation(active),
+        ...runProcessProps(active),
         synchronized,
         elapsedMs,
         snapshotReceivedAt,
@@ -2281,7 +2305,7 @@ test("Tool disclosures expand independently and survive Work process collapse", 
     const [expanded, setExpanded] = useState(false);
     const [expandedToolIds, setExpandedToolIds] = useState(new Set());
     return createElement(RunProcess, {
-      presentation: deriveRunPresentation(value),
+      ...runProcessProps(value),
       expanded,
       onExpandedChange: setExpanded,
       expandedToolIds,
@@ -2548,8 +2572,9 @@ test("terminal transition preserves an explicitly expanded Tool detail", async (
       "2",
     ),
   );
+  // The finished record arrives with the next page read.
+  assert.ok(await screen.findByText("recorded evidence"));
   assert.ok(screen.getByRole("region", { name: "Details for Read" }));
-  assert.ok(screen.getByText("recorded evidence"));
 });
 
 test("reply metadata stays with its response before a later user interjection", () => {
@@ -2920,7 +2945,7 @@ test("Task switches restore each Task reading position without cross-contaminati
   assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
 });
 
-test("reading memory survives unloaded bodies and remount, and restores after history refill", () => {
+test("reading memory survives unloaded bodies and remount, and restores after history refill", async () => {
   const memory = createTaskReadingMemory();
   const value = task({
     id: "task-a",
@@ -2974,7 +2999,8 @@ test("reading memory survives unloaded bodies and remount, and restores after hi
     }),
   );
   assert.equal(nextViewport.scrollTop, 180);
-  assert.ok(screen.getByRole("region", { name: "Details for Read" }));
+  // A remounted view reads the open details' records again.
+  assert.ok(await screen.findByRole("region", { name: "Details for Read" }));
   assert.ok(screen.getByText("preserved tool output"));
 });
 
@@ -3022,7 +3048,9 @@ test("panel tabs distinguish a manifest-confirmed unloaded Run from deleted evid
       true,
       manifest,
     ).tabs.map((entry) => entry.kind),
-    ["review"],
+    // A reference may sit on a Tool page that was never read, so only the
+    // Host can say it is gone; the tab stays while its Run does.
+    ["preview", "review"],
   );
 });
 
@@ -4461,7 +4489,7 @@ test("tool activity describes open calls without inferring execution from Tool r
       const view = render(
         localizedView(
           createElement(RunProcess, {
-            presentation: deriveRunPresentation(value),
+            ...runProcessProps(value),
             reviewingPermission: false,
             expanded: false,
             onExpandedChange() {},
@@ -4476,7 +4504,7 @@ test("tool activity describes open calls without inferring execution from Tool r
       view.rerender(
         localizedView(
           createElement(RunProcess, {
-            presentation: deriveRunPresentation(value),
+            ...runProcessProps(value),
             reviewingPermission: false,
             expanded: false,
             synchronized: false,
@@ -6009,7 +6037,11 @@ test("right-panel targets resolve exact document identities", () => {
   const value = task({
     runs: [
       run({
-        tools: [technicalTool({ fileRefs: [{ id: "ref-a" }] })],
+        tools: [
+          technicalTool({
+            fileRefs: [{ id: "ref-a", title: "a", displayPath: "a.txt" }],
+          }),
+        ],
         fileChanges: { observation: "complete", changes: [{ id: "change-a" }] },
       }),
     ],
@@ -6302,12 +6334,18 @@ test("Task Panel sessions choose a stable neighbor and reconcile only invalid ta
       run({ tools: [technicalTool({ fileRefs: references.slice(0, 1) })] }),
     ],
   });
+  // Records alone cannot retire a preview: the Host answers for references
+  // on unread Tool pages. A tab goes when its Run does.
   session = reconcileTaskPanelSession(session, withoutLast, true);
   assert.deepEqual(
     session.tabs.map((tab) => tab.referenceId),
-    ["a"],
+    ["a", "c"],
   );
-  assert.equal(session.activeTabId, session.tabs[0].tabId);
+  assert.equal(session.activeTabId, session.tabs[1].tabId);
+  assert.deepEqual(
+    reconcileTaskPanelSession(session, { ...withoutLast, runs: [] }, true).tabs,
+    [],
+  );
   assert.deepEqual(
     reconcileTaskPanelSession(session, task({ id: "4" }), true),
     emptyTaskPanelSession,
@@ -6396,7 +6434,15 @@ test("content targets clear on Task switch and never own layout visibility", () 
     );
   }
   const value = task({
-    runs: [run({ tools: [technicalTool({ fileRefs: [{ id: "ref-a" }] })] })],
+    runs: [
+      run({
+        tools: [
+          technicalTool({
+            fileRefs: [{ id: "ref-a", title: "a", displayPath: "a.txt" }],
+          }),
+        ],
+      }),
+    ],
   });
   const view = render(createElement(Harness, { value }));
   assert.equal(session.target.kind, "empty");
@@ -7186,6 +7232,11 @@ async function renderAppFixture(
       ),
     fileChangeDiff: (...ids) =>
       new Promise((resolve, reject) => diffs.push({ ids, resolve, reject })),
+    readRunTools: (taskId, runId, afterOrder) =>
+      runToolsLoaderFor(
+        snapshot.tasks.find((task) => task.id === taskId)?.runs ?? [],
+        snapshot.securityEpoch ?? "1",
+      )(taskId, runId, afterOrder),
     ...clientOverrides,
   }))
     ctx.mock.method(BridgeClient.prototype, name, fn);
@@ -8116,7 +8167,8 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
   assert.notEqual(share, null);
   assert.notEqual(Number(share), 1 / 3);
   fireEvent.click(filePreviewOpener("a.txt"));
-  snapshot.tasks[0].runs[0].tools = [];
+  // A preview is retired with its Run; references on Tool pages are the Host's.
+  snapshot.tasks[0].runs = [];
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
   await act(async () => publish());
   await waitFor(() =>
@@ -10152,7 +10204,7 @@ test("App removes revoked Host conversation before replacement snapshot can succ
   await waitFor(() => assert.ok(document.querySelector("[data-run-id]")));
 });
 
-test("App keeps a preview through a missing history page and closes it only after reference removal", async (ctx) => {
+test("App keeps a preview through a missing history page and closes it only after its Run is removed", async (ctx) => {
   const fixture = await renderAppFixture(ctx);
   await selectRecentTask(/First task/);
   fireEvent.click(filePreviewOpener("a.txt"));
@@ -10196,8 +10248,7 @@ test("App keeps a preview through a missing history page and closes it only afte
   );
   await screen.findByText("retained preview body");
   assert.equal(fixture.previews.length, 1);
-  older.tools = [];
-  older.contentVersion = "3";
+  source.runs = source.runs.filter((entry) => entry !== older);
   await publishAppFixture(fixture);
   await waitFor(() =>
     assert.equal(screen.queryByText("retained preview body") === null, true),

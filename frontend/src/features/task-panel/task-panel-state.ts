@@ -158,10 +158,12 @@ function resolveTaskPanelTab(
   if (!run)
     return manifest?.some((entry) => entry.id === tab.runId) ? tab : null;
   if (tab.kind === "preview") {
+    // A reference read from a Tool page is not in the snapshot. The tab keeps
+    // what it showed, and the Host decides on each read whether it still exists.
     const reference = findRunFileReference(run, tab.referenceId);
     return reference
       ? createTaskPanelPreviewTab(task.id, run.id, reference)
-      : null;
+      : tab;
   }
   if (!typedFileChanges || !run.fileChanges?.changes.length) return null;
   return createTaskPanelReviewTab(task.id, run.id);

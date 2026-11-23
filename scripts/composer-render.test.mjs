@@ -21,6 +21,10 @@ const { ComposerFooter } = await vite.ssrLoadModule(
 const { AppShell, resolveWorkbenchColumns } = await vite.ssrLoadModule(
   "/src/app/AppShell.tsx",
 );
+import {
+  runToolsCacheFor,
+  withToolSummaries,
+} from "./test-support/run-tools-fixture.mjs";
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
@@ -317,7 +321,8 @@ function renderCompletedSurface(
         },
       },
       createElement(TaskContent, {
-        task,
+        task: withToolSummaries(task),
+        runToolsCache: runToolsCacheFor(task),
         revision: "1",
         composerHasDraft: false,
         retryAvailable: true,

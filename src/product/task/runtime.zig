@@ -312,7 +312,6 @@ pub const OperationLimits = struct {
     max_catalog_projection_bytes: usize,
     max_tool_field_bytes: usize,
     max_terminal_diagnostic_bytes: usize,
-    max_tools_per_run: usize,
     max_file_changes_per_run: usize = 256,
     max_commentary_segments_per_run: usize,
     max_skill_arguments: usize,
@@ -1257,6 +1256,50 @@ pub const ProjectionEffects = struct {
         return self.authority_fn(self.context, query);
     }
 };
+
+pub const ToolPageState = enum { ready, missing };
+
+/// One page of a Run's Tool records. `json` is the encoded array inside the
+/// caller's output; `next_after_order` continues the read when not null.
+pub const ToolPage = struct {
+    state: ToolPageState,
+    json: []const u8 = "[]",
+    revision: u64 = 0,
+    total: u64 = 0,
+    next_after_order: ?u64 = null,
+};
+
+fn toolSourceBytes(tool: *const task_state.ToolView) usize {
+    var bytes = tool.id.len + tool.name.len + tool.input.len + tool.progress.len + tool.content.len;
+    if (tool.file_refs) |refs| for (refs) |entry| if (entry) |reference| {
+        bytes += reference.id.len + reference.title.len + reference.display_path.len;
+    };
+    return bytes;
+}
+
+/// Leaves out progress, then content, then input until the entry fits. Text is
+/// dropped whole rather than cut, so a credential can never straddle the cut.
+fn writeTransportCutToolEntry(writer: *std.Io.Writer, text: task_view.TextProjection, tool: *const task_state.ToolView) task_view.Error!void {
+    const mark = writer.end;
+    var reduced = tool.*;
+    // Text goes first, then references, then the name. The entry keeps its
+    // identity, order and state, so the records after it stay readable.
+    inline for (.{ "progress", "content", "input", "file_refs", "name" }) |field| {
+        if (comptime std.mem.eql(u8, field, "file_refs"))
+            reduced.file_refs = null
+        else
+            @field(reduced, field) = @field(reduced, field)[0..0];
+        writer.end = mark;
+        if (task_view.writeToolPageEntry(writer, text, &reduced, true)) |_| {
+            return;
+        } else |err| switch (err) {
+            error.SnapshotTooLarge => {},
+            else => return err,
+        }
+    }
+    writer.end = mark;
+    return error.SnapshotTooLarge;
+}
 
 pub const HistoryFrames = struct {
     allocator: std.mem.Allocator,
@@ -7053,6 +7096,88 @@ pub const Runtime = struct {
         return .{ .start = start, .end = end, .next_before_run_id = if (older) oldest_shown else null };
     }
 
+    /// Writes the Tool records of one projected Run after `after_order`, in
+    /// activity order, as a JSON array into `output`. The page stops before a
+    /// record that would overflow `output`, or once `source_budget` source
+    /// bytes were formatted, and always carries a remaining record: one that
+    /// cannot fit alone is sent with its progress, content and then input left
+    /// out and is marked as cut for transport. Storage never changes.
+    pub fn writeToolPage(
+        self: *const Runtime,
+        allocator: std.mem.Allocator,
+        output: []u8,
+        text: task_view.TextProjection,
+        task_id: u64,
+        run_id: u64,
+        after_order: u64,
+        source_budget: usize,
+    ) task_view.Error!ToolPage {
+        const task = self.findConst(task_id) orelse return .{ .state = .missing };
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return .{ .state = .missing };
+        if (!task_policy.runProjected(task, run)) return .{ .state = .missing };
+        var indices: std.ArrayList(usize) = .empty;
+        defer indices.deinit(allocator);
+        var total: u64 = 0;
+        for (run.tools, 0..) |entry, index| {
+            const tool = entry orelse continue;
+            total += 1;
+            if (tool.order > after_order) try indices.append(allocator, index);
+        }
+        // Slots follow creation order, except history written while receipts
+        // could still displace records; sort only when the order is broken.
+        const ByOrder = struct {
+            tools: []const ?task_state.ToolView,
+            fn lessThan(context: @This(), left: usize, right: usize) bool {
+                return context.tools[left].?.order < context.tools[right].?.order;
+            }
+        };
+        const by_order: ByOrder = .{ .tools = run.tools };
+        if (!std.sort.isSorted(usize, indices.items, by_order, ByOrder.lessThan))
+            std.mem.sort(usize, indices.items, by_order, ByOrder.lessThan);
+        if (output.len < 2) return error.SnapshotTooLarge;
+        // Reserve the closing bracket so a full page always closes.
+        var writer = std.Io.Writer.fixed(output[0 .. output.len - 1]);
+        writer.writeByte('[') catch return error.SnapshotTooLarge;
+        var written: usize = 0;
+        var source_bytes: usize = 0;
+        var next_after_order: ?u64 = null;
+        for (indices.items, 0..) |index, position| {
+            const tool = &run.tools[index].?;
+            const previous_order = if (position != 0) run.tools[indices.items[position - 1]].?.order else after_order;
+            if (written != 0 and source_bytes >= source_budget) {
+                next_after_order = previous_order;
+                break;
+            }
+            const mark = writer.end;
+            const fitted = fitted: {
+                if (written != 0) writer.writeByte(',') catch break :fitted false;
+                task_view.writeToolPageEntry(&writer, text, tool, false) catch |err| switch (err) {
+                    error.SnapshotTooLarge => break :fitted false,
+                    else => return err,
+                };
+                break :fitted true;
+            };
+            if (!fitted) {
+                writer.end = mark;
+                if (written != 0) {
+                    next_after_order = previous_order;
+                    break;
+                }
+                try writeTransportCutToolEntry(&writer, text, tool);
+            }
+            written += 1;
+            source_bytes += toolSourceBytes(tool);
+        }
+        output[writer.end] = ']';
+        return .{
+            .state = .ready,
+            .json = output[0 .. writer.end + 1],
+            .revision = run.tool_revision,
+            .total = total,
+            .next_after_order = next_after_order,
+        };
+    }
+
     pub fn writeHistoryPage(self: *const Runtime, writer: *std.Io.Writer, effects: ProjectionEffects, task_id: u64, before_run_id: u64, limit: u8) (task_view.Error || error{InvalidViewRequest})!void {
         const task = self.findConst(task_id) orelse {
             writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -7079,6 +7204,7 @@ pub const Runtime = struct {
                 task_view.editAdmitted(task, run, external.shutting_down),
                 effects.now_ms,
                 if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
+                self.allocator,
             );
         }
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
@@ -7130,6 +7256,7 @@ pub const Runtime = struct {
             .pending_ui = .{ .context = &pending_ui_context, .write_fn = writePendingUiProjection },
             .run_start = start,
             .run_end = end,
+            .file_references = self.allocator,
         });
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
@@ -9151,7 +9278,7 @@ fn findOrCreateEventTool(
     const context: *EventContext = @ptrCast(@alignCast(raw_context));
     const digest = toolRouteDigest(id);
     if (findToolByRouteDigest(run_record.tools, digest)) |tool| return tool;
-    const slot = findEmptyTool(run_record.tools) orelse return error.ToolCapacity;
+    const slot = try reserveToolSlot(context.runtime.allocator, run_record);
     const order = run_record.next_activity_order;
     var product_id_storage: [task_state.tool_product_id_capacity]u8 = undefined;
     const product_id = std.fmt.bufPrint(
@@ -9194,12 +9321,7 @@ fn findOrCreateEventTool(
         0,
     )).value;
     errdefer context.effects.text.discardCandidate(content);
-    const refs = try context.runtime.allocator.alloc(
-        ?task_state.FileReferenceView,
-        context.effects.max_file_refs_per_tool,
-    );
-    errdefer context.runtime.allocator.free(refs);
-    @memset(refs, null);
+    // References arrive with the result and are allocated for their count.
     run_record.tools[slot] = .{
         .route_digest = digest,
         .id = owned_id,
@@ -9208,7 +9330,6 @@ fn findOrCreateEventTool(
         .input = owned_input.value,
         .progress = progress,
         .content = content,
-        .file_refs = refs,
         .state = .running,
         .input_truncated = owned_input.value.len < input.len,
         .redacted = owned_name.redacted or owned_input.redacted,
@@ -9272,15 +9393,6 @@ fn recordEventOutput(
     };
 }
 
-fn discardEventTool(context: *EventContext, tool: *task_state.ToolView) void {
-    discardReferenceText(context, tool.receipt_metadata, tool.id);
-    discardReferenceText(context, tool.receipt_metadata, tool.name);
-    inline for (.{ "input", "progress", "content" }) |field|
-        context.effects.text.discardCandidate(@field(tool, field));
-    clearEventFileReferences(context, tool);
-    if (tool.file_refs) |refs| context.runtime.allocator.free(refs);
-}
-
 fn retainEventGeneratedMedia(raw_context: *anyopaque, run: *task_state.RunRecord, id: []const u8, path: []const u8, task_id: u64, media: task_state.GeneratedMedia) task_state.EventProjectionError!*task_state.ToolView {
     const context: *EventContext = @ptrCast(@alignCast(raw_context));
     return retainGeneratedMedia(context, run, toolRouteDigest(id), path, task_id, media);
@@ -9288,8 +9400,11 @@ fn retainEventGeneratedMedia(raw_context: *anyopaque, run: *task_state.RunRecord
 
 fn retainGeneratedMedia(context: *EventContext, run: *task_state.RunRecord, digest: [agent.tool_route_digest_bytes]u8, path: []const u8, task_id: u64, media: task_state.GeneratedMedia) task_state.EventProjectionError!*task_state.ToolView {
     const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = path }, .title = "", .kind = @tagName(media) }};
+    // Terminal receipt tails reach this outside an event. The revision moves
+    // only once a record carries the references; a failure changes none.
     if (findToolByRouteDigest(run.tools, digest)) |tool| {
         try replaceToolFileReferences(context, tool, &generated, media, run.initial_credentials[0], task_id, run.generation);
+        run.tool_revision +%= 1;
         if (!tool.receipt_metadata) {
             // Existing owned identity moves from display accounting to the
             // already bounded trusted metadata owner, without copying it.
@@ -9298,16 +9413,7 @@ fn retainGeneratedMedia(context: *EventContext, run: *task_state.RunRecord, dige
         }
         return tool;
     }
-    const slot = findEmptyTool(run.tools) orelse available: {
-        for (run.tools, 0..) |entry, index| if (entry) |tool| {
-            if (tool.receipt_metadata) continue;
-            discardEventTool(context, &run.tools[index].?);
-            run.tools[index] = null;
-            _ = task_state.recordEventProjectionFailure(run);
-            break :available index;
-        };
-        return error.ToolCapacity;
-    };
+    const slot = try reserveToolSlot(context.runtime.allocator, run);
     var storage: [task_state.tool_product_id_capacity]u8 = undefined;
     const id = std.fmt.bufPrint(&storage, "tool-{d}", .{run.next_activity_order}) catch unreachable;
     const owned_id = try context.effects.text.projectReceipt(id, storage.len, &.{});
@@ -9331,6 +9437,7 @@ fn retainGeneratedMedia(context: *EventContext, run: *task_state.RunRecord, dige
         if (candidate.file_refs) |refs| context.runtime.allocator.free(refs);
     }
     try replaceToolFileReferences(context, &candidate, &generated, media, run.initial_credentials[0], task_id, run.generation);
+    run.tool_revision +%= 1;
     run.tools[slot] = candidate;
     return &run.tools[slot].?;
 }
@@ -9382,15 +9489,14 @@ fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView,
         clearEventFileReferences(context, &candidate);
         if (candidate.file_refs) |allocated| context.runtime.allocator.free(allocated);
     }
+    // The ABI decoder already bounds the count; this mirrors that ceiling.
     if (values.len > context.effects.max_file_refs_per_tool)
         return error.ToolCapacity;
-    if (candidate.file_refs == null) {
-        candidate.file_refs = try context.runtime.allocator.alloc(
-            ?task_state.FileReferenceView,
-            context.effects.max_file_refs_per_tool,
-        );
-        @memset(candidate.file_refs.?, null);
-    }
+    candidate.file_refs = try context.runtime.allocator.alloc(
+        ?task_state.FileReferenceView,
+        values.len,
+    );
+    @memset(candidate.file_refs.?, null);
     for (values, 0..) |reference, index| {
         const locator_kind: task_state.FileReferenceLocatorKind = switch (reference.locator) {
             .workspace_path => .workspace_path,
@@ -9787,6 +9893,15 @@ fn absoluteInsideWorkspace(root: []const u8, absolute: []const u8) ?[]const u8 {
 fn findEmptyTool(entries: []?task_state.ToolView) ?usize {
     for (entries, 0..) |entry, index| if (entry == null) return index;
     return null;
+}
+
+/// A Run keeps every Tool record; the slots double when full. Growth moves
+/// the records, which is safe because a `*ToolView` lives only inside one
+/// main-thread event or receipt application: snapshots and Tool pages format
+/// synchronously, file previews copy what they resolve, persistence copies
+/// into its own wire array and no worker reads a Run's Tool slots.
+fn reserveToolSlot(allocator: std.mem.Allocator, run: *task_state.RunRecord) std.mem.Allocator.Error!usize {
+    return findEmptyTool(run.tools) orelse growHistory(allocator, task_state.ToolView, &run.tools);
 }
 
 const toolRouteDigest = agent.toolRouteDigest;
@@ -10508,12 +10623,8 @@ fn reserveRun(
     };
     var input_record = try copyRunInput(self, task, input, &initial_credentials, effects);
     errdefer deinitRunInput(self, effects.release, &input_record);
-    const tools = try self.allocator.alloc(
-        ?task_state.ToolView,
-        effects.limits.max_tools_per_run,
-    );
-    errdefer self.allocator.free(tools);
-    @memset(tools, null);
+    // Tool slots grow as records arrive; a Run has no record count limit.
+    const tools: []?task_state.ToolView = &.{};
     const commentary_ends = try self.allocator.alloc(
         u64,
         effects.limits.max_commentary_segments_per_run,
@@ -12718,7 +12829,7 @@ const InputTestProjection = struct {
             .release = .{ .context = self, .redact_all_fn = redact, .release_projection_bytes_fn = release, .prepare_credential_release_fn = prepareRelease },
             .executor = undefined,
             .worker = undefined,
-            .limits = .{ .max_user_message_bytes = 1024, .max_pending_inputs_per_task = 4, .max_catalog_projection_bytes = 1024, .max_tool_field_bytes = 1024, .max_terminal_diagnostic_bytes = 128, .max_tools_per_run = 1, .max_commentary_segments_per_run = 1, .max_skill_arguments = 8, .max_task_title_bytes = 128, .max_model_id_bytes = 128 },
+            .limits = .{ .max_user_message_bytes = 1024, .max_pending_inputs_per_task = 4, .max_catalog_projection_bytes = 1024, .max_tool_field_bytes = 1024, .max_terminal_diagnostic_bytes = 128, .max_commentary_segments_per_run = 1, .max_skill_arguments = 8, .max_task_title_bytes = 128, .max_model_id_bytes = 128 },
             .run_clock = .{ .now_unix_ms_fn = now },
         };
     }
@@ -13055,6 +13166,8 @@ test "generated image acceptance shares submission order and refresh preserves i
     }
     const envelope: agent.OwnedCoreEvent = .{ .session_id = 1, .run_id = 1, .encoded_bytes = 0, .json = &.{}, .allocator = std.testing.allocator, .generated_image_path = @constCast("image.png"), .event = .{ .arena = undefined, .value = .{ .known = .{ .tool_result = .{ .id = "t", .name = "image", .input = "", .content = "", .is_error = false } } } } };
     try replaceEventFileReferences(&context, &tool, &envelope, "", 1, 1);
+    // References are allocated for their count, not for the per-tool ceiling.
+    try std.testing.expectEqual(@as(usize, 1), tool.file_refs.?.len);
     const original = tool.file_refs.?[0].?.presentation_anchor.?;
     const after = try runtime.receiveInput(1, "after", .{ .text = "make blue" }, projection.effects());
     try std.testing.expect(before.presentation_order.? < original.presentation_order);
@@ -13062,6 +13175,7 @@ test "generated image acceptance shares submission order and refresh preserves i
     runs[0].?.commentary_count = 2;
     try replaceEventFileReferences(&context, &tool, &envelope, "", 1, 1);
     try std.testing.expectEqualDeep(original, tool.file_refs.?[0].?.presentation_anchor.?);
+    try std.testing.expectEqual(@as(usize, 1), tool.file_refs.?.len);
     context.effects.max_file_ref_field_bytes = 1;
     try std.testing.expectError(error.ToolCapacity, replaceEventFileReferences(&context, &tool, &envelope, "", 1, 1));
     try std.testing.expectEqualDeep(original, tool.file_refs.?[0].?.presentation_anchor.?);

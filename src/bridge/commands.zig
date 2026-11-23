@@ -59,6 +59,7 @@ pub const snapshot = "metawork.workbench.snapshot";
 pub const snapshot_chunk = "metawork.workbench.snapshot.chunk";
 pub const output_action = "metawork.outputs.action";
 pub const output_action_cancel = "metawork.outputs.cancel";
+pub const read_run_tools = "metawork.tasks.tools";
 pub const preview_file = "metawork.files.preview";
 pub const list_directory = "metawork.files.listDirectory";
 pub const preview_workspace_file = "metawork.files.previewWorkspace";
@@ -183,6 +184,7 @@ pub const product = [_][]const u8{
     snapshot_chunk,
     output_action,
     output_action_cancel,
+    read_run_tools,
     preview_file,
     list_directory,
     preview_workspace_file,

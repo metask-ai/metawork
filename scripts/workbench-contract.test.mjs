@@ -1,7 +1,10 @@
 import { decodeWorkbenchSnapshot as decodeScopedSnapshot } from "../frontend/src/bridge/decode-contracts.ts";
 import { productViewFixture } from "./test-support/product-view-fixture.mjs";
 import { initialViewScope } from "../frontend/src/bridge/contracts.ts";
-import { decodeProductStateFixture as decodeWorkbenchSnapshot } from "./test-support/decode-product-state-fixture.mjs";
+import {
+  decodeProductStateFixture as decodeWorkbenchSnapshot,
+  decodeRunToolsFixture,
+} from "./test-support/decode-product-state-fixture.mjs";
 import { decodeSendInputResult } from "../frontend/src/bridge/decode-contracts.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -3219,8 +3222,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     /failed Run phase and outcome must agree/,
   );
 
-  const mismatchedToolFailure = clone(fixture);
-  mismatchedToolFailure.tasks[0].runs[0].tools.push({
+  // Tool records arrive in pages; the page decoder holds the record rules.
+  const mismatchedToolFailure = {
     id: "tool-mismatch",
     order: "1",
     name: "Bash",
@@ -3238,9 +3241,9 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     contentTruncated: false,
     redacted: false,
     fileRefs: [],
-  });
+  };
   assert.throws(
-    () => decodeWorkbenchSnapshot(mismatchedToolFailure),
+    () => decodeRunToolsFixture([mismatchedToolFailure]),
     /tool failure state and error flag must agree/,
   );
 
@@ -3451,26 +3454,9 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     /expected keys/,
   );
 
+  // Tool orders are checked by the Host against approvals when history is
+  // saved and loaded; the snapshot still rejects two approvals on one order.
   const duplicateActivityOrder = clone(fixture);
-  duplicateActivityOrder.tasks[0].runs[0].tools.push({
-    id: "tool-1",
-    order: "1",
-    name: "Read",
-    bash: null,
-    presentation: null,
-    errorDetail: null,
-    input: "",
-    progress: "",
-    content: "done",
-    state: "completed",
-    isError: false,
-    elapsedMs: "1",
-    inputTruncated: false,
-    progressTruncated: false,
-    contentTruncated: false,
-    redacted: false,
-    fileRefs: [],
-  });
   duplicateActivityOrder.tasks[0].uiHistory.push({
     requestId: "10",
     runId: "7",
@@ -3486,6 +3472,11 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     reviewReason: null,
     agentRequestId: "",
     permission: null,
+  });
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(duplicateActivityOrder));
+  duplicateActivityOrder.tasks[0].uiHistory.push({
+    ...duplicateActivityOrder.tasks[0].uiHistory.at(-1),
+    requestId: "12",
   });
   assert.throws(
     () => decodeWorkbenchSnapshot(duplicateActivityOrder),
@@ -3529,7 +3520,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     /permission request identity must match record/,
   );
 
-  const duplicateToolIdentity = clone(fixture);
   const firstDuplicateTool = {
     id: "tool-1",
     order: "1",
@@ -3549,13 +3539,13 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     redacted: false,
     fileRefs: [],
   };
-  duplicateToolIdentity.tasks[0].runs[0].tools.push(firstDuplicateTool, {
-    ...firstDuplicateTool,
-    order: "2",
-  });
   assert.throws(
-    () => decodeWorkbenchSnapshot(duplicateToolIdentity),
-    /tool product identities must be unique/,
+    () =>
+      decodeRunToolsFixture([
+        firstDuplicateTool,
+        { ...firstDuplicateTool, order: "2" },
+      ]),
+    /Tool identities are unique in a page/,
   );
 });
 

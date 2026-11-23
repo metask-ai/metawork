@@ -99,7 +99,7 @@ SQLite 返回 `outcome_unknown` 时按现有 Storage 规则 poison instance。�
 
 生产接受身份从首个发布的 schema 开始固定，此后的迁移只追加，既有 checksum/prefix 校验不弱化。实施前再核对 Application/build/release 的实际消费；若发现任何已经承诺保留的 SQL 数据身份，停止硬切并单独评审，不靠“测试库”标签抹掉真实数据。此处只修订未来方案，本次不修改 SQL、迁移校验器或合同真源。
 
-**当前 64 statements / 8 MiB 参数与结果不是已经证明足够的业务上界。** 完整 Run 可涉及 32 个 Tool、256 个 File Change，加上父链、消息与覆盖关系；单条旧合法保留 frame 也可能大于当前 SQL query 预算。不能借用现有限额拒绝本来合法的迁移数据，不能拆开原子事务，也不能改用绕过 authorizer 的 raw SQLite。
+**当前 64 statements / 8 MiB 参数与结果不是已经证明足够的业务上界。** 完整 Run 的 Tool 记录没有条数上限，另可涉及 256 个 File Change，加上父链、消息与覆盖关系；单条旧合法保留 frame 也可能大于当前 SQL query 预算。不能借用现有限额拒绝本来合法的迁移数据，不能拆开原子事务，也不能改用绕过 authorizer 的 raw SQLite。
 
 最小处理是先为每一种原子组生成最大合法 fixture，计算 statement/参数/最大值及查询结果的真实上界。集合 UPDATE/DELETE 避免随历史总量展开；独立 dirty 组按额度合并成有限批次。仍不够时，只对现有 bounded `mutate/query` 和 engine LENGTH 作有证据的最小额度调整，保留有限数组、单一 COMMIT、authorizer 与 outcome 语义；不开放交互式 transaction handle、callback transaction 或任意 PRAGMA。具体常量由代码和边界测试拥有，不能凭本文先拍一个大数字。额度推导和评审必须在任何用户数据切换之前完成。
 

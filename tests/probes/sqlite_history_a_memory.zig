@@ -12,7 +12,7 @@ const Config = struct { tasks: usize = 20, runs: usize = 16, body_bytes: usize =
 const usage: history.UsageWire = .{ .input_tokens = 1, .output_tokens = 1, .cache_read_input_tokens = 0, .cache_creation_input_tokens = 0 };
 
 fn limits(c: Config, expanded: bool) history.Limits {
-    return .{ .max_workspaces = 16, .max_tasks = if (expanded) @max(50, c.tasks) else 50, .max_runs_per_task = if (expanded) @max(16, c.runs) else 16, .max_compacts_per_task = @max(16, c.compacts), .max_tools_per_run = 32, .max_commentary_segments_per_run = 256, .max_file_refs_per_tool = 32, .max_file_changes_per_run = 256, .max_ui_history_per_task = @max(8, c.approvals), .max_workspace_bytes = 16 * 1024, .max_task_title_bytes = 512, .max_user_message_bytes = 256 * 1024, .max_assistant_message_bytes = 256 * 1024, .max_tool_field_bytes = 256 * 1024, .max_file_ref_field_bytes = 8192, .max_execution_model_bytes = 512, .max_terminal_diagnostic_bytes = 512 };
+    return .{ .max_workspaces = 16, .max_tasks = if (expanded) @max(50, c.tasks) else 50, .max_runs_per_task = if (expanded) @max(16, c.runs) else 16, .max_compacts_per_task = @max(16, c.compacts), .max_commentary_segments_per_run = 256, .max_file_refs_per_tool = 32, .max_file_changes_per_run = 256, .max_ui_history_per_task = @max(8, c.approvals), .max_workspace_bytes = 16 * 1024, .max_task_title_bytes = 512, .max_user_message_bytes = 256 * 1024, .max_assistant_message_bytes = 256 * 1024, .max_tool_field_bytes = 256 * 1024, .max_file_ref_field_bytes = 8192, .max_execution_model_bytes = 512, .max_terminal_diagnostic_bytes = 512 };
 }
 
 const Counter = struct {

@@ -57,6 +57,7 @@ export const commands = {
   snapshotChunk: "metawork.workbench.snapshot.chunk",
   outputAction: "metawork.outputs.action",
   cancelOutputAction: "metawork.outputs.cancel",
+  readRunTools: "metawork.tasks.tools",
   previewFile: "metawork.files.preview",
   listDirectory: "metawork.files.listDirectory",
   previewWorkspaceFile: "metawork.files.previewWorkspace",

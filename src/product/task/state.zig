@@ -1071,6 +1071,9 @@ pub const RunRecord = struct {
     execution: ?*RunExecution = null,
     /// Projection invalidation only; never persisted or supplied to AgentCore.
     projection_content_version: u64 = 1,
+    /// Advances whenever a Tool record of this Run is created or changes, so a
+    /// paged read of the records can tell it is stale. Runtime-only.
+    tool_revision: u64 = 0,
     /// Never encoded in history or reconstructed from a checkpoint.
     image_execution: ?OwnedImageExecution = null,
     video_execution: ?OwnedVideoExecution = null,
@@ -2295,6 +2298,8 @@ pub fn applyEvent(
             if (text.len != 0) _ = observeModelActivity(run, .writing);
         },
         .tool_start => |tool_event| {
+            // The revision moves only when a record changes; a call left out
+            // for capacity changes none and publishes no snapshot.
             const tool = try projection.findOrCreateTool(
                 run,
                 tool_event.id,
@@ -2302,6 +2307,7 @@ pub fn applyEvent(
                 tool_event.input,
             );
             tool.state = .running;
+            run.tool_revision +%= 1;
             checkCoreToolCount(run);
         },
         .tool_progress => |progress| {
@@ -2314,6 +2320,7 @@ pub fn applyEvent(
             );
             tool.progress_truncated = projected.truncated;
             tool.redacted = tool.redacted or projected.redacted;
+            run.tool_revision +%= 1;
         },
         // Core also emits progress before model requests. Generic notices must
         // not replace typed activity or in-flight counts.
@@ -2571,6 +2578,8 @@ fn projectToolResultDetails(task_id: u64, run: *RunRecord, envelope: *const agen
         try projection.retain_generated_media_fn(projection.context, run, result.id, path, task_id, .video)
     else
         try projection.findOrCreateTool(run, result.id, result.name, result.input);
+    // The record changes from here on, even when a detail below is left out.
+    run.tool_revision +%= 1;
     tool.is_error = result.is_error;
     tool.elapsed_ms = result.elapsed_ms;
     tool.state = if (result.is_error) .failed else .completed;

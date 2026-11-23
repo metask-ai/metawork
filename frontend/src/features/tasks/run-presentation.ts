@@ -3,7 +3,6 @@ import type {
   RunModelError,
   RunPhase,
   RunView,
-  ToolView,
 } from "../../bridge/contracts.ts";
 import { translate, type Locale } from "../../i18n/runtime.ts";
 
@@ -21,7 +20,6 @@ export type RunPresentation = {
   processVisible: boolean;
   processCanCollapse: boolean;
   showTerminalNotice: boolean;
-  tools: ToolView[];
   runningToolName: string | null;
 };
 
@@ -125,26 +123,17 @@ function fallbackActivity(phase: RunPhase): RunActivity | null {
   }
 }
 
-function orderedTools(tools: ToolView[]): ToolView[] {
-  return [...tools].sort((left, right) => {
-    const leftOrder = BigInt(left.order);
-    const rightOrder = BigInt(right.order);
-    return leftOrder < rightOrder ? -1 : leftOrder > rightOrder ? 1 : 0;
-  });
-}
-
 export function deriveRunPresentation(run: RunView): RunPresentation {
   const active = nonTerminalPhases.has(run.phase);
   const activity = active
     ? (run.activity ?? fallbackActivity(run.phase))
     : null;
-  const tools = orderedTools(run.tools);
-  const runningTools = tools.filter((tool) => tool.state === "running");
   const responseVisible = run.output.response.length > 0;
-  const generatedVideoVisible = tools.some((tool) =>
-    tool.fileRefs.some((reference) => reference.generatedVideo),
+  const generatedVideoVisible = (run.fileReferences?.media ?? []).some(
+    (reference) => reference.generatedVideo,
   );
-  const processCanCollapse = tools.length > 0;
+  // Tool records are read in pages; the summary says whether there are any.
+  const processCanCollapse = run.toolLog.count !== "0";
 
   return {
     active,
@@ -158,12 +147,9 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
         run.output.responseKind === "partial" ||
         run.terminal.outcome !== "completed" ||
         (!responseVisible && !generatedVideoVisible)),
-    tools,
     runningToolName:
-      activity?.kind === "executing_tools" &&
-      activity.inFlight === "1" &&
-      runningTools.length === 1
-        ? runningTools[0]!.name
+      activity?.kind === "executing_tools" && activity.inFlight === "1"
+        ? run.toolLog.runningName
         : null,
   };
 }

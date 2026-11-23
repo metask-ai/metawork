@@ -256,3 +256,33 @@ test("snapshot preparation fails closed on identity changes, extra fields and en
     assert(calls <= maxSnapshotPreparationSteps + 1);
   }
 });
+
+test("snapshot preparation accepts exactly the Host's step bound", async () => {
+  // A cold Host read answers `preparing` once from begin and once per block.
+  assert.equal(maxSnapshotPreparationSteps, 8);
+  for (const preparing of [
+    maxSnapshotPreparationSteps,
+    maxSnapshotPreparationSteps + 1,
+  ]) {
+    let calls = 0;
+    const source = JSON.stringify({});
+    const read = fetchWorkbenchSnapshot(async (command) => {
+      if (command === chunkCommand)
+        return {
+          snapshotId: "1",
+          offset: 0,
+          bytes: source.length,
+          data: encoded(source),
+        };
+      calls += 1;
+      return calls <= preparing
+        ? { snapshotId: "1", phase: "preparing" }
+        : { snapshotId: "1", bytes: source.length, chunkBytes: 262144 };
+    });
+    if (preparing > maxSnapshotPreparationSteps)
+      await assert.rejects(read, /step limit/);
+    else
+      // The descriptor is accepted; decoding the empty body is a later failure.
+      await assert.rejects(read, (error) => !/step limit/.test(error.message));
+  }
+});

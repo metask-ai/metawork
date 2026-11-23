@@ -164,7 +164,6 @@ const Rig = struct {
             .max_tasks = 2,
             .max_workspaces = 2,
             .max_runs_per_task = 5,
-            .max_tools_per_run = 4,
         }, configuration);
         errdefer self.control.deinit();
         try self.control.startCustomProviders(store, self.vault.capability());

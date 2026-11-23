@@ -3,6 +3,7 @@ import { PreviewImagePool } from "./preview-image-pool.ts";
 import { FilePreviewLoader } from "./file-preview.ts";
 import { object } from "./wire-codec.ts";
 import {
+  decodeRunToolsPage,
   decodeOutputActionResult,
   decodeOutputActionCancel,
   decodeSendInputResult,
@@ -19,6 +20,7 @@ import type {
   HostSignal,
   OutputAction,
   OutputActionState,
+  RunToolsPage,
   ViewScope,
   McpHttpConnectionInput,
   McpHttpDraftHeader,
@@ -136,6 +138,7 @@ export class BridgeClient {
     | undefined;
   private nextReceiveBatch = 1n;
   private nextOutputOperation = 1n;
+  private nextRunToolsRequest = 1n;
   private readonly previewImages = new PreviewImagePool();
   private readonly previews = new FilePreviewLoader(
     (command, payload) => this.invoke(command, payload),
@@ -258,6 +261,7 @@ export class BridgeClient {
     };
     this.nextReceiveBatch = 1n;
     this.nextOutputOperation = 1n;
+    this.nextRunToolsRequest = 1n;
     return result.generation;
   }
   async disconnect(generation: string) {
@@ -398,6 +402,39 @@ export class BridgeClient {
     } finally {
       signal.removeEventListener("abort", cancel);
     }
+  }
+  /**
+   * One page of a Run's Tool records after `afterOrder`. The response must
+   * answer this connection and request; the caller compares its security epoch.
+   */
+  async readRunTools(
+    taskId: string,
+    runId: string,
+    afterOrder: string,
+  ): Promise<RunToolsPage> {
+    const connection = this.attachmentConnection;
+    if (!connection) throw new Error("Host connection is unavailable");
+    if (this.nextRunToolsRequest > 18446744073709551615n)
+      throw new Error("Tool page request identity exhausted");
+    const key = {
+      generation: connection.generation,
+      requestId: String(this.nextRunToolsRequest++),
+    };
+    const page = decodeRunToolsPage(
+      await this.invoke(commands.readRunTools, {
+        ...key,
+        taskId,
+        runId,
+        afterOrder,
+      }),
+      afterOrder,
+    );
+    if (page.generation !== key.generation || page.requestId !== key.requestId)
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Tool page identity mismatch",
+      );
+    return page;
   }
   previewFile(
     taskId: string,

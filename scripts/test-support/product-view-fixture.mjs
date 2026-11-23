@@ -2,6 +2,7 @@
 // accepts the scoped wire; these builders are never imported by the Renderer.
 import { readFileSync } from "node:fs";
 import { runInputDisplay } from "../../frontend/src/workbench/run-input.ts";
+import { wireRunWithToolSummary } from "./run-tools-fixture.mjs";
 // Mirrors Product's manifest excerpt for synthetic Runs: the readable input,
 // whitespace folded, cut to 180 UTF-8 bytes on a code point boundary, and
 // withheld for a redacted input. Credential matching has no synthetic peer.
@@ -184,7 +185,9 @@ export function productViewFixture(
           compactBlocker: deriveTaskActions
             ? taskActionBlockers(selected).compactBlocker
             : selected.compactBlocker,
-          runs: selected.runs.slice(-scope.runLimit),
+          runs: selected.runs
+            .slice(-scope.runLimit)
+            .map(wireRunWithToolSummary),
         },
       }
     : null;
@@ -227,7 +230,7 @@ export function productViewFixture(
             return {
               beforeRunId: scope.beforeRunId,
               nextBeforeRunId: start > 0 ? selected.runs[start].id : null,
-              runs: selected.runs.slice(start, end),
+              runs: selected.runs.slice(start, end).map(wireRunWithToolSummary),
             };
           })()
         : null,

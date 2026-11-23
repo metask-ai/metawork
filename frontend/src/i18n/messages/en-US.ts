@@ -1131,6 +1131,10 @@ export const enUS = {
   "run.process.elapsed": "Turn time {duration}",
   "run.process.toggle_tool": "Show or hide details for {name}",
   "run.process.tool_detail": "Details for {name}",
+  "run.process.tools_loading": "Loading tool calls…",
+  "run.process.tools_failed": "Tool calls could not be loaded.",
+  "run.process.tools_retry": "Retry",
+  "run.process.tools_more": "Show more calls ({count} remaining)",
   "run.prepare_retry": "Copy to input box",
   "run.retry_help":
     "Copies this instruction to the Composer for review. Nothing is sent automatically.",

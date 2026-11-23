@@ -31,6 +31,8 @@ const WorstStep = struct {
 };
 
 const samples = 100;
+/// The Bridge's page budget: one Native SDK result less its envelope.
+const tool_page_bytes = 1024 * 1024 - 4 * 1024;
 const Scenario = enum { index_cold, task_cold, history_cold, history_copy, history_confirmed, targeted_update, search_cold, skills_cold, mcp_cold, schedules_cold };
 const Fixture = enum { escaped_history, tool_inputs, tool_results, concentrated_results };
 
@@ -191,7 +193,13 @@ fn measureFixture(comptime fixture: Fixture) !void {
                     var projected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, delivery.snapshot.storage[0..view.bytes], .{});
                     defer projected.deinit();
                     const run = projected.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0];
-                    const bash = run.object.get("tools").?.array.items[0].object.get("bash").?.object;
+                    // Tool records are paged; the first page carries the same entry.
+                    const run_id = try std.fmt.parseInt(u64, run.object.get("id").?.string, 10);
+                    const page_output = try std.testing.allocator.alloc(u8, tool_page_bytes);
+                    defer std.testing.allocator.free(page_output);
+                    var tools = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, (try runtime.writeToolPage(page_output, 1, run_id, 0)).json, .{});
+                    defer tools.deinit();
+                    const bash = tools.value.array.items[0].object.get("bash").?.object;
                     if (sparse) try std.testing.expectEqual(@as(usize, 65_000), bash.get("command").?.string.len);
                     const result = bash.get("result").?;
                     try std.testing.expect(result == .object);
@@ -215,6 +223,27 @@ fn measureFixture(comptime fixture: Fixture) !void {
             const passed = p99 <= p99_limit and maximum <= max_limit;
             over_budget = over_budget or !passed;
             std.debug.print("PROJECTION_PERFORMANCE {{\"mode\":\"{s}\",\"fixture\":\"{s}\",\"scenario\":\"{s}\",\"samples\":{d},\"bytes\":{d},\"p99_ns\":{d},\"max_ns\":{d},\"passed\":{}}}\n", .{ @tagName(builtin.mode), @tagName(fixture), scenario.name, samples, max_bytes, p99, maximum, passed });
+        }
+        // A Tool page is formatted in one main-thread call; it shares the
+        // snapshot step budget.
+        if (fixture != .escaped_history) {
+            const page_output = try std.testing.allocator.alloc(u8, tool_page_bytes);
+            defer std.testing.allocator.free(page_output);
+            const run_id = runtime.testTaskSlots()[0].?.durable.runs[0].?.id;
+            var page_times: [samples]i96 = undefined;
+            var page_bytes: usize = 0;
+            for (&page_times) |*elapsed| {
+                const start = std.Io.Timestamp.now(std.testing.io, .awake);
+                const page = try runtime.writeToolPage(page_output, 1, run_id, 0);
+                elapsed.* = start.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).nanoseconds;
+                page_bytes = page.json.len;
+            }
+            std.mem.sort(i96, &page_times, {}, std.sort.asc(i96));
+            const debug = builtin.mode == .Debug;
+            const passed = page_times[98] <= (if (debug) @as(i96, 16) else 8) * std.time.ns_per_ms and
+                page_times[99] <= (if (debug) @as(i96, 32) else 16) * std.time.ns_per_ms;
+            over_budget = over_budget or !passed;
+            std.debug.print("PROJECTION_TOOL_PAGE {{\"mode\":\"{s}\",\"fixture\":\"{s}\",\"bytes\":{d},\"p99_ns\":{d},\"max_ns\":{d},\"passed\":{}}}\n", .{ @tagName(builtin.mode), @tagName(fixture), page_bytes, page_times[98], page_times[99], passed });
         }
     }
     try std.testing.expect(!over_budget);

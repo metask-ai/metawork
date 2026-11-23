@@ -86,9 +86,9 @@ shutdown 在生产者静止后可重复执行有界 pass 处理有限尾部，�
 | 事实 | 保留前必须完成的工作 | 容量不足时 |
 | --- | --- | --- |
 | 输出段 | 核算 index/turn/group、状态、完整原文字节数及 disposition | 标记实际提交组的缺口，不能用截断后的字节数校验 Core |
-| Tool | 核算调用 identity、状态和必要计数，不依赖展示槽 | 省略详情或普通展示记录；后续 progress/result 不因无展示槽而失败 |
+| Tool | 核算调用 identity、状态和必要计数，不依赖记录是否保留 | 全局历史额度不足时省略详情或该条记录；后续 progress/result 不因缺记录而失败 |
 | 输入采纳 | 复用 callback 登记和终态 accepted/adopted counts 对账 | 不取消真实采纳，不伪造未采纳 |
-| 可信回执 | 按第 6 节核验和交接 | 不因普通 Tool 展示容量不足丢失 |
+| 可信回执 | 按第 6 节核验和交接 | 占用自己的记录位置，不因普通 Tool 记录的额度不足丢失 |
 
 核算与保留在原 owner 内分开，不另建 CoreEvent 协议。造成缺口的 owner 明确发布本地事实，下游不能凭残缺轨迹推断 Core 违约。
 
@@ -98,12 +98,12 @@ applyEvent 的 catch 必须明确分类，删除“除两种协议错误外都�
 
 | 类型 | 处理 |
 | --- | --- |
-| 内容保留容量不足，如 ProjectionCapacity、ToolCapacity | 事实核算已完成后记缺口，继续执行，不请求终止 |
+| 内容保留容量不足，如 ProjectionCapacity，以及交付回执表满或引用超出 ABI 上限的 ToolCapacity | 事实核算已完成后记缺口，继续执行，不请求终止 |
 | InvalidOutputSegment、InvalidInputAdoption 等真实协议错误 | 记录依赖违约并终止 |
 | InvalidDeliveryReceipt | 按实际合同或安全失败处理并终止，不能降级 |
 | OutOfMemory 及其他非容量错误 | 由原失败 owner 处理并终止，不伪装成可忽略缺口，也不一概归因为 Core 违约 |
 
-现有 ToolCapacity 中由“展示槽缺失”引出的错误须在核算与保留分离时消除，不能只在外层 catch 吞掉后宣称核算已完成。
+Tool 记录已不设条数上限，ToolCapacity 不再由展示槽缺失引出，只剩交付回执表满、引用数或引用字段超出 ABI 上限，以及记录因全局额度未建出时到达的 progress。
 
 ### 4.3 记录完整性不覆盖执行结果
 
@@ -177,7 +177,7 @@ Run 受控终止保留 stopped；Task 可等待新的用户意图，这不等于
 | 场景 | 必须观察的结果 |
 | --- | --- |
 | 正常任务跨过原 16 回合 | 同一执行继续并正常结束，无 Host 自动续跑或重放 |
-| Tool、过程说明或输出保留不足 | 先完成核算，执行终态真实，缺口明确；无展示槽不使后续事件失败 |
+| Tool、过程说明或输出保留不足 | 先完成核算，执行终态真实，缺口明确；缺记录不使后续事件失败 |
 | 暂停 drain 直至队列饱和后恢复 | 内存有界，callback 背压，恢复后顺序消费，无 Host fatal/poison |
 | 持续并发产出并注入慢提交 | drain 返回主循环，其他 Session 和 Stop 获得调度；记录实际处理耗时 |
 | 队列饱和时普通 Stop | 主循环继续消费，不主动制造缺口，等待真实取消结果 |
@@ -214,7 +214,7 @@ Run 受控终止保留 stopped；Task 可等待新的用户意图，这不等于
 ## 11. 本轮实施验证
 
 - 分步提交：`735931fa` 有界 drain，`88600ae6` 背压与关闭，`4372b5ca` 结果/记录隔离及完成已读，`0e649b35` 可信回执，`230adf9e` 移除 16 与既有 cause 映射；无 SQL、迁移、依赖 artifact 或 AgentCore 修改。
-- canonical Core 的单 Run 完成 40 次 Bash 调用、41 次 Provider 请求；超过 32 个 Tool 展示槽后仍 completed/reusable，缺口进入历史，无自动续跑或重放。
+- canonical Core 的单 Run 完成 40 次 Bash 调用、41 次 Provider 请求；超过 32 个 Tool 展示槽后仍 completed/reusable，缺口进入历史，无自动续跑或重放。Tool 记录条数上限移除后，同一入口改为断言 40 条记录全部保留、没有缺口。
 - 生产队列积压至少 100 个事件，20ms 注入提交延迟下，drain 约 39.6ms 后返回，Stop 后仍有 95 个待消费事件，约 486.6ms 后正式 cancelled/reusable，未标记本地事件交付丢失。这是 Debug framed writer 调度实验，不是 SQLite 基准或固定 SLA。
 - 正式 Node/Renderer 测试 1,234 passed、2 existing skipped，typecheck 与严格 Native 静态检查通过。相关 Control/lifecycle/image roots 542 passed、3 existing skipped；Office canonical pipeline 9 passed，包含饱和慢提交和跨 16/32 场景。
 - macOS arm64 实际 automation 桌面 active-input vertical 通过 Stop、后续新意图、输入接续、Skill 等待、超时对账及冷重启不重放。现有 Office 桌面入口另通过实际 DeliverFile 回执与冷历史投影；其 direct Run 接回已有 fresh-catalog 等待 helper。architecture/Office guards 45 passed，fmt/diff 检查通过。

@@ -83,6 +83,9 @@ import {
   type RunInputSkillView,
   type RunActivity,
   type RunView,
+  type RunToolLog,
+  type RunFileReferences,
+  type RunToolsPage,
   type InstructionUse,
   type RunInstructions,
   type GlobalInstructionsView,
@@ -2341,8 +2344,19 @@ export function decodeFileChangeDiff(value: unknown): FileChangeDiffResult {
     content: "",
   };
 }
-function decodeTool(value: unknown, path: string): ToolView {
+function trueValue(value: unknown, path: string): true {
+  if (value !== true) fail(path, "expected true");
+  return true;
+}
+function decodeToolEntry(
+  value: unknown,
+  path: string,
+  paged: boolean,
+): ToolView {
+  const transportTruncated =
+    paged && Object.hasOwn(record(value, path), "transportTruncated");
   const item = object(value, path, [
+    ...(transportTruncated ? ["transportTruncated"] : []),
     "bash",
     "presentation",
     "errorDetail",
@@ -2424,6 +2438,14 @@ function decodeTool(value: unknown, path: string): ToolView {
       `${path}.contentTruncated`,
     ),
     redacted: booleanValue(item.redacted, `${path}.redacted`),
+    ...(transportTruncated
+      ? {
+          transportTruncated: trueValue(
+            item.transportTruncated,
+            `${path}.transportTruncated`,
+          ),
+        }
+      : {}),
     fileRefs: arrayValue(
       item.fileRefs,
       `${path}.fileRefs`,
@@ -2843,6 +2865,99 @@ function decodeSubmittedAtUnixMs(value: unknown, path: string): string | null {
     fail(path, "expected a displayable non-zero Unix millisecond timestamp");
   return submittedAtUnixMs;
 }
+function decodeRunToolLog(value: unknown, path: string): RunToolLog {
+  const item = object(value, path, ["count", "revision", "runningName"]);
+  return {
+    count: wireId(item.count, `${path}.count`),
+    revision: wireId(item.revision, `${path}.revision`),
+    runningName:
+      item.runningName === null
+        ? null
+        : stringValue(item.runningName, `${path}.runningName`),
+  };
+}
+function decodeRunFileReferences(
+  value: unknown,
+  path: string,
+): RunFileReferences {
+  const item = object(value, path, ["media", "links", "linksComplete"]);
+  const media = arrayValue(item.media, `${path}.media`, decodeFileReference);
+  if (
+    media.some(
+      (reference) => !reference.generatedImage && !reference.generatedVideo,
+    )
+  )
+    fail(path, "run media must carry a Host generation attestation");
+  const links = arrayValue(item.links, `${path}.links`, decodeFileReference);
+  const paths = new Set<string>();
+  for (const reference of links) {
+    if (reference.generatedVideo || reference.displayPath === "")
+      fail(path, "run links are non-video references with a display path");
+    if (paths.has(reference.displayPath))
+      fail(path, "run links carry one reference per display path");
+    paths.add(reference.displayPath);
+  }
+  return {
+    media,
+    links,
+    linksComplete: booleanValue(item.linksComplete, `${path}.linksComplete`),
+  };
+}
+/** One page of `metawork.tasks.tools`, in activity order after `afterOrder`. */
+export function decodeRunToolsPage(
+  value: unknown,
+  afterOrder: string,
+): RunToolsPage {
+  const path = "$runTools";
+  const item = object(value, path, [
+    "generation",
+    "requestId",
+    "state",
+    "securityEpoch",
+    "revision",
+    "total",
+    "tools",
+    "nextAfterOrder",
+  ]);
+  const state = enumValue(item.state, `${path}.state`, [
+    "ready",
+    "missing",
+  ] as const);
+  const tools = arrayValue(item.tools, `${path}.tools`, (entry, entryPath) =>
+    decodeToolEntry(entry, entryPath, true),
+  );
+  if (state === "missing" && tools.length !== 0)
+    fail(path, "a missing Run carries no Tool records");
+  let previous = BigInt(afterOrder);
+  const ids = new Set<string>();
+  for (const tool of tools) {
+    const order = BigInt(tool.order);
+    if (order <= previous)
+      fail(path, "Tool records follow activity order after the cursor");
+    if (ids.has(tool.id)) fail(path, "Tool identities are unique in a page");
+    ids.add(tool.id);
+    previous = order;
+  }
+  const nextAfterOrder =
+    item.nextAfterOrder === null
+      ? null
+      : positiveWireId(item.nextAfterOrder, `${path}.nextAfterOrder`);
+  if (
+    nextAfterOrder !== null &&
+    (tools.length === 0 || tools.at(-1)!.order !== nextAfterOrder)
+  )
+    fail(path, "a continued page ends at its cursor");
+  return {
+    generation: positiveWireId(item.generation, `${path}.generation`),
+    requestId: positiveWireId(item.requestId, `${path}.requestId`),
+    state,
+    securityEpoch: positiveWireId(item.securityEpoch, `${path}.securityEpoch`),
+    revision: wireId(item.revision, `${path}.revision`),
+    total: wireId(item.total, `${path}.total`),
+    tools,
+    nextAfterOrder,
+  };
+}
 const instructionUseStates = [
   "applied",
   "absent",
@@ -2920,6 +3035,7 @@ function decodeRunInstructions(
 }
 
 function decodeRun(value: unknown, path: string): RunView {
+  const fileReferences = Object.hasOwn(record(value, path), "fileReferences");
   const item = object(value, path, [
     "elapsedMs",
     "submittedAtUnixMs",
@@ -2939,7 +3055,8 @@ function decodeRun(value: unknown, path: string): RunView {
     "activity",
     "terminal",
     "usage",
-    "tools",
+    "toolLog",
+    ...(fileReferences ? ["fileReferences"] : []),
     "fileChanges",
     "outputs",
   ]);
@@ -3071,7 +3188,15 @@ function decodeRun(value: unknown, path: string): RunView {
       cacheRead: wireId(usage.cacheRead, `${path}.usage.cacheRead`),
       cacheCreation: wireId(usage.cacheCreation, `${path}.usage.cacheCreation`),
     },
-    tools: arrayValue(item.tools, `${path}.tools`, decodeTool),
+    toolLog: decodeRunToolLog(item.toolLog, `${path}.toolLog`),
+    ...(fileReferences
+      ? {
+          fileReferences: decodeRunFileReferences(
+            item.fileReferences,
+            `${path}.fileReferences`,
+          ),
+        }
+      : {}),
     fileChanges: decodeRunFileChanges(item.fileChanges, `${path}.fileChanges`),
     outputs: decodeDeliveredOutputs(item.outputs, `${path}.outputs`),
   };
@@ -4382,17 +4507,12 @@ function decodeTask(
     fail(path, "active Task work must have an active operation identity");
   }
   const requestIds = new Set<string>();
+  // Tool records are paged, so their orders are not here. The Host checks
+  // Tool, File Change and approval orders against each other when it saves
+  // and loads history; this page still checks the orders it carries.
   const activityOrders = new Map(
     manifest.map((run) => [run.id, new Set<string>()]),
   );
-  for (const run of runs)
-    activityOrders.set(run.id, new Set(run.tools.map((tool) => tool.order)));
-  for (const run of runs) {
-    if (new Set(run.tools.map((tool) => tool.id)).size !== run.tools.length)
-      fail(path, "tool product identities must be unique within a Run");
-    if (activityOrders.get(run.id)!.size !== run.tools.length)
-      fail(path, "tool activity order must be unique within a Run");
-  }
   for (const record of uiHistory) {
     if (!runIds.has(record.runId))
       fail(path, "UI history must reference a projected Run");

@@ -72,6 +72,7 @@
             .{ .name = "metawork.workbench.snapshot.chunk", .origins = .{"zero://app"} },
             .{ .name = "metawork.outputs.action", .origins = .{"zero://app"} },
             .{ .name = "metawork.outputs.cancel", .origins = .{"zero://app"} },
+            .{ .name = "metawork.tasks.tools", .origins = .{"zero://app"} },
             .{ .name = "metawork.files.preview", .origins = .{"zero://app"} },
             .{ .name = "metawork.files.listDirectory", .origins = .{"zero://app"} },
             .{ .name = "metawork.files.previewWorkspace", .origins = .{"zero://app"} },

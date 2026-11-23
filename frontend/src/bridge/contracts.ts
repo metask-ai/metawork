@@ -514,7 +514,35 @@ export type ToolView = {
   progressTruncated: boolean;
   contentTruncated: boolean;
   redacted: boolean;
+  /** Only on paged reads: this entry's text was left out to fit one response. */
+  transportTruncated?: true;
   fileRefs: FileReferenceView[];
+};
+/** The task page's summary of a Run's Tool records; records are paged. */
+export type RunToolLog = {
+  count: string;
+  revision: string;
+  runningName: string | null;
+};
+/**
+ * Range pages only. `media` holds every Host-generated image and video;
+ * `links` holds one reference per display path, newest first, and
+ * `linksComplete` is false when some paths were left out.
+ */
+export type RunFileReferences = {
+  media: FileReferenceView[];
+  links: FileReferenceView[];
+  linksComplete: boolean;
+};
+export type RunToolsPage = {
+  generation: string;
+  requestId: string;
+  state: "ready" | "missing";
+  securityEpoch: string;
+  revision: string;
+  total: string;
+  tools: ToolView[];
+  nextAfterOrder: string | null;
 };
 export type RunPhase =
   | "queued"
@@ -1004,7 +1032,8 @@ export type RunView = {
     cacheRead: string;
     cacheCreation: string;
   };
-  tools: ToolView[];
+  toolLog: RunToolLog;
+  fileReferences?: RunFileReferences;
   fileChanges: RunFileChanges | null;
   outputs: DeliveredOutputView[];
 };

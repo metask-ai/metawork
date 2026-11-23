@@ -188,7 +188,6 @@ pub fn persistenceLimits(limits: Limits, max_workspaces: usize) task_persistence
         .max_runs_per_task = std.math.maxInt(u32),
         .max_pending_inputs_per_task = limits.max_pending_inputs_per_task,
         .max_compacts_per_task = std.math.maxInt(u32),
-        .max_tools_per_run = limits.max_tools_per_run,
         .max_commentary_segments_per_run = limits.max_commentary_segments_per_run,
         .max_file_refs_per_tool = limits.max_file_refs_per_tool,
         .max_file_changes_per_run = limits.max_file_changes_per_run,
@@ -220,7 +219,6 @@ pub const Limits = struct {
     max_runs_per_task: usize = 16,
     max_pending_inputs_per_task: usize = 64,
     max_compacts_per_task: usize = 16,
-    max_tools_per_run: usize = 32,
     max_commentary_segments_per_run: usize = 256,
     // Must contain the maximum structural projection (every Task/Run/Compact
     // at capacity, including their eager terminal diagnostics) plus one full
@@ -611,8 +609,10 @@ const catalog_snapshot_overhead: usize = 256;
 const catalog_skill_snapshot_overhead = skill_snapshot_structure.catalog_skill;
 const catalog_argument_snapshot_overhead = skill_snapshot_structure.argument;
 const catalog_issue_snapshot_overhead: usize = 128;
+/// Keys, decimal count and revision of a Run's Tool summary.
+const tool_log_snapshot_overhead: usize = 128;
+/// Non-text JSON of one Tool page entry: keys, flags, order and elapsed time.
 const tool_snapshot_overhead: usize = 512;
-const tool_min_projection_bytes: usize = "tool-1".len + 1;
 // writeFileChanges emits at most this much non-projected JSON per collection
 // and record. The global projection allowance below already pays six bytes for
 // every retained text byte, so the record allowance only adds structure after
@@ -1112,6 +1112,11 @@ fn outputCheckAuthorityState(err: anyerror) OutputCheckState {
 }
 
 pub const FilePreviewState = file_preview.State;
+pub const ToolPage = task_runtime.ToolPage;
+pub const ToolPageState = task_runtime.ToolPageState;
+/// Source text one Tool page formats on the main thread. A page always
+/// carries a remaining record, so this bounds the work, not the history.
+pub const tool_page_source_bytes: usize = 256 * 1024;
 pub const DirectoryEntry = file_preview.DirectoryEntry;
 pub const file_preview_chunk_bytes = file_preview.media_chunk_bytes;
 pub const max_file_preview_media = file_preview.max_media_slots;
@@ -1434,7 +1439,6 @@ pub const Runtime = struct {
             limits.max_pending_inputs_per_task == 0 or limits.max_pending_inputs_per_task > 64 or
             limits.max_runs_per_task == 0 or
             limits.max_compacts_per_task == 0 or
-            limits.max_tools_per_run == 0 or
             limits.max_commentary_segments_per_run == 0 or
             limits.max_projection_bytes == 0 or
             limits.max_workspace_bytes == 0 or
@@ -7022,7 +7026,7 @@ pub const Runtime = struct {
         try request_input.validate();
         if (self.projection_security_epoch == 0 or self.projection_history_epoch == 0 or self.task_runtime.searchRevision() == 0) return error.InvalidViewRequest;
         const storage = self.snapshotStorage();
-        const request = try self.snapshot.begin(self.allocator, request_input, self.projection_security_epoch, self.limits.max_tools_per_run);
+        const request = try self.snapshot.begin(self.allocator, request_input, self.projection_security_epoch);
         const credentials = self.snapshot.credentialCollector();
         if (self.account_credentials) |source| try source.visit(credentials, ProjectionCredentials.visit);
         try self.task_runtime.visitExecutionCredentials(credentials, ProjectionCredentials.visit);
@@ -8749,7 +8753,6 @@ pub const Runtime = struct {
                 .max_catalog_projection_bytes = self.limits.max_catalog_projection_bytes,
                 .max_tool_field_bytes = self.limits.max_tool_field_bytes,
                 .max_terminal_diagnostic_bytes = self.limits.max_terminal_diagnostic_bytes,
-                .max_tools_per_run = self.limits.max_tools_per_run,
                 .max_file_changes_per_run = self.limits.max_file_changes_per_run,
                 .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
                 .max_skill_arguments = self.limits.max_skill_arguments,
@@ -10174,6 +10177,22 @@ pub const Runtime = struct {
     pub fn projectionSecurityEpoch(self: *const Runtime) u64 {
         return self.projection_security_epoch;
     }
+
+    /// One page of a Run's Tool records for the Renderer, sanitized with the
+    /// live credential set. Main-thread only; the output is borrowed.
+    pub fn writeToolPage(self: *Runtime, output: []u8, task_id: u64, run_id: u64, after_order: u64) (Error || error{InvalidViewRequest})!ToolPage {
+        // Like the other reads: nothing while shutting down, and nothing
+        // before the projection has a security epoch to answer with.
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.projection_security_epoch == 0) return error.InvalidViewRequest;
+        // The same credential set a snapshot read collects at begin.
+        var credentials: ProjectionCredentials = .{ .allocator = self.allocator };
+        defer credentials.deinit();
+        if (self.account_credentials) |source| try source.visit(&credentials, ProjectionCredentials.visit);
+        try self.task_runtime.visitExecutionCredentials(&credentials, ProjectionCredentials.visit);
+        const text = credentials.text(self.allocator);
+        return self.task_runtime.writeToolPage(self.allocator, output, text.task(), task_id, run_id, after_order, tool_page_source_bytes) catch |err| return @errorCast(err);
+    }
 };
 
 test "updates Control publishes committed facts through the canonical live context" {
@@ -11240,23 +11259,9 @@ fn fileChangeSnapshotAdditionalBytes(limits: Limits) ?usize {
         runs,
         limits.max_file_changes_per_run,
     ) catch return null;
-    const tools = std.math.mul(
-        usize,
-        runs,
-        limits.max_tools_per_run,
-    ) catch return null;
-    const tool_projection_floor = std.math.mul(
-        usize,
-        tools,
-        tool_min_projection_bytes,
-    ) catch return null;
-    // The structural bound below already reserves 512 bytes for every Tool.
-    // A present Tool necessarily retains at least `tool-1` and a non-empty
-    // name. If a Tool slot is absent, its 512-byte structural reservation is
-    // larger than the File Change structure that those seven released text
-    // bytes could admit, so retaining the floor is still conservative.
-    var remaining_projection = limits.max_projection_bytes -|
-        @min(limits.max_projection_bytes, tool_projection_floor);
+    // Tool records no longer enter any snapshot, so no Tool text is set aside
+    // here; every projected byte may belong to a File Change instead.
+    var remaining_projection = limits.max_projection_bytes;
     var total = std.math.mul(
         usize,
         runs,
@@ -11493,11 +11498,13 @@ fn admittedSnapshotBudgetBytes(limits: Limits) ?usize {
         total,
         std.math.mul(usize, compacts, compact_snapshot_overhead) catch return null,
     ) catch return null;
-    const tools = std.math.mul(usize, runs, limits.max_tools_per_run) catch return null;
+    // A Run carries only its fixed-size Tool summary; the running Tool name is
+    // projected text already paid for above. Range pages add each Run's file
+    // reference index, bounded per page by the block limit, never here.
     total = std.math.add(
         usize,
         total,
-        std.math.mul(usize, tools, tool_snapshot_overhead) catch return null,
+        std.math.mul(usize, runs, tool_log_snapshot_overhead) catch return null,
     ) catch return null;
     const pending_ui = pendingUiSnapshotBytes(limits) orelse return null;
     total = std.math.add(
@@ -11533,7 +11540,6 @@ fn testLimits() Limits {
         .max_tasks = 2,
         .max_scheduled_tasks = 2,
         .max_runs_per_task = 2,
-        .max_tools_per_run = 2,
         .max_file_changes_per_run = 2,
         .max_projection_bytes = 64 * 1024,
         .max_scheduled_task_projection_bytes = 4 * 1024,
@@ -11559,7 +11565,6 @@ fn testTaskPersistenceLimits() task_persistence.Limits {
         .max_tasks = limits.max_tasks,
         .max_runs_per_task = limits.max_runs_per_task,
         .max_compacts_per_task = limits.max_compacts_per_task,
-        .max_tools_per_run = limits.max_tools_per_run,
         .max_commentary_segments_per_run = limits.max_commentary_segments_per_run,
         .max_file_refs_per_tool = limits.max_file_refs_per_tool,
         .max_file_changes_per_run = limits.max_file_changes_per_run,
@@ -11768,8 +11773,7 @@ fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: C
     @memset(compacts, null);
     const ui_history = try control.allocator.alloc(?UiRecord, control.limits.max_ui_history_per_task);
     @memset(ui_history, null);
-    const tools = try control.allocator.alloc(?ToolView, control.limits.max_tools_per_run);
-    @memset(tools, null);
+    const tools: []?ToolView = &.{};
     const file_changes = try control.allocator.alloc(
         ?task_test_state.FileChangeView,
         control.limits.max_file_changes_per_run,
@@ -12486,7 +12490,6 @@ test "Workspace registry owns empty selection recent use authorization and capac
             .max_workspaces = 2,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{},
     );
@@ -14052,7 +14055,6 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     var control = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, .{
         .max_tasks = 1,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, .{});
     defer control.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -15251,7 +15253,6 @@ test "Runtime without a ready model rejects explicit creation before Workspace e
         .{
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{},
     );
@@ -15335,7 +15336,6 @@ test "automation installs one ordinary Custom Provider without publishing its cr
         .{
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{},
     );
@@ -15399,7 +15399,6 @@ test "production rejects automation execution before observing fixture input" {
         .{
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{},
     );
@@ -15439,7 +15438,6 @@ test "automation cold restore rehydrates the persisted connection through creden
             .{
                 .max_tasks = 1,
                 .max_runs_per_task = 1,
-                .max_tools_per_run = 1,
             },
             .{},
         );
@@ -15458,7 +15456,6 @@ test "automation cold restore rehydrates the persisted connection through creden
             .{
                 .max_tasks = 1,
                 .max_runs_per_task = 1,
-                .max_tools_per_run = 1,
             },
             .{},
         );
@@ -15537,7 +15534,6 @@ test "Account identity and Models execution publish through separate projections
         .{
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{},
     );
@@ -15982,6 +15978,8 @@ test "released Task credential is permanently scrubbed from every product projec
         "continued SECRET-KEY",
         control.limits.max_assistant_message_bytes,
     );
+    // Slots exist only for records; give this hand-built record one.
+    run.tools = try control.allocator.realloc(run.tools, 1);
     run.tools[0] = .{
         .route_digest = toolRouteDigest("SECRET-KEY"),
         .id = try control.copyBounded("id SECRET-KEY", control.limits.max_tool_field_bytes),
@@ -18189,8 +18187,11 @@ fn maximumProjectionFixtureWithTools(control: *Runtime, tool_inputs: bool, limit
         @memset(compacts, null);
         const ui_history = try control.allocator.alloc(?UiRecord, limits.max_ui_history_per_task);
         @memset(ui_history, null);
+        // Tool records stay out of the snapshot: a Run's count only changes
+        // its toolLog digits, so a fixed count stands for any.
+        const tools_per_run = 32;
         for (0..limits.max_runs_per_task) |run_index| {
-            const tools = try control.allocator.alloc(?ToolView, limits.max_tools_per_run);
+            const tools = try control.allocator.alloc(?ToolView, tools_per_run);
             @memset(tools, null);
             const file_changes = try control.allocator.alloc(
                 ?task_test_state.FileChangeView,
@@ -18201,7 +18202,7 @@ fn maximumProjectionFixtureWithTools(control: *Runtime, tool_inputs: bool, limit
                 u64,
                 limits.max_commentary_segments_per_run,
             );
-            for (0..limits.max_tools_per_run) |tool_index| {
+            for (0..tools_per_run) |tool_index| {
                 var tool_id_storage: [32]u8 = undefined;
                 const tool_id = try std.fmt.bufPrint(
                     &tool_id_storage,
@@ -18220,7 +18221,7 @@ fn maximumProjectionFixtureWithTools(control: *Runtime, tool_inputs: bool, limit
                     .elapsed_ms = std.math.maxInt(u64),
                 };
             }
-            const change_order = limits.max_tools_per_run +
+            const change_order = tools_per_run +
                 limits.max_ui_history_per_task + 1;
             var change_id_storage: [task_test_state.file_change_product_id_capacity]u8 = undefined;
             const change_id = try std.fmt.bufPrint(
@@ -18327,7 +18328,7 @@ fn maximumProjectionFixtureWithTools(control: *Runtime, tool_inputs: bool, limit
             var record = UiRecord{
                 .request_id = @intCast(record_index + 1),
                 .run_id = 1,
-                .order = @intCast(limits.max_tools_per_run + record_index + 1),
+                .order = @intCast(tools_per_run + record_index + 1),
                 .kind = .permission,
                 .state = .allowed_once,
                 .detail_len = ui_record_detail_capacity,
@@ -18781,10 +18782,10 @@ test "Bash presentation interprets only bounded known evidence and sanitizes dec
         tool.input_truncated = case.input_truncated;
         tool.content_truncated = case.content_truncated;
         var storage: [96 * 1024]u8 = undefined;
-        const snapshot = try control.writeViewFixture(&storage, .{ .task_id = 3 });
-        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+        const page = try control.writeToolPage(&storage, 3, 7, 0);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page.json, .{});
         defer parsed.deinit();
-        const projected = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("tools").?.array.items[0];
+        const projected = parsed.value.array.items[0];
         const bash = projected.object.get("bash").?;
         const tool_json = try std.json.Stringify.valueAlloc(std.testing.allocator, projected, .{});
         defer std.testing.allocator.free(tool_json);
@@ -18817,7 +18818,6 @@ test "Bash presentation interprets only bounded known evidence and sanitizes dec
 
 test "built-in Tool presentation projects readable parameters and failures" {
     var limits = testLimits();
-    limits.max_tools_per_run = 4;
     limits.max_projection_bytes = 128 * 1024;
     var control = try testRuntimeWithLimits(limits, .{});
     defer control.deinit();
@@ -18835,10 +18835,10 @@ test "built-in Tool presentation projects readable parameters and failures" {
     }
 
     var storage: [128 * 1024]u8 = undefined;
-    const snapshot = try control.writeAggregateFixture(&storage);
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+    const page = try control.writeToolPage(&storage, 3, 7, 0);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page.json, .{});
     defer parsed.deinit();
-    const tools = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("tools").?.array.items;
+    const tools = parsed.value.array.items;
     try std.testing.expectEqual(@as(usize, events.len), tools.len);
     try std.testing.expectEqualStrings("read", tools[0].object.get("presentation").?.object.get("kind").?.string);
     try std.testing.expectEqualStrings("12", tools[0].object.get("presentation").?.object.get("offset").?.string);
@@ -18869,10 +18869,289 @@ test "Runtime projects tools and full-width usage without parsing protocol in Re
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"name\":\"Bash\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "stdout\\nexit 0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"elapsedMs\":\"18446744073709551615\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"toolLog\":{\"count\":\"1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"input\":\"18446744073709551615\"") != null);
+    var page_storage: [16 * 1024]u8 = undefined;
+    const page = (try control.writeToolPage(&page_storage, 3, 7, 0)).json;
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"name\":\"Bash\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "stdout\\nexit 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"elapsedMs\":\"18446744073709551615\"") != null);
+}
+
+fn applyTestToolResult(control: *Runtime, id: []const u8, content: []const u8) !void {
+    var buffer: [1024]u8 = undefined;
+    var start = try testEnvelope(3, 7, try std.fmt.bufPrint(&buffer, "{{\"tool_start\":{{\"id\":\"{s}\",\"name\":\"Read\",\"input\":\"{{}}\"}}}}", .{id}));
+    defer start.deinit();
+    try control.applyEvent(&start);
+    const encoded = try std.fmt.allocPrint(std.testing.allocator, "{{\"tool_result\":{{\"id\":\"{s}\",\"name\":\"Read\",\"input\":\"{{}}\",\"content\":\"{s}\",\"is_error\":false,\"elapsed_ms\":1}}}}", .{ id, content });
+    defer std.testing.allocator.free(encoded);
+    var result = try testEnvelope(3, 7, encoded);
+    defer result.deinit();
+    try control.applyEvent(&result);
+}
+
+test "task page carries the Tool summary and file references, never the records" {
+    const limits = testLimits();
+    var control = try testRuntimeWithLimits(limits, .{});
+    defer control.deinit();
+    const refs = "{{\"tool_result\":{{\"id\":\"{s}\",\"name\":\"Read\",\"input\":\"{{}}\",\"content\":\"marker-{s}\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[{s}]}}}}";
+    const old_a = "{\"locator\":{\"workspace_path\":\"src/a.zig\"},\"title\":\"old a\",\"kind\":\"read\"}";
+    const new_a = "{\"locator\":{\"workspace_path\":\"src/a.zig\"},\"title\":\"new a\",\"kind\":\"read\"}";
+    const b = "{\"locator\":{\"workspace_path\":\"src/b.zig\"},\"title\":\"b\",\"kind\":\"read\"}";
+    for ([_][2][]const u8{ .{ "first", old_a }, .{ "second", new_a ++ "," ++ b } }) |entry| {
+        const encoded = try std.fmt.allocPrint(std.testing.allocator, refs, .{ entry[0], entry[0], entry[1] });
+        defer std.testing.allocator.free(encoded);
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    var image = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"image\",\"name\":\"GenerateImage\",\"input\":\"\",\"content\":\"\",\"is_error\":false}}");
+    defer image.deinit();
+    image.generated_image_path = try std.testing.allocator.dupe(u8, "generated-images/one.png");
+    try control.applyEvent(&image);
+    var running = try testEnvelope(3, 7, "{\"tool_start\":{\"id\":\"live\",\"name\":\"Bash\",\"input\":\"{}\"}}");
+    defer running.deinit();
+    try control.applyEvent(&running);
+
+    var storage: [96 * 1024]u8 = undefined;
+    const view = try control.writeViewFixture(&storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, view, "marker-") == null);
+    try std.testing.expect(std.mem.indexOf(u8, view, "\"tools\":") == null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, view, .{});
+    defer parsed.deinit();
+    const run = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object;
+    const log = run.get("toolLog").?.object;
+    try std.testing.expectEqualStrings("4", log.get("count").?.string);
+    try std.testing.expectEqualStrings("Bash", log.get("runningName").?.string);
+    const references = run.get("fileReferences").?.object;
+    const media = references.get("media").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), media.len);
+    try std.testing.expect(media[0].object.get("generatedImage").?.bool);
+    // One link per display path, the newest kept, newest first.
+    const links = references.get("links").?.array.items;
+    try std.testing.expect(references.get("linksComplete").?.bool);
+    try std.testing.expectEqualStrings("generated-images/one.png", links[0].object.get("displayPath").?.string);
+    try std.testing.expectEqualStrings("src/b.zig", links[1].object.get("displayPath").?.string);
+    try std.testing.expectEqualStrings("new a", links[2].object.get("title").?.string);
+    try std.testing.expectEqual(@as(usize, 3), links.len);
+
+    // A second running record leaves the live status without a single name.
+    var second = try testEnvelope(3, 7, "{\"tool_start\":{\"id\":\"live-2\",\"name\":\"Read\",\"input\":\"{}\"}}");
+    defer second.deinit();
+    try control.applyEvent(&second);
+    const busy = try control.writeViewFixture(&storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, busy, "\"toolLog\":{\"count\":\"5\",\"revision\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, busy, "\"runningName\":null") != null);
+    // Whole-history projections carry only the summary.
+    const aggregate = try control.writeAggregateFixture(&storage);
+    try std.testing.expect(std.mem.indexOf(u8, aggregate, "\"fileReferences\"") == null);
+}
+
+test "a Run's file links stop at their source budget, newest first" {
+    var limits = testLimits();
+    limits.max_projection_bytes = 1024 * 1024;
+    limits.max_snapshot_bytes = (Limits{}).max_snapshot_bytes;
+    limits.max_file_ref_field_bytes = 8192;
+    var control = try testRuntimeWithLimits(limits, .{});
+    defer control.deinit();
+    // Three records of twenty-four distinct four-kilobyte paths exceed the
+    // link budget; the newest records' paths are kept first.
+    const long_name = "d" ** 4000;
+    for ([_][]const u8{ "one", "two", "three" }) |id| {
+        var entries: std.ArrayList(u8) = .empty;
+        defer entries.deinit(std.testing.allocator);
+        for (0..24) |index| {
+            if (index != 0) try entries.append(std.testing.allocator, ',');
+            try entries.print(std.testing.allocator, "{{\"locator\":{{\"workspace_path\":\"{s}/{s}-{d}.zig\"}},\"title\":\"\",\"kind\":\"read\"}}", .{ long_name, id, index });
+        }
+        const encoded = try std.fmt.allocPrint(std.testing.allocator, "{{\"tool_result\":{{\"id\":\"{s}\",\"name\":\"Read\",\"input\":\"{{}}\",\"content\":\"\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[{s}]}}}}", .{ id, entries.items });
+        defer std.testing.allocator.free(encoded);
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    const storage = try std.testing.allocator.alloc(u8, 4 * 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    const view = try control.writeViewFixture(storage, .{ .task_id = 3 });
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, view, .{});
+    defer parsed.deinit();
+    const references = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("fileReferences").?.object;
+    const links = references.get("links").?.array.items;
+    try std.testing.expect(!references.get("linksComplete").?.bool);
+    try std.testing.expect(links.len > 24 and links.len < 72);
+    var source: usize = 0;
+    for (links) |link| source += link.object.get("displayPath").?.string.len;
+    try std.testing.expect(source <= task_test_view.run_file_link_source_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, links[0].object.get("displayPath").?.string, "/three-23.zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, links[links.len - 1].object.get("displayPath").?.string, "/one-") != null);
+}
+
+fn testToolPageOrders(control: *Runtime, output: []u8, source_budget: usize, orders: *std.ArrayList(u64)) !u64 {
+    const text = control.liveViewText();
+    var after: u64 = 0;
+    var pages: u64 = 0;
+    while (true) {
+        const page = try control.task_runtime.writeToolPage(std.testing.allocator, output, text.task(), 3, 7, after, source_budget);
+        try std.testing.expectEqual(ToolPageState.ready, page.state);
+        pages += 1;
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page.json, .{});
+        defer parsed.deinit();
+        for (parsed.value.array.items) |entry| try orders.append(std.testing.allocator, try std.fmt.parseInt(u64, entry.object.get("order").?.string, 10));
+        after = page.next_after_order orelse return pages;
+    }
+}
+
+test "Tool pages continue in activity order and repair a displaced slot order" {
+    const limits = testLimits();
+    var control = try testRuntimeWithLimits(limits, .{});
+    defer control.deinit();
+    for ([_][]const u8{ "a", "b", "c", "d", "e" }) |id| try applyTestToolResult(&control, id, "ok");
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
+    try std.testing.expect(run.tool_revision != 0);
+    var output: [16 * 1024]u8 = undefined;
+
+    var orders: std.ArrayList(u64) = .empty;
+    defer orders.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), try testToolPageOrders(&control, &output, tool_page_source_bytes, &orders));
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4, 5 }, orders.items);
+
+    // A tiny source budget still carries one record per page.
+    orders.clearRetainingCapacity();
+    try std.testing.expectEqual(@as(u64, 5), try testToolPageOrders(&control, &output, 1, &orders));
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4, 5 }, orders.items);
+
+    // History written while receipts displaced records keeps slots out of order.
+    std.mem.swap(?task_test_state.ToolView, &run.tools[0], &run.tools[3]);
+    orders.clearRetainingCapacity();
+    _ = try testToolPageOrders(&control, &output, 1, &orders);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4, 5 }, orders.items);
+    std.mem.swap(?task_test_state.ToolView, &run.tools[0], &run.tools[3]);
+
+    const text = control.liveViewText();
+    const tail = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, 5, tool_page_source_bytes);
+    try std.testing.expectEqualStrings("[]", tail.json);
+    try std.testing.expectEqual(@as(u64, 5), tail.total);
+    try std.testing.expectEqual(run.tool_revision, tail.revision);
+    try std.testing.expect(tail.next_after_order == null);
+    const revision = run.tool_revision;
+    try applyTestToolResult(&control, "f", "ok");
+    try std.testing.expect(run.tool_revision > revision);
+
+    try std.testing.expectEqual(ToolPageState.missing, (try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 4, 7, 0, tool_page_source_bytes)).state);
+    try std.testing.expectEqual(ToolPageState.missing, (try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 8, 0, tool_page_source_bytes)).state);
+}
+
+test "a Tool record too large for one page is sent without its text and marked" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try applyTestToolResult(&control, "large", "x" ** 4096);
+    try applyTestToolResult(&control, "small", "ok");
+    // Holds one cut entry but not a second one.
+    var output: [512]u8 = undefined;
+    const text = control.liveViewText();
+    const first = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, 0, tool_page_source_bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first.json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    const entry = parsed.value.array.items[0].object;
+    try std.testing.expect(entry.get("transportTruncated").?.bool);
+    try std.testing.expectEqualStrings("", entry.get("content").?.string);
+    try std.testing.expectEqualStrings("{}", entry.get("input").?.string);
+    try std.testing.expectEqual(@as(?u64, 1), first.next_after_order);
+    // The record itself is unchanged; only this response left text out.
+    try std.testing.expectEqual(@as(usize, 4096), control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?.content.len);
+    const second = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, 1, tool_page_source_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, second.json, "transportTruncated") == null);
+    try std.testing.expect(second.next_after_order == null);
+}
+
+test "a Tool record whose references or name cannot fit is still sent, so later records stay readable" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const long_title = "t" ** 250;
+    const reference = "{\"locator\":{\"workspace_path\":\"src/" ++ long_title ++ ".zig\"},\"title\":\"" ++ long_title ++ "\",\"kind\":\"read\"}";
+    var refs = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"refs\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[" ++ reference ++ "," ++ reference ++ "]}}");
+    defer refs.deinit();
+    try control.applyEvent(&refs);
+    var named = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"named\",\"name\":\"" ++ ("n" ** 700) ++ "\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer named.deinit();
+    try control.applyEvent(&named);
+    try applyTestToolResult(&control, "small", "ok");
+    // Holds one reduced entry, but not the references or the long name.
+    var output: [512]u8 = undefined;
+    const text = control.liveViewText();
+    var after: u64 = 0;
+    var entries: [3]std.json.Parsed(std.json.Value) = undefined;
+    for (&entries) |*slot| {
+        const page = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, after, tool_page_source_bytes);
+        slot.* = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page.json, .{});
+        try std.testing.expectEqual(@as(usize, 1), slot.value.array.items.len);
+        after = page.next_after_order orelse 0;
+    }
+    defer for (&entries) |*slot| slot.deinit();
+    try std.testing.expectEqual(@as(u64, 0), after);
+    const first = entries[0].value.array.items[0].object;
+    try std.testing.expect(first.get("transportTruncated").?.bool);
+    try std.testing.expectEqualStrings("Read", first.get("name").?.string);
+    try std.testing.expectEqual(@as(usize, 0), first.get("fileRefs").?.array.items.len);
+    const second = entries[1].value.array.items[0].object;
+    try std.testing.expect(second.get("transportTruncated").?.bool);
+    try std.testing.expectEqualStrings("", second.get("name").?.string);
+    try std.testing.expectEqualStrings("completed", second.get("state").?.string);
+    try std.testing.expect(entries[2].value.array.items[0].object.get("transportTruncated") == null);
+    // Only the responses left these out; the records are unchanged.
+    try std.testing.expectEqual(@as(usize, 700), control.testTaskSlots()[0].?.durable.runs[0].?.tools[1].?.name.len);
+}
+
+test "Tool pages hide credentials learned after the record was kept" {
+    const Account = struct {
+        fn generation(_: *anyopaque) u64 {
+            return 1;
+        }
+        fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            try callback(context, "page-account-key");
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    try applyTestToolResult(&control, "secret", "before page-account-key after");
+    var owner: u8 = 0;
+    control.setAccountProjectionCredentials(.{ .context = &owner, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    var output: [16 * 1024]u8 = undefined;
+    const text = control.liveViewText();
+    const page = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, 0, tool_page_source_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, page.json, "page-account-key") == null);
+    try std.testing.expect(std.mem.indexOf(u8, page.json, "***") != null);
+}
+
+test "Tool pages are refused while shutting down or without a security epoch" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try applyTestToolResult(&control, "kept", "ok");
+    var output: [16 * 1024]u8 = undefined;
+    try std.testing.expectEqual(ToolPageState.ready, (try control.writeToolPage(&output, 3, 7, 0)).state);
+    const epoch = control.projection_security_epoch;
+    control.projection_security_epoch = 0;
+    try std.testing.expectError(error.InvalidViewRequest, control.writeToolPage(&output, 3, 7, 0));
+    control.projection_security_epoch = epoch;
+    control.shutting_down = true;
+    defer control.shutting_down = false;
+    try std.testing.expectError(error.ExecutorShuttingDown, control.writeToolPage(&output, 3, 7, 0));
+}
+
+test "Tool file references are allocated only for the references a result carries" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var start = try testEnvelope(3, 7, "{\"tool_start\":{\"id\":\"refs-tool\",\"name\":\"Bash\",\"input\":\"{}\"}}");
+    defer start.deinit();
+    try control.applyEvent(&start);
+    const tool = &control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?;
+    try std.testing.expect(tool.file_refs == null);
+    var result = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"refs-tool\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer result.deinit();
+    try control.applyEvent(&result);
+    try std.testing.expectEqual(@as(usize, 0), tool.file_refs.?.len);
+    try std.testing.expectEqual(ToolState.completed, tool.state);
 }
 
 test "Runtime projects typed AgentCore file references into bounded tool entries" {
@@ -18884,13 +19163,18 @@ test "Runtime projects typed AgentCore file references into bounded tool entries
     var envelope = try testEnvelope(3, 7, encoded);
     defer envelope.deinit();
     try control.applyEvent(&envelope);
+    try std.testing.expectEqual(@as(usize, 1), control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?.file_refs.?.len);
 
-    var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try control.writeAggregateFixture(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"fileRefs\":[{\"id\":\"file-3-1-1-1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"displayPath\":\"src/main.zig\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"kind\":\"read\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"range\":") == null);
+    var page_storage: [16 * 1024]u8 = undefined;
+    const page = (try control.writeToolPage(&page_storage, 3, 7, 0)).json;
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"fileRefs\":[{\"id\":\"file-3-1-1-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"displayPath\":\"src/main.zig\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"kind\":\"read\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"range\":") == null);
+    // The task page links body text to the same reference.
+    var view_storage: [96 * 1024]u8 = undefined;
+    const view = try control.writeViewFixture(&view_storage, .{ .task_id = 3 });
+    try std.testing.expect(std.mem.indexOf(u8, view, "\"links\":[{\"id\":\"file-3-1-1-1\",\"title\":\"main.zig\",\"displayPath\":\"src/main.zig\"}],\"linksComplete\":true") != null);
     try std.testing.expect(control.task_runtime.fileReference(
         3,
         7,
@@ -20289,14 +20573,19 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "\"redacted\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "prefix *** suffix") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"id\":\"tool-1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"name\":\"Bash ***\"") != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
         "\"redacted\":false,\"provisionalRedacted\":true",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"redacted\":true") != null);
+    // The running record's name reaches the page through the Tool summary.
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"runningName\":null") != null);
+    var page_storage: [16 * 1024]u8 = undefined;
+    const page = (try control.writeToolPage(&page_storage, 3, 7, 0)).json;
+    try std.testing.expect(std.mem.indexOf(u8, page, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"id\":\"tool-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"name\":\"Bash ***\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "\"redacted\":true") != null);
 }
 
 test "Runtime product tool identities remain unique after raw ID redaction" {
@@ -20412,6 +20701,453 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     );
 }
 
+/// Adds an attached Task with one active Run beside the fixture Task 3.
+fn installTestRunTask(control: *Runtime, slot: usize, task_id: u64, run_id: u64) !void {
+    var task_execution = try TestSupport.cloneFixtureExecution(control, control.allocator);
+    errdefer task_execution.deinit();
+    task_execution.source_generation = control.modelsView().providers[0].source_generation;
+    const execution_model = try control.copyBounded(task_execution.input().target.model, models_contract.Limits.model_id_bytes);
+    const runs = try control.allocator.alloc(?TestRunRecord, control.limits.max_runs_per_task);
+    @memset(runs, null);
+    const compacts = try control.allocator.alloc(?TestCompactRecord, control.limits.max_compacts_per_task);
+    @memset(compacts, null);
+    const ui_history = try control.allocator.alloc(?UiRecord, control.limits.max_ui_history_per_task);
+    @memset(ui_history, null);
+    const file_changes = try control.allocator.alloc(?task_test_state.FileChangeView, control.limits.max_file_changes_per_run);
+    @memset(file_changes, null);
+    const commentary_ends = try control.allocator.alloc(u64, control.limits.max_commentary_segments_per_run);
+    const run_execution = try control.allocator.create(task_test_state.RunExecution);
+    run_execution.* = .{};
+    const additional_inputs = try control.allocator.alloc(?task_test_state.AdditionalInput, lifecycle.max_submitted_inputs);
+    @memset(additional_inputs, null);
+    runs[0] = .{
+        .execution = run_execution,
+        .additional_inputs = additional_inputs,
+        .id = run_id,
+        .generation = 1,
+        .execution_generation = 1,
+        .execution_protocol = .anthropic_messages,
+        .execution_model = execution_model,
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
+        .input = .{ .text = .{ .value = try control.copyBounded("long run", control.limits.max_user_message_bytes) } },
+        .commentary_ends = commentary_ends,
+        .active_phase = .running,
+        .agent_handoff = .init(.finishing),
+        .tools = &.{},
+        .file_change_observation = .collecting,
+        .file_changes = file_changes,
+        .terminal_diagnostic = try control.allocTrackedCapacity(control.limits.max_terminal_diagnostic_bytes),
+        .initial_credentials = .{ task_execution.input().api_key, &.{}, &.{} },
+    };
+    control.testTaskSlots()[slot] = try control.allocator.create(TestTask);
+    control.testTaskSlots()[slot].?.* = .{
+        .durable = .{
+            .id = task_id,
+            .recent_order = slot + 1,
+            .execution_generation = 1,
+            .execution_protocol = .anthropic_messages,
+            .execution_model = execution_model,
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .project_id = 1,
+            .workspace_id = 1,
+            .workspace_root = try control.copyBounded("/tmp/metawork-test", control.limits.max_workspace_bytes),
+            .title = try control.copyBounded("", control.limits.max_task_title_bytes),
+            .runs = runs,
+            .compacts = compacts,
+            .next_run_generation = 1,
+            .ui_history = ui_history,
+        },
+        .runtime = .{
+            .attachment = .{ .attached = .{
+                .binding = task_test_agent_session.Binding.testFixture(task_id),
+                .execution = task_execution.take(),
+                .pinned_catalog = null,
+            } },
+            .active_run_id = run_id,
+            .active_operation = .{ .run = run_id },
+        },
+    };
+    control.task_runtime.next_task_id = @max(control.task_runtime.next_task_id, task_id + 1);
+    control.task_runtime.next_recent_order = @max(control.task_runtime.next_recent_order, slot + 2);
+}
+
+/// One completed or failed call with a file reference, elapsed `index` ms.
+fn applyLongRunTool(control: *Runtime, task_id: u64, run_id: u64, index: usize, content: []const u8, failed: bool) !void {
+    const allocator = std.testing.allocator;
+    const start_json = try std.fmt.allocPrint(allocator, "{{\"tool_start\":{{\"id\":\"call-{d}\",\"name\":\"Read\",\"input\":\"{{}}\"}}}}", .{index});
+    defer allocator.free(start_json);
+    var start = try testEnvelope(task_id, run_id, start_json);
+    defer start.deinit();
+    try control.applyEvent(&start);
+    const result_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"tool_result\":{{\"id\":\"call-{d}\",\"name\":\"Read\",\"input\":\"{{}}\",\"content\":\"{s}\",\"is_error\":{},\"elapsed_ms\":{d},\"file_refs\":[{{\"locator\":{{\"workspace_path\":\"src/file-{d}.zig\"}},\"title\":\"file-{d}.zig\",\"kind\":\"read\"}}]}}}}",
+        .{ index, content, failed, index, index, index },
+    );
+    defer allocator.free(result_json);
+    var result = try testEnvelope(task_id, run_id, result_json);
+    defer result.deinit();
+    try control.applyEvent(&result);
+}
+
+/// Every Tool record of a Run read through its pages, in activity order.
+const TestToolRecords = struct {
+    arena: std.heap.ArenaAllocator,
+    entries: std.ArrayList(std.json.Value) = .empty,
+    total: u64 = 0,
+    pages: usize = 0,
+
+    fn deinit(self: *@This()) void {
+        self.arena.deinit();
+    }
+
+    fn entry(self: *const @This(), position: usize) std.json.ObjectMap {
+        return self.entries.items[position - 1].object;
+    }
+
+    fn encoded(self: *@This(), position: usize) ![]const u8 {
+        return std.json.Stringify.valueAlloc(self.arena.allocator(), self.entries.items[position - 1], .{});
+    }
+};
+
+fn readTestToolRecords(control: *Runtime, task_id: u64, run_id: u64) !TestToolRecords {
+    var records: TestToolRecords = .{ .arena = .init(std.testing.allocator) };
+    errdefer records.deinit();
+    const allocator = records.arena.allocator();
+    const output = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(output);
+    var after: u64 = 0;
+    while (true) {
+        const page = try control.writeToolPage(output, task_id, run_id, after);
+        try std.testing.expectEqual(ToolPageState.ready, page.state);
+        records.total = page.total;
+        records.pages += 1;
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, allocator, page.json, .{ .allocate = .alloc_always });
+        for (parsed.array.items) |value| {
+            const order = try std.fmt.parseInt(u64, value.object.get("order").?.string, 10);
+            try std.testing.expect(order > after);
+            try records.entries.append(allocator, value);
+        }
+        after = page.next_after_order orelse return records;
+    }
+}
+
+fn finishTestRun(control: *Runtime, task_id: u64, run_id: u64) !void {
+    const run = findRun(control.testTask(task_id).?.durable.runs, run_id).?;
+    try std.testing.expect(commitTerminal(run, .completed, .completed, null, .reusable, "", false));
+}
+
+test "a Run keeps all 1000 Tool records and a cold restore reads the same ones" {
+    var limits = testLimits();
+    limits.max_history_bytes = 32 * 1024 * 1024;
+    limits.max_tool_field_bytes = 256 * 1024;
+    const storage = try std.testing.allocator.alloc(u8, 8 * 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var history = TestTaskPersistence{ .storage = storage };
+    const large = try std.testing.allocator.alloc(u8, 256 * 1024);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'y');
+    var saved_33: []const u8 = undefined;
+    var saved_1000: []const u8 = undefined;
+    var saved = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer saved.deinit();
+    {
+        var control = try testRuntimeWithLimits(limits, .{});
+        defer control.deinit();
+        for (1..1001) |index| try applyLongRunTool(
+            &control,
+            3,
+            7,
+            index,
+            if (index == 250) "{\\\"error\\\":{\\\"detail\\\":\\\"failed 250\\\"}}" else if (index == 500) large else "ok",
+            index == 250,
+        );
+        try finishTestRun(&control, 3, 7);
+        finalizeTestTerminalEvents(&control);
+        const run = &control.testTask(3).?.durable.runs[0].?;
+        // Nothing was left out, so the Run reports a complete recording.
+        try std.testing.expect(run.event_projection_failure == null);
+
+        var records = try readTestToolRecords(&control, 3, 7);
+        defer records.deinit();
+        try std.testing.expectEqual(@as(u64, 1000), records.total);
+        try std.testing.expectEqual(@as(usize, 1000), records.entries.items.len);
+        try std.testing.expect(records.pages > 1);
+        for ([_]usize{ 33, 1000 }) |position| {
+            const entry = records.entry(position);
+            var expected: [32]u8 = undefined;
+            try std.testing.expectEqualStrings("Read", entry.get("name").?.string);
+            try std.testing.expectEqualStrings("completed", entry.get("state").?.string);
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{d}", .{position}), entry.get("elapsedMs").?.string);
+            const references = entry.get("fileRefs").?.array.items;
+            try std.testing.expectEqual(@as(usize, 1), references.len);
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "src/file-{d}.zig", .{position}), references[0].object.get("displayPath").?.string);
+        }
+        try std.testing.expectEqualStrings("failed", records.entry(250).get("state").?.string);
+        try std.testing.expectEqualStrings("failed 250", records.entry(250).get("errorDetail").?.string);
+        // A field at the single-field limit is kept whole.
+        try std.testing.expectEqual(large.len, records.entry(500).get("content").?.string.len);
+        try std.testing.expect(!records.entry(500).get("contentTruncated").?.bool);
+        saved_33 = try saved.allocator().dupe(u8, try records.encoded(33));
+        saved_1000 = try saved.allocator().dupe(u8, try records.encoded(1000));
+
+        control.task_persistence = history.capability(null);
+        control.task_persistence_health = .ready;
+        try TestSupport.commitTaskHistory(&control);
+        try std.testing.expect(history.len > large.len);
+    }
+    var restored = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, limits, .{
+        .task_persistence = history.capability(storage[0..history.len]),
+    });
+    defer restored.deinit();
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, restored.task_persistence_health);
+    var records = try readTestToolRecords(&restored, 3, 7);
+    defer records.deinit();
+    try std.testing.expectEqual(@as(usize, 1000), records.entries.items.len);
+    try std.testing.expectEqualStrings(saved_33, try records.encoded(33));
+    try std.testing.expectEqualStrings(saved_1000, try records.encoded(1000));
+    try std.testing.expectEqual(large.len, records.entry(500).get("content").?.string.len);
+}
+
+test "two long Runs and a third Task's Run interleave within the global budget and restore" {
+    var limits = testLimits();
+    limits.max_tasks = 3;
+    limits.max_history_bytes = 32 * 1024 * 1024;
+    const storage = try std.testing.allocator.alloc(u8, 8 * 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var history = TestTaskPersistence{ .storage = storage };
+    {
+        var control = try testRuntimeWithLimits(limits, .{});
+        defer control.deinit();
+        try installTestRunTask(&control, 1, 4, 8);
+        for (1..1101) |index| {
+            try applyLongRunTool(&control, 3, 7, index, "first", false);
+            try applyLongRunTool(&control, 4, 8, index, "second", false);
+            if (index != 550) continue;
+            // A third Task starts a Run while both long Runs keep going, and
+            // the budget still admits a further Run beside them.
+            try installTestRunTask(&control, 2, 5, 9);
+            const third = control.testTask(5).?;
+            const admitted = try control.reserveRunRecord(third, .{ .text = "admitted" });
+            control.discardRunRecord(third, admitted);
+            for (1..11) |call| try applyLongRunTool(&control, 5, 9, call, "third", false);
+        }
+        for ([_][2]u64{ .{ 3, 7 }, .{ 4, 8 }, .{ 5, 9 } }) |ids| try finishTestRun(&control, ids[0], ids[1]);
+        finalizeTestTerminalEvents(&control);
+        for ([_][2]u64{ .{ 3, 7 }, .{ 4, 8 }, .{ 5, 9 } }) |ids|
+            try std.testing.expect(findRun(control.testTask(ids[0]).?.durable.runs, ids[1]).?.event_projection_failure == null);
+        control.task_persistence = history.capability(null);
+        control.task_persistence_health = .ready;
+        try TestSupport.commitTaskHistory(&control);
+    }
+    var restored = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, limits, .{
+        .task_persistence = history.capability(storage[0..history.len]),
+    });
+    defer restored.deinit();
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, restored.task_persistence_health);
+    for ([_][3]u64{ .{ 3, 7, 1100 }, .{ 4, 8, 1100 }, .{ 5, 9, 10 } }) |expected| {
+        var records = try readTestToolRecords(&restored, expected[0], expected[1]);
+        defer records.deinit();
+        try std.testing.expectEqual(@as(usize, @intCast(expected[2])), records.entries.items.len);
+        try std.testing.expectEqualStrings(
+            if (expected[0] == 3) "first" else if (expected[0] == 4) "second" else "third",
+            records.entry(records.entries.items.len).get("content").?.string,
+        );
+    }
+}
+
+test "generated media receipts take their own slots after many ordinary records" {
+    var limits = testLimits();
+    limits.max_history_bytes = 8 * 1024 * 1024;
+    var control = try testRuntimeWithLimits(limits, .{});
+    defer control.deinit();
+    for (1..101) |index| try applyLongRunTool(&control, 3, 7, index, "ordinary", false);
+    for ([_][]const u8{ "one", "two", "three" }) |name| {
+        const encoded = try std.fmt.allocPrint(std.testing.allocator, "{{\"tool_result\":{{\"id\":\"image-{s}\",\"name\":\"GenerateImage\",\"input\":\"\",\"content\":\"\",\"is_error\":false}}}}", .{name});
+        defer std.testing.allocator.free(encoded);
+        var image = try testEnvelope(3, 7, encoded);
+        defer image.deinit();
+        image.generated_image_path = try std.fmt.allocPrint(std.testing.allocator, "generated-images/{s}.png", .{name});
+        try control.applyEvent(&image);
+    }
+    var video = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"video\",\"name\":\"GenerateVideo\",\"input\":\"{}\",\"content\":\"{}\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer video.deinit();
+    video.generated_video_path = try std.testing.allocator.dupe(u8, "generated-videos/clip.mp4");
+    try control.applyEvent(&video);
+
+    var records = try readTestToolRecords(&control, 3, 7);
+    defer records.deinit();
+    try std.testing.expectEqual(@as(u64, 104), records.total);
+    var ordinary: usize = 0;
+    for (records.entries.items) |value| {
+        if (std.mem.eql(u8, value.object.get("name").?.string, "Read")) ordinary += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 100), ordinary);
+    try std.testing.expect(control.testTask(3).?.durable.runs[0].?.event_projection_failure == null);
+
+    // Every receipt keeps its reading anchor in the task page.
+    const view_storage = try std.testing.allocator.alloc(u8, 512 * 1024);
+    defer std.testing.allocator.free(view_storage);
+    const view = try control.writeViewFixture(view_storage, .{ .task_id = 3 });
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, view, .{});
+    defer parsed.deinit();
+    const run = parsed.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object;
+    const media = run.get("fileReferences").?.object.get("media").?.array.items;
+    try std.testing.expectEqual(@as(usize, 4), media.len);
+    var videos: usize = 0;
+    for (media) |reference| {
+        try std.testing.expect(reference.object.get("presentationAnchor").? != .null);
+        if (reference.object.get("generatedVideo") != null) videos += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), videos);
+}
+
+test "a full global budget leaves a recording gap, refuses a new Run, restores whole and frees on delete" {
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var history = TestTaskPersistence{ .storage = storage };
+    var control = try testRuntime();
+    defer control.deinit();
+    for (1..9) |index| try applyLongRunTool(&control, 3, 7, index, "kept", false);
+    // Fill the budget exactly: the next call has no room for its record.
+    const budget = control.limits.max_projection_bytes;
+    control.limits.max_projection_bytes = control.projection_bytes;
+    try std.testing.expectError(error.ProjectionCapacity, applyLongRunTool(&control, 3, 7, 9, "lost", false));
+    // The event pump records the gap and the Run carries on to its end.
+    control.recordEventProjectionFailure(3, 7);
+    try finishTestRun(&control, 3, 7);
+    finalizeTestTerminalEvents(&control);
+    const task = control.testTask(3).?;
+    const run = &task.durable.runs[0].?;
+    try std.testing.expectEqual(RunOutcome.completed, productTerminalFacts(run).?.outcome);
+    try std.testing.expect(run.event_projection_failure != null);
+    // A new round is refused with the capacity reason.
+    try std.testing.expectError(error.ProjectionCapacity, control.reserveRunRecord(task, .{ .text = "next round" }));
+    try std.testing.expectEqual(task_runtime.SendInputReason.capacity_reached, sendInputRejection(error.ProjectionCapacity));
+
+    // Saved at a full budget, the history restores whole under the same one.
+    control.task_persistence = history.capability(null);
+    control.task_persistence_health = .ready;
+    try TestSupport.commitTaskHistory(&control);
+    var restored_limits = testLimits();
+    restored_limits.max_projection_bytes = control.limits.max_projection_bytes;
+    {
+        var restored = try Runtime.init(std.testing.allocator, std.testing.io, test_agent_port, restored_limits, .{
+            .task_persistence = history.capability(storage[0..history.len]),
+        });
+        defer restored.deinit();
+        try std.testing.expectEqual(TaskPersistenceHealth.ready, restored.task_persistence_health);
+        var records = try readTestToolRecords(&restored, 3, 7);
+        defer records.deinit();
+        try std.testing.expectEqual(@as(usize, 8), records.entries.items.len);
+        try std.testing.expect(findRun(restored.testTask(3).?.durable.runs, 7).?.event_projection_failure != null);
+    }
+
+    // Deleting the Task gives its text back to the budget.
+    task.runtime.active_run_id = 0;
+    control.releaseTaskAttachmentNoFail(task, .cold_start);
+    const before_delete = control.projection_bytes;
+    try control.deleteTask(3);
+    control.syncLifecycle();
+    try std.testing.expect(control.testTask(3) == null);
+    try std.testing.expect(control.projection_bytes < before_delete);
+    control.limits.max_projection_bytes = budget;
+}
+
+test "a record left out for capacity leaves the Tool revision where it was" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try applyLongRunTool(&control, 3, 7, 1, "kept", false);
+    const run = &control.testTask(3).?.durable.runs[0].?;
+    const revision = run.tool_revision;
+    try std.testing.expect(revision != 0);
+    control.limits.max_projection_bytes = control.projection_bytes;
+    // Neither a call without room for its record nor progress without room
+    // for its text changes a record, so the Renderer has nothing to reread.
+    try std.testing.expectError(error.ProjectionCapacity, applyLongRunTool(&control, 3, 7, 2, "lost", false));
+    try std.testing.expectEqual(revision, run.tool_revision);
+    var progress = try testEnvelope(3, 7, "{\"tool_progress\":{\"id\":\"call-1\",\"text\":\"progress without room\"}}");
+    defer progress.deinit();
+    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&progress));
+    try std.testing.expectEqual(revision, run.tool_revision);
+}
+
+test "Tool slots grow while a snapshot read and a file preview are in flight" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var bytes: [1024]u8 = undefined;
+    @memset(&bytes, 'a');
+    const jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
+    @memcpy(bytes[0..jpeg.len], jpeg);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = &bytes });
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
+    defer control.deinit();
+    // The preview fixture's Workspace also needs a catalog to be projected.
+    control.skill.registerWorkspaceOwned(.{
+        .id = 2,
+        .epoch = control.workspace.facts(2).?.epoch,
+        .catalog_authorized = true,
+        .canonical_root = try control.allocator.dupe(u8, root),
+    }, control.skillProjectionBudget());
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
+    const capacity = run.tools.len;
+
+    const output = try std.testing.allocator.alloc(u8, 256 * 1024);
+    defer std.testing.allocator.free(output);
+    var read = try control.writeSnapshot(output, .{ .task_id = 3 });
+    var capture: PreviewTestCapture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(81, 3, 7, "file-3-1-1-1"));
+    // Records arrive until the slots move to a larger array.
+    for (1..capacity + 2) |index| try applyLongRunTool(control, 3, 7, index, "grown", false);
+    try std.testing.expect(run.tools.len > capacity);
+
+    // The read keeps what it froze: the single record before the growth.
+    while (read.bytes == 0) read = try control.continueSnapshot(read.id, output);
+    try control.writeSnapshotRange(read.id, output, 0, read.bytes);
+    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "\"toolLog\":{\"count\":\"1\",") != null);
+    // The preview resolves its reference by identity, not by slot.
+    for (0..5000) |_| {
+        control.drainFilePreviewCompletions(capture.sink());
+        if (capture.calls != 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expectEqual(FilePreviewState.ready, capture.state);
+    if (capture.image) |image| _ = control.releaseFilePreview(image.id);
+    var records = try readTestToolRecords(control, 3, 7);
+    defer records.deinit();
+    try std.testing.expectEqual(@as(u64, capacity + 2), records.total);
+}
+
+test "a history store from a newer build is never offered for recovery" {
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var persistence = TestTaskPersistence{ .storage = storage };
+    var control = try testRuntime();
+    defer control.deinit();
+    control.task_persistence = persistence.capability(null);
+    for ([_]TaskPersistenceHealth{ .read_failed, .corrupt, .write_failed }) |health| {
+        control.task_persistence_health = health;
+        control.task_persistence.restore_incompatible = false;
+        try std.testing.expect(control.taskHistoryRecoveryAvailable());
+        // A build that meets a migration it does not know, such as one from
+        // before 0014, must not offer to replace the store it cannot read.
+        control.task_persistence.restore_incompatible = true;
+        try std.testing.expect(!control.taskHistoryRecoveryAvailable());
+        try std.testing.expectEqual(
+            PersistenceRecoveryOutcome.unavailable,
+            control.recoverTaskHistory(control.currentRevision()),
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 0), persistence.recoveries);
+}
+
 test "projection gap preserves completion, continuation and completion-seen persistence" {
     const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
     defer std.testing.allocator.free(storage);
@@ -20438,14 +21174,29 @@ test "projection gap preserves completion, continuation and completion-seen pers
         "",
         false,
     ));
-    var overflow = try testEnvelope(
+    // A Run keeps every record while the global budget has room.
+    var third = try testEnvelope(
         3,
         7,
         "{\"tool_start\":{\"id\":\"third\",\"name\":\"Edit\",\"input\":\"three\"}}",
     );
+    defer third.deinit();
+    try control.applyEvent(&third);
+    var page_storage: [16 * 1024]u8 = undefined;
+    try std.testing.expectEqual(@as(u64, 3), (try control.writeToolPage(&page_storage, 3, 7, 0)).total);
+    // Only an exhausted global budget leaves a record out.
+    const budget = control.limits.max_projection_bytes;
+    control.limits.max_projection_bytes = control.projection_bytes;
+    var overflow = try testEnvelope(
+        3,
+        7,
+        "{\"tool_start\":{\"id\":\"fourth\",\"name\":\"Write\",\"input\":\"four\"}}",
+    );
     defer overflow.deinit();
-    try std.testing.expectError(error.ToolCapacity, control.applyEvent(&overflow));
+    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&overflow));
+    control.limits.max_projection_bytes = budget;
     control.recordEventProjectionFailure(3, 7);
+    try std.testing.expectEqual(@as(u64, 3), (try control.writeToolPage(&page_storage, 3, 7, 0)).total);
     finalizeTestTerminalEvents(&control);
 
     // Agent completion remains immutable; only Runtime product facts report
@@ -22361,9 +23112,12 @@ test "Product view cold assembly uses the frozen writer through nested catalogs 
         try std.testing.expectEqualStrings(@tagName(management), root.get("management").?.object.get("kind").?.string);
         try std.testing.expect(std.mem.count(u8, snapshot, "builtin.review") >= 3);
         try std.testing.expect(std.mem.indexOf(u8, snapshot, "title ***") != null);
-        try std.testing.expect(std.mem.indexOf(u8, snapshot, "progress ***") != null);
         try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     }
+    // Tool progress is read in pages, with the same credential set.
+    const page = (try control.writeToolPage(&output, 3, 7, 0)).json;
+    try std.testing.expect(std.mem.indexOf(u8, page, "progress ***") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "SECRET-KEY") == null);
 }
 
 test "Product view cached delivery confirms versions without rebuilding stable blocks" {
@@ -22482,66 +23236,49 @@ test "Product view history versions ignore unrelated revisions and observe termi
     try std.testing.expectEqual(task_test_state.FileChangeObservation.incomplete, run.file_change_observation.?);
 }
 
-test "Product view preparation owns frozen tools and cannot clean a changed cache" {
+test "Product view preparation keeps its frozen scope and cannot clean a changed cache" {
     var control = try testRuntime();
     defer control.deinit();
-    var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"prepared\",\"name\":\"Bash\",\"input\":\"{\\\"command\\\":\\\"echo original\\\"}\",\"content\":\"old result\",\"is_error\":false,\"elapsed_ms\":1}}");
-    defer event.deinit();
-    try control.applyEvent(&event);
+    try applyTestToolResult(&control, "prepared", "old result");
     var output: [96 * 1024]u8 = undefined;
     var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
     try std.testing.expectEqual(@as(usize, 0), read.bytes);
-    try std.testing.expectEqual(@as(usize, 1), control.snapshot.preparation.tools.items.len);
     try std.testing.expect(control.snapshot.preparation.credentials != null);
     try std.testing.expectError(error.InvalidOffset, control.writeSnapshotRange(read.id, &output, 0, 1));
-    const tool = &control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?;
-    try control.replaceTracked(&tool.content, "new result", control.limits.max_tool_field_bytes);
-    control.bumpRevision();
+    try applyTestToolResult(&control, "later", "new result");
     while (read.bytes == 0) read = try control.continueSnapshot(read.id, &output);
     try std.testing.expect(control.snapshot.preparation.credentials == null);
-    try std.testing.expectEqual(@as(usize, 0), control.snapshot.preparation.tools.items.len);
     var offset: usize = 0;
     while (offset < read.bytes) : (offset += 31) try control.writeSnapshotRange(read.id, &output, offset, @min(@as(usize, 31), read.bytes - offset));
-    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "old result") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "new result") == null);
+    // Tool records never enter the page; its summary is the one frozen at begin.
+    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "old result") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "\"toolLog\":{\"count\":\"1\"") != null);
     try std.testing.expect(control.encoded_views.get(view_read.Read.keyFor(.{ .task_id = 3 }, .taskPage)) == null);
     const current = try control.writeViewFixture(&output, .{ .task_id = 3 });
-    try std.testing.expect(std.mem.indexOf(u8, current, "new result") != null);
+    try std.testing.expect(std.mem.indexOf(u8, current, "\"toolLog\":{\"count\":\"2\"") != null);
     control.encoded_views.invalidateAll();
     read = try control.writeSnapshot(&output, .{ .task_id = 3 });
     try std.testing.expectEqual(@as(usize, 0), read.bytes);
     control.learnProjectionCredential("new preparation boundary");
     try std.testing.expectError(error.StaleSnapshot, control.continueSnapshot(read.id, &output));
     try std.testing.expect(control.snapshot.preparation.credentials == null);
-    try std.testing.expectEqual(@as(usize, 0), control.snapshot.preparation.tools.items.len);
 }
 
-test "Product view failed formatter stage releases partially prepared source and credentials" {
+test "Product view failed preparation step releases its source and credentials" {
     var control = try testRuntimeWithLimits(.{}, .{});
     defer control.deinit();
-    var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"partial\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":\"result\",\"is_error\":false,\"elapsed_ms\":1}}");
-    defer event.deinit();
-    try control.applyEvent(&event);
-    const command = try std.testing.allocator.alloc(u8, 20_000);
-    defer std.testing.allocator.free(command);
-    @memset(command, '\n');
-    const input = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .command = command }, .{});
-    defer std.testing.allocator.free(input);
-    try control.replaceTracked(&control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?.input, input, control.limits.max_tool_field_bytes);
+    try applyTestToolResult(&control, "partial", "result");
     var output: [96 * 1024]u8 = undefined;
-    var read = try control.writeSnapshot(&output, .{ .task_id = 3 });
-    read = try control.continueSnapshot(read.id, &output);
+    const read = try control.writeSnapshot(&output, .{ .task_id = 3 });
     try std.testing.expectEqual(@as(usize, 0), read.bytes);
-    try std.testing.expect(control.snapshot.preparation.tools.items[0].state.stage == .bash_input);
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     const original_allocator = control.allocator;
     control.allocator = failing.allocator();
     defer control.allocator = original_allocator;
-    try std.testing.expectError(error.SnapshotTooLarge, control.continueSnapshot(read.id, &output));
+    if (control.continueSnapshot(read.id, &output)) |_| return error.TestUnexpectedResult else |_| {}
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqual(@as(u64, 0), control.snapshot.plan.id);
     try std.testing.expect(control.snapshot.preparation.credentials == null);
-    try std.testing.expectEqual(@as(usize, 0), control.snapshot.preparation.tools.items.len);
 }
 
 test "the global instructions editor works under the home only and never carries a known credential" {
@@ -22626,10 +23363,11 @@ test "Account image token protects Task views between Runs and rotation revokes 
         try control.writeSnapshotRange(read.id, &output, offset, len);
         offset += len;
     }
-    const projected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output[0..read.bytes], .{});
-    defer projected.deinit();
-    const tool = projected.value.object.get("taskPage").?.object.get("task").?.object.get("runs").?.array.items[0].object.get("tools").?.array.items[0];
-    try std.testing.expectEqualStrings("echo ***", tool.object.get("bash").?.object.get("command").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, output[0..read.bytes], "account-image-token") == null);
+    var page_storage: [16 * 1024]u8 = undefined;
+    const page = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, (try control.writeToolPage(&page_storage, 3, 7, 0)).json, .{});
+    defer page.deinit();
+    try std.testing.expectEqualStrings("echo ***", page.value.array.items[0].object.get("bash").?.object.get("command").?.string);
     const duplicate = try control.allocator.dupe(u8, account.token);
     defer control.allocator.free(duplicate);
     control.learnProjectionCredential(duplicate);
@@ -22720,7 +23458,7 @@ test "Product view cached large body moves into frozen read without a body-sized
     defer std.testing.allocator.destroy(control);
     try TestSupport.maximumSmallFixture(control);
     defer control.deinit();
-    try TestSupport.installResultFixture(control, true);
+    // The fixture's escaped response alone makes the task page a large body.
     const output = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(output);
     const request: ViewRequest = .{ .task_id = 1 };
@@ -22745,7 +23483,7 @@ test "Product view cached large body moves into frozen read without a body-sized
     const key = view_read.Read.keyFor(request, .taskPage);
     const version = control.encoded_views.get(key).?.version;
     const pointer = control.encoded_views.get(key).?.bytes.ptr;
-    try std.testing.expect(control.encoded_views.get(key).?.bytes.len > 4 * 1024 * 1024);
+    try std.testing.expect(control.encoded_views.get(key).?.bytes.len > 1024 * 1024);
     // Include revalidation after a dirty mark with identical facts: this must
     // attach the owned encoded body rather than copy it through replaceSpan.
     for ([_]bool{ false, true }) |revalidate| {
@@ -22947,7 +23685,7 @@ test "terminal receipt tail is adopted before completion and deduplicates queued
     try std.testing.expect(control.projection_bytes <= control.limits.max_projection_bytes);
 }
 
-test "trusted delivery and image metadata survive full Tool and display capacity" {
+test "trusted delivery and image metadata survive full display capacity beside every record" {
     for ([_]bool{ false, true }) |generated| {
         var storage: [256 * 1024]u8 = undefined;
         var history = TestTaskPersistence{ .storage = &storage };
@@ -22986,6 +23724,12 @@ test "trusted delivery and image metadata survive full Tool and display capacity
             try std.testing.expect(protected.file_refs.?[0].?.generated_image);
             try std.testing.expectEqual(@as(usize, 0), protected.input.len);
             try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
+            // The receipt takes a slot of its own; no ordinary record leaves.
+            var kept: usize = 0;
+            for (run.tools) |entry| if (entry != null) {
+                kept += 1;
+            };
+            try std.testing.expectEqual(@as(usize, 3), kept);
         } else {
             result.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(3), "outputs/kept.docx", 12, @splat(4));
             try control.applyEvent(&result);
