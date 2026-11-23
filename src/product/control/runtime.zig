@@ -20922,6 +20922,24 @@ test "a full global budget leaves a recording gap, refuses a new Run, restores w
     control.limits.max_projection_bytes = budget;
 }
 
+test "a record left out for capacity leaves the Tool revision where it was" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try applyLongRunTool(&control, 3, 7, 1, "kept", false);
+    const run = &control.testTask(3).?.durable.runs[0].?;
+    const revision = run.tool_revision;
+    try std.testing.expect(revision != 0);
+    control.limits.max_projection_bytes = control.projection_bytes;
+    // Neither a call without room for its record nor progress without room
+    // for its text changes a record, so the Renderer has nothing to reread.
+    try std.testing.expectError(error.ProjectionCapacity, applyLongRunTool(&control, 3, 7, 2, "lost", false));
+    try std.testing.expectEqual(revision, run.tool_revision);
+    var progress = try testEnvelope(3, 7, "{\"tool_progress\":{\"id\":\"call-1\",\"text\":\"progress without room\"}}");
+    defer progress.deinit();
+    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&progress));
+    try std.testing.expectEqual(revision, run.tool_revision);
+}
+
 test "Tool slots grow while a snapshot read and a file preview are in flight" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

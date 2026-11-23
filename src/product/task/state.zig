@@ -2290,7 +2290,8 @@ pub fn applyEvent(
             if (text.len != 0) _ = observeModelActivity(run, .writing);
         },
         .tool_start => |tool_event| {
-            run.tool_revision +%= 1;
+            // The revision moves only when a record changes; a call left out
+            // for capacity changes none and publishes no snapshot.
             const tool = try projection.findOrCreateTool(
                 run,
                 tool_event.id,
@@ -2298,12 +2299,12 @@ pub fn applyEvent(
                 tool_event.input,
             );
             tool.state = .running;
+            run.tool_revision +%= 1;
             checkCoreToolCount(run);
         },
         .tool_progress => |progress| {
             const tool = findTool(run.tools, progress.id) orelse
                 return error.ToolCapacity;
-            run.tool_revision +%= 1;
             const projected = try projection.replaceText(
                 &tool.progress,
                 progress.text,
@@ -2311,6 +2312,7 @@ pub fn applyEvent(
             );
             tool.progress_truncated = projected.truncated;
             tool.redacted = tool.redacted or projected.redacted;
+            run.tool_revision +%= 1;
         },
         // Core also emits progress before model requests. Generic notices must
         // not replace typed activity or in-flight counts.
@@ -2323,7 +2325,6 @@ pub fn applyEvent(
                 const record = projection.record_output_fn orelse return error.InvalidDeliveryReceipt;
                 try record(projection.context, run, receipt);
             }
-            run.tool_revision +%= 1;
             projectToolResultDetails(task.durable.id, run, envelope, projection) catch |failure| switch (failure) {
                 error.ProjectionCapacity, error.ToolCapacity => _ = recordEventProjectionFailure(run),
                 else => return @as(EventApplyError!EventApplication, failure),
@@ -2569,6 +2570,8 @@ fn projectToolResultDetails(task_id: u64, run: *RunRecord, envelope: *const agen
         try projection.retain_generated_media_fn(projection.context, run, result.id, path, task_id, .video)
     else
         try projection.findOrCreateTool(run, result.id, result.name, result.input);
+    // The record changes from here on, even when a detail below is left out.
+    run.tool_revision +%= 1;
     tool.is_error = result.is_error;
     tool.elapsed_ms = result.elapsed_ms;
     tool.state = if (result.is_error) .failed else .completed;

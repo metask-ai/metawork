@@ -9377,10 +9377,11 @@ fn retainEventGeneratedMedia(raw_context: *anyopaque, run: *task_state.RunRecord
 
 fn retainGeneratedMedia(context: *EventContext, run: *task_state.RunRecord, digest: [agent.tool_route_digest_bytes]u8, path: []const u8, task_id: u64, media: task_state.GeneratedMedia) task_state.EventProjectionError!*task_state.ToolView {
     const generated = [_]CoreFileReference{.{ .locator = .{ .workspace_path = path }, .title = "", .kind = @tagName(media) }};
-    // Terminal receipt tails reach this outside an event; either way a record changes.
-    run.tool_revision +%= 1;
+    // Terminal receipt tails reach this outside an event. The revision moves
+    // only once a record carries the references; a failure changes none.
     if (findToolByRouteDigest(run.tools, digest)) |tool| {
         try replaceToolFileReferences(context, tool, &generated, media, run.initial_credentials[0], task_id, run.generation);
+        run.tool_revision +%= 1;
         if (!tool.receipt_metadata) {
             // Existing owned identity moves from display accounting to the
             // already bounded trusted metadata owner, without copying it.
@@ -9413,6 +9414,7 @@ fn retainGeneratedMedia(context: *EventContext, run: *task_state.RunRecord, dige
         if (candidate.file_refs) |refs| context.runtime.allocator.free(refs);
     }
     try replaceToolFileReferences(context, &candidate, &generated, media, run.initial_credentials[0], task_id, run.generation);
+    run.tool_revision +%= 1;
     run.tools[slot] = candidate;
     return &run.tools[slot].?;
 }
