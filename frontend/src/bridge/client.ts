@@ -43,6 +43,7 @@ import type {
   NotificationTextRegistration,
   InboxConversationPage,
   InboxTaskDetail,
+  InboxFileOpen,
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
@@ -58,6 +59,7 @@ import {
   decodeInboxCommandResult,
   decodeInboxConversationPage,
   decodeInboxTaskDetail,
+  decodeInboxFileOpen,
   decodeExecutionCommandResult,
   decodeCatalogRefreshResult,
   decodeWorkspaceRemovalResult,
@@ -375,6 +377,27 @@ export class BridgeClient {
       throw new RendererBridgeContractError(
         "invalid_response",
         "Inbox task identity mismatch",
+      );
+    return result;
+  }
+  /**
+   * Opens a shared file's download in the system browser. The Host reads a
+   * fresh download address and keeps it; only the outcome comes back.
+   */
+  async openInboxFile(binding: string, fileId: string): Promise<InboxFileOpen> {
+    const { generation, requestId } = this.inboxRequest();
+    const result = decodeInboxFileOpen(
+      await this.invoke(commands.inboxOpenFile, {
+        generation,
+        binding,
+        requestId,
+        fileId,
+      }),
+    );
+    if (result.binding !== binding || result.requestId !== requestId)
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Inbox file identity mismatch",
       );
     return result;
   }

@@ -10,8 +10,11 @@ import {
 import type { BridgeClient } from "../../bridge/client.ts";
 import type {
   InboxConversation,
+  InboxFileView,
   InboxMessage,
+  InboxProjectView,
   InboxTaskDetail,
+  InboxTaskView,
   InboxView,
 } from "../../bridge/contracts.ts";
 import { Badge } from "../../components/ui/badge.tsx";
@@ -32,6 +35,7 @@ export type InboxClient = Pick<
   | "loadEarlierInbox"
   | "readInboxConversation"
   | "readInboxTask"
+  | "openInboxFile"
 >;
 
 /** One read's own outcome; the connection state stays the list's. */
@@ -46,10 +50,26 @@ export type OpenedConversation = {
   failure: ConversationFailure | null;
 };
 
+/** Opening a shared file's download, as the Host answered. */
+export type DownloadStatus =
+  | "idle"
+  | "opening"
+  | "opened"
+  | "not_downloadable"
+  | "forbidden"
+  | "not_found"
+  | "failed";
+
+/**
+ * The linked item open in the detail dialog: a task, a shared file or a
+ * project. `trail` holds the items it was reached from, for going back.
+ */
 export type OpenedTask = {
   taskId: string;
   status: "loading" | "ready" | "forbidden" | "not_found" | "failed";
-  task: InboxTaskDetail["task"];
+  detail: InboxTaskDetail | null;
+  trail: readonly string[];
+  download: DownloadStatus;
 };
 
 function mergeMessages(
@@ -252,30 +272,71 @@ export function useInbox(
       void client.refreshInbox(binding, true).catch(() => undefined);
       if (conversation?.failure) void read(conversation.peerId, "latest", null);
     },
-    async openTask(taskId: string) {
-      setTask({ taskId, status: "loading", task: null });
-      let detail: InboxTaskDetail | null = null;
+    openTask,
+    /** A sub-task or a project's file, opened from the item on screen. */
+    openNested(taskId: string) {
+      void openTask(taskId, task ? [...task.trail, task.taskId] : []);
+    },
+    back() {
+      const previous = task?.trail.at(-1);
+      if (task && previous !== undefined)
+        void openTask(previous, task.trail.slice(0, -1));
+    },
+    async downloadFile(fileId: string) {
+      setTask((current) =>
+        current?.taskId === fileId
+          ? { ...current, download: "opening" }
+          : current,
+      );
+      let status: DownloadStatus = "failed";
       try {
-        detail = await client.readInboxTask(binding, taskId);
-      } catch {
-        detail = null;
-      }
-      setTask((current) => {
-        if (current?.taskId !== taskId) return current;
-        if (detail?.state === "superseded") return current;
-        if (detail?.state === "ready")
-          return { taskId, status: "ready", task: detail.task };
-        const status =
-          detail?.state === "forbidden" || detail?.state === "not_found"
-            ? detail.state
+        const result = await client.openInboxFile(binding, fileId);
+        if (result.state === "superseded") return;
+        status =
+          result.state === "opened" ||
+          result.state === "not_downloadable" ||
+          result.state === "forbidden" ||
+          result.state === "not_found"
+            ? result.state
             : "failed";
-        return { taskId, status, task: null };
-      });
+      } catch {
+        status = "failed";
+      }
+      setTask((current) =>
+        current?.taskId === fileId ? { ...current, download: status } : current,
+      );
     },
     closeTask() {
       setTask(null);
     },
   };
+
+  async function openTask(taskId: string, trail: readonly string[] = []) {
+    setTask({
+      taskId,
+      status: "loading",
+      detail: null,
+      trail,
+      download: "idle",
+    });
+    let detail: InboxTaskDetail | null = null;
+    try {
+      detail = await client.readInboxTask(binding, taskId);
+    } catch {
+      detail = null;
+    }
+    setTask((current) => {
+      if (current?.taskId !== taskId) return current;
+      if (detail?.state === "superseded") return current;
+      if (detail?.state === "ready")
+        return { ...current, status: "ready", detail };
+      const status =
+        detail?.state === "forbidden" || detail?.state === "not_found"
+          ? detail.state
+          : "failed";
+      return { ...current, status, detail: null };
+    });
+  }
 }
 
 export type InboxController = ReturnType<typeof useInbox>;
@@ -581,8 +642,8 @@ function LinkedTask({
         <Icon name="new-task" />
       </span>
       <span className="inbox-task-caption">
-        <span>{t("inbox.linked_task")}</span>
-        <strong>{t("inbox.task_number", { id: taskId })}</strong>
+        <span>{t("inbox.linked_item")}</span>
+        <strong>{t("inbox.item_number", { id: taskId })}</strong>
       </span>
       <span className="inbox-task-end">
         <Icon name="chevron-right" />
@@ -591,16 +652,347 @@ function LinkedTask({
   );
 }
 
-function InboxTaskDialog({
+/** Sizes as the composer shows attachments: decimal units. */
+function formatSize(value: string) {
+  const bytes = Number(value);
+  if (!Number.isSafeInteger(bytes) || bytes < 0) return value;
+  if (bytes < 1_000) return `${bytes} B`;
+  if (bytes < 1_000_000) return `${Math.ceil(bytes / 1_000)} KB`;
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
+type Translate = ReturnType<typeof useI18n>["t"];
+
+/** MetaTeam's progress and state words, shown in the user's language. */
+function progressLabel(value: string, t: Translate) {
+  switch (value) {
+    case "plan":
+      return t("inbox.progress_plan");
+    case "todo":
+      return t("inbox.progress_todo");
+    case "doing":
+      return t("inbox.progress_doing");
+    case "done":
+      return t("inbox.progress_done");
+    default:
+      return value;
+  }
+}
+
+function stateLabel(value: string, t: Translate) {
+  switch (value) {
+    case "active":
+      return t("inbox.state_active");
+    case "closed":
+      return t("inbox.state_closed");
+    case "deleted":
+      return t("inbox.state_deleted");
+    default:
+      return value;
+  }
+}
+
+function Fact({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{children}</dd>
+    </div>
+  );
+}
+
+type InboxNote = NonNullable<InboxTaskView["lastNote"]>;
+
+function NoteLine({ note }: { note: InboxNote }) {
+  const formats = useTimeFormats();
+  return (
+    <>
+      <p className="inbox-note-text">{note.text}</p>
+      {(note.by !== null || note.atMs !== null) && (
+        <p className="inbox-note-meta">
+          {[
+            note.by,
+            note.atMs === null
+              ? null
+              : formats.dateTime.format(new Date(Number(note.atMs))),
+          ]
+            .filter((part) => part !== null)
+            .join(" · ")}
+        </p>
+      )}
+    </>
+  );
+}
+
+function TaskDetailBody({
   task,
-  onClose,
+  onOpen,
 }: {
-  task: OpenedTask | null;
-  onClose: () => void;
+  task: InboxTaskView;
+  onOpen: (id: string) => void;
 }) {
   const { t } = useI18n();
   const formats = useTimeFormats();
-  const detail = task?.task ?? null;
+  // The latest note already leads the list when MetaTeam includes it.
+  const notes = task.notes;
+  return (
+    <>
+      {task.description && (
+        <Dialog.Description className="inbox-task-description">
+          {task.description}
+        </Dialog.Description>
+      )}
+      <dl className="inbox-task-facts">
+        <Fact label={t("inbox.task_id")}>{task.id}</Fact>
+        {task.progress && (
+          <Fact label={t("inbox.task_status")}>
+            <Badge className="whitespace-nowrap">
+              {progressLabel(task.progress, t)}
+            </Badge>
+          </Fact>
+        )}
+        {task.state && (
+          <Fact label={t("inbox.task_state")}>{stateLabel(task.state, t)}</Fact>
+        )}
+        {task.assignees.length > 0 && (
+          <Fact label={t("inbox.task_assignees")}>
+            {task.assignees.join(t("inbox.list_separator"))}
+          </Fact>
+        )}
+        {task.createdBy && (
+          <Fact label={t("inbox.task_created_by")}>{task.createdBy}</Fact>
+        )}
+        {task.path && <Fact label={t("inbox.task_path")}>{task.path}</Fact>}
+        {task.updatedAtMs && (
+          <Fact label={t("inbox.task_updated")}>
+            {formats.dateTime.format(new Date(Number(task.updatedAtMs)))}
+          </Fact>
+        )}
+      </dl>
+      {task.lastNote && (
+        <section className="inbox-detail-section">
+          <h3>{t("inbox.task_last_note")}</h3>
+          <NoteLine note={task.lastNote} />
+        </section>
+      )}
+      {notes.length > 0 && (
+        <section className="inbox-detail-section">
+          <h3>{t("inbox.task_notes")}</h3>
+          <ol className="inbox-notes">
+            {notes.map((note, index) => (
+              <li key={index}>
+                <NoteLine note={note} />
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+      {task.children.length > 0 && (
+        <section className="inbox-detail-section">
+          <h3>{t("inbox.task_children")}</h3>
+          <ul className="inbox-detail-links">
+            {task.children.map((child) => (
+              <li key={child.id}>
+                <button
+                  type="button"
+                  className="inbox-detail-link focus-ring"
+                  onClick={() => onOpen(child.id)}
+                >
+                  <span>{child.name}</span>
+                  {child.progress && (
+                    <Badge className="whitespace-nowrap">
+                      {progressLabel(child.progress, t)}
+                    </Badge>
+                  )}
+                  <Icon name="chevron-right" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </>
+  );
+}
+
+function FileDetailBody({
+  file,
+  download,
+  onDownload,
+}: {
+  file: InboxFileView;
+  download: DownloadStatus;
+  onDownload: () => void;
+}) {
+  const { t } = useI18n();
+  const formats = useTimeFormats();
+  const downloadNote =
+    download === "opened"
+      ? t("inbox.download_opened")
+      : download === "not_downloadable"
+        ? t("inbox.download_unavailable")
+        : download === "forbidden"
+          ? t("inbox.task_forbidden")
+          : download === "not_found"
+            ? t("inbox.task_not_found")
+            : download === "failed"
+              ? t("inbox.download_failed")
+              : null;
+  return (
+    <>
+      {file.description && (
+        <Dialog.Description className="inbox-task-description">
+          {file.description}
+        </Dialog.Description>
+      )}
+      <dl className="inbox-task-facts">
+        {file.sizeBytes && (
+          <Fact label={t("inbox.file_size")}>{formatSize(file.sizeBytes)}</Fact>
+        )}
+        {file.mime && <Fact label={t("inbox.file_type")}>{file.mime}</Fact>}
+        {file.tag && <Fact label={t("inbox.file_tag")}>{file.tag}</Fact>}
+        {file.path && <Fact label={t("inbox.task_path")}>{file.path}</Fact>}
+        {file.by && <Fact label={t("inbox.file_by")}>{file.by}</Fact>}
+        {file.updatedAtMs && (
+          <Fact label={t("inbox.task_updated")}>
+            {formats.dateTime.format(new Date(Number(file.updatedAtMs)))}
+          </Fact>
+        )}
+      </dl>
+      {file.content !== null && (
+        <section className="inbox-detail-section">
+          <h3>{t("inbox.file_preview")}</h3>
+          <pre className="inbox-file-preview">{file.content}</pre>
+          {file.contentTruncated && (
+            <p className="inbox-message-note">
+              {t("inbox.file_preview_truncated")}
+            </p>
+          )}
+        </section>
+      )}
+      {file.downloadable && (
+        <div className="inbox-detail-actions">
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={download === "opening"}
+            onClick={onDownload}
+          >
+            <Icon name="download" />
+            {download === "opening"
+              ? t("inbox.download_opening")
+              : t("inbox.download")}
+          </Button>
+          {downloadNote && (
+            <span className="inbox-message-note" role="status">
+              {downloadNote}
+            </span>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ProjectDetailBody({
+  project,
+  onOpen,
+}: {
+  project: InboxProjectView;
+  onOpen: (id: string) => void;
+}) {
+  const { t } = useI18n();
+  const formats = useTimeFormats();
+  return (
+    <>
+      {project.description && (
+        <Dialog.Description className="inbox-task-description">
+          {project.description}
+        </Dialog.Description>
+      )}
+      <dl className="inbox-task-facts">
+        <Fact label={t("inbox.task_id")}>{project.id}</Fact>
+        {project.path && (
+          <Fact label={t("inbox.task_path")}>{project.path}</Fact>
+        )}
+        {project.updatedAtMs && (
+          <Fact label={t("inbox.task_updated")}>
+            {formats.dateTime.format(new Date(Number(project.updatedAtMs)))}
+          </Fact>
+        )}
+      </dl>
+      {project.fileTags.length > 0 && (
+        <section className="inbox-detail-section">
+          <h3>{t("inbox.project_file_tags")}</h3>
+          <ul className="inbox-file-tags">
+            {project.fileTags.map((tag) => (
+              <li key={tag.tag}>
+                <Badge className="whitespace-nowrap">
+                  {t("inbox.project_file_tag", {
+                    tag: tag.tag,
+                    count: Number(tag.count),
+                  })}
+                </Badge>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      <section className="inbox-detail-section">
+        <h3>{t("inbox.project_files")}</h3>
+        {project.files.length === 0 ? (
+          <p className="inbox-message-note">{t("inbox.project_no_files")}</p>
+        ) : (
+          <ul className="inbox-detail-links">
+            {project.files.map((file) => (
+              <li key={file.id}>
+                <button
+                  type="button"
+                  className="inbox-detail-link focus-ring"
+                  onClick={() => onOpen(file.id)}
+                >
+                  <span>{file.name}</span>
+                  <span className="inbox-detail-link-meta">
+                    {[file.tag, file.sizeBytes && formatSize(file.sizeBytes)]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </span>
+                  <Icon name="chevron-right" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {project.filesTruncated && (
+          <p className="inbox-message-note">{t("inbox.project_files_more")}</p>
+        )}
+      </section>
+    </>
+  );
+}
+
+function InboxTaskDialog({
+  task,
+  onClose,
+  onOpen,
+  onBack,
+  onDownload,
+}: {
+  task: OpenedTask | null;
+  onClose: () => void;
+  onOpen: (id: string) => void;
+  onBack: () => void;
+  onDownload: (id: string) => void;
+}) {
+  const { t } = useI18n();
+  const detail = task?.detail ?? null;
+  const item = detail?.task ?? detail?.file ?? detail?.project ?? null;
+  const icon = detail?.file
+    ? "skill-file"
+    : detail?.project
+      ? "workspace"
+      : "new-task";
   return (
     <Dialog.Root
       open={task !== null}
@@ -610,14 +1002,24 @@ function InboxTaskDialog({
     >
       <Dialog.Portal>
         <Dialog.Backdrop />
-        <Dialog.Popup>
+        <Dialog.Popup className="inbox-detail-dialog">
           <div className="inbox-task-dialog-header">
+            {task && task.trail.length > 0 && (
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={t("inbox.detail_back")}
+                onClick={onBack}
+              >
+                <Icon name="arrow-left" />
+              </button>
+            )}
             <span className="inbox-task-icon">
-              <Icon name="new-task" />
+              <Icon name={icon} />
             </span>
             <Dialog.Title>
-              {detail?.name ??
-                (task ? t("inbox.task_number", { id: task.taskId }) : "")}
+              {item?.name ??
+                (task ? t("inbox.item_number", { id: task.taskId }) : "")}
             </Dialog.Title>
             <Dialog.Close
               className="icon-button"
@@ -626,69 +1028,37 @@ function InboxTaskDialog({
               <Icon name="close" />
             </Dialog.Close>
           </div>
-          {task?.status === "loading" && (
-            <Dialog.Description className="inbox-task-description">
-              {t("inbox.task_loading")}
-            </Dialog.Description>
-          )}
-          {(task?.status === "failed" ||
-            task?.status === "forbidden" ||
-            task?.status === "not_found") && (
-            <Dialog.Description className="inbox-task-description">
-              {task.status === "forbidden"
-                ? t("inbox.task_forbidden")
-                : task.status === "not_found"
-                  ? t("inbox.task_not_found")
-                  : t("inbox.task_failed")}
-            </Dialog.Description>
-          )}
-          {detail && (
-            <>
-              {detail.description && (
-                <Dialog.Description className="inbox-task-description">
-                  {detail.description}
-                </Dialog.Description>
-              )}
-              <dl className="inbox-task-facts">
-                <div>
-                  <dt>{t("inbox.task_id")}</dt>
-                  <dd>{detail.id}</dd>
-                </div>
-                {(detail.progress ?? detail.state) && (
-                  <div>
-                    <dt>{t("inbox.task_status")}</dt>
-                    <dd>
-                      <Badge className="whitespace-nowrap">
-                        {detail.progress ?? detail.state}
-                      </Badge>
-                    </dd>
-                  </div>
-                )}
-                {detail.assignees.length > 0 && (
-                  <div>
-                    <dt>{t("inbox.task_assignees")}</dt>
-                    <dd>{detail.assignees.join(t("inbox.list_separator"))}</dd>
-                  </div>
-                )}
-                {detail.path && (
-                  <div>
-                    <dt>{t("inbox.task_path")}</dt>
-                    <dd>{detail.path}</dd>
-                  </div>
-                )}
-                {detail.updatedAtMs && (
-                  <div>
-                    <dt>{t("inbox.task_updated")}</dt>
-                    <dd>
-                      {formats.dateTime.format(
-                        new Date(Number(detail.updatedAtMs)),
-                      )}
-                    </dd>
-                  </div>
-                )}
-              </dl>
-            </>
-          )}
+          <div className="inbox-detail-body">
+            {task?.status === "loading" && (
+              <Dialog.Description className="inbox-task-description">
+                {t("inbox.task_loading")}
+              </Dialog.Description>
+            )}
+            {(task?.status === "failed" ||
+              task?.status === "forbidden" ||
+              task?.status === "not_found") && (
+              <Dialog.Description className="inbox-task-description">
+                {task.status === "forbidden"
+                  ? t("inbox.task_forbidden")
+                  : task.status === "not_found"
+                    ? t("inbox.task_not_found")
+                    : t("inbox.task_failed")}
+              </Dialog.Description>
+            )}
+            {detail?.task && (
+              <TaskDetailBody task={detail.task} onOpen={onOpen} />
+            )}
+            {detail?.file && task && (
+              <FileDetailBody
+                file={detail.file}
+                download={task.download}
+                onDownload={() => onDownload(task.taskId)}
+              />
+            )}
+            {detail?.project && (
+              <ProjectDetailBody project={detail.project} onOpen={onOpen} />
+            )}
+          </div>
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>
@@ -988,7 +1358,13 @@ export function InboxMain({
           hint={t("inbox.pick_hint")}
         />
       )}
-      <InboxTaskDialog task={controller.task} onClose={controller.closeTask} />
+      <InboxTaskDialog
+        task={controller.task}
+        onClose={controller.closeTask}
+        onOpen={controller.openNested}
+        onBack={controller.back}
+        onDownload={(id) => void controller.downloadFile(id)}
+      />
     </>
   );
 }

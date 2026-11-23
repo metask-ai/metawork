@@ -14,7 +14,8 @@ pub const Limits = struct {
     /// for again with a smaller `limit`.
     pub const unread_bytes = 256 * 1024;
     pub const messages_bytes = 4 * 1024 * 1024;
-    pub const task_bytes = 256 * 1024;
+    /// A shared text file brings up to 200 KB of content, escaped.
+    pub const detail_bytes = 1024 * 1024;
     pub const json_depth = 16;
     /// The conversation list is built from the most recent messages and grows
     /// backwards on request; a page is a transfer unit, never a visibility cap.
@@ -170,7 +171,7 @@ pub const Request = union(enum) {
         return switch (self) {
             .unread => Limits.unread_bytes,
             .messages => Limits.messages_bytes,
-            .task => Limits.task_bytes,
+            .task => Limits.detail_bytes,
         };
     }
 };
@@ -323,8 +324,19 @@ pub const Messages = struct {
     }
 };
 
-pub const Task = struct {
-    arena: std.heap.ArenaAllocator,
+pub const Note = struct {
+    text: []const u8,
+    at_ms: ?u64,
+    by: ?[]const u8,
+};
+
+pub const Child = struct {
+    id: Id,
+    name: []const u8,
+    progress: ?[]const u8,
+};
+
+pub const TaskFacts = struct {
     id: ?Id,
     name: []const u8,
     progress: ?[]const u8,
@@ -332,9 +344,67 @@ pub const Task = struct {
     path: ?[]const u8,
     description: ?[]const u8,
     assignees: []const []const u8,
+    created_by: ?[]const u8,
     updated_at_ms: ?u64,
+    last_note: ?Note,
+    /// MetaTeam's latest notes, oldest first.
+    notes: []const Note,
+    children: []const Child,
+};
 
-    pub fn deinit(self: *Task) void {
+pub const FileFacts = struct {
+    id: ?Id,
+    name: []const u8,
+    tag: ?[]const u8,
+    size: ?u64,
+    mime: ?[]const u8,
+    description: ?[]const u8,
+    by: ?[]const u8,
+    updated_at_ms: ?u64,
+    path: ?[]const u8,
+    /// Only for a small text file.
+    content: ?[]const u8,
+    /// A short-lived signed address. Application opens it in the system
+    /// browser; it never reaches the Renderer.
+    download_url: ?[]const u8,
+};
+
+pub const ProjectFile = struct {
+    id: Id,
+    name: []const u8,
+    tag: ?[]const u8,
+    size: ?u64,
+    mime: ?[]const u8,
+    by: ?[]const u8,
+    updated_at_ms: ?u64,
+};
+
+pub const TagCount = struct {
+    tag: []const u8,
+    count: u64,
+};
+
+pub const ProjectFacts = struct {
+    id: ?Id,
+    name: []const u8,
+    description: ?[]const u8,
+    path: ?[]const u8,
+    updated_at_ms: ?u64,
+    files: []const ProjectFile,
+    file_tags: []const TagCount,
+};
+
+/// What `/open/v1/tasks/{id}` answered: a message's linked id may name a
+/// task, a shared file or a project.
+pub const Detail = struct {
+    arena: std.heap.ArenaAllocator,
+    kind: union(enum) {
+        task: TaskFacts,
+        file: FileFacts,
+        project: ProjectFacts,
+    },
+
+    pub fn deinit(self: *Detail) void {
         self.arena.deinit();
         self.* = undefined;
     }
@@ -598,17 +668,57 @@ pub fn parseMessages(allocator: std.mem.Allocator, bytes: []const u8) ParseError
     return result;
 }
 
-pub fn parseTask(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Task {
+/// The name, which every kind needs, is the only required field. Optional
+/// fields and list entries that are missing or mistyped are left out: they
+/// never make the rest unusable.
+pub fn parseDetail(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Detail {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();
-    var data = try parseData(a, bytes, Limits.task_bytes);
+    var data = try parseData(a, bytes, Limits.detail_bytes);
     if (data != .object) return error.InvalidResponse;
     if (field(data.object, "task")) |inner| {
         if (inner == .object) data = inner;
     }
     const object = data.object;
     const name = nonEmptyString(field(object, "name")) orelse return error.InvalidResponse;
+    const id = if (field(object, "id")) |value| idValue(value) catch null else null;
+    const updated = optionalTime(object, &.{"updatedAt"});
+    const path = nonEmptyString(field(object, "path"));
+    const description = nonEmptyString(field(object, "description")) orelse nonEmptyString(field(object, "desc"));
+    const kind = nonEmptyString(field(object, "type"));
+    // MetaTeam tells them apart by their fields: a file has a tag or a
+    // MIME type, a task a progress, a project its files.
+    if (field(object, "tag") != null or field(object, "mime") != null) return .{ .arena = arena, .kind = .{ .file = .{
+        .id = id,
+        .name = name,
+        .tag = nonEmptyString(field(object, "tag")),
+        .size = if (field(object, "size")) |value| countValue(value) catch null else null,
+        .mime = nonEmptyString(field(object, "mime")),
+        .description = description,
+        .by = nonEmptyString(field(object, "by")),
+        .updated_at_ms = updated,
+        .path = path,
+        .content = if (field(object, "content")) |value| if (value == .string) value.string else null else null,
+        .download_url = nonEmptyString(field(object, "downloadUrl")),
+    } } };
+    const is_task = field(object, "progress") != null or (kind != null and std.mem.eql(u8, kind.?, "task"));
+    const is_project = (kind != null and std.mem.eql(u8, kind.?, "project")) or
+        field(object, "files") != null or field(object, "fileTags") != null;
+    if (is_project and !is_task) {
+        // Allocated before the arena's state is copied into the result.
+        const files = try projectFiles(a, field(object, "files"));
+        const file_tags = try tagCounts(a, field(object, "fileTags"));
+        return .{ .arena = arena, .kind = .{ .project = .{
+            .id = id,
+            .name = name,
+            .description = description,
+            .path = path,
+            .updated_at_ms = updated,
+            .files = files,
+            .file_tags = file_tags,
+        } } };
+    }
     var assignees: std.ArrayList([]const u8) = .empty;
     if (field(object, "assignees")) |value| {
         if (value == .array) for (value.array.items) |entry| {
@@ -620,23 +730,111 @@ pub fn parseTask(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Tas
             try assignees.append(a, text);
         };
     }
-    const id = if (field(object, "id")) |value| idValue(value) catch null else null;
-    const updated = if (field(object, "updatedAt")) |value| timeValue(value) catch null else null;
-    const progress = nonEmptyString(field(object, "progress"));
-    const state = nonEmptyString(field(object, "state"));
-    const path = nonEmptyString(field(object, "path"));
-    const description = nonEmptyString(field(object, "description")) orelse nonEmptyString(field(object, "desc"));
-    return .{
-        .arena = arena,
+    var notes: std.ArrayList(Note) = .empty;
+    if (field(object, "notes")) |value| if (value == .array) for (value.array.items) |entry| {
+        if (noteValue(entry)) |note| try notes.append(a, note);
+    };
+    var children: std.ArrayList(Child) = .empty;
+    if (field(object, "children")) |value| if (value == .array) for (value.array.items) |entry| {
+        if (entry != .object) continue;
+        const child_id = idValue(entry.object.get("id") orelse continue) catch continue;
+        const child_name = nonEmptyString(field(entry.object, "name")) orelse continue;
+        // Each child is a key on the Renderer side: kept once.
+        for (children.items) |*seen| {
+            if (seen.id.eql(child_id.slice())) break;
+        } else try children.append(a, .{ .id = child_id, .name = child_name, .progress = nonEmptyString(field(entry.object, "progress")) });
+    };
+    return .{ .arena = arena, .kind = .{ .task = .{
         .id = id,
         .name = name,
-        .progress = progress,
-        .state = state,
+        .progress = nonEmptyString(field(object, "progress")),
+        .state = nonEmptyString(field(object, "state")),
         .path = path,
         .description = description,
         .assignees = assignees.items,
+        .created_by = nonEmptyString(field(object, "createdBy")),
         .updated_at_ms = updated,
+        .last_note = if (field(object, "lastNote")) |value| noteValue(value) else null,
+        .notes = notes.items,
+        .children = children.items,
+    } } };
+}
+
+fn noteValue(value: std.json.Value) ?Note {
+    if (value != .object) return null;
+    const text = nonEmptyString(field(value.object, "text")) orelse return null;
+    return .{ .text = text, .at_ms = optionalTime(value.object, &.{ "at", "time" }), .by = nonEmptyString(field(value.object, "by")) };
+}
+
+fn projectFiles(arena: std.mem.Allocator, value: ?std.json.Value) ParseError![]const ProjectFile {
+    const list = value orelse return &.{};
+    if (list != .array) return &.{};
+    var files: std.ArrayList(ProjectFile) = .empty;
+    for (list.array.items) |entry| {
+        if (entry != .object) continue;
+        const object = entry.object;
+        const id = idValue(object.get("id") orelse continue) catch continue;
+        const name = nonEmptyString(field(object, "name")) orelse continue;
+        for (files.items) |*seen| {
+            if (seen.id.eql(id.slice())) break;
+        } else try files.append(arena, .{
+            .id = id,
+            .name = name,
+            .tag = nonEmptyString(field(object, "tag")),
+            .size = if (field(object, "size")) |size| countValue(size) catch null else null,
+            .mime = nonEmptyString(field(object, "mime")),
+            .by = nonEmptyString(field(object, "by")),
+            .updated_at_ms = optionalTime(object, &.{"updatedAt"}),
+        });
+    }
+    return files.items;
+}
+
+/// Counts by category, as an object of counts or a list of `{tag, count}`.
+/// A category named twice is one, its counts added.
+fn tagCounts(arena: std.mem.Allocator, value: ?std.json.Value) ParseError![]const TagCount {
+    const present = value orelse return &.{};
+    var tags: std.ArrayList(TagCount) = .empty;
+    switch (present) {
+        .object => |object| {
+            var entries = object.iterator();
+            while (entries.next()) |entry| {
+                if (entry.key_ptr.len == 0) continue;
+                const count = countValue(entry.value_ptr.*) catch continue;
+                try addTag(arena, &tags, entry.key_ptr.*, count);
+            }
+        },
+        .array => |array| for (array.items) |entry| {
+            if (entry != .object) continue;
+            const tag = nonEmptyString(field(entry.object, "tag")) orelse nonEmptyString(field(entry.object, "name")) orelse continue;
+            const count = countValue(entry.object.get("count") orelse continue) catch continue;
+            try addTag(arena, &tags, tag, count);
+        },
+        else => {},
+    }
+    return tags.items;
+}
+
+fn addTag(arena: std.mem.Allocator, tags: *std.ArrayList(TagCount), tag: []const u8, count: u64) !void {
+    for (tags.items) |*seen| if (std.mem.eql(u8, seen.tag, tag)) {
+        seen.count +|= count;
+        return;
     };
+    try tags.append(arena, .{ .tag = tag, .count = count });
+}
+
+/// Whether a file's download address may be handed to the system browser:
+/// an absolute web address without credentials, and never one that carries
+/// the device key.
+pub fn validDownloadUrl(url: []const u8, key: []const u8) bool {
+    if (url.len == 0) return false;
+    for (url) |byte| if (byte <= 0x20 or byte >= 0x7f or byte == '\\') return false;
+    if (key.len != 0 and std.mem.indexOf(u8, url, key) != null) return false;
+    const uri = std.Uri.parse(url) catch return false;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http") and !std.ascii.eqlIgnoreCase(uri.scheme, "https")) return false;
+    const host = uri.host orelse return false;
+    if (host.isEmpty()) return false;
+    return uri.user == null and uri.password == null and uri.fragment == null;
 }
 
 /// `YYYY-MM-DD[T ]HH:MM:SS[.fraction][Z|±HH:MM|±HHMM]`. A missing zone is UTC.
@@ -1304,6 +1502,18 @@ pub const ConversationPage = struct {
     complete: bool,
 };
 
+pub const NoteView = struct {
+    text: []const u8,
+    atMs: ?U64,
+    by: ?[]const u8,
+};
+
+pub const ChildView = struct {
+    id: []const u8,
+    name: []const u8,
+    progress: ?[]const u8,
+};
+
 pub const TaskView = struct {
     id: []const u8,
     name: []const u8,
@@ -1312,16 +1522,86 @@ pub const TaskView = struct {
     path: ?[]const u8,
     description: ?[]const u8,
     assignees: []const []const u8,
+    createdBy: ?[]const u8,
     updatedAtMs: ?U64,
+    lastNote: ?NoteView,
+    /// Oldest first. Older ones are left out when the detail does not fit.
+    notes: []const NoteView,
+    children: []const ChildView,
+};
+
+/// A shared file. Its download address stays in Application; `downloadable`
+/// only says whether there is one to open.
+pub const FileView = struct {
+    id: []const u8,
+    name: []const u8,
+    tag: ?[]const u8,
+    sizeBytes: ?U64,
+    mime: ?[]const u8,
+    description: ?[]const u8,
+    by: ?[]const u8,
+    updatedAtMs: ?U64,
+    path: ?[]const u8,
+    content: ?[]const u8,
+    /// The content was cut to fit one Bridge result.
+    contentTruncated: bool,
+    downloadable: bool,
+};
+
+pub const ProjectFileView = struct {
+    id: []const u8,
+    name: []const u8,
+    tag: ?[]const u8,
+    sizeBytes: ?U64,
+    mime: ?[]const u8,
+    by: ?[]const u8,
+    updatedAtMs: ?U64,
+};
+
+pub const TagCountView = struct {
+    tag: []const u8,
+    count: U64,
+};
+
+pub const ProjectView = struct {
+    id: []const u8,
+    name: []const u8,
+    description: ?[]const u8,
+    path: ?[]const u8,
+    updatedAtMs: ?U64,
+    files: []const ProjectFileView,
+    /// More files exist than fit one Bridge result.
+    filesTruncated: bool,
+    fileTags: []const TagCountView,
 };
 
 pub const TaskState = enum { ready, stale_binding, superseded, unavailable, forbidden, not_found, failed };
 
+/// One linked id's detail: when `ready`, exactly one of `task`, `file` and
+/// `project` is present.
 pub const TaskDetail = struct {
     binding: U64,
     requestId: U64,
     state: TaskState,
     task: ?TaskView,
+    file: ?FileView,
+    project: ?ProjectView,
+};
+
+pub const FileOpenRequest = struct {
+    binding: u64,
+    request_id: u64,
+    file: []const u8,
+};
+
+/// `not_downloadable`: the id is not a file, or MetaTeam gave no usable
+/// download address. `failed` includes the system refusing to open it.
+pub const FileOpenState = enum { opened, stale_binding, superseded, unavailable, forbidden, not_found, not_downloadable, failed };
+
+pub const FileOpen = struct {
+    binding: U64,
+    requestId: U64,
+    state: FileOpenState,
 };
 
 /// Application receives only these lifecycle capabilities, never the Control
@@ -1452,17 +1732,89 @@ test "unusable responses are rejected as a whole" {
 }
 
 test "task details read only the fields shown" {
-    var task = try parseTask(testing.allocator,
+    var detail = try parseDetail(testing.allocator,
         \\{"data":{"id":13066,"name":"Inbox","progress":"doing","path":"metawork / Inbox","assignees":[{"name":"Ann"},"Bob",3],"desc":"Read only","updatedAt":1795428968292,"other":[1]}}
     );
-    defer task.deinit();
+    defer detail.deinit();
+    const task = detail.kind.task;
     try testing.expectEqualStrings("13066", task.id.?.slice());
     try testing.expectEqualStrings("Inbox", task.name);
     try testing.expectEqualStrings("doing", task.progress.?);
     try testing.expectEqual(@as(usize, 2), task.assignees.len);
     try testing.expectEqualStrings("Read only", task.description.?);
     try testing.expectEqual(@as(?u64, 1795428968292), task.updated_at_ms);
-    try testing.expectError(error.InvalidResponse, parseTask(testing.allocator, "{\"data\":{\"id\":1}}"));
+    try testing.expect(task.last_note == null and task.notes.len == 0 and task.children.len == 0);
+    try testing.expectError(error.InvalidResponse, parseDetail(testing.allocator, "{\"data\":{\"id\":1}}"));
+}
+
+test "a linked id is a task, a shared file or a project, told apart by its fields" {
+    var task = try parseDetail(testing.allocator,
+        \\{"data":{"id":9801,"name":"API","type":"task","progress":"doing","state":"closed","createdBy":"Lin",
+        \\ "lastNote":{"text":"deployed","at":1795242000000,"by":"Lin"},
+        \\ "notes":[{"text":"found it","at":"2026-11-21T03:00:00Z","by":"Lin"},{"at":1},"bad",{"text":"deployed","at":1795242000000}],
+        \\ "children":[{"id":9802,"name":"Docs","progress":"todo"},{"id":"9802","name":"Docs again"},{"name":"no id"},{"id":9803,"name":"Tests"}]}}
+    );
+    defer task.deinit();
+    const facts = task.kind.task;
+    try testing.expectEqualStrings("closed", facts.state.?);
+    try testing.expectEqualStrings("Lin", facts.created_by.?);
+    try testing.expectEqualStrings("deployed", facts.last_note.?.text);
+    try testing.expectEqual(@as(?u64, 1795242000000), facts.last_note.?.at_ms);
+    // Unusable entries are left out; the rest keep MetaTeam's order.
+    try testing.expectEqual(@as(usize, 2), facts.notes.len);
+    try testing.expectEqualStrings("found it", facts.notes[0].text);
+    try testing.expectEqual(@as(usize, 2), facts.children.len);
+    try testing.expectEqualStrings("9802", facts.children[0].id.slice());
+    try testing.expectEqualStrings("todo", facts.children[0].progress.?);
+    try testing.expectEqualStrings("9803", facts.children[1].id.slice());
+
+    var file = try parseDetail(testing.allocator,
+        \\{"data":{"id":9830,"name":"metawork-api.md","tag":"API","size":12034,"mime":"text/markdown","desc":"","by":"Lin",
+        \\ "updatedAt":1795245000000,"projectId":1131,"path":"space / metawork-api.md","content":"# Title","downloadUrl":"https://h.test/dl?exp=1&sig=2","webUrl":"https://h.test/web"}}
+    );
+    defer file.deinit();
+    const shared = file.kind.file;
+    try testing.expectEqualStrings("API", shared.tag.?);
+    try testing.expectEqual(@as(?u64, 12034), shared.size);
+    try testing.expectEqualStrings("# Title", shared.content.?);
+    try testing.expectEqualStrings("https://h.test/dl?exp=1&sig=2", shared.download_url.?);
+    try testing.expect(shared.description == null);
+
+    var project = try parseDetail(testing.allocator,
+        \\{"data":{"id":740,"name":"metawork","type":"project","desc":"Desktop",
+        \\ "files":[{"id":1,"name":"a.md","tag":"Docs","size":10},{"id":"1","name":"dup"},{"name":"no id"},{"id":2,"name":"b.png","mime":"image/png"}],
+        \\ "fileTags":{"Docs":1,"Images":"x","":3}}}
+    );
+    defer project.deinit();
+    const space = project.kind.project;
+    try testing.expectEqualStrings("Desktop", space.description.?);
+    try testing.expectEqual(@as(usize, 2), space.files.len);
+    try testing.expectEqualStrings("b.png", space.files[1].name);
+    try testing.expectEqual(@as(usize, 1), space.file_tags.len);
+    try testing.expectEqual(@as(u64, 1), space.file_tags[0].count);
+
+    var listed = try parseDetail(testing.allocator,
+        \\{"data":{"id":740,"name":"metawork","fileTags":[{"tag":"Docs","count":2},{"name":"Docs","count":1},{"tag":"Other"}]}}
+    );
+    defer listed.deinit();
+    try testing.expectEqual(@as(usize, 1), listed.kind.project.file_tags.len);
+    try testing.expectEqual(@as(u64, 3), listed.kind.project.file_tags[0].count);
+}
+
+test "only a credential-free web address without the key is handed to the browser" {
+    try testing.expect(validDownloadUrl("http://192.0.2.10:8080/agent/v1/files/9/dl?exp=1&sig=ab", "mtk-key"));
+    try testing.expect(validDownloadUrl("https://cdn.example.test/f?sig=1", "mtk-key"));
+    for ([_][]const u8{
+        "",
+        "ftp://h.test/f",
+        "file:///C:/x",
+        "javascript:alert(1)",
+        "https://user:pw@h.test/f",
+        "https://h.test/f#frag",
+        "https://h.test/f?k=mtk-key",
+        "https://h.test/f g",
+        "/relative/f",
+    }) |url| try testing.expect(!validDownloadUrl(url, "mtk-key"));
 }
 
 test "ISO instants become Unix milliseconds" {

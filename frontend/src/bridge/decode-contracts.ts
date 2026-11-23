@@ -22,6 +22,7 @@ import {
   decodeInboxViewWire,
   decodeInboxConversationPageWire,
   decodeInboxTaskDetailWire,
+  decodeInboxFileOpenWire,
 } from "./generated-wire.ts";
 import {
   exactKeys,
@@ -5932,11 +5933,41 @@ export function decodeInboxView(value: unknown) {
 export function decodeInboxConversationPage(value: unknown) {
   return decodeInboxConversationPageWire(value, "$.result");
 }
+function uniqueKeys(path: string, keys: readonly string[], what: string) {
+  if (new Set(keys).size !== keys.length) fail(path, `duplicate ${what}`);
+}
+/** A ready detail is exactly one of a task, a shared file or a project. */
 export function decodeInboxTaskDetail(value: unknown) {
-  const result = decodeInboxTaskDetailWire(value, "$.result");
-  if ((result.state === "ready") !== (result.task !== null))
-    fail("$.result", "inconsistent task detail");
+  const path = "$.result";
+  const result = decodeInboxTaskDetailWire(value, path);
+  const present = [result.task, result.file, result.project].filter(
+    (item) => item !== null,
+  ).length;
+  if (present !== (result.state === "ready" ? 1 : 0))
+    fail(path, "inconsistent task detail");
+  if (result.task) {
+    uniqueKeys(
+      path,
+      result.task.children.map((child) => child.id),
+      "sub-task",
+    );
+  }
+  if (result.project) {
+    uniqueKeys(
+      path,
+      result.project.files.map((file) => file.id),
+      "project file",
+    );
+    uniqueKeys(
+      path,
+      result.project.fileTags.map((tag) => tag.tag),
+      "file category",
+    );
+  }
   return result;
+}
+export function decodeInboxFileOpen(value: unknown) {
+  return decodeInboxFileOpenWire(value, "$.result");
 }
 export function decodeUpdateView(value: unknown) {
   const path = "$.updates";

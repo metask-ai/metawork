@@ -288,6 +288,13 @@ pub const InboxTaskRead = struct {
     requestId: []const u8,
     taskId: []const u8,
 };
+
+pub const InboxFileOpen = struct {
+    generation: []const u8,
+    binding: []const u8,
+    requestId: []const u8,
+    fileId: []const u8,
+};
 /// `text` is the whole file the editor wants saved; the payload limit makes
 /// room for its JSON escaping, and the Host checks the decoded bytes.
 pub const GlobalInstructionsSave = struct {

@@ -556,14 +556,72 @@ export type InboxTaskDetailWire = {
     path: string | null;
     description: string | null;
     assignees: readonly string[];
+    createdBy: string | null;
     updatedAtMs: string | null;
+    lastNote: {
+      text: string;
+      atMs: string | null;
+      by: string | null;
+    } | null;
+    notes: readonly {
+      text: string;
+      atMs: string | null;
+      by: string | null;
+    }[];
+    children: readonly {
+      id: string;
+      name: string;
+      progress: string | null;
+    }[];
+  } | null;
+  file: {
+    id: string;
+    name: string;
+    tag: string | null;
+    sizeBytes: string | null;
+    mime: string | null;
+    description: string | null;
+    by: string | null;
+    updatedAtMs: string | null;
+    path: string | null;
+    content: string | null;
+    contentTruncated: boolean;
+    downloadable: boolean;
+  } | null;
+  project: {
+    id: string;
+    name: string;
+    description: string | null;
+    path: string | null;
+    updatedAtMs: string | null;
+    files: readonly {
+      id: string;
+      name: string;
+      tag: string | null;
+      sizeBytes: string | null;
+      mime: string | null;
+      by: string | null;
+      updatedAtMs: string | null;
+    }[];
+    filesTruncated: boolean;
+    fileTags: readonly {
+      tag: string;
+      count: string;
+    }[];
   } | null;
 };
 export function decodeInboxTaskDetailWire(
   value: unknown,
   path: string,
 ): InboxTaskDetailWire {
-  const item = object(value, path, ["binding", "requestId", "state", "task"]);
+  const item = object(value, path, [
+    "binding",
+    "requestId",
+    "state",
+    "task",
+    "file",
+    "project",
+  ]);
   return {
     binding: u64WireInteger(item.binding, path + ".binding"),
     requestId: u64WireInteger(item.requestId, path + ".requestId"),
@@ -588,7 +646,11 @@ export function decodeInboxTaskDetailWire(
               "path",
               "description",
               "assignees",
+              "createdBy",
               "updatedAtMs",
+              "lastNote",
+              "notes",
+              "children",
             ]);
             return {
               id: stringValue(item.id, path + ".id"),
@@ -615,11 +677,252 @@ export function decodeInboxTaskDetailWire(
                 (entry: unknown, entryPath: string) =>
                   stringValue(entry, entryPath),
               ),
+              createdBy:
+                item.createdBy === null
+                  ? null
+                  : stringValue(item.createdBy, path + ".createdBy"),
               updatedAtMs:
                 item.updatedAtMs === null
                   ? null
                   : u64WireInteger(item.updatedAtMs, path + ".updatedAtMs"),
+              lastNote:
+                item.lastNote === null
+                  ? null
+                  : ((value: unknown, path: string) => {
+                      const item = object(value, path, ["text", "atMs", "by"]);
+                      return {
+                        text: stringValue(item.text, path + ".text"),
+                        atMs:
+                          item.atMs === null
+                            ? null
+                            : u64WireInteger(item.atMs, path + ".atMs"),
+                        by:
+                          item.by === null
+                            ? null
+                            : stringValue(item.by, path + ".by"),
+                      };
+                    })(item.lastNote, path + ".lastNote"),
+              notes: arrayValue(
+                item.notes,
+                path + ".notes",
+                (entry: unknown, entryPath: string) =>
+                  ((value: unknown, path: string) => {
+                    const item = object(value, path, ["text", "atMs", "by"]);
+                    return {
+                      text: stringValue(item.text, path + ".text"),
+                      atMs:
+                        item.atMs === null
+                          ? null
+                          : u64WireInteger(item.atMs, path + ".atMs"),
+                      by:
+                        item.by === null
+                          ? null
+                          : stringValue(item.by, path + ".by"),
+                    };
+                  })(entry, entryPath),
+              ),
+              children: arrayValue(
+                item.children,
+                path + ".children",
+                (entry: unknown, entryPath: string) =>
+                  ((value: unknown, path: string) => {
+                    const item = object(value, path, [
+                      "id",
+                      "name",
+                      "progress",
+                    ]);
+                    return {
+                      id: stringValue(item.id, path + ".id"),
+                      name: stringValue(item.name, path + ".name"),
+                      progress:
+                        item.progress === null
+                          ? null
+                          : stringValue(item.progress, path + ".progress"),
+                    };
+                  })(entry, entryPath),
+              ),
             };
           })(item.task, path + ".task"),
+    file:
+      item.file === null
+        ? null
+        : ((value: unknown, path: string) => {
+            const item = object(value, path, [
+              "id",
+              "name",
+              "tag",
+              "sizeBytes",
+              "mime",
+              "description",
+              "by",
+              "updatedAtMs",
+              "path",
+              "content",
+              "contentTruncated",
+              "downloadable",
+            ]);
+            return {
+              id: stringValue(item.id, path + ".id"),
+              name: stringValue(item.name, path + ".name"),
+              tag:
+                item.tag === null ? null : stringValue(item.tag, path + ".tag"),
+              sizeBytes:
+                item.sizeBytes === null
+                  ? null
+                  : u64WireInteger(item.sizeBytes, path + ".sizeBytes"),
+              mime:
+                item.mime === null
+                  ? null
+                  : stringValue(item.mime, path + ".mime"),
+              description:
+                item.description === null
+                  ? null
+                  : stringValue(item.description, path + ".description"),
+              by: item.by === null ? null : stringValue(item.by, path + ".by"),
+              updatedAtMs:
+                item.updatedAtMs === null
+                  ? null
+                  : u64WireInteger(item.updatedAtMs, path + ".updatedAtMs"),
+              path:
+                item.path === null
+                  ? null
+                  : stringValue(item.path, path + ".path"),
+              content:
+                item.content === null
+                  ? null
+                  : stringValue(item.content, path + ".content"),
+              contentTruncated: booleanValue(
+                item.contentTruncated,
+                path + ".contentTruncated",
+              ),
+              downloadable: booleanValue(
+                item.downloadable,
+                path + ".downloadable",
+              ),
+            };
+          })(item.file, path + ".file"),
+    project:
+      item.project === null
+        ? null
+        : ((value: unknown, path: string) => {
+            const item = object(value, path, [
+              "id",
+              "name",
+              "description",
+              "path",
+              "updatedAtMs",
+              "files",
+              "filesTruncated",
+              "fileTags",
+            ]);
+            return {
+              id: stringValue(item.id, path + ".id"),
+              name: stringValue(item.name, path + ".name"),
+              description:
+                item.description === null
+                  ? null
+                  : stringValue(item.description, path + ".description"),
+              path:
+                item.path === null
+                  ? null
+                  : stringValue(item.path, path + ".path"),
+              updatedAtMs:
+                item.updatedAtMs === null
+                  ? null
+                  : u64WireInteger(item.updatedAtMs, path + ".updatedAtMs"),
+              files: arrayValue(
+                item.files,
+                path + ".files",
+                (entry: unknown, entryPath: string) =>
+                  ((value: unknown, path: string) => {
+                    const item = object(value, path, [
+                      "id",
+                      "name",
+                      "tag",
+                      "sizeBytes",
+                      "mime",
+                      "by",
+                      "updatedAtMs",
+                    ]);
+                    return {
+                      id: stringValue(item.id, path + ".id"),
+                      name: stringValue(item.name, path + ".name"),
+                      tag:
+                        item.tag === null
+                          ? null
+                          : stringValue(item.tag, path + ".tag"),
+                      sizeBytes:
+                        item.sizeBytes === null
+                          ? null
+                          : u64WireInteger(item.sizeBytes, path + ".sizeBytes"),
+                      mime:
+                        item.mime === null
+                          ? null
+                          : stringValue(item.mime, path + ".mime"),
+                      by:
+                        item.by === null
+                          ? null
+                          : stringValue(item.by, path + ".by"),
+                      updatedAtMs:
+                        item.updatedAtMs === null
+                          ? null
+                          : u64WireInteger(
+                              item.updatedAtMs,
+                              path + ".updatedAtMs",
+                            ),
+                    };
+                  })(entry, entryPath),
+              ),
+              filesTruncated: booleanValue(
+                item.filesTruncated,
+                path + ".filesTruncated",
+              ),
+              fileTags: arrayValue(
+                item.fileTags,
+                path + ".fileTags",
+                (entry: unknown, entryPath: string) =>
+                  ((value: unknown, path: string) => {
+                    const item = object(value, path, ["tag", "count"]);
+                    return {
+                      tag: stringValue(item.tag, path + ".tag"),
+                      count: u64WireInteger(item.count, path + ".count"),
+                    };
+                  })(entry, entryPath),
+              ),
+            };
+          })(item.project, path + ".project"),
+  };
+}
+export type InboxFileOpenWire = {
+  binding: string;
+  requestId: string;
+  state:
+    | "opened"
+    | "stale_binding"
+    | "superseded"
+    | "unavailable"
+    | "forbidden"
+    | "not_found"
+    | "not_downloadable"
+    | "failed";
+};
+export function decodeInboxFileOpenWire(
+  value: unknown,
+  path: string,
+): InboxFileOpenWire {
+  const item = object(value, path, ["binding", "requestId", "state"]);
+  return {
+    binding: u64WireInteger(item.binding, path + ".binding"),
+    requestId: u64WireInteger(item.requestId, path + ".requestId"),
+    state: enumValue(item.state, path + ".state", [
+      "opened",
+      "stale_binding",
+      "superseded",
+      "unavailable",
+      "forbidden",
+      "not_found",
+      "not_downloadable",
+      "failed",
+    ] as const),
   };
 }

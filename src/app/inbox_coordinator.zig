@@ -25,6 +25,8 @@ pub const Host = struct {
     wake_fn: *const fn (?*anyopaque) anyerror!void,
     start_timer_fn: *const fn (?*anyopaque, u64, u64, bool) anyerror!void,
     cancel_timer_fn: *const fn (?*anyopaque, u64) anyerror!void,
+    /// Opens a web address in the system browser.
+    open_fn: *const fn (?*anyopaque, []const u8) anyerror!void,
     on_main_thread_fn: *const fn (?*anyopaque) bool,
 };
 
@@ -162,6 +164,7 @@ pub const max_bridge_id_bytes = 128;
 
 pub const ConversationRequest = inbox.ConversationRequest;
 pub const TaskRequest = inbox.TaskRequest;
+pub const FileOpenRequest = inbox.FileOpenRequest;
 
 const Reply = struct {
     responder: native_sdk.bridge.AsyncResponder,
@@ -187,6 +190,8 @@ const Work = union(enum) {
     list: inbox.ListPreparation,
     conversation: ConversationWork,
     task: TaskWork,
+    /// Reads the file's detail for a fresh download address to open.
+    file: TaskWork,
 };
 
 const Job = struct {
@@ -212,7 +217,7 @@ const Job = struct {
     unread: ?inbox.Unread = null,
     page: ?inbox.Messages = null,
     page_limit: u32 = 0,
-    detail: ?inbox.Task = null,
+    detail: ?inbox.Detail = null,
 
     fn run(self: *Job) void {
         defer {
@@ -254,11 +259,11 @@ const Job = struct {
                 };
                 _ = try self.pageOf(query, inbox.Limits.conversation_page);
             },
-            .task => |work| {
-                const buffer = try self.allocator.alloc(u8, inbox.Limits.task_bytes);
+            .task, .file => |work| {
+                const buffer = try self.allocator.alloc(u8, inbox.Limits.detail_bytes);
                 defer self.allocator.free(buffer);
                 const body = (self.fetch(.{ .task = work.task.slice() }, buffer) catch return self.unusable(.task, 0)) orelse return;
-                self.detail = inbox.parseTask(self.allocator, body) catch |err| switch (err) {
+                self.detail = inbox.parseDetail(self.allocator, body) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidResponse => return self.unusable(.task, body.len),
                 };
@@ -362,6 +367,11 @@ pub const Coordinator = struct {
     conversation_next: ?ConversationWork = null,
     task: ?*Job = null,
     task_next: ?TaskWork = null,
+    file: ?*Job = null,
+    file_next: ?TaskWork = null,
+
+    /// Every request slot, for what applies to all of them alike.
+    const slots = .{ "poll", "list", "conversation", "task", "file" };
 
     fn now(self: *const Coordinator) u64 {
         return self.host.now_ns_fn(self.host.context) / std.time.ns_per_ms;
@@ -449,7 +459,7 @@ pub const Coordinator = struct {
         self.bound = null;
         self.retire_fn(self.retire_context, current.isolation);
         current.release(self.allocator);
-        inline for (.{ "poll", "list", "conversation", "task" }) |name| if (@field(self, name)) |job| job.cancellation.cancel();
+        inline for (slots) |name| if (@field(self, name)) |job| job.cancellation.cancel();
         if (self.conversation_next) |work| {
             self.conversation_next = null;
             respondConversationState(work.reply, work.peer.slice(), .stale_binding);
@@ -457,6 +467,10 @@ pub const Coordinator = struct {
         if (self.task_next) |work| {
             self.task_next = null;
             respondTaskState(work.reply, .stale_binding);
+        }
+        if (self.file_next) |work| {
+            self.file_next = null;
+            respondFileState(work.reply, .stale_binding);
         }
     }
 
@@ -531,8 +545,10 @@ pub const Coordinator = struct {
         self.assertMain();
         if (self.conversation_next) |work| respondConversationState(work.reply, work.peer.slice(), .superseded);
         if (self.task_next) |work| respondTaskState(work.reply, .superseded);
+        if (self.file_next) |work| respondFileState(work.reply, .superseded);
         self.conversation_next = null;
         self.task_next = null;
+        self.file_next = null;
         if (self.conversation) |job| if (!job.replied) {
             respondConversationState(job.work.conversation.reply, job.work.conversation.peer.slice(), .superseded);
             job.replied = true;
@@ -541,6 +557,12 @@ pub const Coordinator = struct {
         };
         if (self.task) |job| if (!job.replied) {
             respondTaskState(job.work.task.reply, .superseded);
+            job.replied = true;
+            job.superseded = true;
+            job.cancellation.cancel();
+        };
+        if (self.file) |job| if (!job.replied) {
+            respondFileState(job.work.file.reply, .superseded);
             job.replied = true;
             job.superseded = true;
             job.cancellation.cancel();
@@ -622,6 +644,35 @@ pub const Coordinator = struct {
         return true;
     }
 
+    /// Reads the file's detail again for a fresh download address and opens
+    /// it in the system browser. The address never reaches the Renderer.
+    pub fn openFile(self: *Coordinator, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: FileOpenRequest) bool {
+        self.assertMain();
+        const target = reply(responder, bridge_id, request.binding, request.request_id) orelse return false;
+        const file = inbox.Id.init(request.file) catch return false;
+        if (!inbox.validTaskId(file.slice())) return false;
+        const state: ?inbox.FileOpenState = if (self.stopped or self.bound == null)
+            .unavailable
+        else if (!self.management.accepts_fn(self.management.context, request.binding))
+            .stale_binding
+        else
+            null;
+        if (state) |value| {
+            respondFileState(target, value);
+            return true;
+        }
+        if (self.file_next) |previous| respondFileState(previous.reply, .superseded);
+        self.file_next = .{ .reply = target, .task = file };
+        if (self.file) |job| if (!job.replied) {
+            respondFileState(job.work.file.reply, .superseded);
+            job.replied = true;
+            job.superseded = true;
+            job.cancellation.cancel();
+        };
+        self.reconcile();
+        return true;
+    }
+
     pub fn drain(self: *Coordinator) void {
         self.assertMain();
         if (self.stopped) return;
@@ -683,6 +734,33 @@ pub const Coordinator = struct {
             }
             job.destroy();
         };
+        if (self.file) |job| if (job.finished.load(.acquire)) {
+            job.join();
+            self.file = null;
+            const work = job.work.file;
+            if (job.replied) {
+                // Already answered; nothing is sent twice.
+            } else if (job.superseded) {
+                respondFileState(work.reply, .superseded);
+            } else if (!self.management.accepts_fn(self.management.context, work.reply.binding)) {
+                respondFileState(work.reply, .stale_binding);
+            } else if (job.detail) |*detail| {
+                respondFileState(work.reply, self.openDownload(detail, job.key));
+            } else {
+                respondFileState(work.reply, requestState(inbox.FileOpenState, job.status));
+            }
+            job.destroy();
+        };
+    }
+
+    fn openDownload(self: *Coordinator, detail: *const inbox.Detail, key: []const u8) inbox.FileOpenState {
+        const url = switch (detail.kind) {
+            .file => |file| file.download_url orelse return .not_downloadable,
+            else => return .not_downloadable,
+        };
+        if (url.len > native_sdk.platform.max_external_url_bytes or !inbox.validDownloadUrl(url, key)) return .not_downloadable;
+        self.host.open_fn(self.host.context, url) catch return .failed;
+        return .opened;
     }
 
     fn completeList(self: *Coordinator, job: *Job, preparation: inbox.ListPreparation, now_ms: u64) void {
@@ -713,13 +791,25 @@ pub const Coordinator = struct {
                     break :blk null;
                 };
             };
+            if (self.file == null) if (self.file_next) |work| {
+                self.file_next = null;
+                self.file = self.startJob(.{ .file = work }) catch blk: {
+                    respondFileState(work.reply, .failed);
+                    break :blk null;
+                };
+            };
         }
         self.reconcileTimer();
     }
 
+    fn running(self: *const Coordinator) bool {
+        inline for (slots) |name| if (@field(self, name) != null) return true;
+        return false;
+    }
+
     fn reconcileTimer(self: *Coordinator) void {
         if (self.stopped) return;
-        const busy = self.poll != null or self.list != null or self.conversation != null or self.task != null;
+        const busy = self.running();
         const now_ms = self.now();
         var next: ?u64 = self.management.next_poll_fn(self.management.context);
         if (self.find_retry_at) |at| next = if (next) |value| @min(value, at) else at;
@@ -741,12 +831,13 @@ pub const Coordinator = struct {
         if (self.stopped) return;
         self.stopped = true;
         self.host.cancel_timer_fn(self.host.context, timer_id) catch {};
-        inline for (.{ "poll", "list", "conversation", "task" }) |name| if (@field(self, name)) |job| job.cancellation.cancel();
-        inline for (.{ "poll", "list", "conversation", "task" }) |name| if (@field(self, name)) |job| {
+        inline for (slots) |name| if (@field(self, name)) |job| job.cancellation.cancel();
+        inline for (slots) |name| if (@field(self, name)) |job| {
             job.join();
             if (!job.replied) switch (job.work) {
                 .conversation => |work| respondConversationState(work.reply, work.peer.slice(), .unavailable),
                 .task => |work| respondTaskState(work.reply, .unavailable),
+                .file => |work| respondFileState(work.reply, .unavailable),
                 else => {},
             };
             job.destroy();
@@ -754,8 +845,10 @@ pub const Coordinator = struct {
         };
         if (self.conversation_next) |work| respondConversationState(work.reply, work.peer.slice(), .unavailable);
         if (self.task_next) |work| respondTaskState(work.reply, .unavailable);
+        if (self.file_next) |work| respondFileState(work.reply, .unavailable);
         self.conversation_next = null;
         self.task_next = null;
+        self.file_next = null;
         if (self.bound) |*current| {
             self.retire_fn(self.retire_context, current.isolation);
             current.release(self.allocator);
@@ -782,38 +875,160 @@ pub const Coordinator = struct {
         work.reply.responder.success(work.reply.bridge_id.slice(), json) catch {};
     }
 
-    /// The whole detail when it fits one Bridge result; otherwise the
-    /// description is cut, the one field that can be long.
-    fn respondTask(self: *Coordinator, work: TaskWork, detail: *const inbox.Task) void {
-        const output = self.allocator.alloc(u8, native_sdk.bridge.max_result_bytes - 256) catch
+    /// The whole detail when it fits one Bridge result; otherwise the long
+    /// parts are cut, see `shrinkDetail`.
+    fn respondTask(self: *Coordinator, work: TaskWork, detail: *const inbox.Detail) void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const output = arena.allocator().alloc(u8, native_sdk.bridge.max_result_bytes - 256) catch
             return respondTaskState(work.reply, .failed);
-        defer self.allocator.free(output);
-        var view: inbox.TaskView = .{
-            .id = if (detail.id) |*id| id.slice() else work.task.slice(),
-            .name = detail.name,
-            .progress = detail.progress,
-            .state = detail.state,
-            .path = detail.path,
-            .description = detail.description,
-            .assignees = detail.assignees,
-            .updatedAtMs = if (detail.updated_at_ms) |at| .{ .value = at } else null,
-        };
+        var result = detailView(arena.allocator(), work, detail) catch
+            return respondTaskState(work.reply, .failed);
         while (true) {
             var writer = std.Io.Writer.fixed(output);
-            if (std.json.Stringify.value(inbox.TaskDetail{
-                .binding = .{ .value = work.reply.binding },
-                .requestId = .{ .value = work.reply.request_id },
-                .state = .ready,
-                .task = view,
-            }, .{}, &writer)) |_| {
+            if (std.json.Stringify.value(result, .{}, &writer)) |_| {
                 work.reply.responder.success(work.reply.bridge_id.slice(), writer.buffered()) catch {};
                 return;
             } else |_| {}
-            const description = view.description orelse return respondTaskState(work.reply, .failed);
-            view.description = if (description.len == 0) null else inbox.utf8Prefix(description, description.len / 2);
+            if (!shrinkDetail(&result)) return respondTaskState(work.reply, .failed);
         }
     }
 };
+
+fn optionalU64(value: ?u64) ?inbox.U64 {
+    return if (value) |present| .{ .value = present } else null;
+}
+
+fn noteView(note: inbox.Note) inbox.NoteView {
+    return .{ .text = note.text, .atMs = optionalU64(note.at_ms), .by = note.by };
+}
+
+/// The Renderer view of one detail. The id MetaTeam returned wins over the
+/// one asked for: a renamed task answers under its current id.
+fn detailView(allocator: std.mem.Allocator, work: TaskWork, detail: *const inbox.Detail) !inbox.TaskDetail {
+    var result: inbox.TaskDetail = .{
+        .binding = .{ .value = work.reply.binding },
+        .requestId = .{ .value = work.reply.request_id },
+        .state = .ready,
+        .task = null,
+        .file = null,
+        .project = null,
+    };
+    switch (detail.kind) {
+        .task => |*task| {
+            const notes = try allocator.alloc(inbox.NoteView, task.notes.len);
+            for (task.notes, notes) |note, *view| view.* = noteView(note);
+            const children = try allocator.alloc(inbox.ChildView, task.children.len);
+            for (task.children, children) |*child, *view| view.* = .{ .id = child.id.slice(), .name = child.name, .progress = child.progress };
+            result.task = .{
+                .id = if (task.id) |*id| id.slice() else work.task.slice(),
+                .name = task.name,
+                .progress = task.progress,
+                .state = task.state,
+                .path = task.path,
+                .description = task.description,
+                .assignees = task.assignees,
+                .createdBy = task.created_by,
+                .updatedAtMs = optionalU64(task.updated_at_ms),
+                .lastNote = if (task.last_note) |note| noteView(note) else null,
+                .notes = notes,
+                .children = children,
+            };
+        },
+        .file => |*file| result.file = .{
+            .id = if (file.id) |*id| id.slice() else work.task.slice(),
+            .name = file.name,
+            .tag = file.tag,
+            .sizeBytes = optionalU64(file.size),
+            .mime = file.mime,
+            .description = file.description,
+            .by = file.by,
+            .updatedAtMs = optionalU64(file.updated_at_ms),
+            .path = file.path,
+            .content = file.content,
+            .contentTruncated = false,
+            .downloadable = file.download_url != null,
+        },
+        .project => |*project| {
+            const files = try allocator.alloc(inbox.ProjectFileView, project.files.len);
+            for (project.files, files) |*file, *view| view.* = .{
+                .id = file.id.slice(),
+                .name = file.name,
+                .tag = file.tag,
+                .sizeBytes = optionalU64(file.size),
+                .mime = file.mime,
+                .by = file.by,
+                .updatedAtMs = optionalU64(file.updated_at_ms),
+            };
+            const tags = try allocator.alloc(inbox.TagCountView, project.file_tags.len);
+            for (project.file_tags, tags) |tag, *view| view.* = .{ .tag = tag.tag, .count = .{ .value = tag.count } };
+            result.project = .{
+                .id = if (project.id) |*id| id.slice() else work.task.slice(),
+                .name = project.name,
+                .description = project.description,
+                .path = project.path,
+                .updatedAtMs = optionalU64(project.updated_at_ms),
+                .files = files,
+                .filesTruncated = false,
+                .fileTags = tags,
+            };
+        },
+    }
+    return result;
+}
+
+fn halved(text: []const u8) ?[]const u8 {
+    return if (text.len == 0) null else inbox.utf8Prefix(text, text.len / 2);
+}
+
+/// One step towards fitting a Bridge result, longest parts first: a file's
+/// content, then descriptions; a task's oldest notes, then its children;
+/// a project's last files. False when nothing is left to cut.
+fn shrinkDetail(result: *inbox.TaskDetail) bool {
+    if (result.file) |*file| {
+        if (file.content) |content| {
+            file.content = halved(content);
+            file.contentTruncated = true;
+            return true;
+        }
+        if (file.description) |description| {
+            file.description = halved(description);
+            return true;
+        }
+        return false;
+    }
+    if (result.task) |*task| {
+        if (task.description) |description| if (description.len > 4096) {
+            task.description = halved(description);
+            return true;
+        };
+        if (task.notes.len != 0) {
+            task.notes = task.notes[(task.notes.len + 1) / 2 ..];
+            return true;
+        }
+        if (task.children.len != 0) {
+            task.children = task.children[0 .. task.children.len / 2];
+            return true;
+        }
+        if (task.description) |description| {
+            task.description = halved(description);
+            return true;
+        }
+        return false;
+    }
+    if (result.project) |*project| {
+        if (project.files.len != 0) {
+            project.files = project.files[0 .. project.files.len / 2];
+            project.filesTruncated = true;
+            return true;
+        }
+        if (project.description) |description| {
+            project.description = halved(description);
+            return true;
+        }
+    }
+    return false;
+}
 
 fn requestState(comptime State: type, status: ?u16) State {
     return switch (inbox.requestFailure(status)) {
@@ -908,6 +1123,22 @@ fn respondTaskState(target: Reply, state: inbox.TaskState) void {
         .requestId = .{ .value = target.request_id },
         .state = state,
         .task = null,
+        .file = null,
+        .project = null,
+    }, .{}, &writer) catch {
+        target.responder.fail(target.bridge_id.slice(), .internal_error, "Inbox response encoding failed") catch {};
+        return;
+    };
+    target.responder.success(target.bridge_id.slice(), writer.buffered()) catch {};
+}
+
+fn respondFileState(target: Reply, state: inbox.FileOpenState) void {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    std.json.Stringify.value(inbox.FileOpen{
+        .binding = .{ .value = target.binding },
+        .requestId = .{ .value = target.request_id },
+        .state = state,
     }, .{}, &writer) catch {
         target.responder.fail(target.bridge_id.slice(), .internal_error, "Inbox response encoding failed") catch {};
         return;
@@ -1003,9 +1234,18 @@ const TestHost = struct {
     main_thread: std.Thread.Id,
     now_ms: u64 = 1000,
     timer_ms: ?u64 = null,
+    opened: [256]u8 = undefined,
+    opened_len: usize = 0,
+    opens: usize = 0,
 
     fn host(self: *TestHost) Host {
-        return .{ .context = self, .now_ns_fn = now, .wake_fn = wake, .start_timer_fn = startTimer, .cancel_timer_fn = cancelTimer, .on_main_thread_fn = onMain };
+        return .{ .context = self, .now_ns_fn = now, .wake_fn = wake, .start_timer_fn = startTimer, .cancel_timer_fn = cancelTimer, .open_fn = open, .on_main_thread_fn = onMain };
+    }
+    fn open(context: ?*anyopaque, url: []const u8) anyerror!void {
+        const self = of(context);
+        self.opens += 1;
+        self.opened_len = @min(url.len, self.opened.len);
+        @memcpy(self.opened[0..self.opened_len], url[0..self.opened_len]);
     }
     fn of(context: ?*anyopaque) *TestHost {
         return @ptrCast(@alignCast(context.?));
@@ -1149,10 +1389,9 @@ const Fixture = struct {
     fn settle(self: *Fixture) void {
         var rounds: usize = 0;
         while (rounds < 8) : (rounds += 1) {
-            inline for (.{ "poll", "list", "conversation", "task" }) |name| if (@field(self.coordinator, name)) |job| job.join();
+            inline for (Coordinator.slots) |name| if (@field(self.coordinator, name)) |job| job.join();
             self.coordinator.drain();
-            const busy = self.coordinator.poll != null or self.coordinator.list != null or self.coordinator.conversation != null or self.coordinator.task != null;
-            if (!busy) return;
+            if (!self.coordinator.running()) return;
         }
     }
     fn view(self: *Fixture) inbox.View {
@@ -1430,6 +1669,90 @@ test "inbox coordinator: a closed Bridge connection answers pending reads once" 
     try testing.expectEqual(@as(usize, 2), fixture.capture.responses.items.len);
     for (fixture.capture.responses.items) |response|
         try testing.expect(std.mem.indexOf(u8, response, "\"state\":\"superseded\"") != null);
+}
+
+test "inbox coordinator: linked files, projects and tasks answer by kind; a download opens in the browser and never reaches the Renderer" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    const responder = fixture.capture.responder();
+    const download = "http://192.0.2.10:8080/team/agent/v1/files/9830/dl?exp=1&sig=ab";
+    fixture.transport.task = "{\"data\":{\"id\":9830,\"name\":\"api.md\",\"tag\":\"API\",\"size\":12,\"mime\":\"text/markdown\",\"by\":\"Lin\",\"path\":\"space / api.md\",\"content\":\"# Title\",\"downloadUrl\":\"" ++ download ++ "\",\"webUrl\":\"http://192.0.2.10:8080/team/api/v1/files/9830/content\"}}";
+    try testing.expect(fixture.coordinator.readTask(responder, "t1", .{ .binding = binding, .request_id = 1, .task = "9830" }));
+    fixture.settle();
+    const file = fixture.capture.last();
+    try testing.expect(std.mem.indexOf(u8, file, "\"file\":{\"id\":\"9830\"") != null);
+    try testing.expect(std.mem.indexOf(u8, file, "\"content\":\"# Title\"") != null);
+    try testing.expect(std.mem.indexOf(u8, file, "\"downloadable\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, file, "\"task\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, file, "192.0.2.10") == null);
+    try testing.expect(std.mem.indexOf(u8, file, "sig=") == null);
+
+    // The download address is read again and handed to the browser only.
+    try testing.expect(fixture.coordinator.openFile(responder, "f1", .{ .binding = binding, .request_id = 2, .file = "9830" }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"opened\"") != null);
+    try testing.expectEqualStrings(download, fixture.host.opened[0..fixture.host.opened_len]);
+    try testing.expectEqualStrings("http://192.0.2.10:8080/team/open/v1/tasks/9830", fixture.transport.url(fixture.transport.count - 1));
+
+    // An address carrying the key, or an id that is not a file, is not opened.
+    fixture.transport.task = "{\"data\":{\"id\":9830,\"name\":\"api.md\",\"mime\":\"text/plain\",\"downloadUrl\":\"http://h.test/dl?k=" ++ sentinel_key ++ "\"}}";
+    try testing.expect(fixture.coordinator.openFile(responder, "f2", .{ .binding = binding, .request_id = 3, .file = "9830" }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"not_downloadable\"") != null);
+    fixture.transport.task = "{\"data\":{\"id\":13067,\"name\":\"Inbox\",\"type\":\"task\",\"progress\":\"doing\",\"state\":\"active\",\"lastNote\":null,\"notes\":[{\"text\":\"started\",\"at\":1,\"by\":\"Ann\"}],\"children\":[{\"id\":13070,\"name\":\"Reply\",\"progress\":\"todo\"}]}}";
+    try testing.expect(fixture.coordinator.openFile(responder, "f3", .{ .binding = binding, .request_id = 4, .file = "13066" }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"not_downloadable\"") != null);
+    try testing.expectEqual(@as(usize, 1), fixture.host.opens);
+
+    // A task answers under the id MetaTeam returned, with its notes and children.
+    try testing.expect(fixture.coordinator.readTask(responder, "t2", .{ .binding = binding, .request_id = 5, .task = "13066" }));
+    fixture.settle();
+    const task = fixture.capture.last();
+    try testing.expect(std.mem.indexOf(u8, task, "\"task\":{\"id\":\"13067\"") != null);
+    try testing.expect(std.mem.indexOf(u8, task, "\"notes\":[{\"text\":\"started\",\"atMs\":\"1\",\"by\":\"Ann\"}]") != null);
+    try testing.expect(std.mem.indexOf(u8, task, "\"children\":[{\"id\":\"13070\",\"name\":\"Reply\",\"progress\":\"todo\"}]") != null);
+
+    fixture.transport.task = "{\"data\":{\"id\":740,\"name\":\"metawork\",\"type\":\"project\",\"files\":[{\"id\":1,\"name\":\"a.md\",\"tag\":\"Docs\"}],\"fileTags\":{\"Docs\":1}}}";
+    try testing.expect(fixture.coordinator.readTask(responder, "t3", .{ .binding = binding, .request_id = 6, .task = "740" }));
+    fixture.settle();
+    const project = fixture.capture.last();
+    try testing.expect(std.mem.indexOf(u8, project, "\"project\":{\"id\":\"740\"") != null);
+    try testing.expect(std.mem.indexOf(u8, project, "\"fileTags\":[{\"tag\":\"Docs\",\"count\":\"1\"}]") != null);
+
+    // A refused file read is that request's outcome only.
+    fixture.transport.task_status = 403;
+    try testing.expect(fixture.coordinator.openFile(responder, "f4", .{ .binding = binding, .request_id = 7, .file = "9830" }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"forbidden\"") != null);
+    try testing.expectEqual(inbox.State.ready, fixture.view().state);
+    for (fixture.capture.responses.items) |response| try testing.expect(std.mem.indexOf(u8, response, sentinel_key) == null);
+}
+
+test "inbox coordinator: a detail larger than one Bridge result is cut, longest parts first" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    const responder = fixture.capture.responder();
+    const content = try testing.allocator.alloc(u8, native_sdk.bridge.max_result_bytes);
+    defer testing.allocator.free(content);
+    @memset(content, 'x');
+    const body = try std.fmt.allocPrint(testing.allocator, "{{\"data\":{{\"id\":1,\"name\":\"big.txt\",\"mime\":\"text/plain\",\"content\":\"{s}\"}}}}", .{content[0 .. inbox.Limits.detail_bytes - 128]});
+    defer testing.allocator.free(body);
+    fixture.transport.task = body;
+    try testing.expect(fixture.coordinator.readTask(responder, "t", .{ .binding = binding, .request_id = 1, .task = "1" }));
+    fixture.settle();
+    const answer = fixture.capture.last();
+    try testing.expect(answer.len < native_sdk.bridge.max_result_bytes);
+    try testing.expect(std.mem.indexOf(u8, answer, "\"state\":\"ready\"") != null);
+    try testing.expect(std.mem.indexOf(u8, answer, "\"contentTruncated\":true") != null);
 }
 
 test "inbox coordinator: the MCP source resolves a sensitive MetaTeam endpoint through the credential store" {

@@ -133,10 +133,38 @@ function message(id, direction, text, taskIds = []) {
   };
 }
 
-function fakeClient({ pages = {}, task, taskState } = {}) {
+function taskView(patch = {}) {
+  return {
+    id: "13066",
+    name: "Inbox",
+    progress: "doing",
+    state: null,
+    path: "metawork / Inbox",
+    description: "Read only",
+    assignees: ["Ann"],
+    createdBy: null,
+    updatedAtMs: null,
+    lastNote: null,
+    notes: [],
+    children: [],
+    ...patch,
+  };
+}
+
+function fakeClient({
+  pages = {},
+  task,
+  taskState,
+  details = {},
+  fileState = "opened",
+} = {}) {
   const calls = [];
   return {
     calls,
+    async openInboxFile(binding, fileId) {
+      calls.push(["file", binding, fileId]);
+      return { binding, requestId: String(calls.length), state: fileState };
+    },
     async refreshInbox(binding, explicit) {
       calls.push(["refresh", binding, explicit]);
       return { outcome: "accepted" };
@@ -162,11 +190,15 @@ function fakeClient({ pages = {}, task, taskState } = {}) {
     },
     async readInboxTask(binding, taskId) {
       calls.push(["task", binding, taskId]);
+      const detail = details[taskId] ?? (task ? { task } : null);
       return {
         binding,
         requestId: String(calls.length),
-        state: task ? "ready" : (taskState ?? "failed"),
-        task: task ?? null,
+        state: detail ? "ready" : (taskState ?? "failed"),
+        task: null,
+        file: null,
+        project: null,
+        ...detail,
       };
     },
   };
@@ -300,16 +332,7 @@ test("the open inbox refreshes, and a conversation is read only when it is opene
       },
       "ann:before:10": { messages: [message("4", "in", "Earlier note")] },
     },
-    task: {
-      id: "13066",
-      name: "Inbox",
-      progress: "doing",
-      state: null,
-      path: "metawork / Inbox",
-      description: "Read only",
-      assignees: ["Ann"],
-      updatedAtMs: null,
-    },
+    task: taskView(),
   });
   const closed = render(element(client, view(), { open: false }));
   assert.equal(client.calls.length, 0);
@@ -341,9 +364,9 @@ test("the open inbox refreshes, and a conversation is read only when it is opene
     ),
   );
 
-  await user.click(screen.getByRole("button", { name: /Task #13066/ }));
+  await user.click(screen.getByRole("button", { name: /#13066/ }));
   await waitFor(() => assert.ok(screen.getByText("Read only")));
-  assert.ok(screen.getByText("doing"));
+  assert.ok(screen.getByText("In progress"));
   assert.ok(screen.getByText("metawork / Inbox"));
   assert.deepEqual(
     client.calls.find(([kind]) => kind === "task"),
@@ -526,6 +549,100 @@ test("messages show new marks, sending agents and read receipts; unread rows sho
   );
 });
 
+test("a linked file, project or task shows its own details, opens nested items and downloads through the Host", async () => {
+  const user = userEvent.setup({ document });
+  const file = {
+    id: "9830",
+    name: "metawork-api.md",
+    tag: "API",
+    sizeBytes: "12034",
+    mime: "text/markdown",
+    description: null,
+    by: "Lin",
+    updatedAtMs: at("2026-11-21T03:00:00Z"),
+    path: "space / metawork-api.md",
+    content: "# MetaTeam messages",
+    contentTruncated: false,
+    downloadable: true,
+  };
+  const client = fakeClient({
+    pages: {
+      "ann:latest:null": {
+        messages: [message("12", "in", "See these", ["740", "9749"])],
+      },
+    },
+    details: {
+      740: {
+        project: {
+          id: "740",
+          name: "metawork",
+          description: "Desktop app",
+          path: null,
+          updatedAtMs: null,
+          files: [
+            {
+              id: "9830",
+              name: "metawork-api.md",
+              tag: "API",
+              sizeBytes: "12034",
+              mime: "text/markdown",
+              by: "Lin",
+              updatedAtMs: null,
+            },
+          ],
+          filesTruncated: false,
+          fileTags: [{ tag: "API", count: "1" }],
+        },
+      },
+      9830: { file },
+      9749: {
+        task: taskView({
+          id: "9749",
+          name: "Open API",
+          state: "closed",
+          createdBy: "Lin",
+          lastNote: { text: "Deployed", atMs: null, by: "Lin" },
+          notes: [
+            { text: "Found it", atMs: null, by: "Lin" },
+            { text: "Deployed", atMs: null, by: "Lin" },
+          ],
+          children: [{ id: "9801", name: "Write docs", progress: "todo" }],
+        }),
+      },
+      9801: { task: taskView({ id: "9801", name: "Write docs" }) },
+    },
+  });
+  render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await waitFor(() => assert.ok(screen.getByText("See these")));
+
+  await user.click(screen.getByRole("button", { name: /#740/ }));
+  await waitFor(() => assert.ok(screen.getByText("Desktop app")));
+  assert.ok(screen.getByText("API · 1"));
+  await user.click(screen.getByRole("button", { name: /metawork-api\.md/ }));
+  await waitFor(() => assert.ok(screen.getByText("# MetaTeam messages")));
+  assert.ok(screen.getByText("13 KB"));
+  assert.ok(screen.getByText("text/markdown"));
+  assert.ok(screen.getByText("space / metawork-api.md"));
+  await user.click(screen.getByRole("button", { name: "Download" }));
+  await waitFor(() => assert.ok(screen.getByText("Opened in your browser.")));
+  assert.deepEqual(client.calls.at(-1), ["file", "1", "9830"]);
+  // Back to the project the file was opened from.
+  await user.click(screen.getByRole("button", { name: "Back" }));
+  await waitFor(() => assert.ok(screen.getByText("Desktop app")));
+  await user.keyboard("{Escape}");
+
+  await user.click(screen.getByRole("button", { name: /#9749/ }));
+  await waitFor(() => assert.ok(screen.getByText("Found it")));
+  assert.ok(screen.getByText("Closed"));
+  assert.ok(screen.getByText("Latest note"));
+  await user.click(screen.getByRole("button", { name: /Write docs/ }));
+  await waitFor(() =>
+    assert.ok(screen.getByRole("heading", { name: "Write docs" })),
+  );
+  assert.deepEqual(client.calls.at(-1), ["task", "1", "9801"]);
+});
+
 test("a refused task or a missing conversation is shown where it was asked for", async () => {
   const user = userEvent.setup({ document });
   const client = fakeClient({
@@ -542,7 +659,7 @@ test("a refused task or a missing conversation is shown where it was asked for",
   await waitFor(() =>
     assert.equal(document.querySelectorAll(".inbox-bubble").length, 1),
   );
-  await user.click(screen.getByRole("button", { name: /Task #13066/ }));
+  await user.click(screen.getByRole("button", { name: /#13066/ }));
   await waitFor(() =>
     assert.ok(screen.getByText("This device may not view this task.")),
   );
