@@ -140,6 +140,8 @@ pub const InstallationFailure = enum { invalid_request, credential_request_faile
 pub const InstallationWire = struct {
     task_id: u64,
     run_id: u64,
+    /// Holds the id of the Run that submitted the installation, not a message
+    /// id; renaming it would change the persisted registry format.
     source_message_id: u64,
     revision: u64,
     source_origin: []const u8,
@@ -156,6 +158,7 @@ pub const InstallationWire = struct {
 pub const InstallationStart = struct {
     task_id: u64,
     run_id: u64,
+    /// The submitting Run id, stored under the persisted field name; see `InstallationWire`.
     source_message_id: u64,
     source_origin: []const u8,
     phase: InstallationPhase = .preparing,
