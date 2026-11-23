@@ -492,14 +492,16 @@ export function useInbox(
       let status: DownloadStatus = "failed";
       try {
         const result = await client.openInboxFile(binding, fileId);
-        if (result.state === "superseded") return;
-        status =
-          result.state === "opened" ||
-          result.state === "not_downloadable" ||
-          result.state === "forbidden" ||
-          result.state === "not_found"
-            ? result.state
-            : "failed";
+        // Answered for a connection that ended: nothing to report.
+        if (result.state === "superseded") status = "idle";
+        else
+          status =
+            result.state === "opened" ||
+            result.state === "not_downloadable" ||
+            result.state === "forbidden" ||
+            result.state === "not_found"
+              ? result.state
+              : "failed";
       } catch {
         status = "failed";
       }
@@ -743,10 +745,13 @@ export function NewMessageDialog({
   const [failure, setFailure] = useState<SendFailure | null>(null);
   const [requestKey, setRequestKey] = useState<string | null>(null);
   const loadPeople = controller.loadPeople;
+  // Only the latest read may change what the picker shows.
+  const reads = useRef(0);
   const load = useCallback(async () => {
+    const read = ++reads.current;
     setPhase("loading");
     const answer = await loadPeople();
-    if (answer?.state === "superseded") return;
+    if (read !== reads.current) return;
     if (answer?.state === "ready") {
       setMembers(answer.people);
       setPhase("ready");
