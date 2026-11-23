@@ -18798,6 +18798,21 @@ test "Runtime projects tools and full-width usage without parsing protocol in Re
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"input\":\"18446744073709551615\"") != null);
 }
 
+test "Tool file references are allocated only for the references a result carries" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var start = try testEnvelope(3, 7, "{\"tool_start\":{\"id\":\"refs-tool\",\"name\":\"Bash\",\"input\":\"{}\"}}");
+    defer start.deinit();
+    try control.applyEvent(&start);
+    const tool = &control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?;
+    try std.testing.expect(tool.file_refs == null);
+    var result = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"refs-tool\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer result.deinit();
+    try control.applyEvent(&result);
+    try std.testing.expectEqual(@as(usize, 0), tool.file_refs.?.len);
+    try std.testing.expectEqual(ToolState.completed, tool.state);
+}
+
 test "Runtime projects typed AgentCore file references into bounded tool entries" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var control = try testRuntime();
@@ -18807,6 +18822,7 @@ test "Runtime projects typed AgentCore file references into bounded tool entries
     var envelope = try testEnvelope(3, 7, encoded);
     defer envelope.deinit();
     try control.applyEvent(&envelope);
+    try std.testing.expectEqual(@as(usize, 1), control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?.file_refs.?.len);
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&snapshot_storage);

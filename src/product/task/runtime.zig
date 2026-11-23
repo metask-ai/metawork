@@ -9176,12 +9176,7 @@ fn findOrCreateEventTool(
         0,
     )).value;
     errdefer context.effects.text.discardCandidate(content);
-    const refs = try context.runtime.allocator.alloc(
-        ?task_state.FileReferenceView,
-        context.effects.max_file_refs_per_tool,
-    );
-    errdefer context.runtime.allocator.free(refs);
-    @memset(refs, null);
+    // References arrive with the result and are allocated for their count.
     run_record.tools[slot] = .{
         .route_digest = digest,
         .id = owned_id,
@@ -9190,7 +9185,6 @@ fn findOrCreateEventTool(
         .input = owned_input.value,
         .progress = progress,
         .content = content,
-        .file_refs = refs,
         .state = .running,
         .input_truncated = owned_input.value.len < input.len,
         .redacted = owned_name.redacted or owned_input.redacted,
@@ -9364,15 +9358,14 @@ fn replaceToolFileReferences(context: *EventContext, tool: *task_state.ToolView,
         clearEventFileReferences(context, &candidate);
         if (candidate.file_refs) |allocated| context.runtime.allocator.free(allocated);
     }
+    // The ABI decoder already bounds the count; this mirrors that ceiling.
     if (values.len > context.effects.max_file_refs_per_tool)
         return error.ToolCapacity;
-    if (candidate.file_refs == null) {
-        candidate.file_refs = try context.runtime.allocator.alloc(
-            ?task_state.FileReferenceView,
-            context.effects.max_file_refs_per_tool,
-        );
-        @memset(candidate.file_refs.?, null);
-    }
+    candidate.file_refs = try context.runtime.allocator.alloc(
+        ?task_state.FileReferenceView,
+        values.len,
+    );
+    @memset(candidate.file_refs.?, null);
     for (values, 0..) |reference, index| {
         const locator_kind: task_state.FileReferenceLocatorKind = switch (reference.locator) {
             .workspace_path => .workspace_path,
@@ -12971,6 +12964,8 @@ test "generated image acceptance shares submission order and refresh preserves i
     }
     const envelope: agent.OwnedCoreEvent = .{ .session_id = 1, .run_id = 1, .encoded_bytes = 0, .json = &.{}, .allocator = std.testing.allocator, .generated_image_path = @constCast("image.png"), .event = .{ .arena = undefined, .value = .{ .known = .{ .tool_result = .{ .id = "t", .name = "image", .input = "", .content = "", .is_error = false } } } } };
     try replaceEventFileReferences(&context, &tool, &envelope, "", 1, 1);
+    // References are allocated for their count, not for the per-tool ceiling.
+    try std.testing.expectEqual(@as(usize, 1), tool.file_refs.?.len);
     const original = tool.file_refs.?[0].?.presentation_anchor.?;
     const after = try runtime.receiveInput(1, "after", .{ .text = "make blue" }, projection.effects());
     try std.testing.expect(before.presentation_order.? < original.presentation_order);
@@ -12978,6 +12973,7 @@ test "generated image acceptance shares submission order and refresh preserves i
     runs[0].?.commentary_count = 2;
     try replaceEventFileReferences(&context, &tool, &envelope, "", 1, 1);
     try std.testing.expectEqualDeep(original, tool.file_refs.?[0].?.presentation_anchor.?);
+    try std.testing.expectEqual(@as(usize, 1), tool.file_refs.?.len);
     context.effects.max_file_ref_field_bytes = 1;
     try std.testing.expectError(error.ToolCapacity, replaceEventFileReferences(&context, &tool, &envelope, "", 1, 1));
     try std.testing.expectEqualDeep(original, tool.file_refs.?[0].?.presentation_anchor.?);
