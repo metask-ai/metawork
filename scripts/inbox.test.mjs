@@ -821,6 +821,100 @@ test("a new message picks a member read on opening, and the conversation it star
   assert.equal(client.calls.filter(([kind]) => kind === "people").length, 1);
 });
 
+test("leaving a conversation while it sends keeps its reply box, and the answer lands only in that attempt", async () => {
+  const user = userEvent.setup({ document });
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const client = fakeClient({
+    sendGate: gate,
+    sendStates: ["failed", "sent"],
+    pages: {
+      "ann:latest:null": { messages: [message("12", "in", "Can you review?")] },
+      "bob:latest:null": { messages: [message("9", "out", "Done")] },
+    },
+  });
+  render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await waitFor(() =>
+    assert.equal(document.querySelectorAll(".inbox-bubble").length, 1),
+  );
+  await user.type(screen.getByRole("textbox", { name: "Message Ann" }), "A");
+  await user.keyboard("{Enter}");
+  await waitFor(() =>
+    assert.ok(screen.getByRole("button", { name: "Sending…" })),
+  );
+
+  // Bob's box is his own; one message is on its way, so his waits.
+  await user.click(screen.getByRole("button", { name: "Bob" }));
+  const bobBox = await screen.findByRole("textbox", { name: "Message Bob" });
+  assert.equal(bobBox.value, "");
+  await user.type(bobBox, "B{Enter}");
+  await waitFor(() =>
+    assert.ok(screen.getByText("Another message is still being sent.")),
+  );
+  assert.equal(client.calls.filter(([kind]) => kind === "send").length, 1);
+
+  // Back with Ann: still her message, still on its way.
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  const annBox = await screen.findByRole("textbox", { name: "Message Ann" });
+  assert.equal(annBox.value, "A");
+  assert.equal(annBox.readOnly, true);
+  release();
+  await waitFor(() =>
+    assert.ok(screen.getByText(/Retrying won't send it twice/)),
+  );
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => assert.equal(annBox.value, ""));
+  const sends = client.calls.filter(([kind]) => kind === "send");
+  assert.equal(sends.length, 2);
+  assert.deepEqual(sends[1].slice(2, 5), ["ann", "A", sends[0][4]]);
+  // Bob's draft was never touched by Ann's answers.
+  await user.click(screen.getByRole("button", { name: "Bob" }));
+  assert.equal(
+    (await screen.findByRole("textbox", { name: "Message Bob" })).value,
+    "B",
+  );
+});
+
+test("a new message belongs to its connection: another one closes the picker and its late answer opens nothing", async () => {
+  const user = userEvent.setup({ document });
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const client = fakeClient({
+    sendGate: gate,
+    people: [{ username: "bob", name: "Bob Li", online: null }],
+    conversation: { peerId: "bob-id", name: "Bob Li" },
+  });
+  const { rerender } = render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "New message" }));
+  await user.click(await screen.findByRole("button", { name: /Bob Li/ }));
+  await user.type(screen.getByRole("textbox", { name: "Message" }), "Hi");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  rerender(element(client, view({ binding: "2" })));
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+  release();
+  await waitFor(() =>
+    assert.equal(client.calls.filter(([kind]) => kind === "send").length, 1),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(screen.getByText("Select a conversation"));
+  assert.equal(client.calls.filter(([kind]) => kind === "read").length, 0);
+});
+
+test("a new message to oneself opens the Me conversation", async () => {
+  const user = userEvent.setup({ document });
+  const client = fakeClient({
+    people: [{ username: "zj", name: "Zhu", online: true }],
+    conversation: { peerId: "me", name: "Zhu" },
+  });
+  render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "New message" }));
+  await user.click(await screen.findByRole("button", { name: /Zhu/ }));
+  await user.type(screen.getByRole("textbox", { name: "Message" }), "note");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => assert.ok(screen.getByRole("heading", { name: "Me" })));
+});
+
 test("a refused task or a missing conversation is shown where it was asked for", async () => {
   const user = userEvent.setup({ document });
   const client = fakeClient({

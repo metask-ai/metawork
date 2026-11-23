@@ -68,6 +68,10 @@ export type Composer = {
   requestKey: string | null;
 };
 
+function emptyComposer(peerId: string): Composer {
+  return { peerId, text: "", sending: false, failure: null, requestKey: null };
+}
+
 export function sendRetryable(failure: SendFailure) {
   return (
     failure !== "rejected" && failure !== "forbidden" && failure !== "not_found"
@@ -175,12 +179,30 @@ export function useInbox(
     null,
   );
   const [task, setTask] = useState<OpenedTask | null>(null);
-  const [composer, setComposer] = useState<Composer | null>(null);
+  // One reply box per conversation: leaving one while it sends keeps it,
+  // and an answer only ever lands in the attempt that asked.
+  const [composers, setComposers] = useState<
+    Readonly<Record<string, Composer>>
+  >({});
+  const composer = conversation
+    ? (composers[conversation.peerId] ?? emptyComposer(conversation.peerId))
+    : null;
   // Set at once, before any render: a second submit in the same frame
   // still sees the first one on its way.
   const sending = useRef(false);
   const conversationRef = useRef(conversation);
   conversationRef.current = conversation;
+  const bindingRef = useRef(binding);
+  bindingRef.current = binding;
+  const updateComposer = (
+    peerId: string,
+    change: (current: Composer) => Composer,
+  ) =>
+    setComposers((all) => {
+      const current = all[peerId] ?? emptyComposer(peerId);
+      const next = change(current);
+      return next === current ? all : { ...all, [peerId]: next };
+    });
   const readRef = useRef<
     (
       peerId: string,
@@ -195,7 +217,7 @@ export function useInbox(
     setSelectedId(null);
     setConversation(null);
     setTask(null);
-    setComposer(null);
+    setComposers({});
     followed.current = null;
   }, [binding]);
 
@@ -313,18 +335,6 @@ export function useInbox(
   function select(peerId: string, name: string) {
     setSelectedId(peerId);
     setTask(null);
-    // Opening the same conversation again keeps what was being written.
-    setComposer((current) =>
-      current?.peerId === peerId
-        ? current
-        : {
-            peerId,
-            text: "",
-            sending: false,
-            failure: null,
-            requestKey: null,
-          },
-    );
     followed.current = null;
     setConversation({
       peerId,
@@ -365,26 +375,39 @@ export function useInbox(
   }
 
   return {
+    /** The MetaTeam connection this inbox state belongs to. */
+    binding,
     selectedId,
     conversation,
     task,
     composer,
     /** A changed message is a new message: it gets a new identity. */
     setDraft(text: string) {
-      setComposer((current) =>
-        current === null || current.sending || current.text === text
+      const peerId = conversationRef.current?.peerId;
+      if (peerId === undefined) return;
+      updateComposer(peerId, (current) =>
+        current.sending || current.text === text
           ? current
           : { ...current, text, failure: null, requestKey: null },
       );
     },
     async send() {
       const draft = composer;
-      if (!draft || draft.sending || sending.current) return;
-      if (draft.text.trim() === "") return;
+      if (!draft || draft.sending || draft.text.trim() === "") return;
       const { peerId, text } = draft;
+      // One message at a time, as the Host sends them.
+      if (sending.current) {
+        updateComposer(peerId, (current) => ({ ...current, failure: "busy" }));
+        return;
+      }
       const requestKey = draft.requestKey ?? newRequestKey();
       sending.current = true;
-      setComposer({ ...draft, sending: true, failure: null, requestKey });
+      updateComposer(peerId, (current) => ({
+        ...current,
+        sending: true,
+        failure: null,
+        requestKey,
+      }));
       let state = "failed";
       try {
         state = (
@@ -395,17 +418,14 @@ export function useInbox(
       } finally {
         sending.current = false;
       }
+      // A different connection started over with empty reply boxes.
+      if (bindingRef.current !== binding) return;
+      // The answer belongs to this attempt only.
+      const mine = (current: Composer) =>
+        current.sending && current.requestKey === requestKey;
       if (state === "sent") {
-        setComposer((current) =>
-          current?.peerId === peerId
-            ? {
-                peerId,
-                text: "",
-                sending: false,
-                failure: null,
-                requestKey: null,
-              }
-            : current,
+        updateComposer(peerId, (current) =>
+          mine(current) ? emptyComposer(peerId) : current,
         );
         // Show it: what came after the newest message on screen.
         const open = conversationRef.current;
@@ -416,8 +436,8 @@ export function useInbox(
         return;
       }
       const failure = sendFailure(state);
-      setComposer((current) =>
-        current?.peerId === peerId
+      updateComposer(peerId, (current) =>
+        mine(current)
           ? {
               ...current,
               sending: false,
@@ -456,6 +476,8 @@ export function useInbox(
       } catch {
         result = null;
       }
+      // An answer for a connection that was replaced opens nothing.
+      if (bindingRef.current !== binding) return result;
       if (result?.state === "sent" && result.conversation)
         select(result.conversation.peerId, result.conversation.name);
       return result;
@@ -776,9 +798,15 @@ export function NewMessageDialog({
   const ready = picked !== undefined && text.trim() !== "" && !sending;
   // Set at once, before any render, like the reply box.
   const inFlight = useRef(false);
+  // The connection the picker was opened for. Its members, request key and
+  // failure mean nothing for another one: a different key would not be
+  // deduplicated, and a username may name someone else elsewhere.
+  const binding = useRef(controller.binding);
+  binding.current = controller.binding;
   const send = async () => {
     if (!picked || sending || inFlight.current || text.trim() === "") return;
     const key = requestKey ?? newRequestKey();
+    const started = binding.current;
     inFlight.current = true;
     setSending(true);
     setFailure(null);
@@ -790,6 +818,7 @@ export function NewMessageDialog({
     );
     inFlight.current = false;
     setSending(false);
+    if (binding.current !== started) return;
     if (result?.state === "sent") {
       onClose();
       onStarted?.();
@@ -961,10 +990,13 @@ export function InboxSidebar({
   // button still asks for more.
   const [automatic, setAutomatic] = useState(true);
   const countAtRequest = useRef<number | null>(null);
+  const [composing, setComposing] = useState(false);
   const count = inbox.conversations.length;
   useEffect(() => {
     setAutomatic(true);
     countAtRequest.current = null;
+    // A new message is written for one connection: another closes it.
+    setComposing(false);
   }, [inbox.binding]);
   useEffect(() => {
     if (inbox.loadingConversations) return;
@@ -976,7 +1008,6 @@ export function InboxSidebar({
     countAtRequest.current = count;
     controller.loadEarlierConversations();
   };
-  const [composing, setComposing] = useState(false);
   return (
     <section className="inbox-list" aria-labelledby="inbox-list-title">
       <div className="inbox-list-header">
@@ -1886,7 +1917,11 @@ export function InboxMain({
       )}
       {controller.conversation ? (
         <InboxConversationView
-          name={controller.conversation.name}
+          name={conversationName(
+            controller.conversation.peerId,
+            controller.conversation.name,
+            t,
+          )}
           conversation={controller.conversation}
           composer={controller.composer}
           onLoadEarlier={controller.loadEarlierMessages}
