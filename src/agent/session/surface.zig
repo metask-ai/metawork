@@ -125,6 +125,52 @@ pub const PermissionInteraction = enum {
     noninteractive,
 };
 
+/// The most text one user instruction document contributes, in UTF-8 bytes.
+/// The caller reads and truncates at a code point boundary; the Agent only
+/// checks the result.
+pub const max_instruction_text_bytes: usize = 32 * 1024;
+pub const max_instruction_path_bytes: usize = 4096;
+
+/// A file of the user's own instructions, as the caller read it. The Agent
+/// decides how it becomes a prompt section; the caller never names one.
+pub const InstructionDocument = struct {
+    /// Absolute path the text was read from, shown to the model as its source.
+    path: []const u8,
+    /// Non-empty UTF-8 with no NUL, at most `max_instruction_text_bytes`.
+    text: []const u8,
+    /// The file held more than `text`.
+    truncated: bool,
+};
+
+/// The documents a Session's next Run is to carry. A missing one carries no
+/// section, so an empty value restores the base profile.
+pub const Instructions = struct {
+    global: ?InstructionDocument = null,
+    project: ?InstructionDocument = null,
+};
+
+/// Which supplied documents Core accepted. Core refuses a profile as a whole;
+/// a document it would not take is left out rather than costing the other.
+pub const InstructionsApplied = struct {
+    global: bool = false,
+    project: bool = false,
+};
+
+pub fn validateInstructions(value: Instructions) error{InvalidInstructions}!void {
+    for ([_]?InstructionDocument{ value.global, value.project }) |entry| {
+        const document = entry orelse continue;
+        if (document.path.len == 0 or document.path.len > max_instruction_path_bytes or
+            !std.unicode.utf8ValidateSlice(document.path))
+            return error.InvalidInstructions;
+        // The path is one header line.
+        for (document.path) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidInstructions;
+        if (document.text.len == 0 or document.text.len > max_instruction_text_bytes or
+            !std.unicode.utf8ValidateSlice(document.text) or
+            std.mem.indexOfScalar(u8, document.text, 0) != null)
+            return error.InvalidInstructions;
+    }
+}
+
 pub const McpActivationUnavailableReason = enum {
     refresh_failed,
     refresh_rejected,
@@ -313,6 +359,10 @@ pub const Error = error{
     PermissionModeUpdateFailed,
     PermissionModeBudgetRequired,
     RewindFailed,
+    /// A caller's instruction document broke `validateInstructions`.
+    InvalidInstructions,
+    /// No instruction profile could be installed; the previous one stays.
+    InstructionsUpdateFailed,
     /// The half that performs this call cannot be reached.
     ///
     /// No other member means it. Reusing one would assert something false --

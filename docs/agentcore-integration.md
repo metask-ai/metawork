@@ -198,13 +198,13 @@ Agent 在 SDK-validated event 外附加 Workspace、Session、Run identity 和�
 
 Agent 内部固定替换官方 `metacodes:identity` 与 `metacodes:subagent` sections，分别维护主助手产品身份和子代理委派角色；显示名称取 canonical manifest。其余 locked safety/system 与模型、平台、工作区环境继续由 AgentCore 提供。此策略不建立 Product、Bridge 或 Renderer 配置、状态或 mutation 接口。
 
-fresh create 同步传入该 profile。checkpoint restore 完成原有 report、逻辑身份、模型、generation 与 idle 校验后，Agent 在发布候选 route 前调用官方 idle-only profile setter；相同 profile 由 SDK 处理为 no-op。恢复 reservation 与 in-flight fence 覆盖 setter 及失败清理，mutation 不持有 sessions mutex。更新失败不发布可用候选，沿既有恢复错误返回；销毁失败时保留 poisoned candidate，由 Runtime shutdown 继续拥有清理责任。不得清空 profile、增加预算、compaction 或无限重试来伪造成功。
+fresh create 同步传入基础 profile（身份段与下节的行为指引）。checkpoint restore 完成原有 report、逻辑身份、模型、generation 与 idle 校验后，Agent 在发布候选 route 前调用官方 idle-only profile setter 套用同一基础 profile；相同 profile 由 SDK 处理为 no-op。恢复 reservation 与 in-flight fence 覆盖 setter 及失败清理，mutation 不持有 sessions mutex。更新失败不发布可用候选，沿既有恢复错误返回；销毁失败时保留 poisoned candidate，由 Runtime shutdown 继续拥有清理责任。不得清空 profile、增加预算、compaction 或无限重试来伪造成功。
 
-profile 的 owned copy、子代理与 isolated Skill 继承、checkpoint 编码均由官方 SDK 拥有。旧 checkpoint 先恢复再应用当前身份；下一次正常导出持久化该 profile，不改写历史或批量迁移。带 profile 的官方 checkpoint 不能通过删除 profile 或降级依赖来兼容早期 SDK。`describe.prompt` 与 Run `prompt_manifest` 仅有界消费和验证，不成为上层投影。
+profile 的 owned copy、子代理与 isolated Skill 继承、checkpoint 编码均由官方 SDK 拥有。旧 checkpoint 先恢复再应用当前身份；checkpoint 冻结的用户指令段同样被基础 profile 取代，下一轮之前按当前文件重新安装（见[用户指令段](#用户指令段)）；下一次正常导出持久化当时的 profile，不改写历史或批量迁移。带 profile 的官方 checkpoint 不能通过删除 profile 或降级依赖来兼容早期 SDK。`describe.prompt` 与 Run `prompt_manifest` 仅有界消费和验证，不成为上层投影。
 
 ### Session 行为指引
 
-除产品身份外，Agent 还通过 `host:<name>` 段注入行为约束——约束模型在本机写出什么命令、把哪些文件作为结果交给用户，而不是声明身份。两类段组合进同一个 `PromptProfileV1`：ABI 的模型是逐条独立编辑，组合即拼接。`src/agent/session/prompt.zig` 唯一持有该组合与 profile setter 调用，身份段与行为段各是独立模块；fresh create 与 restore 走同一个组合后的 profile。
+除产品身份外，Agent 还通过 `host:<name>` 段注入行为约束——约束模型在本机写出什么命令、把哪些文件作为结果交给用户，而不是声明身份。两类段组合进同一个 `PromptProfileV1`：ABI 的模型是逐条独立编辑，组合即拼接。`src/agent/session/prompt.zig` 唯一持有该组合与 profile setter 调用，身份段与行为段各是独立模块；fresh create 与 restore 走同一个组合后的基础 profile，用户指令段只在其后由运行时拼装追加。
 
 - 只用 `PROMPT_OP_ADD`，不替换也不移除 AgentCore 的内核段。替换内核段会让 MetaWork 永久跟踪上游对那段文字的改动，而行为约束不需要改写内核规则；
 - `order` 决定渲染位置（ties 按 id）。收窄既有规则的段排在被收窄的内核段之后：`host:windows-downloads` 取 1100，落在 `metacodes:using-tools`(1000) 之后、`metacodes:tone`(2000) 之前，两侧留出后续 host 段的空位。`host:outputs` 取 1200，细化工具使用规则，排在 `host:windows-downloads` 之后；不靠近 `metacodes:validation`(300)，避免交付被读成检查步骤。身份段是 `PROMPT_OP_REPLACE`，`order` 为零并落在被替换内核段的原位，因此两类段之间没有次序关系需要协调；
@@ -215,6 +215,19 @@ profile 的 owned copy、子代理与 isolated Skill 继承、checkpoint 编码�
 首个段是 `host:windows-downloads`（仅 Windows 构建携带）：联网取字节优先 `curl.exe`（`curl` 是 PowerShell 的 `Invoke-WebRequest` 别名，必须带 `.exe`）；确需 `Invoke-WebRequest` / `Invoke-RestMethod` 时必须带 `-UseBasicParsing`；多个文件合并为单条命令。依据是 PowerShell 5.1 的 web cmdlet 默认走旧 Internet Explorer 解析路径，本机安全软件会在该路径上按命令粒度弹出模态框并阻塞命令，无人值守场景直接挂起。指引降低写出被拦命令的概率；拦截是否消失取决于本机安全软件，不在 MetaWork 可验证的范围内，验收只固定“段按平台到达 provider 的 system 内容”，见[验证规范](validation.md)。
 
 第二个段是 `host:outputs`（所有平台携带）：判断依据是用户要不要打开这个文件才能用上本轮结果，与文件怎样产生无关。要打开才能用的文件（网页、报告、表格、演示文稿、PDF、图表图片、视频，以及修改过的 Office 文档）用 `DeliverFile` 交付；回复正文已给出的结果、用户只需审查改动的代码/配置/文本修改、过程文件（脚本、中间稿、临时数据、日志）不交付；代码文件只在用户明确要求交付该文件时交付，网页属于成果；生成的图片或视频只在用户要的就是它本身时交付，当素材使用时交付用它做成的文件。交付的前提只有文件已是本轮最终版本，不要求也不表示内容经过检查，Skill 要求的检查各自进行；多个文件构成结果时全部交付，不规定交付顺序。验收同样只固定“段到达 provider 的 system 内容且在所有平台出现”，模型据此交付哪些文件不在验收范围内。
+
+### 用户指令段
+
+用户自己写的指令（全局 `~/.metawork/AGENTS.md` 与 Task 实际工作目录根部的 `AGENTS.md`）由 Product 读取，以指令文档（来源路径、正文、是否截断）交给 Agent。段的 id、order、段首文字与 `interpolate` 都由 Agent 决定，Product 只能整体替换这两份文档，不能写入任意段。读取范围、上限与失败分类归 Product。
+
+- 两个 `PROMPT_OP_ADD` 段：`host:user-instructions-global`（order 10000）与 `host:user-instructions-project`（order 10100）。0.15.0-fork.1 实测内核段最大 order 是 `metacodes:env` 的 9000，两段排在所有内核段与 host 行为指引之后，项目段在全局段之后。验收以探针断言“渲染位置在所有 kernel 段之后”为准，不依赖这个数；内核出现更大的 order 时调高这两个值；
+- 段首依次是标题、`Source: <路径>`、优先级说明（冲突时项目指令优先于全局指令）与“不改变安全、权限和审批规则，也不授予这些规则未给的能力”，随后是原样正文；截断时段尾注明只包含了前多少字节。正文与路径分别以 32 KiB 和 4096 字节为上限，路径不含控制字符，正文不含 NUL；最坏情况在编译期断言不超过 ABI 的单段、整份与段数上限；
+- `interpolate` 恒为 0：用户文本里的 `{{...}}` 原样到达模型。置 1 会让未知占位符原子拒绝整份 profile，连身份段一起失效；
+- fresh create 与 restore 只用基础 profile。用户指令只通过 idle-only 的 `Session.setInstructions` 安装，Product 在每轮 `prepareRun` 之前调用；已经开始的 Run 保持开始时的 profile；
+- Core 整份拒绝 profile，所以内容类拒绝（`INVALID_ARGUMENT`、`RESOURCE_LIMIT`）按“两份 → 只全局 → 只项目 → 都不带”逐级缩小，返回实际装上的文档，被拒的那份只是不出现。这段阶梯在执行进程内跑完，不来回过 link。最后一级是建会话时已被接受的基础 profile，它也被拒属于依赖违约，poison Session。`BUSY` 返回 `SessionNotIdle`；`OUT_OF_MEMORY` 返回 `InstructionsUpdateFailed`，原 profile 不变；`INVALID_STATE`、`CORE_ERROR` 与非法状态码或 diagnostic poison Session；
+- 子代理与 isolated Skill 由 ABI 继承 profile，Host 不另行注入；
+- restore 之后、下一轮之前的 manual compact 使用基础 profile，不带用户指令。compact 只生成摘要，这一差异可以接受；
+- 跨执行进程只多一个 link 方法 `set_instructions`，请求是两份可选文档，响应是实际装上了哪几份；create 与 restore 的 link 形状不变。
 
 ## 6. Session 与 Runtime 生命周期
 
@@ -265,7 +278,7 @@ Core 将日期写入本轮用户记录的 `currentDate` system-reminder，系统
 
 ### 每 Session 规则
 
-- 至多一个 in-flight operation；Run、manual compact、model/Skill/permission mutation 与 destroy 互斥；匹配 Run 的 abort 与文本 submitInput 是受调用静止屏障约束的并发控制调用；
+- 至多一个 in-flight operation；Run、manual compact、model/Skill/permission/用户指令 mutation 与 destroy 互斥；匹配 Run 的 abort 与文本 submitInput 是受调用静止屏障约束的并发控制调用；
 - Permission rule update 不得改变 Task-owned PermissionProfile；Run 与 restore 使用 Task 当前已提交的 profile，profile 切换遵循 [UI request callback](#ui-request-callback) 的独立 mutation 合同；
 - Session 已有 in-flight operation 时拒绝第二个 Run；追加文本只用匹配当前 Run 的 submitInput，不在当前同步调用期间再次调用 `session_run_input`；
 - run ID 单调且与 Session 绑定；

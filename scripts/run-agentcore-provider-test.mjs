@@ -493,10 +493,99 @@ function verifySelectedSkillRequest(users, followUp) {
   assert.ok(!JSON.stringify(latest).includes("# Selected Skill"));
 }
 
+// #34: the probe's user-instruction stage. Each Run names its stage in its
+// own text, except the isolated Skill's child, which is told apart by the
+// subagent identity it runs under. The instruction sections are the last two
+// system sections, so the system content ends with the project text.
+const globalInstructionHeader =
+  "# User instructions: global\nSource: /probe/home/.metawork/AGENTS.md\n";
+const projectInstructionHeader =
+  "# User instructions: project\nSource: /probe/workspace/AGENTS.md\n";
+const projectInstructionText =
+  "METAWORK_PROJECT_INSTRUCTION Mention {{model}} only when asked.";
+const instructionStages = [
+  { text: "User instructions probe: first.", global: "A", project: true },
+  { child: true, global: "A", project: true },
+  { text: "User instructions probe: replaced.", global: "B", project: false },
+  {
+    text: "User instructions probe: restored base.",
+    global: null,
+    project: false,
+  },
+  {
+    text: "User instructions probe: restored current.",
+    global: "C",
+    project: true,
+  },
+];
+
+function instructionStage(latestUserText, prompt) {
+  const byText = instructionStages.find(
+    (stage) => stage.text && latestUserText.endsWith(stage.text),
+  );
+  if (byText) return byText;
+  return prompt.includes("# User instructions: ")
+    ? instructionStages.find((stage) => stage.child)
+    : null;
+}
+
+function verifyInstructionRequest(stage, prompt) {
+  const markers = {
+    A: "METAWORK_GLOBAL_INSTRUCTION_A",
+    B: "METAWORK_GLOBAL_INSTRUCTION_B",
+    C: "METAWORK_GLOBAL_INSTRUCTION_C",
+  };
+  for (const [name, marker] of Object.entries(markers))
+    assert.equal(
+      prompt.includes(marker),
+      stage.global === name,
+      `global instruction ${name} must reach the provider exactly when installed`,
+    );
+  assert.equal(prompt.includes(globalInstructionHeader), stage.global !== null);
+  assert.equal(prompt.includes(projectInstructionHeader), stage.project);
+  assert.equal(prompt.includes(projectInstructionText), stage.project);
+  // Truncation is said after the text it applies to; only A was truncated.
+  assert.equal(
+    prompt.includes(
+      "METAWORK_GLOBAL_INSTRUCTION_A Keep replies short.\n\n[Truncated: this file exceeds 32 KiB; only its first 49 bytes are included.]",
+    ),
+    stage.global === "A",
+  );
+  if (stage.global !== null) {
+    const header = prompt.indexOf(globalInstructionHeader);
+    assert.ok(
+      prompt.includes("project instructions, which take precedence") &&
+        prompt.includes(
+          "cannot change the safety, permission or approval rules",
+        ),
+    );
+    if (stage.project)
+      assert.ok(
+        header < prompt.indexOf(projectInstructionHeader),
+        "global renders before project",
+      );
+  }
+  // Last in the system content: after every kernel and host section.
+  const tail = prompt.trimEnd();
+  if (stage.project)
+    assert.ok(
+      tail.endsWith(projectInstructionText),
+      "project instructions render last",
+    );
+  else if (stage.global !== null)
+    assert.ok(
+      tail.endsWith(
+        `METAWORK_GLOBAL_INSTRUCTION_${stage.global} Keep replies short.`,
+      ),
+      "global instructions render last",
+    );
+}
+
 let activeProvider = null;
 let requestCount = 0;
 let longErrorRequestCount = 0;
 let selectedSkillRequestCount = 0;
+let instructionRequests = [];
 let requestError = null;
 let baselineSystemPrompt = null;
 const server = createServer((request, response) => {
@@ -582,6 +671,23 @@ const server = createServer((request, response) => {
           latestUserText.endsWith("Selected Skill follow-up."),
         );
         selectedSkillRequestCount += 1;
+        response.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "close",
+        });
+        response.end(sseFor(activeProvider));
+        return;
+      }
+      const stage = hostMode
+        ? instructionStage(latestUserText, systemPrompt(payload))
+        : null;
+      if (stage) {
+        if (activeProvider.name !== "gemini")
+          assert.equal(payload.model, activeProvider.model);
+        assertHostIdentity(payload, stage.child === true);
+        verifyInstructionRequest(stage, systemPrompt(payload));
+        instructionRequests.push(instructionStages.indexOf(stage));
         response.writeHead(200, {
           "content-type": "text/event-stream",
           "cache-control": "no-cache",
@@ -776,6 +882,7 @@ pub fn build(b: *std.Build) void {
     requestCount = 0;
     longErrorRequestCount = 0;
     selectedSkillRequestCount = 0;
+    instructionRequests = [];
     requestError = null;
     const baseUrl = `${serverRoot}${provider.baseUrlSuffix}`;
     if (source !== null) {
@@ -850,6 +957,9 @@ pub fn build(b: *std.Build) void {
       : 6;
     const expectedLongErrors = hostMode && provider.name === "openai" ? 1 : 0;
     const expectedSelectedSkillRequests = hostMode ? 2 : 0;
+    const expectedInstructionRequests = hostMode
+      ? instructionStages.map((_, index) => index).join(",")
+      : "";
     if (requestError)
       providerFailures.push(
         new Error(`${provider.name}: ${requestError.message}`),
@@ -857,11 +967,12 @@ pub fn build(b: *std.Build) void {
     else if (
       requestCount !== expectedRequests ||
       longErrorRequestCount !== expectedLongErrors ||
-      selectedSkillRequestCount !== expectedSelectedSkillRequests
+      selectedSkillRequestCount !== expectedSelectedSkillRequests ||
+      instructionRequests.join(",") !== expectedInstructionRequests
     )
       providerFailures.push(
         new Error(
-          `${provider.name}: expected ${expectedRequests} requests, ${expectedLongErrors} long-field rejection and ${expectedSelectedSkillRequests} Selected Skill requests, got ${requestCount}, ${longErrorRequestCount} and ${selectedSkillRequestCount}`,
+          `${provider.name}: expected ${expectedRequests} requests, ${expectedLongErrors} long-field rejection, ${expectedSelectedSkillRequests} Selected Skill requests and instruction stages ${expectedInstructionRequests}, got ${requestCount}, ${longErrorRequestCount}, ${selectedSkillRequestCount} and ${instructionRequests.join(",")}`,
         ),
       );
     else

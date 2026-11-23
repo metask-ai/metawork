@@ -288,14 +288,23 @@ pub const CallbackSignal = struct {
 };
 
 // Bounded owned snapshots of actual Host ABI input; tests inspect what was sent.
+// A text longer than the kept head is still identified exactly: its length,
+// its tail and its digest are kept with the head, so equality never misses a
+// change and a test can read both ends of a long section.
 pub const FakePromptProfile = struct {
+    pub const max_sections = 8;
+    pub const kept_head_bytes = 2048;
+    pub const kept_tail_bytes = 512;
+
     count: usize = 0,
-    ids: [4][64]u8 = @splat(@splat(0)),
-    id_lens: [4]usize = @splat(0),
-    texts: [4][2048]u8 = @splat(@splat(0)),
-    text_lens: [4]usize = @splat(0),
-    ops: [4]u32 = @splat(0),
-    orders: [4]i64 = @splat(0),
+    ids: [max_sections][64]u8 = @splat(@splat(0)),
+    id_lens: [max_sections]usize = @splat(0),
+    texts: [max_sections][kept_head_bytes]u8 = @splat(@splat(0)),
+    tails: [max_sections][kept_tail_bytes]u8 = @splat(@splat(0)),
+    text_lens: [max_sections]usize = @splat(0),
+    digests: [max_sections][32]u8 = @splat(@splat(0)),
+    ops: [max_sections]u32 = @splat(0),
+    orders: [max_sections]i64 = @splat(0),
 
     fn copy(input: ?*const wire.PromptProfileV1) ?FakePromptProfile {
         var result = FakePromptProfile{};
@@ -320,9 +329,13 @@ pub const FakePromptProfile = struct {
                     text.len == 0) return null,
                 else => return null,
             }
-            if (id.len > result.ids[i].len or text.len > result.texts[i].len) return null;
+            if (id.len > result.ids[i].len or text.len > wire.MAX_PROMPT_SECTION_TEXT_BYTES_V1) return null;
             @memcpy(result.ids[i][0..id.len], id);
-            @memcpy(result.texts[i][0..text.len], text);
+            const head = @min(text.len, kept_head_bytes);
+            @memcpy(result.texts[i][0..head], text[0..head]);
+            const tail = @min(text.len, kept_tail_bytes);
+            @memcpy(result.tails[i][0..tail], text[text.len - tail ..]);
+            std.crypto.hash.sha2.Sha256.hash(text, &result.digests[i], .{});
             result.id_lens[i] = id.len;
             result.text_lens[i] = text.len;
             result.ops[i] = section.op_code;
@@ -335,8 +348,23 @@ pub const FakePromptProfile = struct {
         return self.ids[index][0..self.id_lens[index]];
     }
 
+    /// The whole text when it fits the kept head, otherwise its head.
     pub fn sectionText(self: *const FakePromptProfile, index: usize) []const u8 {
-        return self.texts[index][0..self.text_lens[index]];
+        return self.texts[index][0..@min(self.text_lens[index], kept_head_bytes)];
+    }
+
+    pub fn sectionTail(self: *const FakePromptProfile, index: usize) []const u8 {
+        return self.tails[index][0..@min(self.text_lens[index], kept_tail_bytes)];
+    }
+
+    pub fn sectionLen(self: *const FakePromptProfile, index: usize) usize {
+        return self.text_lens[index];
+    }
+
+    /// Index of the section with this id, or null.
+    pub fn find(self: *const FakePromptProfile, id: []const u8) ?usize {
+        for (0..self.count) |index| if (std.mem.eql(u8, self.sectionId(index), id)) return index;
+        return null;
     }
 };
 
@@ -539,6 +567,9 @@ pub const FakeCore = struct {
     description_poisoned: bool = false,
     forced_checkpoint_restore_status: ?u32 = null,
     forced_prompt_status: ?u32 = null,
+    /// Every profile with a section containing this text is refused with
+    /// INVALID_ARGUMENT, as Core refuses a whole profile for one bad section.
+    prompt_reject_marker: ?[]const u8 = null,
     malformed_prompt_diagnostic: bool = false,
     prompt_updates: usize = 0,
     prompt_changes: usize = 0,
@@ -1820,11 +1851,11 @@ pub fn sessionDescribe(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }
-    var entries: [4]sdk.PromptProfileSection = undefined;
+    var entries: [FakePromptProfile.max_sections]sdk.PromptProfileSection = undefined;
     for (entries[0..session.prompt_profile.count], 0..) |*entry, i| entry.* = .{
         .op = .replace,
-        .id = session.prompt_profile.ids[i][0..session.prompt_profile.id_lens[i]],
-        .text = session.prompt_profile.texts[i][0..session.prompt_profile.text_lens[i]],
+        .id = session.prompt_profile.sectionId(i),
+        .text = session.prompt_profile.sectionText(i),
         .order = 0,
         .interpolate = false,
     };
@@ -2951,12 +2982,19 @@ fn sessionSetPromptProfile(handle: ?*wire.SessionHandle, profile: ?*const wire.P
     fake_core.forced_prompt_status = null;
     const malformed = fake_core.malformed_prompt_diagnostic;
     fake_core.malformed_prompt_diagnostic = false;
+    const reject_marker = fake_core.prompt_reject_marker;
     fake_core.unlock();
     if (malformed) {
         if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 1 };
         return wire.STATUS_OK;
     }
     if (forced) |code| return code;
+    if (reject_marker) |marker| if (profile) |value| if (value.sections) |sections| {
+        for (sections[0..@intCast(value.section_count)]) |section| {
+            const text = sdk.borrowedBytes(section.text) catch return wire.STATUS_INVALID_ARGUMENT;
+            if (std.mem.indexOf(u8, text, marker) != null) return wire.STATUS_INVALID_ARGUMENT;
+        }
+    };
     session.lock();
     defer session.unlock();
     if (!session.in_use or session.destroyed) return wire.STATUS_INVALID_STATE;
