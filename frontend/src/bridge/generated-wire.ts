@@ -3,6 +3,7 @@ import {
   object,
   stringValue,
   booleanValue,
+  arrayValue,
   positiveWireId,
   positiveU64WireId,
   u64WireInteger,
@@ -231,5 +232,362 @@ export function decodeUpdateViewWire(
       "browser_unavailable",
       "unavailable",
     ] as const),
+  };
+}
+export type InboxViewWire = {
+  binding: string;
+  state: "unavailable" | "checking" | "ready" | "reauthorize" | "unreachable";
+  unreadTotal: string | null;
+  syncedAtMs: string | null;
+  conversations: readonly {
+    peerId: string;
+    name: string;
+    unread: string;
+    latest: {
+      id: string;
+      direction: "in" | "out";
+      preview: string;
+      sentAtMs: string;
+    } | null;
+  }[];
+  conversationsLoaded: boolean;
+  loadingConversations: boolean;
+  hasEarlier: boolean;
+  diagnostic: {
+    phase:
+      | "admission"
+      | "resolve"
+      | "connect"
+      | "send"
+      | "head"
+      | "body"
+      | "complete";
+    cause:
+      | "invalid_request"
+      | "dns_failed"
+      | "connect_failed"
+      | "tls_failed"
+      | "write_failed"
+      | "read_failed"
+      | "invalid_response"
+      | "response_too_large"
+      | "out_of_memory"
+      | "resource_limit"
+      | "cancelled"
+      | "deadline_exceeded";
+    elapsed: "under_1s" | "under_5s" | "under_15s" | "over_15s";
+  } | null;
+};
+export function decodeInboxViewWire(
+  value: unknown,
+  path: string,
+): InboxViewWire {
+  const item = object(value, path, [
+    "binding",
+    "state",
+    "unreadTotal",
+    "syncedAtMs",
+    "conversations",
+    "conversationsLoaded",
+    "loadingConversations",
+    "hasEarlier",
+    "diagnostic",
+  ]);
+  return {
+    binding: u64WireInteger(item.binding, path + ".binding"),
+    state: enumValue(item.state, path + ".state", [
+      "unavailable",
+      "checking",
+      "ready",
+      "reauthorize",
+      "unreachable",
+    ] as const),
+    unreadTotal:
+      item.unreadTotal === null
+        ? null
+        : u64WireInteger(item.unreadTotal, path + ".unreadTotal"),
+    syncedAtMs:
+      item.syncedAtMs === null
+        ? null
+        : u64WireInteger(item.syncedAtMs, path + ".syncedAtMs"),
+    conversations: arrayValue(
+      item.conversations,
+      path + ".conversations",
+      (entry: unknown, entryPath: string) =>
+        ((value: unknown, path: string) => {
+          const item = object(value, path, [
+            "peerId",
+            "name",
+            "unread",
+            "latest",
+          ]);
+          return {
+            peerId: stringValue(item.peerId, path + ".peerId"),
+            name: stringValue(item.name, path + ".name"),
+            unread: u64WireInteger(item.unread, path + ".unread"),
+            latest:
+              item.latest === null
+                ? null
+                : ((value: unknown, path: string) => {
+                    const item = object(value, path, [
+                      "id",
+                      "direction",
+                      "preview",
+                      "sentAtMs",
+                    ]);
+                    return {
+                      id: stringValue(item.id, path + ".id"),
+                      direction: enumValue(
+                        item.direction,
+                        path + ".direction",
+                        ["in", "out"] as const,
+                      ),
+                      preview: stringValue(item.preview, path + ".preview"),
+                      sentAtMs: u64WireInteger(
+                        item.sentAtMs,
+                        path + ".sentAtMs",
+                      ),
+                    };
+                  })(item.latest, path + ".latest"),
+          };
+        })(entry, entryPath),
+    ),
+    conversationsLoaded: booleanValue(
+      item.conversationsLoaded,
+      path + ".conversationsLoaded",
+    ),
+    loadingConversations: booleanValue(
+      item.loadingConversations,
+      path + ".loadingConversations",
+    ),
+    hasEarlier: booleanValue(item.hasEarlier, path + ".hasEarlier"),
+    diagnostic:
+      item.diagnostic === null
+        ? null
+        : ((value: unknown, path: string) => {
+            const item = object(value, path, ["phase", "cause", "elapsed"]);
+            return {
+              phase: enumValue(item.phase, path + ".phase", [
+                "admission",
+                "resolve",
+                "connect",
+                "send",
+                "head",
+                "body",
+                "complete",
+              ] as const),
+              cause: enumValue(item.cause, path + ".cause", [
+                "invalid_request",
+                "dns_failed",
+                "connect_failed",
+                "tls_failed",
+                "write_failed",
+                "read_failed",
+                "invalid_response",
+                "response_too_large",
+                "out_of_memory",
+                "resource_limit",
+                "cancelled",
+                "deadline_exceeded",
+              ] as const),
+              elapsed: enumValue(item.elapsed, path + ".elapsed", [
+                "under_1s",
+                "under_5s",
+                "under_15s",
+                "over_15s",
+              ] as const),
+            };
+          })(item.diagnostic, path + ".diagnostic"),
+  };
+}
+export type InboxConversationPageWire = {
+  binding: string;
+  requestId: string;
+  state:
+    | "ready"
+    | "stale_binding"
+    | "unknown_peer"
+    | "superseded"
+    | "unavailable"
+    | "reauthorize"
+    | "unreachable";
+  peerId: string;
+  messages: readonly {
+    id: string;
+    direction: "in" | "out";
+    fromPeerId: string;
+    fromName: string;
+    recipients: readonly {
+      peerId: string;
+      name: string;
+    }[];
+    text: string;
+    truncated: boolean;
+    sentAtMs: string;
+    taskIds: readonly string[];
+  }[];
+  hasEarlier: boolean;
+  complete: boolean;
+};
+export function decodeInboxConversationPageWire(
+  value: unknown,
+  path: string,
+): InboxConversationPageWire {
+  const item = object(value, path, [
+    "binding",
+    "requestId",
+    "state",
+    "peerId",
+    "messages",
+    "hasEarlier",
+    "complete",
+  ]);
+  return {
+    binding: u64WireInteger(item.binding, path + ".binding"),
+    requestId: u64WireInteger(item.requestId, path + ".requestId"),
+    state: enumValue(item.state, path + ".state", [
+      "ready",
+      "stale_binding",
+      "unknown_peer",
+      "superseded",
+      "unavailable",
+      "reauthorize",
+      "unreachable",
+    ] as const),
+    peerId: stringValue(item.peerId, path + ".peerId"),
+    messages: arrayValue(
+      item.messages,
+      path + ".messages",
+      (entry: unknown, entryPath: string) =>
+        ((value: unknown, path: string) => {
+          const item = object(value, path, [
+            "id",
+            "direction",
+            "fromPeerId",
+            "fromName",
+            "recipients",
+            "text",
+            "truncated",
+            "sentAtMs",
+            "taskIds",
+          ]);
+          return {
+            id: stringValue(item.id, path + ".id"),
+            direction: enumValue(item.direction, path + ".direction", [
+              "in",
+              "out",
+            ] as const),
+            fromPeerId: stringValue(item.fromPeerId, path + ".fromPeerId"),
+            fromName: stringValue(item.fromName, path + ".fromName"),
+            recipients: arrayValue(
+              item.recipients,
+              path + ".recipients",
+              (entry: unknown, entryPath: string) =>
+                ((value: unknown, path: string) => {
+                  const item = object(value, path, ["peerId", "name"]);
+                  return {
+                    peerId: stringValue(item.peerId, path + ".peerId"),
+                    name: stringValue(item.name, path + ".name"),
+                  };
+                })(entry, entryPath),
+            ),
+            text: stringValue(item.text, path + ".text"),
+            truncated: booleanValue(item.truncated, path + ".truncated"),
+            sentAtMs: u64WireInteger(item.sentAtMs, path + ".sentAtMs"),
+            taskIds: arrayValue(
+              item.taskIds,
+              path + ".taskIds",
+              (entry: unknown, entryPath: string) =>
+                stringValue(entry, entryPath),
+            ),
+          };
+        })(entry, entryPath),
+    ),
+    hasEarlier: booleanValue(item.hasEarlier, path + ".hasEarlier"),
+    complete: booleanValue(item.complete, path + ".complete"),
+  };
+}
+export type InboxTaskDetailWire = {
+  binding: string;
+  requestId: string;
+  state:
+    | "ready"
+    | "stale_binding"
+    | "superseded"
+    | "unavailable"
+    | "reauthorize"
+    | "unreachable";
+  task: {
+    id: string;
+    name: string;
+    progress: string | null;
+    state: string | null;
+    path: string | null;
+    description: string | null;
+    assignees: readonly string[];
+    updatedAtMs: string | null;
+  } | null;
+};
+export function decodeInboxTaskDetailWire(
+  value: unknown,
+  path: string,
+): InboxTaskDetailWire {
+  const item = object(value, path, ["binding", "requestId", "state", "task"]);
+  return {
+    binding: u64WireInteger(item.binding, path + ".binding"),
+    requestId: u64WireInteger(item.requestId, path + ".requestId"),
+    state: enumValue(item.state, path + ".state", [
+      "ready",
+      "stale_binding",
+      "superseded",
+      "unavailable",
+      "reauthorize",
+      "unreachable",
+    ] as const),
+    task:
+      item.task === null
+        ? null
+        : ((value: unknown, path: string) => {
+            const item = object(value, path, [
+              "id",
+              "name",
+              "progress",
+              "state",
+              "path",
+              "description",
+              "assignees",
+              "updatedAtMs",
+            ]);
+            return {
+              id: stringValue(item.id, path + ".id"),
+              name: stringValue(item.name, path + ".name"),
+              progress:
+                item.progress === null
+                  ? null
+                  : stringValue(item.progress, path + ".progress"),
+              state:
+                item.state === null
+                  ? null
+                  : stringValue(item.state, path + ".state"),
+              path:
+                item.path === null
+                  ? null
+                  : stringValue(item.path, path + ".path"),
+              description:
+                item.description === null
+                  ? null
+                  : stringValue(item.description, path + ".description"),
+              assignees: arrayValue(
+                item.assignees,
+                path + ".assignees",
+                (entry: unknown, entryPath: string) =>
+                  stringValue(entry, entryPath),
+              ),
+              updatedAtMs:
+                item.updatedAtMs === null
+                  ? null
+                  : u64WireInteger(item.updatedAtMs, path + ".updatedAtMs"),
+            };
+          })(item.task, path + ".task"),
   };
 }

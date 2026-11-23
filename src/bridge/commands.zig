@@ -16,6 +16,10 @@ pub const register_notification_text = "metawork.host.notifications.registerText
 pub const updates_check = "metawork.updates.check";
 pub const updates_open_download = "metawork.updates.openDownload";
 pub const updates_open_website = "metawork.updates.openWebsite";
+pub const inbox_refresh = "metawork.inbox.refresh";
+pub const inbox_load_earlier = "metawork.inbox.loadEarlier";
+pub const inbox_read_conversation = "metawork.inbox.readConversation";
+pub const inbox_read_task = "metawork.inbox.readTask";
 pub const add_project = "metawork.workspaces.addProject";
 pub const choose_workspace = "metawork.workspaces.choose";
 pub const open_workspace = "metawork.workspaces.open";
@@ -141,6 +145,10 @@ pub const product = [_][]const u8{
     updates_check,
     updates_open_download,
     updates_open_website,
+    inbox_refresh,
+    inbox_load_earlier,
+    inbox_read_conversation,
+    inbox_read_task,
     choose_workspace,
     add_project,
     open_workspace,

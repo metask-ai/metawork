@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const update = @import("metawork_product_update");
+const inbox = @import("metawork_product_inbox");
 const native_sdk = @import("native_sdk");
 const account_contract = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
@@ -21,7 +22,7 @@ const attachment_grant = @import("attachment_grant.zig");
 const notification_text = @import("notification_text.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 22;
+const async_product_handler_count = 24;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
@@ -182,6 +183,16 @@ pub const UpdatesHost = struct {
     cancel_fn: *const fn (*anyopaque) void,
 };
 
+/// Application-owned MetaTeam inbox effects. The coordinator answers the
+/// asynchronous reads itself, on the main thread, once its request finishes.
+pub const InboxHost = struct {
+    context: *anyopaque,
+    refresh_fn: *const fn (*anyopaque, u64) inbox.CommandOutcome,
+    load_earlier_fn: *const fn (*anyopaque, u64) inbox.CommandOutcome,
+    read_conversation_fn: *const fn (*anyopaque, native_sdk.bridge.AsyncResponder, []const u8, inbox.ConversationRequest) bool,
+    read_task_fn: *const fn (*anyopaque, native_sdk.bridge.AsyncResponder, []const u8, inbox.TaskRequest) bool,
+};
+
 pub const ModelsHost = struct {
     context: *anyopaque,
     refresh_catalog_fn: *const fn (*anyopaque) models_contract.CommandResult,
@@ -337,6 +348,7 @@ pub const Dispatcher = struct {
     mcp_draft_add: ?McpDraftReply = null,
     models_host: ?ModelsHost = null,
     updates_host: ?UpdatesHost = null,
+    inbox_host: ?InboxHost = null,
     bootstrap_window_id: native_sdk.platform.WindowId,
     delivery: product_delivery.Delivery,
     pending_notification_task: ?u64 = null,
@@ -409,6 +421,10 @@ pub const Dispatcher = struct {
         self.models_host = host;
     }
 
+    pub fn setInboxHost(self: *Dispatcher, host: ?InboxHost) void {
+        self.inbox_host = host;
+    }
+
     pub fn setUpdatesHost(self: *Dispatcher, host: ?UpdatesHost) void {
         self.updates_host = host;
     }
@@ -439,6 +455,8 @@ pub const Dispatcher = struct {
             .{ .name = commands.updates_check, .function = checkUpdates },
             .{ .name = commands.updates_open_download, .function = openUpdateDownload },
             .{ .name = commands.updates_open_website, .function = openUpdateWebsite },
+            .{ .name = commands.inbox_refresh, .function = refreshInbox },
+            .{ .name = commands.inbox_load_earlier, .function = loadEarlierInbox },
             .{ .name = commands.output_action_cancel, .function = cancelOutputAction },
             .{ .name = commands.remove_workspace, .function = removeWorkspace },
             .{ .name = commands.remove_project, .function = removeProject },
@@ -569,6 +587,8 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[19] = .{ .name = commands.media_preview, .context = self, .invoke_fn = mediaPreview };
         self.registered_async_handlers[20] = .{ .name = commands.add_project, .context = self, .invoke_fn = chooseWorkspace };
         self.registered_async_handlers[21] = .{ .name = commands.read_run_tools, .context = self, .invoke_fn = readRunTools };
+        self.registered_async_handlers[22] = .{ .name = commands.inbox_read_conversation, .context = self, .invoke_fn = readInboxConversation };
+        self.registered_async_handlers[23] = .{ .name = commands.inbox_read_task, .context = self, .invoke_fn = readInboxTask };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -962,6 +982,83 @@ pub const Dispatcher = struct {
         _ = try update.Version.parse(parsed.value.expectedVersion);
         const result: update.CommandOutcome = if (self.updates_host) |host| host.download_fn(host.context, parsed.value.expectedVersion) else .unavailable;
         return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{@tagName(result)});
+    }
+
+    fn refreshInbox(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        return self.inboxCommand(invocation, output, .refresh);
+    }
+
+    fn loadEarlierInbox(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        return self.inboxCommand(invocation, output, .earlier);
+    }
+
+    fn inboxCommand(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, output: []u8, comptime kind: enum { refresh, earlier }) anyerror![]const u8 {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.InboxBinding, invocation.request.payload);
+        defer parsed.deinit();
+        const binding = try handlers.parseWireId(parsed.value.binding);
+        const result: inbox.CommandOutcome = if (self.inbox_host) |host| switch (kind) {
+            .refresh => host.refresh_fn(host.context, binding),
+            .earlier => host.load_earlier_fn(host.context, binding),
+        } else .unavailable;
+        return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{@tagName(result)});
+    }
+
+    fn readInboxConversation(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginInboxConversation(invocation, responder) catch {
+            // A malformed or unanswerable request learns nothing about messages.
+            responder.fail(invocation.request.id, .handler_failed, "Inbox messages are unavailable") catch {};
+        };
+    }
+
+    fn beginInboxConversation(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        var parsed = try handlers.parsePayload(handlers.InboxConversationRead, invocation.request.payload);
+        defer parsed.deinit();
+        const request_id = try handlers.parseWireId(parsed.value.requestId);
+        if (request_id == 0) return error.InvalidBridgePayload;
+        const host = self.inbox_host orelse return error.InvalidBridgePayload;
+        const request: inbox.ConversationRequest = .{
+            .binding = try handlers.parseWireId(parsed.value.binding),
+            .request_id = request_id,
+            .peer = parsed.value.peerId,
+            .kind = std.meta.stringToEnum(inbox.ConversationPageKind, parsed.value.page) orelse return error.InvalidBridgePayload,
+            .anchor = parsed.value.anchorId,
+        };
+        if (!host.read_conversation_fn(host.context, responder, invocation.request.id, request)) return error.InvalidBridgePayload;
+    }
+
+    fn readInboxTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginInboxTask(invocation, responder) catch {
+            responder.fail(invocation.request.id, .handler_failed, "Inbox task details are unavailable") catch {};
+        };
+    }
+
+    fn beginInboxTask(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        var parsed = try handlers.parsePayload(handlers.InboxTaskRead, invocation.request.payload);
+        defer parsed.deinit();
+        const request_id = try handlers.parseWireId(parsed.value.requestId);
+        if (request_id == 0) return error.InvalidBridgePayload;
+        const host = self.inbox_host orelse return error.InvalidBridgePayload;
+        const request: inbox.TaskRequest = .{
+            .binding = try handlers.parseWireId(parsed.value.binding),
+            .request_id = request_id,
+            .task = parsed.value.taskId,
+        };
+        if (!host.read_task_fn(host.context, responder, invocation.request.id, request)) return error.InvalidBridgePayload;
     }
 
     fn openUpdateWebsite(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -8179,6 +8276,9 @@ test "Dispatcher validates authority before domain calls and preserves committed
         workspace_path: []const u8,
         update_calls: usize = 0,
         update_cancels: usize = 0,
+        inbox_calls: usize = 0,
+        inbox_kind: ?inbox.ConversationPageKind = null,
+        inbox_anchor_present: bool = false,
         wake_calls: usize = 0,
         account_calls: usize = 0,
         models_calls: usize = 0,
@@ -8202,6 +8302,27 @@ test "Dispatcher validates authority before domain calls and preserves committed
             const self: *@This() = @ptrCast(@alignCast(context));
             self.update_calls += 1;
             return .accepted;
+        }
+        fn refreshInbox(context: *anyopaque, binding: u64) inbox.CommandOutcome {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.inbox_calls += 1;
+            return if (binding == 4) .accepted else .rejected;
+        }
+        fn readInboxConversation(context: *anyopaque, responder: native_sdk.bridge.AsyncResponder, id: []const u8, read: inbox.ConversationRequest) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.inbox_calls += 1;
+            self.inbox_kind = read.kind;
+            self.inbox_anchor_present = read.anchor != null;
+            if (read.binding != 4 or read.request_id != 9 or !std.mem.eql(u8, read.peer, "ann")) return false;
+            responder.success(id, "{\"answered\":true}") catch {};
+            return true;
+        }
+        fn readInboxTask(context: *anyopaque, responder: native_sdk.bridge.AsyncResponder, id: []const u8, read: inbox.TaskRequest) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.inbox_calls += 1;
+            if (!std.mem.eql(u8, read.task, "13066")) return false;
+            responder.success(id, "{\"answered\":true}") catch {};
+            return true;
         }
         fn downloadUpdate(context: *anyopaque, version: []const u8) update.CommandOutcome {
             std.testing.expectEqualStrings("0.2.8", version) catch return .rejected;
@@ -8419,6 +8540,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         .reset_store_fn = Harness.resetModels,
     });
     dispatcher.setUpdatesHost(.{ .context = &harness, .check_fn = Harness.checkUpdates, .download_fn = Harness.downloadUpdate, .website_fn = Harness.updateWebsite, .cancel_fn = Harness.cancelUpdate });
+    dispatcher.setInboxHost(.{ .context = &harness, .refresh_fn = Harness.refreshInbox, .load_earlier_fn = Harness.refreshInbox, .read_conversation_fn = Harness.readInboxConversation, .read_task_fn = Harness.readInboxTask });
     const native_dispatcher = dispatcher.register(
         @import("policy.zig").product(.release),
     );
@@ -8653,6 +8775,54 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const website = native_dispatcher.dispatch("{\"id\":\"update-website\",\"command\":\"metawork.updates.openWebsite\",\"payload\":{}}", source, &response);
     try std.testing.expect(std.mem.indexOf(u8, website, "\"outcome\":\"opened\"") != null);
     try std.testing.expectEqual(@as(usize, 3), harness.update_calls);
+
+    // Inbox commands carry identities only: a binding, a request, a member
+    // or a task. Anything else in the payload is refused before the Host.
+    for ([_][]const u8{
+        "{\"id\":\"inbox-extra\",\"command\":\"metawork.inbox.refresh\",\"payload\":{\"binding\":\"4\",\"url\":\"http://evil.test\"}}",
+        "{\"id\":\"inbox-number\",\"command\":\"metawork.inbox.refresh\",\"payload\":{\"binding\":4}}",
+        "{\"id\":\"inbox-earlier-empty\",\"command\":\"metawork.inbox.loadEarlier\",\"payload\":{}}",
+    }) |request| {
+        const denied = native_dispatcher.dispatch(request, source, &response);
+        try std.testing.expect(std.mem.indexOf(u8, denied, "\"handler_failed\"") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), harness.inbox_calls);
+    const inbox_refresh = native_dispatcher.dispatch("{\"id\":\"inbox-refresh\",\"command\":\"metawork.inbox.refresh\",\"payload\":{\"binding\":\"4\"}}", source, &response);
+    try std.testing.expect(std.mem.indexOf(u8, inbox_refresh, "\"outcome\":\"accepted\"") != null);
+    const inbox_stale = native_dispatcher.dispatch("{\"id\":\"inbox-earlier\",\"command\":\"metawork.inbox.loadEarlier\",\"payload\":{\"binding\":\"5\"}}", source, &response);
+    try std.testing.expect(std.mem.indexOf(u8, inbox_stale, "\"outcome\":\"rejected\"") != null);
+    {
+        const InboxCapture = struct {
+            response: ?[]u8 = null,
+            fn receive(context: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
+                const self: *@This() = @ptrCast(@alignCast(context));
+                if (self.response) |old| std.testing.allocator.free(old);
+                self.response = try std.testing.allocator.dupe(u8, bytes);
+            }
+        };
+        var capture: InboxCapture = .{};
+        defer if (capture.response) |bytes| std.testing.allocator.free(bytes);
+        const conversation = native_dispatcher.async_registry.find(commands.inbox_read_conversation).?;
+        const task = native_dispatcher.async_registry.find(commands.inbox_read_task).?;
+        const responder: native_sdk.bridge.AsyncResponder = .{ .context = &capture, .source = source, .respond_fn = InboxCapture.receive };
+        for ([_]struct { []const u8, bool }{
+            .{ "{\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"page\":\"before\",\"anchorId\":\"12\"}", true },
+            .{ "{\"binding\":\"4\",\"requestId\":\"0\",\"peerId\":\"ann\",\"page\":\"latest\",\"anchorId\":null}", false },
+            .{ "{\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"page\":\"sideways\",\"anchorId\":null}", false },
+            .{ "{\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"page\":\"latest\"}", false },
+            .{ "{\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"bob\",\"page\":\"latest\",\"anchorId\":null}", false },
+        }) |case| {
+            try conversation.invoke_fn(conversation.context, .{ .request = .{ .id = "inbox-read", .command = commands.inbox_read_conversation, .payload = case[0] }, .source = source }, responder);
+            const answered = std.mem.indexOf(u8, capture.response.?, "\"answered\":true") != null;
+            try std.testing.expectEqual(case[1], answered);
+            if (!case[1]) try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"handler_failed\"") != null);
+        }
+        try std.testing.expectEqual(inbox.ConversationPageKind.latest, harness.inbox_kind.?);
+        try task.invoke_fn(task.context, .{ .request = .{ .id = "inbox-task", .command = commands.inbox_read_task, .payload = "{\"binding\":\"4\",\"requestId\":\"9\",\"taskId\":\"13066\"}" }, .source = source }, responder);
+        try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"answered\":true") != null);
+        try task.invoke_fn(task.context, .{ .request = .{ .id = "inbox-task", .command = commands.inbox_read_task, .payload = "{\"binding\":\"4\",\"requestId\":\"9\",\"taskId\":\"13066\",\"url\":\"x\"}" }, .source = source }, responder);
+        try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"handler_failed\"") != null);
+    }
     const cancels = harness.update_cancels;
     dispatcher.breakConnection();
     try std.testing.expectEqual(cancels + 1, harness.update_cancels);

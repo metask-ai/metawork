@@ -262,6 +262,24 @@ pub const AutomaticWorkspaceRootMutation = struct {
     expectedGeneration: []const u8,
 };
 pub const GlobalInstructionsRead = struct {};
+
+pub const InboxBinding = struct {
+    binding: []const u8,
+};
+
+pub const InboxConversationRead = struct {
+    binding: []const u8,
+    requestId: []const u8,
+    peerId: []const u8,
+    page: []const u8,
+    anchorId: ?[]const u8,
+};
+
+pub const InboxTaskRead = struct {
+    binding: []const u8,
+    requestId: []const u8,
+    taskId: []const u8,
+};
 /// `text` is the whole file the editor wants saved; the payload limit makes
 /// room for its JSON escaping, and the Host checks the decoded bytes.
 pub const GlobalInstructionsSave = struct {

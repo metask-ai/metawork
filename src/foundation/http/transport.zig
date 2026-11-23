@@ -21,7 +21,7 @@ pub const Error = error{
     Cancelled,
     DeadlineExceeded,
 };
-pub const Consumer = enum { update, completion, metask, mcp_oauth, mcp };
+pub const Consumer = enum { update, completion, metask, mcp_oauth, mcp, inbox };
 
 /// The data projection of `Error`. The switch is exhaustive and the counts
 /// must match, so neither vocabulary can gain or lose a member alone.
@@ -82,7 +82,7 @@ pub const Isolation = struct {
     digest: [32]u8,
 
     /// Distinct owners never share a connection even for equal identities.
-    pub const Namespace = enum(u8) { public, metask_account, mcp_server, mcp_draft, completion_source };
+    pub const Namespace = enum(u8) { public, metask_account, mcp_server, mcp_draft, completion_source, inbox };
 
     /// Credential-free endpoints owned by Application, such as updates.
     pub const public: Isolation = .{ .namespace = .public, .digest = @splat(0) };

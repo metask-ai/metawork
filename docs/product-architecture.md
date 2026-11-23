@@ -13,7 +13,7 @@ Agent 位于 Product 之外，拥有 MetaWork 对 AgentCore Runtime、Session、
 
 Application 必须分别组装 Account coordinator 与 Models coordinator。前者只编排 Account Runtime terminal commit；后者只取得 Account 的窄 authorization lease，并绑定 Models Metask catalog worker、credential vault、Agent-owned model probe 与 Models 管理生命周期。Account commit 后，Application 先发布 Account fact，再通知 Models observer；observer 只能请求当次 lease、查询无 secret 的三值授权状态（查询会让 Account 立即重新安排已逾期的刷新），或声明授权不可用，不能读取 Account 内部 token owner或把 Models 结果写回 Account。用户在桌面 Renderer 中显式填写的 Custom Provider API Key 只经专用 create/replace typed command 调用期转交 Models credential mutation；Bridge 不保留副本，Models 立即将其写入 credential vault，canonical metadata、projection、result、event、日志和历史均不得包含该值。Models 来源提交、实际 credential 的 Schedule scrub 和 Task-owned execution 安装属于 Product Control 内部事务，不得由 Application coordinator 重新拼装。
 
-Models、Workspace、Task、Schedule、Skill、MCP 与 Update 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
+Models、Workspace、Task、Schedule、Skill、MCP、Update 与 Inbox 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
 
 Product 事务只使用三种机制：
 
@@ -412,6 +412,18 @@ Product 的用户指令模块（`src/product/instructions`）拥有两份用户�
 - 失败分类：读不了的文件（`access_denied`、`not_regular_file`、`outside_workspace`、`not_utf8`、`invalid_path`、`io_error`）只跳过那一份；内核拒绝某一份记 `rejected`，另一份照常。这两类都记入已安装指纹，同一个文件不会每轮重复尝试，文件改动后重新读取。打开成功、读取本身失败（如另一个程序锁住了文件）时，指纹里这一份记成失败而不是打开时看到的大小与时间，所以下一轮即使文件大小和时间都没变也会重读。Session 无法更新但仍可用（内存不足、预算放不下、link 不可达等）时，这一轮沿用 Session 原有的 profile，不更新已安装指纹，下一轮重试；每份按 Session 实际带着什么报告：仍带着之前装入的这份段记 `update_failed`（这一轮用的是之前的版本），没带这份段时报告本轮读到的状态，读到了却装不进去记 `not_installed`（这一轮没有这份指令）；Session 忙时按 `TaskBusy` 让排队稍后再来。以上都不阻止这一轮运行。Session 在更新途中失效（Agent 返回 `SessionPoisoned`）不属于指令问题：这一轮失败，attachment 标记为 poisoned 并交给既有的关闭流程，下一条消息经 Conversation 恢复重建 Session，新 Session 照常安装当前文件；
 - 每轮报告：Run 记录运行期事实 `instructions`（每份的状态、是否截断、读取失败原因；项目文件不适用时为空）和准备时实际打开的项目文件路径，随 Run 投影，不持久化；路径是这一轮打开的那个文件，不按 Task 当前的根目录重新拼。重启前的历史和没有经过指令准备的 Run 报告为空，不据当前文件补写；
 - 全局文件编辑：设置页通过 Product Control 读和存，在 Control 线程同步完成，与其他小型 Host 配置文件一致。读取与开轮读取一样先打开文件，之后的判断都以句柄为准（POSIX 上不阻塞地打开，不是普通文件就关闭不读）；读取不创建任何目录或文件，最多读 128 KiB：更大的文件只报告大小，不交给编辑器。不是文本、不是普通文件、读不了的文件报告原因。文件里出现 Host 持有的已知凭据时报告 `contains_credential`，正文不离开 Host；匹配用的是 Host 投影文本时的同一个已知凭据判断（`containsKnownCredential`）。revision 是文件字节的 SHA-256，文件不存在时是 `absent`；只有可编辑的文件（存在且可读，或不存在）才发布 revision。保存先校验正文：UTF-8 字节数不超过 32 KiB、合法 UTF-8、不含 NUL、不含已知凭据。然后打开当前文件，经同一句柄算出当前 revision 和它的真实路径；与编辑器载入时的 revision 不同就返回冲突和当前 revision，不写入。`~/.metawork/AGENTS.md` 是链接时，替换的是链接指向的那个文件：在目标文件所在目录写临时文件，POSIX 上沿用目标文件的权限，链接本身保留；指向不存在文件的链接不替换，返回 `write_failed`。文件不存在时只在 `~/.metawork` 不存在时创建它（POSIX 上为 0700）。写临时文件、fsync 后 rename 覆盖，再同步目录；rename 之前任何失败都不改变原文件，也不留下临时文件。检查 revision 与 rename 之间的外部修改不在保护范围内。保存不通知任何 Session：下一轮准入会发现变化。
+
+### 2.10 消息收件箱
+
+Inbox aggregate（`src/product/inbox.zig`）独占 MetaTeam 连接的识别规则、连接状态、未读事实、会话摘要、刷新排期与 Renderer 读请求的接纳；它不持有设备 key，也不持久化任何东西。Application 的 inbox coordinator 只执行注入的连接查找、timer、独立有界 worker 与 HTTP（Foundation 引擎，consumer `inbox`，isolation 按 MCP server 与连接 fingerprint 区分）。worker 只持 owned 请求、key 副本与窄 transport，不持 Product、credential store 或 Native Runtime；完成回到主线程后由 Inbox 按请求 id 与 binding 版本校验，stale 结果只销毁。
+
+- **识别**：候选是 MCP 运行时按自身准备规则会连接的服务器（`prepare` 判为 eligible），且为 streamable_http、无 OAuth、无静态 header。Application 在主线程解析 endpoint（敏感 endpoint 只经 credential storage 组装），交给 Inbox 的纯函数按 MetaTeam 公布的格式 `<服务地址>/agent/v1/mcp/k/<key>` 精确匹配；服务地址可带 base path，开放接口为 `<base>/open/v1/...`，主机名与显示名不参与。多个匹配取 registry 中最后一个，即最新创建的。停用、删除、不再匹配都是未接入；fingerprint 变化即新 binding，旧 key 清零、旧连接按 isolation retire。凭据库读不到时进入 unreachable，60 秒后或用户重试时再找。只在 MCP desired generation 变化、到期重试或用户重试时查找，不在每次 wake 读凭据库。
+- **key**：只存在于 coordinator 的自有缓冲与 worker 副本中，用完 `secureZero`；只以 `Authorization: Bearer` 发往匹配出的服务 base，不进 URL、日志、projection、Bridge 或持久化；引擎不跟随重定向。日志只记 consumer、状态码、正文字节数与 phase/cause。
+- **读取**：后台只读 `/open/v1/unread`；`/open/v1/messages` 与 `/open/v1/tasks/{id}` 只在 Renderer 请求时读（消息页打开期间的 refresh、loadEarlier、打开会话、打开任务）。前提是读取消息不改变已读状态：MetaTeam openapi 把不带 peer 的读取描述为新设备的全量同步，`afterId`/`beforeId` 为不漏不重的增量，已读另有写接口。若证实读取会标已读，需另行处理。
+- **会话列表**：按时间倒序分页读取（每页 200 条），按人归组：收到的归发送者，发出的归每个收件人；只保留每人最新一条的摘要（首行，至多 160 个字符）。newer 页满页说明中间可能有缺口，此时以该页重建窗口，避免缺口里的最新消息被旧摘要掩盖；有未读但不在窗口内的成员单独取最近一条。页大小是传输单位而非可见范围，更早的会话由 `beforeId` 继续取得。打开的会话按 `peer` 每页 50 条读取，结果直接交给 Renderer，Host 不保留。
+- **排期**：应用在前台时每 60 秒读一次未读，由结果排期；失败依次等 30、60、120 秒，此后每 300 秒，成功复位。401/403 停止后台读取，直到 binding 变化或用户 refresh。应用进入后台即撤销 timer，回到前台且上次结果已超过 15 秒时立即读。refresh 不受退避与拒绝的限制。
+- **响应**：MetaTeam 未公布响应 schema，只读用到的字段，未知字段忽略，缺失或类型错误按不可用响应处理。数字 id 保留 JSON 原文作为字符串，只用于判等与原样回传，不经过浮点；时间接受 Unix 毫秒或 ISO 8601。正文有界读取：messages 4 MiB，unread 与 task 各 256 KiB；带 `limit` 的读取超出时减半重取，只有单条消息超出才算不可用。
+- **关闭**：coordinator 在 Bridge 证明静止之前关闭：撤销 timer，取消并 join 所有 worker，给未决读请求回 `unavailable`，清零 key，retire 连接，最后通知 Inbox 停止。
 
 ## 3. 并发与生命周期
 

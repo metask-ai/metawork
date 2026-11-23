@@ -46,6 +46,9 @@ const app_window = @import("app/window.zig");
 const product_update = @import("metawork_product_update");
 const update_coordinator = @import("app/update_coordinator.zig");
 const update_http = @import("app/update_http_transport.zig");
+const product_inbox = @import("metawork_product_inbox");
+const inbox_coordinator = @import("app/inbox_coordinator.zig");
+const inbox_http = @import("app/inbox_http_transport.zig");
 
 pub const panic = std.debug.FullPanic(capturePanic);
 
@@ -200,6 +203,9 @@ const App = struct {
     single_instance: ?*app_single_instance.Coordinator = null,
     update_transport: ?update_http.Adapter = null,
     updates: ?update_coordinator.Coordinator = null,
+    inbox_transport: ?inbox_http.Adapter = null,
+    inbox_source: ?inbox_coordinator.McpSource = null,
+    inbox: ?inbox_coordinator.Coordinator = null,
     history_restore_owner: ?*app_stores.Stores = null,
 
     fn prepareFileDelivery(context: *anyopaque, authority: product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
@@ -436,6 +442,23 @@ const App = struct {
             };
             self.updates.?.start(product_identity.automatic_update_checks);
             self.dispatcher.?.setUpdatesHost(.{ .context = self, .check_fn = requestUpdateCheck, .download_fn = requestUpdateDownload, .website_fn = openUpdateWebsite, .cancel_fn = cancelUpdateDownload });
+
+            // The MetaTeam inbox reads through the installed MetaTeam MCP
+            // connection's device key, which never leaves this coordinator.
+            self.inbox_transport = .{ .http = self.completion_transport.http };
+            self.inbox_source = .{ .port = control_storage.mcpManagementPort(), .credential_store = &self.mcp_credential_store.? };
+            self.inbox = .{
+                .allocator = std.heap.c_allocator,
+                .io = self.io,
+                .management = control_storage.inboxManagement(),
+                .transport = self.inbox_transport.?.transport(),
+                .retire_fn = inbox_http.Adapter.retire,
+                .retire_context = &self.inbox_transport.?,
+                .source = self.inbox_source.?.source(),
+                .host = .{ .context = host.context, .now_ns_fn = host.now_fn, .wake_fn = host.wake_fn, .start_timer_fn = host.start_timer_fn, .cancel_timer_fn = host.cancel_timer_fn, .on_main_thread_fn = host.on_main_thread_fn },
+            };
+            self.inbox.?.start(native_runtime.app_active);
+            self.dispatcher.?.setInboxHost(.{ .context = self, .refresh_fn = refreshInbox, .load_earlier_fn = loadEarlierInbox, .read_conversation_fn = readInboxConversation, .read_task_fn = readInboxTask });
         }
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
     }
@@ -452,6 +475,22 @@ const App = struct {
         const self: *App = @ptrCast(@alignCast(context));
         return if (self.updates) |*coordinator| coordinator.openWebsite() else false;
     }
+    fn refreshInbox(context: *anyopaque, binding: u64) product_inbox.CommandOutcome {
+        const self: *App = @ptrCast(@alignCast(context));
+        return if (self.inbox) |*coordinator| coordinator.refresh(binding) else .unavailable;
+    }
+    fn loadEarlierInbox(context: *anyopaque, binding: u64) product_inbox.CommandOutcome {
+        const self: *App = @ptrCast(@alignCast(context));
+        return if (self.inbox) |*coordinator| coordinator.loadEarlier(binding) else .unavailable;
+    }
+    fn readInboxConversation(context: *anyopaque, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: product_inbox.ConversationRequest) bool {
+        const self: *App = @ptrCast(@alignCast(context));
+        return if (self.inbox) |*coordinator| coordinator.readConversation(responder, bridge_id, request) else false;
+    }
+    fn readInboxTask(context: *anyopaque, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: product_inbox.TaskRequest) bool {
+        const self: *App = @ptrCast(@alignCast(context));
+        return if (self.inbox) |*coordinator| coordinator.readTask(responder, bridge_id, request) else false;
+    }
     fn cancelUpdateDownload(context: *anyopaque) void {
         const self: *App = @ptrCast(@alignCast(context));
         if (self.updates) |*coordinator| coordinator.cancelDownload();
@@ -461,6 +500,8 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (self.control) |control| control.beginShutdown();
         if (self.updates) |*coordinator| coordinator.shutdown();
+        // Settles every pending inbox read before the Bridge proves quiescence.
+        if (self.inbox) |*coordinator| coordinator.shutdown();
         if (self.single_instance) |coordinator| coordinator.stopIngress();
         if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
         if (self.account_started) if (self.account_coordinator) |coordinator|
@@ -490,6 +531,7 @@ const App = struct {
             dispatcher.detachProductControl();
             dispatcher.setModelsHost(null);
             dispatcher.setUpdatesHost(null);
+            dispatcher.setInboxHost(null);
         }
         if (self.mcp_management) |*coordinator| coordinator.shutdown();
         if (self.mcp_oauth_refresh) |*coordinator| coordinator.shutdown();
@@ -535,6 +577,7 @@ const App = struct {
         switch (value) {
             .effects_wake => {
                 if (self.updates) |*coordinator| coordinator.drain();
+                if (self.inbox) |*coordinator| coordinator.drain();
                 if (self.single_instance) |coordinator|
                     if (coordinator.drain()) self.platform.activateMainWindow();
                 if (self.account_coordinator) |coordinator|
@@ -567,6 +610,11 @@ const App = struct {
                 if (timer.id == update_coordinator.timer_id) {
                     if (self.updates) |*coordinator| coordinator.onTimer();
                     if (self.dispatcher) |dispatcher| try dispatcher.emitProductChanged();
+                    return;
+                }
+                if (timer.id == inbox_coordinator.timer_id) {
+                    if (self.inbox) |*coordinator| coordinator.onTimer();
+                    if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
                     return;
                 }
                 if (self.account_coordinator) |coordinator|
@@ -618,6 +666,11 @@ const App = struct {
                         if (self.dispatcher) |dispatcher| try dispatcher.openTaskFromNotification(task_id);
                     }
                 }
+            },
+            // The inbox asks MetaTeam only while MetaWork is in front.
+            .lifecycle => |phase| if (phase == .activate or phase == .deactivate) {
+                if (self.inbox) |*coordinator| coordinator.setActive(phase == .activate);
+                if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
             },
             else => {},
         }
@@ -1425,6 +1478,8 @@ test {
     std.testing.refAllDecls(metask_http_transport);
     std.testing.refAllDecls(update_http);
     std.testing.refAllDecls(update_coordinator);
+    std.testing.refAllDecls(inbox_http);
+    std.testing.refAllDecls(inbox_coordinator);
     std.testing.refAllDecls(models_automation_vault);
     std.testing.refAllDecls(models_coordinator);
     std.testing.refAllDecls(attachment_images);

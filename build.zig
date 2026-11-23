@@ -95,6 +95,10 @@ pub fn build(b: *std.Build) void {
     const run_update_tests = b.addRunArtifact(update_tests);
     b.step("test-updates", "Run bounded Product update policy tests").dependOn(&run_update_tests.step);
     artifacts.tests.step.dependOn(&run_update_tests.step);
+    const inbox_tests = b.addTest(.{ .name = "metawork-inbox", .root_module = test_modules.product_inbox });
+    const run_inbox_tests = b.addRunArtifact(inbox_tests);
+    b.step("test-inbox", "Run Product MetaTeam inbox policy tests").dependOn(&run_inbox_tests.step);
+    artifacts.tests.step.dependOn(&run_inbox_tests.step);
     const office_publish_tests = b.addTest(.{
         .name = "metawork-office-resource-publish",
         .root_module = existingImport(test_modules.app, "metawork_office_resource_publish_compat"),
@@ -647,6 +651,10 @@ pub fn build(b: *std.Build) void {
     });
     account_test_step.dependOn(&b.addRunArtifact(account_bridge_tests).step);
     const app_history_tests = b.addTest(.{ .name = "metawork-app-history", .root_module = test_modules.app, .filters = &.{"SQLite history"} });
+    const app_inbox_tests = b.addTest(.{ .name = "metawork-app-inbox", .root_module = test_modules.app, .filters = &.{"inbox"} });
+    const inbox_host_step = b.step("test-inbox-host", "Run MetaTeam inbox coordinator, HTTP and Bridge tests");
+    inbox_host_step.dependOn(&b.addRunArtifact(app_inbox_tests).step);
+    inbox_host_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "metawork-inbox-bridge", .root_module = test_modules.bridge, .filters = &.{"Dispatcher validates authority"} })).step);
     b.step("test-app-history", "Verify Application SQLite history lifecycle").dependOn(&b.addRunArtifact(app_history_tests).step);
     const storage_tests = b.addTest(.{
         .name = "metawork-storage",
@@ -922,6 +930,9 @@ fn addRendererWireGenerator(b: *std.Build) void {
     const update = b.createModule(.{ .root_source_file = b.path("src/product/update.zig"), .target = b.graph.host });
     update.addImport("metawork_http_contract", b.createModule(.{ .root_source_file = b.path("src/foundation/http/contract.zig"), .target = b.graph.host }));
     module.addImport("product_update", update);
+    const inbox = b.createModule(.{ .root_source_file = b.path("src/product/inbox.zig"), .target = b.graph.host });
+    inbox.addImport("metawork_http_contract", existingImport(update, "metawork_http_contract"));
+    module.addImport("product_inbox", inbox);
     const generator = b.addExecutable(.{ .name = "metawork-renderer-wire-generator", .root_module = module });
     b.step("generate-renderer-wire", "Generate Renderer structures from actual Host wire types").dependOn(&b.addRunArtifact(generator).step);
 }
@@ -998,6 +1009,7 @@ fn addLifecycleTests(
 
 const WiredModules = struct {
     product_update: *std.Build.Module,
+    product_inbox: *std.Build.Module,
     metawork_storage_sqlite: *std.Build.Module,
     metawork_storage_sql: *std.Build.Module,
     product_control_history_schema: *std.Build.Module,
@@ -1895,6 +1907,11 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const product_inbox = b.createModule(.{
+        .root_source_file = b.path("src/product/inbox.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const models_contract = b.createModule(.{
         .root_source_file = b.path("src/product/models/contract.zig"),
         .target = target,
@@ -1983,6 +2000,7 @@ fn wireAgentCore(
     // Update publishes the engine's typed failure facts; the engine itself
     // stays Application-only.
     product_update.addImport("metawork_http_contract", metawork_http_contract);
+    product_inbox.addImport("metawork_http_contract", metawork_http_contract);
     metawork_oauth_loopback_transport.addImport("metawork_select_start", metawork_select_start);
     metawork_oauth_loopback_transport.addImport("metawork_oauth_loopback", metawork_oauth_loopback);
     const metask_transport = b.createModule(.{
@@ -2721,6 +2739,7 @@ fn wireAgentCore(
     product_control_runtime.addImport("product_credential_match", credential_match);
     product_control_runtime.addImport("metawork_agent_contract", agent_contract);
     product_control_runtime.addImport("metawork_product_update", product_update);
+    product_control_runtime.addImport("metawork_product_inbox", product_inbox);
     product_control_runtime.addImport("metawork_product_identity", product_identity);
     product_control_runtime.addImport("metawork_account_contract", account_contract);
     product_control_runtime.addImport("metawork_product_models_contract", models_contract);
@@ -2818,6 +2837,7 @@ fn wireAgentCore(
     bridge.addImport("metawork_product_models_contract", models_contract);
     bridge.addImport("metawork_product_control", product_control);
     bridge.addImport("metawork_product_update", product_update);
+    bridge.addImport("metawork_product_inbox", product_inbox);
     bridge.addImport("metawork_product_mcp", product_mcp);
     bridge.addImport("metawork_product_skill", product_skill);
 
@@ -2927,6 +2947,7 @@ fn wireAgentCore(
     app.addImport("app_execution_server", app_execution_server);
     app.addImport("event_pump", event_pump);
     app.addImport("metawork_product_update", product_update);
+    app.addImport("metawork_product_inbox", product_inbox);
     app.addImport("app_output_file", output_file);
     app.addImport("metawork_product_workspace", product_workspace);
     app.addImport("metawork_product_control", product_control);
@@ -2977,6 +2998,7 @@ fn wireAgentCore(
     root_module.link_libc = bundle.link_libc;
     return .{
         .product_update = product_update,
+        .product_inbox = product_inbox,
         .metawork_storage_sqlite = metawork_storage_sqlite,
         .metawork_storage_sql = metawork_storage_sql,
         .product_control_history_schema = product_control_history_schema,
