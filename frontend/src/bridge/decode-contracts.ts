@@ -2851,6 +2851,7 @@ const instructionUseStates = [
   "rejected",
   "update_failed",
   "unavailable",
+  "not_installed",
 ] as const;
 const instructionUnreadableReasons = [
   "access_denied",
@@ -2878,7 +2879,8 @@ function decodeInstructionUse(
     truncated &&
     state !== "applied" &&
     state !== "rejected" &&
-    state !== "update_failed"
+    state !== "update_failed" &&
+    state !== "not_installed"
   )
     fail(path, "only a read instruction file can be truncated");
   return { state, truncated, reason };

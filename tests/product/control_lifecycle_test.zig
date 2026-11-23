@@ -12881,11 +12881,19 @@ test "a Run carries the user's instruction files, and a later Run replaces them 
     try std.testing.expectEqual(task_state.product_instructions.State.absent, fourth.instructions.?.project.?.state);
     try std.testing.expectEqual(task_state.product_instructions.State.applied, fourth.instructions.?.global.state);
 
-    // The Run view says the same, with the project file's path.
+    // The Run keeps the project file its preparation opened, gone or not,
+    // and its view says the same.
+    const opened = try std.fs.path.join(std.testing.allocator, &.{ files.workspace, "AGENTS.md" });
+    defer std.testing.allocator.free(opened);
+    try std.testing.expectEqualStrings(opened, fourth.instructions_project_path.?);
+    var quoted_storage: [4096]u8 = undefined;
+    var quoted: std.Io.Writer = .fixed(&quoted_storage);
+    try std.json.Stringify.value(opened, .{}, &quoted);
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "\"instructions\":{{\"global\":{{\"state\":\"applied\",\"truncated\":false,\"reason\":null}},\"project\":{{\"path\":{s},\"state\":\"absent\",\"truncated\":false,\"reason\":null}}}}", .{quoted.buffered()});
+    defer std.testing.allocator.free(expected);
     var output: [512 * 1024]u8 = undefined;
     const snapshot = try workbench.writeAggregateFixture(&output);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"instructions\":{\"global\":{\"state\":\"applied\",\"truncated\":false,\"reason\":null},\"project\":{\"path\":") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"state\":\"absent\",\"truncated\":false,\"reason\":null}}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, expected) != null);
 }
 
 test "an instruction file that cannot be read or that Core refuses never stops a Run" {
@@ -12936,7 +12944,8 @@ test "an instruction file that cannot be read or that Core refuses never stops a
     fake_core.unlock();
 
     // A Session that cannot be updated keeps what it had for this Run, and
-    // the next Run tries again.
+    // the next Run tries again. Each file says what the Run has of it: the
+    // earlier global text, and nothing of the project file Core had refused.
     try files.write(InstructionFiles.global_path, "Global rule, revised.");
     const kept = instructionProfile();
     fake_core.lock();
@@ -12944,7 +12953,7 @@ test "an instruction file that cannot be read or that Core refuses never stops a
     fake_core.unlock();
     const failed = try runInstructionTurn(&workbench, task_id, "update failed");
     try std.testing.expectEqual(task_state.product_instructions.State.update_failed, failed.instructions.?.global.state);
-    try std.testing.expectEqual(task_state.product_instructions.State.update_failed, failed.instructions.?.project.?.state);
+    try std.testing.expectEqual(task_state.product_instructions.State.not_installed, failed.instructions.?.project.?.state);
     try std.testing.expect(std.meta.eql(kept, instructionProfile()));
     const retried = try runInstructionTurn(&workbench, task_id, "retried");
     try std.testing.expectEqual(task_state.product_instructions.State.applied, retried.instructions.?.global.state);

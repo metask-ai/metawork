@@ -1095,6 +1095,10 @@ pub const RunRecord = struct {
     /// Runtime-only: the user instructions this Run's Session carried when it
     /// was prepared. Never persisted, so restored history reports null.
     instructions: ?product_instructions.InstructionsUse = null,
+    /// Runtime-only and owned, a projected copy: the project instruction file
+    /// that preparation opened, read or not. Null with no project source, or
+    /// for a path longer than the Agent accepts, which is never shown cut.
+    instructions_project_path: ?[]u8 = null,
     id: u64,
     coverage: ConversationCoverage = .pending,
     /// The 1-based position Core's Conversation gave this Run's input, read

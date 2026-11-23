@@ -1386,7 +1386,9 @@ export const enUS = {
   "task.instructions.reason.io_error": "read error",
   "task.instructions.rejected": "Not used: the agent refused it",
   "task.instructions.update_failed":
-    "Not updated for this run; the previous instructions were kept",
+    "Not updated for this run; it kept the version added earlier",
+  "task.instructions.not_installed":
+    "Not added: this run could not be updated, so it has none of this file",
   "task.instructions.unavailable": "No home folder",
   "task.information_scope":
     "Connector information reflects tool selection at task creation, not current connection status. Approval mode shows the current conversation setting.",

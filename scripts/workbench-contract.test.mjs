@@ -616,6 +616,10 @@ test("Run instructions say what each file contributed, and nothing they cannot h
       project: { path: null, ...use("rejected") },
     },
     { global: use("unreadable", false, "invalid_path"), project: null },
+    {
+      global: use("not_installed", true),
+      project: { path: "/repo/AGENTS.md", ...use("update_failed") },
+    },
   ];
   for (const instructions of valid) {
     const candidate = clone(fixture);

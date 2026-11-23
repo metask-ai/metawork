@@ -1008,10 +1008,9 @@ fn writeInstructionUseFields(writer: *std.Io.Writer, use: product_instructions.U
 fn writeInstructions(
     writer: *std.Io.Writer,
     text_projection: TextProjection,
-    task: *const task_state.Task,
-    value: ?product_instructions.InstructionsUse,
+    run: *const task_state.RunRecord,
 ) Error!void {
-    const used = value orelse {
+    const used = run.instructions orelse {
         writer.writeAll("null") catch return error.SnapshotTooLarge;
         return;
     };
@@ -1022,15 +1021,12 @@ fn writeInstructions(
         writer.writeAll("null}") catch return error.SnapshotTooLarge;
         return;
     };
-    // The file read is always `AGENTS.md` at the Task's working directory
-    // root, so the path is composed here rather than kept on every Run.
+    // The file this Run's preparation opened, not one composed from the
+    // Task's root now.
     writer.writeAll("{\"path\":") catch return error.SnapshotTooLarge;
-    var storage: [product_instructions.max_path_bytes]u8 = undefined;
-    const root = task.durable.workspace_root;
-    const separator: []const u8 = if (root.len != 0 and std.fs.path.isSep(root[root.len - 1])) "" else std.fs.path.sep_str;
-    if (std.fmt.bufPrint(&storage, "{s}{s}{s}", .{ root, separator, product_instructions.file_name })) |path|
+    if (run.instructions_project_path) |path|
         try text_projection.writeJson(writer, path)
-    else |_|
+    else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeByte(',') catch return error.SnapshotTooLarge;
     try writeInstructionUseFields(writer, project);
@@ -1076,7 +1072,7 @@ pub fn writeRun(
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"instructions\":") catch return error.SnapshotTooLarge;
-    try writeInstructions(writer, text_projection, task, run.instructions);
+    try writeInstructions(writer, text_projection, run);
     writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
     try writeInput(writer, text_projection, run.input, null);
     writer.writeAll(",\"submission\":") catch return error.SnapshotTooLarge;

@@ -6693,7 +6693,7 @@ test("task information shows the instructions the current or latest Run carried,
   await open(null, runs);
   assert.equal(
     fact("Last run global instructions"),
-    "Not updated for this run; the previous instructions were kept",
+    "Not updated for this run; it kept the version added earlier",
   );
   assert.equal(screen.queryByText("Last run project instructions"), null);
   cleanup();
@@ -6720,6 +6720,19 @@ test("task information shows the instructions the current or latest Run carried,
   assert.equal(
     fact("Last run project instructions"),
     "/work/repo/AGENTS.mdUsed",
+  );
+  cleanup();
+
+  // A Session that could not be updated, and never carried this file.
+  await open(null, [
+    {
+      ...runs[1],
+      instructions: { global: use("not_installed", true), project: null },
+    },
+  ]);
+  assert.equal(
+    fact("Last run global instructions"),
+    "Not added: this run could not be updated, so it has none of this file",
   );
   cleanup();
 

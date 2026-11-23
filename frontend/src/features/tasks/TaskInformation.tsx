@@ -38,6 +38,8 @@ function instructionStatus(
       return t("task.instructions.rejected");
     case "update_failed":
       return t("task.instructions.update_failed");
+    case "not_installed":
+      return t("task.instructions.not_installed");
     case "unavailable":
       return t("task.instructions.unavailable");
   }

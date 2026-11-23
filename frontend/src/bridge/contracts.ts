@@ -949,7 +949,8 @@ export type InstructionUseState =
   | "unreadable"
   | "rejected"
   | "update_failed"
-  | "unavailable";
+  | "unavailable"
+  | "not_installed";
 export type InstructionUnreadableReason =
   | "access_denied"
   | "not_regular_file"

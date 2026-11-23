@@ -3653,6 +3653,7 @@ pub const Runtime = struct {
         const run_record = &task.durable.runs[slot].?;
         run_record.id = run_id;
         run_record.instructions = instructions_used;
+        run_record.instructions_project_path = try projectInstructionsPath(effects, instructions_used);
         // A rewind leaves the Conversation ending just below the position it
         // named, so the input takes that position exactly. Everything from
         // there on is out of the Conversation, and attributing it to this Run
@@ -10664,7 +10665,7 @@ fn applyInstructions(
 ) RunError!?product_instructions.InstructionsUse {
     const preparation = effects.instructions orelse return null;
     const attached = task.runtime.attached() orelse return null;
-    const candidate = switch (preparation.*) {
+    const candidate = switch (preparation.found) {
         .unchanged => return if (attached.instructions) |installed| installed.use else null,
         .changed => |*value| value,
     };
@@ -10686,9 +10687,10 @@ fn applyInstructions(
         },
         else => {
             // The profile Core had stays, so this Run carries what the last
-            // one did; the unchanged fingerprint makes the next turn retry.
+            // install left, which may be nothing of the user's; the
+            // unchanged fingerprint makes the next turn retry.
             std.log.warn("task.instructions_update_failed task_id={d} error={s}", .{ task.durable.id, @errorName(err) });
-            return candidate.use(null);
+            return candidate.useKept(if (attached.instructions) |installed| installed.use else null);
         },
     };
     const use = candidate.use(applied);
@@ -10698,6 +10700,21 @@ fn applyInstructions(
         .sections = applied.global or applied.project,
     };
     return use;
+}
+
+/// The project instruction file this Run reports: the one its preparation
+/// opened, projected like the Run's other display text. A path longer than
+/// the Agent accepts is not shown at all rather than shown cut.
+fn projectInstructionsPath(
+    effects: OperationEffects,
+    used: ?product_instructions.InstructionsUse,
+) RunError!?[]u8 {
+    const report = used orelse return null;
+    if (report.project == null) return null;
+    const preparation = effects.instructions orelse return null;
+    const path = preparation.project_path orelse return null;
+    if (path.len > product_instructions.max_path_bytes) return null;
+    return (try effects.text.project(path, product_instructions.max_path_bytes, &.{}, 0)).value;
 }
 
 fn applyModelIntent(
@@ -11754,6 +11771,7 @@ fn deinitRun(
     releaseTrackedText(self, effects, &run.output_continued);
     if (run.execution_model_owned)
         releaseProjectedSlice(self, effects, @constCast(run.execution_model));
+    if (run.instructions_project_path) |path| releaseProjectedSlice(self, effects, path);
     releaseProjectedSlice(self, effects, run.terminal_diagnostic);
     if (run.model_error_storage) |storage| {
         std.crypto.secureZero(u8, std.mem.asBytes(storage));

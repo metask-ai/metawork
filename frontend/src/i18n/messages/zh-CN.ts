@@ -1197,7 +1197,8 @@ export const zhCN: Record<MessageId, string> = {
   "task.instructions.reason.invalid_path": "路径含控制字符或过长",
   "task.instructions.reason.io_error": "读取出错",
   "task.instructions.rejected": "未使用：被智能体拒绝",
-  "task.instructions.update_failed": "本轮未能更新，沿用上一轮的指令",
+  "task.instructions.update_failed": "本轮未能更新，沿用之前装入的版本",
+  "task.instructions.not_installed": "本轮未能更新，没有带上这份指令",
   "task.instructions.unavailable": "没有用户主目录",
   "task.information_scope":
     "连接器信息反映创建任务时的工具选择，不代表当前连接状态；审批模式显示此会话当前设置。",

@@ -69,11 +69,14 @@ pub const State = enum {
     unreadable,
     /// Read, but Core would not take it; the other source was unaffected.
     rejected,
-    /// The Session could not be updated; the Run carries what the previous
-    /// one did.
+    /// The Session could not be updated and still carries the section an
+    /// earlier install gave this source: the Run carries that earlier text.
     update_failed,
     /// No home directory, so there is no global file to read.
     unavailable,
+    /// Read, but the Session could not be updated and carries no section
+    /// for this source: the Run carries none of it.
+    not_installed,
 };
 
 pub const Use = struct {
@@ -143,12 +146,25 @@ pub const Candidate = struct {
         return value.global != null or value.project != null;
     }
 
-    /// `applied` is what Core took; null when the Session could not be
-    /// updated at all, so every source with a path reports `update_failed`.
-    pub fn use(self: *const Candidate, applied: ?agent.InstructionsApplied) InstructionsUse {
+    /// What the Run carries once Core took `applied` of the documents.
+    pub fn use(self: *const Candidate, applied: agent.InstructionsApplied) InstructionsUse {
         return .{
-            .global = if (self.global) |outcome| sourceUse(outcome, if (applied) |value| value.global else null) else .{ .state = .unavailable },
-            .project = if (self.project) |outcome| sourceUse(outcome, if (applied) |value| value.project else null) else null,
+            .global = if (self.global) |outcome| sourceUse(outcome, applied.global) else .{ .state = .unavailable },
+            .project = if (self.project) |outcome| sourceUse(outcome, applied.project) else null,
+        };
+    }
+
+    /// What the Run carries when the Session could not be updated, so its
+    /// profile is still the one `installed` describes (null: none of the
+    /// user's). A source whose section the Session still carries reports
+    /// `update_failed`, since the Run has that earlier text; a source it
+    /// carries nothing for reports what this turn found, and a document it
+    /// could not add is `not_installed`.
+    pub fn useKept(self: *const Candidate, installed: ?InstructionsUse) InstructionsUse {
+        const before = installed orelse InstructionsUse{ .global = .{ .state = .absent }, .project = null };
+        return .{
+            .global = if (self.global) |outcome| keptUse(outcome, before.global) else .{ .state = .unavailable },
+            .project = if (self.project) |outcome| keptUse(outcome, before.project orelse .{ .state = .absent }) else null,
         };
     }
 };
@@ -161,11 +177,7 @@ fn view(entry: ?Outcome) ?agent.InstructionDocument {
     };
 }
 
-fn sourceUse(outcome: Outcome, applied: ?bool) Use {
-    const taken = applied orelse return .{
-        .state = .update_failed,
-        .truncated = outcome == .document and outcome.document.truncated,
-    };
+fn sourceUse(outcome: Outcome, taken: bool) Use {
     return switch (outcome) {
         .document => |document| .{ .state = if (taken) .applied else .rejected, .truncated = document.truncated },
         .absent => .{ .state = .absent },
@@ -174,13 +186,31 @@ fn sourceUse(outcome: Outcome, applied: ?bool) Use {
     };
 }
 
-/// What a turn's start produced: nothing to change, or both sources read.
-pub const Preparation = union(enum) {
-    unchanged,
-    changed: Candidate,
+fn keptUse(outcome: Outcome, before: Use) Use {
+    if (before.state == .applied) return .{ .state = .update_failed, .truncated = before.truncated };
+    return switch (outcome) {
+        .document => |document| .{ .state = .not_installed, .truncated = document.truncated },
+        else => sourceUse(outcome, false),
+    };
+}
+
+/// What a turn's start produced. Owns everything it holds.
+pub const Preparation = struct {
+    allocator: std.mem.Allocator,
+    /// The project file this turn opened, read or not: the path its Run
+    /// reports. Null where the working directory admits no project file.
+    project_path: ?[]u8,
+    found: Found,
+
+    pub const Found = union(enum) {
+        /// What the Session carries is what the files hold.
+        unchanged,
+        changed: Candidate,
+    };
 
     pub fn deinit(self: *Preparation) void {
-        switch (self.*) {
+        if (self.project_path) |path| self.allocator.free(path);
+        switch (self.found) {
             .unchanged => {},
             .changed => |*candidate| candidate.deinit(),
         }
@@ -280,6 +310,8 @@ fn within(root: []const u8, path: []const u8) bool {
 /// reads them, through the handles just checked. Every handle is closed
 /// before this returns, and nothing here fails for a file the user wrote.
 pub fn prepare(io: std.Io, allocator: std.mem.Allocator, paths: Paths, installed: ?Fingerprint) std.mem.Allocator.Error!Preparation {
+    const project_path = if (paths.project) |entry| try allocator.dupe(u8, entry.path) else null;
+    errdefer if (project_path) |path| allocator.free(path);
     var global: ?Opened = if (paths.global) |path| try open(io, allocator, path, null) else null;
     defer if (global) |*opened| opened.close(io);
     var project: ?Opened = if (paths.project) |entry| try open(io, allocator, entry.path, entry.root) else null;
@@ -288,12 +320,13 @@ pub fn prepare(io: std.Io, allocator: std.mem.Allocator, paths: Paths, installed
         .global = if (global) |opened| opened.observation else null,
         .project = if (project) |opened| opened.observation else null,
     };
-    if (installed) |carried| if (carried.eql(found)) return .unchanged;
+    if (installed) |carried| if (carried.eql(found))
+        return .{ .allocator = allocator, .project_path = project_path, .found = .unchanged };
     var candidate: Candidate = .{ .allocator = allocator, .fingerprint = found, .global = null, .project = null };
     errdefer candidate.deinit();
     if (global) |*opened| candidate.global = try readOpened(io, allocator, paths.global.?, opened, &candidate.fingerprint.global.?);
     if (project) |*opened| candidate.project = try readOpened(io, allocator, paths.project.?.path, opened, &candidate.fingerprint.project.?);
-    return .{ .changed = candidate };
+    return .{ .allocator = allocator, .project_path = project_path, .found = .{ .changed = candidate } };
 }
 
 /// `recorded` is this source's entry in the fingerprint the Session will
@@ -503,19 +536,19 @@ test "a turn reports absence, a directory and a file, and reads only when that c
     // Nothing there yet: no `.metawork`, no project file, and nothing created.
     var nothing = try prepare(testing.io, testing.allocator, paths, null);
     defer nothing.deinit();
-    try testing.expectEqual(Observation.absent, nothing.changed.fingerprint.global.?);
-    try testing.expectEqual(Observation.absent, nothing.changed.fingerprint.project.?);
-    try testing.expect(!nothing.changed.hasDocuments());
+    try testing.expectEqual(Observation.absent, nothing.found.changed.fingerprint.global.?);
+    try testing.expectEqual(Observation.absent, nothing.found.changed.fingerprint.project.?);
+    try testing.expect(!nothing.found.changed.hasDocuments());
     try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, ".metawork", .{}));
-    var still = try prepare(testing.io, testing.allocator, paths, nothing.changed.fingerprint);
+    var still = try prepare(testing.io, testing.allocator, paths, nothing.found.changed.fingerprint);
     defer still.deinit();
-    try testing.expect(still == .unchanged);
+    try testing.expect(still.found == .unchanged);
 
     try tmp.dir.createDirPath(testing.io, ".metawork" ++ std.fs.path.sep_str ++ "AGENTS.md");
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "AGENTS.md", .data = "Project rules." });
-    var first = try prepare(testing.io, testing.allocator, paths, nothing.changed.fingerprint);
+    var first = try prepare(testing.io, testing.allocator, paths, nothing.found.changed.fingerprint);
     defer first.deinit();
-    const candidate = &first.changed;
+    const candidate = &first.found.changed;
     try testing.expectEqual(Observation{ .failed = .not_regular_file }, candidate.fingerprint.global.?);
     try testing.expectEqual(@as(u64, "Project rules.".len), candidate.fingerprint.project.?.file.size);
     try testing.expectEqual(Unreadable.not_regular_file, candidate.global.?.unreadable);
@@ -524,24 +557,56 @@ test "a turn reports absence, a directory and a file, and reads only when that c
     const documents = candidate.instructions();
     try testing.expect(documents.global == null);
     try testing.expectEqualStrings("Project rules.", documents.project.?.text);
-    // Core taking the project file, and Core being unreachable.
+    // Core taking the project file, and Core refusing it.
     const used = candidate.use(.{ .project = true });
     try testing.expectEqual(State.unreadable, used.global.state);
     try testing.expectEqual(Unreadable.not_regular_file, used.global.reason.?);
     try testing.expectEqual(State.applied, used.project.?.state);
-    const failed = candidate.use(null);
-    try testing.expectEqual(State.update_failed, failed.global.state);
-    try testing.expectEqual(State.update_failed, failed.project.?.state);
     try testing.expectEqual(State.rejected, candidate.use(.{}).project.?.state);
+    // Both opened paths are reported, whether or not a file was there.
+    try testing.expectEqualStrings(paths.project.?.path, first.project_path.?);
+    try testing.expectEqualStrings(paths.project.?.path, nothing.project_path.?);
 
     // Finding the same files again reads nothing; a change of size is read.
     var again = try prepare(testing.io, testing.allocator, paths, candidate.fingerprint);
     defer again.deinit();
-    try testing.expect(again == .unchanged);
+    try testing.expect(again.found == .unchanged);
+    try testing.expectEqualStrings(paths.project.?.path, again.project_path.?);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "AGENTS.md", .data = "Project rules, revised." });
     var revised = try prepare(testing.io, testing.allocator, paths, candidate.fingerprint);
     defer revised.deinit();
-    try testing.expectEqualStrings("Project rules, revised.", revised.changed.project.?.document.text);
+    try testing.expectEqualStrings("Project rules, revised.", revised.found.changed.project.?.document.text);
+}
+
+test "a Session that could not be updated reports, per file, whether it still carries an earlier version" {
+    const document = Outcome{ .document = .{ .path = @constCast("/repo/AGENTS.md"), .text = @constCast("Rules."), .truncated = true } };
+    const candidate: Candidate = .{
+        .allocator = testing.allocator,
+        .fingerprint = .{ .global = .absent, .project = .absent },
+        .global = document,
+        .project = .absent,
+    };
+    // A Session that never carried the user's files: nothing is carried.
+    const fresh = candidate.useKept(null);
+    try testing.expectEqual(Use{ .state = .not_installed, .truncated = true }, fresh.global);
+    try testing.expectEqual(Use{ .state = .absent }, fresh.project.?);
+    // A Session carrying an earlier version of both, the global one cut: the
+    // Run has those, even of a file that is gone now.
+    const earlier: InstructionsUse = .{
+        .global = .{ .state = .applied, .truncated = false },
+        .project = .{ .state = .applied, .truncated = true },
+    };
+    const kept = candidate.useKept(earlier);
+    try testing.expectEqual(Use{ .state = .update_failed }, kept.global);
+    try testing.expectEqual(Use{ .state = .update_failed, .truncated = true }, kept.project.?);
+    // One it carried and one Core had refused.
+    const partial = candidate.useKept(.{ .global = .{ .state = .rejected }, .project = .{ .state = .applied } });
+    try testing.expectEqual(State.not_installed, partial.global.state);
+    try testing.expectEqual(State.update_failed, partial.project.?.state);
+    // No home: the global source stays unavailable whatever happened.
+    const homeless: Candidate = .{ .allocator = testing.allocator, .fingerprint = .{ .global = null, .project = null }, .global = null, .project = null };
+    try testing.expectEqual(State.unavailable, homeless.useKept(earlier).global.state);
+    try testing.expect(homeless.useKept(earlier).project == null);
 }
 
 fn readNamed(tmp: std.testing.TmpDir, name: []const u8) !Outcome {
@@ -607,20 +672,20 @@ test "a file that could not be read is read again once it can be, at the same si
     };
     defer refused.deinit();
     // A process that may read anything proves nothing here.
-    if (refused.changed.global.? != .unreadable) return error.SkipZigTest;
-    try testing.expect(refused.changed.fingerprint.global.? == .failed);
-    try testing.expectEqual(State.unreadable, refused.changed.use(.{}).global.state);
+    if (refused.found.changed.global.? != .unreadable) return error.SkipZigTest;
+    try testing.expect(refused.found.changed.fingerprint.global.? == .failed);
+    try testing.expectEqual(State.unreadable, refused.found.changed.use(.{}).global.state);
 
     // Nothing about the file changed, and the next turn still reads it.
     const after = try tmp.dir.statFile(testing.io, sub_path, .{});
     try testing.expectEqual(before.size, after.size);
     try testing.expectEqual(before.mtime.nanoseconds, after.mtime.nanoseconds);
-    var recovered = try prepare(testing.io, testing.allocator, paths, refused.changed.fingerprint);
+    var recovered = try prepare(testing.io, testing.allocator, paths, refused.found.changed.fingerprint);
     defer recovered.deinit();
-    try testing.expectEqualStrings("Be brief.", recovered.changed.global.?.document.text);
+    try testing.expectEqualStrings("Be brief.", recovered.found.changed.global.?.document.text);
     try testing.expectEqual(
         Observation{ .file = .{ .size = after.size, .mtime_ns = after.mtime.nanoseconds } },
-        recovered.changed.fingerprint.global.?,
+        recovered.found.changed.fingerprint.global.?,
     );
 }
 
@@ -637,10 +702,10 @@ test "a path the Agent would refuse is reported and costs only its own source" {
     defer paths.deinit(testing.allocator);
     var prepared = try prepare(testing.io, testing.allocator, paths, null);
     defer prepared.deinit();
-    try testing.expectEqual(Observation{ .failed = .invalid_path }, prepared.changed.fingerprint.global.?);
-    try testing.expectEqual(Unreadable.invalid_path, prepared.changed.global.?.unreadable);
-    try testing.expectEqualStrings("Project rules.", prepared.changed.project.?.document.text);
-    try agent.validateInstructions(prepared.changed.instructions());
+    try testing.expectEqual(Observation{ .failed = .invalid_path }, prepared.found.changed.fingerprint.global.?);
+    try testing.expectEqual(Unreadable.invalid_path, prepared.found.changed.global.?.unreadable);
+    try testing.expectEqualStrings("Project rules.", prepared.found.changed.project.?.document.text);
+    try agent.validateInstructions(prepared.found.changed.instructions());
 }
 
 test "a project file linked outside its working directory is not read" {
@@ -672,6 +737,6 @@ test "a project file linked outside its working directory is not read" {
     try workspace_dir.symLink(testing.io, "CLAUDE.md", "AGENTS.md", .{});
     var prepared = try prepare(testing.io, testing.allocator, paths, null);
     defer prepared.deinit();
-    try testing.expectEqual(@as(u64, "inside".len), prepared.changed.fingerprint.project.?.file.size);
-    try testing.expectEqualStrings("inside", prepared.changed.project.?.document.text);
+    try testing.expectEqual(@as(u64, "inside".len), prepared.found.changed.fingerprint.project.?.file.size);
+    try testing.expectEqualStrings("inside", prepared.found.changed.project.?.document.text);
 }
