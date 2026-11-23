@@ -1194,6 +1194,7 @@ export const zhCN: Record<MessageId, string> = {
   "task.instructions.reason.not_regular_file": "不是普通文件",
   "task.instructions.reason.outside_workspace": "链接指向工作目录之外",
   "task.instructions.reason.not_utf8": "不是 UTF-8 文本",
+  "task.instructions.reason.invalid_path": "路径含控制字符或过长",
   "task.instructions.reason.io_error": "读取出错",
   "task.instructions.rejected": "未使用：被智能体拒绝",
   "task.instructions.update_failed": "本轮未能更新，沿用上一轮的指令",

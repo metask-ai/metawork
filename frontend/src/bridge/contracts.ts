@@ -955,6 +955,7 @@ export type InstructionUnreadableReason =
   | "not_regular_file"
   | "outside_workspace"
   | "not_utf8"
+  | "invalid_path"
   | "io_error";
 /** What one instruction file contributed to a Run. */
 export type InstructionUse = {

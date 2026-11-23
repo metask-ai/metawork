@@ -156,14 +156,21 @@ pub const InstructionsApplied = struct {
     project: bool = false,
 };
 
+/// Whether `path` can be a document's source line: non-empty UTF-8 with no
+/// control character, at most `max_instruction_path_bytes`. A caller asks
+/// before reading, so a path this refuses costs only its own document.
+pub fn validInstructionPath(path: []const u8) bool {
+    if (path.len == 0 or path.len > max_instruction_path_bytes or !std.unicode.utf8ValidateSlice(path))
+        return false;
+    // The path is one header line.
+    for (path) |byte| if (byte < 0x20 or byte == 0x7f) return false;
+    return true;
+}
+
 pub fn validateInstructions(value: Instructions) error{InvalidInstructions}!void {
     for ([_]?InstructionDocument{ value.global, value.project }) |entry| {
         const document = entry orelse continue;
-        if (document.path.len == 0 or document.path.len > max_instruction_path_bytes or
-            !std.unicode.utf8ValidateSlice(document.path))
-            return error.InvalidInstructions;
-        // The path is one header line.
-        for (document.path) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidInstructions;
+        if (!validInstructionPath(document.path)) return error.InvalidInstructions;
         if (document.text.len == 0 or document.text.len > max_instruction_text_bytes or
             !std.unicode.utf8ValidateSlice(document.text) or
             std.mem.indexOfScalar(u8, document.text, 0) != null)

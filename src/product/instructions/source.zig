@@ -7,11 +7,15 @@
 //! upward or into subdirectories, and the Task's project membership plays no
 //! part, as for directory Skills.
 //!
-//! Observing a file costs one stat; its text is read only when what was
-//! observed differs from what the Session already carries. A file that cannot
-//! be read is reported and left out: it never stops a Run.
+//! A turn opens each file once and learns everything from the handle: what it
+//! is, its size and modification time, and for a project file where it really
+//! lives. Its text is read through that same handle, and only when what was
+//! found differs from what the Session already carries. A file that cannot be
+//! read is reported and left out: it never stops a Run.
 const std = @import("std");
 const agent = @import("metawork_agent_contract");
+const handle = @import("handle.zig");
+const builtin = @import("builtin");
 
 pub const file_name = "AGENTS.md";
 pub const global_directory = ".metawork";
@@ -25,10 +29,15 @@ pub const Unreadable = enum {
     outside_workspace,
     /// Not UTF-8 text, or text with a NUL byte.
     not_utf8,
+    /// A path the Agent cannot name as a source: a control character, not
+    /// UTF-8, or longer than it accepts. Checked before anything is opened.
+    invalid_path,
     io_error,
 };
 
-/// One file as a turn's start found it, without reading it.
+/// One file as a turn's start found it. `failed` is also what a read that
+/// failed after a successful open leaves behind, so the next turn, finding
+/// the file again, tries once more.
 pub const Observation = union(enum) {
     absent,
     file: struct { size: u64, mtime_ns: i96 },
@@ -165,8 +174,7 @@ fn sourceUse(outcome: Outcome, applied: ?bool) Use {
     };
 }
 
-/// What a turn's start does: observe both files and, when that differs from
-/// what the Session carries, read them.
+/// What a turn's start produced: nothing to change, or both sources read.
 pub const Preparation = union(enum) {
     unchanged,
     changed: Candidate,
@@ -194,56 +202,70 @@ pub const Paths = struct {
 };
 
 /// `home` is the canonical user home, if any; `project_root` the canonical
-/// working directory when it admits a project file.
+/// working directory when it admits a project file. A path the Agent would
+/// refuse is kept as it is, never cut: opening it reports `invalid_path`.
 pub fn resolvePaths(allocator: std.mem.Allocator, home: ?[]const u8, project_root: ?[]const u8) std.mem.Allocator.Error!Paths {
-    const global = if (home) |root| try joinBounded(allocator, &.{ root, global_directory, file_name }) else null;
+    const global = if (home) |root| try std.fs.path.join(allocator, &.{ root, global_directory, file_name }) else null;
     errdefer if (global) |path| allocator.free(path);
-    const project_path = if (project_root) |root| try joinBounded(allocator, &.{ root, file_name }) else null;
+    const project_path = if (project_root) |root| try std.fs.path.join(allocator, &.{ root, file_name }) else null;
     return .{
         .global = global,
         .project = if (project_path) |path| .{ .path = path, .root = project_root.? } else null,
     };
 }
 
-/// A path longer than the Agent accepts stays out rather than being cut: it
-/// would name some other file.
-fn joinBounded(allocator: std.mem.Allocator, parts: []const []const u8) std.mem.Allocator.Error!?[]u8 {
-    const path = try std.fs.path.join(allocator, parts);
-    if (path.len > max_path_bytes or !std.unicode.utf8ValidateSlice(path)) {
-        allocator.free(path);
-        return null;
+/// One source as a turn found it. A regular file's handle stays open until
+/// the turn has read it, so the text comes from the file that was checked.
+pub const Opened = struct {
+    observation: Observation,
+    file: ?std.Io.File = null,
+
+    pub fn close(self: *Opened, io: std.Io) void {
+        if (self.file) |file| file.close(io);
+        self.file = null;
     }
-    return path;
-}
+};
 
-pub fn observeAll(io: std.Io, allocator: std.mem.Allocator, paths: Paths) Fingerprint {
-    return .{
-        .global = if (paths.global) |path| observe(io, allocator, path, null) else null,
-        .project = if (paths.project) |project| observe(io, allocator, project.path, project.root) else null,
+/// Opens `path` without waiting and checks it through the handle: a regular
+/// file, and for a project file (`root` set) one that resolves inside the
+/// working directory. A link may point anywhere; only a target inside is the
+/// project's own file, so `AGENTS.md -> CLAUDE.md` is read and a link out of
+/// the directory is not.
+pub fn open(io: std.Io, allocator: std.mem.Allocator, path: []const u8, root: ?[]const u8) std.mem.Allocator.Error!Opened {
+    // The Agent's own rule, asked for this document alone, so a path it
+    // would refuse costs only this source.
+    if (!agent.validInstructionPath(path)) return .{ .observation = .{ .failed = .invalid_path } };
+    const opened = handle.openRegular(io, path) catch |err| return .{ .observation = switch (err) {
+        error.FileNotFound => .absent,
+        error.AccessDenied => .{ .failed = .access_denied },
+        error.NotRegularFile => .{ .failed = .not_regular_file },
+        error.InputOutput => .{ .failed = .io_error },
+    } };
+    var result: Opened = .{
+        .observation = .{ .file = .{ .size = opened.stat.size, .mtime_ns = opened.stat.mtime.nanoseconds } },
+        .file = opened.file,
     };
+    errdefer result.close(io);
+    if (root) |workspace| {
+        if (try resolvedOutside(io, allocator, opened.file, workspace)) |failure| {
+            result.close(io);
+            result.observation = failure;
+        }
+    }
+    return result;
 }
 
-/// One stat, plus a containment check for a project file. Never opens the
-/// file: a FIFO would block the opener.
-pub fn observe(io: std.Io, allocator: std.mem.Allocator, path: []const u8, root: ?[]const u8) Observation {
-    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| return switch (err) {
-        error.FileNotFound, error.NotDir => .absent,
+/// Null when the open file lives inside `workspace`, otherwise what to
+/// report instead of it.
+fn resolvedOutside(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, workspace: []const u8) std.mem.Allocator.Error!?Observation {
+    const buffer = try allocator.alloc(u8, std.fs.max_path_bytes);
+    defer allocator.free(buffer);
+    const length = file.realPath(io, buffer) catch |err| return switch (err) {
+        error.FileNotFound => .absent,
         error.AccessDenied, error.PermissionDenied => .{ .failed = .access_denied },
         else => .{ .failed = .io_error },
     };
-    if (stat.kind != .file) return .{ .failed = .not_regular_file };
-    if (root) |workspace| {
-        // A link may point anywhere; only a target inside the working
-        // directory is the project's own file.
-        const real = std.Io.Dir.realPathFileAbsoluteAlloc(io, path, allocator) catch |err| return switch (err) {
-            error.FileNotFound => .absent,
-            error.AccessDenied, error.PermissionDenied => .{ .failed = .access_denied },
-            else => .{ .failed = .io_error },
-        };
-        defer allocator.free(real);
-        if (!within(workspace, real)) return .{ .failed = .outside_workspace };
-    }
-    return .{ .file = .{ .size = stat.size, .mtime_ns = stat.mtime.nanoseconds } };
+    return if (within(workspace, buffer[0..length])) null else .{ .failed = .outside_workspace };
 }
 
 fn within(root: []const u8, path: []const u8) bool {
@@ -253,41 +275,66 @@ fn within(root: []const u8, path: []const u8) bool {
     return std.fs.path.isSep(path[root.len]);
 }
 
-/// Reads every observed file. A source whose observation failed keeps that
-/// failure; nothing here returns an error for a file the user wrote.
-pub fn readAll(io: std.Io, allocator: std.mem.Allocator, paths: Paths, fingerprint: Fingerprint) std.mem.Allocator.Error!Candidate {
-    var candidate: Candidate = .{ .allocator = allocator, .fingerprint = fingerprint, .global = null, .project = null };
+/// What a turn's start does. Opens both files and compares what it finds
+/// with `installed`, what the Session already carries; only a difference
+/// reads them, through the handles just checked. Every handle is closed
+/// before this returns, and nothing here fails for a file the user wrote.
+pub fn prepare(io: std.Io, allocator: std.mem.Allocator, paths: Paths, installed: ?Fingerprint) std.mem.Allocator.Error!Preparation {
+    var global: ?Opened = if (paths.global) |path| try open(io, allocator, path, null) else null;
+    defer if (global) |*opened| opened.close(io);
+    var project: ?Opened = if (paths.project) |entry| try open(io, allocator, entry.path, entry.root) else null;
+    defer if (project) |*opened| opened.close(io);
+    const found: Fingerprint = .{
+        .global = if (global) |opened| opened.observation else null,
+        .project = if (project) |opened| opened.observation else null,
+    };
+    if (installed) |carried| if (carried.eql(found)) return .unchanged;
+    var candidate: Candidate = .{ .allocator = allocator, .fingerprint = found, .global = null, .project = null };
     errdefer candidate.deinit();
-    if (paths.global) |path| candidate.global = try readObserved(io, allocator, path, fingerprint.global.?);
-    if (paths.project) |project| candidate.project = try readObserved(io, allocator, project.path, fingerprint.project.?);
-    return candidate;
+    if (global) |*opened| candidate.global = try readOpened(io, allocator, paths.global.?, opened, &candidate.fingerprint.global.?);
+    if (project) |*opened| candidate.project = try readOpened(io, allocator, paths.project.?.path, opened, &candidate.fingerprint.project.?);
+    return .{ .changed = candidate };
 }
 
-fn readObserved(io: std.Io, allocator: std.mem.Allocator, path: []const u8, observation: Observation) std.mem.Allocator.Error!Outcome {
-    return switch (observation) {
+/// `recorded` is this source's entry in the fingerprint the Session will
+/// keep. A read that fails after the open replaces it with the failure: the
+/// file as found was never read, and keeping its size and time would make
+/// the next turn, finding the same file, skip it for good.
+fn readOpened(io: std.Io, allocator: std.mem.Allocator, path: []const u8, opened: *const Opened, recorded: *Observation) std.mem.Allocator.Error!Outcome {
+    return switch (opened.observation) {
         .absent => .absent,
         .failed => |reason| .{ .unreadable = reason },
-        .file => |file| read(io, allocator, path, file.size),
+        .file => |found| read(io, allocator, opened.file.?, path, found.size) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.AccessDenied => {
+                recorded.* = .{ .failed = .access_denied };
+                return .{ .unreadable = .access_denied };
+            },
+            error.ReadFailed => {
+                recorded.* = .{ .failed = .io_error };
+                return .{ .unreadable = .io_error };
+            },
+        },
     };
 }
 
 const bom = "\xef\xbb\xbf";
 
-/// Reads at most the limit (plus a byte-order mark) and decides what the
-/// file contributes. `size` is the observed size, which says whether the
-/// file holds more than was kept.
-pub fn read(io: std.Io, allocator: std.mem.Allocator, path: []const u8, size: u64) std.mem.Allocator.Error!Outcome {
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{ .allow_directory = false }) catch |err| return switch (err) {
-        error.FileNotFound, error.NotDir => .absent,
-        error.AccessDenied, error.PermissionDenied => .{ .unreadable = .access_denied },
-        error.IsDir => .{ .unreadable = .not_regular_file },
-        else => .{ .unreadable = .io_error },
-    };
-    defer file.close(io);
+pub const ReadError = std.mem.Allocator.Error || error{ AccessDenied, ReadFailed };
+
+/// Reads at most the limit (plus a byte-order mark) from an open file and
+/// decides what it contributes. `size` is the handle's size, which says
+/// whether the file holds more than was kept; `path` is the document's
+/// source line. What the bytes are (text, empty, not UTF-8) is an outcome;
+/// only a read that could not happen is an error.
+pub fn read(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, path: []const u8, size: u64) ReadError!Outcome {
     const capacity: usize = @intCast(@min(size, max_text_bytes + bom.len));
     const buffer = try allocator.alloc(u8, capacity);
     defer allocator.free(buffer);
-    const count = file.readPositionalAll(io, buffer, 0) catch return .{ .unreadable = .io_error };
+    const count = file.readPositionalAll(io, buffer, 0) catch |err| return switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        else => error.ReadFailed,
+    };
     switch (decide(buffer[0..count], size > capacity)) {
         .text => |text| {
             const owned_path = try allocator.dupe(u8, path);
@@ -388,6 +435,22 @@ test "a byte-order mark is dropped, whitespace is empty, and non-text is unreada
     try testing.expectEqualStrings("one\r\ntwo", decide("one\r\ntwo", false).text.bytes);
 }
 
+test "every text a file contributes passes the Agent's own check" {
+    const path = if (std.fs.path.sep == '\\') "C:\\repo\\AGENTS.md" else "/repo/AGENTS.md";
+    const large = try testing.allocator.alloc(u8, max_text_bytes + 8);
+    defer testing.allocator.free(large);
+    @memset(large, 'a');
+    @memcpy(large[max_text_bytes - 1 ..][0..3], "\xe4\xb8\xad");
+    for ([_]struct { bytes: []const u8, more: bool }{
+        .{ .bytes = "Use tabs.", .more = false },
+        .{ .bytes = bom ++ " x ", .more = false },
+        .{ .bytes = large, .more = true },
+    }) |case| {
+        const text = decide(case.bytes, case.more).text;
+        try agent.validateInstructions(.{ .global = .{ .path = path, .text = text.bytes, .truncated = text.truncated } });
+    }
+}
+
 test "only a home gives a global path, and only a project root gives a project path" {
     const sep = std.fs.path.sep_str;
     const root = if (sep[0] == '\\') "C:\\repo" else "/repo";
@@ -400,14 +463,19 @@ test "only a home gives a global path, and only a project root gives a project p
     var neither = try resolvePaths(testing.allocator, null, null);
     defer neither.deinit(testing.allocator);
     try testing.expect(neither.global == null and neither.project == null);
-    // A path the Agent would refuse is no path at all.
+    // A path the Agent would refuse is kept whole, never cut to name some
+    // other file, and opening it reports why it is left out.
     const long = try testing.allocator.alloc(u8, max_path_bytes);
     defer testing.allocator.free(long);
     @memset(long, 'd');
     long[0] = sep[0];
     var too_long = try resolvePaths(testing.allocator, long, null);
     defer too_long.deinit(testing.allocator);
-    try testing.expect(too_long.global == null);
+    try testing.expect(std.mem.startsWith(u8, too_long.global.?, long));
+    var opened = try open(testing.io, testing.allocator, too_long.global.?, null);
+    defer opened.close(testing.io);
+    try testing.expectEqual(Observation{ .failed = .invalid_path }, opened.observation);
+    try testing.expect(opened.file == null);
 }
 
 test "containment needs a separator after the root" {
@@ -424,7 +492,7 @@ fn tmpPath(dir: std.testing.TmpDir, name: []const u8) ![]u8 {
     return std.fs.path.join(testing.allocator, &.{ root, name });
 }
 
-test "observing reports absence, a directory and a file, and reading follows the observation" {
+test "a turn reports absence, a directory and a file, and reads only when that changed" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
@@ -433,20 +501,23 @@ test "observing reports absence, a directory and a file, and reading follows the
     defer paths.deinit(testing.allocator);
 
     // Nothing there yet: no `.metawork`, no project file, and nothing created.
-    const nothing = observeAll(testing.io, testing.allocator, paths);
-    try testing.expectEqual(Observation.absent, nothing.global.?);
-    try testing.expectEqual(Observation.absent, nothing.project.?);
+    var nothing = try prepare(testing.io, testing.allocator, paths, null);
+    defer nothing.deinit();
+    try testing.expectEqual(Observation.absent, nothing.changed.fingerprint.global.?);
+    try testing.expectEqual(Observation.absent, nothing.changed.fingerprint.project.?);
+    try testing.expect(!nothing.changed.hasDocuments());
     try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, ".metawork", .{}));
+    var still = try prepare(testing.io, testing.allocator, paths, nothing.changed.fingerprint);
+    defer still.deinit();
+    try testing.expect(still == .unchanged);
 
     try tmp.dir.createDirPath(testing.io, ".metawork" ++ std.fs.path.sep_str ++ "AGENTS.md");
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "AGENTS.md", .data = "Project rules." });
-    const observed = observeAll(testing.io, testing.allocator, paths);
-    try testing.expectEqual(Observation{ .failed = .not_regular_file }, observed.global.?);
-    try testing.expectEqual(@as(u64, "Project rules.".len), observed.project.?.file.size);
-    try testing.expect(observed.eql(observeAll(testing.io, testing.allocator, paths)));
-
-    var candidate = try readAll(testing.io, testing.allocator, paths, observed);
-    defer candidate.deinit();
+    var first = try prepare(testing.io, testing.allocator, paths, nothing.changed.fingerprint);
+    defer first.deinit();
+    const candidate = &first.changed;
+    try testing.expectEqual(Observation{ .failed = .not_regular_file }, candidate.fingerprint.global.?);
+    try testing.expectEqual(@as(u64, "Project rules.".len), candidate.fingerprint.project.?.file.size);
     try testing.expectEqual(Unreadable.not_regular_file, candidate.global.?.unreadable);
     try testing.expectEqualStrings("Project rules.", candidate.project.?.document.text);
     try testing.expectEqualStrings(paths.project.?.path, candidate.project.?.document.path);
@@ -463,9 +534,22 @@ test "observing reports absence, a directory and a file, and reading follows the
     try testing.expectEqual(State.update_failed, failed.project.?.state);
     try testing.expectEqual(State.rejected, candidate.use(.{}).project.?.state);
 
-    // A change of size is a different observation.
+    // Finding the same files again reads nothing; a change of size is read.
+    var again = try prepare(testing.io, testing.allocator, paths, candidate.fingerprint);
+    defer again.deinit();
+    try testing.expect(again == .unchanged);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "AGENTS.md", .data = "Project rules, revised." });
-    try testing.expect(!observed.eql(observeAll(testing.io, testing.allocator, paths)));
+    var revised = try prepare(testing.io, testing.allocator, paths, candidate.fingerprint);
+    defer revised.deinit();
+    try testing.expectEqualStrings("Project rules, revised.", revised.changed.project.?.document.text);
+}
+
+fn readNamed(tmp: std.testing.TmpDir, name: []const u8) !Outcome {
+    const path = try tmpPath(tmp, name);
+    defer testing.allocator.free(path);
+    const opened = try handle.openRegular(testing.io, path);
+    defer opened.file.close(testing.io);
+    return read(testing.io, testing.allocator, opened.file, path, opened.stat.size);
 }
 
 test "a read keeps the limit, reports truncation and rejects non-text" {
@@ -477,9 +561,7 @@ test "a read keeps the limit, reports truncation and rejects non-text" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "large.md", .data = large });
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "binary.md", .data = "\x89PNG\x00\x01" });
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "blank.md", .data = "\n\n" });
-    const large_path = try tmpPath(tmp, "large.md");
-    defer testing.allocator.free(large_path);
-    const truncated = try read(testing.io, testing.allocator, large_path, large.len);
+    const truncated = try readNamed(tmp, "large.md");
     defer switch (truncated) {
         .document => |document| {
             testing.allocator.free(document.path);
@@ -489,15 +571,76 @@ test "a read keeps the limit, reports truncation and rejects non-text" {
     };
     try testing.expectEqual(max_text_bytes, truncated.document.text.len);
     try testing.expect(truncated.document.truncated);
-    const binary_path = try tmpPath(tmp, "binary.md");
-    defer testing.allocator.free(binary_path);
-    try testing.expectEqual(Outcome{ .unreadable = .not_utf8 }, try read(testing.io, testing.allocator, binary_path, 6));
-    const blank_path = try tmpPath(tmp, "blank.md");
-    defer testing.allocator.free(blank_path);
-    try testing.expectEqual(Outcome.empty, try read(testing.io, testing.allocator, blank_path, 2));
+    try testing.expectEqual(Outcome{ .unreadable = .not_utf8 }, try readNamed(tmp, "binary.md"));
+    try testing.expectEqual(Outcome.empty, try readNamed(tmp, "blank.md"));
     const missing_path = try tmpPath(tmp, "missing.md");
     defer testing.allocator.free(missing_path);
-    try testing.expectEqual(Outcome.absent, try read(testing.io, testing.allocator, missing_path, 0));
+    var missing = try open(testing.io, testing.allocator, missing_path, null);
+    defer missing.close(testing.io);
+    try testing.expectEqual(Observation.absent, missing.observation);
+}
+
+test "a file that could not be read is read again once it can be, at the same size and time" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    var paths = try resolvePaths(testing.allocator, root, null);
+    defer paths.deinit(testing.allocator);
+    const sub_path = ".metawork" ++ std.fs.path.sep_str ++ "AGENTS.md";
+    try tmp.dir.createDirPath(testing.io, ".metawork");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = sub_path, .data = "Be brief." });
+    const before = try tmp.dir.statFile(testing.io, sub_path, .{});
+
+    var refused = refused: {
+        if (builtin.os.tag == .windows) {
+            // Another handle's lock lets the file open but refuses the read:
+            // the failure comes after the size and time were found.
+            const lock = try tmp.dir.openFile(testing.io, sub_path, .{ .lock = .exclusive });
+            defer lock.close(testing.io);
+            break :refused try prepare(testing.io, testing.allocator, paths, null);
+        }
+        // Without read permission the open itself is refused.
+        try tmp.dir.setFilePermissions(testing.io, sub_path, .fromMode(0), .{});
+        defer tmp.dir.setFilePermissions(testing.io, sub_path, .fromMode(0o600), .{}) catch {};
+        break :refused try prepare(testing.io, testing.allocator, paths, null);
+    };
+    defer refused.deinit();
+    // A process that may read anything proves nothing here.
+    if (refused.changed.global.? != .unreadable) return error.SkipZigTest;
+    try testing.expect(refused.changed.fingerprint.global.? == .failed);
+    try testing.expectEqual(State.unreadable, refused.changed.use(.{}).global.state);
+
+    // Nothing about the file changed, and the next turn still reads it.
+    const after = try tmp.dir.statFile(testing.io, sub_path, .{});
+    try testing.expectEqual(before.size, after.size);
+    try testing.expectEqual(before.mtime.nanoseconds, after.mtime.nanoseconds);
+    var recovered = try prepare(testing.io, testing.allocator, paths, refused.changed.fingerprint);
+    defer recovered.deinit();
+    try testing.expectEqualStrings("Be brief.", recovered.changed.global.?.document.text);
+    try testing.expectEqual(
+        Observation{ .file = .{ .size = after.size, .mtime_ns = after.mtime.nanoseconds } },
+        recovered.changed.fingerprint.global.?,
+    );
+}
+
+test "a path the Agent would refuse is reported and costs only its own source" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "AGENTS.md", .data = "Project rules." });
+    // A home whose name holds a line break cannot be a source line.
+    const home = try std.fs.path.join(testing.allocator, &.{ root, "line\nbreak" });
+    defer testing.allocator.free(home);
+    var paths = try resolvePaths(testing.allocator, home, root);
+    defer paths.deinit(testing.allocator);
+    var prepared = try prepare(testing.io, testing.allocator, paths, null);
+    defer prepared.deinit();
+    try testing.expectEqual(Observation{ .failed = .invalid_path }, prepared.changed.fingerprint.global.?);
+    try testing.expectEqual(Unreadable.invalid_path, prepared.changed.global.?.unreadable);
+    try testing.expectEqualStrings("Project rules.", prepared.changed.project.?.document.text);
+    try agent.validateInstructions(prepared.changed.instructions());
 }
 
 test "a project file linked outside its working directory is not read" {
@@ -520,9 +663,15 @@ test "a project file linked outside its working directory is not read" {
     };
     var paths = try resolvePaths(testing.allocator, null, workspace);
     defer paths.deinit(testing.allocator);
-    try testing.expectEqual(Observation{ .failed = .outside_workspace }, observeAll(testing.io, testing.allocator, paths).project.?);
+    var outside = try open(testing.io, testing.allocator, paths.project.?.path, paths.project.?.root);
+    defer outside.close(testing.io);
+    try testing.expectEqual(Observation{ .failed = .outside_workspace }, outside.observation);
+    try testing.expect(outside.file == null);
     // A link that stays inside, the common AGENTS.md -> CLAUDE.md, is read.
     try workspace_dir.deleteFile(testing.io, "AGENTS.md");
     try workspace_dir.symLink(testing.io, "CLAUDE.md", "AGENTS.md", .{});
-    try testing.expectEqual(@as(u64, "inside".len), observeAll(testing.io, testing.allocator, paths).project.?.file.size);
+    var prepared = try prepare(testing.io, testing.allocator, paths, null);
+    defer prepared.deinit();
+    try testing.expectEqual(@as(u64, "inside".len), prepared.changed.fingerprint.project.?.file.size);
+    try testing.expectEqualStrings("inside", prepared.changed.project.?.document.text);
 }

@@ -6703,6 +6703,26 @@ test("task information shows the instructions the current or latest Run carried,
   assert.equal(screen.queryByText("Last run global instructions"), null);
   cleanup();
 
+  // A path the agent cannot be given costs only its own file.
+  await open(null, [
+    {
+      ...runs[1],
+      instructions: {
+        global: use("unreadable", false, "invalid_path"),
+        project: { path: "/work/repo/AGENTS.md", ...use("applied") },
+      },
+    },
+  ]);
+  assert.equal(
+    fact("Last run global instructions"),
+    "Could not be read: path has a control character or is too long",
+  );
+  assert.equal(
+    fact("Last run project instructions"),
+    "/work/repo/AGENTS.mdUsed",
+  );
+  cleanup();
+
   await open({ kind: "run", id: "7" }, runs, "zh-CN");
   assert.equal(fact("当前轮全局指令"), "已使用（截断到 32 KiB）");
   assert.equal(

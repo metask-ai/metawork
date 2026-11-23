@@ -2857,6 +2857,7 @@ const instructionUnreadableReasons = [
   "not_regular_file",
   "outside_workspace",
   "not_utf8",
+  "invalid_path",
   "io_error",
 ] as const;
 

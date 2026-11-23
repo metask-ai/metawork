@@ -3,8 +3,10 @@
 //! how the Settings editor loads and saves the global one.
 pub const source = @import("instructions/source.zig");
 pub const global_file = @import("instructions/global_file.zig");
+pub const handle = @import("instructions/handle.zig");
 
 test {
     _ = source;
     _ = global_file;
+    _ = handle;
 }

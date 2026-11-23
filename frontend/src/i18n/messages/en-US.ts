@@ -1381,6 +1381,8 @@ export const enUS = {
   "task.instructions.reason.outside_workspace":
     "links outside the working directory",
   "task.instructions.reason.not_utf8": "not UTF-8 text",
+  "task.instructions.reason.invalid_path":
+    "path has a control character or is too long",
   "task.instructions.reason.io_error": "read error",
   "task.instructions.rejected": "Not used: the agent refused it",
   "task.instructions.update_failed":

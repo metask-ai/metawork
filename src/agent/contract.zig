@@ -107,6 +107,7 @@ pub const InstructionsApplied = surface.InstructionsApplied;
 pub const max_instruction_path_bytes = surface.max_instruction_path_bytes;
 pub const max_instruction_text_bytes = surface.max_instruction_text_bytes;
 pub const validateInstructions = surface.validateInstructions;
+pub const validInstructionPath = surface.validInstructionPath;
 /// The MCP owners the execution link stands in for across a process
 /// boundary, named here so the link, which imports only this module, reaches
 /// them without the AgentCore archive.

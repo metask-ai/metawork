@@ -3729,12 +3729,13 @@ pub const Runtime = struct {
         };
     }
 
-    /// Observes both user instruction files for the Task's next Run and reads
+    /// Opens both user instruction files for the Task's next Run and reads
     /// them only when what it finds differs from what the Task's Session
-    /// already carries. Runs on this thread: a stat per file every turn, and
-    /// at most two bounded reads when something changed. A working directory
-    /// on an unreachable network share therefore holds this call until the
-    /// file system answers; see `product-architecture.md` 2.9.
+    /// already carries. Runs on this thread: an open and a handle stat per
+    /// file every turn, and at most two bounded reads when something changed.
+    /// A working directory on an unreachable network share therefore holds
+    /// this call until the file system answers; see
+    /// `product-architecture.md` 2.9.
     fn prepareRunInstructions(
         self: *Runtime,
         task_id: u64,
@@ -3746,10 +3747,8 @@ pub const Runtime = struct {
             null;
         var paths = try product_instructions.resolvePaths(self.allocator, self.canonical_user_home, project_root);
         defer paths.deinit(self.allocator);
-        const observed = product_instructions.observeAll(self.io, self.allocator, paths);
-        if (self.task_runtime.installedInstructions(task_id)) |installed|
-            if (installed.fingerprint.eql(observed)) return .unchanged;
-        return .{ .changed = try product_instructions.readAll(self.io, self.allocator, paths, observed) };
+        const installed = if (self.task_runtime.installedInstructions(task_id)) |value| value.fingerprint else null;
+        return product_instructions.prepare(self.io, self.allocator, paths, installed);
     }
 
     /// The global instructions file for the Settings editor. `path` is null

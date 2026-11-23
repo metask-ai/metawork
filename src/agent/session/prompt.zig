@@ -324,6 +324,11 @@ test "instruction documents are checked before any section is built" {
         try std.testing.expectError(error.InvalidInstructions, surface.validateInstructions(.{ .global = document }));
         try std.testing.expectError(error.InvalidInstructions, surface.validateInstructions(.{ .global = valid, .project = document }));
     }
+    // The path rule a caller checks before reading is the one applied here.
+    try std.testing.expect(surface.validInstructionPath(valid.path));
+    for (invalid[0..3]) |document| try std.testing.expect(!surface.validInstructionPath(document.path));
+    try std.testing.expect(!surface.validInstructionPath("/a\x7fb"));
+    try std.testing.expect(!surface.validInstructionPath("/" ++ "p" ** surface.max_instruction_path_bytes));
 }
 
 test "the largest valid documents fit one section each" {

@@ -615,6 +615,7 @@ test("Run instructions say what each file contributed, and nothing they cannot h
       global: use("update_failed", true),
       project: { path: null, ...use("rejected") },
     },
+    { global: use("unreadable", false, "invalid_path"), project: null },
   ];
   for (const instructions of valid) {
     const candidate = clone(fixture);
