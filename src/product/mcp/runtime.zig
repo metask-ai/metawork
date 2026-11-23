@@ -1254,13 +1254,16 @@ pub const Runtime = struct {
         return null;
     }
 
-    pub fn startPendingInstallation(self: *Runtime, id: u64, request: agent.McpInstallRequest, source_message: ?u64, requires_confirmation: bool, existing: ?[]const u8) Error!configuration.CreateResult {
+    /// The tool call that submitted the request already carries the user's
+    /// authorization for this installation under the Task's approval mode.
+    /// Only a cross-origin credential transfer asks the Host again.
+    pub fn startPendingInstallation(self: *Runtime, id: u64, request: agent.McpInstallRequest, existing: ?[]const u8) Error!configuration.CreateResult {
         const pending = self.pendingInstallation() orelse return .{ .outcome = .rejected };
         if (pending.id != id) return .{ .outcome = .rejected };
         const d = request.connection;
         const source_url = std.mem.sliceTo(request.sourceUrl, '#');
         const origin = configuration.endpointOrigin(source_url, 4096) orelse return .{ .outcome = .rejected };
-        var needs_authorization = requires_confirmation;
+        var needs_authorization = false;
         const destination = if (d.endpoint) |endpoint| configuration.endpointOrigin(endpoint, 4096) orelse return .{ .outcome = .rejected } else null;
         var slots: [16]configuration.InstallationCredentialWire = undefined;
         for (request.credentials, 0..) |plan, i| {
@@ -1288,7 +1291,7 @@ pub const Runtime = struct {
         return self.startInstallation(inspection.desired_generation orelse 0, connection, .{
             .task_id = pending.task_id,
             .run_id = pending.run_id,
-            .source_message_id = source_message orelse pending.run_id,
+            .source_message_id = pending.run_id,
             .source_origin = origin,
             .phase = if (needs_authorization) .needs_authorization else .preparing,
             .request = pending.json,

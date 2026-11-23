@@ -6317,10 +6317,8 @@ pub const Runtime = struct {
         if (pending.id != id or !self.task_runtime.mcpInstallationSourceAvailable(pending.task_id, pending.run_id)) return .{ .outcome = .rejected };
         var parsed = lifecycle.parseMcpInstallRequest(self.allocator, pending.json) catch return .{ .outcome = .rejected };
         defer parsed.deinit();
-        const request = parsed.parsed.value;
-        const evidence = self.task_runtime.mcpInstallationSourceEvidence(pending.task_id, request.sourceUrl);
         defer self.publishMcpRuntimeChanges();
-        return runtime.startPendingInstallation(id, request, evidence.message_id, evidence.requiresConfirmation(), existing) catch |err| return @errorCast(err);
+        return runtime.startPendingInstallation(id, parsed.parsed.value, existing) catch |err| return @errorCast(err);
     }
 
     pub fn observeMcpInstallation(self: *Runtime, id: ?[]const u8) ?control_ports.McpInstallObservation {
