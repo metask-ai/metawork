@@ -1110,6 +1110,11 @@ fn outputCheckAuthorityState(err: anyerror) OutputCheckState {
 }
 
 pub const FilePreviewState = file_preview.State;
+pub const ToolPage = task_runtime.ToolPage;
+pub const ToolPageState = task_runtime.ToolPageState;
+/// Source text one Tool page formats on the main thread. A page always
+/// carries a remaining record, so this bounds the work, not the history.
+pub const tool_page_source_bytes: usize = 256 * 1024;
 pub const DirectoryEntry = file_preview.DirectoryEntry;
 pub const file_preview_chunk_bytes = file_preview.media_chunk_bytes;
 pub const max_file_preview_media = file_preview.max_media_slots;
@@ -10097,6 +10102,13 @@ pub const Runtime = struct {
     pub fn projectionSecurityEpoch(self: *const Runtime) u64 {
         return self.projection_security_epoch;
     }
+
+    /// One page of a Run's Tool records for the Renderer, sanitized with the
+    /// live credential set. Main-thread only; the output is borrowed.
+    pub fn writeToolPage(self: *Runtime, output: []u8, task_id: u64, run_id: u64, after_order: u64) Error!ToolPage {
+        const text = self.liveViewText();
+        return self.task_runtime.writeToolPage(self.allocator, output, text.task(), task_id, run_id, after_order, tool_page_source_bytes) catch |err| return @errorCast(err);
+    }
 };
 
 test "updates Control publishes committed facts through the canonical live context" {
@@ -18796,6 +18808,119 @@ test "Runtime projects tools and full-width usage without parsing protocol in Re
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "stdout\\nexit 0") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"elapsedMs\":\"18446744073709551615\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"input\":\"18446744073709551615\"") != null);
+}
+
+fn applyTestToolResult(control: *Runtime, id: []const u8, content: []const u8) !void {
+    var buffer: [1024]u8 = undefined;
+    var start = try testEnvelope(3, 7, try std.fmt.bufPrint(&buffer, "{{\"tool_start\":{{\"id\":\"{s}\",\"name\":\"Read\",\"input\":\"{{}}\"}}}}", .{id}));
+    defer start.deinit();
+    try control.applyEvent(&start);
+    const encoded = try std.fmt.allocPrint(std.testing.allocator, "{{\"tool_result\":{{\"id\":\"{s}\",\"name\":\"Read\",\"input\":\"{{}}\",\"content\":\"{s}\",\"is_error\":false,\"elapsed_ms\":1}}}}", .{ id, content });
+    defer std.testing.allocator.free(encoded);
+    var result = try testEnvelope(3, 7, encoded);
+    defer result.deinit();
+    try control.applyEvent(&result);
+}
+
+fn testToolPageOrders(control: *Runtime, output: []u8, source_budget: usize, orders: *std.ArrayList(u64)) !u64 {
+    const text = control.liveViewText();
+    var after: u64 = 0;
+    var pages: u64 = 0;
+    while (true) {
+        const page = try control.task_runtime.writeToolPage(std.testing.allocator, output, text.task(), 3, 7, after, source_budget);
+        try std.testing.expectEqual(ToolPageState.ready, page.state);
+        pages += 1;
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page.json, .{});
+        defer parsed.deinit();
+        for (parsed.value.array.items) |entry| try orders.append(std.testing.allocator, try std.fmt.parseInt(u64, entry.object.get("order").?.string, 10));
+        after = page.next_after_order orelse return pages;
+    }
+}
+
+test "Tool pages continue in activity order and repair a displaced slot order" {
+    var limits = testLimits();
+    limits.max_tools_per_run = 6;
+    var control = try testRuntimeWithLimits(limits, .{});
+    defer control.deinit();
+    for ([_][]const u8{ "a", "b", "c", "d", "e" }) |id| try applyTestToolResult(&control, id, "ok");
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
+    try std.testing.expect(run.tool_revision != 0);
+    var output: [16 * 1024]u8 = undefined;
+
+    var orders: std.ArrayList(u64) = .empty;
+    defer orders.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), try testToolPageOrders(&control, &output, tool_page_source_bytes, &orders));
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4, 5 }, orders.items);
+
+    // A tiny source budget still carries one record per page.
+    orders.clearRetainingCapacity();
+    try std.testing.expectEqual(@as(u64, 5), try testToolPageOrders(&control, &output, 1, &orders));
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4, 5 }, orders.items);
+
+    // History written while receipts displaced records keeps slots out of order.
+    std.mem.swap(?task_test_state.ToolView, &run.tools[0], &run.tools[3]);
+    orders.clearRetainingCapacity();
+    _ = try testToolPageOrders(&control, &output, 1, &orders);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4, 5 }, orders.items);
+    std.mem.swap(?task_test_state.ToolView, &run.tools[0], &run.tools[3]);
+
+    const text = control.liveViewText();
+    const tail = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, 5, tool_page_source_bytes);
+    try std.testing.expectEqualStrings("[]", tail.json);
+    try std.testing.expectEqual(@as(u64, 5), tail.total);
+    try std.testing.expectEqual(run.tool_revision, tail.revision);
+    try std.testing.expect(tail.next_after_order == null);
+    const revision = run.tool_revision;
+    try applyTestToolResult(&control, "f", "ok");
+    try std.testing.expect(run.tool_revision > revision);
+
+    try std.testing.expectEqual(ToolPageState.missing, (try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 4, 7, 0, tool_page_source_bytes)).state);
+    try std.testing.expectEqual(ToolPageState.missing, (try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 8, 0, tool_page_source_bytes)).state);
+}
+
+test "a Tool record too large for one page is sent without its text and marked" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try applyTestToolResult(&control, "large", "x" ** 4096);
+    try applyTestToolResult(&control, "small", "ok");
+    // Holds one cut entry but not a second one.
+    var output: [512]u8 = undefined;
+    const text = control.liveViewText();
+    const first = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, 0, tool_page_source_bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first.json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    const entry = parsed.value.array.items[0].object;
+    try std.testing.expect(entry.get("transportTruncated").?.bool);
+    try std.testing.expectEqualStrings("", entry.get("content").?.string);
+    try std.testing.expectEqualStrings("{}", entry.get("input").?.string);
+    try std.testing.expectEqual(@as(?u64, 1), first.next_after_order);
+    // The record itself is unchanged; only this response left text out.
+    try std.testing.expectEqual(@as(usize, 4096), control.testTaskSlots()[0].?.durable.runs[0].?.tools[0].?.content.len);
+    const second = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, 1, tool_page_source_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, second.json, "transportTruncated") == null);
+    try std.testing.expect(second.next_after_order == null);
+}
+
+test "Tool pages hide credentials learned after the record was kept" {
+    const Account = struct {
+        fn generation(_: *anyopaque) u64 {
+            return 1;
+        }
+        fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            try callback(context, "page-account-key");
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    try applyTestToolResult(&control, "secret", "before page-account-key after");
+    var owner: u8 = 0;
+    control.setAccountProjectionCredentials(.{ .context = &owner, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    var output: [16 * 1024]u8 = undefined;
+    const text = control.liveViewText();
+    const page = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, 0, tool_page_source_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, page.json, "page-account-key") == null);
+    try std.testing.expect(std.mem.indexOf(u8, page.json, "***") != null);
 }
 
 test "Tool file references are allocated only for the references a result carries" {

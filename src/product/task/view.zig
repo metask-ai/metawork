@@ -1165,10 +1165,17 @@ fn writeDeliveredOutput(writer: *std.Io.Writer, text: TextProjection, output: *c
 pub const ToolProjection = task_state.ToolView;
 
 pub const ToolStage = enum { identity, bash_input, bash_result, presentation_input, presentation_result, error_detail, details, done };
-pub const ToolWritingState = struct { stage: ToolStage = .identity, redacted: bool = false, presentation_open: bool = false };
+pub const ToolWritingState = struct { stage: ToolStage = .identity, redacted: bool = false, presentation_open: bool = false, transport_truncated: bool = false };
 
 pub fn writeToolProjection(writer: *std.Io.Writer, text_projection: TextProjection, tool: *const ToolProjection) Error!void {
     var state: ToolWritingState = .{};
+    while (state.stage != .done) try writeToolStage(writer, text_projection, tool, &state);
+}
+
+/// One entry of a paged Tool read: the same shape as a snapshot Tool, marked
+/// when its text fields were left out so the entry fits one response.
+pub fn writeToolPageEntry(writer: *std.Io.Writer, text_projection: TextProjection, tool: *const ToolProjection, transport_truncated: bool) Error!void {
+    var state: ToolWritingState = .{ .transport_truncated = transport_truncated };
     while (state.stage != .done) try writeToolStage(writer, text_projection, tool, &state);
 }
 
@@ -1198,7 +1205,7 @@ fn writeToolStage(writer: *std.Io.Writer, text_projection: TextProjection, tool:
             try text_projection.writeJson(writer, tool.progress);
             writer.writeAll(",\"content\":") catch return error.SnapshotTooLarge;
             try text_projection.writeJson(writer, if (state.redacted) "***" else tool.content);
-            writer.print(",\"state\":\"{s}\",\"isError\":{},\"elapsedMs\":\"{d}\",\"inputTruncated\":{},\"progressTruncated\":{},\"contentTruncated\":{},\"redacted\":{},\"fileRefs\":[", .{
+            writer.print(",\"state\":\"{s}\",\"isError\":{},\"elapsedMs\":\"{d}\",\"inputTruncated\":{},\"progressTruncated\":{},\"contentTruncated\":{},\"redacted\":{}", .{
                 @tagName(tool.state),
                 tool.is_error,
                 tool.elapsed_ms,
@@ -1207,6 +1214,9 @@ fn writeToolStage(writer: *std.Io.Writer, text_projection: TextProjection, tool:
                 tool.content_truncated,
                 tool.redacted or state.redacted,
             }) catch return error.SnapshotTooLarge;
+            if (state.transport_truncated)
+                writer.writeAll(",\"transportTruncated\":true") catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"fileRefs\":[") catch return error.SnapshotTooLarge;
             var file_ref_count: usize = 0;
             if (tool.file_refs) |refs| for (refs) |*file_ref_entry| {
                 const reference = file_ref_entry.* orelse continue;

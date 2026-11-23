@@ -21,10 +21,12 @@ const attachment_grant = @import("attachment_grant.zig");
 const notification_text = @import("notification_text.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 21;
+const async_product_handler_count = 22;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
+/// The identity fields and the success envelope fit in the remainder.
+const run_tools_page_bytes: usize = native_sdk.bridge.max_result_bytes - 4 * 1024;
 const max_preview_in_flight: usize = 8;
 const max_diff_in_flight: usize = 8;
 const max_attachment_in_flight: usize = 4;
@@ -355,6 +357,7 @@ pub const Dispatcher = struct {
     preview_in_flight: [max_preview_in_flight]PreviewInFlight = @splat(.{}),
     next_preview_completion_id: u64 = 1,
     preview_high_water: u64 = 0,
+    run_tools_high_water: u64 = 0,
     preview_grants: [product_control.max_file_preview_media]?PreviewGrant = @splat(null),
     preview_timer_armed: bool = false,
     output_timer_armed: bool = false,
@@ -564,6 +567,7 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[18] = .{ .name = commands.mcp_verify_add_http_draft, .context = self, .invoke_fn = verifyAndAddMcpHttpDraft };
         self.registered_async_handlers[19] = .{ .name = commands.media_preview, .context = self, .invoke_fn = mediaPreview };
         self.registered_async_handlers[20] = .{ .name = commands.add_project, .context = self, .invoke_fn = chooseWorkspace };
+        self.registered_async_handlers[21] = .{ .name = commands.read_run_tools, .context = self, .invoke_fn = readRunTools };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -814,6 +818,7 @@ pub const Dispatcher = struct {
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
         self.deliverNotificationTask() catch {};
         self.preview_high_water = 0;
+        self.run_tools_high_water = 0;
         self.output_high_water = 0;
         self.grants.invalidate();
         self.invalidateSkillPreparation();
@@ -1351,6 +1356,54 @@ pub const Dispatcher = struct {
         if (preview_id == 0) return error.InvalidBridgeId;
         try self.delivery.validateConnection(generation, invocation.source.window_id);
         return .{ .generation = generation, .preview_id = preview_id };
+    }
+
+    fn readRunTools(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.respondRunTools(invocation, responder) catch {
+            // A malformed, stale or unauthorized request learns nothing about history.
+            responder.fail(invocation.request.id, .handler_failed, "Tool records are unavailable") catch {};
+        };
+    }
+    /// One page is formatted synchronously and bounded by its source budget;
+    /// the encoded page leaves room for the identity fields and the envelope.
+    fn respondRunTools(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.RunToolsRequest, invocation.request.payload);
+        defer parsed.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        const generation = try handlers.parseWireId(parsed.value.generation);
+        const request_id = try handlers.parseWireId(parsed.value.requestId);
+        if (request_id == 0 or request_id <= self.run_tools_high_water) return error.InvalidBridgePayload;
+        try self.delivery.validateConnection(generation, invocation.source.window_id);
+        self.run_tools_high_water = request_id;
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const run_id = try handlers.parseWireId(parsed.value.runId);
+        const after_order = try handlers.parseWireId(parsed.value.afterOrder);
+        if (task_id == 0 or run_id == 0) return error.InvalidBridgePayload;
+        const control = try self.requireProductControl();
+        const page_buffer = try self.allocator.alloc(u8, run_tools_page_bytes);
+        defer self.allocator.free(page_buffer);
+        const page = try control.writeToolPage(page_buffer, task_id, run_id, after_order);
+        const result = try self.allocator.alloc(u8, native_sdk.bridge.max_result_bytes);
+        defer self.allocator.free(result);
+        var writer = std.Io.Writer.fixed(result);
+        try writer.print("{{\"generation\":\"{d}\",\"requestId\":\"{d}\",\"state\":\"{s}\",\"securityEpoch\":\"{d}\",\"revision\":\"{d}\",\"total\":\"{d}\",\"tools\":", .{
+            generation,
+            request_id,
+            @tagName(page.state),
+            control.projectionSecurityEpoch(),
+            page.revision,
+            page.total,
+        });
+        try writer.writeAll(if (page.state == .ready) page.json else "[]");
+        if (page.next_after_order) |order|
+            try writer.print(",\"nextAfterOrder\":\"{d}\"}}", .{order})
+        else
+            try writer.writeAll(",\"nextAfterOrder\":null}");
+        try responder.success(invocation.request.id, writer.buffered());
     }
 
     fn previewFile(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
@@ -7059,6 +7112,108 @@ test "file preview native grants bind authority and cancellation and expire with
     try std.testing.expectEqual(@as(usize, 9), opened.calls);
     try std.testing.expect(!control.hasFilePreviews());
     boundary.assertQuiescent();
+}
+
+test "Tool page command answers the bound connection with one bounded page" {
+    const Host = struct {
+        fn wake(_: ?*anyopaque) !void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) !void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) !void {}
+        fn cancel(_: ?*anyopaque, _: u64) !void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn random(_: ?*anyopaque, bytes: []u8) bool {
+            @memset(bytes, 7);
+            return true;
+        }
+    };
+    const Capture = struct {
+        response: ?[]u8 = null,
+        fn receive(context: *anyopaque, _: native_sdk.bridge.Source, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.response) |old| std.testing.allocator.free(old);
+            self.response = try std.testing.allocator.dupe(u8, bytes);
+        }
+        fn deinit(self: *@This()) void {
+            if (self.response) |bytes| std.testing.allocator.free(bytes);
+        }
+        fn invoke(self: *@This(), native: native_sdk.bridge.Dispatcher, payload: []const u8, window_id: u64) !void {
+            const handler = native.async_registry.find(commands.read_run_tools).?;
+            const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = window_id };
+            try handler.invoke_fn(handler.context, .{ .request = .{ .id = "tools-test", .command = commands.read_run_tools, .payload = payload }, .source = source }, .{ .context = self, .source = source, .respond_fn = receive });
+        }
+        fn result(self: *@This()) !std.json.Parsed(std.json.Value) {
+            return std.json.parseFromSlice(std.json.Value, std.testing.allocator, self.response.?, .{});
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const control = try std.testing.allocator.create(product_control.Runtime);
+    defer std.testing.allocator.destroy(control);
+    try product_control.TestSupport.filePreviewFixture(control, root);
+    defer control.deinit();
+    var boundary = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{
+        .context = null,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .random_fn = Host.random,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_control_fn = undefined,
+    }, .{}, 3);
+    defer boundary.deinit();
+    _ = try boundary.delivery.connect(3, boundary.transport());
+    const native = boundary.register(@import("policy.zig").product(.release));
+    var capture: Capture = .{};
+    defer capture.deinit();
+
+    try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"0\"}", 3);
+    {
+        var parsed = try capture.result();
+        defer parsed.deinit();
+        const value = parsed.value.object.get("result").?.object;
+        try std.testing.expectEqual(@as(usize, 8), value.count());
+        try std.testing.expectEqualStrings("1", value.get("generation").?.string);
+        try std.testing.expectEqualStrings("1", value.get("requestId").?.string);
+        try std.testing.expectEqualStrings("ready", value.get("state").?.string);
+        var epoch: [20]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&epoch, "{d}", .{control.projectionSecurityEpoch()}), value.get("securityEpoch").?.string);
+        try std.testing.expectEqualStrings("1", value.get("total").?.string);
+        try std.testing.expect(value.get("nextAfterOrder").? == .null);
+        const tools = value.get("tools").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), tools.len);
+        try std.testing.expectEqualStrings("file-3-1-1-1", tools[0].object.get("fileRefs").?.array.items[0].object.get("id").?.string);
+    }
+    // Request identities only move forward on a connection.
+    try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"0\"}", 3);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"ok\":false") != null);
+    // A Run outside this Task reveals nothing but that it is missing.
+    try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"2\",\"taskId\":\"3\",\"runId\":\"8\",\"afterOrder\":\"0\"}", 3);
+    {
+        var parsed = try capture.result();
+        defer parsed.deinit();
+        const value = parsed.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("missing", value.get("state").?.string);
+        try std.testing.expectEqual(@as(usize, 0), value.get("tools").?.array.items.len);
+    }
+    // Another window or a stale generation is not the bound connection.
+    try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"3\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"0\"}", 4);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"ok\":false") != null);
+    try capture.invoke(native, "{\"generation\":\"2\",\"requestId\":\"4\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"0\"}", 3);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"ok\":false") != null);
+    try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"5\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"x\"}", 3);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"ok\":false") != null);
 }
 
 test "file preview async response preserves the exact bounded wire shape" {

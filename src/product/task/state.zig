@@ -1070,6 +1070,9 @@ pub const RunRecord = struct {
     execution: ?*RunExecution = null,
     /// Projection invalidation only; never persisted or supplied to AgentCore.
     projection_content_version: u64 = 1,
+    /// Advances whenever a Tool record of this Run is created or changes, so a
+    /// paged read of the records can tell it is stale. Runtime-only.
+    tool_revision: u64 = 0,
     /// Never encoded in history or reconstructed from a checkpoint.
     image_execution: ?OwnedImageExecution = null,
     video_execution: ?OwnedVideoExecution = null,
@@ -2287,6 +2290,7 @@ pub fn applyEvent(
             if (text.len != 0) _ = observeModelActivity(run, .writing);
         },
         .tool_start => |tool_event| {
+            run.tool_revision +%= 1;
             const tool = try projection.findOrCreateTool(
                 run,
                 tool_event.id,
@@ -2299,6 +2303,7 @@ pub fn applyEvent(
         .tool_progress => |progress| {
             const tool = findTool(run.tools, progress.id) orelse
                 return error.ToolCapacity;
+            run.tool_revision +%= 1;
             const projected = try projection.replaceText(
                 &tool.progress,
                 progress.text,
@@ -2318,6 +2323,7 @@ pub fn applyEvent(
                 const record = projection.record_output_fn orelse return error.InvalidDeliveryReceipt;
                 try record(projection.context, run, receipt);
             }
+            run.tool_revision +%= 1;
             projectToolResultDetails(task.durable.id, run, envelope, projection) catch |failure| switch (failure) {
                 error.ProjectionCapacity, error.ToolCapacity => _ = recordEventProjectionFailure(run),
                 else => return @as(EventApplyError!EventApplication, failure),

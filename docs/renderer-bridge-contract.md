@@ -152,6 +152,14 @@ save 由 Application 消费 Native SDK Runtime 保存对话框选择目标，路
 
 `skillManagement.assets[].scope` 精确为 `{ kind: personal | project | external, workspaceId }`，project 时 `workspaceId` 非空，其余为 null；asset 不携带 Workspace epoch。Renderer 只按 `workspaceId` 把 project asset 归入 `workspaces[]` 中的 Workspace；所有携带 `expectedWorkspaceEpoch` 的 command 必须取同一 snapshot 中该 Workspace 的当前 `epoch`。
 
+## Tool page command
+
+`metawork.tasks.tools` 是 revision 1 command catalog 中的异步 command，按页读取一个 Run 的 Tool 记录。request 精确为 `{ generation, requestId, taskId, runId, afterOrder }`，五个字段都是 canonical decimal `u64` string。`requestId` 在同一连接内严格递增；`afterOrder = "0"` 表示从头读，否则只读 activity order 大于它的记录。Task 与 Run 必须是当前连接可投影的 Task 及其可投影 Run。
+
+response result 精确为 `{ generation, requestId, state, securityEpoch, revision, total, tools, nextAfterOrder }`。`state` 为 `ready | missing`，`missing` 时 `tools` 为空数组。`revision` 是该 Run Tool 记录的运行期版本，任一记录创建或改变都会推进，冷启动后重新计数；`total` 是该 Run 保留的记录数；两者都是 canonical decimal `u64` string。`tools[]` 按 activity order 递增，每项与 Snapshot 中的 Tool 条目同形，另可带 `transportTruncated: true`：该条单独放不下一个响应时，Host 依次整段省略 progress、content、input 的发送，存储不变。`nextAfterOrder` 为本页最后一条的 order，读完为 null。Renderer 必须丢弃 `securityEpoch` 与当前值不一致的响应。
+
+一页在主线程同步格式化：源文本至多 256 KiB，但至少一条，编码结果连同响应外壳落在 Native SDK 1 MiB 上限内。清洗使用与 Snapshot 相同的 Host 凭据集合。同一安全代次内，非 running 记录不再改变，Renderer 只需重读含 running 记录的页和尾页。格式错误、重放的 `requestId`、非绑定窗口或 generation 都返回 handler failure，不透露历史。
+
 ## File preview command
 
 `metawork.files.preview` 是 revision 1 command catalog 中的异步 command，原地 hard cut 使用 Native SDK async registry；它不出现在同步 handler registry。request 精确为：
