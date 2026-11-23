@@ -1,9 +1,47 @@
 import type { Ref, ReactNode } from "react";
-import type { ModelsView, TaskView } from "../../bridge/contracts.ts";
+import type {
+  InstructionUse,
+  ModelsView,
+  TaskView,
+} from "../../bridge/contracts.ts";
 import { DiagnosticDisclosure } from "../../components/ui/DiagnosticDisclosure.tsx";
 import { Popover } from "../../components/ui/popover.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
-import { useI18n } from "../../i18n/context.ts";
+import { useI18n, type MessageId } from "../../i18n/context.ts";
+
+/** What one instruction file contributed to the Run, as the Host said. */
+function instructionStatus(
+  use: InstructionUse,
+  source: "global" | "project",
+  t: (id: MessageId, values?: Record<string, string>) => string,
+) {
+  switch (use.state) {
+    case "applied":
+      return t(
+        use.truncated
+          ? "task.instructions.applied_truncated"
+          : "task.instructions.applied",
+      );
+    case "absent":
+      return t(
+        source === "global"
+          ? "task.instructions.global_absent"
+          : "task.instructions.project_absent",
+      );
+    case "empty":
+      return t("task.instructions.empty");
+    case "unreadable":
+      return t("task.instructions.unreadable", {
+        reason: t(`task.instructions.reason.${use.reason ?? "io_error"}`),
+      });
+    case "rejected":
+      return t("task.instructions.rejected");
+    case "update_failed":
+      return t("task.instructions.update_failed");
+    case "unavailable":
+      return t("task.instructions.unavailable");
+  }
+}
 
 export function TaskInformation({
   task,
@@ -89,6 +127,51 @@ export function TaskInformation({
                       )}
                     </dd>
                   </div>
+                </>
+              )}
+              {executionRun?.instructions && (
+                <>
+                  <div>
+                    <dt>
+                      {t(
+                        activeRun
+                          ? "task.current_run_global_instructions"
+                          : "task.last_run_global_instructions",
+                      )}
+                    </dt>
+                    <dd>
+                      {instructionStatus(
+                        executionRun.instructions.global,
+                        "global",
+                        t,
+                      )}
+                    </dd>
+                  </div>
+                  {executionRun.instructions.project && (
+                    <div>
+                      <dt>
+                        {t(
+                          activeRun
+                            ? "task.current_run_project_instructions"
+                            : "task.last_run_project_instructions",
+                        )}
+                      </dt>
+                      <dd className="task-instructions-fact">
+                        {executionRun.instructions.project.path && (
+                          <code title={executionRun.instructions.project.path}>
+                            {executionRun.instructions.project.path}
+                          </code>
+                        )}
+                        <span>
+                          {instructionStatus(
+                            executionRun.instructions.project,
+                            "project",
+                            t,
+                          )}
+                        </span>
+                      </dd>
+                    </div>
+                  )}
                 </>
               )}
               <div>

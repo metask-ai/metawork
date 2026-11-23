@@ -1366,6 +1366,26 @@ export const enUS = {
   "task.last_run_model": "Last run model",
   "task.current_run_protocol": "Current run protocol",
   "task.last_run_protocol": "Last run protocol",
+  "task.current_run_global_instructions": "Current run global instructions",
+  "task.last_run_global_instructions": "Last run global instructions",
+  "task.current_run_project_instructions": "Current run project instructions",
+  "task.last_run_project_instructions": "Last run project instructions",
+  "task.instructions.applied": "Used",
+  "task.instructions.applied_truncated": "Used (truncated to 32 KiB)",
+  "task.instructions.global_absent": "Not set",
+  "task.instructions.project_absent": "No AGENTS.md",
+  "task.instructions.empty": "File is empty",
+  "task.instructions.unreadable": "Could not be read: {reason}",
+  "task.instructions.reason.access_denied": "permission denied",
+  "task.instructions.reason.not_regular_file": "not a regular file",
+  "task.instructions.reason.outside_workspace":
+    "links outside the working directory",
+  "task.instructions.reason.not_utf8": "not UTF-8 text",
+  "task.instructions.reason.io_error": "read error",
+  "task.instructions.rejected": "Not used: the agent refused it",
+  "task.instructions.update_failed":
+    "Not updated for this run; the previous instructions were kept",
+  "task.instructions.unavailable": "No home folder",
   "task.information_scope":
     "Connector information reflects tool selection at task creation, not current connection status. Approval mode shows the current conversation setting.",
   "conversation.context_observed":
