@@ -64,7 +64,7 @@ import { useAutosizeTextarea } from "../../components/ui/textarea.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
 import { RunProcess } from "./RunProcess.tsx";
-import type { RunToolsCache, RunToolsLoader } from "./run-tools.ts";
+import { RunToolsCache, type RunToolsLoader } from "./run-tools.ts";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
 import { RunOutputs, type OutputEditHandler } from "./RunOutputs.tsx";
 import {
@@ -633,7 +633,12 @@ export function TaskContent({
   }) => ReactNode;
 }) {
   const { locale, t } = useI18n();
-  const [toolsCache] = useState(() => runToolsCache ?? new Map());
+  const [toolsCache] = useState(() => runToolsCache ?? new RunToolsCache());
+  // Run ids restart in every Task: pages of another Task or security epoch
+  // are dropped as soon as this view shows a different one.
+  useEffect(() => {
+    toolsCache.retain(task?.id, securityEpoch);
+  }, [toolsCache, task?.id, securityEpoch]);
   const observedRunTerminals = useRef(new Map<string, boolean>());
   useEffect(() => {
     observedRunTerminals.current = new Map(

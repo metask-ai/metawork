@@ -177,7 +177,7 @@ const next = {
 };
 let revision = 0;
 // One view keeps the Tool pages it read across these renders.
-const runToolsCache = runToolsCacheFor([base, done, next]);
+const runToolsCache = runToolsCacheFor({ id: "3", runs: [base, done, next] });
 function render(stage: string) {
   const runs =
     stage === "paged"

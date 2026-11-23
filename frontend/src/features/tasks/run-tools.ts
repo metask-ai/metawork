@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type {
   RunToolLog,
   RunToolsPage,
@@ -17,47 +17,184 @@ export type RunToolsLoader = (
  * the cursor of the next unread page; null means the read reached the end.
  */
 export type RunToolsState = {
+  /** The task page's `toolLog.revision` these pages answer. */
   revision: string | null;
   tools: ToolView[];
   nextAfterOrder: string | null;
   status: "idle" | "loading" | "ready" | "error";
+  /** Read while the Run was active; its end may still settle records. */
+  readWhileActive: boolean;
 };
-
-/**
- * Pages read per Run, owned by the Task view. A Run's details render from
- * one place while it is active and another once it ends; the cache keeps the
- * pages across that remount instead of reading them again.
- */
-export type RunToolsCache = Map<string, RunToolsState>;
 
 export const idleRunTools: RunToolsState = {
   revision: null,
   tools: [],
   nextAfterOrder: null,
   status: "idle",
+  readWhileActive: false,
 };
 
-/** Keeps the records up to `cursor` and puts the page after them. */
-export function mergeRunToolsPage(
-  state: RunToolsState,
-  cursor: string,
-  page: RunToolsPage,
-): RunToolsState {
-  const bound = BigInt(cursor);
-  const kept = state.tools.filter((tool) => BigInt(tool.order) <= bound);
-  return {
-    revision: page.revision,
-    tools: page.state === "ready" ? [...kept, ...page.tools] : [],
-    nextAfterOrder: page.state === "ready" ? page.nextAfterOrder : null,
-    status: "ready",
-  };
+/** Run ids restart in every Task, and pages belong to one security epoch. */
+export function runToolsKey(
+  taskId: string,
+  runId: string,
+  securityEpoch: string | undefined,
+): string {
+  return `${securityEpoch ?? ""}:${taskId}:${runId}`;
+}
+
+type RunToolsRead = {
+  loader: RunToolsLoader;
+  taskId: string;
+  runId: string;
+  securityEpoch: string | undefined;
+  /** Records up to this order are kept; the read starts after it. */
+  cursor: string;
+  /** Pages continue until they pass this order; null reads one page. */
+  through: string | null;
+  revision: string | null;
+  active: boolean;
+};
+
+/**
+ * Pages read per Run, owned by the Task view. A Run's details render from
+ * one place while it is active and another once it ends, so the cache, not a
+ * component, owns each read: a response always lands here, and the details
+ * that mount next find it. One read per Run is in flight at a time.
+ */
+export class RunToolsCache {
+  readonly #states = new Map<string, RunToolsState>();
+  readonly #listeners = new Map<string, Set<() => void>>();
+  readonly #reads = new Map<string, symbol>();
+  readonly #requests = new Map<string, RunToolsRead>();
+
+  get(key: string): RunToolsState {
+    return this.#states.get(key) ?? idleRunTools;
+  }
+
+  subscribe(key: string, listener: () => void): () => void {
+    let listeners = this.#listeners.get(key);
+    if (!listeners) this.#listeners.set(key, (listeners = new Set()));
+    const own = listeners;
+    own.add(listener);
+    return () => {
+      own.delete(listener);
+      if (own.size === 0 && this.#listeners.get(key) === own)
+        this.#listeners.delete(key);
+    };
+  }
+
+  /** Pages a view already holds, as when it restores them. */
+  set(key: string, state: RunToolsState) {
+    this.#write(key, state);
+  }
+
+  /** Forgets one Run's pages; a read still in flight is dropped. */
+  reset(key: string) {
+    this.#reads.delete(key);
+    this.#requests.delete(key);
+    this.#write(key, idleRunTools);
+  }
+
+  /** Forgets every Run outside this Task and security epoch. */
+  retain(taskId: string | undefined, securityEpoch: string | undefined) {
+    const prefix =
+      taskId === undefined ? null : runToolsKey(taskId, "", securityEpoch);
+    for (const key of new Set([...this.#states.keys(), ...this.#reads.keys()]))
+      if (prefix === null || !key.startsWith(prefix)) this.reset(key);
+  }
+
+  /** Nothing read can have changed; only the answered revision moves. */
+  acknowledge(key: string, revision: string) {
+    const state = this.get(key);
+    if (state.status === "ready" && state.revision !== revision)
+      this.#write(key, { ...state, revision });
+  }
+
+  read(key: string, request: RunToolsRead) {
+    if (this.#reads.has(key)) return;
+    const token = Symbol(key);
+    this.#reads.set(key, token);
+    this.#requests.set(key, request);
+    this.#write(key, { ...this.get(key), status: "loading" });
+    void this.#run(key, token, request);
+  }
+
+  /** Repeats the last read of a Run after it failed. */
+  retry(key: string) {
+    const request = this.#requests.get(key);
+    if (request && this.get(key).status === "error") this.read(key, request);
+  }
+
+  async #run(key: string, token: symbol, request: RunToolsRead) {
+    const pages: ToolView[] = [];
+    let cursor = request.cursor;
+    let next: string | null = null;
+    let missing = false;
+    try {
+      for (;;) {
+        const page = await request.loader(
+          request.taskId,
+          request.runId,
+          cursor,
+        );
+        if (this.#reads.get(key) !== token) return;
+        if (
+          request.securityEpoch !== undefined &&
+          page.securityEpoch !== request.securityEpoch
+        )
+          throw new Error("Tool page from another security epoch");
+        if (page.state === "missing") {
+          missing = true;
+          break;
+        }
+        pages.push(...page.tools);
+        next = page.nextAfterOrder;
+        if (
+          next === null ||
+          request.through === null ||
+          BigInt(next) >= BigInt(request.through)
+        )
+          break;
+        cursor = next;
+      }
+    } catch {
+      if (this.#reads.get(key) !== token) return;
+      this.#reads.delete(key);
+      this.#write(key, { ...this.get(key), status: "error" });
+      return;
+    }
+    this.#reads.delete(key);
+    const current = this.get(key);
+    const bound = BigInt(request.cursor);
+    this.#write(key, {
+      revision: request.revision,
+      tools: missing
+        ? []
+        : [
+            ...current.tools.filter((tool) => BigInt(tool.order) <= bound),
+            ...pages,
+          ],
+      nextAfterOrder: missing ? null : next,
+      status: "ready",
+      readWhileActive:
+        request.active || (bound !== 0n && current.readWhileActive),
+    });
+  }
+
+  #write(key: string, state: RunToolsState) {
+    if (state === idleRunTools) this.#states.delete(key);
+    else this.#states.set(key, state);
+    for (const listener of [...(this.#listeners.get(key) ?? [])]) listener();
+  }
 }
 
 /**
- * Within one security epoch a finished record never changes, so a newer
- * revision only has to be read from the first record still running, or after
- * the last record when the read had reached the end. Null: nothing loaded can
- * have changed; later records arrive through "show more".
+ * Within one security epoch, records change only while they run and, once,
+ * when the Run ends and trusted receipts settle. A newer revision therefore
+ * only has to be read from the first record still running, or after the last
+ * record when the read had reached the end. Null: nothing read can have
+ * changed; later records arrive through "show more".
  */
 export function runToolsRefreshCursor(state: RunToolsState): string | null {
   const running = state.tools.findIndex((tool) => tool.state === "running");
@@ -79,8 +216,9 @@ export type RunToolsView = {
 
 /**
  * Reads the Tool records of one Run while its execution details are open.
- * One request is in flight at a time; a response from another security epoch
- * is dropped.
+ * A read answers the task page revision it was asked for, so a page newer
+ * than the snapshot asks nothing more until the snapshot moves. After the Run
+ * ends, what was read while it ran is read once more.
  */
 export function useRunTools(
   loader: RunToolsLoader | undefined,
@@ -89,77 +227,68 @@ export function useRunTools(
   securityEpoch: string | undefined,
   toolLog: RunToolLog,
   expanded: boolean,
+  active: boolean,
   cache?: RunToolsCache,
 ): RunToolsView {
-  const [state, setState] = useState<RunToolsState>(
-    () => cache?.get(runId) ?? idleRunTools,
+  const [own] = useState(() => new RunToolsCache());
+  const store = cache ?? own;
+  const key = runToolsKey(taskId, runId, securityEpoch);
+  const subscribe = useCallback(
+    (listener: () => void) => store.subscribe(key, listener),
+    [store, key],
   );
-  useEffect(() => {
-    if (!cache) return;
-    if (state.status === "idle") cache.delete(runId);
-    else cache.set(runId, state);
-  }, [cache, runId, state]);
-  const inFlight = useRef(false);
-  const lastCursor = useRef("0");
-  const alive = useRef(true);
-  useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-    };
-  }, []);
-  const load = useCallback(
-    (cursor: string) => {
-      if (!loader || inFlight.current) return;
-      inFlight.current = true;
-      lastCursor.current = cursor;
-      setState((current) => ({ ...current, status: "loading" }));
-      loader(taskId, runId, cursor).then(
-        (page) => {
-          inFlight.current = false;
-          if (!alive.current) return;
-          if (
-            securityEpoch !== undefined &&
-            page.securityEpoch !== securityEpoch
-          ) {
-            setState((current) => ({ ...current, status: "error" }));
-            return;
-          }
-          setState((current) => mergeRunToolsPage(current, cursor, page));
-        },
-        () => {
-          inFlight.current = false;
-          if (alive.current)
-            setState((current) => ({ ...current, status: "error" }));
-        },
-      );
+  const snapshot = useCallback(() => store.get(key), [store, key]);
+  const state = useSyncExternalStore(subscribe, snapshot, snapshot);
+  const request = useCallback(
+    (cursor: string, through: string | null, revision: string | null) => {
+      if (loader)
+        store.read(key, {
+          loader,
+          taskId,
+          runId,
+          securityEpoch,
+          cursor,
+          through,
+          revision,
+          active,
+        });
     },
-    [loader, taskId, runId, securityEpoch],
+    [store, key, loader, taskId, runId, securityEpoch, active],
   );
   useEffect(() => {
     // Closed details keep the pages read so reopening shows them at once;
-    // the Task view drops them all when it goes away. A failed read starts
-    // over the next time the details open.
+    // the Task view drops them when it moves to another Task. A failed read
+    // starts over the next time the details open.
     if (!expanded) {
-      if (state.status === "error") setState(idleRunTools);
+      if (state.status === "error") store.reset(key);
       return;
     }
-    if (
-      toolLog.count === "0" ||
-      state.status === "loading" ||
-      state.status === "error"
-    )
+    if (!loader || state.status === "loading" || state.status === "error")
       return;
     if (state.status === "idle") {
-      load("0");
+      if (toolLog.count !== "0") request("0", null, toolLog.revision);
+      return;
+    }
+    const last = state.tools.at(-1)?.order ?? null;
+    if (!active && state.readWhileActive) {
+      request("0", last, toolLog.revision);
       return;
     }
     if (state.revision === toolLog.revision) return;
     const cursor = runToolsRefreshCursor(state);
-    if (cursor === null)
-      setState((current) => ({ ...current, revision: toolLog.revision }));
-    else load(cursor);
-  }, [expanded, toolLog.count, toolLog.revision, state, load]);
+    if (cursor === null) store.acknowledge(key, toolLog.revision);
+    else request(cursor, last, toolLog.revision);
+  }, [
+    expanded,
+    loader,
+    state,
+    store,
+    key,
+    active,
+    toolLog.count,
+    toolLog.revision,
+    request,
+  ]);
   const hasMore = state.nextAfterOrder !== null;
   const remaining = hasMore
     ? BigInt(toolLog.count) - BigInt(state.tools.length)
@@ -170,8 +299,9 @@ export function useRunTools(
     remaining: remaining > 0n ? remaining : 0n,
     hasMore,
     loadMore: () => {
-      if (state.nextAfterOrder !== null) load(state.nextAfterOrder);
+      if (state.nextAfterOrder !== null && state.status === "ready")
+        request(state.nextAfterOrder, null, state.revision);
     },
-    retry: () => load(lastCursor.current),
+    retry: () => store.retry(key),
   };
 }

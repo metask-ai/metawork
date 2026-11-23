@@ -321,7 +321,7 @@ function renderCompletedSurface(
       },
       createElement(TaskContent, {
         task: withToolSummaries(task),
-        runToolsCache: runToolsCacheFor(task.runs),
+        runToolsCache: runToolsCacheFor(task),
         revision: "1",
         composerHasDraft: false,
         retryAvailable: true,

@@ -443,6 +443,7 @@ export function RunProcess({
     toolSource.securityEpoch,
     toolSource.toolLog,
     expanded && presentation.processCanCollapse,
+    presentation.active,
     toolSource.cache,
   );
   if (!presentation.processVisible && !approvalHistory && !deliveryActions)

@@ -215,7 +215,7 @@ function runProcessProps(value) {
       taskId: "1",
       runId: value.id,
       toolLog: shaped.toolLog,
-      cache: runToolsCacheFor([value]),
+      cache: runToolsCacheFor({ id: "1", runs: [value] }),
     },
   };
 }
@@ -746,7 +746,7 @@ function renderTaskContent(value, locale = "en-US", props = {}) {
       },
       createElement(TaskContent, {
         task: withToolSummaries(value),
-        runToolsCache: runToolsCacheFor(value.runs),
+        runToolsCache: runToolsCacheFor(value),
         revision: "1",
         composerHasDraft: false,
         retryAvailable: false,
@@ -1004,7 +1004,7 @@ function taskContentElement(
   return localizedView(
     createElement(TaskContent, {
       task: value && withToolSummaries(value),
-      runToolsCache: runToolsCacheFor(value?.runs ?? []),
+      runToolsCache: runToolsCacheFor(value),
       loadRunTools: runToolsLoaderFor(value?.runs ?? []),
       snapshotReceivedAt: null,
       revision,

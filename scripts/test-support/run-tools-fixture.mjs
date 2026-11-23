@@ -1,6 +1,10 @@
 // Renderer fixtures still describe a Run's Tool records as `tools`. The task
 // page carries only their summary and file references, and the records arrive
 // in pages. These helpers derive both the way the Host does.
+import {
+  RunToolsCache,
+  runToolsKey,
+} from "../../frontend/src/features/tasks/run-tools.ts";
 
 /** Changes whenever the listed records change, like the Host's revision. */
 function recordsRevision(tools) {
@@ -73,16 +77,20 @@ export function withToolSummaries(task) {
   return { ...task, runs: task.runs.map(withToolSummary) };
 }
 
-/** Pages already read for each Run that lists records, as the view caches them. */
-export function runToolsCacheFor(runs) {
-  const cache = new Map();
-  for (const run of runs) {
+/**
+ * Pages already read for each Run of a Task that lists records, as the view
+ * caches them under that Task and security epoch.
+ */
+export function runToolsCacheFor(task, securityEpoch) {
+  const cache = new RunToolsCache();
+  for (const run of task?.runs ?? []) {
     if (!run.tools?.length) continue;
-    cache.set(run.id, {
+    cache.set(runToolsKey(task.id, run.id, securityEpoch), {
       revision: withToolSummary(run).toolLog.revision,
       tools: [...run.tools].sort(byOrder),
       nextAfterOrder: null,
       status: "ready",
+      readWhileActive: false,
     });
   }
   return cache;
