@@ -516,6 +516,48 @@ test("official update checks require distribution opt-in and stay outside Agent 
   );
 });
 
+test("the MetaTeam inbox reads only through Application and keeps the device key out of Product and the Renderer", () => {
+  const product = read("src/product/inbox.zig");
+  assertNoImports(
+    ["src/product/inbox.zig"],
+    [
+      "native_sdk",
+      "metawork_app",
+      "metawork_agent",
+      "metawork_product_mcp",
+      "metawork_product_task",
+      "metawork_product_control",
+      "metawork_storage_sql",
+      "metawork_storage_sqlite",
+      // Inbox publishes the engine's returned facts, never performs requests.
+      "metawork_http_transport",
+      "metawork_http_memory",
+    ],
+  );
+  assert.match(product, /@import\("metawork_http_contract"\)/);
+  assert.doesNotMatch(product, /std\.http\.Client|std\.Thread\.spawn/);
+  // Only the transport opens requests; the coordinator never does.
+  assert.doesNotMatch(
+    read("src/app/inbox_coordinator.zig"),
+    /\.run\(\.\{|operation\.open\(/,
+  );
+  // The key travels only as a Bearer header, never as a query parameter.
+  for (const file of [
+    "src/product/inbox.zig",
+    "src/app/inbox_http_transport.zig",
+  ])
+    assert.doesNotMatch(read(file), /[?&]key=/);
+  assert.match(
+    read("src/app/inbox_http_transport.zig"),
+    /\.name = "Authorization", \.value = authorization/,
+  );
+  // The Renderer never reaches the service itself.
+  assert.doesNotMatch(
+    read("frontend/src/features/inbox/MessageInbox.tsx"),
+    /\bfetch\(|https?:\/\/|window\.zero/,
+  );
+});
+
 test("artifact identities preserve development and isolate automation namespaces", () => {
   const identity = read("src/product_identity.zig");
   const app = read("src/app.zig");

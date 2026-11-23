@@ -2,8 +2,18 @@ import {
   approvalFailureReasons,
   type TaskApprovalResultWire,
   type UpdateViewWire,
+  type InboxViewWire,
+  type InboxConversationPageWire,
+  type InboxTaskDetailWire,
 } from "./generated-wire.ts";
 export type UpdateView = UpdateViewWire;
+/** The MetaTeam inbox: connection state, unread facts and conversations. */
+export type InboxView = InboxViewWire;
+export type InboxConversation = InboxView["conversations"][number];
+export type InboxConversationPage = InboxConversationPageWire;
+export type InboxMessage = InboxConversationPage["messages"][number];
+export type InboxTaskDetail = InboxTaskDetailWire;
+export type InboxCommandOutcome = "accepted" | "rejected" | "unavailable";
 /**
  * The system-notification strings the Host holds on our behalf. It raises the
  * banners but does not know the application language, so it keeps no copy of
@@ -1564,6 +1574,7 @@ export const emptyViewVersions: ViewVersions = {
 };
 export type WorkbenchSnapshot = {
   updates: UpdateView;
+  inbox: InboxView;
   revision: string;
   blockVersions: ViewVersions;
   securityEpoch: string;

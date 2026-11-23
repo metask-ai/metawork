@@ -3,12 +3,13 @@ const std = @import("std");
 const snapshot = @import("snapshot_contract");
 const task_view = @import("task_view_contract");
 const update = @import("product_update");
+const inbox = @import("product_inbox");
 pub fn main(init: std.process.Init) !void {
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
     const writer = &output.interface;
     try writer.writeAll("// Generated from Host wire types. Do not edit.\n");
-    try writer.writeAll("import { object, stringValue, booleanValue, positiveWireId, positiveU64WireId, u64WireInteger, positiveNumber, enumValue } from './wire-codec.ts';\n");
+    try writer.writeAll("import { object, stringValue, booleanValue, arrayValue, positiveWireId, positiveU64WireId, u64WireInteger, positiveNumber, enumValue } from './wire-codec.ts';\n");
     try writer.print("export const maxSnapshotBytes = {d};\nexport const maxSnapshotChunkBytes = {d};\n", .{ snapshot.max_snapshot_bytes, snapshot.chunk_bytes });
     try writer.print("export const maxSnapshotPreparationSteps = {d};\n", .{snapshot.max_preparation_steps});
     try emitEnumValues(task_view.ApprovalFailureReason, "approvalFailureReasons", writer);
@@ -16,6 +17,9 @@ pub fn main(init: std.process.Init) !void {
     try emit(snapshot.SnapshotDescriptor, "SnapshotDescriptor", writer);
     try emit(task_view.ApprovalResult, "TaskApprovalResultWire", writer);
     try emit(update.View, "UpdateViewWire", writer);
+    try emit(inbox.View, "InboxViewWire", writer);
+    try emit(inbox.ConversationPage, "InboxConversationPageWire", writer);
+    try emit(inbox.TaskDetail, "InboxTaskDetailWire", writer);
     try writer.flush();
 }
 
@@ -46,8 +50,12 @@ fn tsType(comptime T: type, writer: *std.Io.Writer) !void {
         },
         .bool => try writer.writeAll("boolean"),
         .pointer => |info| {
-            if (info.size != .slice or info.child != u8 or !info.is_const) @compileError("Unsupported wire pointer");
-            try writer.writeAll("string");
+            if (info.size != .slice or !info.is_const) @compileError("Unsupported wire pointer");
+            if (info.child == u8) return writer.writeAll("string");
+            // A list of any supported wire type.
+            try writer.writeAll("readonly (");
+            try tsType(info.child, writer);
+            try writer.writeAll(")[]");
         },
         .@"enum" => |info| {
             inline for (info.fields, 0..) |field, i| {
@@ -67,8 +75,11 @@ fn decode(comptime T: type, comptime value: []const u8, comptime path: []const u
     switch (@typeInfo(T)) {
         .bool => try writer.print("booleanValue({s}, {s})", .{ value, path }),
         .pointer => |info| {
-            if (info.size != .slice or info.child != u8 or !info.is_const) @compileError("Unsupported wire pointer");
-            try writer.print("stringValue({s}, {s})", .{ value, path });
+            if (info.size != .slice or !info.is_const) @compileError("Unsupported wire pointer");
+            if (info.child == u8) return writer.print("stringValue({s}, {s})", .{ value, path });
+            try writer.print("arrayValue({s}, {s}, (entry: unknown, entryPath: string) => ", .{ value, path });
+            try decode(info.child, "entry", "entryPath", writer);
+            try writer.writeAll(")");
         },
         .@"struct" => {
             if (@hasDecl(T, "wire_scalar")) {

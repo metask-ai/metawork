@@ -19,6 +19,9 @@ import {
 import {
   decodeTaskApprovalResultWire,
   decodeUpdateViewWire,
+  decodeInboxViewWire,
+  decodeInboxConversationPageWire,
+  decodeInboxTaskDetailWire,
 } from "./generated-wire.ts";
 import {
   exactKeys,
@@ -5909,6 +5912,32 @@ export function decodeViewVersions(value: unknown): ViewVersions {
     ]),
   ) as ViewVersions;
 }
+export function decodeInboxView(value: unknown) {
+  const path = "$.inbox";
+  const result = decodeInboxViewWire(value, path);
+  const counted = result.state === "ready" || result.state === "unreachable";
+  if (result.unreadTotal !== null && !counted)
+    fail(path, "unread count without a usable connection");
+  if (result.diagnostic !== null && result.state !== "unreachable")
+    fail(path, "diagnostics without a failed request");
+  if (result.state === "unavailable" && result.conversations.length !== 0)
+    fail(path, "conversations without a connection");
+  const peers = new Set<string>();
+  for (const conversation of result.conversations) {
+    if (peers.has(conversation.peerId)) fail(path, "duplicate conversation");
+    peers.add(conversation.peerId);
+  }
+  return result;
+}
+export function decodeInboxConversationPage(value: unknown) {
+  return decodeInboxConversationPageWire(value, "$.result");
+}
+export function decodeInboxTaskDetail(value: unknown) {
+  const result = decodeInboxTaskDetailWire(value, "$.result");
+  if ((result.state === "ready") !== (result.task !== null))
+    fail("$.result", "inconsistent task detail");
+  return result;
+}
 export function decodeUpdateView(value: unknown) {
   const path = "$.updates";
   const result = decodeUpdateViewWire(value, path);
@@ -5933,6 +5962,10 @@ export function decodeUpdateView(value: unknown) {
   )
     fail(path, "inconsistent release availability");
   return result;
+}
+/** `metawork.inbox.refresh` and `metawork.inbox.loadEarlier` answer alike. */
+export function decodeInboxCommandResult(value: unknown) {
+  return decodeUpdateCommandResult(value);
 }
 export function decodeUpdateCommandResult(value: unknown) {
   const item = object(value, "$", ["outcome"]);
@@ -5987,6 +6020,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "permissions",
     "account",
     "updates",
+    "inbox",
     "models",
     "newTaskAdmission",
     "automaticWorkspaceRoot",
@@ -6723,6 +6757,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     permissions,
     account: decodeAccount(root.account, "$.account"),
     updates: decodeUpdateView(root.updates),
+    inbox: decodeInboxView(root.inbox),
     models: decodeModels(root.models, "$.models"),
     newTaskAdmission: decodeNewTaskAdmission(
       root.newTaskAdmission,

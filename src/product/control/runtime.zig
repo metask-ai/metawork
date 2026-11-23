@@ -2,6 +2,7 @@ const std = @import("std");
 const credential_match = @import("product_credential_match");
 const builtin = @import("builtin");
 const update = @import("metawork_product_update");
+const inbox = @import("metawork_product_inbox");
 const product_identity = @import("metawork_product_identity");
 const lifecycle = @import("metawork_agent_contract");
 const account_contract = @import("metawork_account_contract");
@@ -1337,6 +1338,7 @@ pub const Runtime = struct {
     pub const testTaskSlots = if (builtin.is_test) TestSupport.taskSlots else struct {};
 
     updates: update.Runtime,
+    inbox: inbox.Runtime,
     run_clock: task_runtime.RunClock,
     run_trace: task_runtime.RunTrace,
     allocator: std.mem.Allocator,
@@ -1673,6 +1675,7 @@ pub const Runtime = struct {
                 .os = if (builtin.os.tag == .windows) .windows else .macos,
                 .arch = if (builtin.cpu.arch == .aarch64) .arm64 else .x64,
             }) catch unreachable,
+            .inbox = .init(allocator),
             .executor = executor,
             .approval_executor = approval_executor,
             .mcp_executor = mcp_executor,
@@ -4990,6 +4993,7 @@ pub const Runtime = struct {
     pub fn beginShutdown(self: *Runtime) void {
         if (self.mcp) |*runtime| runtime.closeInstallation(self.io);
         self.updates.stop();
+        self.inbox.stop();
         self.output_checks.stopAdmission();
         self.cancelSnapshot();
         self.shutting_down = true;
@@ -7000,6 +7004,8 @@ pub const Runtime = struct {
         try self.writeAccount(writer, text);
         writer.writeAll(",\"updates\":") catch return error.SnapshotTooLarge;
         std.json.Stringify.value(self.updates.view(), .{}, writer) catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"inbox\":") catch return error.SnapshotTooLarge;
+        std.json.Stringify.value(self.inbox.view(), .{}, writer) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
         try self.writeModels(writer, text);
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
@@ -7549,6 +7555,7 @@ pub const Runtime = struct {
         self.shutdownExecutor();
         self.cancelSnapshot();
         self.encoded_views.clear(self.allocator);
+        self.inbox.deinit();
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
         self.attachments.deinit();
@@ -10158,6 +10165,111 @@ pub const Runtime = struct {
     fn updateStop(context: *anyopaque) void {
         const self: *Runtime = @ptrCast(@alignCast(context));
         self.updates.stop();
+        self.updateChanged();
+    }
+
+    pub fn inboxManagement(self: *Runtime) inbox.Management {
+        return .{
+            .context = self,
+            .start_fn = inboxStart,
+            .bind_fn = inboxBind,
+            .binding_failed_fn = inboxBindingFailed,
+            .current_binding_fn = inboxCurrentBinding,
+            .set_active_fn = inboxSetActive,
+            .next_poll_fn = inboxNextPoll,
+            .begin_poll_fn = inboxBeginPoll,
+            .complete_poll_fn = inboxCompletePoll,
+            .request_refresh_fn = inboxRequestRefresh,
+            .request_earlier_fn = inboxRequestEarlier,
+            .begin_list_fn = inboxBeginList,
+            .complete_list_fn = inboxCompleteList,
+            .knows_peer_fn = inboxKnowsPeer,
+            .accepts_fn = inboxAccepts,
+            .complete_conversation_fn = inboxCompleteConversation,
+            .stop_fn = inboxStop,
+        };
+    }
+
+    fn inboxOwner(context: *anyopaque) *Runtime {
+        return @ptrCast(@alignCast(context));
+    }
+    fn inboxStart(context: *anyopaque, active: bool) void {
+        const self = inboxOwner(context);
+        if (self.shutting_down) return;
+        self.inbox.start(active);
+    }
+    /// A projection that cannot be rebuilt for lack of memory is cleared
+    /// rather than left describing an older binding.
+    fn inboxSettle(self: *Runtime, changed: std.mem.Allocator.Error!bool) void {
+        const value = changed catch blk: {
+            self.inbox.stop();
+            break :blk true;
+        };
+        if (value) self.updateChanged();
+    }
+    fn inboxBind(context: *anyopaque, now_ms: u64, key: ?inbox.BindingKey) void {
+        const self = inboxOwner(context);
+        if (self.shutting_down) return;
+        self.inboxSettle(self.inbox.bind(now_ms, key));
+    }
+    fn inboxBindingFailed(context: *anyopaque, now_ms: u64) void {
+        const self = inboxOwner(context);
+        if (self.shutting_down) return;
+        if (self.inbox.bindingFailed(now_ms)) self.updateChanged();
+    }
+    fn inboxCurrentBinding(context: *anyopaque) ?u64 {
+        const self = inboxOwner(context);
+        return if (self.shutting_down) null else self.inbox.currentBinding();
+    }
+    fn inboxSetActive(context: *anyopaque, now_ms: u64, active: bool) void {
+        inboxOwner(context).inbox.setActive(now_ms, active);
+    }
+    fn inboxNextPoll(context: *anyopaque) ?u64 {
+        const self = inboxOwner(context);
+        return if (self.shutting_down) null else self.inbox.nextPoll();
+    }
+    fn inboxBeginPoll(context: *anyopaque) ?u64 {
+        const self = inboxOwner(context);
+        return if (self.shutting_down) null else self.inbox.beginPoll();
+    }
+    fn inboxCompletePoll(context: *anyopaque, now_ms: u64, wall_ms: u64, id: u64, completion: inbox.PollCompletion) void {
+        const self = inboxOwner(context);
+        self.inboxSettle(self.inbox.completePoll(now_ms, wall_ms, id, completion));
+    }
+    fn inboxRequestRefresh(context: *anyopaque, now_ms: u64, binding: u64, explicit: bool) inbox.CommandOutcome {
+        const self = inboxOwner(context);
+        return if (self.shutting_down) .unavailable else self.inbox.requestRefresh(now_ms, binding, explicit);
+    }
+    fn inboxRequestEarlier(context: *anyopaque, binding: u64) inbox.CommandOutcome {
+        const self = inboxOwner(context);
+        return if (self.shutting_down) .unavailable else self.inbox.requestEarlier(binding);
+    }
+    fn inboxBeginList(context: *anyopaque) ?inbox.ListPreparation {
+        const self = inboxOwner(context);
+        if (self.shutting_down) return null;
+        const preparation = self.inbox.beginList() orelse return null;
+        self.updateChanged();
+        return preparation;
+    }
+    fn inboxCompleteList(context: *anyopaque, now_ms: u64, id: u64, kind: inbox.ListKind, completion: inbox.ListCompletion) void {
+        const self = inboxOwner(context);
+        self.inboxSettle(self.inbox.completeList(now_ms, id, kind, completion));
+    }
+    fn inboxKnowsPeer(context: *anyopaque, binding: u64, peer: []const u8) bool {
+        const self = inboxOwner(context);
+        return !self.shutting_down and self.inbox.knowsPeer(binding, peer);
+    }
+    fn inboxAccepts(context: *anyopaque, binding: u64) bool {
+        const self = inboxOwner(context);
+        return !self.shutting_down and self.inbox.accepts(binding);
+    }
+    fn inboxCompleteConversation(context: *anyopaque, binding: u64, peer: []const u8, kind: inbox.ConversationPageKind, messages: []const inbox.Message) void {
+        const self = inboxOwner(context);
+        self.inboxSettle(self.inbox.completeConversation(binding, peer, kind, messages));
+    }
+    fn inboxStop(context: *anyopaque) void {
+        const self = inboxOwner(context);
+        self.inbox.stop();
         self.updateChanged();
     }
 
@@ -23025,7 +23137,7 @@ test "Product Control snapshot serializer omits image formats when attachments a
     limits.max_staged_attachment_bytes = 2048;
     var control = try testRuntimeWithLimits(limits, .{});
     defer control.deinit();
-    var storage: [8192]u8 = undefined;
+    var storage: [16 * 1024]u8 = undefined;
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try control.writeAggregateFixture(&storage), .{});
     defer parsed.deinit();
     const capability = parsed.value.object.get("capabilities").?.object.get("attachments").?;

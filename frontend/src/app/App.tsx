@@ -97,10 +97,11 @@ import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
 import { SkillsPage } from "../features/skills/SkillsPage.tsx";
 import { McpPage } from "../features/mcp/McpPage.tsx";
 import {
-  InboxConversationList,
-  InboxConversationView,
+  InboxMain,
+  InboxSidebar,
   MessageNavigationItem,
-  useMessageInbox,
+  inboxUnread,
+  useInbox,
 } from "../features/inbox/MessageInbox.tsx";
 import { McpInstallationCard } from "../features/mcp/McpInstallationCard.tsx";
 import { WorkspaceDirectoryFact } from "../features/workspaces/WorkspaceDirectoryFact.tsx";
@@ -375,7 +376,6 @@ export default function App() {
   >({});
   const [route, setRoute] = useState<ShellRoute>("workbench");
   const inboxOpen = route === "inbox";
-  const inbox = useMessageInbox();
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1707,6 +1707,12 @@ export default function App() {
     taskDrafts.invalidateAttachments,
   ]);
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
+  const inboxPage = useInbox(
+    client,
+    snapshot.inbox,
+    inboxOpen,
+    bridgeUnavailable,
+  );
   const openExternalLink = useCallback(
     async (url: string) => {
       if (viewSyncFailed || !bridgeReady) return false;
@@ -5434,8 +5440,13 @@ export default function App() {
             </Tooltip.Root>
             <MessageNavigationItem
               active={inboxOpen}
-              unread={inbox.unread}
-              onOpen={() => openWorkbenchPage("inbox")}
+              unread={inboxUnread(snapshot.inbox)}
+              onOpen={() => {
+                openWorkbenchPage("inbox");
+                // A narrow window keeps the drawer open on the conversation
+                // list; with nothing to list it shows the inbox state instead.
+                if (snapshot.inbox.state === "unavailable") dismissDrawer();
+              }}
             />
           </nav>
           <AccountIdentity
@@ -5472,13 +5483,10 @@ export default function App() {
       leftPanelKind={inboxOpen ? "conversations" : "tasks"}
       left={(dismissDrawer) =>
         inboxOpen ? (
-          <InboxConversationList
-            entries={inbox.entries}
-            selectedId={inbox.selected?.id}
-            onSelect={(id) => {
-              inbox.openConversation(id);
-              dismissDrawer();
-            }}
+          <InboxSidebar
+            inbox={snapshot.inbox}
+            controller={inboxPage}
+            onSelected={dismissDrawer}
           />
         ) : (
           <div className="sidebar-primary">
@@ -6009,11 +6017,10 @@ export default function App() {
       }
     >
       {inboxOpen ? (
-        <InboxConversationView
-          conversation={inbox.selected}
-          draft={inbox.draft}
-          onDraftChange={inbox.updateDraft}
-          onSend={inbox.sendReply}
+        <InboxMain
+          inbox={snapshot.inbox}
+          controller={inboxPage}
+          onOpenConnectors={() => openWorkbenchPage("mcp")}
         />
       ) : route === "skills" ? (
         snapshot.skillManagement ? (

@@ -262,6 +262,32 @@ pub const AutomaticWorkspaceRootMutation = struct {
     expectedGeneration: []const u8,
 };
 pub const GlobalInstructionsRead = struct {};
+
+pub const InboxBinding = struct {
+    binding: []const u8,
+};
+
+pub const InboxRefresh = struct {
+    binding: []const u8,
+    /// The user's own retry; an automatic refresh keeps the background rules.
+    explicit: bool,
+};
+
+pub const InboxConversationRead = struct {
+    generation: []const u8,
+    binding: []const u8,
+    requestId: []const u8,
+    peerId: []const u8,
+    page: []const u8,
+    anchorId: ?[]const u8,
+};
+
+pub const InboxTaskRead = struct {
+    generation: []const u8,
+    binding: []const u8,
+    requestId: []const u8,
+    taskId: []const u8,
+};
 /// `text` is the whole file the editor wants saved; the payload limit makes
 /// room for its JSON escaping, and the Host checks the decoded bytes.
 pub const GlobalInstructionsSave = struct {

@@ -344,18 +344,57 @@
   color: var(--ui-content-muted);
 }
 
-.inbox-reply-bar {
-  flex: none;
-  padding: 12px clamp(12px, 3vw, 32px) 16px;
-  border-top: 1px solid var(--ui-border);
-  background: var(--ui-surface-panel);
+.inbox-list-note {
+  padding: 16px 18px;
+  color: var(--ui-content-muted);
 }
 
-.inbox-reply-form {
-  display: grid;
-  width: min(100%, var(--content-measure));
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
+.inbox-list-footer {
+  display: flex;
+  justify-content: center;
+  padding: 8px 12px 16px;
+}
+
+.inbox-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 8px;
-  margin-inline: auto;
+  margin-top: 8px;
+}
+
+.inbox-banner {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px clamp(12px, 3vw, 32px);
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-surface-panel-2);
+  color: var(--ui-content-muted);
+}
+
+.inbox-banner > span {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.inbox-transcript-earlier {
+  display: flex;
+  justify-content: center;
+  padding-top: 12px;
+}
+
+.inbox-message-recipients,
+.inbox-message-note {
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  overflow-wrap: anywhere;
+}
+
+.inbox-bubble p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

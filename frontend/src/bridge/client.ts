@@ -41,6 +41,8 @@ import type {
   FileChangeDiffResult,
   ModelMetadata,
   NotificationTextRegistration,
+  InboxConversationPage,
+  InboxTaskDetail,
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
@@ -53,6 +55,9 @@ import {
   decodeAccountCommandResult,
   decodeUpdateCommandResult,
   decodeUpdateWebsiteResult,
+  decodeInboxCommandResult,
+  decodeInboxConversationPage,
+  decodeInboxTaskDetail,
   decodeExecutionCommandResult,
   decodeCatalogRefreshResult,
   decodeWorkspaceRemovalResult,
@@ -139,6 +144,7 @@ export class BridgeClient {
   private nextReceiveBatch = 1n;
   private nextOutputOperation = 1n;
   private nextRunToolsRequest = 1n;
+  private nextInboxRequest = 1n;
   private readonly previewImages = new PreviewImagePool();
   private readonly previews = new FilePreviewLoader(
     (command, payload) => this.invoke(command, payload),
@@ -296,6 +302,81 @@ export class BridgeClient {
     return decodeUpdateWebsiteResult(
       await this.invoke(commands.updatesOpenWebsite, {}),
     );
+  }
+  /** Asks the Host for the unread facts and newer conversations now. */
+  async refreshInbox(binding: string, explicit: boolean) {
+    return decodeInboxCommandResult(
+      await this.invoke(commands.inboxRefresh, { binding, explicit }),
+    );
+  }
+  /** Extends the conversation list with earlier conversations. */
+  async loadEarlierInbox(binding: string) {
+    return decodeInboxCommandResult(
+      await this.invoke(commands.inboxLoadEarlier, { binding }),
+    );
+  }
+  private inboxRequest() {
+    const connection = this.attachmentConnection;
+    if (!connection) throw new Error("Host connection is unavailable");
+    if (this.nextInboxRequest > 18446744073709551615n)
+      throw new Error("Inbox request identity exhausted");
+    return {
+      generation: connection.generation,
+      requestId: String(this.nextInboxRequest++),
+    };
+  }
+  /**
+   * One page of a conversation the user opened: the latest messages, the
+   * ones before `anchorId`, or the ones after it.
+   */
+  async readInboxConversation(
+    binding: string,
+    peerId: string,
+    page: "latest" | "before" | "after",
+    anchorId: string | null,
+  ): Promise<InboxConversationPage> {
+    const { generation, requestId } = this.inboxRequest();
+    const result = decodeInboxConversationPage(
+      await this.invoke(commands.inboxReadConversation, {
+        generation,
+        binding,
+        requestId,
+        peerId,
+        page,
+        anchorId,
+      }),
+    );
+    if (
+      result.binding !== binding ||
+      result.requestId !== requestId ||
+      result.peerId !== peerId
+    )
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Inbox page identity mismatch",
+      );
+    return result;
+  }
+  /** The details of a task a message links to. */
+  async readInboxTask(
+    binding: string,
+    taskId: string,
+  ): Promise<InboxTaskDetail> {
+    const { generation, requestId } = this.inboxRequest();
+    const result = decodeInboxTaskDetail(
+      await this.invoke(commands.inboxReadTask, {
+        generation,
+        binding,
+        requestId,
+        taskId,
+      }),
+    );
+    if (result.binding !== binding || result.requestId !== requestId)
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Inbox task identity mismatch",
+      );
+    return result;
   }
   async openExternalLink(url: string) {
     return decodeExternalLinkOpenResult(
