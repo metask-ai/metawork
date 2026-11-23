@@ -12,6 +12,7 @@ const task_deletion = @import("product_task_deletion");
 const task_recovery = @import("product_task_recovery");
 const worker_lease = @import("product_task_worker_lease");
 const execution_credentials = @import("product_task_execution_binding").credential;
+pub const product_instructions = @import("metawork_product_instructions").source;
 
 pub const automatic_title_result_capacity: usize = 512;
 pub const ui_record_detail_capacity: usize = 512;
@@ -1091,6 +1092,13 @@ pub const RunRecord = struct {
     /// exposes the Run as terminal. Older history and unavailable clocks stay
     /// null rather than receiving a reconstructed time.
     finished_at_unix_ms: ?u64 = null,
+    /// Runtime-only: the user instructions this Run's Session carried when it
+    /// was prepared. Never persisted, so restored history reports null.
+    instructions: ?product_instructions.InstructionsUse = null,
+    /// Runtime-only and owned, a projected copy: the project instruction file
+    /// that preparation opened, read or not. Null with no project source, or
+    /// for a path longer than the Agent accepts, which is never shown cut.
+    instructions_project_path: ?[]u8 = null,
     id: u64,
     coverage: ConversationCoverage = .pending,
     /// The 1-based position Core's Conversation gave this Run's input, read

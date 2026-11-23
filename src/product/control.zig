@@ -19,6 +19,7 @@ pub const TaskWorkspaceTrust = runtime_impl.TaskWorkspaceTrust;
 pub const TaskCreateInput = runtime_impl.TaskCreateInput;
 pub const TaskMcpAuthorityAtCreation = runtime_impl.TaskMcpAuthorityAtCreation;
 pub const TaskWorkspaceRequest = runtime_impl.TaskWorkspaceRequest;
+pub const instructions_file = runtime_impl.instructions_file;
 pub const TaskRunInput = runtime_impl.TaskRunInput;
 pub const AttachmentArchiveTool = product_attachment.ArchiveTool;
 pub const AttachmentFormat = product_attachment.Format;

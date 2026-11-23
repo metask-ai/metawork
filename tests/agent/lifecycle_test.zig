@@ -6411,3 +6411,240 @@ test "rewind failures stay typed and a disagreeing Core closes admission" {
             try std.testing.expectEqual(@as(u64, 2), (try session.conversationBounds()).message_count);
     }
 }
+
+const global_document: lifecycle.InstructionDocument = .{
+    .path = "/home/user/.metawork/AGENTS.md",
+    .text = "Global standing instruction.",
+    .truncated = false,
+};
+const project_document: lifecycle.InstructionDocument = .{
+    .path = "/work/repo/AGENTS.md",
+    .text = "Project instruction.",
+    .truncated = false,
+};
+
+fn rawSession(session: *lifecycle.Session) *fixture.FakeSession {
+    return @ptrCast(@alignCast(session.raw.?));
+}
+
+test "idle instructions follow the base sections, replace each other and never touch a prepared Run" {
+    fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const base = rawSession(session).prompt_profile;
+    try expectMetaWorkProfile(base);
+
+    try std.testing.expectEqual(
+        lifecycle.InstructionsApplied{ .global = true, .project = true },
+        try session.setInstructions(.{ .global = global_document, .project = project_document }),
+    );
+    const both = rawSession(session).prompt_profile;
+    try std.testing.expectEqual(base.count + 2, both.count);
+    // The base sections are untouched and still come first.
+    for (0..base.count) |index| {
+        try std.testing.expectEqualStrings(base.sectionId(index), both.sectionId(index));
+        try std.testing.expectEqualStrings(base.sectionText(index), both.sectionText(index));
+    }
+    const global = both.find("host:user-instructions-global").?;
+    const project = both.find("host:user-instructions-project").?;
+    try std.testing.expectEqual(base.count, global);
+    try std.testing.expectEqual(base.count + 1, project);
+    try std.testing.expectEqual(wire.PROMPT_OP_ADD, both.ops[global]);
+    try std.testing.expectEqual(@as(i64, 10000), both.orders[global]);
+    try std.testing.expectEqual(@as(i64, 10100), both.orders[project]);
+    try std.testing.expect(std.mem.indexOf(u8, both.sectionText(global), "Source: /home/user/.metawork/AGENTS.md\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, both.sectionText(global), global_document.text));
+    try std.testing.expect(std.mem.indexOf(u8, both.sectionText(project), "Source: /work/repo/AGENTS.md\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, both.sectionText(project), project_document.text));
+    try runFixtureTurn(session, "first turn with instructions");
+
+    // A new set replaces the old one whole: a document left out loses its
+    // section, and an empty set is the base profile again.
+    _ = try session.setInstructions(.{ .global = global_document });
+    const global_only = rawSession(session).prompt_profile;
+    try std.testing.expectEqual(base.count + 1, global_only.count);
+    try std.testing.expect(global_only.find("host:user-instructions-project") == null);
+    try std.testing.expectEqual(lifecycle.InstructionsApplied{}, try session.setInstructions(.{}));
+    try std.testing.expect(std.meta.eql(base, rawSession(session).prompt_profile));
+
+    // A prepared Run is already on its way, so its profile stays.
+    const updates = fake_core.prompt_updates;
+    const prepared = try session.prepareRun(.{ .text = "hold admission" });
+    try std.testing.expectError(error.SessionNotIdle, session.setInstructions(.{ .global = global_document }));
+    try std.testing.expectEqual(updates, fake_core.prompt_updates);
+    try session.cancelPreparedRun(prepared);
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+}
+
+test "a refused document is left out while the other one is installed" {
+    const cases = [_]struct {
+        marker: []const u8,
+        offered: lifecycle.Instructions,
+        applied: lifecycle.InstructionsApplied,
+        calls: usize,
+    }{
+        // Only the project document is refused: both, then global alone.
+        .{ .marker = "Project instruction.", .offered = .{ .global = global_document, .project = project_document }, .applied = .{ .global = true }, .calls = 2 },
+        // Only the global document is refused: both, global alone, then project alone.
+        .{ .marker = "Global standing instruction.", .offered = .{ .global = global_document, .project = project_document }, .applied = .{ .project = true }, .calls = 3 },
+        // The only document offered is refused: it, then the base profile.
+        .{ .marker = "Project instruction.", .offered = .{ .project = project_document }, .applied = .{}, .calls = 2 },
+    };
+    for (cases) |case| {
+        fake_core.reset();
+        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const base = rawSession(session).prompt_profile;
+        fake_core.prompt_reject_marker = case.marker;
+        const updates = fake_core.prompt_updates;
+        try std.testing.expectEqual(case.applied, try session.setInstructions(case.offered));
+        try std.testing.expectEqual(updates + case.calls, fake_core.prompt_updates);
+        const installed = rawSession(session).prompt_profile;
+        try std.testing.expectEqual(case.applied.global, installed.find("host:user-instructions-global") != null);
+        try std.testing.expectEqual(case.applied.project, installed.find("host:user-instructions-project") != null);
+        try std.testing.expectEqual(base.count + @intFromBool(case.applied.global) + @intFromBool(case.applied.project), installed.count);
+        try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+        // The Session stays usable for the turn that follows.
+        try runFixtureTurn(session, "turn after a refusal");
+    }
+}
+
+test "instruction failures keep the installed profile or close admission on Core's broken contract" {
+    const cases = [_]struct {
+        status: ?u32 = null,
+        malformed: bool = false,
+        marker: ?[]const u8 = null,
+        expected: anyerror,
+        poisoned: bool = false,
+    }{
+        .{ .status = wire.STATUS_BUSY, .expected = error.SessionNotIdle },
+        .{ .status = wire.STATUS_OUT_OF_MEMORY, .expected = error.InstructionsUpdateFailed },
+        .{ .status = wire.STATUS_INTERNAL_ERROR, .expected = error.InstructionsUpdateFailed },
+        // A lost Session says so, apart from a refusal that left it usable.
+        .{ .status = wire.STATUS_INVALID_STATE, .expected = error.SessionPoisoned, .poisoned = true },
+        .{ .status = wire.STATUS_CORE_ERROR, .expected = error.SessionPoisoned, .poisoned = true },
+        .{ .status = wire.STATUS_STALE_RUN, .expected = error.SessionPoisoned, .poisoned = true },
+        .{ .status = 0xffff, .expected = error.SessionPoisoned, .poisoned = true },
+        .{ .malformed = true, .expected = error.SessionPoisoned, .poisoned = true },
+        // Core refusing the content of the base profile it accepted at
+        // creation is its contract breaking, not the user's files.
+        .{ .marker = "MetaWork", .expected = error.SessionPoisoned, .poisoned = true },
+    };
+    for (cases) |case| {
+        fake_core.reset();
+        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        _ = try session.setInstructions(.{ .global = global_document });
+        const installed = rawSession(session).prompt_profile;
+        fake_core.forced_prompt_status = case.status;
+        fake_core.malformed_prompt_diagnostic = case.malformed;
+        fake_core.prompt_reject_marker = case.marker;
+        try std.testing.expectError(case.expected, session.setInstructions(.{ .global = global_document, .project = project_document }));
+        try std.testing.expectEqual(
+            @as(lifecycle.SessionState, if (case.poisoned) .poisoned else .idle),
+            session.snapshot().state,
+        );
+        // Nothing Core refused replaced what it had.
+        try std.testing.expect(std.meta.eql(installed, rawSession(session).prompt_profile));
+    }
+}
+
+test "a budget refusal narrows the documents, and refusing all of them keeps the profile and the Session" {
+    fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const base = rawSession(session).prompt_profile;
+    var base_bytes: usize = 0;
+    for (0..base.count) |index| base_bytes += base.sectionLen(index);
+    // Measure what each document adds, then return to the base profile.
+    _ = try session.setInstructions(.{ .global = global_document, .project = project_document });
+    const measured = rawSession(session).prompt_profile;
+    const global_bytes = measured.sectionLen(measured.find("host:user-instructions-global").?);
+    try std.testing.expectEqual(lifecycle.InstructionsApplied{}, try session.setInstructions(.{}));
+
+    // Room for the global document but not for both: the ladder steps down.
+    fake_core.lock();
+    fake_core.prompt_budget_bytes = base_bytes + global_bytes;
+    fake_core.unlock();
+    try std.testing.expectEqual(
+        lifecycle.InstructionsApplied{ .global = true },
+        try session.setInstructions(.{ .global = global_document, .project = project_document }),
+    );
+    const narrowed = rawSession(session).prompt_profile;
+    try std.testing.expect(narrowed.find("host:user-instructions-project") == null);
+
+    // No room even for the base profile: every step is refused, the profile
+    // Core had stands and the Session stays usable.
+    fake_core.lock();
+    fake_core.prompt_budget_bytes = 0;
+    fake_core.unlock();
+    try std.testing.expectError(
+        error.InstructionsUpdateFailed,
+        session.setInstructions(.{ .global = global_document, .project = project_document }),
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+    try std.testing.expect(std.meta.eql(narrowed, rawSession(session).prompt_profile));
+    fake_core.lock();
+    fake_core.prompt_budget_bytes = null;
+    fake_core.unlock();
+    try runFixtureTurn(session, "turn after a budget refusal");
+}
+
+test "malformed instruction documents are refused before Core is called" {
+    fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const updates = fake_core.prompt_updates;
+    const malformed = [_]lifecycle.InstructionDocument{
+        .{ .path = "", .text = "text", .truncated = false },
+        .{ .path = "/repo/AGENTS.md", .text = "", .truncated = false },
+        .{ .path = "/repo/AGENTS.md", .text = "nul\x00byte", .truncated = false },
+        .{ .path = "/repo/AGENTS.md", .text = "\xff", .truncated = false },
+    };
+    for (malformed) |document|
+        try std.testing.expectError(error.InvalidInstructions, session.setInstructions(.{ .global = global_document, .project = document }));
+    try std.testing.expectEqual(updates, fake_core.prompt_updates);
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+}
+
+test "restore installs the base profile whatever instructions the checkpoint froze" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(3);
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const fresh = try openSession(runtime);
+    const base = rawSession(fresh).prompt_profile;
+    _ = try fresh.setInstructions(.{ .global = global_document, .project = project_document });
+    // The checkpoint carries the profile in force when it was exported.
+    fake_core.restored_prompt_profile = rawSession(fresh).prompt_profile;
+    try closeSession(fresh, .session_close);
+    try runtime.releaseClosedSession(fresh);
+    var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
+    const restored = try runtime.restoreSessionRoute(restoreOptions(source.source(), "000000000000000000000002", 0, 0));
+    // The caller supplies current instructions before the next Run; nothing
+    // a checkpoint froze outlives the restore.
+    try std.testing.expect(std.meta.eql(base, rawSession(restored.session).prompt_profile));
+}

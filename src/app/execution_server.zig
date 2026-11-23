@@ -801,6 +801,7 @@ fn answerSession(
         .update_permission_mode => reply(self, method, session.updatePermissionMode(request.expected, request.target)),
         .conversation_bounds => reply(self, method, session.conversationBounds()),
         .rewind_to_user_message => reply(self, method, session.rewindToUserMessage(request.position)),
+        .set_instructions => reply(self, method, session.setInstructions(request)),
         .update_credential => reply(self, method, session.updateCredential(request.credential)),
         .request_termination => reply(self, method, session.requestTermination(request.run_id, request.signal)),
         .prepare_run => prepared: {

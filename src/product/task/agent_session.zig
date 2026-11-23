@@ -246,6 +246,10 @@ pub const Access = struct {
         return self.get().rewindToUserMessage(position);
     }
 
+    pub fn setInstructions(self: *Access, instructions: agent.Instructions) !agent.InstructionsApplied {
+        return self.get().setInstructions(instructions);
+    }
+
     pub fn updateCredential(self: *Access, credential: []const u8) !void {
         return self.get().updateCredential(credential);
     }

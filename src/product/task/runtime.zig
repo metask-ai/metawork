@@ -29,6 +29,7 @@ const recovery_job = @import("product_task_recovery_job");
 pub const approval_job = @import("product_task_approval_job");
 const agent_protocol = @import("product_agent_protocol_adapter");
 const permission_review = @import("product_permission_review");
+pub const product_instructions = @import("metawork_product_instructions").source;
 
 pub const DurableCommit = task_persistence.Commit;
 pub const HistoryInput = approval_job.HistoryInput;
@@ -457,6 +458,9 @@ pub const OperationEffects = struct {
     mcp_installation: ?agent.McpInstallationInput = null,
     /// Borrowed only during prepareRun; never retained by PreparedRun or a worker.
     model_target: ?models_contract.SourceCandidateInput = null,
+    /// The user instruction files as this turn's start found them. Borrowed
+    /// only during prepareRun; null when the caller prepared none.
+    instructions: ?*const product_instructions.Preparation = null,
     text: TextProjection,
     release: ReleaseEffects,
     executor: ExecutorPort,
@@ -3568,6 +3572,9 @@ pub const Runtime = struct {
         var access_live = true;
         errdefer if (access_live) access.deinit();
         try applyModelIntent(self, task, &access, effects);
+        // The Session is idle and stays so until the Run is prepared: the one
+        // place a changed instruction file reaches this Run and not a later one.
+        const instructions_used = try applyInstructions(task, &access, effects);
         const execution = try taskExecutionInput(task);
         var input_parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
         const agent_input = try validateRunInput(task, input, effects.limits, &input_parts, null);
@@ -3645,6 +3652,8 @@ pub const Runtime = struct {
         errdefer if (record_owned) discardRun(self, task, slot, effects.release);
         const run_record = &task.durable.runs[slot].?;
         run_record.id = run_id;
+        run_record.instructions = instructions_used;
+        run_record.instructions_project_path = try projectInstructionsPath(effects, instructions_used);
         // A rewind leaves the Conversation ending just below the position it
         // named, so the input takes that position exactly. Everything from
         // there on is out of the Conversation, and attributing it to this Run
@@ -4619,6 +4628,15 @@ pub const Runtime = struct {
         const task = self.findConst(task_id) orelse return false;
         const execution = task.runtime.executionConst() orelse return false;
         return execution.matchesSourceGeneration(source_generation);
+    }
+
+    /// What the Task's live Session carries of the user's instructions, and
+    /// the observation it was installed from. Null without a live Session or
+    /// before its first Run.
+    pub fn installedInstructions(self: *Runtime, task_id: u64) ?product_instructions.Installed {
+        const task = self.find(task_id) orelse return null;
+        const attached = task.runtime.attached() orelse return null;
+        return attached.instructions;
     }
 
     pub fn installedModelNeedsSourceChange(self: *const Runtime, task_id: u64, candidate: models_contract.SourceCandidateInput) bool {
@@ -10625,6 +10643,7 @@ fn applyProvisionalTitle(
 fn cleanRunEffects(effects: OperationEffects) OperationEffects {
     var clean = effects;
     clean.model_target = null;
+    clean.instructions = null;
     clean.input_catalog = null;
     clean.prepared_input = null;
     clean.image_execution = null;
@@ -10632,6 +10651,70 @@ fn cleanRunEffects(effects: OperationEffects) OperationEffects {
     clean.file_delivery = null;
     clean.mcp_installation = null;
     return clean;
+}
+
+/// Installs this turn's user instructions in the idle Session and says what
+/// the Run carries. Nothing about the user's files stops a Run: a file that
+/// cannot be read or that Core refuses is left out, and a Session that cannot
+/// be updated keeps what it had. A busy Session defers the Run, and a Session
+/// lost on the way fails it, as any other use of a lost Session would.
+fn applyInstructions(
+    task: *task_state.Task,
+    access: *task_agent_session.Access,
+    effects: OperationEffects,
+) RunError!?product_instructions.InstructionsUse {
+    const preparation = effects.instructions orelse return null;
+    const attached = task.runtime.attached() orelse return null;
+    const candidate = switch (preparation.found) {
+        .unchanged => return if (attached.instructions) |installed| installed.use else null,
+        .changed => |*value| value,
+    };
+    const carries = if (attached.instructions) |installed| installed.sections else false;
+    // A Session without instruction sections needs no call to stay so.
+    if (!candidate.hasDocuments() and !carries) {
+        const use = candidate.use(.{});
+        attached.instructions = .{ .fingerprint = candidate.fingerprint, .use = use, .sections = false };
+        return use;
+    }
+    const applied = access.setInstructions(candidate.instructions()) catch |err| switch (err) {
+        error.SessionNotIdle => return error.TaskBusy,
+        // The Session itself is lost, not just this update: no Run can start
+        // on it. Marking it poisoned hands it to the ordinary close, and the
+        // next message's recovery builds a Session that installs the files.
+        error.SessionPoisoned => {
+            attached.health = .session_poisoned;
+            return error.SessionPoisoned;
+        },
+        else => {
+            // The profile Core had stays, so this Run carries what the last
+            // install left, which may be nothing of the user's; the
+            // unchanged fingerprint makes the next turn retry.
+            std.log.warn("task.instructions_update_failed task_id={d} error={s}", .{ task.durable.id, @errorName(err) });
+            return candidate.useKept(if (attached.instructions) |installed| installed.use else null);
+        },
+    };
+    const use = candidate.use(applied);
+    attached.instructions = .{
+        .fingerprint = candidate.fingerprint,
+        .use = use,
+        .sections = applied.global or applied.project,
+    };
+    return use;
+}
+
+/// The project instruction file this Run reports: the one its preparation
+/// opened, projected like the Run's other display text. A path longer than
+/// the Agent accepts is not shown at all rather than shown cut.
+fn projectInstructionsPath(
+    effects: OperationEffects,
+    used: ?product_instructions.InstructionsUse,
+) RunError!?[]u8 {
+    const report = used orelse return null;
+    if (report.project == null) return null;
+    const preparation = effects.instructions orelse return null;
+    const path = preparation.project_path orelse return null;
+    if (path.len > product_instructions.max_path_bytes) return null;
+    return (try effects.text.project(path, product_instructions.max_path_bytes, &.{}, 0)).value;
 }
 
 fn applyModelIntent(
@@ -11688,6 +11771,7 @@ fn deinitRun(
     releaseTrackedText(self, effects, &run.output_continued);
     if (run.execution_model_owned)
         releaseProjectedSlice(self, effects, @constCast(run.execution_model));
+    if (run.instructions_project_path) |path| releaseProjectedSlice(self, effects, path);
     releaseProjectedSlice(self, effects, run.terminal_diagnostic);
     if (run.model_error_storage) |storage| {
         std.crypto.secureZero(u8, std.mem.asBytes(storage));

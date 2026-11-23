@@ -10,6 +10,7 @@ const task_state = @import("product_task_state");
 const task_policy = @import("product_task_policy");
 const task_recovery = @import("product_task_recovery");
 const view_contract = @import("product_task_view_contract");
+const product_instructions = @import("metawork_product_instructions").source;
 
 pub const Error = std.mem.Allocator.Error || error{
     SnapshotTooLarge,
@@ -994,6 +995,44 @@ pub fn editAdmitted(
         task_policy.editablePosition(task, run) == .position;
 }
 
+/// What one instruction source contributed, without its path.
+fn writeInstructionUseFields(writer: *std.Io.Writer, use: product_instructions.Use) Error!void {
+    writer.print("\"state\":\"{s}\",\"truncated\":{},\"reason\":", .{ @tagName(use.state), use.truncated }) catch
+        return error.SnapshotTooLarge;
+    if (use.reason) |reason|
+        writer.print("\"{s}\"", .{@tagName(reason)}) catch return error.SnapshotTooLarge
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+}
+
+fn writeInstructions(
+    writer: *std.Io.Writer,
+    text_projection: TextProjection,
+    run: *const task_state.RunRecord,
+) Error!void {
+    const used = run.instructions orelse {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    };
+    writer.writeAll("{\"global\":{") catch return error.SnapshotTooLarge;
+    try writeInstructionUseFields(writer, used.global);
+    writer.writeAll("},\"project\":") catch return error.SnapshotTooLarge;
+    const project = used.project orelse {
+        writer.writeAll("null}") catch return error.SnapshotTooLarge;
+        return;
+    };
+    // The file this Run's preparation opened, not one composed from the
+    // Task's root now.
+    writer.writeAll("{\"path\":") catch return error.SnapshotTooLarge;
+    if (run.instructions_project_path) |path|
+        try text_projection.writeJson(writer, path)
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeByte(',') catch return error.SnapshotTooLarge;
+    try writeInstructionUseFields(writer, project);
+    writer.writeAll("}}") catch return error.SnapshotTooLarge;
+}
+
 pub fn writeRun(
     writer: *std.Io.Writer,
     text_projection: TextProjection,
@@ -1032,6 +1071,8 @@ pub fn writeRun(
         writer.print("\"{d}\"", .{run.finished_at_unix_ms.?}) catch return error.SnapshotTooLarge
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"instructions\":") catch return error.SnapshotTooLarge;
+    try writeInstructions(writer, text_projection, run);
     writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
     try writeInput(writer, text_projection, run.input, null);
     writer.writeAll(",\"submission\":") catch return error.SnapshotTooLarge;

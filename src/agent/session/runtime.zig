@@ -1052,7 +1052,9 @@ pub const Runtime = struct {
         config.struct_size = @sizeOf(wire.SessionCreateConfigV1);
         config.host = &host_config;
         config.model = sdk.bytesView(binding.target.model);
-        config.prompt_profile = &prompt_profile.profile;
+        // User instructions arrive through the idle setter before the first
+        // Run; a fresh Session starts from the base profile alone.
+        config.prompt_profile = &prompt_profile.base_profile;
 
         var diagnostic = emptyOwnedBytes();
         var raw_session: ?*wire.SessionHandle = null;

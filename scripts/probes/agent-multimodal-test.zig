@@ -26,6 +26,16 @@ const Checkpoint = struct {
     }
 };
 
+/// Which user instruction sections the next manifests must carry. Every Run
+/// outside `userInstructions` carries none.
+var expected_instructions: agent.InstructionsApplied = .{};
+/// Set when the next Run follows an instruction change, whose prompt-cache
+/// boundary Core announces with a manifest.
+var manifest_required = false;
+/// The highest order of any kernel section seen in a manifest: the
+/// instruction sections must render after all of them, whatever the number.
+var max_kernel_order: ?i64 = null;
+
 fn execute(session: *agent.Session, input: agent.RunInput) !agent.TerminalResult {
     const id = try session.prepareRun(input);
     var run = try session.beginRun(id);
@@ -63,7 +73,8 @@ fn success(runtime: *agent.Runtime, session: *agent.Session, input: agent.RunInp
         events += 1;
     }
     if (events == 0) return error.MissingHostEvents;
-    if ((id == 1 or input == .skill) and manifests == 0) return error.MissingPromptManifest;
+    if ((id == 1 or input == .skill or manifest_required) and manifests == 0) return error.MissingPromptManifest;
+    manifest_required = false;
     return id;
 }
 
@@ -220,6 +231,10 @@ pub fn main(init: std.process.Init) !void {
     }
     if (protocol == .openai_chat_completions) try longModelError(runtime, options);
     try selectedSkill(runtime, options);
+    checkpoint.len = 0;
+    checkpoint.offset = 0;
+    try userInstructions(runtime, options, limits, &checkpoint);
+    std.debug.print("Host user instructions passed: {s}; highest kernel section order {?d}\n", .{ provider, max_kernel_order });
     std.debug.print("Host identity, legacy restore and isolated Skill inheritance passed: {s}\n", .{provider});
     std.debug.print("Host multimodal history and checkpoint acceptance passed: {s}\n", .{provider});
 }
@@ -241,6 +256,87 @@ fn selectedSkill(runtime: *agent.Runtime, options: agent.SessionOpenOptions) !vo
         .selected_skill = .{ .skill_id = "0123456789abcdef" ** 4, .invocation_name = "xlsx" },
     } });
     _ = try success(runtime, session, .{ .text = "Selected Skill follow-up." });
+}
+
+/// #34: the user's instruction documents reach the Provider as the last two
+/// system sections, an isolated Skill's child carries them too, a
+/// replacement takes effect at the next Run, and restore leaves only the base
+/// profile until the caller supplies current instructions. The runner checks
+/// the request bodies by the user text each Run sends.
+fn userInstructions(runtime: *agent.Runtime, options: agent.SessionOpenOptions, limits: agent.CheckpointLimits, checkpoint: *Checkpoint) !void {
+    var catalog = try runtime.querySkillCatalog(.{
+        .canonical_user_home = options.canonical_user_home,
+        .target = .{ .workspace = .{ .canonical_root = options.workspace.canonical_root, .epoch = "instructions-proof" } },
+    });
+    defer catalog.deinitProjection();
+    defer runtime.releaseSkillCatalog(catalog.lease) catch unreachable;
+    if (catalog.projection.skills.len != 1) return error.MissingIsolatedSkill;
+    const skill = catalog.projection.skills[0];
+    var bound = options;
+    bound.workspace_epoch = "instructions-proof";
+    bound.skill_catalog = catalog.lease;
+    bound.skill_policy = .{ .granted_skill_ids = &.{skill.skill_id} };
+    const global_path = "/probe/home/.metawork/AGENTS.md";
+    const project_path = "/probe/workspace/AGENTS.md";
+    const project: agent.InstructionDocument = .{
+        .path = project_path,
+        .text = "METAWORK_PROJECT_INSTRUCTION Mention {{model}} only when asked.",
+        .truncated = false,
+    };
+    const session = try runtime.createSession(bound);
+    const both = agent.InstructionsApplied{ .global = true, .project = true };
+    if (!std.meta.eql(both, try session.setInstructions(.{
+        .global = .{ .path = global_path, .text = "METAWORK_GLOBAL_INSTRUCTION_A Keep replies short.", .truncated = true },
+        .project = project,
+    }))) return error.InstructionsRefused;
+    expected_instructions = both;
+    manifest_required = true;
+    _ = try success(runtime, session, .{ .text = "User instructions probe: first." });
+    // An isolated Skill runs in a child Session, which inherits the profile.
+    _ = try success(runtime, session, .{ .skill = .{
+        .skill_id = skill.skill_id,
+        .catalog_revision = catalog.projection.revision,
+        .argument_values = &.{},
+    } });
+    if (!std.meta.eql(agent.InstructionsApplied{ .global = true }, try session.setInstructions(.{
+        .global = .{ .path = global_path, .text = "METAWORK_GLOBAL_INSTRUCTION_B Keep replies short.", .truncated = false },
+    }))) return error.InstructionsRefused;
+    expected_instructions = .{ .global = true };
+    manifest_required = true;
+    const last_run = try success(runtime, session, .{ .text = "User instructions probe: replaced." });
+    var exported = try session.exportCheckpoint(limits, .{ .context = checkpoint, .write_fn = Checkpoint.write }, last_run, 0, bound.model_binding.target.model);
+    defer exported.deinit();
+    if (exported != .success) return error.InstructionsExportFailed;
+    const description = exported.success.description;
+    try session.close(.session_close);
+    try runtime.releaseClosedSession(session);
+    bound.operation_id_floor = .{ .last_run_id = description.last_run_id, .last_compact_id = description.last_compact_id };
+    const restored = try runtime.restoreSessionRoute(.{
+        .session = bound,
+        .checkpoint_limits = limits,
+        .source = .{ .context = checkpoint, .read_fn = Checkpoint.read },
+        .expectation = .{
+            .logical_session_id = description.session_id,
+            .checkpoint_generation = exported.success.checkpoint.generation,
+            .last_run_id = description.last_run_id,
+            .last_compact_id = description.last_compact_id,
+            .model = bound.model_binding.target.model,
+        },
+    });
+    if (restored.report.health != .complete) return error.InstructionsRestoreDegraded;
+    // The checkpoint froze instruction B; restore installs the base profile.
+    expected_instructions = .{};
+    _ = try success(runtime, restored.session, .{ .text = "User instructions probe: restored base." });
+    if (!std.meta.eql(both, try restored.session.setInstructions(.{
+        .global = .{ .path = global_path, .text = "METAWORK_GLOBAL_INSTRUCTION_C Keep replies short.", .truncated = false },
+        .project = project,
+    }))) return error.InstructionsRefused;
+    expected_instructions = both;
+    manifest_required = true;
+    _ = try success(runtime, restored.session, .{ .text = "User instructions probe: restored current." });
+    expected_instructions = .{};
+    try restored.session.close(.session_close);
+    try runtime.releaseClosedSession(restored.session);
 }
 
 fn longModelError(runtime: *agent.Runtime, options: agent.SessionOpenOptions) !void {
@@ -290,7 +386,22 @@ fn validateManifest(manifest: anytype, child: bool) !void {
     var using_tools_index: ?usize = null;
     var downloads_index: ?usize = null;
     var outputs_index: ?usize = null;
+    var last_kernel_index: ?usize = null;
+    var global_index: ?usize = null;
+    var project_index: ?usize = null;
     for (manifest.sections, 0..) |section, index| {
+        if (section.origin == .kernel) {
+            last_kernel_index = index;
+            max_kernel_order = if (max_kernel_order) |seen| @max(seen, section.order) else section.order;
+        }
+        if (std.mem.eql(u8, section.id, "host:user-instructions-global")) {
+            if (section.origin != .host or section.order != 10000) return error.InvalidPromptManifest;
+            global_index = index;
+        }
+        if (std.mem.eql(u8, section.id, "host:user-instructions-project")) {
+            if (section.origin != .host or section.order != 10100) return error.InvalidPromptManifest;
+            project_index = index;
+        }
         if (std.mem.eql(u8, section.id, if (child) "metacodes:subagent" else "metacodes:identity")) identity_seen = section.origin == .host;
         if (std.mem.eql(u8, section.id, "metacodes:env")) env_seen = section.class == .generated;
         if (std.mem.eql(u8, section.id, "metacodes:safety-policy")) safety_seen = section.class == .locked and section.origin == .kernel;
@@ -327,6 +438,18 @@ fn validateManifest(manifest: anytype, child: bool) !void {
         if (outputs < using_tools) return error.InvalidPromptManifest;
     if (downloads_index) |downloads|
         if (outputs < downloads) return error.InvalidPromptManifest;
+    // The user's instructions are present exactly as installed, child Sessions
+    // included, and render after every kernel section, project last.
+    if ((global_index != null) != expected_instructions.global or
+        (project_index != null) != expected_instructions.project)
+        return error.InvalidPromptManifest;
+    for ([_]?usize{ global_index, project_index }) |entry| {
+        const placed = entry orelse continue;
+        if (last_kernel_index) |kernel| if (placed < kernel) return error.InvalidPromptManifest;
+        if (placed < outputs) return error.InvalidPromptManifest;
+    }
+    if (global_index) |global| if (project_index) |project_placed|
+        if (project_placed < global) return error.InvalidPromptManifest;
 }
 
 // Simulate a historical unprofiled Session using the existing internal Runtime

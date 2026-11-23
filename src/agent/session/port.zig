@@ -280,6 +280,7 @@ pub const SessionPort = struct {
         update_permission_mode: *const fn (?*anyopaque, session_control.PermissionMode, session_control.PermissionMode) Error!surface.PermissionModeUpdate,
         conversation_bounds: *const fn (?*anyopaque) Error!surface.ConversationBounds,
         rewind_to_user_message: *const fn (?*anyopaque, u64) Error!surface.RewindOutcome,
+        set_instructions: *const fn (?*anyopaque, surface.Instructions) Error!surface.InstructionsApplied,
         update_credential: *const fn (?*anyopaque, []const u8) Error!void,
         request_termination: *const fn (?*anyopaque, u64, session_control.TerminationSignal) Error!void,
         prepare_run: *const fn (?*anyopaque, surface.RunInput) Allocating!u64,
@@ -378,6 +379,13 @@ pub const SessionPort = struct {
     /// `surface.RewindRefusal`.
     pub fn rewindToUserMessage(self: SessionPort, position: u64) Error!surface.RewindOutcome {
         return self.vtable.rewind_to_user_message(self.context, position);
+    }
+
+    /// Replaces the user instruction sections while the Session is idle. The
+    /// answer says which documents Core took; one it refused is left out
+    /// rather than costing the other. See `surface.Instructions`.
+    pub fn setInstructions(self: SessionPort, instructions: surface.Instructions) Error!surface.InstructionsApplied {
+        return self.vtable.set_instructions(self.context, instructions);
     }
 
     pub fn updateCredential(self: SessionPort, credential: []const u8) Error!void {

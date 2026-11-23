@@ -24,6 +24,8 @@ pub const remove_project = "metawork.workspaces.removeProject";
 pub const choose_automatic_workspace_root = "metawork.workspaces.chooseAutomaticRoot";
 pub const reset_automatic_workspace_root = "metawork.workspaces.resetAutomaticRoot";
 pub const retry_automatic_workspace_root = "metawork.workspaces.retryAutomaticRoot";
+pub const read_global_instructions = "metawork.instructions.readGlobal";
+pub const save_global_instructions = "metawork.instructions.saveGlobal";
 pub const refresh_workspace_skill_catalog = "metawork.workspaces.refreshSkillCatalog";
 pub const refresh_skill_catalog = "metawork.skills.refreshCatalog";
 pub const set_skill_enabled = "metawork.skills.setEnabled";
@@ -146,6 +148,8 @@ pub const product = [_][]const u8{
     choose_automatic_workspace_root,
     reset_automatic_workspace_root,
     retry_automatic_workspace_root,
+    read_global_instructions,
+    save_global_instructions,
     refresh_workspace_skill_catalog,
     refresh_skill_catalog,
     set_skill_enabled,

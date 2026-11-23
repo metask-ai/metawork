@@ -881,6 +881,73 @@ summary::-webkit-details-marker {
   gap: 8px;
 }
 
+.settings-instructions {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+}
+
+.settings-instructions-path {
+  display: block;
+  min-width: 0;
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 5px 8px;
+  border: 1px solid var(--settings-line);
+  border-radius: 6px;
+  color: var(--settings-ink);
+  background: var(--ui-surface-panel-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-instructions-editor {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 280px;
+  max-height: 60vh;
+  padding: 10px 12px;
+  resize: vertical;
+  border: 1px solid var(--settings-line);
+  border-radius: 8px;
+  color: var(--settings-ink);
+  background: var(--ui-surface-panel);
+  font-family: var(--font-mono);
+  font-size: var(--text-control);
+  line-height: 1.5;
+}
+
+.settings-instructions-editor:disabled {
+  color: var(--settings-muted);
+}
+
+.settings-instructions-meta,
+.settings-instructions-actions,
+.settings-instructions-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-instructions-meta {
+  justify-content: space-between;
+  color: var(--settings-muted);
+  font-size: var(--text-label);
+}
+
+.settings-instructions-notice {
+  justify-content: space-between;
+}
+
+.settings-field p.settings-instructions-error,
+.settings-instructions-meta .settings-instructions-error {
+  color: var(--ui-content-error);
+}
+
 .settings-row p.settings-automatic-root-health,
 .settings-row p.settings-automatic-root-error {
   color: var(--ui-content-warning);
@@ -9133,6 +9200,23 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
   line-height: 1.35;
+}
+
+.task-instructions-fact {
+  display: grid;
+  min-width: 0;
+  justify-items: end;
+  gap: 2px;
+}
+
+.task-instructions-fact code {
+  max-width: 240px;
+  overflow: hidden;
+  color: var(--ui-content-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .run-process-tool-detail {
   min-width: 0;

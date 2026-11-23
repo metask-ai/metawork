@@ -942,11 +942,45 @@ export type DeliveredOutputView = {
   sizeBytes: string;
   redacted: boolean;
 };
+export type InstructionUseState =
+  | "applied"
+  | "absent"
+  | "empty"
+  | "unreadable"
+  | "rejected"
+  | "update_failed"
+  | "unavailable"
+  | "not_installed";
+export type InstructionUnreadableReason =
+  | "access_denied"
+  | "not_regular_file"
+  | "outside_workspace"
+  | "not_utf8"
+  | "invalid_path"
+  | "io_error";
+/** What one instruction file contributed to a Run. */
+export type InstructionUse = {
+  state: InstructionUseState;
+  truncated: boolean;
+  /** Present exactly when `state` is `unreadable`. */
+  reason: InstructionUnreadableReason | null;
+};
+/**
+ * The user instructions a Run carried. Runtime-only: history from before the
+ * current Host process, and Runs started without a Session to install into,
+ * report null rather than a reconstructed answer.
+ */
+export type RunInstructions = {
+  global: InstructionUse;
+  /** Null where the working directory admits no project file. */
+  project: (InstructionUse & { path: string | null }) | null;
+};
 export type RunView = {
   submission: InputSubmission | null;
   elapsedMs: string | null;
   submittedAtUnixMs: string | null;
   finishedAtUnixMs: string | null;
+  instructions: RunInstructions | null;
   id: string;
   conversationCoverage: ConversationCoverage;
   /** Whether this run's own message can still be edited and rerun from. */
@@ -1613,6 +1647,41 @@ export type WorkbenchSnapshot = {
   workspaces: WorkspaceView[];
   scheduledTasks: ScheduledTaskView[] | null;
   tasks: TaskView[];
+};
+export type GlobalInstructionsState =
+  | "ready"
+  | "absent"
+  | "too_large"
+  | "unreadable"
+  | "contains_credential"
+  | "unavailable";
+/** The global instructions file as the Settings editor loads it. */
+export type GlobalInstructionsView = {
+  /** Null exactly when there is no trusted home (`unavailable`). */
+  path: string | null;
+  state: GlobalInstructionsState;
+  /** The file's text, present exactly when `ready`. */
+  text: string | null;
+  /** What a save must name: the loaded bytes' digest, or `absent`. Null
+   * where the editor may not replace the file. */
+  revision: string | null;
+  byteLength: string | null;
+  reason: InstructionUnreadableReason | null;
+  /** The most UTF-8 bytes a save may carry. */
+  limitBytes: number;
+};
+export type GlobalInstructionsSaveOutcome =
+  | "saved"
+  | "conflict"
+  | "too_large"
+  | "invalid_text"
+  | "contains_credential"
+  | "write_failed"
+  | "unavailable";
+export type GlobalInstructionsSaveResult = {
+  outcome: GlobalInstructionsSaveOutcome;
+  /** The file's revision now: the saved text, or the outside change. */
+  revision: string | null;
 };
 export type AutomaticWorkspaceRootMutationResult = {
   outcome: "applied" | "cancelled";
