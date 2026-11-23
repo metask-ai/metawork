@@ -2162,6 +2162,42 @@ test("Settings switches between one section page at a time", async () => {
   assert.equal(screen.queryByRole("heading", { name: "Account" }), null);
 });
 
+test("Settings lists Global instructions after Models and opens the editor from it", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  let reads = 0;
+  renderSettings(readySettingsAccount, {
+    initialSection: "general",
+    globalInstructions: {
+      read: async () => {
+        reads += 1;
+        return {
+          path: "/home/user/.metawork/AGENTS.md",
+          state: "absent",
+          text: null,
+          revision: "absent",
+          byteLength: null,
+          reason: null,
+          limitBytes: 32768,
+        };
+      },
+      save: async () => ({ outcome: "saved", revision: "a".repeat(64) }),
+    },
+  });
+  const names = screen
+    .getAllByRole("link")
+    .map((link) => link.textContent.trim());
+  assert.equal(
+    names.indexOf("Global instructions"),
+    names.indexOf("Models") + 1,
+  );
+  // Nothing is read until the page is opened.
+  assert.equal(reads, 0);
+  await user.click(screen.getByRole("link", { name: "Global instructions" }));
+  assert.ok(screen.getByRole("heading", { name: "Global instructions" }));
+  await screen.findByRole("textbox", { name: "Instructions for every task" });
+  assert.equal(reads, 1);
+});
+
 test("Settings keeps permission choices out of its navigation and pages", () => {
   renderSettings(readySettingsAccount, { initialSection: "general" });
 

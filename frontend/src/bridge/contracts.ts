@@ -1646,6 +1646,41 @@ export type WorkbenchSnapshot = {
   scheduledTasks: ScheduledTaskView[] | null;
   tasks: TaskView[];
 };
+export type GlobalInstructionsState =
+  | "ready"
+  | "absent"
+  | "too_large"
+  | "unreadable"
+  | "contains_credential"
+  | "unavailable";
+/** The global instructions file as the Settings editor loads it. */
+export type GlobalInstructionsView = {
+  /** Null exactly when there is no trusted home (`unavailable`). */
+  path: string | null;
+  state: GlobalInstructionsState;
+  /** The file's text, present exactly when `ready`. */
+  text: string | null;
+  /** What a save must name: the loaded bytes' digest, or `absent`. Null
+   * where the editor may not replace the file. */
+  revision: string | null;
+  byteLength: string | null;
+  reason: InstructionUnreadableReason | null;
+  /** The most UTF-8 bytes a save may carry. */
+  limitBytes: number;
+};
+export type GlobalInstructionsSaveOutcome =
+  | "saved"
+  | "conflict"
+  | "too_large"
+  | "invalid_text"
+  | "contains_credential"
+  | "write_failed"
+  | "unavailable";
+export type GlobalInstructionsSaveResult = {
+  outcome: GlobalInstructionsSaveOutcome;
+  /** The file's revision now: the saved text, or the outside change. */
+  revision: string | null;
+};
 export type AutomaticWorkspaceRootMutationResult = {
   outcome: "applied" | "cancelled";
 };

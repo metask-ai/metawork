@@ -557,6 +557,15 @@ export default function App() {
     observeSnapshot: observeUiResponseSnapshot,
   } = useUiResponseStates();
   const client = useMemo(() => new BridgeClient(), []);
+  // Stable for the life of the client, so the editor loads once per visit.
+  const globalInstructions = useMemo(
+    () => ({
+      read: () => client.readGlobalInstructions(),
+      save: (expectedRevision: string, text: string) =>
+        client.saveGlobalInstructions(expectedRevision, text),
+    }),
+    [client],
+  );
   const [notificationTarget, setNotificationTarget] = useState<{
     generation: string;
     taskId: string;
@@ -5770,6 +5779,7 @@ export default function App() {
       overlay={
         settingsOpen ? (
           <SettingsPage
+            globalInstructions={globalInstructions}
             directoryManagement={
               <WorkingDirectoriesSettings
                 workspaces={snapshot.workspaces}

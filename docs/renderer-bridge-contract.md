@@ -128,6 +128,22 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 
 非空时 Task 投影追加 `conversationOutputs`。每项为 `{ id, displayPath, sizeBytes, redacted, runId }`，由首个可见登记的 Run 提供 action scope，覆盖未加载正文的历史轮次。
 
+## Global instructions commands
+
+设置页的全局指令编辑只用两条 Host 命令，正文不进入 Snapshot。
+
+- `metawork.instructions.readGlobal` 的 payload 是 `{}`，Renderer 不提交路径。结果精确为 `{ path, state, text, revision, byteLength, reason, limitBytes }`：
+  - `state = ready | absent | too_large | unreadable | contains_credential | unavailable`；
+  - `path` 是 Host 解析的 `~/.metawork/AGENTS.md` 绝对路径，只在 `unavailable`（没有可信 home）时为 null；
+  - `text` 只在 `ready` 时非空；`revision` 只在 `ready`（文件字节的 64 位小写十六进制 SHA-256）与 `absent`（字面 `absent`）时非空；
+  - `reason` 只在 `unreadable` 时非空，取值同 Run `instructions` 的读取失败原因；`byteLength` 是 nullable canonical decimal 字符串，`too_large` 时必有；`limitBytes` 是保存允许的最大 UTF-8 字节数（32768）；
+  - 含 Host 持有的已知凭据的文件以 `contains_credential` 回答，`text` 为 null。
+- `metawork.instructions.saveGlobal` 的 payload 精确为 `{ expectedRevision, text }`，因 JSON 转义放宽到 256 KiB，Host 再按解码后的 UTF-8 字节复核 32 KiB 上限。结果精确为 `{ outcome, revision }`：
+  - `outcome = saved | conflict | too_large | invalid_text | contains_credential | write_failed | unavailable`；
+  - `revision` 只在 `saved`（新文件的摘要）与 `conflict`（当前文件的摘要，文件已被删除时为 `absent`）时非空。
+  - 冲突时不写入；Renderer 只能在用户确认后以返回的 `revision` 重新保存，不自动重放。
+- 两条命令都不发布 Snapshot revision：保存的效果由下一轮准入读取文件时体现。
+
 ## Delivered file actions
 
 `metawork.outputs.action` 是异步请求，精确输入 `{ generation, operationId, taskId, runId, outputId, action }`。前四项为非零 canonical decimal u64 string；outputId 为所属 Task/Run 内非零 32 位小写十六进制成果 ID；action 支持 `check | check_current | reveal | save | open`。Renderer 不提交路径、摘要、文件字节或任意 OS intent。operationId 在当前 connection 内严格递增，不接受重放；Host 独立绑定当前 window/connection、Task/Run/成果和 Workspace authority。

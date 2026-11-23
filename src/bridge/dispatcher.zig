@@ -443,6 +443,8 @@ pub const Dispatcher = struct {
             .{ .name = commands.open_workspace, .function = openWorkspaceDirectory },
             .{ .name = commands.reset_automatic_workspace_root, .function = resetAutomaticWorkspaceRoot },
             .{ .name = commands.retry_automatic_workspace_root, .function = retryAutomaticWorkspaceRoot },
+            .{ .name = commands.read_global_instructions, .function = readGlobalInstructions },
+            .{ .name = commands.save_global_instructions, .function = saveGlobalInstructions },
             .{ .name = commands.refresh_workspace_skill_catalog, .function = refreshWorkspaceSkillCatalog },
             .{ .name = commands.refresh_skill_catalog, .function = refreshSkillCatalog },
             .{ .name = commands.set_skill_enabled, .function = setSkillEnabled },
@@ -3633,6 +3635,74 @@ pub const Dispatcher = struct {
         );
         self.notifyCommitted();
         return "{\"outcome\":\"applied\"}";
+    }
+
+    /// The global instructions file for the Settings editor. Its text crosses
+    /// only here, never in a snapshot, and only once the Host found no known
+    /// credential in it.
+    fn readGlobalInstructions(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.GlobalInstructionsRead, invocation.request.payload);
+        parsed.deinit();
+        const control = try self.requireProductControl();
+        var current = try control.readGlobalInstructions();
+        defer current.deinit(control.allocator);
+        const loaded = current.loaded;
+        // Only a file the editor may replace has a revision to save against:
+        // one it shows, or none at all.
+        const editable = current.path != null and (loaded.state == .ready or loaded.state == .absent);
+        var revision_storage: [64]u8 = undefined;
+        var length_storage: [24]u8 = undefined;
+        var writer = std.Io.Writer.fixed(output);
+        try std.json.Stringify.value(.{
+            .path = current.path,
+            .state = if (current.path == null) "unavailable" else @tagName(loaded.state),
+            .text = loaded.text,
+            .revision = if (editable) loaded.revision.slice(&revision_storage) else null,
+            .byteLength = if (loaded.byte_length) |length| std.fmt.bufPrint(&length_storage, "{d}", .{length}) catch unreachable else null,
+            .reason = if (loaded.reason) |reason| @tagName(reason) else null,
+            .limitBytes = product_control.instructions_file.max_text_bytes,
+        }, .{}, &writer);
+        return writer.buffered();
+    }
+
+    fn saveGlobalInstructions(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(
+            handlers.GlobalInstructionsSave,
+            invocation.request.payload,
+            handlers.max_global_instructions_save_payload_bytes,
+        );
+        defer parsed.deinit();
+        const expected = product_control.instructions_file.Revision.parse(parsed.value.expectedRevision) orelse
+            return error.InvalidBridgePayload;
+        const control = try self.requireProductControl();
+        const outcome = (try control.saveGlobalInstructions(expected, parsed.value.text)) orelse
+            return "{\"outcome\":\"unavailable\",\"revision\":null}";
+        var revision_storage: [64]u8 = undefined;
+        var writer = std.Io.Writer.fixed(output);
+        switch (outcome) {
+            .saved, .conflict => |revision| try writer.print("{{\"outcome\":\"{s}\",\"revision\":\"{s}\"}}", .{
+                @tagName(outcome),
+                revision.slice(&revision_storage),
+            }),
+            else => try writer.print("{{\"outcome\":\"{s}\",\"revision\":null}}", .{@tagName(outcome)}),
+        }
+        return writer.buffered();
     }
 
     fn parseAutomaticWorkspaceRootMutation(payload: []const u8) !u64 {
@@ -7647,6 +7717,117 @@ const DialogTestDispatch = struct {
         return output[0..capture.len];
     }
 };
+
+test "global instructions cross the Bridge only as the editor's own load and revision-bound save" {
+    const fixture = @import("lifecycle_fixture");
+    const Harness = struct {
+        fn wake(_: ?*anyopaque) anyerror!void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
+        fn startTimer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
+        fn cancelTimer(_: ?*anyopaque, _: u64) anyerror!void {}
+        fn request(_: ?*anyopaque, _: u64, _: u64, _: Dialog.Options, _: *const Dialog.Completion) !u64 {
+            return error.UnexpectedDialog;
+        }
+        fn canonicalizeDirectory(_: ?*anyopaque, path: []const u8, output: []u8) anyerror![]const u8 {
+            @memcpy(output[0..path.len], path);
+            return output[0..path.len];
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn onMainThread(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn finish(_: *@This()) void {}
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+
+    fixture.fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    var configuration = fixture.productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime.runtimePort(),
+        .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        configuration,
+    );
+    var harness: Harness = .{};
+    var dispatcher = try Dispatcher.init(
+        std.testing.allocator,
+        &workbench,
+        undefined,
+        undefined,
+        .{
+            .context = &harness,
+            .wake_fn = Harness.wake,
+            .emit_fn = Harness.emit,
+            .start_timer_fn = Harness.startTimer,
+            .cancel_timer_fn = Harness.cancelTimer,
+            .request_dialog_fn = Harness.request,
+            .canonicalize_directory_fn = Harness.canonicalizeDirectory,
+            .window_chrome_connect_fn = undefined,
+            .window_chrome_refresh_fn = undefined,
+            .window_chrome_control_fn = undefined,
+            .now_fn = Harness.now,
+            .on_main_thread_fn = Harness.onMainThread,
+        },
+        .{},
+        3,
+    );
+    defer {
+        dispatcher.deinit();
+        workbench.shutdownExecutor();
+        runtime.shutdown() catch unreachable;
+        workbench.deinit();
+        runtime.deinit();
+    }
+    const native = dispatcher.register(@import("policy.zig").product(.release));
+    const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+    var output: [8192]u8 = undefined;
+    _ = try DialogTestDispatch.run(&harness, native, "{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}", source, &output);
+
+    // Loading creates nothing; a missing file is editable against `absent`.
+    const absent = try DialogTestDispatch.run(&harness, native, "{\"id\":\"read\",\"command\":\"metawork.instructions.readGlobal\",\"payload\":{}}", source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, absent, "\"state\":\"absent\",\"text\":null,\"revision\":\"absent\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, absent, "\"limitBytes\":32768") != null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, ".metawork", .{}));
+
+    const saved = try DialogTestDispatch.run(&harness, native, "{\"id\":\"save\",\"command\":\"metawork.instructions.saveGlobal\",\"payload\":{\"expectedRevision\":\"absent\",\"text\":\"Use tabs.\"}}", source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "\"outcome\":\"saved\",\"revision\":\"") != null);
+    const ready = try DialogTestDispatch.run(&harness, native, "{\"id\":\"read-again\",\"command\":\"metawork.instructions.readGlobal\",\"payload\":{}}", source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, ready, "\"state\":\"ready\",\"text\":\"Use tabs.\"") != null);
+
+    // A save naming the revision before that one conflicts and writes nothing.
+    const stale = try DialogTestDispatch.run(&harness, native, "{\"id\":\"stale\",\"command\":\"metawork.instructions.saveGlobal\",\"payload\":{\"expectedRevision\":\"absent\",\"text\":\"Other.\"}}", source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, stale, "\"outcome\":\"conflict\"") != null);
+    const unchanged = try tmp.dir.readFileAlloc(std.testing.io, ".metawork" ++ std.fs.path.sep_str ++ "AGENTS.md", std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(unchanged);
+    try std.testing.expectEqualStrings("Use tabs.", unchanged);
+
+    // The Renderer names no path, and a malformed revision is refused.
+    for ([_][]const u8{
+        "{\"id\":\"bad-read\",\"command\":\"metawork.instructions.readGlobal\",\"payload\":{\"path\":\"/tmp/leak\"}}",
+        "{\"id\":\"bad-save\",\"command\":\"metawork.instructions.saveGlobal\",\"payload\":{\"expectedRevision\":\"latest\",\"text\":\"x\"}}",
+        "{\"id\":\"bad-extra\",\"command\":\"metawork.instructions.saveGlobal\",\"payload\":{\"expectedRevision\":\"absent\",\"text\":\"x\",\"path\":\"/tmp/leak\"}}",
+    }) |request| {
+        const response = try DialogTestDispatch.run(&harness, native, request, source, &output);
+        try std.testing.expect(std.mem.indexOf(u8, response, "handler_failed") != null);
+    }
+
+    // Text over the limit fits the payload but not the file.
+    const over = try std.testing.allocator.alloc(u8, product_control.instructions_file.max_text_bytes + 1);
+    defer std.testing.allocator.free(over);
+    @memset(over, 'a');
+    const large = try std.fmt.allocPrint(std.testing.allocator, "{{\"id\":\"large\",\"command\":\"metawork.instructions.saveGlobal\",\"payload\":{{\"expectedRevision\":\"absent\",\"text\":\"{s}\"}}}}", .{over});
+    defer std.testing.allocator.free(large);
+    const too_large = try DialogTestDispatch.run(&harness, native, large, source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, too_large, "\"outcome\":\"too_large\",\"revision\":null") != null);
+}
 
 test "Automatic Workspace root Bridge keeps paths Host-only and mutates by generation" {
     const fixture = @import("lifecycle_fixture");

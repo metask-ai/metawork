@@ -22,6 +22,8 @@ export const commands = {
   chooseAutomaticWorkspaceRoot: "metawork.workspaces.chooseAutomaticRoot",
   resetAutomaticWorkspaceRoot: "metawork.workspaces.resetAutomaticRoot",
   retryAutomaticWorkspaceRoot: "metawork.workspaces.retryAutomaticRoot",
+  readGlobalInstructions: "metawork.instructions.readGlobal",
+  saveGlobalInstructions: "metawork.instructions.saveGlobal",
   refreshWorkspaceSkillCatalog: "metawork.workspaces.refreshSkillCatalog",
   refreshSkillCatalog: "metawork.skills.refreshCatalog",
   setSkillEnabled: "metawork.skills.setEnabled",

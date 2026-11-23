@@ -1068,6 +1068,9 @@ Models
     ├── Model list（test / edit / remove）
     └── Add model dialog（vendor preset / custom service）
 
+Global instructions
+└── ~/.metawork/AGENTS.md（path / editor / save）
+
 Working directories
 ├── Choose / Reauthorize directory
 └── Revoke authorization
@@ -1093,6 +1096,8 @@ Archived tasks
 `Models / 模型` 只管理用户自行添加的模型与对应服务配置，不再提供平级 `Providers` 导航。模型服务管理分组只有在 management、API Key 写入系统 credential storage、模型测试和已开放 protocol admission 共同可用时才显示；该组隐藏不影响配置恢复入口。不能显示不可完成的空壳或“能力不可用”配置表单。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
 
 “工作目录”分区列出已登记的 Manual Workspace，可选择新目录、通过原生 picker 重新授权、撤销目录授权。在此处选择目录只登记授权。撤销确认默认聚焦取消，说明实际使用目录的 Task 将被收口；有项目入口时说明入口一并移除，以及在其他目录工作的 N 条日常会话仍保留在“最近”，重新添加项目恢复分组。归档记录保留。只在 Host 收口成功并从 Snapshot 移除目录后更新列表，失败保留事实并提示重试；等待期间禁止重复提交。目录额度满时说明原因并指向此分区。Automatic Workspace 仍随 owning Task 管理；本页不提供磁盘迁移或清理。Renderer 的目录选择保存在项目草稿内，不维护 `activeWorkspaceId` 或全局活动 Workspace 镜像。
+
+`Global instructions / 全局指令` 是“模型”之后的平级分区，编辑 `~/.metawork/AGENTS.md`，也就是每个 Task 都会带上的全局指令；读取与注入规则见 [产品需求](requirements.md#54-agent-交互)。进入分区才向 Host 读取一次，页面显示 Host 给出的文件路径与说明：冲突时项目指令优先，指令不改变安全、权限和审批规则。文件不存在时编辑框为空，并说明保存时才创建；Renderer 不提交路径，只通过 Host 命令读和存。编辑框下方显示按 UTF-8 计的字节数和 32 KiB 上限，超限时就地说明并禁用保存；没有改动或正在保存时也不能保存。保存成功后以 Host 返回的 revision 为准，并说明之后开始的轮次使用新指令；不做乐观更新。文件在载入后被外部修改时，Host 返回冲突，页面保留草稿并提供“重新载入”（换成外部版本）和“覆盖保存”（确认后按 Host 报告的新 revision 保存），不直接覆盖。文件含 MetaWork 保存的凭据时不显示正文，提示用外部编辑器打开上面的路径修改；文件太大（超过 128 KiB）、不能作为文本读取或没有用户主目录时同样不提供编辑框，只给出路径和原因。保存被拒（超限、无效文本、含凭据）或写入失败时保留草稿并就地说明。
 
 `General / 常规` 中提供一行“Automatic Workspace 位置”，它只设置未来随机子目录的直接上级目录，不关闭随机目录、不改名、不迁移也不删除既有 Workspace。主值始终显示 Host 发布的 effective canonical path；system default 只在路径旁显示为“默认”状态标签，不能用“系统默认位置”等抽象文案替代真实路径。辅助文案明确“仅影响新建任务”；动作为“选择文件夹”与仅在非默认或需要显式恢复时出现的“恢复默认”。Choose 只打开 Host 原生 picker，并在 Host 拥有 canonical path 时以当前路径作为初始目录；没有可信路径时不猜测目录。取消后保持页面和焦点；命令完成前禁用该行动作，成功后等待 canonical Snapshot 刷新，不乐观替换路径。
 
@@ -1398,6 +1403,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 已有 live Task 保留当前 execution binding epoch，默认变化不改写历史或 live Session；detached Task 的 Conversation restore 可按 §6.4 为兼容 credential target 建立 adoption epoch，任意 protocol/model 变化仍只有未来的显式 rebind 可以建立新 epoch；
 - Host 重启后点击左栏 Task 只浏览已保存时间线，未完成 operation 显示 `Interrupted`；满足 Host 恢复资格时 Composer 保持普通输入形态，用户发送时在同一意图内执行 restore→Run，required、restoring 与 failed/retry 不形成独立恢复控件或文案。不得因导航自动 restore、伪造 Run/Stop、显示假的 rebind，或仅因当前默认配置看似匹配而开放发送；
 - API 只在设置中显示脱敏名称、protocol 和尾号；完整 secret 不进入 DOM、snapshot、日志或错误；
+- 全局指令分区覆盖文件不存在、可编辑、超限禁用保存、保存成功、外部修改后的冲突（重新载入与覆盖保存）、含凭据不显示正文、太大或不能读取只给路径，以及没有用户主目录；中英文文案齐全；
 - 左下账号入口在窄窗口、长姓名、重认证和 200% text 下仍可用。
 
 ### 19.6 内容状态

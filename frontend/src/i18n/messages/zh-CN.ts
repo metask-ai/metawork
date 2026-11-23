@@ -1305,6 +1305,33 @@ export const zhCN: Record<MessageId, string> = {
   "settings.general": "通用",
   "settings.account": "账户",
   "settings.models": "模型",
+  "settings.instructions": "全局指令",
+  "settings.instructions.global": "所有任务的指令",
+  "settings.instructions.help":
+    "MetaWork 会把这个文件加入每个任务的系统提示词。与任务工作目录里 AGENTS.md 的项目指令冲突时，以项目指令为准。指令不会改变安全、权限和审批规则。",
+  "settings.instructions.loading": "正在读取…",
+  "settings.instructions.load_failed": "读取指令文件失败。",
+  "settings.instructions.reload": "重新载入",
+  "settings.instructions.absent": "文件尚未创建，保存时会创建。",
+  "settings.instructions.size": "{bytes} / {limit} 字节",
+  "settings.instructions.save": "保存",
+  "settings.instructions.saving": "正在保存…",
+  "settings.instructions.saved": "已保存。从现在开始的每一轮都会使用这些指令。",
+  "settings.instructions.over_limit": "指令最多 32 KiB，请删减后再保存。",
+  "settings.instructions.invalid_text": "文本里有无法保存的字符。",
+  "settings.instructions.save_contains_credential":
+    "文本里含有 MetaWork 保存的凭据，没有保存。",
+  "settings.instructions.save_failed": "保存失败，文本仍保留，请重试。",
+  "settings.instructions.conflict":
+    "载入后，文件在 MetaWork 之外被修改过。可以重新载入查看那个版本，或用当前文本覆盖。",
+  "settings.instructions.overwrite": "覆盖保存",
+  "settings.instructions.unavailable": "找不到用户主目录，无法保存全局指令。",
+  "settings.instructions.too_large_to_edit":
+    "文件有 {size} 字节，太大，无法在这里编辑。请用其他编辑器打开上面的路径删减。",
+  "settings.instructions.unreadable":
+    "这个文件无法作为文本读取。请用其他编辑器打开上面的路径修改。",
+  "settings.instructions.contains_credential":
+    "文件里含有 MetaWork 保存的凭据，所以不在这里显示。请用其他编辑器打开上面的路径修改。",
   "settings.general_basics": "常规",
   "settings.automatic_workspace.title": "自动工作区位置",
   "settings.automatic_workspace.help":

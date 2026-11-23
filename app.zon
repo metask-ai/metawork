@@ -37,6 +37,8 @@
             .{ .name = "metawork.workspaces.chooseAutomaticRoot", .origins = .{"zero://app"} },
             .{ .name = "metawork.workspaces.resetAutomaticRoot", .origins = .{"zero://app"} },
             .{ .name = "metawork.workspaces.retryAutomaticRoot", .origins = .{"zero://app"} },
+            .{ .name = "metawork.instructions.readGlobal", .origins = .{"zero://app"} },
+            .{ .name = "metawork.instructions.saveGlobal", .origins = .{"zero://app"} },
             .{ .name = "metawork.workspaces.refreshSkillCatalog", .origins = .{"zero://app"} },
             .{ .name = "metawork.skills.refreshCatalog", .origins = .{"zero://app"} },
             .{ .name = "metawork.skills.setEnabled", .origins = .{"zero://app"} },

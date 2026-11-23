@@ -1513,6 +1513,40 @@ export const enUS = {
   "settings.general": "General",
   "settings.account": "Account",
   "settings.models": "Models",
+  "settings.instructions": "Global instructions",
+  "settings.instructions.global": "Instructions for every task",
+  "settings.instructions.help":
+    "MetaWork adds this file to the system prompt of every task. Where it conflicts with the AGENTS.md in a task's working directory, the project instructions win. Instructions never change the safety, permission or approval rules.",
+  "settings.instructions.loading": "Loading…",
+  "settings.instructions.load_failed":
+    "The instructions file could not be loaded.",
+  "settings.instructions.reload": "Reload",
+  "settings.instructions.absent":
+    "This file does not exist yet. Saving creates it.",
+  "settings.instructions.size": "{bytes} / {limit} bytes",
+  "settings.instructions.save": "Save",
+  "settings.instructions.saving": "Saving…",
+  "settings.instructions.saved":
+    "Saved. Turns that start from now on use these instructions.",
+  "settings.instructions.over_limit":
+    "Instructions can be at most 32 KiB. Shorten the text to save it.",
+  "settings.instructions.invalid_text":
+    "The text contains characters that cannot be saved.",
+  "settings.instructions.save_contains_credential":
+    "The text contains a credential MetaWork stores, so it was not saved.",
+  "settings.instructions.save_failed":
+    "The file could not be saved. Your text is still here; try again.",
+  "settings.instructions.conflict":
+    "The file was changed outside MetaWork after it was loaded. Reload to see that version, or overwrite it with your text.",
+  "settings.instructions.overwrite": "Overwrite",
+  "settings.instructions.unavailable":
+    "There is no home folder to keep global instructions in.",
+  "settings.instructions.too_large_to_edit":
+    "The file is {size} bytes, too large to edit here. Open the path above in another editor to shorten it.",
+  "settings.instructions.unreadable":
+    "The file cannot be read as text. Open the path above in another editor to fix it.",
+  "settings.instructions.contains_credential":
+    "The file contains a credential MetaWork stores, so it is not shown here. Open the path above in another editor to change it.",
   "settings.general_basics": "Basics",
   "settings.automatic_workspace.title": "Automatic Workspace location",
   "settings.automatic_workspace.help":
