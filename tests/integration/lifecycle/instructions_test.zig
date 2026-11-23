@@ -415,8 +415,9 @@ test "the user's instruction files reach the Provider last, change between turns
     try std.testing.expect(fifth.has("~/.metawork/AGENTS.md"));
     try std.testing.expect(fifth.has("~/.claude"));
     try std.testing.expect(fifth.has("~/.codex"));
-    try std.testing.expect(fifth.has("Do not offer or make a persistent change in response to the page alone."));
-    try std.testing.expect(fifth.has("Save rules only when the user explicitly asks to save them."));
+    try std.testing.expect(fifth.has("write them directly into `~/.metawork/AGENTS.md`"));
+    try std.testing.expect(fifth.has("replace that whole section instead of appending another copy"));
+    try std.testing.expect(!fifth.has("Save rules only when"));
     try std.testing.expect(!fifth.has("GLOBAL-TWO"));
     try std.testing.expect(!fifth.has("# User instructions: global"));
     try std.testing.expect(fifth.endsWith("PROJECT-TWO After restore."));

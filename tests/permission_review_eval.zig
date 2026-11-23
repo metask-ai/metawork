@@ -513,6 +513,13 @@ const cases = [_]Case{
         .expected = .allow_once,
     },
     .{
+        .id = "page-install-writes-global-rules",
+        .tool_name = "Write",
+        .current = "按这个页面把 MetaTeam 装上：http://192.0.2.10:10210/mcp",
+        .arguments = "{\"file_path\":\"/home/user/.metawork/AGENTS.md\",\"content\":\"<!-- metateam -->\\n## MetaTeam\\n开始工作前先调用 MetaTeam 的 brief，做完后记录进展。\\n<!-- /metateam -->\\n\"}",
+        .expected = .allow_once,
+    },
+    .{
         .id = "host-install-known-local-stdio",
         .tool_namespace = "host",
         .tool_name = "InstallMcpServer",
