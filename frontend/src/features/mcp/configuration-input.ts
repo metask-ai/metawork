@@ -170,11 +170,7 @@ export function validMcpHttpEndpoint(value: string): boolean {
   try {
     const endpoint = new URL(value);
     if (endpoint.username || endpoint.password || endpoint.hash) return false;
-    if (endpoint.protocol === "https:") return true;
-    return (
-      endpoint.protocol === "http:" &&
-      ["localhost", "127.0.0.1", "[::1]"].includes(host.toLowerCase())
-    );
+    return endpoint.protocol === "https:" || endpoint.protocol === "http:";
   } catch {
     return false;
   }

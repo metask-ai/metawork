@@ -1162,7 +1162,7 @@ test("MCP checks a remote draft before asking the user to add it", async () => {
   assert.equal(endpoint.hasAttribute("aria-describedby"), false);
 
   fireEvent.change(endpoint, {
-    target: { value: "http://example.com/mcp" },
+    target: { value: "http://user@example.com/mcp" },
   });
   assert.equal(endpoint.getAttribute("aria-invalid"), "true");
   assert.ok(endpoint.getAttribute("aria-describedby"));

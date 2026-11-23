@@ -528,7 +528,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.install.rejected": "无法创建连接器，请到「连接器」页面查看状态。",
   "mcp.add.endpoint": "MCP 服务地址",
   "mcp.add.endpoint_help":
-    "使用 HTTPS；HTTP 仅允许 localhost、127.0.0.1 或 ::1。不接受用户信息和 fragment。",
+    "使用 HTTP 或 HTTPS 地址。不接受用户信息和 fragment。",
   "mcp.add.submit": "添加连接器",
   "mcp.add.adding": "正在添加…",
   "mcp.rename.action": "保存名称",

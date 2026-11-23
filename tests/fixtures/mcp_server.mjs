@@ -388,7 +388,11 @@ function startHttp() {
           return;
         }
         const target = new URL(request.url, "http://localhost");
-        if (target.pathname !== "/mcp" && target.pathname !== "/mcp/draft-test")
+        const mcpPath = options.pathKey ? `/mcp/k/${options.pathKey}` : "/mcp";
+        if (
+          target.pathname !== mcpPath &&
+          target.pathname !== "/mcp/draft-test"
+        )
           throw new Error("unexpected endpoint");
         if (
           options.expectedQuery &&
@@ -812,6 +816,7 @@ function parseOptions(args) {
   let refreshGate = null;
   let expectedBearer = null;
   let expectedQuery = null;
+  let pathKey = null;
   let installRequestFile = null;
   let emptyCatalogFile = null;
   let requireEnv = false;
@@ -849,6 +854,9 @@ function parseOptions(args) {
         break;
       case "--expected-query":
         expectedQuery = args[++index] || null;
+        break;
+      case "--path-key":
+        pathKey = args[++index] || null;
         break;
       case "--install-request-file":
         installRequestFile = args[++index] || null;
@@ -888,6 +896,7 @@ function parseOptions(args) {
     refreshGate,
     expectedBearer,
     expectedQuery,
+    pathKey,
     installRequestFile,
     emptyCatalogFile,
     requireEnv,
