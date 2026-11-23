@@ -183,7 +183,7 @@ export const zhCN: Record<MessageId, string> = {
   "inbox.people_none": "没有匹配的成员。",
   "inbox.people_online": "在线",
   "inbox.composer_label": "发消息给 {name}",
-  "inbox.composer_placeholder": "写消息。Enter 发送，Shift+Enter 换行。",
+  "inbox.composer_placeholder": "写消息…",
   "inbox.send": "发送",
   "inbox.sending": "正在发送…",
   "inbox.send_failed":

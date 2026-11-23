@@ -223,8 +223,7 @@ export const enUS = {
   "inbox.people_none": "No matching members.",
   "inbox.people_online": "online",
   "inbox.composer_label": "Message {name}",
-  "inbox.composer_placeholder":
-    "Write a message. Enter sends, Shift+Enter adds a line.",
+  "inbox.composer_placeholder": "Write a message…",
   "inbox.send": "Send",
   "inbox.sending": "Sending…",
   "inbox.send_failed":

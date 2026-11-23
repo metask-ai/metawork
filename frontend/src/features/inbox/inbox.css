@@ -71,10 +71,6 @@
   background: var(--ui-action-hover-surface);
 }
 
-.inbox-new-message-actions {
-  justify-content: flex-end;
-}
-
 .inbox-list-scroll {
   display: grid;
   min-height: 0;
@@ -512,57 +508,77 @@
   overflow-wrap: anywhere;
 }
 
+/* The message box reuses the task composer's shell (`ai-composer`), its
+   toolbar and its round send button from the shared stylesheet; only the
+   placement around them is the inbox's own. */
 .inbox-composer {
   display: grid;
   flex: none;
-  gap: 8px;
-  padding: 12px clamp(16px, 3vw, 32px) 16px;
-  border-top: 1px solid var(--ui-border);
-  background: var(--ui-surface-panel);
+  gap: 6px;
+  padding: 8px clamp(16px, 3vw, 32px) 16px;
 }
 
-.inbox-composer-row {
-  display: flex;
+.inbox-composer > * {
   width: min(100%, var(--content-measure));
-  align-items: flex-end;
-  gap: 10px;
   margin-inline: auto;
 }
 
-.inbox-composer-input {
+.inbox-new-message .inbox-composer {
+  padding: 0;
+}
+
+.inbox-composer-toolbar {
+  justify-content: flex-end;
+}
+
+.inbox-composer .ai-composer textarea[readonly] {
+  color: var(--ui-content-muted);
+}
+
+/* Why the last attempt failed: one small line, never a block of its own. */
+.inbox-composer-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  margin: 0;
+  padding-inline: 4px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  line-height: 1.5;
+}
+
+.inbox-composer-note > span {
   min-width: 0;
-  min-height: 44px;
-  max-height: 200px;
   flex: 1;
-  padding: 8px 10px;
+  overflow-wrap: anywhere;
+}
+
+.inbox-composer-retry {
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ui-action-primary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.inbox-composer-retry:disabled {
+  color: var(--ui-content-muted);
+  cursor: default;
+}
+
+.inbox-search-input {
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 10px;
   border: 1px solid var(--ui-border);
   border-radius: 10px;
   background: var(--ui-surface-canvas);
   color: var(--ui-content-primary);
   font-size: var(--text-body);
-  line-height: 1.5;
-  resize: vertical;
-}
-
-.inbox-composer-input[readonly] {
-  color: var(--ui-content-muted);
-}
-
-.inbox-composer-failure {
-  display: flex;
-  width: min(100%, var(--content-measure));
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-inline: auto;
-  color: var(--ui-content-primary);
-  font-size: var(--text-label);
-}
-
-.inbox-composer-failure > span {
-  min-width: 0;
-  flex: 1;
-  overflow-wrap: anywhere;
 }
 
 .inbox-transcript-earlier {

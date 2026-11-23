@@ -702,6 +702,11 @@ test("a reply is sent once, shown from the newer messages, and retried under the
   await waitFor(() =>
     assert.ok(screen.getByRole("button", { name: "Sending…" })),
   );
+  // The task composer's shell: one box, the round send button in it.
+  const shell = box.closest(".ai-composer");
+  assert.equal(shell.dataset.state, "running");
+  assert.ok(shell.querySelector("button.composer-send"));
+  assert.equal(box.placeholder, "Write a message…");
   // While it is on its way nothing else is submitted.
   assert.equal(box.readOnly, true);
   await user.type(box, "{Enter}");

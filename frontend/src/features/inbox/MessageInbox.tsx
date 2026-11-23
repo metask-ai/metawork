@@ -20,11 +20,16 @@ import type {
   InboxTaskView,
   InboxView,
 } from "../../bridge/contracts.ts";
+import { Composer } from "../../components/ai/index.ts";
 import { Badge } from "../../components/ui/badge.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { DiagnosticDisclosure } from "../../components/ui/DiagnosticDisclosure.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
+import {
+  Textarea,
+  useAutosizeTextarea,
+} from "../../components/ui/textarea.tsx";
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { inboxDiagnosticText } from "./inbox-diagnostics.ts";
@@ -795,7 +800,6 @@ export function NewMessageDialog({
   }, [open]);
   const shown = members.filter((member) => memberMatches(member, query));
   const picked = members.find((member) => member.username === username);
-  const ready = picked !== undefined && text.trim() !== "" && !sending;
   // Set at once, before any render, like the reply box.
   const inFlight = useRef(false);
   // The connection the picker was opened for. Its members, request key and
@@ -855,15 +859,9 @@ export function NewMessageDialog({
               <Icon name="close" />
             </Dialog.Close>
           </div>
-          <form
-            className="inbox-new-message-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void send();
-            }}
-          >
+          <div className="inbox-new-message-form">
             <input
-              className="inbox-composer-input focus-ring"
+              className="inbox-search-input focus-ring"
               type="search"
               aria-label={t("inbox.people_search")}
               placeholder={t("inbox.people_search")}
@@ -874,21 +872,20 @@ export function NewMessageDialog({
               <p className="inbox-message-note">{t("inbox.people_loading")}</p>
             )}
             {(phase === "failed" || phase === "forbidden") && (
-              <div className="inbox-composer-failure" role="alert">
+              <p className="inbox-composer-note" role="alert">
                 <span>
                   {phase === "forbidden"
                     ? t("inbox.people_forbidden")
                     : t("inbox.people_failed")}
                 </span>
-                <Button
+                <button
                   type="button"
-                  size="sm"
-                  variant="ghost"
+                  className="inbox-composer-retry focus-ring"
                   onClick={() => void load()}
                 >
                   {t("inbox.retry")}
-                </Button>
-              </div>
+                </button>
+              </p>
             )}
             {phase === "ready" && (
               <ul className="inbox-people" aria-label={t("inbox.people_label")}>
@@ -917,54 +914,21 @@ export function NewMessageDialog({
                 ))}
               </ul>
             )}
-            <textarea
-              className="inbox-composer-input focus-ring"
-              aria-label={t("inbox.new_message_text")}
+            <MessageBox
+              label={t("inbox.new_message_text")}
               placeholder={
                 picked
-                  ? t("inbox.composer_label", { name: picked.name })
+                  ? t("inbox.composer_placeholder")
                   : t("inbox.new_message_pick")
               }
-              rows={3}
-              value={text}
-              readOnly={sending}
-              onChange={(event) => {
-                const value = event.target.value;
-                change(() => setText(value));
-              }}
+              text={text}
+              sending={sending}
+              ready={picked !== undefined}
+              failure={failure}
+              onChange={(value) => change(() => setText(value))}
+              onSend={() => void send()}
             />
-            {failure && (
-              <div className="inbox-composer-failure" role="alert">
-                <span>{sendFailureText(failure, t)}</span>
-                {sendRetryable(failure) && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    disabled={sending}
-                    onClick={() => void send()}
-                  >
-                    {t("inbox.retry")}
-                  </Button>
-                )}
-              </div>
-            )}
-            <div className="inbox-detail-actions inbox-new-message-actions">
-              <Button
-                type="button"
-                size="md"
-                variant="secondary"
-                disabled={sending}
-                onClick={onClose}
-              >
-                {t("common.cancel")}
-              </Button>
-              <Button type="submit" size="md" disabled={!ready}>
-                <Icon name="send" />
-                {sending ? t("inbox.sending") : t("inbox.send")}
-              </Button>
-            </div>
-          </form>
+          </div>
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>
@@ -1596,9 +1560,102 @@ function sendFailureText(failure: SendFailure, t: Translate) {
 }
 
 /**
- * The reply box. Enter sends and Shift+Enter starts a new line; nothing is
- * sent while an input method is composing or a message is on its way.
+ * A message box shaped like the task composer: the shared composer shell,
+ * a borderless input and the round send button in its corner. Enter sends
+ * and Shift+Enter starts a new line; nothing is sent while an input method
+ * is composing or a message is on its way. Why the last attempt failed sits
+ * in one small line above it.
  */
+function MessageBox({
+  label,
+  placeholder,
+  text,
+  sending,
+  ready = true,
+  failure,
+  onChange,
+  onSend,
+}: {
+  label: string;
+  placeholder: string;
+  text: string;
+  sending: boolean;
+  /** Whatever else sending needs, such as a picked member. */
+  ready?: boolean;
+  failure: SendFailure | null;
+  onChange: (text: string) => void;
+  onSend: () => void;
+}) {
+  const { t } = useI18n();
+  const input = useRef<HTMLTextAreaElement>(null);
+  useAutosizeTextarea(input, text);
+  const blocked = sending || !ready || text.trim() === "";
+  const submit = () => {
+    if (!blocked) onSend();
+  };
+  return (
+    <form
+      className="inbox-composer"
+      aria-busy={sending || undefined}
+      onSubmit={(event) => {
+        event.preventDefault();
+        submit();
+      }}
+    >
+      {failure && (
+        <p className="inbox-composer-note" role="alert">
+          <span>{sendFailureText(failure, t)}</span>
+          {sendRetryable(failure) && (
+            <button
+              type="button"
+              className="inbox-composer-retry focus-ring"
+              disabled={sending}
+              onClick={onSend}
+            >
+              {t("inbox.retry")}
+            </button>
+          )}
+        </p>
+      )}
+      <Composer state={sending ? "running" : "normal"}>
+        <Textarea
+          ref={input}
+          aria-label={label}
+          placeholder={placeholder}
+          rows={1}
+          value={text}
+          readOnly={sending}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (
+              event.key !== "Enter" ||
+              event.shiftKey ||
+              event.nativeEvent.isComposing
+            )
+              return;
+            event.preventDefault();
+            submit();
+          }}
+        />
+        <div className="ai-composer-toolbar inbox-composer-toolbar">
+          <Button
+            type="submit"
+            variant="primary"
+            size="icon"
+            className="composer-send"
+            aria-label={sending ? t("inbox.sending") : t("inbox.send")}
+            title={sending ? t("inbox.sending") : t("inbox.send")}
+            disabled={blocked}
+          >
+            <Icon name="send" />
+          </Button>
+        </div>
+      </Composer>
+    </form>
+  );
+}
+
+/** The reply box of an open conversation. */
 export function InboxComposer({
   name,
   text,
@@ -1615,58 +1672,16 @@ export function InboxComposer({
   onSend: () => void;
 }) {
   const { t } = useI18n();
-  const empty = text.trim() === "";
   return (
-    <form
-      className="inbox-composer"
-      aria-busy={sending || undefined}
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (!sending && !empty) onSend();
-      }}
-    >
-      {failure && (
-        <div className="inbox-composer-failure" role="alert">
-          <span>{sendFailureText(failure, t)}</span>
-          {sendRetryable(failure) && (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              disabled={sending}
-              onClick={onSend}
-            >
-              {t("inbox.retry")}
-            </Button>
-          )}
-        </div>
-      )}
-      <div className="inbox-composer-row">
-        <textarea
-          className="inbox-composer-input focus-ring"
-          aria-label={t("inbox.composer_label", { name })}
-          placeholder={t("inbox.composer_placeholder")}
-          rows={2}
-          value={text}
-          readOnly={sending}
-          onChange={(event) => onChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (
-              event.key !== "Enter" ||
-              event.shiftKey ||
-              event.nativeEvent.isComposing
-            )
-              return;
-            event.preventDefault();
-            if (!sending && !empty) onSend();
-          }}
-        />
-        <Button type="submit" size="md" disabled={sending || empty}>
-          <Icon name="send" />
-          {sending ? t("inbox.sending") : t("inbox.send")}
-        </Button>
-      </div>
-    </form>
+    <MessageBox
+      label={t("inbox.composer_label", { name })}
+      placeholder={t("inbox.composer_placeholder")}
+      text={text}
+      sending={sending}
+      failure={failure}
+      onChange={onChange}
+      onSend={onSend}
+    />
   );
 }
 
