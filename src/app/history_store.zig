@@ -1331,6 +1331,81 @@ test "SQLite history from before 0014 refuses a store whose Run keeps more than 
     try std.testing.expectEqual(@as(u32, product.history_migrations.len), store.database.?.schemaVersion());
 }
 
+test "SQLite history keeps all 1000 Tool records of a Run through commit and reopen" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const state = try testHistory(scratch, 1, 1, "message");
+    const large = try scratch.alloc(u8, 256 * 1024);
+    @memset(large, 'y');
+    const tools = try scratch.alloc(wire.ToolWire, 1000);
+    for (tools, 1..) |*tool, position| {
+        const path = try std.fmt.allocPrint(scratch, "src/file-{d}.zig", .{position});
+        const refs = try scratch.alloc(wire.FileReferenceWire, 1);
+        refs[0] = .{
+            .id = try std.fmt.allocPrint(scratch, "file-1-1-{d}-1", .{position}),
+            .title = "file",
+            .display_path = path,
+            .kind = "read",
+            .locator_kind = "workspace_path",
+            .locator = path,
+        };
+        tool.* = .{
+            .id = try std.fmt.allocPrint(scratch, "tool-{d}", .{position}),
+            .order = position,
+            .name = "Read",
+            .input = "{}",
+            .progress = "",
+            .content = if (position == 500) large else "ok",
+            .state = if (position == 250) "failed" else "completed",
+            .is_error = position == 250,
+            .elapsed_ms = position,
+            .input_truncated = false,
+            .progress_truncated = false,
+            .content_truncated = false,
+            .redacted = false,
+            .file_refs = refs,
+        };
+    }
+    state.tasks[0].runs[0].tools = tools;
+    state.tasks[0].runs[0].next_activity_order = tools.len + 1;
+    const saved = saved: {
+        var store = try Store.init(std.testing.io, a, directory);
+        defer store.deinit();
+        if (try store.loadFixtureAlloc(a)) |bytes| a.free(bytes);
+        const bytes = try wire.encodeAlloc(scratch, state, .{}, store.limits);
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
+        break :saved (try store.loadFixtureAlloc(a)).?;
+    };
+    defer a.free(saved);
+    // A new Store reads every record back from SQLite, as a cold start does.
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    var restored = (try store.load(a)).?;
+    defer restored.deinit();
+    const run = restored.value.tasks[0].runs[0];
+    try std.testing.expectEqual(@as(usize, 1000), run.tools.len);
+    for ([_]u64{ 33, 250, 500, 1000 }) |position| {
+        const tool = for (run.tools) |entry| {
+            if (entry.order == position) break entry;
+        } else return error.MissingToolRecord;
+        var expected: [32]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "tool-{d}", .{position}), tool.id);
+        try std.testing.expectEqual(position, tool.elapsed_ms);
+        try std.testing.expectEqualStrings(if (position == 250) "failed" else "completed", tool.state);
+        try std.testing.expectEqual(@as(usize, if (position == 500) large.len else 2), tool.content.len);
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "src/file-{d}.zig", .{position}), tool.file_refs.?[0].display_path);
+    }
+    const reloaded = try wire.encodeAlloc(a, restored.value, restored.preserved, store.limits);
+    defer a.free(reloaded);
+    try std.testing.expectEqualStrings(saved, reloaded);
+}
+
 test "SQLite history recovery publication unknown is confirmed before a newer candidate" {
     const a = std.testing.allocator;
     var temporary = std.testing.tmpDir(.{});
