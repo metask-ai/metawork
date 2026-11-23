@@ -2235,6 +2235,249 @@ test "inbox coordinator: one message at a time, and a changed connection never c
     try testing.expectEqual(@as(usize, 2), fixture.transport.sends);
 }
 
+/// A local stand-in for MetaTeam over real HTTP: the open API, members and
+/// notify with MetaTeam's request-key deduplication. The first new message
+/// is taken and its answer lost, as when a connection drops.
+const FakeMetaTeam = struct {
+    listener: *std.Io.net.Server,
+    stop: std.atomic.Value(bool) = .init(false),
+    failure: ?anyerror = null,
+    refused: usize = 0,
+    posts: usize = 0,
+    delivered: usize = 0,
+    replayed: usize = 0,
+    lose_first_answer: bool = true,
+    keys: [8][64]u8 = undefined,
+    key_lens: [8]usize = @splat(0),
+    key_count: usize = 0,
+
+    const unread_body = "{\"data\":{\"unread\":1,\"byPeer\":[{\"peer\":{\"id\":\"ann-id\",\"username\":\"ann_u\",\"name\":\"Ann\"},\"unread\":1,\"lastAt\":1795428968292}]}}";
+    const messages_body = "{\"data\":{\"messages\":[" ++
+        "{\"id\":\"m1\",\"at\":1795428000000,\"time\":\"2026-11-23T08:00:00.000Z\",\"direction\":\"self\",\"from\":{\"id\":\"me-id\",\"username\":\"me_u\",\"name\":\"Me\"},\"text\":\"note to self\",\"taskIds\":[]}," ++
+        "{\"id\":\"m2\",\"at\":1795428968292,\"time\":\"2026-11-23T08:16:08.292Z\",\"direction\":\"in\",\"from\":{\"id\":\"ann-id\",\"username\":\"ann_u\",\"name\":\"Ann\"},\"text\":\"see the file\",\"taskIds\":[9830],\"new\":true,\"readAt\":1795428968300}" ++
+        "]}}";
+    const file_body = "{\"data\":{\"id\":9830,\"name\":\"api.md\",\"tag\":\"API\",\"size\":7,\"mime\":\"text/markdown\",\"by\":\"Lin\",\"content\":\"# Title\",\"downloadUrl\":\"http://127.0.0.1:1/agent/v1/files/9830/dl?exp=1&sig=ab\",\"webUrl\":\"http://127.0.0.1:1/api/v1/files/9830/content\"}}";
+    const people_body = "{\"data\":{\"count\":2,\"people\":[{\"name\":\"Ann\",\"username\":\"ann_u\",\"online\":true},{\"name\":\"Bob\",\"username\":\"bob\"}]}}";
+    const sent_body = "{\"data\":{\"sent\":[\"Ann\"]}}";
+
+    fn run(self: *FakeMetaTeam) void {
+        while (!self.stop.load(.acquire)) self.serve() catch |err| {
+            if (!self.stop.load(.acquire)) self.failure = err;
+        };
+    }
+
+    fn serve(self: *FakeMetaTeam) !void {
+        var connection = try self.listener.accept(testing.io);
+        defer connection.close(testing.io);
+        if (self.stop.load(.acquire)) return;
+        var reads: [8192]u8 = undefined;
+        var writes: [8192]u8 = undefined;
+        var reader = connection.reader(testing.io, &reads);
+        var writer = connection.writer(testing.io, &writes);
+        var server: std.http.Server = .init(&reader.interface, &writer.interface);
+        var request = try server.receiveHead();
+        var authorized = false;
+        var request_key: []const u8 = "";
+        var headers = request.iterateHeaders();
+        while (headers.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) authorized = std.mem.eql(u8, header.value, "Bearer " ++ sentinel_key);
+            if (std.ascii.eqlIgnoreCase(header.name, "X-Request-Id")) request_key = header.value;
+        }
+        const target = request.head.target;
+        if (!authorized) {
+            self.refused += 1;
+            return request.respond("{\"error\":{\"code\":\"401\",\"message\":\"no\"}}", .{ .status = .unauthorized, .keep_alive = false });
+        }
+        var key_copy: [64]u8 = undefined;
+        const key = key_copy[0..@min(request_key.len, key_copy.len)];
+        @memcpy(key, request_key[0..key.len]);
+        if (request.head.method == .POST and std.mem.eql(u8, target, "/team/agent/v1/notify")) {
+            var body: [512]u8 = undefined;
+            const length: usize = @min(@as(usize, @intCast(request.head.content_length orelse 0)), body.len);
+            var body_buffer: [64]u8 = undefined;
+            try request.readerExpectNone(&body_buffer).readSliceAll(body[0..length]);
+            self.posts += 1;
+            for (self.keys[0..self.key_count], self.key_lens[0..self.key_count]) |*seen, seen_len| {
+                if (std.mem.eql(u8, seen[0..seen_len], key)) {
+                    self.replayed += 1;
+                    return request.respond(sent_body, .{ .keep_alive = false });
+                }
+            }
+            @memcpy(self.keys[self.key_count][0..key.len], key);
+            self.key_lens[self.key_count] = key.len;
+            self.key_count += 1;
+            self.delivered += 1;
+            if (self.lose_first_answer) {
+                self.lose_first_answer = false;
+                return; // Taken, but the answer never arrives.
+            }
+            return request.respond(sent_body, .{ .keep_alive = false });
+        }
+        const body: []const u8 = if (std.mem.eql(u8, target, "/team/open/v1/unread"))
+            unread_body
+        else if (std.mem.startsWith(u8, target, "/team/open/v1/messages"))
+            messages_body
+        else if (std.mem.eql(u8, target, "/team/open/v1/tasks/9830"))
+            file_body
+        else if (std.mem.eql(u8, target, "/team/agent/v1/people"))
+            people_body
+        else
+            return request.respond("{\"error\":{\"code\":\"404\",\"message\":\"no\"}}", .{ .status = .not_found, .keep_alive = false });
+        try request.respond(body, .{ .keep_alive = false });
+    }
+
+    fn shutdown(self: *FakeMetaTeam, port: u16) void {
+        self.stop.store(true, .release);
+        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+        var stream = address.connect(testing.io, .{ .mode = .stream }) catch return;
+        stream.close(testing.io);
+    }
+};
+
+test "inbox coordinator: against a local MetaTeam over real HTTP, with the key read from the credential store" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(testing.io, .{ .kernel_backlog = 8 });
+    defer listener.deinit(testing.io);
+    const port = listener.socket.address.getPort();
+    var service: FakeMetaTeam = .{ .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, FakeMetaTeam.run, .{&service});
+    defer {
+        service.shutdown(port);
+        thread.join();
+    }
+
+    // The production path: a sensitive endpoint in the credential store,
+    // resolved by the MCP source into a base and a key.
+    const harness = try native_sdk.TestHarness().create(testing.allocator, .{});
+    defer harness.destroy(testing.allocator);
+    var store: mcp_platform.CredentialStore = .{ .io = testing.io, .runtime = &harness.runtime, .main_thread_id = std.Thread.getCurrentId() };
+    const locator = "mcp/endpoint-1";
+    var origin_buffer: [64]u8 = undefined;
+    const origin = try std.fmt.bufPrint(&origin_buffer, "http://127.0.0.1:{d}", .{port});
+    var url_buffer: [160]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buffer, "{s}/team/agent/v1/mcp/k/{s}", .{ origin, sentinel_key });
+    const effects = store.effects();
+    try testing.expect(effects.create_fn(effects.context, locator, url));
+    var server: mcp_configuration.ServerWire = .{
+        .id = "server-1",
+        .namespace = "metateam",
+        .display_name = "MetaTeam",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 30_000,
+        .transport = .{ .kind = "streamable_http", .sensitive_endpoint = .{ .origin = origin, .identity = locator, .credential_refs = &.{locator} } },
+        .auth = .{ .kind = "none", .oauth = null },
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    const fingerprint = mcp_configuration.connectionFingerprint(server);
+    server.connection_approval = .{ .fingerprint = &fingerprint };
+    var servers = [_]mcp_configuration.ServerWire{server};
+    var storage: [16 * 1024]u8 = undefined;
+    const bytes = try mcp_configuration.encode(&storage, .{ .schema_version = mcp_configuration.schema_version, .generation = 1, .oauth_operation = null, .servers = &servers }, mcp_startup.configuration_limits);
+    const Port = struct {
+        bytes: []const u8,
+        fn inspect(_: *anyopaque) ?mcp_configuration.ManagementInspection {
+            return .{ .health = .ready, .desired_generation = 1, .runtime_alignment = .current, .server_count = 1 };
+        }
+        fn write(context: *anyopaque, _: u64, output: []u8) anyerror![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            @memcpy(output[0..self.bytes.len], self.bytes);
+            return output[0..self.bytes.len];
+        }
+    };
+    var port_state: Port = .{ .bytes = bytes };
+    var management_port: control_ports.McpManagementPort = undefined;
+    management_port.context = &port_state;
+    management_port.inspect_fn = Port.inspect;
+    management_port.write_desired_fn = Port.write;
+    var mcp: McpSource = .{ .port = management_port, .credential_store = &store };
+
+    var engine: @import("metawork_http_transport").Engine = undefined;
+    engine.init(testing.allocator, threaded.io());
+    defer engine.deinit();
+    var adapter: http.Adapter = .{ .http = &engine };
+    var management: TestManagement = .{ .runtime = .init(testing.allocator) };
+    defer management.runtime.deinit();
+    var host: TestHost = .{ .main_thread = std.Thread.getCurrentId() };
+    var capture: Capture = .{};
+    defer capture.deinit();
+    var coordinator: Coordinator = .{
+        .allocator = testing.allocator,
+        .io = testing.io,
+        .management = management.management(),
+        .transport = adapter.transport(),
+        .retire_fn = http.Adapter.retire,
+        .retire_context = &adapter,
+        .source = mcp.source(),
+        .host = host.host(),
+    };
+    defer coordinator.shutdown();
+    const settle = struct {
+        fn run(value: *Coordinator) void {
+            for (0..16) |_| {
+                inline for (Coordinator.slots) |name| if (@field(value, name)) |job| job.join();
+                value.drain();
+                if (!value.running()) return;
+            }
+        }
+    }.run;
+
+    coordinator.start(true);
+    settle(&coordinator);
+    try testing.expectEqual(inbox.State.ready, management.runtime.view().state);
+    const binding = management.runtime.view().binding.value;
+    try testing.expectEqual(inbox.CommandOutcome.accepted, coordinator.refresh(binding, false));
+    settle(&coordinator);
+    // A message to oneself is the `me` conversation, beside Ann's.
+    var rows: [2][]const u8 = undefined;
+    for (management.runtime.view().conversations, 0..) |row, index| rows[index] = row.peerId;
+    try testing.expectEqual(@as(usize, 2), management.runtime.view().conversations.len);
+    try testing.expectEqualStrings("ann-id", rows[0]);
+    try testing.expectEqualStrings(inbox.self_peer_id, rows[1]);
+
+    const responder = capture.responder();
+    const key = "0b6f7c2e-7d1a-4c55-9f0e-2a4b6c8d0e1f";
+    try testing.expect(coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .to = .{ .peer = "ann-id" }, .text = "On it", .request_key = key }));
+    settle(&coordinator);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "\"state\":\"failed\"") != null);
+    // The user's retry: the same request key, so MetaTeam takes it once.
+    try testing.expect(coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 2, .to = .{ .peer = "ann-id" }, .text = "On it", .request_key = key }));
+    settle(&coordinator);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "\"state\":\"sent\",\"sent\":[\"Ann\"]") != null);
+    try testing.expectEqual(@as(usize, 2), service.posts);
+    try testing.expectEqual(@as(usize, 1), service.delivered);
+    try testing.expectEqual(@as(usize, 1), service.replayed);
+
+    try testing.expect(coordinator.listPeople(responder, "p1", .{ .binding = binding, .request_id = 3 }));
+    settle(&coordinator);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "{\"username\":\"bob\",\"name\":\"Bob\",\"online\":null}") != null);
+    try testing.expect(coordinator.readTask(responder, "t1", .{ .binding = binding, .request_id = 4, .task = "9830" }));
+    settle(&coordinator);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "\"content\":\"# Title\"") != null);
+    try testing.expect(coordinator.openFile(responder, "f1", .{ .binding = binding, .request_id = 5, .file = "9830" }));
+    settle(&coordinator);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "\"state\":\"opened\"") != null);
+    try testing.expectEqualStrings("http://127.0.0.1:1/agent/v1/files/9830/dl?exp=1&sig=ab", host.opened[0..host.opened_len]);
+
+    try testing.expectEqual(@as(?anyerror, null), service.failure);
+    try testing.expectEqual(@as(usize, 0), service.refused);
+    // The key reached MetaTeam only as a header: never a Renderer answer,
+    // the snapshot, a download address or the address of a request.
+    var snapshot: [16 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&snapshot);
+    try std.json.Stringify.value(management.runtime.view(), .{}, &writer);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), sentinel_key) == null);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "127.0.0.1") == null);
+    for (capture.responses.items) |response| {
+        try testing.expect(std.mem.indexOf(u8, response, sentinel_key) == null);
+        try testing.expect(std.mem.indexOf(u8, response, "127.0.0.1") == null);
+        try testing.expect(std.mem.indexOf(u8, response, "sig=") == null);
+    }
+}
+
 test "inbox coordinator: the MCP source resolves a sensitive MetaTeam endpoint through the credential store" {
     const harness = try native_sdk.TestHarness().create(testing.allocator, .{});
     defer harness.destroy(testing.allocator);
