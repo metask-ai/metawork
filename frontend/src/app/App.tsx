@@ -97,9 +97,11 @@ import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
 import { SkillsPage } from "../features/skills/SkillsPage.tsx";
 import { McpPage } from "../features/mcp/McpPage.tsx";
 import {
+  InboxMain,
   InboxSidebar,
-  InboxUnavailable,
   MessageNavigationItem,
+  inboxUnread,
+  useInbox,
 } from "../features/inbox/MessageInbox.tsx";
 import { McpInstallationCard } from "../features/mcp/McpInstallationCard.tsx";
 import { WorkspaceDirectoryFact } from "../features/workspaces/WorkspaceDirectoryFact.tsx";
@@ -1705,6 +1707,12 @@ export default function App() {
     taskDrafts.invalidateAttachments,
   ]);
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
+  const inboxPage = useInbox(
+    client,
+    snapshot.inbox,
+    inboxOpen,
+    bridgeUnavailable,
+  );
   const openExternalLink = useCallback(
     async (url: string) => {
       if (viewSyncFailed || !bridgeReady) return false;
@@ -5432,6 +5440,7 @@ export default function App() {
             </Tooltip.Root>
             <MessageNavigationItem
               active={inboxOpen}
+              unread={inboxUnread(snapshot.inbox)}
               onOpen={() => {
                 openWorkbenchPage("inbox");
                 dismissDrawer();
@@ -5472,7 +5481,11 @@ export default function App() {
       leftPanelKind={inboxOpen ? "conversations" : "tasks"}
       left={(dismissDrawer) =>
         inboxOpen ? (
-          <InboxSidebar />
+          <InboxSidebar
+            inbox={snapshot.inbox}
+            controller={inboxPage}
+            onSelected={dismissDrawer}
+          />
         ) : (
           <div className="sidebar-primary">
             <button
@@ -6002,7 +6015,11 @@ export default function App() {
       }
     >
       {inboxOpen ? (
-        <InboxUnavailable />
+        <InboxMain
+          inbox={snapshot.inbox}
+          controller={inboxPage}
+          onOpenConnectors={() => openWorkbenchPage("mcp")}
+        />
       ) : route === "skills" ? (
         snapshot.skillManagement ? (
           <SkillsPage
