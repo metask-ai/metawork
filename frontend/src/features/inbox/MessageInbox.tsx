@@ -176,6 +176,9 @@ export function useInbox(
   );
   const [task, setTask] = useState<OpenedTask | null>(null);
   const [composer, setComposer] = useState<Composer | null>(null);
+  // Set at once, before any render: a second submit in the same frame
+  // still sees the first one on its way.
+  const sending = useRef(false);
   const conversationRef = useRef(conversation);
   conversationRef.current = conversation;
   const readRef = useRef<
@@ -307,6 +310,60 @@ export function useInbox(
     void read(conversation.peerId, "after", last.id);
   }, [open, conversation, latestId, read]);
 
+  function select(peerId: string, name: string) {
+    setSelectedId(peerId);
+    setTask(null);
+    // Opening the same conversation again keeps what was being written.
+    setComposer((current) =>
+      current?.peerId === peerId
+        ? current
+        : {
+            peerId,
+            text: "",
+            sending: false,
+            failure: null,
+            requestKey: null,
+          },
+    );
+    followed.current = null;
+    setConversation({
+      peerId,
+      name,
+      messages: [],
+      hasEarlier: false,
+      loading: true,
+      failure: null,
+    });
+    void read(peerId, "latest", null);
+  }
+
+  async function openTask(taskId: string, trail: readonly string[] = []) {
+    setTask({
+      taskId,
+      status: "loading",
+      detail: null,
+      trail,
+      download: "idle",
+    });
+    let detail: InboxTaskDetail | null = null;
+    try {
+      detail = await client.readInboxTask(binding, taskId);
+    } catch {
+      detail = null;
+    }
+    setTask((current) => {
+      if (current?.taskId !== taskId) return current;
+      if (detail?.state === "superseded") return current;
+      if (detail?.state === "ready")
+        return { ...current, status: "ready", detail };
+      const status =
+        detail?.state === "forbidden" || detail?.state === "not_found"
+          ? detail.state
+          : "failed";
+      return { ...current, status, detail: null };
+    });
+  }
+
   return {
     selectedId,
     conversation,
@@ -322,9 +379,11 @@ export function useInbox(
     },
     async send() {
       const draft = composer;
-      if (!draft || draft.sending || draft.text.trim() === "") return;
+      if (!draft || draft.sending || sending.current) return;
+      if (draft.text.trim() === "") return;
       const { peerId, text } = draft;
       const requestKey = draft.requestKey ?? newRequestKey();
+      sending.current = true;
       setComposer({ ...draft, sending: true, failure: null, requestKey });
       let state = "failed";
       try {
@@ -333,6 +392,8 @@ export function useInbox(
         ).state;
       } catch {
         state = "failed";
+      } finally {
+        sending.current = false;
       }
       if (state === "sent") {
         setComposer((current) =>
@@ -450,60 +511,6 @@ export function useInbox(
       setTask(null);
     },
   };
-
-  function select(peerId: string, name: string) {
-    setSelectedId(peerId);
-    setTask(null);
-    // Opening the same conversation again keeps what was being written.
-    setComposer((current) =>
-      current?.peerId === peerId
-        ? current
-        : {
-            peerId,
-            text: "",
-            sending: false,
-            failure: null,
-            requestKey: null,
-          },
-    );
-    followed.current = null;
-    setConversation({
-      peerId,
-      name,
-      messages: [],
-      hasEarlier: false,
-      loading: true,
-      failure: null,
-    });
-    void read(peerId, "latest", null);
-  }
-
-  async function openTask(taskId: string, trail: readonly string[] = []) {
-    setTask({
-      taskId,
-      status: "loading",
-      detail: null,
-      trail,
-      download: "idle",
-    });
-    let detail: InboxTaskDetail | null = null;
-    try {
-      detail = await client.readInboxTask(binding, taskId);
-    } catch {
-      detail = null;
-    }
-    setTask((current) => {
-      if (current?.taskId !== taskId) return current;
-      if (detail?.state === "superseded") return current;
-      if (detail?.state === "ready")
-        return { ...current, status: "ready", detail };
-      const status =
-        detail?.state === "forbidden" || detail?.state === "not_found"
-          ? detail.state
-          : "failed";
-      return { ...current, status, detail: null };
-    });
-  }
 }
 
 export type InboxController = ReturnType<typeof useInbox>;
@@ -762,9 +769,12 @@ export function NewMessageDialog({
   const shown = members.filter((member) => memberMatches(member, query));
   const picked = members.find((member) => member.username === username);
   const ready = picked !== undefined && text.trim() !== "" && !sending;
+  // Set at once, before any render, like the reply box.
+  const inFlight = useRef(false);
   const send = async () => {
-    if (!picked || sending || text.trim() === "") return;
+    if (!picked || sending || inFlight.current || text.trim() === "") return;
     const key = requestKey ?? newRequestKey();
+    inFlight.current = true;
     setSending(true);
     setFailure(null);
     setRequestKey(key);
@@ -773,6 +783,7 @@ export function NewMessageDialog({
       text,
       key,
     );
+    inFlight.current = false;
     setSending(false);
     if (result?.state === "sent") {
       onClose();
