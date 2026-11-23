@@ -533,8 +533,11 @@ pub const Coordinator = struct {
         self.assertMain();
         if (self.stopped) return .unavailable;
         if (self.bound == null) {
-            // Retry looking for the connection, e.g. after a credential read failed.
-            self.observe(true);
+            // A credential read that failed is retried now. Without a
+            // connection the open page asks every few seconds, and the
+            // credential store is not read for that: a new or changed
+            // connection is noticed from the MCP generation.
+            if (self.find_retry_at != null) self.observe(true);
             self.reconcile();
             return .rejected;
         }
@@ -1199,6 +1202,11 @@ test "inbox coordinator: a refused key stops background polling until the user r
     fixture.coordinator.drain();
     try testing.expectEqual(inbox.State.unavailable, fixture.view().state);
     try testing.expect(fixture.coordinator.bound == null);
+    // Without a connection the open page keeps asking; the credential store
+    // is not read for that.
+    const quiet = fixture.source.finds;
+    try testing.expectEqual(inbox.CommandOutcome.rejected, fixture.coordinator.refresh(fixture.view().binding.value));
+    try testing.expectEqual(quiet, fixture.source.finds);
 
     // A credential that cannot be read is reported and looked for again.
     fixture.source.result = .unavailable;
@@ -1206,10 +1214,13 @@ test "inbox coordinator: a refused key stops background polling until the user r
     fixture.coordinator.drain();
     try testing.expectEqual(inbox.State.@"unreachable", fixture.view().state);
     const finds = fixture.source.finds;
+    // The user retries at once; the timer retries later by itself.
+    _ = fixture.coordinator.refresh(fixture.view().binding.value);
+    try testing.expectEqual(finds + 1, fixture.source.finds);
     fixture.source.result = .found;
     fixture.host.now_ms += find_retry_ms;
     fixture.coordinator.onTimer();
-    try testing.expectEqual(finds + 1, fixture.source.finds);
+    try testing.expectEqual(finds + 2, fixture.source.finds);
     try testing.expectEqual(inbox.State.checking, fixture.view().state);
 }
 
