@@ -10103,7 +10103,11 @@ pub const Runtime = struct {
 
     /// One page of a Run's Tool records for the Renderer, sanitized with the
     /// live credential set. Main-thread only; the output is borrowed.
-    pub fn writeToolPage(self: *Runtime, output: []u8, task_id: u64, run_id: u64, after_order: u64) Error!ToolPage {
+    pub fn writeToolPage(self: *Runtime, output: []u8, task_id: u64, run_id: u64, after_order: u64) (Error || error{InvalidViewRequest})!ToolPage {
+        // Like the other reads: nothing while shutting down, and nothing
+        // before the projection has a security epoch to answer with.
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.projection_security_epoch == 0) return error.InvalidViewRequest;
         // The same credential set a snapshot read collects at begin.
         var credentials: ProjectionCredentials = .{ .allocator = self.allocator };
         defer credentials.deinit();
@@ -19041,6 +19045,21 @@ test "Tool pages hide credentials learned after the record was kept" {
     const page = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, 0, tool_page_source_bytes);
     try std.testing.expect(std.mem.indexOf(u8, page.json, "page-account-key") == null);
     try std.testing.expect(std.mem.indexOf(u8, page.json, "***") != null);
+}
+
+test "Tool pages are refused while shutting down or without a security epoch" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try applyTestToolResult(&control, "kept", "ok");
+    var output: [16 * 1024]u8 = undefined;
+    try std.testing.expectEqual(ToolPageState.ready, (try control.writeToolPage(&output, 3, 7, 0)).state);
+    const epoch = control.projection_security_epoch;
+    control.projection_security_epoch = 0;
+    try std.testing.expectError(error.InvalidViewRequest, control.writeToolPage(&output, 3, 7, 0));
+    control.projection_security_epoch = epoch;
+    control.shutting_down = true;
+    defer control.shutting_down = false;
+    try std.testing.expectError(error.ExecutorShuttingDown, control.writeToolPage(&output, 3, 7, 0));
 }
 
 test "Tool file references are allocated only for the references a result carries" {
