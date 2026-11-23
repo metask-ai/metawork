@@ -247,7 +247,7 @@ App 只做跨页 action wiring。公开草稿/提议类型放 shared projection 
 | create 成功后 reload 或旧 id 重交                               | 原子消费，旧 id 在 effect 前拒绝，不退回普通 Add 重复创建         |
 | 提议接管前后新获知凭据                                          | 敏感提议不进 snapshot，失效释放名额，不用脱敏地址连接             |
 | registry 与提议同时满额、最大转义、预算溢出                     | 分配覆盖真实上界，无静默丢提议，溢出明确失败                      |
-| Run 超过 Tool 展示容量                                          | canonical 提议仍可查看，不改变记录政策                            |
+| Run 的 Tool 记录因全局历史额度不足而缺失                        | canonical 提议仍可查看，不改变记录政策                            |
 | 旧工具集合 checkpoint 到新集合                                  | 官方 report 合法，Session/历史连续，无重放或扩权                  |
 | 已发现未选择工具；选择后新建 Task                               | 前者仍待选择，后者实际收到一次目标 tools/call                     |
 | 当前 Task 与冷重启                                              | 当前 Task 不热附加，持久配置/凭据正常恢复，提议与秘密输入不恢复   |
