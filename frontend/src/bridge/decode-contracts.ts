@@ -86,6 +86,10 @@ import {
   type RunToolLog,
   type RunFileReferences,
   type RunToolsPage,
+  type InstructionUse,
+  type RunInstructions,
+  type GlobalInstructionsView,
+  type GlobalInstructionsSaveResult,
   type RunManifest,
   type TaskSummary,
   type ViewScope,
@@ -2954,12 +2958,89 @@ export function decodeRunToolsPage(
     nextAfterOrder,
   };
 }
+const instructionUseStates = [
+  "applied",
+  "absent",
+  "empty",
+  "unreadable",
+  "rejected",
+  "update_failed",
+  "unavailable",
+  "not_installed",
+] as const;
+const instructionUnreadableReasons = [
+  "access_denied",
+  "not_regular_file",
+  "outside_workspace",
+  "not_utf8",
+  "invalid_path",
+  "io_error",
+] as const;
+
+function decodeInstructionUse(
+  item: Record<string, unknown>,
+  path: string,
+): InstructionUse {
+  const state = enumValue(item.state, `${path}.state`, instructionUseStates);
+  const truncated = booleanValue(item.truncated, `${path}.truncated`);
+  const reason =
+    item.reason === null
+      ? null
+      : enumValue(item.reason, `${path}.reason`, instructionUnreadableReasons);
+  if ((state === "unreadable") !== (reason !== null))
+    fail(path, "an unreadable instruction file must say why, and only it");
+  // Only a file that was read can have been cut.
+  if (
+    truncated &&
+    state !== "applied" &&
+    state !== "rejected" &&
+    state !== "update_failed" &&
+    state !== "not_installed"
+  )
+    fail(path, "only a read instruction file can be truncated");
+  return { state, truncated, reason };
+}
+
+function decodeRunInstructions(
+  value: unknown,
+  path: string,
+): RunInstructions | null {
+  if (value === null) return null;
+  const item = object(value, path, ["global", "project"]);
+  const global = decodeInstructionUse(
+    object(item.global, `${path}.global`, ["state", "truncated", "reason"]),
+    `${path}.global`,
+  );
+  if (item.project === null) return { global, project: null };
+  const projectItem = object(item.project, `${path}.project`, [
+    "path",
+    "state",
+    "truncated",
+    "reason",
+  ]);
+  const project = decodeInstructionUse(projectItem, `${path}.project`);
+  // A working directory always has a home for its project file.
+  if (project.state === "unavailable")
+    fail(`${path}.project`, "a project instruction file cannot be unavailable");
+  return {
+    global,
+    project: {
+      ...project,
+      path:
+        projectItem.path === null
+          ? null
+          : stringValue(projectItem.path, `${path}.project.path`),
+    },
+  };
+}
+
 function decodeRun(value: unknown, path: string): RunView {
   const fileReferences = Object.hasOwn(record(value, path), "fileReferences");
   const item = object(value, path, [
     "elapsedMs",
     "submittedAtUnixMs",
     "finishedAtUnixMs",
+    "instructions",
     "id",
     "conversationCoverage",
     "editAdmitted",
@@ -3096,6 +3177,10 @@ function decodeRun(value: unknown, path: string): RunView {
     elapsedMs,
     submittedAtUnixMs,
     finishedAtUnixMs,
+    instructions: decodeRunInstructions(
+      item.instructions,
+      `${path}.instructions`,
+    ),
     terminal,
     usage: {
       input: wireId(usage.input, `${path}.usage.input`),
@@ -7960,6 +8045,98 @@ export function decodeAttachmentReleaseResult(value: unknown) {
   const item = object(value, "$", ["released"]);
   return { released: booleanValue(item.released, "$.released") };
 }
+const globalInstructionsStates = [
+  "ready",
+  "absent",
+  "too_large",
+  "unreadable",
+  "contains_credential",
+  "unavailable",
+] as const;
+const globalInstructionsSaveOutcomes = [
+  "saved",
+  "conflict",
+  "too_large",
+  "invalid_text",
+  "contains_credential",
+  "write_failed",
+  "unavailable",
+] as const;
+
+function instructionsRevision(value: unknown, path: string) {
+  const revision = stringValue(value, path);
+  if (revision !== "absent" && !/^[0-9a-f]{64}$/.test(revision))
+    fail(path, "expected a file digest or absent");
+  return revision;
+}
+
+export function decodeGlobalInstructions(
+  value: unknown,
+): GlobalInstructionsView {
+  const item = object(value, "$", [
+    "path",
+    "state",
+    "text",
+    "revision",
+    "byteLength",
+    "reason",
+    "limitBytes",
+  ]);
+  const state = enumValue(item.state, "$.state", globalInstructionsStates);
+  const path = item.path === null ? null : stringValue(item.path, "$.path");
+  if ((state === "unavailable") !== (path === null))
+    fail("$.path", "only an unavailable home has no path");
+  const text = item.text === null ? null : stringValue(item.text, "$.text");
+  if ((state === "ready") !== (text !== null))
+    fail("$.text", "text is present exactly when the file is ready");
+  const revision =
+    item.revision === null
+      ? null
+      : instructionsRevision(item.revision, "$.revision");
+  if ((state === "ready" || state === "absent") !== (revision !== null))
+    fail("$.revision", "only an editable file has a revision");
+  if ((state === "absent") !== (revision === "absent"))
+    fail("$.revision", "absent names exactly a missing file");
+  const reason =
+    item.reason === null
+      ? null
+      : enumValue(item.reason, "$.reason", instructionUnreadableReasons);
+  if ((state === "unreadable") !== (reason !== null))
+    fail("$.reason", "a reason is present exactly when unreadable");
+  const byteLength =
+    item.byteLength === null ? null : wireId(item.byteLength, "$.byteLength");
+  if (state === "too_large" && byteLength === null)
+    fail("$.byteLength", "a file too large to edit states its size");
+  const limitBytes = item.limitBytes;
+  if (
+    typeof limitBytes !== "number" ||
+    !Number.isSafeInteger(limitBytes) ||
+    limitBytes <= 0
+  )
+    fail("$.limitBytes", "expected a positive byte limit");
+  return { path, state, text, revision, byteLength, reason, limitBytes };
+}
+
+export function decodeGlobalInstructionsSaveResult(
+  value: unknown,
+): GlobalInstructionsSaveResult {
+  const item = object(value, "$", ["outcome", "revision"]);
+  const outcome = enumValue(
+    item.outcome,
+    "$.outcome",
+    globalInstructionsSaveOutcomes,
+  );
+  const revision =
+    item.revision === null
+      ? null
+      : instructionsRevision(item.revision, "$.revision");
+  if ((outcome === "saved" || outcome === "conflict") !== (revision !== null))
+    fail("$.revision", "a revision comes with a save or a conflict only");
+  if (outcome === "saved" && revision === "absent")
+    fail("$.revision", "a saved file exists");
+  return { outcome, revision };
+}
+
 export function decodeAutomaticWorkspaceRootMutationResult(
   value: unknown,
 ): AutomaticWorkspaceRootMutationResult {

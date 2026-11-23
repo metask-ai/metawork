@@ -598,6 +598,66 @@ test("Run submitted time is nullable, bounded, and valid before completion", () 
   }
 });
 
+test("Run instructions say what each file contributed, and nothing they cannot have", () => {
+  const use = (state, truncated = false, reason = null) => ({
+    state,
+    truncated,
+    reason,
+  });
+  const valid = [
+    null,
+    { global: use("applied", true), project: null },
+    {
+      global: use("unavailable"),
+      project: {
+        path: "/repo/AGENTS.md",
+        ...use("unreadable", false, "not_utf8"),
+      },
+    },
+    {
+      global: use("update_failed", true),
+      project: { path: null, ...use("rejected") },
+    },
+    { global: use("unreadable", false, "invalid_path"), project: null },
+    {
+      global: use("not_installed", true),
+      project: { path: "/repo/AGENTS.md", ...use("update_failed") },
+    },
+  ];
+  for (const instructions of valid) {
+    const candidate = clone(fixture);
+    candidate.tasks[0].runs[0].instructions = instructions;
+    assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  }
+  const invalid = [
+    undefined,
+    { global: use("applied") },
+    { global: use("applied"), project: null, extra: true },
+    // A reason exactly when the file could not be read.
+    { global: use("unreadable"), project: null },
+    { global: use("absent", false, "io_error"), project: null },
+    { global: use("unreadable", false, "missing"), project: null },
+    // Only a file that was read can have been cut.
+    { global: use("absent", true), project: null },
+    {
+      global: use("applied"),
+      project: { path: "/repo/AGENTS.md", ...use("empty", true) },
+    },
+    // A working directory always has a project path to look at.
+    {
+      global: use("applied"),
+      project: { path: "/repo/AGENTS.md", ...use("unavailable") },
+    },
+    { global: use("applied"), project: use("applied") },
+    { global: use("retired"), project: null },
+  ];
+  for (const instructions of invalid) {
+    const candidate = clone(fixture);
+    candidate.tasks[0].runs[0].instructions = instructions;
+    assert.throws(() => decodeWorkbenchSnapshot(candidate));
+  }
+});
+
 function terminal(outcome, cause = null, diagnosticDisposition = "absent") {
   return {
     outcome,

@@ -12678,3 +12678,339 @@ test "Control third consecutive denial keeps only current request manual then re
         try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(task_id));
     }
 }
+
+// #34: the user's instruction files reach a Run's Session before it starts.
+
+const InstructionFiles = struct {
+    tmp: std.testing.TmpDir,
+    home: [:0]u8,
+    workspace: [:0]u8,
+
+    fn init() !InstructionFiles {
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try tmp.dir.createDirPath(std.testing.io, "home" ++ std.fs.path.sep_str ++ ".metawork");
+        try tmp.dir.createDirPath(std.testing.io, "workspace");
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", std.testing.allocator);
+        errdefer std.testing.allocator.free(home);
+        const workspace = try tmp.dir.realPathFileAlloc(std.testing.io, "workspace", std.testing.allocator);
+        return .{ .tmp = tmp, .home = home, .workspace = workspace };
+    }
+
+    fn deinit(self: *InstructionFiles) void {
+        std.testing.allocator.free(self.home);
+        std.testing.allocator.free(self.workspace);
+        self.tmp.cleanup();
+    }
+
+    const global_path = "home" ++ std.fs.path.sep_str ++ ".metawork" ++ std.fs.path.sep_str ++ "AGENTS.md";
+    const project_path = "workspace" ++ std.fs.path.sep_str ++ "AGENTS.md";
+
+    fn write(self: *InstructionFiles, path: []const u8, data: []const u8) !void {
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = data });
+    }
+};
+
+fn liveFakeSession() *fixture.FakeSession {
+    for (&fake_core.sessions) |*session| {
+        if (session.in_use and !session.destroyed) return session;
+    }
+    unreachable;
+}
+
+fn instructionProfile() fixture.FakePromptProfile {
+    const session = liveFakeSession();
+    session.lock();
+    defer session.unlock();
+    return session.prompt_profile;
+}
+
+fn promptUpdates() usize {
+    fake_core.lock();
+    defer fake_core.unlock();
+    return fake_core.prompt_updates;
+}
+
+/// Starts a Run and waits until the Task has nothing in flight.
+fn runInstructionTurn(workbench: *product_control.Runtime, task_id: u64, text: []const u8) !*task_state.RunRecord {
+    const run_id = try runPreparedTask(workbench, task_id, .{ .text = text });
+    const task = workbench.testTask(task_id).?;
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.RunDidNotSettle;
+    const run = task_state.findRun(task.durable.runs, run_id).?;
+    try std.testing.expectEqual(product_task.RunOutcome.completed, task_state.productTerminalFacts(run).?.outcome);
+    return run;
+}
+
+test "a Run carries the user's instruction files, and a later Run replaces them only when a file changed" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var files = try InstructionFiles.init();
+    defer files.deinit();
+    try files.write(InstructionFiles.global_path, "Global rule.");
+    try files.write(InstructionFiles.project_path, "Project rule.");
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = files.home;
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_tasks = 1,
+        .max_workspaces = 1,
+        .max_runs_per_task = 4,
+    }, configuration);
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    const task_id = try workbench.createTask(.{ .workspace_root = files.workspace, .trust = .explicitly_trusted }, try product_control.TestSupport.fixtureModelSelection(&workbench));
+    // Creating the Session installs nothing of the user's.
+    try std.testing.expectEqual(@as(usize, 0), promptUpdates());
+
+    const first = try runInstructionTurn(&workbench, task_id, "first");
+    try std.testing.expectEqual(@as(usize, 1), promptUpdates());
+    const both = instructionProfile();
+    const global = both.find("host:user-instructions-global").?;
+    const project = both.find("host:user-instructions-project").?;
+    try std.testing.expect(global < project);
+    try std.testing.expect(std.mem.endsWith(u8, both.sectionText(global), "Global rule."));
+    try std.testing.expect(std.mem.endsWith(u8, both.sectionText(project), "Project rule."));
+    try std.testing.expect(std.mem.indexOf(u8, both.sectionText(project), files.workspace) != null);
+    const used = first.instructions.?;
+    try std.testing.expectEqual(task_state.product_instructions.State.applied, used.global.state);
+    try std.testing.expectEqual(task_state.product_instructions.State.applied, used.project.?.state);
+    try std.testing.expect(!used.global.truncated);
+
+    // Nothing changed: no Core call, and the Run reports what its Session carries.
+    const second = try runInstructionTurn(&workbench, task_id, "second");
+    try std.testing.expectEqual(@as(usize, 1), promptUpdates());
+    try std.testing.expectEqualDeep(used, second.instructions.?);
+
+    // A changed file is installed before the next Run, and only that Run.
+    try files.write(InstructionFiles.global_path, "Global rule, revised.");
+    _ = try runInstructionTurn(&workbench, task_id, "third");
+    try std.testing.expectEqual(@as(usize, 2), promptUpdates());
+    const revised = instructionProfile();
+    try std.testing.expect(std.mem.endsWith(u8, revised.sectionText(revised.find("host:user-instructions-global").?), "Global rule, revised."));
+
+    // A removed file takes its section with it.
+    try files.tmp.dir.deleteFile(std.testing.io, InstructionFiles.project_path);
+    const fourth = try runInstructionTurn(&workbench, task_id, "fourth");
+    try std.testing.expectEqual(@as(usize, 3), promptUpdates());
+    try std.testing.expect(instructionProfile().find("host:user-instructions-project") == null);
+    try std.testing.expectEqual(task_state.product_instructions.State.absent, fourth.instructions.?.project.?.state);
+    try std.testing.expectEqual(task_state.product_instructions.State.applied, fourth.instructions.?.global.state);
+
+    // The Run keeps the project file its preparation opened, gone or not,
+    // and its view says the same.
+    const opened = try std.fs.path.join(std.testing.allocator, &.{ files.workspace, "AGENTS.md" });
+    defer std.testing.allocator.free(opened);
+    try std.testing.expectEqualStrings(opened, fourth.instructions_project_path.?);
+    var quoted_storage: [4096]u8 = undefined;
+    var quoted: std.Io.Writer = .fixed(&quoted_storage);
+    try std.json.Stringify.value(opened, .{}, &quoted);
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "\"instructions\":{{\"global\":{{\"state\":\"applied\",\"truncated\":false,\"reason\":null}},\"project\":{{\"path\":{s},\"state\":\"absent\",\"truncated\":false,\"reason\":null}}}}", .{quoted.buffered()});
+    defer std.testing.allocator.free(expected);
+    var output: [512 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeAggregateFixture(&output);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, expected) != null);
+}
+
+test "an instruction file that cannot be read or that Core refuses never stops a Run" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var files = try InstructionFiles.init();
+    defer files.deinit();
+    // A directory where the global file belongs, and a project file that is not text.
+    try files.tmp.dir.createDirPath(std.testing.io, InstructionFiles.global_path);
+    try files.write(InstructionFiles.project_path, "caf\xe9");
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = files.home;
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_tasks = 1,
+        .max_workspaces = 1,
+        .max_runs_per_task = 4,
+    }, configuration);
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    const task_id = try workbench.createTask(.{ .workspace_root = files.workspace, .trust = .explicitly_trusted }, try product_control.TestSupport.fixtureModelSelection(&workbench));
+
+    const unreadable = try runInstructionTurn(&workbench, task_id, "unreadable");
+    // Nothing to carry and nothing carried: Core is not asked.
+    try std.testing.expectEqual(@as(usize, 0), promptUpdates());
+    try std.testing.expectEqual(task_state.product_instructions.Unreadable.not_regular_file, unreadable.instructions.?.global.reason.?);
+    try std.testing.expectEqual(task_state.product_instructions.Unreadable.not_utf8, unreadable.instructions.?.project.?.reason.?);
+
+    // Core refuses the project file only: the global one is still installed.
+    try files.tmp.dir.deleteDir(std.testing.io, InstructionFiles.global_path);
+    try files.write(InstructionFiles.global_path, "Global rule.");
+    try files.write(InstructionFiles.project_path, "Project rule.");
+    fake_core.lock();
+    fake_core.prompt_reject_marker = "Project rule.";
+    fake_core.unlock();
+    const refused = try runInstructionTurn(&workbench, task_id, "refused");
+    try std.testing.expectEqual(task_state.product_instructions.State.applied, refused.instructions.?.global.state);
+    try std.testing.expectEqual(task_state.product_instructions.State.rejected, refused.instructions.?.project.?.state);
+    try std.testing.expect(instructionProfile().find("host:user-instructions-global") != null);
+    try std.testing.expect(instructionProfile().find("host:user-instructions-project") == null);
+    fake_core.lock();
+    fake_core.prompt_reject_marker = null;
+    fake_core.unlock();
+
+    // A Session that cannot be updated keeps what it had for this Run, and
+    // the next Run tries again. Each file says what the Run has of it: the
+    // earlier global text, and nothing of the project file Core had refused.
+    try files.write(InstructionFiles.global_path, "Global rule, revised.");
+    const kept = instructionProfile();
+    fake_core.lock();
+    fake_core.forced_prompt_status = wire.STATUS_OUT_OF_MEMORY;
+    fake_core.unlock();
+    const failed = try runInstructionTurn(&workbench, task_id, "update failed");
+    try std.testing.expectEqual(task_state.product_instructions.State.update_failed, failed.instructions.?.global.state);
+    try std.testing.expectEqual(task_state.product_instructions.State.not_installed, failed.instructions.?.project.?.state);
+    try std.testing.expect(std.meta.eql(kept, instructionProfile()));
+    const retried = try runInstructionTurn(&workbench, task_id, "retried");
+    try std.testing.expectEqual(task_state.product_instructions.State.applied, retried.instructions.?.global.state);
+    try std.testing.expectEqual(task_state.product_instructions.State.applied, retried.instructions.?.project.?.state);
+}
+
+test "a working directory that is not explicitly trusted, and a scheduled Task, carry only the global file" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var files = try InstructionFiles.init();
+    defer files.deinit();
+    try files.write(InstructionFiles.global_path, "Global rule.");
+    // Present, but this directory is only temporarily trusted.
+    try files.write(InstructionFiles.project_path, "Project rule.");
+    try files.tmp.dir.createDirPath(std.testing.io, "automatic");
+    const automatic = try files.tmp.dir.realPathFileAlloc(std.testing.io, "automatic", std.testing.allocator);
+    defer std.testing.allocator.free(automatic);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(std.testing.io, std.testing.allocator, automatic);
+    defer automatic_root.deinit();
+    var schedule_support: TestScheduleSupport = .{};
+    var task_persistence: TaskPersistenceProbe = .{};
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_workspaces = 2,
+        .max_tasks = 2,
+        .max_scheduled_tasks = 1,
+        .max_runs_per_task = 1,
+    }, .{
+        .directories = .{ .canonical_user_home = files.home, .testing_automatic_workspace_root = &automatic_root },
+        .schedule_timer = schedule_support.timer(),
+        .schedule_persistence = schedule_support.persistence(),
+        .schedule_notifier = schedule_support.notifier(),
+        .task_persistence = task_persistence.capability(),
+    });
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const temporary_task = try workbench.createTask(.{ .workspace_root = files.workspace, .trust = .{ .temporary = files.workspace } }, try product_control.TestSupport.fixtureModelSelection(&workbench));
+    const temporary = try runInstructionTurn(&workbench, temporary_task, "temporary");
+    try std.testing.expect(temporary.instructions.?.project == null);
+    try std.testing.expectEqual(task_state.product_instructions.State.applied, temporary.instructions.?.global.state);
+
+    const schedule_id = try workbench.createScheduledTask(.{
+        .title = "Instructions",
+        .model_selection = try product_control.TestSupport.fixtureModelSelection(&workbench),
+        .permission_profile = .approval_required,
+        .input = "Scheduled turn",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    const scheduled_task = try workbench.runScheduledTaskNow(schedule_id, 1);
+    const task = workbench.testTask(scheduled_task).?;
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.RunDidNotSettle;
+    const scheduled = task.durable.runs[0].?.instructions.?;
+    try std.testing.expect(scheduled.project == null);
+    try std.testing.expectEqual(task_state.product_instructions.State.applied, scheduled.global.state);
+}
+
+test "a lost Session fails only that turn, a busy one defers it, and later turns carry the instructions" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var files = try InstructionFiles.init();
+    defer files.deinit();
+    try files.write(InstructionFiles.global_path, "Global rule.");
+    // Rebuilding a Session goes through Conversation recovery.
+    var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, files.home);
+    defer checkpoints.deinit();
+    const history = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+    defer std.testing.allocator.free(history);
+    var persistence = TaskPersistenceProbe{ .storage = history };
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = files.home;
+    configuration.task_persistence = persistence.capability();
+    configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_tasks = 1,
+        .max_workspaces = 1,
+        .max_runs_per_task = 4,
+    }, configuration);
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    const task_id = try workbench.createTask(.{ .workspace_root = files.workspace, .trust = .explicitly_trusted }, try product_control.TestSupport.fixtureModelSelection(&workbench));
+    const task = workbench.testTask(task_id).?;
+
+    // Core loses the Session while installing: that turn cannot start on it.
+    fake_core.lock();
+    fake_core.forced_prompt_status = wire.STATUS_INVALID_STATE;
+    fake_core.unlock();
+    try std.testing.expectError(error.SessionPoisoned, runPreparedTask(&workbench, task_id, .{ .text = "lost" }));
+    try std.testing.expectEqual(.session_poisoned, task.runtime.attached().?.health);
+    // The ordinary close takes the poisoned Session away ...
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        workbench.syncLifecycle();
+        if (task.runtime.attachment == .detached and task.runtime.close_thread == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.PoisonedSessionNotClosed;
+    // ... and the next message rebuilds one, which installs the files again.
+    _ = try workbench.restoreTaskConversation(task_id, task.durable.binding_epoch);
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        workbench.syncLifecycle();
+        if (task.runtime.attached() != null and task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.SessionNotRebuilt;
+    const recovered = try runInstructionTurn(&workbench, task_id, "recovered");
+    try std.testing.expectEqual(task_state.product_instructions.State.applied, recovered.instructions.?.global.state);
+    try std.testing.expect(instructionProfile().find("host:user-instructions-global") != null);
+
+    // A Session that answers busy defers the turn rather than dropping the
+    // files; the turn after installs them.
+    try files.write(InstructionFiles.global_path, "Global rule, revised.");
+    fake_core.lock();
+    fake_core.forced_prompt_status = wire.STATUS_BUSY;
+    fake_core.unlock();
+    try std.testing.expectError(error.TaskBusy, runPreparedTask(&workbench, task_id, .{ .text = "busy" }));
+    try std.testing.expectEqual(.available, task.runtime.attached().?.health);
+    const after_busy = try runInstructionTurn(&workbench, task_id, "after busy");
+    try std.testing.expectEqual(task_state.product_instructions.State.applied, after_busy.instructions.?.global.state);
+    const profile = instructionProfile();
+    try std.testing.expect(std.mem.endsWith(u8, profile.sectionText(profile.find("host:user-instructions-global").?), "Global rule, revised."));
+}

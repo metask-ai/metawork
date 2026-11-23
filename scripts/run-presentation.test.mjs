@@ -80,6 +80,7 @@ function run(overrides = {}) {
     activity: { kind: "waiting_model" },
     submittedAtUnixMs: null,
     finishedAtUnixMs: null,
+    instructions: null,
     terminal: null,
     usage: { input: "0", output: "0", cacheRead: "0", cacheCreation: "0" },
     additionalInputs: [],

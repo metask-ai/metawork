@@ -25,16 +25,26 @@ import {
   type CustomModelActions,
 } from "./CustomModelsSettings.tsx";
 import { supportsCustomProviders } from "../../workbench/model-setup.ts";
+import {
+  GlobalInstructionsSettings,
+  type GlobalInstructionsActions,
+} from "./GlobalInstructionsSettings.tsx";
 export type SettingsFocusTarget =
   "title" | "account" | "models" | "archived" | "directories";
 
 type SettingsSection =
-  "general" | "account" | "models" | "archived" | "directories";
+  | "general"
+  | "account"
+  | "models"
+  | "instructions"
+  | "archived"
+  | "directories";
 type AutomaticWorkspaceRootAction = "choose" | "reset" | "retry";
 type AutomaticWorkspaceRootMutationOutcome = "applied" | "cancelled" | false;
 export function SettingsPage({
   archiveManagement,
   directoryManagement,
+  globalInstructions,
   account,
   accountFeedback,
   accountDiagnostics,
@@ -67,6 +77,7 @@ export function SettingsPage({
 }: {
   archiveManagement?: ArchivedTasksProps;
   directoryManagement?: ReactNode;
+  globalInstructions?: GlobalInstructionsActions;
   account: AccountView;
   accountFeedback?: ReactNode;
   accountDiagnostics?: ReactNode;
@@ -119,6 +130,7 @@ export function SettingsPage({
   const generalHeading = useRef<HTMLHeadingElement>(null);
   const accountHeading = useRef<HTMLHeadingElement>(null);
   const modelsHeading = useRef<HTMLHeadingElement>(null);
+  const instructionsHeading = useRef<HTMLHeadingElement>(null);
   const automaticRootChooseButton = useRef<HTMLButtonElement>(null);
   const automaticRootResetButton = useRef<HTMLButtonElement>(null);
   const automaticRootRetryButton = useRef<HTMLButtonElement>(null);
@@ -167,6 +179,8 @@ export function SettingsPage({
         accountHeading.current?.focus();
       } else if (activeSection === "models") {
         modelsHeading.current?.focus();
+      } else if (activeSection === "instructions") {
+        instructionsHeading.current?.focus();
       }
     });
     return () => window.cancelAnimationFrame(frame);
@@ -310,6 +324,24 @@ export function SettingsPage({
             </span>
             <span>{t("settings.models")}</span>
           </a>
+          {globalInstructions && (
+            <a
+              className="focus-ring"
+              href="#settings-instructions"
+              aria-current={
+                activeSection === "instructions" ? "location" : undefined
+              }
+              onClick={(event) => {
+                event.preventDefault();
+                setActiveSection("instructions");
+              }}
+            >
+              <span className="settings-nav-icon" aria-hidden="true">
+                <Icon name="instructions" />
+              </span>
+              <span>{t("settings.instructions")}</span>
+            </a>
+          )}
           <a
             className="focus-ring"
             href="#settings-directories"
@@ -359,6 +391,13 @@ export function SettingsPage({
             {t("settings.title")}
           </h1>
           {activeSection === "directories" && directoryManagement}
+          {activeSection === "instructions" && globalInstructions && (
+            <GlobalInstructionsSettings
+              actions={globalInstructions}
+              disabled={disabled}
+              headingRef={instructionsHeading}
+            />
+          )}
           {activeSection === "archived" && archiveManagement && (
             <ArchivedTasks {...archiveManagement} />
           )}

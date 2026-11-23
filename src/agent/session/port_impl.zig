@@ -203,6 +203,11 @@ const session_vtable: port.SessionPort.VTable = .{
             return sessionOf(context).rewindToUserMessage(position);
         }
     }.call,
+    .set_instructions = struct {
+        fn call(context: ?*anyopaque, instructions: surface.Instructions) surface.Error!surface.InstructionsApplied {
+            return sessionOf(context).setInstructions(instructions);
+        }
+    }.call,
     .update_credential = struct {
         fn call(context: ?*anyopaque, credential: []const u8) surface.Error!void {
             return sessionOf(context).updateCredential(credential);

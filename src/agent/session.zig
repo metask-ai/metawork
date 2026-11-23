@@ -43,6 +43,11 @@ pub const PermissionModeUpdate = surface.PermissionModeUpdate;
 pub const ConversationBounds = surface.ConversationBounds;
 pub const RewindRefusal = surface.RewindRefusal;
 pub const RewindOutcome = surface.RewindOutcome;
+pub const InstructionDocument = surface.InstructionDocument;
+pub const Instructions = surface.Instructions;
+pub const InstructionsApplied = surface.InstructionsApplied;
+pub const max_instruction_text_bytes = surface.max_instruction_text_bytes;
+pub const max_instruction_path_bytes = surface.max_instruction_path_bytes;
 pub const PermissionInteraction = surface.PermissionInteraction;
 pub const McpActivationUnavailableReason = surface.McpActivationUnavailableReason;
 pub const McpActivationOutcome = surface.McpActivationOutcome;
@@ -1314,6 +1319,93 @@ pub const Session = struct {
         if (after.message_count != position - 1 or after.compact_boundary != before.compact_boundary)
             return self.failRewindContract();
         return .rewound;
+    }
+
+    /// Replaces the user instruction sections of this Session's prompt while
+    /// it is idle; identity and guidance never change. The next Run renders
+    /// from the result, and a Run already under way keeps what it began with.
+    ///
+    /// Core refuses a profile as a whole, so a refusal of what the documents
+    /// add -- their content, or the durable budget the profile counts
+    /// against -- is narrowed one document at a time: both, global only,
+    /// project only, neither. The answer says which documents Core took. The
+    /// last step is the base profile Core accepted at creation: refusing its
+    /// content is Core's broken contract, while a budget or transient refusal
+    /// of it leaves the profile Core had, as every refusal does. The ladder
+    /// runs here, next to Core, so it costs no extra link round trips.
+    ///
+    /// `InstructionsUpdateFailed` means the previous profile stands and the
+    /// Session is usable; `SessionPoisoned` means it is not, and the caller
+    /// must not start a Run on it.
+    pub fn setInstructions(self: *Session, instructions: Instructions) Error!InstructionsApplied {
+        try surface.validateInstructions(instructions);
+        // Every fallible Host allocation precedes the Core calls.
+        var assembly = session_prompt.Assembly.init(self.agent_runtime.allocator, instructions) catch
+            return error.InstructionsUpdateFailed;
+        defer assembly.deinit();
+        const offered = assembly.offered();
+        var ladder: [4]session_prompt.Keep = undefined;
+        var steps: usize = 0;
+        if (offered.global and offered.project) {
+            ladder[steps] = offered;
+            steps += 1;
+        }
+        if (offered.global) {
+            ladder[steps] = .{ .global = true };
+            steps += 1;
+        }
+        if (offered.project) {
+            ladder[steps] = .{ .project = true };
+            steps += 1;
+        }
+        ladder[steps] = .{};
+        steps += 1;
+
+        self.lock();
+        defer self.unlock();
+        if (self.agent_runtime.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
+        switch (self.state) {
+            .idle => {},
+            .poisoned => return error.SessionPoisoned,
+            .closing, .closed => return error.SessionClosing,
+            else => return error.SessionNotIdle,
+        }
+        if (self.core_call_in_progress or self.active_callback_refs != 0 or
+            self.abort_calls_in_progress != 0 or self.credential_updates_in_progress != 0)
+            return error.SessionNotIdle;
+        for (ladder[0..steps], 0..) |keep, index| {
+            const last = index + 1 == steps;
+            const profile = assembly.profile(keep);
+            switch (session_prompt.set(self.agent_runtime.api, self.raw, &profile)) {
+                .contract_violation => return self.failInstructionsContract(),
+                .status => |status| switch (status) {
+                    .ok => return .{ .global = keep.global, .project = keep.project },
+                    .busy => return error.SessionNotIdle,
+                    // Core took nothing; the profile it had stays.
+                    .out_of_memory, .internal_error => return error.InstructionsUpdateFailed,
+                    // The profile is durable Session state: a smaller one may
+                    // fit where a larger one did not. Refused even without
+                    // instructions, the profile Core had still stands.
+                    .checkpoint_budget_required, .resource_limit => if (last)
+                        return error.InstructionsUpdateFailed,
+                    .invalid_argument => if (last) return self.failInstructionsContract(),
+                    .invalid_state, .core_error => return self.poisonInstructions(),
+                    else => return self.failInstructionsContract(),
+                },
+            }
+        }
+        unreachable;
+    }
+
+    fn poisonInstructions(self: *Session) Error {
+        self.state = .poisoned;
+        self.broadcast();
+        return error.SessionPoisoned;
+    }
+
+    fn failInstructionsContract(self: *Session) Error {
+        self.dependency_contract_failure = true;
+        return self.poisonInstructions();
     }
 
     fn refusedRewind(refusal: surface.RewindRefusal, source: @FieldType(@FieldType(RewindOutcome, "refused"), "source")) RewindOutcome {

@@ -261,6 +261,15 @@ pub const WorkspaceIdentity = struct {
 pub const AutomaticWorkspaceRootMutation = struct {
     expectedGeneration: []const u8,
 };
+pub const GlobalInstructionsRead = struct {};
+/// `text` is the whole file the editor wants saved; the payload limit makes
+/// room for its JSON escaping, and the Host checks the decoded bytes.
+pub const GlobalInstructionsSave = struct {
+    expectedRevision: []const u8,
+    text: []const u8,
+};
+/// 32 KiB of text, each byte escaped at worst as `\u00XX`, plus the revision.
+pub const max_global_instructions_save_payload_bytes: usize = 256 * 1024;
 pub const SkillImportTarget = struct {
     kind: []const u8,
     workspaceId: ?[]const u8,

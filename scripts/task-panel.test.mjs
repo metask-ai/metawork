@@ -197,6 +197,7 @@ function run(overrides = {}) {
     activity: null,
     submittedAtUnixMs: null,
     finishedAtUnixMs: null,
+    instructions: null,
     elapsedMs: "12000",
     terminal: terminal(),
     usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
@@ -6671,6 +6672,122 @@ test("task information separates the selected Provider from the actual active or
     );
     cleanup();
   }
+});
+
+test("task information shows the instructions the current or latest Run carried, and nothing it cannot know", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const use = (state, truncated = false, reason = null) => ({
+    state,
+    truncated,
+    reason,
+  });
+  const runs = [
+    {
+      id: "7",
+      execution: { model: "minimax-m3", protocol: "openai_chat_completions" },
+      instructions: {
+        global: use("applied", true),
+        project: {
+          path: "/work/repo/AGENTS.md",
+          ...use("unreadable", false, "not_utf8"),
+        },
+      },
+    },
+    {
+      id: "8",
+      execution: { model: "glm-5.3-flash", protocol: "anthropic_messages" },
+      instructions: { global: use("update_failed"), project: null },
+    },
+  ];
+  const fact = (label) =>
+    screen.getByText(label).parentElement.querySelector("dd").textContent;
+  const open = async (activeOperation, taskRuns, locale = "en-US") => {
+    render(
+      localizedView(
+        createElement(TaskInformation, {
+          task: task({ activeOperation, runs: taskRuns }),
+          models: taskInformationModels,
+          permissionProfilesEnabled: false,
+        }),
+        locale,
+      ),
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: locale === "en-US" ? "Task information" : "任务信息",
+      }),
+    );
+  };
+
+  // The current Run: truncation and a project file that could not be read.
+  await open({ kind: "run", id: "7" }, runs);
+  assert.equal(
+    fact("Current run global instructions"),
+    "Used (truncated to 32 KiB)",
+  );
+  assert.equal(
+    fact("Current run project instructions"),
+    "/work/repo/AGENTS.mdCould not be read: not UTF-8 text",
+  );
+  assert.equal(
+    screen.getByText("/work/repo/AGENTS.md").getAttribute("title"),
+    "/work/repo/AGENTS.md",
+  );
+  cleanup();
+
+  // The latest Run, in a working directory that admits no project file.
+  await open(null, runs);
+  assert.equal(
+    fact("Last run global instructions"),
+    "Not updated for this run; it kept the version added earlier",
+  );
+  assert.equal(screen.queryByText("Last run project instructions"), null);
+  cleanup();
+
+  // History from before this Host process says nothing about instructions.
+  await open(null, [{ ...runs[1], instructions: null }]);
+  assert.equal(screen.queryByText("Last run global instructions"), null);
+  cleanup();
+
+  // A path the agent cannot be given costs only its own file.
+  await open(null, [
+    {
+      ...runs[1],
+      instructions: {
+        global: use("unreadable", false, "invalid_path"),
+        project: { path: "/work/repo/AGENTS.md", ...use("applied") },
+      },
+    },
+  ]);
+  assert.equal(
+    fact("Last run global instructions"),
+    "Could not be read: path has a control character or is too long",
+  );
+  assert.equal(
+    fact("Last run project instructions"),
+    "/work/repo/AGENTS.mdUsed",
+  );
+  cleanup();
+
+  // A Session that could not be updated, and never carried this file.
+  await open(null, [
+    {
+      ...runs[1],
+      instructions: { global: use("not_installed", true), project: null },
+    },
+  ]);
+  assert.equal(
+    fact("Last run global instructions"),
+    "Not added: this run could not be updated, so it has none of this file",
+  );
+  cleanup();
+
+  await open({ kind: "run", id: "7" }, runs, "zh-CN");
+  assert.equal(fact("当前轮全局指令"), "已使用（截断到 32 KiB）");
+  assert.equal(
+    fact("当前轮项目指令"),
+    "/work/repo/AGENTS.md读取失败：不是 UTF-8 文本",
+  );
 });
 
 test("task information preserves a removed Provider ID and never guesses the source of legacy history", async () => {

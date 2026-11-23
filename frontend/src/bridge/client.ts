@@ -96,6 +96,8 @@ import {
   decodeAttachmentAddResult,
   decodeAttachmentCancelResult,
   decodeAutomaticWorkspaceRootMutationResult,
+  decodeGlobalInstructions,
+  decodeGlobalInstructionsSaveResult,
   decodeExternalLinkOpenResult,
   decodeWorkspaceOpenResult,
 } from "./decode-contracts.ts";
@@ -576,6 +578,21 @@ export class BridgeClient {
     return decodeAutomaticWorkspaceRootMutationResult(
       await this.invoke(commands.retryAutomaticWorkspaceRoot, {
         expectedGeneration,
+      }),
+    );
+  }
+  async readGlobalInstructions() {
+    return decodeGlobalInstructions(
+      await this.invoke(commands.readGlobalInstructions, {}),
+    );
+  }
+  /** Replaces the global instructions file when it still has the revision
+   * the editor loaded; an outside change answers `conflict`. */
+  async saveGlobalInstructions(expectedRevision: string, text: string) {
+    return decodeGlobalInstructionsSaveResult(
+      await this.invoke(commands.saveGlobalInstructions, {
+        expectedRevision,
+        text,
       }),
     );
   }

@@ -2365,6 +2365,10 @@ fn sessionRewindToUserMessage(context: ?*anyopaque, position: u64) Error!surface
     return sessionCall(remoteOf(context), .rewind_to_user_message, Error, .{ .position = position });
 }
 
+fn sessionSetInstructions(context: ?*anyopaque, instructions: surface.Instructions) Error!surface.InstructionsApplied {
+    return sessionCall(remoteOf(context), .set_instructions, Error, instructions);
+}
+
 fn sessionUpdateCredential(context: ?*anyopaque, credential: []const u8) Error!void {
     return sessionCall(remoteOf(context), .update_credential, Error, .{ .credential = credential });
 }
@@ -2597,6 +2601,7 @@ const session_vtable: port.SessionPort.VTable = .{
     .update_permission_mode = sessionUpdatePermissionMode,
     .conversation_bounds = sessionConversationBounds,
     .rewind_to_user_message = sessionRewindToUserMessage,
+    .set_instructions = sessionSetInstructions,
     .update_credential = sessionUpdateCredential,
     .request_termination = sessionRequestTermination,
     .prepare_run = sessionPrepareRun,

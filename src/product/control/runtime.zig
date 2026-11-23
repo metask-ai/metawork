@@ -20,6 +20,8 @@ const attachment_staging = @import("product_attachment_staging");
 const file_change_io = @import("product_control_file_change_io");
 const product_attachment = @import("metawork_product_attachment");
 const product_workspace = @import("metawork_product_workspace");
+const product_instructions = @import("metawork_product_instructions").source;
+pub const instructions_file = @import("metawork_product_instructions").global_file;
 const product_schedule = @import("metawork_product_schedule");
 const skill_ports = @import("metawork_product_skill").ports;
 const skill_runtime = @import("metawork_product_skill").runtime;
@@ -3731,6 +3733,73 @@ pub const Runtime = struct {
         };
     }
 
+    /// Opens both user instruction files for the Task's next Run and reads
+    /// them only when what it finds differs from what the Task's Session
+    /// already carries. Runs on this thread: an open and a handle stat per
+    /// file every turn, and at most two bounded reads when something changed.
+    /// A working directory on an unreachable network share therefore holds
+    /// this call until the file system answers; see
+    /// `product-architecture.md` 2.9.
+    fn prepareRunInstructions(
+        self: *Runtime,
+        task_id: u64,
+        workspace: product_workspace.TaskAuthority,
+    ) std.mem.Allocator.Error!product_instructions.Preparation {
+        const project_root: ?[]const u8 = if (workspace.kind == .manual and workspace.trust == .explicitly_trusted)
+            workspace.canonical_root
+        else
+            null;
+        var paths = try product_instructions.resolvePaths(self.allocator, self.canonical_user_home, project_root);
+        defer paths.deinit(self.allocator);
+        const installed = if (self.task_runtime.installedInstructions(task_id)) |value| value.fingerprint else null;
+        return product_instructions.prepare(self.io, self.allocator, paths, installed);
+    }
+
+    /// The global instructions file for the Settings editor. `path` is null
+    /// when there is no trusted home, which leaves nothing to edit.
+    pub const GlobalInstructions = struct {
+        path: ?[]const u8,
+        loaded: instructions_file.Loaded,
+
+        pub fn deinit(self: *GlobalInstructions, allocator: std.mem.Allocator) void {
+            if (self.path) |path| allocator.free(path);
+            self.loaded.deinit(allocator);
+            self.* = undefined;
+        }
+    };
+
+    pub fn readGlobalInstructions(self: *Runtime) std.mem.Allocator.Error!GlobalInstructions {
+        var paths = try product_instructions.resolvePaths(self.allocator, self.canonical_user_home, null);
+        const path = paths.global orelse return .{ .path = null, .loaded = .{ .state = .absent } };
+        paths.global = null;
+        errdefer self.allocator.free(path);
+        const loaded = try instructions_file.load(self.io, self.allocator, path, self.instructionCredentialCheck());
+        return .{ .path = path, .loaded = loaded };
+    }
+
+    /// Null when there is no trusted home to save into. Nothing here needs
+    /// to reach a Session: the next Run's start finds the changed file.
+    pub fn saveGlobalInstructions(
+        self: *Runtime,
+        expected: instructions_file.Revision,
+        text: []const u8,
+    ) std.mem.Allocator.Error!?instructions_file.SaveOutcome {
+        var paths = try product_instructions.resolvePaths(self.allocator, self.canonical_user_home, null);
+        defer paths.deinit(self.allocator);
+        const path = paths.global orelse return null;
+        return try instructions_file.save(self.io, self.allocator, path, expected, text, self.instructionCredentialCheck());
+    }
+
+    fn instructionCredentialCheck(self: *Runtime) instructions_file.CredentialCheck {
+        return .{ .context = self, .contains_fn = containsKnownCredentialText };
+    }
+
+    /// The one known-credential match every Host projection uses.
+    fn containsKnownCredentialText(context: *anyopaque, text: []const u8) bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        return self.containsKnownCredential(text);
+    }
+
     pub fn workspaceEpoch(self: *const Runtime, workspace_id: u64) Error!u64 {
         const workspace = self.workspace.facts(workspace_id) orelse
             return error.UnknownWorkspace;
@@ -4172,6 +4241,11 @@ pub const Runtime = struct {
         run_effects.image_execution = &image;
         run_effects.file_delivery = &delivery;
         run_effects.model_target = if (model_target) |*target| target.input() else null;
+        // A scheduled Task always runs in its own Automatic Workspace, so only
+        // the global file applies.
+        var instructions = try self.prepareRunInstructions(task.id(), image_workspace);
+        defer instructions.deinit();
+        run_effects.instructions = &instructions;
         var run = try self.task_runtime.startRun(
             task.id(),
             binding_epoch,
@@ -5105,6 +5179,9 @@ pub const Runtime = struct {
         operation_effects.video_execution = &video;
         operation_effects.file_delivery = &delivery;
         operation_effects.model_target = if (model_target) |*target| target.input() else null;
+        var instructions = try self.prepareRunInstructions(task_id, workspace);
+        defer instructions.deinit();
+        operation_effects.instructions = &instructions;
         if (staged.borrow != null) {
             acceptance_context = .{
                 .borrow = &staged.borrow.?,
@@ -23202,6 +23279,56 @@ test "Product view failed preparation step releases its source and credentials" 
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqual(@as(u64, 0), control.snapshot.plan.id);
     try std.testing.expect(control.snapshot.preparation.credentials == null);
+}
+
+test "the global instructions editor works under the home only and never carries a known credential" {
+    const Account = struct {
+        token: []const u8 = "account-instructions-token",
+        fn generation(_: *anyopaque) u64 {
+            return 1;
+        }
+        fn visit(context: *anyopaque, visitor_context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try callback(visitor_context, self.token);
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    var account: Account = .{};
+    control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    const previous_home = control.canonical_user_home;
+    defer control.canonical_user_home = previous_home;
+
+    // Without a trusted home there is nothing to load or save.
+    control.canonical_user_home = null;
+    var unavailable = try control.readGlobalInstructions();
+    defer unavailable.deinit(control.allocator);
+    try std.testing.expect(unavailable.path == null);
+    try std.testing.expect(try control.saveGlobalInstructions(.absent, "text") == null);
+
+    control.canonical_user_home = home;
+    var absent = try control.readGlobalInstructions();
+    defer absent.deinit(control.allocator);
+    try std.testing.expectEqual(instructions_file.LoadState.absent, absent.loaded.state);
+    const expected_path = try std.fs.path.join(std.testing.allocator, &.{ home, ".metawork", "AGENTS.md" });
+    defer std.testing.allocator.free(expected_path);
+    try std.testing.expectEqualStrings(expected_path, absent.path.?);
+    const saved = (try control.saveGlobalInstructions(.absent, "Use tabs.")).?.saved;
+    // A known credential is never saved from the editor.
+    try std.testing.expect((try control.saveGlobalInstructions(saved, "token account-instructions-token")).? == .contains_credential);
+    var ready = try control.readGlobalInstructions();
+    defer ready.deinit(control.allocator);
+    try std.testing.expectEqualStrings("Use tabs.", ready.loaded.text.?);
+    // Nor handed to the Renderer when the file was written outside.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".metawork" ++ std.fs.path.sep_str ++ "AGENTS.md", .data = "account-instructions-token" });
+    var guarded = try control.readGlobalInstructions();
+    defer guarded.deinit(control.allocator);
+    try std.testing.expectEqual(instructions_file.LoadState.contains_credential, guarded.loaded.state);
+    try std.testing.expect(guarded.loaded.text == null);
 }
 
 test "Account image token protects Task views between Runs and rotation revokes reads" {

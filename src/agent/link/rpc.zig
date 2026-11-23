@@ -88,6 +88,7 @@ pub const Method = enum(u16) {
     release_skill_catalog = 40,
     refresh_skill_catalog = 41,
     skill_policy_matches = 42,
+    set_instructions = 43,
 
     /// Whether the call names a Session. The rest are the Runtime's.
     pub fn namesSession(self: Method) bool {
@@ -433,6 +434,7 @@ fn MethodRequest(comptime method: Method) type {
         .set_model => struct { model: []const u8 },
         .update_permission_mode => struct { expected: control.PermissionMode, target: control.PermissionMode },
         .rewind_to_user_message => struct { position: u64 },
+        .set_instructions => surface.Instructions,
         .update_credential => struct { credential: []const u8 },
         .request_termination => struct { run_id: u64, signal: control.TerminationSignal },
         .prepare_run => struct {
@@ -490,6 +492,7 @@ fn MethodResponse(comptime method: Method) type {
         .update_permission_mode => surface.PermissionModeUpdate,
         .conversation_bounds => surface.ConversationBounds,
         .rewind_to_user_message => surface.RewindOutcome,
+        .set_instructions => surface.InstructionsApplied,
         .prepare_run, .prepare_compact => u64,
         .begin_run => BeginRun,
         .execute_prepared_compact => shapes.CompactTerminalResult,
@@ -810,6 +813,48 @@ test "a Run's selected Skill crosses with its parts" {
             try testing.expectEqualStrings(expected.invocation_name, input.selected_skill.?.invocation_name);
         } else try testing.expect(input.selected_skill == null);
     }
+}
+
+test "user instruction documents cross whole, both at their limit, and the answer says what Core took" {
+    const path = "/home/user/.metawork/AGENTS.md";
+    const text = try testing.allocator.alloc(u8, surface.max_instruction_text_bytes);
+    defer testing.allocator.free(text);
+    for (text, 0..) |*byte, index| byte.* = 'a' + @as(u8, @intCast(index % 26));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const cases = [_]surface.Instructions{
+        .{ .global = .{ .path = path, .text = text, .truncated = true }, .project = .{ .path = "D:\\repo\\AGENTS.md", .text = text, .truncated = false } },
+        .{ .project = .{ .path = "D:\\repo\\AGENTS.md", .text = "only the project", .truncated = false } },
+        .{},
+    };
+    for (cases) |sent| {
+        const bytes = try encodeRequest(.set_instructions, testing.allocator, 5, sent);
+        defer testing.allocator.free(bytes);
+        // Larger than one frame, so the request is carried in fragments.
+        if (sent.global != null) try testing.expect(bytes.len > @import("frame.zig").max_fragment_payload_bytes);
+        const received = try decodeRequestHeader(bytes);
+        try testing.expectEqual(Method.set_instructions, received.method);
+        const value = try decodeRequest(.set_instructions, arena.allocator(), received.body);
+        for ([_]?surface.InstructionDocument{ sent.global, sent.project }, [_]?surface.InstructionDocument{ value.global, value.project }) |expected, actual| {
+            if (expected) |document| {
+                try testing.expectEqualStrings(document.path, actual.?.path);
+                try testing.expectEqualStrings(document.text, actual.?.text);
+                try testing.expectEqual(document.truncated, actual.?.truncated);
+            } else try testing.expect(actual == null);
+        }
+    }
+    const applied = try encodeOk(.set_instructions, testing.allocator, .{ .global = true, .project = false });
+    defer testing.allocator.free(applied);
+    try testing.expectEqual(
+        surface.InstructionsApplied{ .global = true, .project = false },
+        (try decodeResponse(.set_instructions, arena.allocator(), applied)).ok,
+    );
+    const refused = try encodeError(testing.allocator, error.InstructionsUpdateFailed);
+    defer testing.allocator.free(refused);
+    try testing.expectEqual(
+        @as(error_code.LinkError, error.InstructionsUpdateFailed),
+        (try decodeResponse(.set_instructions, arena.allocator(), refused)).err,
+    );
 }
 
 test "a method number this build does not declare is refused, not guessed" {

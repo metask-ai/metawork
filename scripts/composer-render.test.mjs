@@ -270,6 +270,7 @@ function renderCompletedSurface(
         activity: pendingUi ? { kind: "waiting_user" } : null,
         submittedAtUnixMs: null,
         finishedAtUnixMs: null,
+        instructions: null,
         terminal: pendingUi
           ? null
           : {

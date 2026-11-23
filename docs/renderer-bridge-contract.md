@@ -88,6 +88,8 @@ Run 的 `elapsedMs` 是 nullable canonical decimal `u64` string，表示从本�
 
 Run 的 `submittedAtUnixMs` 是 nullable canonical decimal `u64` string，表示 Product 接纳该 Run 输入时观察到的 Unix epoch 毫秒。该字段适用于 active 与 terminal Run，并随 Run 历史持久化；时钟不可用以及字段引入前的历史记录保持 null，不做迁移，不允许 Renderer 以完成时间、Snapshot 接收时间、Run 顺序、Run ID 或 `elapsedMs` 反推。非空值必须大于零且不超过 ECMAScript Date 上界 `8640000000000000`，写入后不可修改；Renderer 只进行本地化相对时间呈现，不把它解释为 Agent 开始执行、事件时间线或执行耗时。
 
+Run 的 `instructions` 是 nullable 运行期事实，说明该 Run 实际带上了哪些用户指令（规则见 [Product 架构](product-architecture.md#29-用户指令)）：`{ global, project }`，`global = { state, truncated, reason }`，`project = { path, state, truncated, reason } | null`。`state = applied | absent | empty | unreadable | rejected | update_failed | unavailable | not_installed`；Session 未能更新时，`update_failed` 表示这一轮仍带着之前装入的这份指令，`not_installed` 表示读到了但这一轮没有带上；`reason` 只在 `unreadable` 时非空，取 `access_denied | not_regular_file | outside_workspace | not_utf8 | invalid_path | io_error`（`invalid_path` 是 Agent 不接受的路径：含控制字符、不是 UTF-8 或过长）；只有读过的文件（`applied | rejected | update_failed | not_installed`）可以 `truncated`。`global.state = unavailable` 表示没有可信 home；`project` 为 null 表示该工作目录不读项目文件（Automatic），`project.state` 不会是 `unavailable`。`path` 是该 Run 准备时实际打开的项目文件（工作目录根部的 `AGENTS.md`）的 Host 投影路径，经凭据清洗，超过 Agent 接受的长度时为 null，不按 Task 当前的根目录重新拼。该字段不持久化：当前 Host 进程之前的历史和没有经过指令准备的 Run 为 null，Renderer 不得据当前文件、设置或其他 Run 补写。
+
 Run 的 `finishedAtUnixMs` 是 nullable canonical decimal `u64` string，表示 Product 在完整 terminal event-drain barrier 后首次把该 Run 收口为正式终态时观察到的 Unix epoch 毫秒。非 terminal Run 必须为 null；时钟不可用以及该字段引入前的历史记录继续为 null，不允许 Renderer 以 Snapshot 接收、reload、Run 顺序或 `elapsedMs` 反推。非空值必须大于零且不超过 ECMAScript Date 上界 `8640000000000000`，随 Run 历史持久化且写入后不可修改；Renderer 只进行本地化相对时间呈现，绝不把它解释为事件时间线或执行耗时。
 
 `metawork.tasks.create` 必须提交非空 `modelSelection = { targetModelRef: { sourceId, modelId }, expectedSourceGeneration, expectedCatalogGeneration }`；generation 是非零 canonical decimal u64。删除 expectedExecutionGeneration、默认 expectedSelectionRevision 与 null 选择 shape。Host 校验具体来源、目录 membership、协议与 credential，建立 Task-owned 配置，不消费起始偏好作为执行 authority。
@@ -98,7 +100,7 @@ Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Hos
 
 Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，快速开发阶段固定 revision 为 `1`。Host 与 Renderer 随同一应用包原子发布，任何 command、event、payload 字段或 wire 语义变化都直接原地 hard cut，不为临时合同形态递增 revision、不维护兼容层，也不在 snapshot 内维护第二个局部版本。`contractRevision` 仍精确匹配，用于拒绝非当前固定标识，但不承诺识别同 revision 的开发产物错配。任何合同类版本标识的变更都必须先得到用户显式同意；对本文件即包括 Renderer Bridge revision。
 
-Run snapshot 已在 revision 1 内原地 hard cut 删除自由文本 `assistant`、`assistantRedacted`、`status`，以及 Run 顶层 `outcome/cause` 与 Task 顶层 `lastRunOutcome/cause`。每个 Run 精确发布 `execution + elapsedMs + submittedAtUnixMs + finishedAtUnixMs + output + activity + terminal`：`execution = { generation, protocol, model }`，generation 是非零 canonical decimal wire integer，protocol 为合同既有封闭枚举，model 是该 Run 实际持有的无 secret model identity；它们是不可由 Task 当前 binding 或 Models 当前默认值补写的逐 Run 历史 provenance。Task 最近结果由最后一个非空 Run terminal 派生，不发布第二份摘要。
+Run snapshot 已在 revision 1 内原地 hard cut 删除自由文本 `assistant`、`assistantRedacted`、`status`，以及 Run 顶层 `outcome/cause` 与 Task 顶层 `lastRunOutcome/cause`。每个 Run 精确发布 `execution + elapsedMs + submittedAtUnixMs + finishedAtUnixMs + instructions + output + activity + terminal`：`execution = { generation, protocol, model }`，generation 是非零 canonical decimal wire integer，protocol 为合同既有封闭枚举，model 是该 Run 实际持有的无 secret model identity；它们是不可由 Task 当前 binding 或 Models 当前默认值补写的逐 Run 历史 provenance。Task 最近结果由最后一个非空 Run terminal 派生，不发布第二份摘要。
 
 `output = { commentary, response, responseKind, provisional, redacted, provisionalRedacted }`，其中 `commentary` 是最多 256 项的有序 string array，每一项对应一个非空、已闭合的 Product commentary group；数组顺序只表达 Run 内的稳定叙事顺序，不运输时间戳、CoreEvent identity、Tool 关联或 raw event timeline。credential 清洗跨整个 canonical output 一次完成，可以使个别投影项为空，但不得改变项数或泄漏跨边界 credential。`responseKind = final | partial | null`；null 时 response 必须为空，分类后的 response 不得同时保留 provisional，terminal Run 的 provisional 必须为空。全部 commentary 项、response 与 provisional 来自同一个 Host output byte budget；provisional 只包含 open/continued buffer 中 credential-safe committed bytes，discard 后必须消失。
 
@@ -127,6 +129,23 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 每个 Run 另精确发布必需的 `outputs` 数组，每项为 `{ id, displayPath, sizeBytes, redacted }`，对监测到本轮期间内容变化的成果追加 `updated: true`。单轮明确交付最多八项，更新可以引用会话中其他已登记成果。id 是非零、32 位小写十六进制的 opaque Task 成果身份，同一成果可由多个可见 Run 引用，同一 Run 内只发布一次；sizeBytes 是可为零的 canonical decimal `u64` string。displayPath 只包含用于展示及下述普通指令引用的相对文本，必须是容量不超过 512 UTF-8 bytes 的 Workspace 相对路径，不能包含路径逃逸、绝对路径或控制字符；redacted 为 true 时必须为空。Host 还须在投影时防御性检查已知 credential，不能因旧 redacted flag 不一致而泄露路径。协议不运输 locator authority、摘要或组件路径，Renderer 不从 Tool 文本构建成果。`capabilities.typedOutputs` 表示可信交付记录的呈现能力；记录不证明当前文件可用，文件动作须按自己的 Host 授权与内容校验收口。该字段与严格 decoder、scoped/history Run projection 和 fixture 在 revision 1 原位同步替换，不接纳缺失字段的旧 wire。
 
 非空时 Task 投影追加 `conversationOutputs`。每项为 `{ id, displayPath, sizeBytes, redacted, runId }`，由首个可见登记的 Run 提供 action scope，覆盖未加载正文的历史轮次。
+
+## Global instructions commands
+
+设置页的全局指令编辑只用两条 Host 命令，正文不进入 Snapshot。
+
+- `metawork.instructions.readGlobal` 的 payload 是 `{}`，Renderer 不提交路径。结果精确为 `{ path, state, text, revision, byteLength, reason, limitBytes }`：
+  - `state = ready | absent | too_large | unreadable | contains_credential | unavailable`；
+  - `path` 是 Host 解析的 `~/.metawork/AGENTS.md` 绝对路径，只在 `unavailable`（没有可信 home）时为 null；
+  - `text` 只在 `ready` 时非空；`revision` 只在 `ready`（文件字节的 64 位小写十六进制 SHA-256）与 `absent`（字面 `absent`）时非空；
+  - `reason` 只在 `unreadable` 时非空，取值同 Run `instructions` 的读取失败原因；`byteLength` 是 nullable canonical decimal 字符串，`too_large` 时必有；`limitBytes` 是保存允许的最大 UTF-8 字节数（32768）；
+  - 含 Host 持有的已知凭据的文件以 `contains_credential` 回答，`text` 为 null。
+- `metawork.instructions.saveGlobal` 的 payload 精确为 `{ expectedRevision, text }`，因 JSON 转义放宽到 256 KiB，Host 再按解码后的 UTF-8 字节复核 32 KiB 上限。结果精确为 `{ outcome, revision }`：
+  - `outcome = saved | conflict | too_large | invalid_text | contains_credential | write_failed | unavailable`；
+  - `revision` 只在 `saved`（新文件的摘要）与 `conflict`（当前文件的摘要，文件已被删除时为 `absent`）时非空。
+  - 冲突时不写入；Renderer 只能在用户确认后以返回的 `revision` 重新保存，不自动重放。
+  - `text` 是要写入的字节：载入的正文用 CRLF 换行时，Renderer 按 CRLF 提交编辑后的正文（textarea 只报告 LF），字节计数也按提交的正文算；判断是否有改动时比较统一换行后的正文。
+- 两条命令都不发布 Snapshot revision：保存的效果由下一轮准入读取文件时体现。
 
 ## Delivered file actions
 

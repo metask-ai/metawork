@@ -1370,6 +1370,30 @@ export const enUS = {
   "task.last_run_model": "Last run model",
   "task.current_run_protocol": "Current run protocol",
   "task.last_run_protocol": "Last run protocol",
+  "task.current_run_global_instructions": "Current run global instructions",
+  "task.last_run_global_instructions": "Last run global instructions",
+  "task.current_run_project_instructions": "Current run project instructions",
+  "task.last_run_project_instructions": "Last run project instructions",
+  "task.instructions.applied": "Used",
+  "task.instructions.applied_truncated": "Used (truncated to 32 KiB)",
+  "task.instructions.global_absent": "Not set",
+  "task.instructions.project_absent": "No AGENTS.md",
+  "task.instructions.empty": "File is empty",
+  "task.instructions.unreadable": "Could not be read: {reason}",
+  "task.instructions.reason.access_denied": "permission denied",
+  "task.instructions.reason.not_regular_file": "not a regular file",
+  "task.instructions.reason.outside_workspace":
+    "links outside the working directory",
+  "task.instructions.reason.not_utf8": "not UTF-8 text",
+  "task.instructions.reason.invalid_path":
+    "path has a control character or is too long",
+  "task.instructions.reason.io_error": "read error",
+  "task.instructions.rejected": "Not used: the agent refused it",
+  "task.instructions.update_failed":
+    "Not updated for this run; it kept the version added earlier",
+  "task.instructions.not_installed":
+    "Not added: this run could not be updated, so it has none of this file",
+  "task.instructions.unavailable": "No home folder",
   "task.information_scope":
     "Connector information reflects tool selection at task creation, not current connection status. Approval mode shows the current conversation setting.",
   "conversation.context_observed":
@@ -1517,6 +1541,40 @@ export const enUS = {
   "settings.general": "General",
   "settings.account": "Account",
   "settings.models": "Models",
+  "settings.instructions": "Global instructions",
+  "settings.instructions.global": "Instructions for every task",
+  "settings.instructions.help":
+    "MetaWork adds this file to the system prompt of every task. Where it conflicts with the AGENTS.md in a task's working directory, the project instructions win. Instructions never change the safety, permission or approval rules.",
+  "settings.instructions.loading": "Loading…",
+  "settings.instructions.load_failed":
+    "The instructions file could not be loaded.",
+  "settings.instructions.reload": "Reload",
+  "settings.instructions.absent":
+    "This file does not exist yet. Saving creates it.",
+  "settings.instructions.size": "{bytes} / {limit} bytes",
+  "settings.instructions.save": "Save",
+  "settings.instructions.saving": "Saving…",
+  "settings.instructions.saved":
+    "Saved. Turns that start from now on use these instructions.",
+  "settings.instructions.over_limit":
+    "Instructions can be at most 32 KiB. Shorten the text to save it.",
+  "settings.instructions.invalid_text":
+    "The text contains characters that cannot be saved.",
+  "settings.instructions.save_contains_credential":
+    "The text contains a credential MetaWork stores, so it was not saved.",
+  "settings.instructions.save_failed":
+    "The file could not be saved. Your text is still here; try again.",
+  "settings.instructions.conflict":
+    "The file was changed outside MetaWork after it was loaded. Reload to see that version, or overwrite it with your text.",
+  "settings.instructions.overwrite": "Overwrite",
+  "settings.instructions.unavailable":
+    "There is no home folder to keep global instructions in.",
+  "settings.instructions.too_large_to_edit":
+    "The file is {size} bytes, too large to edit here. Open the path above in another editor to shorten it.",
+  "settings.instructions.unreadable":
+    "The file cannot be read as text. Open the path above in another editor to fix it.",
+  "settings.instructions.contains_credential":
+    "The file contains a credential MetaWork stores, so it is not shown here. Open the path above in another editor to change it.",
   "settings.general_basics": "Basics",
   "settings.automatic_workspace.title": "Automatic Workspace location",
   "settings.automatic_workspace.help":

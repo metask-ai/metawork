@@ -103,6 +103,7 @@ type IconName =
   | "terminal"
   | "skills"
   | "skill-file"
+  | "instructions"
   | "file-diff"
   | "upload"
   | "folder-up"
@@ -166,6 +167,7 @@ const icons: Record<IconName, LucideIcon> = {
   terminal: Terminal,
   skills: Puzzle,
   "skill-file": FileText,
+  instructions: FileText,
   "file-diff": FileDiff,
   upload: FolderUp,
   "folder-up": FolderUp,

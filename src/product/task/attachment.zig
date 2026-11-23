@@ -7,6 +7,7 @@ const agent_session = @import("product_task_agent_session");
 const owned_execution = @import("product_task_execution_binding");
 const recovery_job = @import("product_task_recovery_job");
 const worker_lease = @import("product_task_worker_lease");
+const instructions = @import("metawork_product_instructions").source;
 
 pub const DetachmentCause = enum {
     cold_start,
@@ -33,6 +34,10 @@ pub const LiveAttachment = struct {
     execution: owned_execution.OwnedTaskExecution,
     pinned_catalog: ?catalog_snapshot.Snapshot,
     health: AttachedHealth = .available,
+    /// Process-local proof of the user instructions this Session's profile
+    /// carries. A fresh or restored Session carries none, so this starts
+    /// empty and the next Run installs the current files.
+    instructions: ?instructions.Installed = null,
 };
 
 pub const ClosingAttachment = struct {
