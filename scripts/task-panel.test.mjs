@@ -191,6 +191,7 @@ function run(overrides = {}) {
     activity: null,
     submittedAtUnixMs: null,
     finishedAtUnixMs: null,
+    instructions: null,
     elapsedMs: "12000",
     terminal: terminal(),
     usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },

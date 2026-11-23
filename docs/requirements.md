@@ -191,6 +191,8 @@ New task Composer 汇总 Metask 与所有 Custom Provider 的 ready 模型，以
 
 - 每次普通文本或多模态 Run 开始执行时，由 AgentCore 官方日期上下文为模型提供本轮开始时的系统本地日历日期与时区信息，用于解释“今天”“近期”等时间参照，不提供具体钟点。排队、跨日、系统时区变化和 Conversation 恢复后的新 Run 按 Core 官方语义重新采样；同一本地日期且时区信息不变时，上下文正文不随时分秒变化。本地时区不可用时 Core 使用 UTC 日期并说明时区未知。用户明确指定的时区或参考日期仍有效，历史日期只描述旧 Run；该日期不能替代最新事实查询，知识截止日期不得作为当前日期参照。MetaWork 不改变用户输入、产品历史与复制内容，也不建立自有时钟或日期 fallback；当前 Core 的异常时钟行为与验证限制以[验证规范](validation.md)登记为准。
 
+- 用户可以写两份自己的指令，让 Agent 在 Task 里遵守：全局指令是 `~/.metawork/AGENTS.md`，对所有 Task 生效，文件不存在就表示没有全局指令；项目指令是 Task 实际工作目录根部的 `AGENTS.md`，只在用户明确授权的手动工作目录里读取，自动工作目录只用全局指令。项目指令跟着实际工作目录走，与 Task 的项目归属无关，不往上层目录找，也不读子目录里的 `AGENTS.md`；定时任务同样适用。MetaWork 不读取 `CLAUDE.md`。两份指令冲突时项目指令优先，指令不改变安全、权限和审批规则。每份最多 32 KiB（UTF-8 字节），超出部分在字符边界截断，模型看到的段尾注明已截断。每轮开始前检查两个文件，有变化就在这一轮开始前换上新内容，已经开始的一轮不变；恢复的会话在下一轮用当前文件。文件读不了（权限不足、不是 UTF-8 文本、不是普通文件、项目文件链接到工作目录之外）或被模型内核拒绝时，只跳过那一份，不阻止这一轮运行；读取规则与已知代价见 [Product 架构](product-architecture.md#29-用户指令)；
+
 - 用户可以提交普通文本，或由图片与其他文件附件组成的多模态输入并启动真实 Agent Run；大文本文件经本地引用按需读取，不等于文档解析能力。模型目录中的 `imageInput` 只提供图片发送前提示，不能替代 Product admission 或 AgentCore typed capability 判断，也不能授权 Renderer 丢弃媒体、切换模型或降级成文本。目录仍可保留上游 `pdfInput` 元数据，但 MetaWork 不据此发送 Provider 原生 PDF part；PDF 文件仍按通用文件引用处理；
 - AgentCore → Host → Bridge 持续投影 Agent 可见输出，并把 commentary、final/partial response 与 provisional 区分为稳定过程说明、安全正文和可回滚临时文本；Renderer 必须在正式 terminal fact 前随真实 Snapshot revision 持续更新 Run 的工作过程，不能把已到达的过程事实藏到终态后一次性展示；
 - `thinking_chunk` 正文不进入可见 output、Snapshot、持久历史或搜索；其事件类型只把当前安全状态细化为“正在思考”，`text_chunk` 到达后状态切换为“正在撰写回复”；

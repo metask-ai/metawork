@@ -20,6 +20,7 @@ const attachment_staging = @import("product_attachment_staging");
 const file_change_io = @import("product_control_file_change_io");
 const product_attachment = @import("metawork_product_attachment");
 const product_workspace = @import("metawork_product_workspace");
+const product_instructions = @import("metawork_product_instructions").source;
 const product_schedule = @import("metawork_product_schedule");
 const skill_ports = @import("metawork_product_skill").ports;
 const skill_runtime = @import("metawork_product_skill").runtime;
@@ -3727,6 +3728,29 @@ pub const Runtime = struct {
         };
     }
 
+    /// Observes both user instruction files for the Task's next Run and reads
+    /// them only when what it finds differs from what the Task's Session
+    /// already carries. Runs on this thread: a stat per file every turn, and
+    /// at most two bounded reads when something changed. A working directory
+    /// on an unreachable network share therefore holds this call until the
+    /// file system answers; see `product-architecture.md` 2.9.
+    fn prepareRunInstructions(
+        self: *Runtime,
+        task_id: u64,
+        workspace: product_workspace.TaskAuthority,
+    ) std.mem.Allocator.Error!product_instructions.Preparation {
+        const project_root: ?[]const u8 = if (workspace.kind == .manual and workspace.trust == .explicitly_trusted)
+            workspace.canonical_root
+        else
+            null;
+        var paths = try product_instructions.resolvePaths(self.allocator, self.canonical_user_home, project_root);
+        defer paths.deinit(self.allocator);
+        const observed = product_instructions.observeAll(self.io, self.allocator, paths);
+        if (self.task_runtime.installedInstructions(task_id)) |installed|
+            if (installed.fingerprint.eql(observed)) return .unchanged;
+        return .{ .changed = try product_instructions.readAll(self.io, self.allocator, paths, observed) };
+    }
+
     pub fn workspaceEpoch(self: *const Runtime, workspace_id: u64) Error!u64 {
         const workspace = self.workspace.facts(workspace_id) orelse
             return error.UnknownWorkspace;
@@ -4168,6 +4192,11 @@ pub const Runtime = struct {
         run_effects.image_execution = &image;
         run_effects.file_delivery = &delivery;
         run_effects.model_target = if (model_target) |*target| target.input() else null;
+        // A scheduled Task always runs in its own Automatic Workspace, so only
+        // the global file applies.
+        var instructions = try self.prepareRunInstructions(task.id(), image_workspace);
+        defer instructions.deinit();
+        run_effects.instructions = &instructions;
         var run = try self.task_runtime.startRun(
             task.id(),
             binding_epoch,
@@ -5101,6 +5130,9 @@ pub const Runtime = struct {
         operation_effects.video_execution = &video;
         operation_effects.file_delivery = &delivery;
         operation_effects.model_target = if (model_target) |*target| target.input() else null;
+        var instructions = try self.prepareRunInstructions(task_id, workspace);
+        defer instructions.deinit();
+        operation_effects.instructions = &instructions;
         if (staged.borrow != null) {
             acceptance_context = .{
                 .borrow = &staged.borrow.?,

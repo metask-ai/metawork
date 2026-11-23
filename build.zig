@@ -136,6 +136,20 @@ pub fn build(b: *std.Build) void {
     }));
     b.step("test-skill-resource-context", "Verify managed Skill resource reads through both canonical Core inputs").dependOn(&skill_resource_tests.step);
     artifacts.tests.step.dependOn(&office_pipeline_tests.step);
+    const instructions_options = b.addOptions();
+    instructions_options.addOption([]const u8, "node_path", b.findProgram(&.{"node"}, &.{}) catch @panic("Node.js required for the instructions provider fixture"));
+    instructions_options.addOption([]const u8, "fixture_path", b.pathFromRoot("tests/fixtures/instructions_provider.mjs"));
+    const instructions_cases = b.createModule(.{
+        .root_source_file = b.path("tests/integration/lifecycle/instructions_test.zig"),
+        .target = test_modules.app.resolved_target,
+        .optimize = test_modules.app.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    instructions_cases.addImport("lifecycle_fixture", lifecycle_fixture);
+    instructions_cases.addOptions("instructions_options", instructions_options);
+    const instructions_tests = b.addRunArtifact(b.addTest(.{ .name = "metawork-instructions-pipeline", .root_module = instructions_cases }));
+    b.step("test-instructions-pipeline", "Run canonical Core and Product user instruction delivery against a local provider").dependOn(&instructions_tests.step);
+    artifacts.tests.step.dependOn(&instructions_tests.step);
     const office_skill_shell = b.addExecutable(.{ .name = "office-skill-shell", .root_module = b.createModule(.{
         .root_source_file = b.path("tests/office_skill_shell.zig"),
         .target = test_modules.app.resolved_target,
@@ -372,6 +386,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-task-policy", .root_module = test_modules.product_task_policy },
         .{ .name = "metawork-product-task-execution", .root_module = test_modules.product_task_execution },
         .{ .name = "metawork-product-task-view", .root_module = test_modules.product_task_view },
+        .{ .name = "metawork-product-instructions", .root_module = test_modules.product_instructions },
     };
     const schedule_tests = b.step("test-product-schedule", "Run Schedule state, persistence and timer authority tests");
     const product_control_step = b.step("test-product-control", "Run the complete Product Control test root");
@@ -383,6 +398,8 @@ pub fn build(b: *std.Build) void {
             schedule_tests.dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.agent_contract)
             b.step("test-agent-contract", "Run the Agent contract declarations and codec tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_instructions)
+            b.step("test-product-instructions", "Run the user instruction file reading and editing tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.agent_link)
             b.step("test-agent-link", "Run the execution link frame, registry and channel tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_skill_runtime)
@@ -1102,6 +1119,7 @@ const WiredModules = struct {
     product_task_policy: *std.Build.Module,
     product_task_execution: *std.Build.Module,
     product_task_view: *std.Build.Module,
+    product_instructions: *std.Build.Module,
 };
 
 fn createLifecycleFixture(
@@ -2372,12 +2390,19 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     task_agent_session.addImport("metawork_agent_contract", agent_contract);
+    const product_instructions = b.createModule(.{
+        .root_source_file = b.path("src/product/instructions.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_instructions.addImport("metawork_agent_contract", agent_contract);
     const task_attachment = b.createModule(.{
         .root_source_file = b.path("src/product/task/attachment.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     task_attachment.addImport("metawork_agent_contract", agent_contract);
+    task_attachment.addImport("metawork_product_instructions", product_instructions);
     task_attachment.addImport("product_task_agent_session", task_agent_session);
     task_attachment.addImport("metawork_product_skill", product_skill);
     task_attachment.addImport("product_task_execution_binding", owned_task_execution);
@@ -2419,6 +2444,7 @@ fn wireAgentCore(
     });
     task_state.addImport("product_task_view_contract", task_view_contract);
     task_state.addImport("metawork_agent_contract", agent_contract);
+    task_state.addImport("metawork_product_instructions", product_instructions);
     task_state.addImport("metawork_product_models_contract", models_contract);
     task_state.addImport("product_task_checkpoint_record", checkpoint_record);
     task_state.addImport("product_task_attachment", task_attachment);
@@ -2464,6 +2490,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     task_runtime.addImport("product_credential_match", credential_match);
+    task_runtime.addImport("metawork_product_instructions", product_instructions);
     task_runtime.addImport("product_task_state", task_state);
     task_runtime.addImport("product_task_approval_job", task_approval_job);
     task_runtime.addImport("product_permission_review", product_permission_review);
@@ -2516,6 +2543,7 @@ fn wireAgentCore(
     task_view_fixture.addOption([]const u8, "multimodal_skill_input", @embedFile("frontend/src/bridge/__fixtures__/multimodal-skill-input.fixture"));
     task_view.addOptions("task_view_fixture", task_view_fixture);
     task_view.addImport("metawork_agent_contract", agent_contract);
+    task_view.addImport("metawork_product_instructions", product_instructions);
     task_view.addImport("metawork_product_skill", product_skill);
     task_view.addImport("product_task_state", task_state);
     task_view.addImport("product_task_policy", task_policy);
@@ -2717,6 +2745,7 @@ fn wireAgentCore(
     product_control_runtime.addImport("metawork_product_schedule", product_schedule);
     product_control_runtime.addImport("metawork_product_workspace", product_workspace);
     product_control_runtime.addImport("metawork_product_task", product_task);
+    product_control_runtime.addImport("metawork_product_instructions", product_instructions);
     product_control_runtime.addImport("metawork_product_skill", product_skill);
     product_control_runtime.addImport("metawork_product_mcp", product_mcp);
     product_control_runtime.addImport("metawork_product_control_ports", product_control_ports);
@@ -3069,6 +3098,7 @@ fn wireAgentCore(
         .product_task_policy = task_policy,
         .product_task_execution = task_execution,
         .product_task_view = task_view,
+        .product_instructions = product_instructions,
     };
 }
 

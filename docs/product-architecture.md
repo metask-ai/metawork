@@ -401,6 +401,17 @@ Update aggregate 独占正式版本比较、官方 manifest 接受规则、进�
 
 连接撤销使尚未交接的下载意图失效；检查结果可继续作为全局事实供新连接读取。shutdown 先关闭 Update admission、撤销 timer 并取消/join 独立 worker，之后才能释放依赖；迟到结果不得重新发布或打开浏览器。检查与预检不使用 Agent/Task Executor。后台完成的主线程 wake 丢失时只由同一 coordinator 的有界完成 timer 收口，不借 Renderer 轮询。
 
+### 2.9 用户指令
+
+Product 的用户指令模块（`src/product/instructions`）拥有两份用户指令文件的路径规则、读取与每轮报告；段的组合与安装归 Agent，见 [AgentCore 集成契约](agentcore-integration.md#用户指令段)。
+
+- 来源：全局文件是 canonical user home 下的 `.metawork/AGENTS.md`，没有可信 home 时全局指令不可用。项目文件是 Task 实际工作目录根部的 `AGENTS.md`，只有 kind 为 Manual 且 trust 为 explicitly trusted 的 Workspace 才有；Automatic Workspace（含定时任务）只有全局指令。不往上层目录找，不读子目录，不看 Task 的项目归属，与目录 Skill 的范围规则一致。不读取 `CLAUDE.md`。路径超过 Agent 接受的 4096 字节或不是 UTF-8 时视为没有这个来源，不截断成另一个文件名；
+- 读取规则：每轮准入时 Product Control 对两个路径各做一次 stat（跟随链接），只认普通文件，不打开 FIFO 一类会阻塞的对象；项目文件解析链接后必须仍在工作目录根内，指向目录外的链接报告 `outside_workspace`，不读取，留在目录内的链接（如 `AGENTS.md → CLAUDE.md`）照常读取。stat 结果（不存在、大小与修改时间、或失败原因）构成指纹；指纹与 attachment 上已安装的相同就不读文件、不替换。指纹不同才读取，每份最多读 32 KiB（UTF-8 字节，开头的 UTF-8 BOM 另计并去掉），超出部分在字符边界截断并标记截断；不是 UTF-8 或含 NUL 字节报告 `not_utf8`；只有空白报告 `empty`，不生成段。只看大小和修改时间意味着修改时间粒度内大小不变的改动可能漏检，这是每轮只 stat、不读全文的代价；
+- 线程与已知代价：读取在 Control 线程同步完成，与普通准入的历史提交在同一线程。每轮固定两次 stat，内容变化时最多读 2×32 KiB。这是开轮时第一次碰用户的文件夹：此前准入只读内存里的工作区事实。项目目录在网络盘、而网络盘不可达时，开轮会卡住界面，直到文件系统调用返回。这是已知代价，不是没有影响；
+- 安装：`prepareRun` 在模型意图之后、`prepareRunWithTools` 之前调用 Session 的 idle-only `setInstructions`。Session 不带任何指令段、这一轮也没有文档时不调用。安装结果记录在 live attachment 上（指纹、每份状态、是否带段），属于进程内事实；fresh 与恢复的 attachment 都从“未安装”开始，所以恢复后的下一轮按当前文件重新安装。已经开始的 Run 不受影响；
+- 失败分类：读不了的文件（`access_denied`、`not_regular_file`、`outside_workspace`、`not_utf8`、`io_error`）只跳过那一份；内核拒绝某一份记 `rejected`，另一份照常。这两类都记入已安装指纹，同一个文件不会每轮重复尝试，文件改动后重新读取。Session 无法更新（内存不足、link 不可达等）时两份都记 `update_failed`，这一轮沿用上一轮的指令，不更新已安装指纹，下一轮重试；Session 忙时按 `TaskBusy` 让排队稍后再来。以上都不阻止这一轮运行；只有 Core 拒绝基础 profile 这类依赖违约会使 Session poison，按既有失败路径处理；
+- 每轮报告：Run 记录运行期事实 `instructions`（每份的状态、是否截断、读取失败原因；项目文件不适用时为空），随 Run 投影，不持久化。重启前的历史和没有经过指令准备的 Run 报告为空，不据当前文件补写。
+
 ## 3. 并发与生命周期
 
 - 每个 Agent Session 至多一个 in-flight operation；Run、manual compact、Session mutation 与 destroy 互斥。Conversation recovery 按 §2.2 的 Task-owned active-operation 槽互斥，成功提交后才形成新的 Session attachment；

@@ -83,6 +83,8 @@ import {
   type RunInputSkillView,
   type RunActivity,
   type RunView,
+  type InstructionUse,
+  type RunInstructions,
   type RunManifest,
   type TaskSummary,
   type ViewScope,
@@ -2839,11 +2841,85 @@ function decodeSubmittedAtUnixMs(value: unknown, path: string): string | null {
     fail(path, "expected a displayable non-zero Unix millisecond timestamp");
   return submittedAtUnixMs;
 }
+const instructionUseStates = [
+  "applied",
+  "absent",
+  "empty",
+  "unreadable",
+  "rejected",
+  "update_failed",
+  "unavailable",
+] as const;
+const instructionUnreadableReasons = [
+  "access_denied",
+  "not_regular_file",
+  "outside_workspace",
+  "not_utf8",
+  "io_error",
+] as const;
+
+function decodeInstructionUse(
+  item: Record<string, unknown>,
+  path: string,
+): InstructionUse {
+  const state = enumValue(item.state, `${path}.state`, instructionUseStates);
+  const truncated = booleanValue(item.truncated, `${path}.truncated`);
+  const reason =
+    item.reason === null
+      ? null
+      : enumValue(item.reason, `${path}.reason`, instructionUnreadableReasons);
+  if ((state === "unreadable") !== (reason !== null))
+    fail(path, "an unreadable instruction file must say why, and only it");
+  // Only a file that was read can have been cut.
+  if (
+    truncated &&
+    state !== "applied" &&
+    state !== "rejected" &&
+    state !== "update_failed"
+  )
+    fail(path, "only a read instruction file can be truncated");
+  return { state, truncated, reason };
+}
+
+function decodeRunInstructions(
+  value: unknown,
+  path: string,
+): RunInstructions | null {
+  if (value === null) return null;
+  const item = object(value, path, ["global", "project"]);
+  const global = decodeInstructionUse(
+    object(item.global, `${path}.global`, ["state", "truncated", "reason"]),
+    `${path}.global`,
+  );
+  if (item.project === null) return { global, project: null };
+  const projectItem = object(item.project, `${path}.project`, [
+    "path",
+    "state",
+    "truncated",
+    "reason",
+  ]);
+  const project = decodeInstructionUse(projectItem, `${path}.project`);
+  // A working directory always has a home for its project file.
+  if (project.state === "unavailable")
+    fail(`${path}.project`, "a project instruction file cannot be unavailable");
+  return {
+    global,
+    project: {
+      ...project,
+      path:
+        projectItem.path === null
+          ? null
+          : stringValue(projectItem.path, `${path}.project.path`),
+    },
+  };
+}
+
 function decodeRun(value: unknown, path: string): RunView {
   const item = object(value, path, [
     "elapsedMs",
     "submittedAtUnixMs",
     "finishedAtUnixMs",
+    "instructions",
     "id",
     "conversationCoverage",
     "editAdmitted",
@@ -2979,6 +3055,10 @@ function decodeRun(value: unknown, path: string): RunView {
     elapsedMs,
     submittedAtUnixMs,
     finishedAtUnixMs,
+    instructions: decodeRunInstructions(
+      item.instructions,
+      `${path}.instructions`,
+    ),
     terminal,
     usage: {
       input: wireId(usage.input, `${path}.usage.input`),
