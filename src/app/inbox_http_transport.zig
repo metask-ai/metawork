@@ -115,6 +115,17 @@ pub const Adapter = struct {
         const status: u16 = @intFromEnum(response.head.status);
         // A refusal or a server error is the whole fact; its body is not read.
         if (status < 200 or status > 299) return .{ .status = status };
+        // A send is decided by its status: MetaTeam took the message, and a
+        // retry under the same key would replay this same answer. Its body
+        // only names the recipients, so an unreadable one is left empty.
+        if (send != null) {
+            if (response.head.content_encoding != .identity) return .{ .status = status };
+            const body = request.readAll(&response, output) catch |err| switch (err) {
+                error.ResponseTooLarge => return err,
+                else => return .{ .status = status },
+            };
+            return .{ .status = status, .body_len = body.len };
+        }
         if (response.head.content_encoding != .identity) return operation.fail(error.InvalidResponse);
         const body = try request.readAll(&response, output);
         return .{ .status = status, .body_len = body.len };
@@ -330,6 +341,56 @@ test "inbox HTTP sends a message once, as JSON with its request key, and never s
     var diagnostic: ?inbox.Diagnostic = null;
     try std.testing.expectError(error.InvalidResponse, adapter.transport().perform_fn(&adapter, .{ .base = "http://127.0.0.1:9", .key = key, .isolation = .of(.inbox, "server") }, .{ .send = .{ .body = "{}", .request_key = "a\r\nX-Evil: 1" } }, &buffer, &cancellation, &diagnostic));
     try std.testing.expectEqual(@as(u64, 0), engine.stats().consumers.get(.inbox).requests);
+}
+
+test "inbox HTTP takes a send's success from its status even when the body cannot be read" {
+    const Server = struct {
+        listener: *std.Io.net.Server,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.serve() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn serve(self: *@This()) !void {
+            var connection = try self.listener.accept(std.testing.io);
+            defer connection.close(std.testing.io);
+            var reads: [4096]u8 = undefined;
+            var writes: [4096]u8 = undefined;
+            var reader = connection.reader(std.testing.io, &reads);
+            var writer = connection.writer(std.testing.io, &writes);
+            var server: std.http.Server = .init(&reader.interface, &writer.interface);
+            var request = try server.receiveHead();
+            var body: [64]u8 = undefined;
+            var body_buffer: [64]u8 = undefined;
+            const length: usize = @intCast(request.head.content_length orelse 0);
+            try request.readerExpectNone(&body_buffer).readSliceAll(body[0..length]);
+            try request.respond("not gzip at all", .{ .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Encoding", .value = "gzip" }} });
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 1 });
+    defer listener.deinit(std.testing.io);
+    var server: Server = .{ .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Server.run, .{&server});
+    const base = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+    defer std.testing.allocator.free(base);
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, threaded.io());
+    defer engine.deinit();
+    var adapter: Adapter = .{ .http = &engine };
+    var cancellation: Cancellation = .{ .io = threaded.io() };
+    var buffer: [64]u8 = undefined;
+    var diagnostic: ?inbox.Diagnostic = null;
+    const result = adapter.transport().perform_fn(&adapter, .{ .base = base, .key = "k", .isolation = .of(.inbox, "server") }, .{ .send = .{ .body = "{\"to\":\"me\",\"text\":\"x\"}", .request_key = "0b6f7c2e-7d1a-4c55-9f0e-2a4b6c8d0e1f" } }, &buffer, &cancellation, &diagnostic);
+    thread.join();
+    try std.testing.expectEqual(@as(?anyerror, null), server.failure);
+    const response = try result;
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqual(@as(usize, 0), response.body_len);
 }
 
 test "inbox HTTP reports where an unreachable service stopped" {

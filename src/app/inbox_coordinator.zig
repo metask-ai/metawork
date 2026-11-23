@@ -1072,8 +1072,9 @@ pub const Coordinator = struct {
                 .task => |work| respondTaskState(work.reply, .unavailable),
                 .file => |work| respondFileState(work.reply, .unavailable),
                 .people => |work| respondPeopleState(work.reply, .unavailable),
-                // Cancelled on its way: whether it arrived is unknown.
-                .send => |work| respondSendState(work.reply, .failed),
+                // What MetaTeam answered before the cancel stands; without
+                // an answer, whether it arrived is unknown.
+                .send => |work| respondSend(self.allocator, work.reply, inbox.sendState(job.send_status), job.sent orelse &.{}, null),
                 else => {},
             };
             job.destroy();
@@ -2195,6 +2196,28 @@ test "inbox coordinator: members are listed on request, and a message to one sta
     // A username that could not be an address is refused before anything is sent.
     try testing.expect(!fixture.coordinator.sendMessage(responder, "s3", .{ .binding = binding, .request_id = 5, .to = .{ .username = "" }, .text = "Hi", .request_key = "33333333-2222-4333-8444-555555555555" }));
     for (fixture.capture.responses.items) |response| try testing.expect(std.mem.indexOf(u8, response, sentinel_key) == null);
+}
+
+test "inbox coordinator: closing answers a send once, with what MetaTeam said or failed without an answer" {
+    for ([_]struct { ?u16, []const u8 }{ .{ 200, "sent" }, .{ 400, "rejected" }, .{ null, "failed" } }) |case| {
+        var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+        fixture.init();
+        defer fixture.deinit();
+        fixture.coordinator.start(true);
+        fixture.settle();
+        const binding = fixture.view().binding.value;
+        const responder = fixture.capture.responder();
+        fixture.transport.send_status = case[0];
+        try testing.expect(fixture.coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .to = .{ .peer = "ann" }, .text = "x", .request_key = "11111111-2222-4333-8444-555555555555" }));
+        // Answered by MetaTeam, not yet delivered when the app closes.
+        fixture.coordinator.send.?.join();
+        const before = fixture.capture.responses.items.len;
+        fixture.coordinator.shutdown();
+        try testing.expect(fixture.coordinator.send == null);
+        try testing.expectEqual(before + 1, fixture.capture.responses.items.len);
+        var expected: [64]u8 = undefined;
+        try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), try std.fmt.bufPrint(&expected, "\"requestId\":\"1\",\"state\":\"{s}\"", .{case[1]})) != null);
+    }
 }
 
 test "inbox coordinator: one message at a time, and a changed connection never cancels one in flight" {
