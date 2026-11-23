@@ -18,6 +18,8 @@ pub const Limits = struct {
     pub const detail_bytes = 1024 * 1024;
     /// A send answers with the names it reached.
     pub const send_bytes = 64 * 1024;
+    /// Every member with their projects and current work.
+    pub const people_bytes = 1024 * 1024;
     pub const json_depth = 16;
     /// The conversation list is built from the most recent messages and grows
     /// backwards on request; a page is a transfer unit, never a visibility cap.
@@ -178,6 +180,8 @@ pub const Request = union(enum) {
     /// `POST /agent/v1/notify`. Never resent by this client on its own:
     /// only the user's retry sends it again, under the same request key.
     send: Send,
+    /// `GET /agent/v1/people`: the organization's current members.
+    people,
 
     pub fn maxBytes(self: Request) usize {
         return switch (self) {
@@ -185,6 +189,7 @@ pub const Request = union(enum) {
             .messages => Limits.messages_bytes,
             .task => Limits.detail_bytes,
             .send => Limits.send_bytes,
+            .people => Limits.people_bytes,
         };
     }
 };
@@ -234,6 +239,7 @@ pub fn writeUrl(writer: *std.Io.Writer, base: []const u8, request: Request) std.
     switch (request) {
         .unread => try writer.writeAll("/open/v1/unread"),
         .send => try writer.writeAll("/agent/v1/notify"),
+        .people => try writer.writeAll("/agent/v1/people"),
         .task => |id| {
             try writer.writeAll("/open/v1/tasks/");
             try writeComponent(writer, id);
@@ -306,6 +312,65 @@ pub fn parseSent(allocator: std.mem.Allocator, bytes: []const u8) error{OutOfMem
     errdefer names.deinit(allocator);
     for (items) |item| if (item == .string and item.string.len != 0) try names.append(allocator, .truncated(item.string));
     return names.toOwnedSlice(allocator);
+}
+
+pub const Member = struct {
+    username: Name,
+    name: Name,
+    online: ?bool,
+};
+
+pub const People = struct {
+    items: []Member,
+
+    pub fn deinit(self: *People, allocator: std.mem.Allocator) void {
+        allocator.free(self.items);
+        self.* = undefined;
+    }
+};
+
+/// The members a message can be addressed to. A member without a usable
+/// username cannot be: they are left out. A username listed twice is one
+/// member.
+pub fn parsePeople(allocator: std.mem.Allocator, bytes: []const u8) ParseError!People {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const data = try parseData(arena.allocator(), bytes, Limits.people_bytes);
+    if (data != .object) return error.InvalidResponse;
+    const list = data.object.get("people") orelse return error.InvalidResponse;
+    if (list != .array) return error.InvalidResponse;
+    var members: std.ArrayList(Member) = .empty;
+    errdefer members.deinit(allocator);
+    for (list.array.items) |entry| {
+        if (entry != .object) continue;
+        const username = Name.init(nonEmptyString(field(entry.object, "username")) orelse continue) catch continue;
+        const name = nonEmptyString(field(entry.object, "name")) orelse username.slice();
+        const online: ?bool = if (field(entry.object, "online")) |value| if (value == .bool) value.bool else null else null;
+        for (members.items) |*seen| {
+            if (seen.username.eql(username.slice())) break;
+        } else try members.append(allocator, .{ .username = username, .name = .truncated(name), .online = online });
+    }
+    return .{ .items = try members.toOwnedSlice(allocator) };
+}
+
+/// The conversation a message to `username` landed in, from MetaTeam's
+/// newest message with them: the member with that username, `me` for a
+/// message to oneself, or the only recipient. Null when it cannot be told.
+pub fn conversationOf(messages: []const Message, username: []const u8) ?Peer {
+    var index = messages.len;
+    while (index > 0) {
+        index -= 1;
+        const message = &messages[index];
+        for (message.conversations) |peer| if (peer.username) |name| {
+            if (std.ascii.eqlIgnoreCase(name.slice(), username)) return peer;
+        };
+        switch (message.direction) {
+            .self => return message.conversations[0],
+            .out => if (message.conversations.len == 1) return message.conversations[0],
+            .in => {},
+        }
+    }
+    return null;
 }
 
 /// A task id becomes one path segment. Every byte is percent-encoded except
@@ -1700,13 +1765,19 @@ pub const FileOpen = struct {
     state: FileOpenState,
 };
 
-/// A Renderer request to send one message in a conversation it has open.
-/// Borrowed for the call.
+/// Where a message goes: a conversation the list knows, or a member picked
+/// by username for a new one.
+pub const SendTarget = union(enum) {
+    /// A member's id or `me`.
+    peer: []const u8,
+    username: []const u8,
+};
+
+/// A Renderer request to send one message. Borrowed for the call.
 pub const SendRequest = struct {
     binding: u64,
     request_id: u64,
-    /// The conversation: a member's id or `me`.
-    peer: []const u8,
+    to: SendTarget,
     text: []const u8,
     /// The `X-Request-Id`; the Renderer sends it again only for a retry.
     request_key: []const u8,
@@ -1722,12 +1793,40 @@ pub const SendRequest = struct {
 /// - `superseded`: the Bridge connection ended before the answer.
 pub const SendState = enum { sent, stale_binding, unknown_peer, busy, superseded, unavailable, forbidden, not_found, rejected, failed };
 
+pub const ConversationRef = struct {
+    peerId: []const u8,
+    name: []const u8,
+};
+
 pub const SendResult = struct {
     binding: U64,
     requestId: U64,
     state: SendState,
     /// The names MetaTeam reports it reached.
     sent: []const []const u8,
+    /// For a message to a member picked by username: the conversation it
+    /// landed in, now in the list, when it could be told.
+    conversation: ?ConversationRef,
+};
+
+pub const MemberView = struct {
+    username: []const u8,
+    name: []const u8,
+    online: ?bool,
+};
+
+pub const PeopleState = enum { ready, stale_binding, superseded, unavailable, forbidden, not_found, failed };
+
+pub const PeopleRequest = struct {
+    binding: u64,
+    request_id: u64,
+};
+
+pub const PeopleList = struct {
+    binding: U64,
+    requestId: U64,
+    state: PeopleState,
+    people: []const MemberView,
 };
 
 /// Application receives only these lifecycle capabilities, never the Control
@@ -1975,6 +2074,31 @@ test "a message goes to a username or to me, and its answer is typed" {
     try testing.expect(runtime.peerAddress(binding, self_peer_id).? == .self);
     try testing.expect(runtime.peerAddress(binding, "nobody") == null);
     try testing.expect(runtime.peerAddress(binding + 1, "u-1") == null);
+}
+
+test "members are addressable by username, once each; a sent message's conversation is told from MetaTeam's newest message" {
+    var people = try parsePeople(testing.allocator,
+        \\{"data":{"count":4,"people":[{"name":"Ann","username":"ann","role":"dev","online":true,"projects":["a"]},
+        \\ {"username":"bob"},{"name":"Ann twice","username":"ann"},{"name":"No username"},"bad",{"name":"Cy","username":"cy","online":"yes"}]}}
+    );
+    defer people.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), people.items.len);
+    try testing.expectEqualStrings("Ann", people.items[0].name.slice());
+    try testing.expectEqual(@as(?bool, true), people.items[0].online);
+    try testing.expectEqualStrings("bob", people.items[1].name.slice());
+    try testing.expect(people.items[2].online == null);
+    try testing.expectError(error.InvalidResponse, parsePeople(testing.allocator, "{\"data\":{\"count\":0}}"));
+
+    var messages = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[
+        \\ {"id":1,"time":1,"direction":"out","from":{"id":"me"},"recipients":[{"id":"u-b","username":"Bob","name":"Bob"}],"text":"hi"},
+        \\ {"id":2,"time":2,"direction":"self","from":{"id":"u-me","username":"zj"},"text":"note"}
+        \\]}}
+    );
+    defer messages.deinit();
+    try testing.expectEqualStrings("u-b", conversationOf(messages.items[0..1], "bob").?.id.slice());
+    try testing.expectEqualStrings(self_peer_id, conversationOf(messages.items, "zj").?.id.slice());
+    try testing.expect(conversationOf(&.{}, "bob") == null);
 }
 
 test "only a credential-free web address without the key is handed to the browser" {

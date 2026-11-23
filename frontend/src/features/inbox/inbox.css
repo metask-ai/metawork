@@ -32,15 +32,47 @@
   height: 100%;
 }
 
-.inbox-list h2 {
+.inbox-list-header {
   display: flex;
   min-height: 72px;
   flex: none;
   align-items: center;
-  padding: 12px 18px;
+  gap: 8px;
+  padding: 12px 12px 12px 18px;
   border-bottom: 1px solid var(--ui-border);
+}
+
+.inbox-list h2 {
+  min-width: 0;
+  flex: 1;
   font-size: var(--text-title-lg);
   font-weight: 680;
+}
+
+.inbox-new-message {
+  width: min(32rem, calc(100vw - 2rem));
+}
+
+.inbox-new-message-form {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.inbox-people {
+  display: grid;
+  max-height: 240px;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.inbox-people .inbox-detail-link[aria-pressed="true"] {
+  border-color: var(--ui-control-focus-border);
+  background: var(--ui-action-hover-surface);
+}
+
+.inbox-new-message-actions {
+  justify-content: flex-end;
 }
 
 .inbox-list-scroll {

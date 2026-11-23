@@ -22,7 +22,7 @@ const attachment_grant = @import("attachment_grant.zig");
 const notification_text = @import("notification_text.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 26;
+const async_product_handler_count = 27;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
@@ -198,6 +198,8 @@ pub const InboxHost = struct {
     open_file_fn: *const fn (*anyopaque, native_sdk.bridge.AsyncResponder, []const u8, inbox.FileOpenRequest) bool,
     /// Sends one message; the Host answers once MetaTeam did.
     send_fn: *const fn (*anyopaque, native_sdk.bridge.AsyncResponder, []const u8, inbox.SendRequest) bool,
+    /// Lists the members a new conversation can start with.
+    list_people_fn: *const fn (*anyopaque, native_sdk.bridge.AsyncResponder, []const u8, inbox.PeopleRequest) bool,
 };
 
 pub const ModelsHost = struct {
@@ -598,6 +600,7 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[23] = .{ .name = commands.inbox_read_task, .context = self, .invoke_fn = readInboxTask };
         self.registered_async_handlers[24] = .{ .name = commands.inbox_open_file, .context = self, .invoke_fn = openInboxFile };
         self.registered_async_handlers[25] = .{ .name = commands.inbox_send, .context = self, .invoke_fn = sendInboxMessage };
+        self.registered_async_handlers[26] = .{ .name = commands.inbox_list_people, .context = self, .invoke_fn = listInboxPeople };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -1104,14 +1107,40 @@ pub const Dispatcher = struct {
         const request_id = try handlers.parseWireId(parsed.value.requestId);
         if (request_id == 0) return error.InvalidBridgePayload;
         const host = self.inbox_host orelse return error.InvalidBridgePayload;
+        const to: inbox.SendTarget = if (parsed.value.peerId) |peer| blk: {
+            if (parsed.value.username != null) return error.InvalidBridgePayload;
+            break :blk .{ .peer = peer };
+        } else .{ .username = parsed.value.username orelse return error.InvalidBridgePayload };
         const request: inbox.SendRequest = .{
             .binding = try handlers.parseWireId(parsed.value.binding),
             .request_id = request_id,
-            .peer = parsed.value.peerId,
+            .to = to,
             .text = parsed.value.text,
             .request_key = parsed.value.requestKey,
         };
         if (!host.send_fn(host.context, responder, invocation.request.id, request)) return error.InvalidBridgePayload;
+    }
+
+    fn listInboxPeople(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginInboxPeople(invocation, responder) catch {
+            responder.fail(invocation.request.id, .handler_failed, "Inbox members are unavailable") catch {};
+        };
+    }
+
+    fn beginInboxPeople(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        var parsed = try handlers.parsePayload(handlers.InboxPeopleRead, invocation.request.payload);
+        defer parsed.deinit();
+        try self.delivery.validateConnection(try handlers.parseWireId(parsed.value.generation), invocation.source.window_id);
+        const request_id = try handlers.parseWireId(parsed.value.requestId);
+        if (request_id == 0) return error.InvalidBridgePayload;
+        const host = self.inbox_host orelse return error.InvalidBridgePayload;
+        const request: inbox.PeopleRequest = .{ .binding = try handlers.parseWireId(parsed.value.binding), .request_id = request_id };
+        if (!host.list_people_fn(host.context, responder, invocation.request.id, request)) return error.InvalidBridgePayload;
     }
 
     fn openInboxFile(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
@@ -8423,7 +8452,18 @@ test "Dispatcher validates authority before domain calls and preserves committed
         fn sendInbox(context: *anyopaque, responder: native_sdk.bridge.AsyncResponder, id: []const u8, send: inbox.SendRequest) bool {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.inbox_calls += 1;
-            if (send.binding != 4 or !std.mem.eql(u8, send.peer, "ann") or !std.mem.eql(u8, send.request_key, "11111111-2222-4333-8444-555555555555")) return false;
+            const addressed = switch (send.to) {
+                .peer => |peer| std.mem.eql(u8, peer, "ann"),
+                .username => |username| std.mem.eql(u8, username, "bob"),
+            };
+            if (send.binding != 4 or !addressed or !std.mem.eql(u8, send.request_key, "11111111-2222-4333-8444-555555555555")) return false;
+            responder.success(id, "{\"answered\":true}") catch {};
+            return true;
+        }
+        fn listInboxPeople(context: *anyopaque, responder: native_sdk.bridge.AsyncResponder, id: []const u8, read: inbox.PeopleRequest) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.inbox_calls += 1;
+            if (read.binding != 4) return false;
             responder.success(id, "{\"answered\":true}") catch {};
             return true;
         }
@@ -8643,7 +8683,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         .reset_store_fn = Harness.resetModels,
     });
     dispatcher.setUpdatesHost(.{ .context = &harness, .check_fn = Harness.checkUpdates, .download_fn = Harness.downloadUpdate, .website_fn = Harness.updateWebsite, .cancel_fn = Harness.cancelUpdate });
-    dispatcher.setInboxHost(.{ .context = &harness, .refresh_fn = Harness.refreshInbox, .load_earlier_fn = Harness.loadEarlierInbox, .read_conversation_fn = Harness.readInboxConversation, .read_task_fn = Harness.readInboxTask, .open_file_fn = Harness.openInboxFile, .send_fn = Harness.sendInbox, .cancel_fn = Harness.cancelInbox });
+    dispatcher.setInboxHost(.{ .context = &harness, .refresh_fn = Harness.refreshInbox, .load_earlier_fn = Harness.loadEarlierInbox, .read_conversation_fn = Harness.readInboxConversation, .read_task_fn = Harness.readInboxTask, .open_file_fn = Harness.openInboxFile, .send_fn = Harness.sendInbox, .list_people_fn = Harness.listInboxPeople, .cancel_fn = Harness.cancelInbox });
     const native_dispatcher = dispatcher.register(
         @import("policy.zig").product(.release),
     );
@@ -8966,18 +9006,33 @@ test "Dispatcher validates authority before domain calls and preserves committed
         const long_text = try std.testing.allocator.alloc(u8, 64 * 1024);
         defer std.testing.allocator.free(long_text);
         @memset(long_text, 'x');
-        const long_payload = try std.fmt.allocPrint(std.testing.allocator, "{{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"text\":\"{s}\",\"requestKey\":\"11111111-2222-4333-8444-555555555555\"}}", .{long_text});
+        const long_payload = try std.fmt.allocPrint(std.testing.allocator, "{{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"username\":null,\"text\":\"{s}\",\"requestKey\":\"11111111-2222-4333-8444-555555555555\"}}", .{long_text});
         defer std.testing.allocator.free(long_payload);
         for ([_]struct { []const u8, bool }{
-            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"text\":\"hi\",\"requestKey\":\"11111111-2222-4333-8444-555555555555\"}", true },
+            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"username\":null,\"text\":\"hi\",\"requestKey\":\"11111111-2222-4333-8444-555555555555\"}", true },
+            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":null,\"username\":\"bob\",\"text\":\"hi\",\"requestKey\":\"11111111-2222-4333-8444-555555555555\"}", true },
             .{ long_payload, true },
-            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"text\":\"hi\",\"requestKey\":\"11111111-2222-4333-8444-555555555555\",\"to\":[\"x\"]}", false },
-            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"text\":\"hi\"}", false },
-            .{ "{\"generation\":\"999\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"text\":\"hi\",\"requestKey\":\"11111111-2222-4333-8444-555555555555\"}", false },
+            // Exactly one of a conversation and a member.
+            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"username\":\"bob\",\"text\":\"hi\",\"requestKey\":\"11111111-2222-4333-8444-555555555555\"}", false },
+            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":null,\"username\":null,\"text\":\"hi\",\"requestKey\":\"11111111-2222-4333-8444-555555555555\"}", false },
+            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"username\":null,\"text\":\"hi\",\"requestKey\":\"11111111-2222-4333-8444-555555555555\",\"to\":[\"x\"]}", false },
+            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"username\":null,\"text\":\"hi\"}", false },
+            .{ "{\"generation\":\"999\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"username\":null,\"text\":\"hi\",\"requestKey\":\"11111111-2222-4333-8444-555555555555\"}", false },
         }) |case| {
             const payload = try std.mem.replaceOwned(u8, std.testing.allocator, case[0], "GEN", generation);
             defer std.testing.allocator.free(payload);
             try send.invoke_fn(send.context, .{ .request = .{ .id = "inbox-send", .command = commands.inbox_send, .payload = payload }, .source = source }, responder);
+            try std.testing.expectEqual(case[1], std.mem.indexOf(u8, capture.response.?, "\"answered\":true") != null);
+        }
+        const people = native_dispatcher.async_registry.find(commands.inbox_list_people).?;
+        for ([_]struct { []const u8, bool }{
+            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\"}", true },
+            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"who\":\"x\"}", false },
+            .{ "{\"generation\":\"999\",\"binding\":\"4\",\"requestId\":\"9\"}", false },
+        }) |case| {
+            const payload = try std.mem.replaceOwned(u8, std.testing.allocator, case[0], "GEN", generation);
+            defer std.testing.allocator.free(payload);
+            try people.invoke_fn(people.context, .{ .request = .{ .id = "inbox-people", .command = commands.inbox_list_people, .payload = payload }, .source = source }, responder);
             try std.testing.expectEqual(case[1], std.mem.indexOf(u8, capture.response.?, "\"answered\":true") != null);
         }
     }

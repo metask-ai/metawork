@@ -211,6 +211,17 @@ export const enUS = {
   "inbox.unreachable_stale":
     "MetaTeam messages can't be read right now. Showing what was read at {time}.",
   "inbox.retry": "Retry",
+  "inbox.new_message_button": "New message",
+  "inbox.new_message_title": "New message",
+  "inbox.new_message_text": "Message",
+  "inbox.new_message_pick": "Pick a member first",
+  "inbox.people_label": "Members",
+  "inbox.people_search": "Search members",
+  "inbox.people_loading": "Reading members…",
+  "inbox.people_failed": "Members can't be read right now.",
+  "inbox.people_forbidden": "This device may not list members.",
+  "inbox.people_none": "No matching members.",
+  "inbox.people_online": "online",
   "inbox.composer_label": "Message {name}",
   "inbox.composer_placeholder":
     "Write a message. Enter sends, Shift+Enter adds a line.",

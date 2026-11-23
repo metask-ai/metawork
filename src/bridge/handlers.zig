@@ -289,16 +289,24 @@ pub const InboxTaskRead = struct {
     taskId: []const u8,
 };
 
-/// One message in a conversation the Renderer has open. The Host decides
-/// the address from the conversation; `requestKey` is the request identity
-/// MetaTeam deduplicates by, sent again only by the user's retry.
+/// One message: to a conversation the Renderer has open (`peerId`, the Host
+/// decides the address), or to a member picked by `username` for a new
+/// conversation. Exactly one is present. `requestKey` is the request
+/// identity MetaTeam deduplicates by, sent again only by the user's retry.
 pub const InboxSend = struct {
     generation: []const u8,
     binding: []const u8,
     requestId: []const u8,
-    peerId: []const u8,
+    peerId: ?[]const u8,
+    username: ?[]const u8,
     text: []const u8,
     requestKey: []const u8,
+};
+
+pub const InboxPeopleRead = struct {
+    generation: []const u8,
+    binding: []const u8,
+    requestId: []const u8,
 };
 
 pub const InboxFileOpen = struct {

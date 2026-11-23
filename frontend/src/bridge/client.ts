@@ -45,6 +45,8 @@ import type {
   InboxTaskDetail,
   InboxFileOpen,
   InboxSendResult,
+  InboxSendTarget,
+  InboxPeople,
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
@@ -62,6 +64,7 @@ import {
   decodeInboxTaskDetail,
   decodeInboxFileOpen,
   decodeInboxSendResult,
+  decodeInboxPeople,
   decodeExecutionCommandResult,
   decodeCatalogRefreshResult,
   decodeWorkspaceRemovalResult,
@@ -389,7 +392,7 @@ export class BridgeClient {
    */
   async sendInboxMessage(
     binding: string,
-    peerId: string,
+    to: InboxSendTarget,
     text: string,
     requestKey: string,
   ): Promise<InboxSendResult> {
@@ -399,7 +402,8 @@ export class BridgeClient {
         generation,
         binding,
         requestId,
-        peerId,
+        peerId: "peerId" in to ? to.peerId : null,
+        username: "username" in to ? to.username : null,
         text,
         requestKey,
       }),
@@ -408,6 +412,23 @@ export class BridgeClient {
       throw new RendererBridgeContractError(
         "invalid_response",
         "Inbox send identity mismatch",
+      );
+    return result;
+  }
+  /** The members a new conversation can start with; read on request only. */
+  async listInboxPeople(binding: string): Promise<InboxPeople> {
+    const { generation, requestId } = this.inboxRequest();
+    const result = decodeInboxPeople(
+      await this.invoke(commands.inboxListPeople, {
+        generation,
+        binding,
+        requestId,
+      }),
+    );
+    if (result.binding !== binding || result.requestId !== requestId)
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Inbox members identity mismatch",
       );
     return result;
   }

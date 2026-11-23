@@ -24,6 +24,7 @@ import {
   decodeInboxTaskDetailWire,
   decodeInboxFileOpenWire,
   decodeInboxSendResultWire,
+  decodeInboxPeopleWire,
 } from "./generated-wire.ts";
 import {
   exactKeys,
@@ -5972,8 +5973,23 @@ export function decodeInboxFileOpen(value: unknown) {
 }
 export function decodeInboxSendResult(value: unknown) {
   const result = decodeInboxSendResultWire(value, "$.result");
-  if (result.state !== "sent" && result.sent.length !== 0)
+  if (
+    result.state !== "sent" &&
+    (result.sent.length !== 0 || result.conversation !== null)
+  )
     fail("$.result", "recipients without a sent message");
+  return result;
+}
+export function decodeInboxPeople(value: unknown) {
+  const path = "$.result";
+  const result = decodeInboxPeopleWire(value, path);
+  if (result.state !== "ready" && result.people.length !== 0)
+    fail(path, "members without a ready answer");
+  uniqueKeys(
+    path,
+    result.people.map((member) => member.username),
+    "member",
+  );
   return result;
 }
 export function decodeUpdateView(value: unknown) {

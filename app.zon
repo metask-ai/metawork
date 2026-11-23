@@ -25,6 +25,7 @@
             .{ .name = "metawork.inbox.readTask", .origins = .{"zero://app"} },
             .{ .name = "metawork.inbox.openFile", .origins = .{"zero://app"} },
             .{ .name = "metawork.inbox.send", .origins = .{"zero://app"} },
+            .{ .name = "metawork.inbox.listPeople", .origins = .{"zero://app"} },
             .{ .name = "metawork.smoke.ping", .origins = .{"zero://app"} },
             .{ .name = "metawork.smoke.eventAck", .origins = .{"zero://app"} },
             .{ .name = "metawork.events.connect", .origins = .{"zero://app"} },

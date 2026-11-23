@@ -11,8 +11,11 @@ import type { BridgeClient } from "../../bridge/client.ts";
 import type {
   InboxConversation,
   InboxFileView,
+  InboxMember,
   InboxMessage,
+  InboxPeople,
   InboxProjectView,
+  InboxSendResult,
   InboxTaskDetail,
   InboxTaskView,
   InboxView,
@@ -37,6 +40,7 @@ export type InboxClient = Pick<
   | "readInboxTask"
   | "openInboxFile"
   | "sendInboxMessage"
+  | "listInboxPeople"
 >;
 
 /**
@@ -325,7 +329,7 @@ export function useInbox(
       let state = "failed";
       try {
         state = (
-          await client.sendInboxMessage(binding, peerId, text, requestKey)
+          await client.sendInboxMessage(binding, { peerId }, text, requestKey)
         ).state;
       } catch {
         state = "failed";
@@ -362,31 +366,38 @@ export function useInbox(
           : current,
       );
     },
-    select(peerId: string, name: string) {
-      setSelectedId(peerId);
-      setTask(null);
-      // Opening the same conversation again keeps what was being written.
-      setComposer((current) =>
-        current?.peerId === peerId
-          ? current
-          : {
-              peerId,
-              text: "",
-              sending: false,
-              failure: null,
-              requestKey: null,
-            },
-      );
-      followed.current = null;
-      setConversation({
-        peerId,
-        name,
-        messages: [],
-        hasEarlier: false,
-        loading: true,
-        failure: null,
-      });
-      void read(peerId, "latest", null);
+    select,
+    /** The members a new conversation can start with, read when asked. */
+    async loadPeople(): Promise<InboxPeople | null> {
+      try {
+        return await client.listInboxPeople(binding);
+      } catch {
+        return null;
+      }
+    },
+    /**
+     * Sends the first message to a member picked by username. Once sent,
+     * the Host has put the conversation in the list; it is opened here.
+     */
+    async startConversation(
+      username: string,
+      text: string,
+      requestKey: string,
+    ): Promise<InboxSendResult | null> {
+      let result: InboxSendResult | null = null;
+      try {
+        result = await client.sendInboxMessage(
+          binding,
+          { username },
+          text,
+          requestKey,
+        );
+      } catch {
+        result = null;
+      }
+      if (result?.state === "sent" && result.conversation)
+        select(result.conversation.peerId, result.conversation.name);
+      return result;
     },
     loadEarlierMessages() {
       const first = conversation?.messages[0];
@@ -439,6 +450,33 @@ export function useInbox(
       setTask(null);
     },
   };
+
+  function select(peerId: string, name: string) {
+    setSelectedId(peerId);
+    setTask(null);
+    // Opening the same conversation again keeps what was being written.
+    setComposer((current) =>
+      current?.peerId === peerId
+        ? current
+        : {
+            peerId,
+            text: "",
+            sending: false,
+            failure: null,
+            requestKey: null,
+          },
+    );
+    followed.current = null;
+    setConversation({
+      peerId,
+      name,
+      messages: [],
+      hasEarlier: false,
+      loading: true,
+      failure: null,
+    });
+    void read(peerId, "latest", null);
+  }
 
   async function openTask(taskId: string, trail: readonly string[] = []) {
     setTask({
@@ -661,6 +699,233 @@ function EarlierConversations({
   );
 }
 
+type PeoplePhase = "loading" | "ready" | "forbidden" | "failed";
+
+/** Whether a member matches what was typed: name or username, any case. */
+function memberMatches(member: InboxMember, query: string) {
+  const wanted = query.trim().toLocaleLowerCase();
+  if (wanted === "") return true;
+  return (
+    member.name.toLocaleLowerCase().includes(wanted) ||
+    member.username.toLocaleLowerCase().includes(wanted)
+  );
+}
+
+/**
+ * Starts a conversation: pick a member, write the first message, send.
+ * Members are read each time the picker opens, never polled.
+ */
+export function NewMessageDialog({
+  open,
+  controller,
+  onClose,
+  onStarted,
+}: {
+  open: boolean;
+  controller: InboxController;
+  onClose: () => void;
+  onStarted?: () => void;
+}) {
+  const { t } = useI18n();
+  const [phase, setPhase] = useState<PeoplePhase>("loading");
+  const [members, setMembers] = useState<readonly InboxMember[]>([]);
+  const [query, setQuery] = useState("");
+  const [username, setUsername] = useState<string | null>(null);
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [failure, setFailure] = useState<SendFailure | null>(null);
+  const [requestKey, setRequestKey] = useState<string | null>(null);
+  const loadPeople = controller.loadPeople;
+  const load = useCallback(async () => {
+    setPhase("loading");
+    const answer = await loadPeople();
+    if (answer?.state === "superseded") return;
+    if (answer?.state === "ready") {
+      setMembers(answer.people);
+      setPhase("ready");
+      return;
+    }
+    setPhase(answer?.state === "forbidden" ? "forbidden" : "failed");
+  }, [loadPeople]);
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+    setUsername(null);
+    setText("");
+    setFailure(null);
+    setRequestKey(null);
+    setSending(false);
+    void loadRef.current();
+  }, [open]);
+  const shown = members.filter((member) => memberMatches(member, query));
+  const picked = members.find((member) => member.username === username);
+  const ready = picked !== undefined && text.trim() !== "" && !sending;
+  const send = async () => {
+    if (!picked || sending || text.trim() === "") return;
+    const key = requestKey ?? newRequestKey();
+    setSending(true);
+    setFailure(null);
+    setRequestKey(key);
+    const result = await controller.startConversation(
+      picked.username,
+      text,
+      key,
+    );
+    setSending(false);
+    if (result?.state === "sent") {
+      onClose();
+      onStarted?.();
+      return;
+    }
+    const reason = sendFailure(result?.state ?? "failed");
+    setFailure(reason);
+    if (!sendRetryable(reason)) setRequestKey(null);
+  };
+  // A changed message or recipient is a new message.
+  const change = (next: () => void) => {
+    if (sending) return;
+    next();
+    setFailure(null);
+    setRequestKey(null);
+  };
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && !sending) onClose();
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Backdrop />
+        <Dialog.Popup className="inbox-new-message">
+          <div className="inbox-task-dialog-header">
+            <Dialog.Title>{t("inbox.new_message_title")}</Dialog.Title>
+            <Dialog.Close
+              className="icon-button"
+              aria-label={t("common.close")}
+              disabled={sending}
+            >
+              <Icon name="close" />
+            </Dialog.Close>
+          </div>
+          <form
+            className="inbox-new-message-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void send();
+            }}
+          >
+            <input
+              className="inbox-composer-input focus-ring"
+              type="search"
+              aria-label={t("inbox.people_search")}
+              placeholder={t("inbox.people_search")}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            {phase === "loading" && (
+              <p className="inbox-message-note">{t("inbox.people_loading")}</p>
+            )}
+            {(phase === "failed" || phase === "forbidden") && (
+              <div className="inbox-composer-failure" role="alert">
+                <span>
+                  {phase === "forbidden"
+                    ? t("inbox.people_forbidden")
+                    : t("inbox.people_failed")}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => void load()}
+                >
+                  {t("inbox.retry")}
+                </Button>
+              </div>
+            )}
+            {phase === "ready" && (
+              <ul className="inbox-people" aria-label={t("inbox.people_label")}>
+                {shown.length === 0 && (
+                  <li className="inbox-message-note">
+                    {t("inbox.people_none")}
+                  </li>
+                )}
+                {shown.map((member) => (
+                  <li key={member.username}>
+                    <button
+                      type="button"
+                      className="inbox-detail-link focus-ring"
+                      aria-pressed={member.username === username}
+                      onClick={() => change(() => setUsername(member.username))}
+                    >
+                      <span>{member.name}</span>
+                      <span className="inbox-detail-link-meta">
+                        {member.username}
+                        {member.online === true &&
+                          ` · ${t("inbox.people_online")}`}
+                      </span>
+                      {member.username === username && <Icon name="check" />}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <textarea
+              className="inbox-composer-input focus-ring"
+              aria-label={t("inbox.new_message_text")}
+              placeholder={
+                picked
+                  ? t("inbox.composer_label", { name: picked.name })
+                  : t("inbox.new_message_pick")
+              }
+              rows={3}
+              value={text}
+              readOnly={sending}
+              onChange={(event) => {
+                const value = event.target.value;
+                change(() => setText(value));
+              }}
+            />
+            {failure && (
+              <div className="inbox-composer-failure" role="alert">
+                <span>{sendFailureText(failure, t)}</span>
+                {sendRetryable(failure) && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={sending}
+                    onClick={() => void send()}
+                  >
+                    {t("inbox.retry")}
+                  </Button>
+                )}
+              </div>
+            )}
+            <div className="inbox-detail-actions inbox-new-message-actions">
+              <Button
+                type="button"
+                size="md"
+                variant="secondary"
+                disabled={sending}
+                onClick={onClose}
+              >
+                {t("common.cancel")}
+              </Button>
+              <Button type="submit" size="md" disabled={!ready}>
+                <Icon name="send" />
+                {sending ? t("inbox.sending") : t("inbox.send")}
+              </Button>
+            </div>
+          </form>
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 export function InboxSidebar({
   inbox,
   controller,
@@ -695,9 +960,29 @@ export function InboxSidebar({
     countAtRequest.current = count;
     controller.loadEarlierConversations();
   };
+  const [composing, setComposing] = useState(false);
   return (
     <section className="inbox-list" aria-labelledby="inbox-list-title">
-      <h2 id="inbox-list-title">{t("inbox.title")}</h2>
+      <div className="inbox-list-header">
+        <h2 id="inbox-list-title">{t("inbox.title")}</h2>
+        {usable && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => setComposing(true)}
+          >
+            <Icon name="edit" />
+            {t("inbox.new_message_button")}
+          </Button>
+        )}
+      </div>
+      <NewMessageDialog
+        open={composing}
+        controller={controller}
+        onClose={() => setComposing(false)}
+        onStarted={onSelected}
+      />
       {!empty && (
         <ul className="inbox-list-scroll">
           {inbox.conversations.map((conversation) => (

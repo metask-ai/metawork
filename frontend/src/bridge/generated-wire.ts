@@ -941,12 +941,22 @@ export type InboxSendResultWire = {
     | "rejected"
     | "failed";
   sent: readonly string[];
+  conversation: {
+    peerId: string;
+    name: string;
+  } | null;
 };
 export function decodeInboxSendResultWire(
   value: unknown,
   path: string,
 ): InboxSendResultWire {
-  const item = object(value, path, ["binding", "requestId", "state", "sent"]);
+  const item = object(value, path, [
+    "binding",
+    "requestId",
+    "state",
+    "sent",
+    "conversation",
+  ]);
   return {
     binding: u64WireInteger(item.binding, path + ".binding"),
     requestId: u64WireInteger(item.requestId, path + ".requestId"),
@@ -966,6 +976,68 @@ export function decodeInboxSendResultWire(
       item.sent,
       path + ".sent",
       (entry: unknown, entryPath: string) => stringValue(entry, entryPath),
+    ),
+    conversation:
+      item.conversation === null
+        ? null
+        : ((value: unknown, path: string) => {
+            const item = object(value, path, ["peerId", "name"]);
+            return {
+              peerId: stringValue(item.peerId, path + ".peerId"),
+              name: stringValue(item.name, path + ".name"),
+            };
+          })(item.conversation, path + ".conversation"),
+  };
+}
+export type InboxPeopleWire = {
+  binding: string;
+  requestId: string;
+  state:
+    | "ready"
+    | "stale_binding"
+    | "superseded"
+    | "unavailable"
+    | "forbidden"
+    | "not_found"
+    | "failed";
+  people: readonly {
+    username: string;
+    name: string;
+    online: boolean | null;
+  }[];
+};
+export function decodeInboxPeopleWire(
+  value: unknown,
+  path: string,
+): InboxPeopleWire {
+  const item = object(value, path, ["binding", "requestId", "state", "people"]);
+  return {
+    binding: u64WireInteger(item.binding, path + ".binding"),
+    requestId: u64WireInteger(item.requestId, path + ".requestId"),
+    state: enumValue(item.state, path + ".state", [
+      "ready",
+      "stale_binding",
+      "superseded",
+      "unavailable",
+      "forbidden",
+      "not_found",
+      "failed",
+    ] as const),
+    people: arrayValue(
+      item.people,
+      path + ".people",
+      (entry: unknown, entryPath: string) =>
+        ((value: unknown, path: string) => {
+          const item = object(value, path, ["username", "name", "online"]);
+          return {
+            username: stringValue(item.username, path + ".username"),
+            name: stringValue(item.name, path + ".name"),
+            online:
+              item.online === null
+                ? null
+                : booleanValue(item.online, path + ".online"),
+          };
+        })(entry, entryPath),
     ),
   };
 }

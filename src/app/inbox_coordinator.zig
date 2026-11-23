@@ -206,6 +206,13 @@ const SendWork = struct {
     /// The JSON body, owned by the work.
     body: []u8,
     request_key: RequestKey,
+    /// A member picked by username for a new conversation: once sent, the
+    /// conversation it landed in is read back to put it in the list.
+    resolve: ?inbox.Name = null,
+};
+
+const PeopleWork = struct {
+    reply: Reply,
 };
 
 const Work = union(enum) {
@@ -216,6 +223,7 @@ const Work = union(enum) {
     /// Reads the file's detail for a fresh download address to open.
     file: TaskWork,
     send: SendWork,
+    people: PeopleWork,
 };
 
 const Job = struct {
@@ -244,6 +252,10 @@ const Job = struct {
     detail: ?inbox.Detail = null,
     /// The names a send reached, when MetaTeam took it.
     sent: ?[]inbox.Name = null,
+    /// The answer to the send itself; `status` may belong to the read that
+    /// follows it.
+    send_status: ?u16 = null,
+    people: ?inbox.People = null,
 
     fn run(self: *Job) void {
         defer {
@@ -289,12 +301,12 @@ const Job = struct {
                 const buffer = try self.allocator.alloc(u8, inbox.Limits.send_bytes);
                 defer self.allocator.free(buffer);
                 var diagnostic: ?inbox.Diagnostic = null;
-                const response = self.transport.perform_fn(self.transport.context, .{ .base = self.base, .key = self.key, .isolation = self.isolation }, .{ .send = .{ .body = work.body, .request_key = work.request_key.slice() } }, buffer, &self.cancellation, &diagnostic) catch |err| switch (err) {
+                const response: ?http.Response = self.transport.perform_fn(self.transport.context, .{ .base = self.base, .key = self.key, .isolation = self.isolation }, .{ .send = .{ .body = work.body, .request_key = work.request_key.slice() } }, buffer, &self.cancellation, &diagnostic) catch |err| switch (err) {
                     // Only a success has its body read: it was taken.
-                    error.ResponseTooLarge => {
-                        self.status = 200;
+                    error.ResponseTooLarge => blk: {
+                        self.send_status = 200;
                         self.sent = try self.allocator.alloc(inbox.Name, 0);
-                        return;
+                        break :blk null;
                     },
                     // No answer: whether it arrived is unknown, and only the
                     // user's retry sends it again, under the same key.
@@ -303,10 +315,26 @@ const Job = struct {
                         return;
                     },
                 };
-                self.status = response.status;
-                if (inbox.sendState(response.status) == .sent) {
-                    self.sent = try inbox.parseSent(self.allocator, buffer[0..response.body_len]);
-                } else std.log.warn("inbox request consumer=inbox request=send status={d}", .{response.status});
+                if (response) |answer| {
+                    self.send_status = answer.status;
+                    if (inbox.sendState(answer.status) != .sent) {
+                        std.log.warn("inbox request consumer=inbox request=send status={d}", .{answer.status});
+                        return;
+                    }
+                    self.sent = try inbox.parseSent(self.allocator, buffer[0..answer.body_len]);
+                }
+                // A new conversation: MetaTeam's newest message with that
+                // member tells which conversation it is.
+                if (work.resolve) |*username| _ = try self.pageOf(.{ .peer = username.slice() }, 1);
+            },
+            .people => {
+                const buffer = try self.allocator.alloc(u8, inbox.Limits.people_bytes);
+                defer self.allocator.free(buffer);
+                const body = (self.fetch(.people, buffer) catch return self.unusable(.people, 0)) orelse return;
+                self.people = inbox.parsePeople(self.allocator, body) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidResponse => return self.unusable(.people, body.len),
+                };
             },
             .task, .file => |work| {
                 const buffer = try self.allocator.alloc(u8, inbox.Limits.detail_bytes);
@@ -390,6 +418,7 @@ const Job = struct {
         if (self.page) |*value| value.deinit();
         if (self.detail) |*value| value.deinit();
         if (self.sent) |names| self.allocator.free(names);
+        if (self.people) |*value| value.deinit(self.allocator);
         if (self.work == .send) self.allocator.free(self.work.send.body);
         std.crypto.secureZero(u8, self.key);
         self.allocator.free(self.key);
@@ -423,11 +452,13 @@ pub const Coordinator = struct {
     /// One message at a time. Never replaced, and never cancelled by a
     /// changed connection: a send in flight may already have arrived.
     send: ?*Job = null,
+    people: ?*Job = null,
+    people_next: ?PeopleWork = null,
 
     /// Every request slot, for what applies to all of them alike.
-    const slots = .{ "poll", "list", "conversation", "task", "file", "send" };
+    const slots = .{ "poll", "list", "conversation", "task", "file", "people", "send" };
     /// The requests whose result a changed connection makes worthless.
-    const read_slots = .{ "poll", "list", "conversation", "task", "file" };
+    const read_slots = .{ "poll", "list", "conversation", "task", "file", "people" };
 
     fn now(self: *const Coordinator) u64 {
         return self.host.now_ns_fn(self.host.context) / std.time.ns_per_ms;
@@ -528,6 +559,10 @@ pub const Coordinator = struct {
             self.file_next = null;
             respondFileState(work.reply, .stale_binding);
         }
+        if (self.people_next) |work| {
+            self.people_next = null;
+            respondPeopleState(work.reply, .stale_binding);
+        }
     }
 
     fn startJob(self: *Coordinator, work: Work) !*Job {
@@ -602,9 +637,17 @@ pub const Coordinator = struct {
         if (self.conversation_next) |work| respondConversationState(work.reply, work.peer.slice(), .superseded);
         if (self.task_next) |work| respondTaskState(work.reply, .superseded);
         if (self.file_next) |work| respondFileState(work.reply, .superseded);
+        if (self.people_next) |work| respondPeopleState(work.reply, .superseded);
         self.conversation_next = null;
         self.task_next = null;
         self.file_next = null;
+        self.people_next = null;
+        if (self.people) |job| if (!job.replied) {
+            respondPeopleState(job.work.people.reply, .superseded);
+            job.replied = true;
+            job.superseded = true;
+            job.cancellation.cancel();
+        };
         if (self.conversation) |job| if (!job.replied) {
             respondConversationState(job.work.conversation.reply, job.work.conversation.peer.slice(), .superseded);
             job.replied = true;
@@ -636,7 +679,14 @@ pub const Coordinator = struct {
     pub fn sendMessage(self: *Coordinator, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: inbox.SendRequest) bool {
         self.assertMain();
         const target = reply(responder, bridge_id, request.binding, request.request_id) orelse return false;
-        _ = inbox.Id.init(request.peer) catch return false;
+        // A picked member is addressed by their exact username.
+        const picked: ?inbox.Name = switch (request.to) {
+            .peer => |peer| blk: {
+                _ = inbox.Id.init(peer) catch return false;
+                break :blk null;
+            },
+            .username => |username| inbox.Name.init(username) catch return false,
+        };
         if (!inbox.sendableText(request.text)) return false;
         const request_key = RequestKey.init(request.request_key) orelse return false;
         if (self.stopped or self.bound == null) {
@@ -647,7 +697,7 @@ pub const Coordinator = struct {
             respondSendState(target, .stale_binding);
             return true;
         }
-        const address = self.management.peer_address_fn(self.management.context, request.binding, request.peer) orelse {
+        const address: inbox.Address = if (picked) |username| .{ .member = username } else self.management.peer_address_fn(self.management.context, request.binding, request.to.peer) orelse {
             respondSendState(target, .unknown_peer);
             return true;
         };
@@ -666,7 +716,7 @@ pub const Coordinator = struct {
             respondSendState(target, .failed);
             return true;
         };
-        self.send = self.startJob(.{ .send = .{ .reply = target, .body = owned, .request_key = request_key } }) catch {
+        self.send = self.startJob(.{ .send = .{ .reply = target, .body = owned, .request_key = request_key, .resolve = picked } }) catch {
             self.allocator.free(owned);
             respondSendState(target, .failed);
             return true;
@@ -858,6 +908,23 @@ pub const Coordinator = struct {
             }
             job.destroy();
         };
+        if (self.people) |job| if (job.finished.load(.acquire)) {
+            job.join();
+            self.people = null;
+            const work = job.work.people;
+            if (job.replied) {
+                // Already answered; nothing is sent twice.
+            } else if (job.superseded) {
+                respondPeopleState(work.reply, .superseded);
+            } else if (!self.management.accepts_fn(self.management.context, work.reply.binding)) {
+                respondPeopleState(work.reply, .stale_binding);
+            } else if (job.people) |*people| {
+                respondPeople(self.allocator, work.reply, people.items);
+            } else {
+                respondPeopleState(work.reply, requestState(inbox.PeopleState, job.status));
+            }
+            job.destroy();
+        };
     }
 
     /// What MetaTeam answered is a fact about the message, so it is
@@ -867,8 +934,49 @@ pub const Coordinator = struct {
         if (!job.finished.load(.acquire)) return;
         job.join();
         self.send = null;
-        if (!job.replied) respondSend(self.allocator, job.work.send.reply, inbox.sendState(job.status), job.sent orelse &.{});
-        job.destroy();
+        defer job.destroy();
+        const work = &job.work.send;
+        const state = inbox.sendState(job.send_status);
+        // A new conversation joins the list and becomes the one being read;
+        // when it cannot be told, the list asks for its newer end instead.
+        var landed: ?inbox.Peer = null;
+        if (state == .sent) if (work.resolve) |*username| if (self.management.accepts_fn(self.management.context, work.reply.binding)) {
+            if (job.page) |page| if (inbox.conversationOf(page.items, username.slice())) |peer| {
+                landed = peer;
+                self.management.complete_conversation_fn(self.management.context, work.reply.binding, peer.id.slice(), .latest, page.items);
+            };
+            if (landed == null) _ = self.management.request_refresh_fn(self.management.context, self.now(), work.reply.binding, false);
+        };
+        if (job.replied) return;
+        const conversation: ?inbox.ConversationRef = if (landed) |*peer| .{ .peerId = peer.id.slice(), .name = peer.name.slice() } else null;
+        respondSend(self.allocator, work.reply, state, job.sent orelse &.{}, conversation);
+    }
+
+    /// The members a new conversation can start with, read when the picker
+    /// opens; a newer request replaces one still waiting or running.
+    pub fn listPeople(self: *Coordinator, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: inbox.PeopleRequest) bool {
+        self.assertMain();
+        const target = reply(responder, bridge_id, request.binding, request.request_id) orelse return false;
+        const state: ?inbox.PeopleState = if (self.stopped or self.bound == null)
+            .unavailable
+        else if (!self.management.accepts_fn(self.management.context, request.binding))
+            .stale_binding
+        else
+            null;
+        if (state) |value| {
+            respondPeopleState(target, value);
+            return true;
+        }
+        if (self.people_next) |previous| respondPeopleState(previous.reply, .superseded);
+        self.people_next = .{ .reply = target };
+        if (self.people) |job| if (!job.replied) {
+            respondPeopleState(job.work.people.reply, .superseded);
+            job.replied = true;
+            job.superseded = true;
+            job.cancellation.cancel();
+        };
+        self.reconcile();
+        return true;
     }
 
     fn openDownload(self: *Coordinator, detail: *const inbox.Detail, key: []const u8) inbox.FileOpenState {
@@ -916,6 +1024,13 @@ pub const Coordinator = struct {
                     break :blk null;
                 };
             };
+            if (self.people == null) if (self.people_next) |work| {
+                self.people_next = null;
+                self.people = self.startJob(.{ .people = work }) catch blk: {
+                    respondPeopleState(work.reply, .failed);
+                    break :blk null;
+                };
+            };
         }
         self.reconcileTimer();
     }
@@ -956,6 +1071,7 @@ pub const Coordinator = struct {
                 .conversation => |work| respondConversationState(work.reply, work.peer.slice(), .unavailable),
                 .task => |work| respondTaskState(work.reply, .unavailable),
                 .file => |work| respondFileState(work.reply, .unavailable),
+                .people => |work| respondPeopleState(work.reply, .unavailable),
                 // Cancelled on its way: whether it arrived is unknown.
                 .send => |work| respondSendState(work.reply, .failed),
                 else => {},
@@ -966,9 +1082,11 @@ pub const Coordinator = struct {
         if (self.conversation_next) |work| respondConversationState(work.reply, work.peer.slice(), .unavailable);
         if (self.task_next) |work| respondTaskState(work.reply, .unavailable);
         if (self.file_next) |work| respondFileState(work.reply, .unavailable);
+        if (self.people_next) |work| respondPeopleState(work.reply, .unavailable);
         self.conversation_next = null;
         self.task_next = null;
         self.file_next = null;
+        self.people_next = null;
         if (self.bound) |*current| {
             self.retire_fn(self.retire_context, current.isolation);
             current.release(self.allocator);
@@ -1255,10 +1373,50 @@ fn respondTaskState(target: Reply, state: inbox.TaskState) void {
 fn respondSendState(target: Reply, state: inbox.SendState) void {
     var buffer: [1024]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&buffer);
-    respondSend(fixed.allocator(), target, state, &.{});
+    respondSend(fixed.allocator(), target, state, &.{}, null);
 }
 
-fn respondSend(allocator: std.mem.Allocator, target: Reply, state: inbox.SendState, names: []const inbox.Name) void {
+fn respondPeopleState(target: Reply, state: inbox.PeopleState) void {
+    var buffer: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    std.json.Stringify.value(inbox.PeopleList{
+        .binding = .{ .value = target.binding },
+        .requestId = .{ .value = target.request_id },
+        .state = state,
+        .people = &.{},
+    }, .{}, &writer) catch {
+        target.responder.fail(target.bridge_id.slice(), .internal_error, "Inbox response encoding failed") catch {};
+        return;
+    };
+    target.responder.success(target.bridge_id.slice(), writer.buffered()) catch {};
+}
+
+/// Every member when they fit one Bridge result; an organization too large
+/// for one keeps its first members.
+fn respondPeople(allocator: std.mem.Allocator, target: Reply, members: []const inbox.Member) void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const views = arena.allocator().alloc(inbox.MemberView, members.len) catch return respondPeopleState(target, .failed);
+    for (members, views) |*member, *view| view.* = .{ .username = member.username.slice(), .name = member.name.slice(), .online = member.online };
+    const output = arena.allocator().alloc(u8, native_sdk.bridge.max_result_bytes - 256) catch return respondPeopleState(target, .failed);
+    var count = views.len;
+    while (true) {
+        var writer = std.Io.Writer.fixed(output);
+        if (std.json.Stringify.value(inbox.PeopleList{
+            .binding = .{ .value = target.binding },
+            .requestId = .{ .value = target.request_id },
+            .state = .ready,
+            .people = views[0..count],
+        }, .{}, &writer)) |_| {
+            target.responder.success(target.bridge_id.slice(), writer.buffered()) catch {};
+            return;
+        } else |_| {}
+        if (count == 0) return respondPeopleState(target, .failed);
+        count /= 2;
+    }
+}
+
+fn respondSend(allocator: std.mem.Allocator, target: Reply, state: inbox.SendState, names: []const inbox.Name, conversation: ?inbox.ConversationRef) void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const sent = arena.allocator().alloc([]const u8, names.len) catch return target.responder.fail(target.bridge_id.slice(), .internal_error, "Inbox response encoding failed") catch {};
@@ -1269,6 +1427,7 @@ fn respondSend(allocator: std.mem.Allocator, target: Reply, state: inbox.SendSta
         .requestId = .{ .value = target.request_id },
         .state = state,
         .sent = sent,
+        .conversation = conversation,
     }, .{}, &writer.writer) catch {
         target.responder.fail(target.bridge_id.slice(), .internal_error, "Inbox response encoding failed") catch {};
         return;
@@ -1461,6 +1620,7 @@ const TestTransport = struct {
     unread: []const u8 = "{\"data\":{\"unread\":2,\"byPeer\":[{\"peer\":{\"id\":\"ann\",\"username\":\"ann_u\",\"name\":\"Ann\"},\"unread\":2}]}}",
     messages: []const u8 = "{\"data\":{\"messages\":[{\"id\":7,\"time\":1795428968292,\"direction\":\"in\",\"from\":{\"id\":\"ann\",\"name\":\"Ann\"},\"text\":\"hello\",\"taskIds\":[13066]}]}}",
     task: []const u8 = "{\"data\":{\"id\":13066,\"name\":\"Inbox\",\"progress\":\"doing\"}}",
+    people: []const u8 = "{\"data\":{\"count\":4,\"people\":[{\"name\":\"Ann\",\"username\":\"ann_u\",\"online\":true,\"projects\":[\"metawork\"]},{\"name\":\"Bob\",\"username\":\"bob\",\"online\":false},{\"name\":\"Ann again\",\"username\":\"ann_u\"},{\"name\":\"No username\"}]}}",
 
     fn transport(self: *TestTransport) http.Transport {
         return .{ .context = self, .perform_fn = perform };
@@ -1497,6 +1657,7 @@ const TestTransport = struct {
             .unread => self.unread,
             .messages => self.messages,
             .task => self.task,
+            .people => self.people,
             .send => unreachable,
         };
         @memcpy(output[0..body.len], body);
@@ -1932,15 +2093,15 @@ test "inbox coordinator: a reply goes to the member's username once per user act
     const binding = fixture.view().binding.value;
     const responder = fixture.capture.responder();
     const key_a = "11111111-2222-4333-8444-555555555555";
-    try testing.expect(fixture.coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .peer = "ann", .text = "On it \"now\"", .request_key = key_a }));
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .to = .{ .peer = "ann" }, .text = "On it \"now\"", .request_key = key_a }));
     fixture.settle();
-    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"requestId\":\"1\",\"state\":\"sent\",\"sent\":[\"Ann\"]}") != null);
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"requestId\":\"1\",\"state\":\"sent\",\"sent\":[\"Ann\"],\"conversation\":null}") != null);
     try testing.expectEqualStrings("{\"to\":[\"ann_u\"],\"text\":\"On it \\\"now\\\"\"}", fixture.transport.send_body[0..fixture.transport.send_body_len]);
     try testing.expectEqualStrings(key_a, fixture.transport.send_key[0..fixture.transport.send_key_len]);
     try testing.expectEqualStrings("http://192.0.2.10:8080/team/agent/v1/notify", fixture.transport.url(fixture.transport.count - 1));
 
     // The user's own conversation goes to `me`.
-    try testing.expect(fixture.coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 2, .peer = inbox.self_peer_id, .text = "note", .request_key = "22222222-2222-4333-8444-555555555555" }));
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 2, .to = .{ .peer = inbox.self_peer_id }, .text = "note", .request_key = "22222222-2222-4333-8444-555555555555" }));
     fixture.settle();
     try testing.expectEqualStrings("{\"to\":\"me\",\"text\":\"note\"}", fixture.transport.send_body[0..fixture.transport.send_body_len]);
 
@@ -1948,12 +2109,12 @@ test "inbox coordinator: a reply goes to the member's username once per user act
     fixture.transport.send_status = null;
     const sends = fixture.transport.sends;
     const key_b = "33333333-2222-4333-8444-555555555555";
-    try testing.expect(fixture.coordinator.sendMessage(responder, "s3", .{ .binding = binding, .request_id = 3, .peer = "ann", .text = "again", .request_key = key_b }));
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s3", .{ .binding = binding, .request_id = 3, .to = .{ .peer = "ann" }, .text = "again", .request_key = key_b }));
     fixture.settle();
     try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"failed\"") != null);
     try testing.expectEqual(sends + 1, fixture.transport.sends);
     fixture.transport.send_status = 200;
-    try testing.expect(fixture.coordinator.sendMessage(responder, "s4", .{ .binding = binding, .request_id = 4, .peer = "ann", .text = "again", .request_key = key_b }));
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s4", .{ .binding = binding, .request_id = 4, .to = .{ .peer = "ann" }, .text = "again", .request_key = key_b }));
     fixture.settle();
     try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"sent\"") != null);
     try testing.expectEqual(sends + 2, fixture.transport.sends);
@@ -1962,7 +2123,7 @@ test "inbox coordinator: a reply goes to the member's username once per user act
     // A refusal is that message's outcome only.
     for ([_]struct { u16, []const u8 }{ .{ 400, "rejected" }, .{ 403, "forbidden" }, .{ 401, "forbidden" }, .{ 404, "not_found" }, .{ 503, "failed" } }) |case| {
         fixture.transport.send_status = case[0];
-        try testing.expect(fixture.coordinator.sendMessage(responder, "s5", .{ .binding = binding, .request_id = 5, .peer = "ann", .text = "x", .request_key = "44444444-2222-4333-8444-555555555555" }));
+        try testing.expect(fixture.coordinator.sendMessage(responder, "s5", .{ .binding = binding, .request_id = 5, .to = .{ .peer = "ann" }, .text = "x", .request_key = "44444444-2222-4333-8444-555555555555" }));
         fixture.settle();
         var expected: [64]u8 = undefined;
         try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), try std.fmt.bufPrint(&expected, "\"state\":\"{s}\"", .{case[1]})) != null);
@@ -1973,18 +2134,67 @@ test "inbox coordinator: a reply goes to the member's username once per user act
 
     // Nothing is sent without an address, text or a usable request key.
     const before = fixture.transport.sends;
-    try testing.expect(fixture.coordinator.sendMessage(responder, "s6", .{ .binding = binding, .request_id = 6, .peer = "nobody", .text = "x", .request_key = key_a }));
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s6", .{ .binding = binding, .request_id = 6, .to = .{ .peer = "nobody" }, .text = "x", .request_key = key_a }));
     try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"unknown_peer\"") != null);
-    try testing.expect(fixture.coordinator.sendMessage(responder, "s7", .{ .binding = binding + 1, .request_id = 7, .peer = "ann", .text = "x", .request_key = key_a }));
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s7", .{ .binding = binding + 1, .request_id = 7, .to = .{ .peer = "ann" }, .text = "x", .request_key = key_a }));
     try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"stale_binding\"") != null);
-    try testing.expect(!fixture.coordinator.sendMessage(responder, "s8", .{ .binding = binding, .request_id = 8, .peer = "ann", .text = " \n ", .request_key = key_a }));
-    try testing.expect(!fixture.coordinator.sendMessage(responder, "s9", .{ .binding = binding, .request_id = 9, .peer = "ann", .text = "x", .request_key = "bad\r\nkey-value" }));
+    try testing.expect(!fixture.coordinator.sendMessage(responder, "s8", .{ .binding = binding, .request_id = 8, .to = .{ .peer = "ann" }, .text = " \n ", .request_key = key_a }));
+    try testing.expect(!fixture.coordinator.sendMessage(responder, "s9", .{ .binding = binding, .request_id = 9, .to = .{ .peer = "ann" }, .text = "x", .request_key = "bad\r\nkey-value" }));
     fixture.settle();
     try testing.expectEqual(before, fixture.transport.sends);
     for (fixture.capture.responses.items) |response| {
         try testing.expect(std.mem.indexOf(u8, response, sentinel_key) == null);
         try testing.expect(std.mem.indexOf(u8, response, "192.0.2.10") == null);
     }
+}
+
+test "inbox coordinator: members are listed on request, and a message to one starts a conversation in the list" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    const responder = fixture.capture.responder();
+    try testing.expect(fixture.coordinator.listPeople(responder, "p1", .{ .binding = binding, .request_id = 1 }));
+    fixture.settle();
+    const people = fixture.capture.last();
+    try testing.expect(std.mem.indexOf(u8, people, "\"people\":[{\"username\":\"ann_u\",\"name\":\"Ann\",\"online\":true},{\"username\":\"bob\",\"name\":\"Bob\",\"online\":false}]") != null);
+    try testing.expectEqualStrings("http://192.0.2.10:8080/team/agent/v1/people", fixture.transport.url(fixture.transport.count - 1));
+    try testing.expect(fixture.coordinator.listPeople(responder, "p2", .{ .binding = binding + 1, .request_id = 2 }));
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"stale_binding\"") != null);
+
+    // Bob has no conversation yet. Once sent, MetaTeam's newest message with
+    // him says which conversation it is, and the list has it.
+    fixture.transport.messages = "{\"data\":{\"messages\":[{\"id\":40,\"time\":1795428968292,\"direction\":\"out\",\"from\":{\"id\":\"u-me\",\"username\":\"me_u\",\"name\":\"Me\"},\"recipients\":[{\"id\":\"bob-id\",\"username\":\"Bob\",\"name\":\"Bob\",\"readAt\":null}],\"text\":\"Hello Bob\",\"taskIds\":[]}]}}";
+    try testing.expect(!fixture.management.runtime.knowsPeer(binding, "bob-id"));
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 3, .to = .{ .username = "bob" }, .text = "Hello Bob", .request_key = "11111111-2222-4333-8444-555555555555" }));
+    fixture.settle();
+    try testing.expectEqualStrings("{\"to\":[\"bob\"],\"text\":\"Hello Bob\"}", fixture.transport.send_body[0..fixture.transport.send_body_len]);
+    try testing.expectEqualStrings("http://192.0.2.10:8080/team/open/v1/messages?peer=bob&limit=1", fixture.transport.url(fixture.transport.count - 1));
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"sent\",\"sent\":[\"Ann\"],\"conversation\":{\"peerId\":\"bob-id\",\"name\":\"Bob\"}") != null);
+    try testing.expect(fixture.management.runtime.knowsPeer(binding, "bob-id"));
+    try testing.expectEqualStrings("Bob", fixture.management.runtime.peerAddress(binding, "bob-id").?.member.slice());
+    var listed = false;
+    for (fixture.view().conversations) |row| {
+        if (std.mem.eql(u8, row.peerId, "bob-id")) listed = std.mem.eql(u8, row.latest.?.preview, "Hello Bob");
+    }
+    try testing.expect(listed);
+
+    // When the conversation cannot be told, the list asks for its newer end.
+    fixture.transport.messages = "{\"data\":{\"messages\":[]}}";
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 4, .to = .{ .username = "cy" }, .text = "Hi", .request_key = "22222222-2222-4333-8444-555555555555" }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"sent\",\"sent\":[\"Ann\"],\"conversation\":null") != null);
+    var refreshed = false;
+    for (0..fixture.transport.count) |index| {
+        if (std.mem.endsWith(u8, fixture.transport.url(index), "messages?afterId=40&limit=200") or
+            std.mem.endsWith(u8, fixture.transport.url(index), "messages?limit=200")) refreshed = true;
+    }
+    try testing.expect(refreshed);
+    // A username that could not be an address is refused before anything is sent.
+    try testing.expect(!fixture.coordinator.sendMessage(responder, "s3", .{ .binding = binding, .request_id = 5, .to = .{ .username = "" }, .text = "Hi", .request_key = "33333333-2222-4333-8444-555555555555" }));
+    for (fixture.capture.responses.items) |response| try testing.expect(std.mem.indexOf(u8, response, sentinel_key) == null);
 }
 
 test "inbox coordinator: one message at a time, and a changed connection never cancels one in flight" {
@@ -1996,9 +2206,9 @@ test "inbox coordinator: one message at a time, and a changed connection never c
     const binding = fixture.view().binding.value;
     const responder = fixture.capture.responder();
     fixture.transport.block.store(true, .release);
-    try testing.expect(fixture.coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .peer = "ann", .text = "first", .request_key = "11111111-2222-4333-8444-555555555555" }));
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .to = .{ .peer = "ann" }, .text = "first", .request_key = "11111111-2222-4333-8444-555555555555" }));
     const job = fixture.coordinator.send.?;
-    try testing.expect(fixture.coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 2, .peer = "ann", .text = "second", .request_key = "22222222-2222-4333-8444-555555555555" }));
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 2, .to = .{ .peer = "ann" }, .text = "second", .request_key = "22222222-2222-4333-8444-555555555555" }));
     try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"busy\"") != null);
     // The connection is replaced while the message is on its way.
     fixture.source.fingerprint = @splat('b');
@@ -2015,7 +2225,7 @@ test "inbox coordinator: one message at a time, and a changed connection never c
     const now = fixture.view().binding.value;
     fixture.settle();
     fixture.transport.block.store(true, .release);
-    try testing.expect(fixture.coordinator.sendMessage(responder, "s3", .{ .binding = now, .request_id = 3, .peer = "ann", .text = "third", .request_key = "33333333-2222-4333-8444-555555555555" }));
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s3", .{ .binding = now, .request_id = 3, .to = .{ .peer = "ann" }, .text = "third", .request_key = "33333333-2222-4333-8444-555555555555" }));
     fixture.coordinator.cancelReads();
     try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"requestId\":\"3\",\"state\":\"superseded\"") != null);
     const answers = fixture.capture.responses.items.len;

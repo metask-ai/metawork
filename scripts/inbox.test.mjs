@@ -159,12 +159,20 @@ function fakeClient({
   fileState = "opened",
   sendStates = [],
   sendGate = null,
+  people = [],
+  conversation = null,
 } = {}) {
   const calls = [];
   return {
     calls,
-    async sendInboxMessage(binding, peerId, text, requestKey) {
-      calls.push(["send", binding, peerId, text, requestKey]);
+    async sendInboxMessage(binding, to, text, requestKey) {
+      calls.push([
+        "send",
+        binding,
+        to.peerId ?? `@${to.username}`,
+        text,
+        requestKey,
+      ]);
       if (sendGate) await sendGate;
       const state = sendStates.shift() ?? "sent";
       return {
@@ -172,6 +180,16 @@ function fakeClient({
         requestId: String(calls.length),
         state,
         sent: state === "sent" ? ["Ann"] : [],
+        conversation: state === "sent" ? conversation : null,
+      };
+    },
+    async listInboxPeople(binding) {
+      calls.push(["people", binding]);
+      return {
+        binding,
+        requestId: String(calls.length),
+        state: "ready",
+        people,
       };
     },
     async openInboxFile(binding, fileId) {
@@ -746,6 +764,61 @@ test("a refused reply is not retried as is; a changed message gets a new request
   assert.equal(sends.length, 2);
   assert.equal(sends[1][3], "Hi!");
   assert.notEqual(sends[1][4], sends[0][4]);
+});
+
+test("a new message picks a member read on opening, and the conversation it starts opens", async () => {
+  const user = userEvent.setup({ document });
+  const client = fakeClient({
+    sendStates: ["failed", "sent"],
+    people: [
+      { username: "ann", name: "Ann", online: true },
+      { username: "bob", name: "Bob Li", online: false },
+      { username: "cy", name: "Cy", online: null },
+    ],
+    conversation: { peerId: "bob-id", name: "Bob Li" },
+    pages: {
+      "bob-id:latest:null": { messages: [message("40", "out", "Hello Bob")] },
+    },
+  });
+  render(element(client, view()));
+  assert.equal(client.calls.filter(([kind]) => kind === "people").length, 0);
+  await user.click(screen.getByRole("button", { name: "New message" }));
+  await waitFor(() => assert.ok(screen.getByRole("button", { name: /Ann/ })));
+  assert.equal(client.calls.filter(([kind]) => kind === "people").length, 1);
+
+  await user.type(
+    screen.getByRole("searchbox", { name: "Search members" }),
+    "LI",
+  );
+  assert.equal(screen.queryByRole("button", { name: /Ann/ }), null);
+  const send = screen.getByRole("button", { name: "Send" });
+  assert.equal(send.disabled, true);
+  await user.click(screen.getByRole("button", { name: /Bob Li/ }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Message" }),
+    "Hello Bob",
+  );
+  await user.click(send);
+  await waitFor(() =>
+    assert.ok(screen.getByText(/Retrying won't send it twice/)),
+  );
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() =>
+    assert.ok(screen.getByRole("heading", { name: "Bob Li" })),
+  );
+  const sends = client.calls.filter(([kind]) => kind === "send");
+  assert.equal(sends.length, 2);
+  assert.deepEqual(sends[0].slice(0, 4), ["send", "1", "@bob", "Hello Bob"]);
+  assert.equal(sends[1][4], sends[0][4]);
+  // The dialog closed and the new conversation is open and read.
+  assert.equal(screen.queryByRole("dialog"), null);
+  await waitFor(() => assert.ok(screen.getByText("Hello Bob")));
+  assert.deepEqual(
+    client.calls.find(([kind]) => kind === "read"),
+    ["read", "1", "bob-id", "latest", null],
+  );
+  // The members are not asked for again until the picker opens again.
+  assert.equal(client.calls.filter(([kind]) => kind === "people").length, 1);
 });
 
 test("a refused task or a missing conversation is shown where it was asked for", async () => {
