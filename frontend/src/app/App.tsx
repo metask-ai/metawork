@@ -97,10 +97,9 @@ import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
 import { SkillsPage } from "../features/skills/SkillsPage.tsx";
 import { McpPage } from "../features/mcp/McpPage.tsx";
 import {
-  InboxConversationList,
-  InboxConversationView,
+  InboxSidebar,
+  InboxUnavailable,
   MessageNavigationItem,
-  useMessageInbox,
 } from "../features/inbox/MessageInbox.tsx";
 import { McpInstallationCard } from "../features/mcp/McpInstallationCard.tsx";
 import { WorkspaceDirectoryFact } from "../features/workspaces/WorkspaceDirectoryFact.tsx";
@@ -375,7 +374,6 @@ export default function App() {
   >({});
   const [route, setRoute] = useState<ShellRoute>("workbench");
   const inboxOpen = route === "inbox";
-  const inbox = useMessageInbox();
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -5434,8 +5432,10 @@ export default function App() {
             </Tooltip.Root>
             <MessageNavigationItem
               active={inboxOpen}
-              unread={inbox.unread}
-              onOpen={() => openWorkbenchPage("inbox")}
+              onOpen={() => {
+                openWorkbenchPage("inbox");
+                dismissDrawer();
+              }}
             />
           </nav>
           <AccountIdentity
@@ -5472,14 +5472,7 @@ export default function App() {
       leftPanelKind={inboxOpen ? "conversations" : "tasks"}
       left={(dismissDrawer) =>
         inboxOpen ? (
-          <InboxConversationList
-            entries={inbox.entries}
-            selectedId={inbox.selected?.id}
-            onSelect={(id) => {
-              inbox.openConversation(id);
-              dismissDrawer();
-            }}
-          />
+          <InboxSidebar />
         ) : (
           <div className="sidebar-primary">
             <button
@@ -6009,12 +6002,7 @@ export default function App() {
       }
     >
       {inboxOpen ? (
-        <InboxConversationView
-          conversation={inbox.selected}
-          draft={inbox.draft}
-          onDraftChange={inbox.updateDraft}
-          onSend={inbox.sendReply}
-        />
+        <InboxUnavailable />
       ) : route === "skills" ? (
         snapshot.skillManagement ? (
           <SkillsPage
