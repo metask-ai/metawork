@@ -5988,6 +5988,7 @@ fn expectMetaWorkProfile(profile: fixture.FakePromptProfile) !void {
         try std.testing.expectEqual(@as(i64, 1100), profile.orders[2]);
         try std.testing.expect(std.mem.indexOf(u8, text, "curl.exe") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "-UseBasicParsing") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "--data-binary @<file>") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "WebFetch") == null);
     }
     // The global instructions guidance: an ADD after the download constraints,

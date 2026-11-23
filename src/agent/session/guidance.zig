@@ -28,7 +28,10 @@ const windows_downloads_text =
     "Avoid `Invoke-WebRequest` and `Invoke-RestMethod`: their default parsing path can be intercepted " ++
     "by local security software, which blocks the command behind a modal prompt. " ++
     "If one of them is unavoidable, pass `-UseBasicParsing`. " ++
-    "Fetch several files in one command rather than one command per file.";
+    "Fetch several files in one command rather than one command per file. " ++
+    "Windows PowerShell strips double quotes from arguments passed to native programs such as `curl.exe`: " ++
+    "to send a JSON request body, write it to a file and pass it with `--data-binary @<file>`, or through stdin, " ++
+    "rather than putting the JSON directly in a `-d` argument.";
 
 pub const outputs_id = "host:outputs";
 
@@ -129,6 +132,9 @@ test "only Windows carries the download constraints, and they stay well-formed A
     try std.testing.expect(std.mem.indexOf(u8, text, "curl.exe") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "-UseBasicParsing") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "one command") != null);
+    // PowerShell 5.1 strips the quotes of an inline JSON body passed to curl.exe.
+    try std.testing.expect(std.mem.indexOf(u8, text, "strips double quotes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "--data-binary @<file>") != null);
     // WebFetch cannot write bytes to a path, so it is never offered here.
     try std.testing.expect(std.mem.indexOf(u8, text, "WebFetch") == null);
 
