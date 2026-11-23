@@ -13010,3 +13010,74 @@ test "a working directory that is not explicitly trusted, and a scheduled Task, 
     try std.testing.expect(scheduled.project == null);
     try std.testing.expectEqual(task_state.product_instructions.State.applied, scheduled.global.state);
 }
+
+test "a lost Session fails only that turn, a busy one defers it, and later turns carry the instructions" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var files = try InstructionFiles.init();
+    defer files.deinit();
+    try files.write(InstructionFiles.global_path, "Global rule.");
+    // Rebuilding a Session goes through Conversation recovery.
+    var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, files.home);
+    defer checkpoints.deinit();
+    const history = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+    defer std.testing.allocator.free(history);
+    var persistence = TaskPersistenceProbe{ .storage = history };
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = files.home;
+    configuration.task_persistence = persistence.capability();
+    configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_tasks = 1,
+        .max_workspaces = 1,
+        .max_runs_per_task = 4,
+    }, configuration);
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    const task_id = try workbench.createTask(.{ .workspace_root = files.workspace, .trust = .explicitly_trusted }, try product_control.TestSupport.fixtureModelSelection(&workbench));
+    const task = workbench.testTask(task_id).?;
+
+    // Core loses the Session while installing: that turn cannot start on it.
+    fake_core.lock();
+    fake_core.forced_prompt_status = wire.STATUS_INVALID_STATE;
+    fake_core.unlock();
+    try std.testing.expectError(error.SessionPoisoned, runPreparedTask(&workbench, task_id, .{ .text = "lost" }));
+    try std.testing.expectEqual(.session_poisoned, task.runtime.attached().?.health);
+    // The ordinary close takes the poisoned Session away ...
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        workbench.syncLifecycle();
+        if (task.runtime.attachment == .detached and task.runtime.close_thread == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.PoisonedSessionNotClosed;
+    // ... and the next message rebuilds one, which installs the files again.
+    _ = try workbench.restoreTaskConversation(task_id, task.durable.binding_epoch);
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        workbench.syncLifecycle();
+        if (task.runtime.attached() != null and task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.SessionNotRebuilt;
+    const recovered = try runInstructionTurn(&workbench, task_id, "recovered");
+    try std.testing.expectEqual(task_state.product_instructions.State.applied, recovered.instructions.?.global.state);
+    try std.testing.expect(instructionProfile().find("host:user-instructions-global") != null);
+
+    // A Session that answers busy defers the turn rather than dropping the
+    // files; the turn after installs them.
+    try files.write(InstructionFiles.global_path, "Global rule, revised.");
+    fake_core.lock();
+    fake_core.forced_prompt_status = wire.STATUS_BUSY;
+    fake_core.unlock();
+    try std.testing.expectError(error.TaskBusy, runPreparedTask(&workbench, task_id, .{ .text = "busy" }));
+    try std.testing.expectEqual(.available, task.runtime.attached().?.health);
+    const after_busy = try runInstructionTurn(&workbench, task_id, "after busy");
+    try std.testing.expectEqual(task_state.product_instructions.State.applied, after_busy.instructions.?.global.state);
+    const profile = instructionProfile();
+    try std.testing.expect(std.mem.endsWith(u8, profile.sectionText(profile.find("host:user-instructions-global").?), "Global rule, revised."));
+}

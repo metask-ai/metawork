@@ -10655,7 +10655,8 @@ fn cleanRunEffects(effects: OperationEffects) OperationEffects {
 /// Installs this turn's user instructions in the idle Session and says what
 /// the Run carries. Nothing about the user's files stops a Run: a file that
 /// cannot be read or that Core refuses is left out, and a Session that cannot
-/// be updated keeps what it had. Only a busy Session defers the Run.
+/// be updated keeps what it had. A busy Session defers the Run, and a Session
+/// lost on the way fails it, as any other use of a lost Session would.
 fn applyInstructions(
     task: *task_state.Task,
     access: *task_agent_session.Access,
@@ -10676,6 +10677,13 @@ fn applyInstructions(
     }
     const applied = access.setInstructions(candidate.instructions()) catch |err| switch (err) {
         error.SessionNotIdle => return error.TaskBusy,
+        // The Session itself is lost, not just this update: no Run can start
+        // on it. Marking it poisoned hands it to the ordinary close, and the
+        // next message's recovery builds a Session that installs the files.
+        error.SessionPoisoned => {
+            attached.health = .session_poisoned;
+            return error.SessionPoisoned;
+        },
         else => {
             // The profile Core had stays, so this Run carries what the last
             // one did; the unchanged fingerprint makes the next turn retry.
