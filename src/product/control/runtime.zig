@@ -23142,7 +23142,7 @@ test "Product Control snapshot serializer omits image formats when attachments a
     limits.max_staged_attachment_bytes = 2048;
     var control = try testRuntimeWithLimits(limits, .{});
     defer control.deinit();
-    var storage: [8192]u8 = undefined;
+    var storage: [16 * 1024]u8 = undefined;
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try control.writeAggregateFixture(&storage), .{});
     defer parsed.deinit();
     const capability = parsed.value.object.get("capabilities").?.object.get("attachments").?;
