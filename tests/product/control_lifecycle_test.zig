@@ -142,12 +142,19 @@ test "recording gaps continue execution while later retention or Host failures r
         const task = control.testTask(scenario.task_id).?;
         const run = task_state.findRun(task.durable.runs, task.runtime.active_run_id).?;
         const route = task.runtime.routeId();
-        for (0..run.tools.len + 2) |index| {
+        for (0..3) |index| {
             var storage: [256]u8 = undefined;
             const encoded = try std.fmt.bufPrint(&storage, "{{\"tool_start\":{{\"id\":\"retained-{d}\",\"name\":\"Read\",\"input\":\"file\"}}}}", .{index});
             try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, encoded));
             try control.drainAgentEvents();
         }
+        try std.testing.expect(run.event_projection_failure == null);
+        // A full global budget is what leaves a call without its record.
+        const history_budget = control.limits.max_history_bytes;
+        control.limits.max_history_bytes = control.projection_bytes;
+        try scenario.runtime.events.enqueue(try fixture.pumpEnvelope(route, run.id, "{\"tool_start\":{\"id\":\"lost\",\"name\":\"Read\",\"input\":\"file\"}}"));
+        try control.drainAgentEvents();
+        control.limits.max_history_bytes = history_budget;
         try std.testing.expectEqual(.consumer_rejected, run.event_projection_failure.?);
         try std.testing.expect(!run.event_pipeline_failed);
         try std.testing.expect(run.first_event_rejection == null);
@@ -357,7 +364,7 @@ const ReviewScenario = struct {
         errdefer std.testing.allocator.destroy(self);
         self.* = .{
             .runtime = runtime,
-            .control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = max_runs, .max_tools_per_run = 1 }, configuration),
+            .control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = max_runs }, configuration),
             .task_id = 0,
         };
         errdefer self.control.deinit();
@@ -570,7 +577,7 @@ test "Control permission reviewer keeps repeated manual and full-access requests
         var transport: ReviewerTransport = .{};
         var configuration = productControlConfiguration();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -609,7 +616,7 @@ test "Control permission reviewer cannot preempt a valid manual command with a q
         var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1 }, configuration);
         defer control.deinit();
         defer transport.released.store(true, .release);
         try installControlExecution(&control);
@@ -654,7 +661,7 @@ test "Control permission reviewer survives stale identities and unavailable manu
     var configuration = productControlConfiguration();
     configuration.task_persistence = persistence.capability();
     configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1 }, configuration);
     defer control.deinit();
     defer transport.released.store(true, .release);
     try installControlExecution(&control);
@@ -725,7 +732,7 @@ test "Control permission reviewer commits once-only decisions and projects audit
         var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -784,7 +791,7 @@ test "Control permission reviewer scrubs decoded arguments for builtin MCP and H
         var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -812,7 +819,7 @@ test "Control permission reviewer cancellation survives manual response delete a
         transport.hold_cancel_cleanup = case == 1;
         var configuration = productControlConfiguration();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1 }, configuration);
         defer control.deinit();
         defer transport.released.store(true, .release);
         try installControlExecution(&control);
@@ -862,7 +869,7 @@ test "Control permission reviewer requires confirmed persistence and never retri
         var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();
@@ -892,7 +899,7 @@ test "Control permission reviewer capacity includes cancelled workers until they
     var transport: ReviewerTransport = .{ .hold_cancel_cleanup = true };
     var configuration = productControlConfiguration();
     configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 9, .queue_capacity = 9, .max_tasks = 9, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 9, .queue_capacity = 9, .max_tasks = 9, .max_runs_per_task = 2 }, configuration);
     defer control.deinit();
     defer transport.released.store(true, .release);
     try installControlExecution(&control);
@@ -1642,7 +1649,7 @@ test "Saved Workspace selection restores usable Manual roots without a picker" {
     defer std.testing.allocator.free(history);
     var persistence: TaskPersistenceProbe = .{ .storage = history };
     const input: product_control.TaskCreateInput = .{ .workspace_root = home, .trust = .explicitly_trusted };
-    const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 };
+    const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 1 };
     var workspace_id: u64 = undefined;
     {
         var original = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, .{
@@ -1690,7 +1697,7 @@ test "Saved Workspace selection rejects missing and non-directory roots after re
     const history = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
     defer std.testing.allocator.free(history);
     var persistence: TaskPersistenceProbe = .{ .storage = history };
-    const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 1, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 };
+    const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 1, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 1 };
     var workspace_id: u64 = undefined;
     {
         var original = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), limits, .{ .task_persistence = persistence.capability() });
@@ -1743,7 +1750,6 @@ test "Automatic catalog uses personal discovery after creation and waits for Ses
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         }, .{
             .directories = .{ .canonical_user_home = home, .testing_automatic_workspace_root = if (restore_workspace) null else &automatic_root },
             .task_persistence = if (restore_workspace) persistence.capabilityRestored(restored_bytes.?) else persistence.capability(),
@@ -1813,7 +1819,6 @@ test "Automatic deletion retains Workspace authority until the catalog worker dr
         .max_workspaces = 1,
         .max_tasks = 1,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, .{
         .directories = .{ .canonical_user_home = home, .testing_automatic_workspace_root = &automatic_root },
         .skill_enablement = .{ .file_store = &enablement_store },
@@ -1875,7 +1880,6 @@ test "Skill source authorization returns after close failures and checkpoint int
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         }, .{
             .directories = .{ .canonical_user_home = home },
             .task_persistence = persistence.capability(),
@@ -1993,7 +1997,6 @@ test "new Task model selection binds only the created Task and rejects stale aut
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         productControlConfiguration(),
     );
@@ -2052,7 +2055,6 @@ test "new Task model selection is independent of default execution admission" {
         .max_workspaces = 1,
         .max_tasks = 1,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, productControlConfiguration());
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -2121,7 +2123,6 @@ test "new Task model selection uses the full custom connection with or without a
         .max_workspaces = 1,
         .max_tasks = 2,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, productControlConfiguration());
     defer workbench.deinit();
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2268,7 +2269,6 @@ test "Task source settings stay pinned until an explicit same-model selection in
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         }, configuration);
         defer workbench.deinit();
         defer fake_core.releaseControlled();
@@ -2420,7 +2420,6 @@ test "Task model rebind confirms a full target connection and restores the origi
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         }, configuration);
         defer workbench.deinit();
         var blocker: Blocker = .{};
@@ -3088,7 +3087,7 @@ test "detached Task restores its committed target across restart without a globa
         configuration.directories.canonical_user_home = home;
         configuration.task_persistence = persistence.capability();
         configuration.checkpoint_store = .{ .file_store = &store };
-        const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 3, .max_tools_per_run = 1 };
+        const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 3 };
         const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
         defer {
             shutdownTestComposition(runtime) catch unreachable;
@@ -3206,7 +3205,7 @@ test "rebind approval checkpoint survives a crash after the next same-connection
     configuration.directories.canonical_user_home = home;
     configuration.task_persistence = persistence.capability();
     configuration.checkpoint_store = .{ .file_store = &store };
-    const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 3, .max_tools_per_run = 1 };
+    const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 3 };
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
@@ -3454,7 +3453,6 @@ test "Product Control Task admission consumes the fixed MetaWork Agent tool surf
             .max_tasks = 1,
             .max_workspaces = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         productControlConfiguration(),
     );
@@ -3489,7 +3487,6 @@ test "Task permission profile is immutable and successful interactive create rem
             .max_tasks = 5,
             .max_workspaces = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         configuration,
     );
@@ -3620,7 +3617,6 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
             .queue_capacity = 1,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         configuration,
     );
@@ -3733,7 +3729,6 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
             .queue_capacity = 1,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         restart_configuration,
     );
@@ -3764,7 +3759,6 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
             .queue_capacity = 1,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         missing_configuration,
     );
@@ -3842,7 +3836,6 @@ test "restart recovery revalidates live authority and continues the same Convers
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         first_configuration,
     );
@@ -3922,7 +3915,6 @@ test "restart recovery revalidates live authority and continues the same Convers
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         second_configuration,
     );
@@ -4114,7 +4106,6 @@ test "restart recovery revalidates live authority and continues the same Convers
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         third_configuration,
     );
@@ -4202,7 +4193,6 @@ test "restart recovery revalidates live authority and continues the same Convers
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         invalidation_configuration,
     );
@@ -4328,7 +4318,6 @@ test "automatic Task binding adoption survives another restart and admits a seco
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         first_configuration,
     );
@@ -4385,7 +4374,6 @@ test "automatic Task binding adoption survives another restart and admits a seco
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         second_configuration,
     );
@@ -4453,7 +4441,6 @@ test "automatic Task binding adoption survives another restart and admits a seco
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         third_configuration,
     );
@@ -4540,7 +4527,6 @@ test "accepted Task deletion advances after checkpoint quiescence without a seco
             .queue_capacity = 1,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         configuration,
     );
@@ -4595,7 +4581,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
         std.testing.allocator,
         std.testing.io,
         runtime.runtimePort(),
-        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1 },
         configuration,
     );
     var initialized = true;
@@ -4654,7 +4640,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
         std.testing.allocator,
         std.testing.io,
         runtime.runtimePort(),
-        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1 },
         restart_configuration,
     );
     defer restored.deinit();
@@ -4706,7 +4692,7 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
         std.testing.allocator,
         std.testing.io,
         runtime.runtimePort(),
-        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_compacts_per_task = 1, .max_tools_per_run = 1 },
+        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_compacts_per_task = 1 },
         configuration,
     );
     var initialized = true;
@@ -4845,7 +4831,6 @@ test "recovery enqueue failure releases the job lease and remains retryable" {
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         first_configuration,
     );
@@ -4893,7 +4878,6 @@ test "recovery enqueue failure releases the job lease and remains retryable" {
             .max_workspaces = 1,
             .max_tasks = 3,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         restart_configuration,
     );
@@ -4996,7 +4980,6 @@ test "terminal drain candidate restarts without a stale active operation" {
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         configuration,
     );
@@ -5050,7 +5033,6 @@ test "terminal drain candidate restarts without a stale active operation" {
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         restart_configuration,
     );
@@ -5107,7 +5089,6 @@ test "untrusted Task history preserves checkpoint orphans without blocking a new
             .queue_capacity = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         configuration,
     );
@@ -5155,7 +5136,6 @@ test "unavailable checkpoint store does not close Task admission" {
             .queue_capacity = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         configuration,
     );
@@ -5313,7 +5293,6 @@ test "retired Schedule data starts empty without locking interactive Task creati
                 .max_tasks = 1,
                 .max_scheduled_tasks = 1,
                 .max_runs_per_task = 1,
-                .max_tools_per_run = 1,
             },
             configuration,
         );
@@ -5371,7 +5350,6 @@ test "scheduled noninteractive permission request automatically stops the Produc
             .max_tasks = 1,
             .max_scheduled_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .testing_automatic_workspace_root = &automatic_root },
@@ -5479,7 +5457,6 @@ test "scheduled admission rejects an unconfigured Task persistence capability" {
             .max_tasks = 1,
             .max_scheduled_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .testing_automatic_workspace_root = &automatic_root },
@@ -5551,7 +5528,6 @@ test "scheduled durable admission failure does not block an interactive Product 
             .max_tasks = 2,
             .max_scheduled_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .testing_automatic_workspace_root = &automatic_root },
@@ -5639,7 +5615,6 @@ fn expectScheduledAdmissionOutcomeUnknownRecovery(store_candidate: bool) !void {
             .max_tasks = 1,
             .max_scheduled_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .testing_automatic_workspace_root = &automatic_root },
@@ -5728,7 +5703,6 @@ fn expectScheduledAdmissionOutcomeUnknownRecovery(store_candidate: bool) !void {
             .max_tasks = 1,
             .max_scheduled_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         restart_configuration,
     );
@@ -5789,7 +5763,6 @@ test "interactive Product Task remains accepted when history commit outcome is u
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .testing_automatic_workspace_root = &automatic_root },
@@ -5850,7 +5823,6 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         .{ .attachment_store = &attachment_store, .attachment_images = .{ .prepare_fn = fixture.prepareTestAttachmentImage }, .directories = .{ .testing_automatic_workspace_root = &automatic_root } },
     );
@@ -6085,7 +6057,6 @@ test "a Skill selected with attachments runs as one multimodal Run carrying its 
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .canonical_user_home = home },
@@ -6193,7 +6164,6 @@ test "Skill input is accepted once while fresh preparation waits and failed fres
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .canonical_user_home = home },
@@ -6330,7 +6300,6 @@ test "Workspace incomplete catalog refresh preserves the committed last-good aut
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .canonical_user_home = home },
@@ -6393,7 +6362,6 @@ test "Manual Task persistence failure keeps Product Task usable in memory" {
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         configuration,
     );
@@ -6437,7 +6405,6 @@ test "Task model selection during a Run persists intent for the next explicit ad
         .max_workspaces = 1,
         .max_tasks = 1,
         .max_runs_per_task = 3,
-        .max_tools_per_run = 1,
     }, productControlConfiguration());
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -6530,7 +6497,6 @@ test "Task model selection save failure preserves installed execution and unknow
                 .max_workspaces = 1,
                 .max_tasks = 2,
                 .max_runs_per_task = 1,
-                .max_tools_per_run = 1,
             },
             configuration,
         );
@@ -6566,7 +6532,6 @@ test "Task model selection save failure preserves installed execution and unknow
                 .max_workspaces = 1,
                 .max_tasks = 2,
                 .max_runs_per_task = 1,
-                .max_tools_per_run = 1,
             },
             configuration,
         );
@@ -6638,7 +6603,6 @@ test "automatic Workspace admission is Task-owned with explicit Skill unavailabi
             .max_workspaces = 1,
             .max_tasks = 2,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .testing_automatic_workspace_root = &automatic_root },
@@ -6807,7 +6771,6 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
             .max_workspaces = 1,
             .max_tasks = 2,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{ .directories = .{ .testing_automatic_workspace_root = &automatic_root } },
     );
@@ -6854,7 +6817,6 @@ fn testScheduledSourceAuthority(recurrence: product_control.ScheduledTaskRecurre
         .max_tasks = 2,
         .max_scheduled_tasks = 1,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, .{
         .directories = .{ .testing_automatic_workspace_root = &automatic_root },
         .schedule_timer = schedule.timer(),
@@ -6961,7 +6923,6 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
             .max_tasks = 2,
             .max_scheduled_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{
@@ -7149,7 +7110,6 @@ test "schedule rejection retains the automatic Task created before a full Run qu
             .max_tasks = 3,
             .max_scheduled_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .testing_automatic_workspace_root = &automatic_root },
@@ -7225,7 +7185,6 @@ test "Workspace reauthorization reschedules the latest catalog query" {
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .canonical_user_home = home },
@@ -7298,7 +7257,6 @@ test "Product Control rejects stale Skill identity before Session or Run mutatio
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .canonical_user_home = home },
@@ -7388,7 +7346,6 @@ test "Product Control refreshes an idle Task from committed policy after an enab
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{
             .directories = .{ .canonical_user_home = home },
@@ -7478,7 +7435,6 @@ test "Task deletion waits for a requested Session close before its worker starts
     var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .max_tasks = 1,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, productControlConfiguration());
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -7516,7 +7472,6 @@ test "Task deletion retries an off-thread Session release failure" {
     var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .max_tasks = 2,
         .max_runs_per_task = 2,
-        .max_tools_per_run = 2,
     }, productControlConfiguration());
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -7559,7 +7514,6 @@ test "asynchronous Task deletion commit failure retains an unarchived record" {
             .queue_capacity = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         configuration,
     );
@@ -7588,7 +7542,6 @@ test "Task deletion releases an idle Session without blocking the caller" {
     var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
         .max_tasks = 1,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, productControlConfiguration());
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -7621,7 +7574,6 @@ test "Workspace removal interrupts live Runs without deleting Task history" {
         .max_workspaces = 1,
         .max_tasks = 1,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, productControlConfiguration());
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -7660,7 +7612,6 @@ test "Workspace removal failure remains a retryable Workspace fact" {
         .max_workspaces = 1,
         .max_tasks = 1,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, productControlConfiguration());
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -7696,7 +7647,6 @@ test "Product Control cancel of a completed Run is an idempotent no-op" {
         .queue_capacity = 1,
         .max_tasks = 1,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, productControlConfiguration());
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -7744,7 +7694,6 @@ test "Product Control manual compact uses the active operation lane and appends 
             .max_tasks = 1,
             .max_runs_per_task = 1,
             .max_compacts_per_task = 2,
-            .max_tools_per_run = 1,
         },
         productControlConfiguration(),
     );
@@ -7817,7 +7766,6 @@ test "compact queue rejection persists a legal terminal record and returns its o
             .max_tasks = 3,
             .max_runs_per_task = 1,
             .max_compacts_per_task = 1,
-            .max_tools_per_run = 1,
         },
         configuration,
     );
@@ -7885,7 +7833,6 @@ test "Product Control compact cancellation and Task deletion wait for the Agent 
             .max_tasks = 1,
             .max_runs_per_task = 1,
             .max_compacts_per_task = 2,
-            .max_tools_per_run = 1,
         },
         productControlConfiguration(),
     );
@@ -7933,7 +7880,6 @@ test "Product Control terminal compact result wins a too-late cancellation race"
             .max_tasks = 1,
             .max_runs_per_task = 1,
             .max_compacts_per_task = 1,
-            .max_tools_per_run = 1,
         },
         productControlConfiguration(),
     );
@@ -7974,7 +7920,6 @@ test "Product Control coverage saves queued Run cancellation before and after th
         .queue_capacity = 2,
         .max_tasks = 2,
         .max_runs_per_task = 2,
-        .max_tools_per_run = 1,
     }, configuration);
     defer workbench.deinit();
     defer persistence.record_id = 0;
@@ -8032,7 +7977,6 @@ test "Product Control coverage saves queued compact cancellation without enterin
             .max_tasks = 2,
             .max_runs_per_task = 2,
             .max_compacts_per_task = 1,
-            .max_tools_per_run = 1,
         },
         configuration,
     );
@@ -8103,7 +8047,6 @@ fn expectWorkerFailureCoverage(compact_operation: bool) !void {
         .max_tasks = 2,
         .max_runs_per_task = 2,
         .max_compacts_per_task = 1,
-        .max_tools_per_run = 1,
     }, configuration);
     defer workbench.deinit();
     defer persistence.record_id = 0;
@@ -8224,7 +8167,6 @@ test "Product Control shutdown terminates a waiting UI Run before joining worker
         .queue_capacity = 2,
         .max_tasks = 1,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, productControlConfiguration());
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -8288,7 +8230,6 @@ test "graceful shutdown checkpoints an interrupted Run and restart continues wit
             .queue_capacity = 2,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         first_configuration,
     );
@@ -8352,7 +8293,6 @@ test "graceful shutdown checkpoints an interrupted Run and restart continues wit
             .queue_capacity = 2,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         restored_configuration,
     );
@@ -8437,7 +8377,6 @@ test "checkpoint restore preserves Product Run and UI request allocation floors"
             .queue_capacity = 2,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         first_configuration,
     );
@@ -8515,7 +8454,6 @@ test "checkpoint restore preserves Product Run and UI request allocation floors"
             .queue_capacity = 2,
             .max_tasks = 1,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         restored_configuration,
     );
@@ -8600,7 +8538,6 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
             .queue_capacity = 2,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         first_configuration,
     );
@@ -8666,7 +8603,6 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
             .queue_capacity = 2,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         restored_configuration,
     );
@@ -8698,7 +8634,6 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
         .max_tasks = 1,
         .max_runs_per_task = 2,
         .max_compacts_per_task = 8,
-        .max_tools_per_run = 8,
         .max_commentary_segments_per_run = 64,
         .max_file_refs_per_tool = 8,
         .max_ui_history_per_task = 8,
@@ -8775,7 +8710,6 @@ test "poisoned Session closes and the same Task continues with a fresh Conversat
             .queue_capacity = 2,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         configuration,
     );
@@ -8873,7 +8807,6 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
             .queue_capacity = 2,
             .max_tasks = 2,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         first_configuration,
     );
@@ -8951,7 +8884,6 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
             .queue_capacity = 2,
             .max_tasks = 2,
             .max_runs_per_task = 3,
-            .max_tools_per_run = 1,
         },
         restored_configuration,
     );
@@ -9001,7 +8933,6 @@ test "Product Control shutdown rejects new Task admission without creating produ
         .queue_capacity = 1,
         .max_tasks = 1,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, productControlConfiguration());
     defer workbench.deinit();
 
@@ -9030,7 +8961,6 @@ test "late event from a finalized Run is dropped and newer active work continues
         .queue_capacity = 1,
         .max_tasks = 1,
         .max_runs_per_task = 2,
-        .max_tools_per_run = 1,
     }, productControlConfiguration());
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -9103,7 +9033,6 @@ test "expanded text and file limits reach AgentCore intact and reject overflow b
             .max_workspaces = 1,
             .max_tasks = 1,
             .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
         },
         .{ .attachment_store = &attachment_store, .attachment_images = .{ .prepare_fn = fixture.prepareTestAttachmentImage }, .directories = .{ .testing_automatic_workspace_root = &automatic_root } },
     );
@@ -9230,7 +9159,6 @@ test "approval mutation workers retain the same Session and historical Run permi
                 .max_tasks = 1,
                 .max_runs_per_task = 8,
                 .max_compacts_per_task = 8,
-                .max_tools_per_run = 8,
                 .max_file_changes_per_run = 8,
                 .max_commentary_segments_per_run = 64,
                 .max_file_refs_per_tool = 8,
@@ -9769,7 +9697,7 @@ test "approval fresh recovery stays queued and one failure never starts an impli
     configuration.directories.canonical_user_home = home;
     configuration.task_persistence = history.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_runs_per_task = 2 }, configuration);
     defer control.deinit();
     try installControlExecution(&control);
     var input = productControlTaskInput();
@@ -10472,7 +10400,6 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
                 .max_tasks = 1,
                 .max_runs_per_task = 8,
                 .max_compacts_per_task = 8,
-                .max_tools_per_run = 8,
                 .max_commentary_segments_per_run = 64,
                 .max_file_refs_per_tool = 8,
                 .max_ui_history_per_task = 8,
@@ -10778,7 +10705,6 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
                 .max_tasks = 1,
                 .max_runs_per_task = 8,
                 .max_compacts_per_task = 8,
-                .max_tools_per_run = 8,
                 .max_commentary_segments_per_run = 64,
                 .max_file_refs_per_tool = 8,
                 .max_ui_history_per_task = 8,
@@ -11176,7 +11102,7 @@ test "active input persisted before adoption restores as unknown without executi
     defer std.testing.allocator.free(saved);
     var restart = productControlConfiguration();
     restart.task_persistence = history.capabilityRestored(saved);
-    var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, scenario.runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, restart);
+    var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, scenario.runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2 }, restart);
     defer restored.deinit();
     const recovered = restored.testTask(scenario.task_id).?;
     try std.testing.expectEqual(.unknown, recovered.durable.runs[0].?.additional_inputs[0].?.state);
@@ -11605,7 +11531,6 @@ test "a stop for an approval mode change is distinguishable from a user stop in 
             .max_tasks = 1,
             .max_runs_per_task = 8,
             .max_compacts_per_task = 8,
-            .max_tools_per_run = 8,
             .max_file_changes_per_run = 8,
             .max_commentary_segments_per_run = 64,
             .max_file_refs_per_tool = 8,
@@ -12037,7 +11962,7 @@ test "Task message acceptance during title cleanup remains stoppable and preserv
         defer std.testing.allocator.free(saved_bytes);
         var restored_configuration = configuration;
         restored_configuration.task_persistence = history.capabilityRestored(saved_bytes);
-        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, scenario.runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, restored_configuration);
+        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, scenario.runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2 }, restored_configuration);
         defer restored.deinit();
         const saved_task = restored.testTask(scenario.task_id).?;
         try std.testing.expectEqual(@as(usize, 1), saved_task.input_submissions.items.len);
@@ -12144,7 +12069,7 @@ test "image permission review carries Host cost facts without trusting a same-na
             shutdownTestComposition(runtime) catch unreachable;
             deinitTestComposition(runtime);
         }
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, productControlConfiguration());
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1 }, productControlConfiguration());
         defer control.deinit();
         try installControlExecution(&control);
         var image: ImageAdmissionProbe = .{};
@@ -12345,7 +12270,6 @@ test "built-in source replacement keeps canonical Task catalog pinned until expl
         .max_workspaces = 1,
         .max_tasks = 1,
         .max_runs_per_task = 1,
-        .max_tools_per_run = 1,
     }, .{
         .directories = .{ .canonical_user_home = home },
         .skill_enablement = .{ .file_store = &enablement_store },
@@ -12719,7 +12643,7 @@ test "Control third consecutive denial keeps only current request manual then re
         var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
         configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
-        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2 }, configuration);
         defer control.deinit();
         try installControlExecution(&control);
         var input = productControlTaskInput();

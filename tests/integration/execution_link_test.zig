@@ -476,7 +476,6 @@ const product_limits: product_control.Limits = .{
     .queue_capacity = 1,
     .max_tasks = 2,
     .max_runs_per_task = 3,
-    .max_tools_per_run = 1,
 };
 
 /// One turn of what the application's main loop does with the link.

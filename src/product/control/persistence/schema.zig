@@ -16,6 +16,7 @@ pub const migrations: []const sql.Migration = &.{
     .{ .version = 11, .name = "run_output_updates", .sql = @embedFile("migrations/0011_run_output_updates.sql") },
     .{ .version = 12, .name = "task_project_membership", .sql = @embedFile("migrations/0012_task_project_membership.sql") },
     .{ .version = 13, .name = "multimodal_skill_selection", .sql = @embedFile("migrations/0013_multimodal_skill_selection.sql") },
+    .{ .version = 14, .name = "unbounded_run_tools", .sql = @embedFile("migrations/0014_unbounded_run_tools.sql") },
 };
 
 pub const codec = @import("codec.zig");

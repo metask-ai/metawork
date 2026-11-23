@@ -8,7 +8,6 @@ pub const limits: wire.Limits = .{
     .max_tasks = 50,
     .max_runs_per_task = 16,
     .max_compacts_per_task = 16,
-    .max_tools_per_run = 32,
     .max_commentary_segments_per_run = 256,
     .max_file_refs_per_tool = 32,
     .max_file_changes_per_run = 256,

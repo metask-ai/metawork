@@ -605,7 +605,6 @@ pub const Limits = struct {
     max_tasks: usize,
     max_runs_per_task: usize,
     max_compacts_per_task: usize,
-    max_tools_per_run: usize,
     max_commentary_segments_per_run: usize,
     max_file_refs_per_tool: usize,
     max_file_changes_per_run: usize = 256,
@@ -2207,7 +2206,7 @@ fn restoreCheckpointRecord(
 }
 
 fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_state.RunRecord {
-    if (wire.additional_inputs.len > agent.max_submitted_inputs or wire.tools.len > projection.limits.max_tools_per_run) return error.TaskStoreCorrupt;
+    if (wire.additional_inputs.len > agent.max_submitted_inputs) return error.TaskStoreCorrupt;
     const additional = try projection.allocator.alloc(?task_state.AdditionalInput, wire.additional_inputs.len);
     errdefer projection.allocator.free(additional);
     @memset(additional, null);
@@ -3983,7 +3982,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             ((!terminalRunPhase(run.phase) or run.execution_generation == task.binding.execution_generation) and !std.mem.eql(u8, run.execution_protocol, task.binding.protocol)) or
             !validText(run.assistant, limits.max_assistant_message_bytes, true) or
             !validText(run.diagnostic, limits.max_terminal_diagnostic_bytes, true) or
-            run.tools.len > limits.max_tools_per_run or run.next_activity_order == 0)
+            run.next_activity_order == 0)
             return error.Invalid;
         if (run.additional_inputs.len > agent.max_submitted_inputs) return error.Invalid;
         if (run.model_error) |value| {
@@ -6221,7 +6220,6 @@ fn testLimits() Limits {
         .max_tasks = 4,
         .max_runs_per_task = 4,
         .max_compacts_per_task = 4,
-        .max_tools_per_run = 4,
         .max_commentary_segments_per_run = 16,
         .max_file_refs_per_tool = 4,
         .max_ui_history_per_task = 4,

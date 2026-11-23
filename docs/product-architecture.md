@@ -524,7 +524,7 @@ Task 删除是跨持久化、checkpoint、event、Session 和 worker reference �
 
 ### 4.3 `workbench-history.store`
 
-可信成果元数据和可省略的展示详情分开保留。交付回执与 Host 生图引用受既有每 Run 数量、路径及字段长度、历史存储和 Bridge 块边界约束，复制仍经过同一 Host 全量凭据清洗；它们不消耗可淘汰的普通文本详情额度，也不建立新的全局预留或准入机制。生图引用归属于不可淘汰的最小 Tool 记录，必要时省略普通 Tool 行；Tool 名称和产品身份的运行时计费标记不进入持久化格式，冷恢复由可信生图引用重建同一所有权。allocator failure 仍是 Host 失败，不伪装成普通容量缺口。
+可信成果元数据和可省略的展示详情分开保留。交付回执与 Host 生图引用受既有每 Run 数量、路径及字段长度、历史存储和 Bridge 块边界约束，复制仍经过同一 Host 全量凭据清洗；它们不消耗可淘汰的普通文本详情额度，也不建立新的全局预留或准入机制。生图引用归属于不可淘汰的最小 Tool 记录，占用自己的记录位置，不省略或挤占普通 Tool 记录；一轮的 Tool 记录没有条数上限，只受单字段上限与全局历史额度约束；Tool 名称和产品身份的运行时计费标记不进入持久化格式，冷恢复由可信生图引用重建同一所有权。allocator failure 仍是 Host 失败，不伪装成普通容量缺口。
 
 Agent worker 只在预留的 Run execution owner 中写入有界回执尾部，并随 terminal release publication 交给主线程。主线程在该 Session 队列消费完后，按稳定身份去重并接纳回执，再发布 Product 终态；worker 不直接修改 durable Task。其槽位、路径及原 Tool 关联不依赖展示事件队列，Task 删除与 Run retirement 遵循同一静止和释放屏障。
 

@@ -311,7 +311,6 @@ pub const OperationLimits = struct {
     max_catalog_projection_bytes: usize,
     max_tool_field_bytes: usize,
     max_terminal_diagnostic_bytes: usize,
-    max_tools_per_run: usize,
     max_file_changes_per_run: usize = 256,
     max_commentary_segments_per_run: usize,
     max_skill_arguments: usize,
@@ -9256,7 +9255,7 @@ fn findOrCreateEventTool(
     const context: *EventContext = @ptrCast(@alignCast(raw_context));
     const digest = toolRouteDigest(id);
     if (findToolByRouteDigest(run_record.tools, digest)) |tool| return tool;
-    const slot = findEmptyTool(run_record.tools) orelse return error.ToolCapacity;
+    const slot = try reserveToolSlot(context.runtime.allocator, run_record);
     const order = run_record.next_activity_order;
     var product_id_storage: [task_state.tool_product_id_capacity]u8 = undefined;
     const product_id = std.fmt.bufPrint(
@@ -9371,15 +9370,6 @@ fn recordEventOutput(
     };
 }
 
-fn discardEventTool(context: *EventContext, tool: *task_state.ToolView) void {
-    discardReferenceText(context, tool.receipt_metadata, tool.id);
-    discardReferenceText(context, tool.receipt_metadata, tool.name);
-    inline for (.{ "input", "progress", "content" }) |field|
-        context.effects.text.discardCandidate(@field(tool, field));
-    clearEventFileReferences(context, tool);
-    if (tool.file_refs) |refs| context.runtime.allocator.free(refs);
-}
-
 fn retainEventGeneratedMedia(raw_context: *anyopaque, run: *task_state.RunRecord, id: []const u8, path: []const u8, task_id: u64, media: task_state.GeneratedMedia) task_state.EventProjectionError!*task_state.ToolView {
     const context: *EventContext = @ptrCast(@alignCast(raw_context));
     return retainGeneratedMedia(context, run, toolRouteDigest(id), path, task_id, media);
@@ -9399,16 +9389,7 @@ fn retainGeneratedMedia(context: *EventContext, run: *task_state.RunRecord, dige
         }
         return tool;
     }
-    const slot = findEmptyTool(run.tools) orelse available: {
-        for (run.tools, 0..) |entry, index| if (entry) |tool| {
-            if (tool.receipt_metadata) continue;
-            discardEventTool(context, &run.tools[index].?);
-            run.tools[index] = null;
-            _ = task_state.recordEventProjectionFailure(run);
-            break :available index;
-        };
-        return error.ToolCapacity;
-    };
+    const slot = try reserveToolSlot(context.runtime.allocator, run);
     var storage: [task_state.tool_product_id_capacity]u8 = undefined;
     const id = std.fmt.bufPrint(&storage, "tool-{d}", .{run.next_activity_order}) catch unreachable;
     const owned_id = try context.effects.text.projectReceipt(id, storage.len, &.{});
@@ -9887,6 +9868,15 @@ fn absoluteInsideWorkspace(root: []const u8, absolute: []const u8) ?[]const u8 {
 fn findEmptyTool(entries: []?task_state.ToolView) ?usize {
     for (entries, 0..) |entry, index| if (entry == null) return index;
     return null;
+}
+
+/// A Run keeps every Tool record; the slots double when full. Growth moves
+/// the records, which is safe because a `*ToolView` lives only inside one
+/// main-thread event or receipt application: snapshots and Tool pages format
+/// synchronously, file previews copy what they resolve, persistence copies
+/// into its own wire array and no worker reads a Run's Tool slots.
+fn reserveToolSlot(allocator: std.mem.Allocator, run: *task_state.RunRecord) std.mem.Allocator.Error!usize {
+    return findEmptyTool(run.tools) orelse growHistory(allocator, task_state.ToolView, &run.tools);
 }
 
 const toolRouteDigest = agent.toolRouteDigest;
@@ -10608,12 +10598,8 @@ fn reserveRun(
     };
     var input_record = try copyRunInput(self, task, input, &initial_credentials, effects);
     errdefer deinitRunInput(self, effects.release, &input_record);
-    const tools = try self.allocator.alloc(
-        ?task_state.ToolView,
-        effects.limits.max_tools_per_run,
-    );
-    errdefer self.allocator.free(tools);
-    @memset(tools, null);
+    // Tool slots grow as records arrive; a Run has no record count limit.
+    const tools: []?task_state.ToolView = &.{};
     const commentary_ends = try self.allocator.alloc(
         u64,
         effects.limits.max_commentary_segments_per_run,
@@ -12752,7 +12738,7 @@ const InputTestProjection = struct {
             .release = .{ .context = self, .redact_all_fn = redact, .release_projection_bytes_fn = release, .prepare_credential_release_fn = prepareRelease },
             .executor = undefined,
             .worker = undefined,
-            .limits = .{ .max_user_message_bytes = 1024, .max_pending_inputs_per_task = 4, .max_catalog_projection_bytes = 1024, .max_tool_field_bytes = 1024, .max_terminal_diagnostic_bytes = 128, .max_tools_per_run = 1, .max_commentary_segments_per_run = 1, .max_skill_arguments = 8, .max_task_title_bytes = 128, .max_model_id_bytes = 128 },
+            .limits = .{ .max_user_message_bytes = 1024, .max_pending_inputs_per_task = 4, .max_catalog_projection_bytes = 1024, .max_tool_field_bytes = 1024, .max_terminal_diagnostic_bytes = 128, .max_commentary_segments_per_run = 1, .max_skill_arguments = 8, .max_task_title_bytes = 128, .max_model_id_bytes = 128 },
             .run_clock = .{ .now_unix_ms_fn = now },
         };
     }

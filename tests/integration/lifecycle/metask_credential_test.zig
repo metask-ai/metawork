@@ -159,7 +159,12 @@ fn runAndExpect(wake_loop: *fixture.LifecycleWakeLoop, control: *control_api.Run
         try std.testing.expectEqual(.absent, terminal.diagnostic_disposition);
         try std.testing.expectEqual(.reusable, terminal.session_disposition_at_completion);
     }
-    for (run.tools) |tool| try std.testing.expect(tool == null);
+    // Slots grow only for records, so the Run holds no Tool record at all.
+    var records: usize = 0;
+    for (run.tools) |tool| {
+        if (tool != null) records += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), records);
 }
 
 test "Metask token rotation renews an idle old Task without changing its model intent" {

@@ -2792,7 +2792,6 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
             .queue_capacity = 1,
             .max_tasks = 1,
             .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
         },
         .{ .mcp = .{
             .preparation = &preparation,
@@ -3158,7 +3157,7 @@ test "MCP Application coordinator asks a Suno-like server for every scope" {
         std.testing.allocator,
         std.testing.io,
         agent_runtime.runtimePort(),
-        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1 },
         .{ .mcp = .{
             .preparation = &preparation,
             .management = .{
@@ -3376,7 +3375,7 @@ test "MCP Application coordinator signs in to an AceDataCloud-like server that n
         std.testing.allocator,
         std.testing.io,
         agent_runtime.runtimePort(),
-        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1 },
         .{ .mcp = .{
             .preparation = &preparation,
             .management = .{

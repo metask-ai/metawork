@@ -111,6 +111,9 @@ pub const Store = struct {
     pending_publication: ?[32]u8 = null,
     incompatible: bool = false,
     restore_failed: bool = true,
+    /// The history migrations this build knows; a test sets an older prefix
+    /// to act as a build from before a migration.
+    migrations: []const sql.Migration = product.history_migrations,
     // Pointees stay stable and are securely cleared before freeing. Growing
     // the pointer index never reallocates a buffer containing secret bytes.
     credentials: std.ArrayList(*Credential) = .empty,
@@ -152,7 +155,7 @@ pub const Store = struct {
     }
 
     fn open(self: *Store) !void {
-        const database = sqlite.Database.create(self.io, self.allocator, .{ .file = self.path }, product.history_migrations) catch |err| {
+        const database = sqlite.Database.create(self.io, self.allocator, .{ .file = self.path }, self.migrations) catch |err| {
             if (err == error.VersionUnknown) self.incompatible = true;
             return err;
         };
@@ -275,7 +278,7 @@ pub const Store = struct {
         });
         private_file.close(self.io);
         errdefer if (!recovering) self.removeImport() catch {};
-        const candidate = try sqlite.Database.create(self.io, self.allocator, .{ .file = temporary }, product.history_migrations);
+        const candidate = try sqlite.Database.create(self.io, self.allocator, .{ .file = temporary }, self.migrations);
         var candidate_open = true;
         defer if (candidate_open) candidate.destroy() catch unreachable;
         var repository = product.HistoryRepository.init(self.allocator, candidate.capability(), self.limits);
@@ -1260,6 +1263,72 @@ test "SQLite history newer schema cannot be replaced through recovery" {
         const reopened = try sqlite.Database.create(std.testing.io, a, .{ .file = path }, &newer);
         try reopened.destroy();
     }
+}
+
+test "SQLite history from before 0014 refuses a store whose Run keeps more than 32 Tool records" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const state = try testHistory(arena.allocator(), 1, 1, "message");
+    const tools = try arena.allocator().alloc(wire.ToolWire, 40);
+    for (tools, 0..) |*tool, index| tool.* = .{
+        .id = try std.fmt.allocPrint(arena.allocator(), "tool-{d}", .{index + 1}),
+        .order = index + 1,
+        .name = "Bash",
+        .input = "{}",
+        .progress = "",
+        .content = "ok",
+        .state = "completed",
+        .is_error = false,
+        .elapsed_ms = 1,
+        .input_truncated = false,
+        .progress_truncated = false,
+        .content_truncated = false,
+        .redacted = false,
+    };
+    state.tasks[0].runs[0].tools = tools;
+    state.tasks[0].runs[0].next_activity_order = tools.len + 1;
+    const saved = saved: {
+        var store = try Store.init(std.testing.io, a, directory);
+        defer store.deinit();
+        if (try store.loadFixtureAlloc(a)) |bytes| a.free(bytes);
+        const bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
+        try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
+        break :saved (try store.loadFixtureAlloc(a)).?;
+    };
+    defer a.free(saved);
+    {
+        // The last build before 0014 knows the migrations up to 0013 and
+        // would take a Run with more than 32 records for a corrupt store.
+        const unbounded = product.history_migrations.len - 1;
+        try std.testing.expectEqualStrings("unbounded_run_tools", product.history_migrations[unbounded].name);
+        var store = try Store.init(std.testing.io, a, directory);
+        defer store.deinit();
+        store.migrations = product.history_migrations[0..unbounded];
+        try std.testing.expectError(error.VersionUnknown, store.loadFixtureAlloc(a));
+        try std.testing.expect(store.incompatible);
+        try std.testing.expectEqual(wire.Commit.failed, commitFixture(&store, saved, true));
+        try std.testing.expectEqual(wire.Commit.failed, recoverFixture(&store, saved));
+    }
+    // It wrote and quarantined nothing: no backup or stage file appears and
+    // this build reads the same history under the same migrations.
+    var listing = try temporary.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer listing.close(std.testing.io);
+    var entries = listing.iterate();
+    while (try entries.next(std.testing.io)) |entry| {
+        try std.testing.expect(!std.mem.endsWith(u8, entry.name, ".bak"));
+        try std.testing.expect(!std.mem.endsWith(u8, entry.name, ".tmp"));
+    }
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    const reloaded = (try store.loadFixtureAlloc(a)).?;
+    defer a.free(reloaded);
+    try std.testing.expectEqualStrings(saved, reloaded);
+    try std.testing.expectEqual(@as(u32, product.history_migrations.len), store.database.?.schemaVersion());
 }
 
 test "SQLite history recovery publication unknown is confirmed before a newer candidate" {

@@ -234,7 +234,13 @@ fn finish(control: *control_api.Runtime, task_id: u64, id: u64, mode: []const u8
             if (std.mem.eql(u8, mode, "long-run")) {
                 try std.testing.expectEqual(task_api.RunOutcome.completed, terminal.outcome);
                 try std.testing.expect(run.event_stream_finalized);
-                try std.testing.expectEqual(state.EventProjectionFailure.consumer_rejected, run.event_projection_failure.?);
+                // Every one of the 40 Bash calls keeps its record.
+                try std.testing.expect(run.event_projection_failure == null);
+                var bash: usize = 0;
+                for (run.tools) |entry| if (entry) |tool| {
+                    if (std.mem.eql(u8, tool.name, "Bash") and tool.state == .completed) bash += 1;
+                };
+                try std.testing.expectEqual(@as(usize, 40), bash);
                 try std.testing.expect(run.first_event_rejection == null);
                 try std.testing.expect(!run.output_segment_open);
                 try std.testing.expect(std.mem.endsWith(u8, run.assistant.list.items, "Long run completed."));
@@ -325,7 +331,6 @@ fn qualify(mode: []const u8) !void {
         .max_tasks = 1,
         .max_workspaces = 1,
         .max_runs_per_task = 3,
-        .max_tools_per_run = if (std.mem.eql(u8, mode, "long-run")) 32 else 4,
     }, configuration);
     defer control.deinit();
     try control.startCustomProviders(root, vault.capability());
@@ -414,7 +419,7 @@ fn qualify(mode: []const u8) !void {
             const saved = (try history.loadAlloc(std.testing.allocator)).?;
             defer std.testing.allocator.free(saved);
             try std.testing.expect(std.mem.indexOf(u8, saved, "Long run completed.") != null);
-            try std.testing.expect(std.mem.indexOf(u8, saved, "consumer_rejected") != null);
+            try std.testing.expect(std.mem.indexOf(u8, saved, "consumer_rejected") == null);
         }
         if (std.mem.eql(u8, mode, "consumer-starvation")) {
             const saved = (try history.loadAlloc(std.testing.allocator)).?;
@@ -560,7 +565,7 @@ test "Skill resource context reads a managed import through tool and typed input
     }
 }
 
-test "canonical single Run passes 16 turns and 32 Tool records without replay" {
+test "canonical single Run keeps all 40 Tool records without replay" {
     try qualify("long-run");
 }
 
