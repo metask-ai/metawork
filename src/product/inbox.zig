@@ -366,7 +366,9 @@ pub fn conversationOf(messages: []const Message, username: []const u8) ?Peer {
         };
         switch (message.direction) {
             .self => return message.conversations[0],
-            .out => if (message.conversations.len == 1) return message.conversations[0],
+            // Only a recipient MetaTeam named no username for can be the
+            // one picked; a different username is someone else.
+            .out => if (message.conversations.len == 1 and message.conversations[0].username == null) return message.conversations[0],
             .in => {},
         }
     }
@@ -669,7 +671,16 @@ fn optionalTime(object: std.json.ObjectMap, names: []const []const u8) ?u64 {
     return null;
 }
 
+/// The latest instant JavaScript can represent; a later one would break the
+/// Renderer's dates.
+pub const max_time_ms: u64 = 8_640_000_000_000_000;
+
 fn timeValue(value: std.json.Value) error{InvalidResponse}!u64 {
+    const at = try timeOf(value);
+    return if (at > max_time_ms) error.InvalidResponse else at;
+}
+
+fn timeOf(value: std.json.Value) error{InvalidResponse}!u64 {
     return switch (value) {
         // MetaTeam reports instants as Unix milliseconds elsewhere.
         .number_string => |text| if (integerText(text))
@@ -836,10 +847,20 @@ pub fn parseDetail(allocator: std.mem.Allocator, bytes: []const u8) ParseError!D
     const updated = optionalTime(object, &.{"updatedAt"});
     const path = nonEmptyString(field(object, "path"));
     const description = nonEmptyString(field(object, "description")) orelse nonEmptyString(field(object, "desc"));
-    const kind = nonEmptyString(field(object, "type"));
-    // MetaTeam tells them apart by their fields: a file has a tag or a
-    // MIME type, a task a progress, a project its files.
-    if (field(object, "tag") != null or field(object, "mime") != null) return .{ .arena = arena, .kind = .{ .file = .{
+    // A declared type decides. Without one, MetaTeam tells them apart by
+    // their fields: a file has a tag or a MIME type, a task a progress, a
+    // project its files.
+    const Kind = enum { task, file, project };
+    const declared: ?Kind = if (nonEmptyString(field(object, "type"))) |kind| std.meta.stringToEnum(Kind, kind) else null;
+    const resolved: Kind = declared orelse if (field(object, "tag") != null or field(object, "mime") != null)
+        .file
+    else if (field(object, "progress") != null)
+        .task
+    else if (field(object, "files") != null or field(object, "fileTags") != null)
+        .project
+    else
+        .task;
+    if (resolved == .file) return .{ .arena = arena, .kind = .{ .file = .{
         .id = id,
         .name = name,
         .tag = nonEmptyString(field(object, "tag")),
@@ -852,10 +873,7 @@ pub fn parseDetail(allocator: std.mem.Allocator, bytes: []const u8) ParseError!D
         .content = if (field(object, "content")) |value| if (value == .string) value.string else null else null,
         .download_url = nonEmptyString(field(object, "downloadUrl")),
     } } };
-    const is_task = field(object, "progress") != null or (kind != null and std.mem.eql(u8, kind.?, "task"));
-    const is_project = (kind != null and std.mem.eql(u8, kind.?, "project")) or
-        field(object, "files") != null or field(object, "fileTags") != null;
-    if (is_project and !is_task) {
+    if (resolved == .project) {
         // Allocated before the arena's state is copied into the result.
         const files = try projectFiles(a, field(object, "files"));
         const file_tags = try tagCounts(a, field(object, "fileTags"));
@@ -1489,11 +1507,20 @@ pub const Runtime = struct {
     }
 
     fn replaceWindow(self: *Runtime, messages: []const Message, full: bool) std.mem.Allocator.Error!void {
+        const previous = try self.allocator.dupe(Summary, self.summaries.items);
+        defer self.allocator.free(previous);
         const kept: ?Summary = if (self.viewing) |*peer| if (self.summaryIndex(peer.slice())) |index| self.summaries.items[index] else null else null;
         self.summaries.clearRetainingCapacity();
         for (messages) |*message| try self.absorb(message, true);
         if (kept) |summary| if (self.summaryIndex(summary.peer.id.slice()) == null)
             try self.summaries.append(self.allocator, summary);
+        // A rebuilt window keeps the usernames it knew: replies use them.
+        for (self.summaries.items) |*summary| if (summary.peer.username == null) {
+            for (previous) |*old| if (old.peer.id.eql(summary.peer.id.slice())) {
+                summary.peer.username = old.peer.username;
+                break;
+            };
+        };
         self.newest = if (messages.len != 0) messages[messages.len - 1].id else null;
         self.oldest = if (messages.len != 0) messages[0].id else null;
         self.has_earlier = full;
@@ -1509,7 +1536,11 @@ pub const Runtime = struct {
             if (self.summaryIndex(peer.id.slice())) |index| {
                 const current = &self.summaries.items[index];
                 if (newer or message.sent_at_ms > current.latest.sent_at_ms) {
-                    current.* = .{ .peer = peer, .latest = latest };
+                    // A message that does not report the username keeps the
+                    // one known: replies are addressed by it.
+                    var known = peer;
+                    if (known.username == null) known.username = current.peer.username;
+                    current.* = .{ .peer = known, .latest = latest };
                 }
             } else try self.summaries.append(self.allocator, .{ .peer = peer, .latest = latest });
         }
@@ -2099,6 +2130,77 @@ test "members are addressable by username, once each; a sent message's conversat
     try testing.expectEqualStrings("u-b", conversationOf(messages.items[0..1], "bob").?.id.slice());
     try testing.expectEqualStrings(self_peer_id, conversationOf(messages.items, "zj").?.id.slice());
     try testing.expect(conversationOf(&.{}, "bob") == null);
+
+    // A sole recipient is the picked member only when MetaTeam named no
+    // username for them; a different username is someone else.
+    var others = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[
+        \\ {"id":3,"time":3,"direction":"out","from":{"id":"me"},"recipients":[{"id":"u-c","username":"cy"}],"text":"hi"},
+        \\ {"id":4,"time":4,"direction":"out","from":{"id":"me"},"recipients":[{"id":"u-d","name":"Dee"}],"text":"hi"}
+        \\]}}
+    );
+    defer others.deinit();
+    try testing.expect(conversationOf(others.items[0..1], "bob") == null);
+    try testing.expectEqualStrings("u-d", conversationOf(others.items[1..2], "bob").?.id.slice());
+}
+
+test "a newer message without a username keeps the one known for replies" {
+    var runtime: Runtime = .init(testing.allocator);
+    defer runtime.deinit();
+    runtime.start(true);
+    _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
+    const binding = runtime.binding;
+    var first = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[{"id":1,"time":1,"direction":"in","from":{"id":"u-a","username":"ann","name":"Ann"},"text":"hi"}]}}
+    );
+    defer first.deinit();
+    _ = try runtime.completeConversation(binding, "u-a", .latest, first.items);
+    var second = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[{"id":2,"time":2,"direction":"in","from":{"id":"u-a","name":"Ann"},"text":"again"}]}}
+    );
+    defer second.deinit();
+    _ = runtime.requestRefresh(0, binding, false);
+    const list = runtime.beginList().?;
+    _ = try runtime.completeList(0, list.id, list.kind, .{ .page = .{ .messages = second.items, .limit = Limits.list_page } });
+    try testing.expectEqualStrings("again", runtime.view().conversations[0].latest.?.preview);
+    try testing.expectEqualStrings("ann", runtime.peerAddress(binding, "u-a").?.member.slice());
+    _ = try runtime.completeConversation(binding, "u-a", .after, second.items);
+    try testing.expectEqualStrings("ann", runtime.peerAddress(binding, "u-a").?.member.slice());
+}
+
+test "an instant JavaScript cannot represent drops an optional time and refuses a message time" {
+    var unread = try parseUnread(testing.allocator,
+        \\{"data":{"unread":1,"byPeer":[{"peer":{"id":"a"},"unread":1,"lastAt":8640000000000001}]}}
+    );
+    defer unread.deinit(testing.allocator);
+    try testing.expect(unread.by_peer[0].last_at_ms == null);
+    var messages = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[{"id":1,"time":8640000000000000,"direction":"out","from":{"id":"me"},"recipients":[{"id":"a","readAt":99999999999999999}],"text":"x"}]}}
+    );
+    defer messages.deinit();
+    try testing.expect(messages.items[0].recipients[0].read);
+    try testing.expect(messages.items[0].recipients[0].read_at_ms == null);
+    try testing.expectError(error.InvalidResponse, parseMessages(testing.allocator,
+        \\{"data":{"messages":[{"id":1,"time":8640000000000001,"direction":"in","from":{"id":"a"},"text":"x"}]}}
+    ));
+    var detail = try parseDetail(testing.allocator, "{\"data\":{\"name\":\"t\",\"progress\":\"doing\",\"updatedAt\":18446744073709551615,\"lastNote\":{\"text\":\"n\",\"at\":9000000000000000}}}");
+    defer detail.deinit();
+    try testing.expect(detail.kind.task.updated_at_ms == null);
+    try testing.expect(detail.kind.task.last_note.?.at_ms == null);
+}
+
+test "a declared type decides what a linked id is" {
+    for ([_]struct { []const u8, std.meta.Tag(@FieldType(Detail, "kind")) }{
+        .{ "{\"data\":{\"name\":\"n\",\"type\":\"task\",\"tag\":\"x\",\"mime\":\"text/plain\",\"progress\":\"doing\"}}", .task },
+        .{ "{\"data\":{\"name\":\"n\",\"type\":\"file\"}}", .file },
+        .{ "{\"data\":{\"name\":\"n\",\"type\":\"project\",\"progress\":\"doing\"}}", .project },
+        .{ "{\"data\":{\"name\":\"n\",\"type\":\"other\",\"mime\":\"text/plain\"}}", .file },
+        .{ "{\"data\":{\"name\":\"n\",\"progress\":\"doing\",\"files\":[]}}", .task },
+    }) |case| {
+        var detail = try parseDetail(testing.allocator, case[0]);
+        defer detail.deinit();
+        try testing.expectEqual(case[1], std.meta.activeTag(detail.kind));
+    }
 }
 
 test "only a credential-free web address without the key is handed to the browser" {
