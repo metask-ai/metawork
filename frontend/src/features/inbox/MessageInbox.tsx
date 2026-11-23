@@ -21,7 +21,7 @@ import { Dialog } from "../../components/ui/dialog.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n } from "../../i18n/context.ts";
-import { updateDiagnosticText } from "../account/update-diagnostics.ts";
+import { inboxDiagnosticText } from "./inbox-diagnostics.ts";
 
 /** While the inbox page is open and visible the Host is asked this often. */
 export const inboxRefreshMs = 15_000;
@@ -816,7 +816,7 @@ export function InboxMain({
   const diagnostic = inbox.diagnostic && (
     <DiagnosticDisclosure label={t("inbox.diagnostics")}>
       <pre className="feedback-notice-details">
-        {updateDiagnosticText(inbox.diagnostic, t)}
+        {inboxDiagnosticText(inbox.diagnostic, t)}
       </pre>
     </DiagnosticDisclosure>
   );
