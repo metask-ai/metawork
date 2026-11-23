@@ -278,6 +278,9 @@ let retainedAttachmentPaths = [];
 // Viewer-tier preview ids share the connection's monotonic space, and this
 // check opens previews on both sides of the restart.
 let sentMediaPreviewId = 0;
+// The Renderer connects once per launch, so its connection is generation 1;
+// requests that name a connection, like Tool pages, answer that one.
+const rendererConnectionGeneration = "1";
 
 const windowsClipboard70 = clipboardMarkdownFixture(
   70 * 1024,
@@ -3522,6 +3525,7 @@ async function snapshot(options) {
 async function readSnapshot(options) {
   return readProbeProductState(invokeBridge, {
     ...options,
+    generation: rendererConnectionGeneration,
     forbidden: ["metawork-agentcore-vertical-fixture-key"],
   });
 }

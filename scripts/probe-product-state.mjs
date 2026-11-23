@@ -12,12 +12,10 @@ function retryable(message) {
   return Object.assign(new Error(message), { retryableSnapshotRead: true });
 }
 
-// The probe shares the bridge connection with the real Renderer, and Tool page
-// request ids must rise within a connection. The Renderer counts from 1 and
-// reads only while a Run's details are open, which the verticals never do;
-// starting from the clock keeps the probe above it and above an earlier probe
-// process on the same connection.
-let nextToolsRequest = BigInt(Date.now()) * 1_000_000n;
+// The probe shares the bridge connection with the real Renderer. A Tool page
+// request id only pairs a response with its request, so the probe keeps its
+// own count and never disturbs the Renderer's reads.
+let nextToolsRequest = 0n;
 
 /**
  * Task pages carry a Run's Tool summary, not its records. The probe reads the
@@ -73,6 +71,7 @@ export async function readProbeProductState(
     taskId,
     mcpOnly = false,
     includeManagement = true,
+    // The Renderer connection the Tool page requests answer.
     generation = "1",
   } = {},
 ) {

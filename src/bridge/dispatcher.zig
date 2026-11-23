@@ -357,7 +357,6 @@ pub const Dispatcher = struct {
     preview_in_flight: [max_preview_in_flight]PreviewInFlight = @splat(.{}),
     next_preview_completion_id: u64 = 1,
     preview_high_water: u64 = 0,
-    run_tools_high_water: u64 = 0,
     preview_grants: [product_control.max_file_preview_media]?PreviewGrant = @splat(null),
     preview_timer_armed: bool = false,
     output_timer_armed: bool = false,
@@ -818,7 +817,6 @@ pub const Dispatcher = struct {
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
         self.deliverNotificationTask() catch {};
         self.preview_high_water = 0;
-        self.run_tools_high_water = 0;
         self.output_high_water = 0;
         self.grants.invalidate();
         self.invalidateSkillPreparation();
@@ -1376,9 +1374,10 @@ pub const Dispatcher = struct {
         if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
         const generation = try handlers.parseWireId(parsed.value.generation);
         const request_id = try handlers.parseWireId(parsed.value.requestId);
-        if (request_id == 0 or request_id <= self.run_tools_high_water) return error.InvalidBridgePayload;
+        // The identity only pairs a response with its request: a read is
+        // idempotent, and callers sharing a connection keep their own count.
+        if (request_id == 0) return error.InvalidBridgePayload;
         try self.delivery.validateConnection(generation, invocation.source.window_id);
-        self.run_tools_high_water = request_id;
         const task_id = try handlers.parseWireId(parsed.value.taskId);
         const run_id = try handlers.parseWireId(parsed.value.runId);
         const after_order = try handlers.parseWireId(parsed.value.afterOrder);
@@ -7195,8 +7194,17 @@ test "Tool page command answers the bound connection with one bounded page" {
         try std.testing.expectEqual(@as(usize, 1), tools.len);
         try std.testing.expectEqualStrings("file-3-1-1-1", tools[0].object.get("fileRefs").?.array.items[0].object.get("id").?.string);
     }
-    // Request identities only move forward on a connection.
+    // Another caller on the same connection keeps its own count: the same
+    // identity reads again and is echoed back, and zero is never one.
     try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"0\"}", 3);
+    {
+        var parsed = try capture.result();
+        defer parsed.deinit();
+        const value = parsed.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("1", value.get("requestId").?.string);
+        try std.testing.expectEqualStrings("ready", value.get("state").?.string);
+    }
+    try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"0\",\"taskId\":\"3\",\"runId\":\"7\",\"afterOrder\":\"0\"}", 3);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"ok\":false") != null);
     // A Run outside this Task reveals nothing but that it is missing.
     try capture.invoke(native, "{\"generation\":\"1\",\"requestId\":\"2\",\"taskId\":\"3\",\"runId\":\"8\",\"afterOrder\":\"0\"}", 3);
