@@ -1278,8 +1278,13 @@ fn toolSourceBytes(tool: *const task_state.ToolView) usize {
 fn writeTransportCutToolEntry(writer: *std.Io.Writer, text: task_view.TextProjection, tool: *const task_state.ToolView) task_view.Error!void {
     const mark = writer.end;
     var reduced = tool.*;
-    inline for (.{ "progress", "content", "input" }) |field| {
-        @field(reduced, field) = @field(reduced, field)[0..0];
+    // Text goes first, then references, then the name. The entry keeps its
+    // identity, order and state, so the records after it stay readable.
+    inline for (.{ "progress", "content", "input", "file_refs", "name" }) |field| {
+        if (comptime std.mem.eql(u8, field, "file_refs"))
+            reduced.file_refs = null
+        else
+            @field(reduced, field) = @field(reduced, field)[0..0];
         writer.end = mark;
         if (task_view.writeToolPageEntry(writer, text, &reduced, true)) |_| {
             return;

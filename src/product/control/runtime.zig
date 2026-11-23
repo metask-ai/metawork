@@ -18984,6 +18984,44 @@ test "a Tool record too large for one page is sent without its text and marked" 
     try std.testing.expect(second.next_after_order == null);
 }
 
+test "a Tool record whose references or name cannot fit is still sent, so later records stay readable" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const long_title = "t" ** 250;
+    const reference = "{\"locator\":{\"workspace_path\":\"src/" ++ long_title ++ ".zig\"},\"title\":\"" ++ long_title ++ "\",\"kind\":\"read\"}";
+    var refs = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"refs\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[" ++ reference ++ "," ++ reference ++ "]}}");
+    defer refs.deinit();
+    try control.applyEvent(&refs);
+    var named = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"named\",\"name\":\"" ++ ("n" ** 700) ++ "\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1}}");
+    defer named.deinit();
+    try control.applyEvent(&named);
+    try applyTestToolResult(&control, "small", "ok");
+    // Holds one reduced entry, but not the references or the long name.
+    var output: [512]u8 = undefined;
+    const text = control.liveViewText();
+    var after: u64 = 0;
+    var entries: [3]std.json.Parsed(std.json.Value) = undefined;
+    for (&entries) |*slot| {
+        const page = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, after, tool_page_source_bytes);
+        slot.* = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, page.json, .{});
+        try std.testing.expectEqual(@as(usize, 1), slot.value.array.items.len);
+        after = page.next_after_order orelse 0;
+    }
+    defer for (&entries) |*slot| slot.deinit();
+    try std.testing.expectEqual(@as(u64, 0), after);
+    const first = entries[0].value.array.items[0].object;
+    try std.testing.expect(first.get("transportTruncated").?.bool);
+    try std.testing.expectEqualStrings("Read", first.get("name").?.string);
+    try std.testing.expectEqual(@as(usize, 0), first.get("fileRefs").?.array.items.len);
+    const second = entries[1].value.array.items[0].object;
+    try std.testing.expect(second.get("transportTruncated").?.bool);
+    try std.testing.expectEqualStrings("", second.get("name").?.string);
+    try std.testing.expectEqualStrings("completed", second.get("state").?.string);
+    try std.testing.expect(entries[2].value.array.items[0].object.get("transportTruncated") == null);
+    // Only the responses left these out; the records are unchanged.
+    try std.testing.expectEqual(@as(usize, 700), control.testTaskSlots()[0].?.durable.runs[0].?.tools[1].?.name.len);
+}
+
 test "Tool pages hide credentials learned after the record was kept" {
     const Account = struct {
         fn generation(_: *anyopaque) u64 {
