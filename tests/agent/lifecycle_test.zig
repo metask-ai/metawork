@@ -6527,14 +6527,16 @@ test "instruction failures keep the installed profile or close admission on Core
     }{
         .{ .status = wire.STATUS_BUSY, .expected = error.SessionNotIdle },
         .{ .status = wire.STATUS_OUT_OF_MEMORY, .expected = error.InstructionsUpdateFailed },
-        .{ .status = wire.STATUS_INVALID_STATE, .expected = error.InstructionsUpdateFailed, .poisoned = true },
-        .{ .status = wire.STATUS_CORE_ERROR, .expected = error.InstructionsUpdateFailed, .poisoned = true },
-        .{ .status = wire.STATUS_STALE_RUN, .expected = error.InstructionsUpdateFailed, .poisoned = true },
-        .{ .status = 0xffff, .expected = error.InstructionsUpdateFailed, .poisoned = true },
-        .{ .malformed = true, .expected = error.InstructionsUpdateFailed, .poisoned = true },
-        // Core refusing even the base profile it accepted at creation is its
-        // contract breaking, not the user's files.
-        .{ .marker = "MetaWork", .expected = error.InstructionsUpdateFailed, .poisoned = true },
+        .{ .status = wire.STATUS_INTERNAL_ERROR, .expected = error.InstructionsUpdateFailed },
+        // A lost Session says so, apart from a refusal that left it usable.
+        .{ .status = wire.STATUS_INVALID_STATE, .expected = error.SessionPoisoned, .poisoned = true },
+        .{ .status = wire.STATUS_CORE_ERROR, .expected = error.SessionPoisoned, .poisoned = true },
+        .{ .status = wire.STATUS_STALE_RUN, .expected = error.SessionPoisoned, .poisoned = true },
+        .{ .status = 0xffff, .expected = error.SessionPoisoned, .poisoned = true },
+        .{ .malformed = true, .expected = error.SessionPoisoned, .poisoned = true },
+        // Core refusing the content of the base profile it accepted at
+        // creation is its contract breaking, not the user's files.
+        .{ .marker = "MetaWork", .expected = error.SessionPoisoned, .poisoned = true },
     };
     for (cases) |case| {
         fake_core.reset();
@@ -6557,6 +6559,51 @@ test "instruction failures keep the installed profile or close admission on Core
         // Nothing Core refused replaced what it had.
         try std.testing.expect(std.meta.eql(installed, rawSession(session).prompt_profile));
     }
+}
+
+test "a budget refusal narrows the documents, and refusing all of them keeps the profile and the Session" {
+    fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const base = rawSession(session).prompt_profile;
+    var base_bytes: usize = 0;
+    for (0..base.count) |index| base_bytes += base.sectionLen(index);
+    // Measure what each document adds, then return to the base profile.
+    _ = try session.setInstructions(.{ .global = global_document, .project = project_document });
+    const measured = rawSession(session).prompt_profile;
+    const global_bytes = measured.sectionLen(measured.find("host:user-instructions-global").?);
+    try std.testing.expectEqual(lifecycle.InstructionsApplied{}, try session.setInstructions(.{}));
+
+    // Room for the global document but not for both: the ladder steps down.
+    fake_core.lock();
+    fake_core.prompt_budget_bytes = base_bytes + global_bytes;
+    fake_core.unlock();
+    try std.testing.expectEqual(
+        lifecycle.InstructionsApplied{ .global = true },
+        try session.setInstructions(.{ .global = global_document, .project = project_document }),
+    );
+    const narrowed = rawSession(session).prompt_profile;
+    try std.testing.expect(narrowed.find("host:user-instructions-project") == null);
+
+    // No room even for the base profile: every step is refused, the profile
+    // Core had stands and the Session stays usable.
+    fake_core.lock();
+    fake_core.prompt_budget_bytes = 0;
+    fake_core.unlock();
+    try std.testing.expectError(
+        error.InstructionsUpdateFailed,
+        session.setInstructions(.{ .global = global_document, .project = project_document }),
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+    try std.testing.expect(std.meta.eql(narrowed, rawSession(session).prompt_profile));
+    fake_core.lock();
+    fake_core.prompt_budget_bytes = null;
+    fake_core.unlock();
+    try runFixtureTurn(session, "turn after a budget refusal");
 }
 
 test "malformed instruction documents are refused before Core is called" {

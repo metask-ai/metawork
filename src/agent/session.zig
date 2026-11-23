@@ -1325,12 +1325,18 @@ pub const Session = struct {
     /// it is idle; identity and guidance never change. The next Run renders
     /// from the result, and a Run already under way keeps what it began with.
     ///
-    /// Core refuses a profile as a whole, so a content refusal is narrowed one
-    /// document at a time -- both, global only, project only, neither -- and
-    /// the answer says which documents Core took. The last step is the base
-    /// profile Core accepted at creation; a refusal of that is Core's broken
-    /// contract, never a reason to blame the user's files. The ladder runs
-    /// here, next to Core, so it costs no extra link round trips.
+    /// Core refuses a profile as a whole, so a refusal of what the documents
+    /// add -- their content, or the durable budget the profile counts
+    /// against -- is narrowed one document at a time: both, global only,
+    /// project only, neither. The answer says which documents Core took. The
+    /// last step is the base profile Core accepted at creation: refusing its
+    /// content is Core's broken contract, while a budget or transient refusal
+    /// of it leaves the profile Core had, as every refusal does. The ladder
+    /// runs here, next to Core, so it costs no extra link round trips.
+    ///
+    /// `InstructionsUpdateFailed` means the previous profile stands and the
+    /// Session is usable; `SessionPoisoned` means it is not, and the caller
+    /// must not start a Run on it.
     pub fn setInstructions(self: *Session, instructions: Instructions) Error!InstructionsApplied {
         try surface.validateInstructions(instructions);
         // Every fallible Host allocation precedes the Core calls.
@@ -1368,6 +1374,7 @@ pub const Session = struct {
             self.abort_calls_in_progress != 0 or self.credential_updates_in_progress != 0)
             return error.SessionNotIdle;
         for (ladder[0..steps], 0..) |keep, index| {
+            const last = index + 1 == steps;
             const profile = assembly.profile(keep);
             switch (session_prompt.set(self.agent_runtime.api, self.raw, &profile)) {
                 .contract_violation => return self.failInstructionsContract(),
@@ -1375,9 +1382,13 @@ pub const Session = struct {
                     .ok => return .{ .global = keep.global, .project = keep.project },
                     .busy => return error.SessionNotIdle,
                     // Core took nothing; the profile it had stays.
-                    .out_of_memory => return error.InstructionsUpdateFailed,
-                    .invalid_argument, .resource_limit => if (index + 1 == steps)
-                        return self.failInstructionsContract(),
+                    .out_of_memory, .internal_error => return error.InstructionsUpdateFailed,
+                    // The profile is durable Session state: a smaller one may
+                    // fit where a larger one did not. Refused even without
+                    // instructions, the profile Core had still stands.
+                    .checkpoint_budget_required, .resource_limit => if (last)
+                        return error.InstructionsUpdateFailed,
+                    .invalid_argument => if (last) return self.failInstructionsContract(),
                     .invalid_state, .core_error => return self.poisonInstructions(),
                     else => return self.failInstructionsContract(),
                 },
@@ -1389,7 +1400,7 @@ pub const Session = struct {
     fn poisonInstructions(self: *Session) Error {
         self.state = .poisoned;
         self.broadcast();
-        return error.InstructionsUpdateFailed;
+        return error.SessionPoisoned;
     }
 
     fn failInstructionsContract(self: *Session) Error {

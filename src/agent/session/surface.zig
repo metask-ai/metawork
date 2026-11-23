@@ -361,7 +361,9 @@ pub const Error = error{
     RewindFailed,
     /// A caller's instruction document broke `validateInstructions`.
     InvalidInstructions,
-    /// No instruction profile could be installed; the previous one stays.
+    /// No instruction profile could be installed; the previous one stays and
+    /// the Session remains usable. A Session lost on the way says
+    /// `SessionPoisoned` instead.
     InstructionsUpdateFailed,
     /// The half that performs this call cannot be reached.
     ///

@@ -570,6 +570,9 @@ pub const FakeCore = struct {
     /// Every profile with a section containing this text is refused with
     /// INVALID_ARGUMENT, as Core refuses a whole profile for one bad section.
     prompt_reject_marker: ?[]const u8 = null,
+    /// Every profile whose section text exceeds this many bytes is refused
+    /// with CHECKPOINT_BUDGET_REQUIRED, as a Session near its durable budget.
+    prompt_budget_bytes: ?usize = null,
     malformed_prompt_diagnostic: bool = false,
     prompt_updates: usize = 0,
     prompt_changes: usize = 0,
@@ -2983,6 +2986,7 @@ fn sessionSetPromptProfile(handle: ?*wire.SessionHandle, profile: ?*const wire.P
     const malformed = fake_core.malformed_prompt_diagnostic;
     fake_core.malformed_prompt_diagnostic = false;
     const reject_marker = fake_core.prompt_reject_marker;
+    const budget = fake_core.prompt_budget_bytes;
     fake_core.unlock();
     if (malformed) {
         if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 1 };
@@ -2994,6 +2998,11 @@ fn sessionSetPromptProfile(handle: ?*wire.SessionHandle, profile: ?*const wire.P
             const text = sdk.borrowedBytes(section.text) catch return wire.STATUS_INVALID_ARGUMENT;
             if (std.mem.indexOf(u8, text, marker) != null) return wire.STATUS_INVALID_ARGUMENT;
         }
+    };
+    if (budget) |limit| if (profile) |value| if (value.sections) |sections| {
+        var total: usize = 0;
+        for (sections[0..@intCast(value.section_count)]) |section| total += @intCast(section.text.len);
+        if (total > limit) return wire.STATUS_CHECKPOINT_BUDGET_REQUIRED;
     };
     session.lock();
     defer session.unlock();

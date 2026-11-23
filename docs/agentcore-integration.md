@@ -224,7 +224,7 @@ profile 的 owned copy、子代理与 isolated Skill 继承、checkpoint 编码�
 - 段首依次是标题、`Source: <路径>`、优先级说明（冲突时项目指令优先于全局指令）与“不改变安全、权限和审批规则，也不授予这些规则未给的能力”，随后是原样正文；截断时段尾注明只包含了前多少字节。正文与路径分别以 32 KiB 和 4096 字节为上限，路径不含控制字符，正文不含 NUL；最坏情况在编译期断言不超过 ABI 的单段、整份与段数上限；
 - `interpolate` 恒为 0：用户文本里的 `{{...}}` 原样到达模型。置 1 会让未知占位符原子拒绝整份 profile，连身份段一起失效；
 - fresh create 与 restore 只用基础 profile。用户指令只通过 idle-only 的 `Session.setInstructions` 安装，Product 在每轮 `prepareRun` 之前调用；已经开始的 Run 保持开始时的 profile；
-- Core 整份拒绝 profile，所以内容类拒绝（`INVALID_ARGUMENT`、`RESOURCE_LIMIT`）按“两份 → 只全局 → 只项目 → 都不带”逐级缩小，返回实际装上的文档，被拒的那份只是不出现。这段阶梯在执行进程内跑完，不来回过 link。最后一级是建会话时已被接受的基础 profile，它也被拒属于依赖违约，poison Session。`BUSY` 返回 `SessionNotIdle`；`OUT_OF_MEMORY` 返回 `InstructionsUpdateFailed`，原 profile 不变；`INVALID_STATE`、`CORE_ERROR` 与非法状态码或 diagnostic poison Session；
+- Core 整份拒绝 profile，所以针对文档增量的拒绝按“两份 → 只全局 → 只项目 → 都不带”逐级缩小，返回实际装上的文档，被拒的那份只是不出现。这段阶梯在执行进程内跑完，不来回过 link。会缩小的拒绝有两类：内容拒绝（`INVALID_ARGUMENT`），以及 profile 作为 durable Session state 计入的预算或资源上限（`CHECKPOINT_BUDGET_REQUIRED`、`RESOURCE_LIMIT`）。最后一级是建会话时已被接受的基础 profile：它的内容被拒属于依赖违约，poison Session；它因预算或资源被拒，只说明连基础 profile 也放不下，与其他拒绝一样原 profile 不变，返回 `InstructionsUpdateFailed`。`BUSY` 返回 `SessionNotIdle`；`OUT_OF_MEMORY`、`INTERNAL_ERROR` 返回 `InstructionsUpdateFailed`，原 profile 不变，与 restore 对同样状态的处理一致。`INVALID_STATE`、`CORE_ERROR` 与非法状态码或 diagnostic poison Session，并返回 `SessionPoisoned` 而不是 `InstructionsUpdateFailed`：前者表示 Session 已不可用，调用方不得在其上开轮；后者表示 Session 仍可用、沿用原 profile；
 - 子代理与 isolated Skill 由 ABI 继承 profile，Host 不另行注入；
 - restore 之后、下一轮之前的 manual compact 使用基础 profile，不带用户指令。compact 只生成摘要，这一差异可以接受；
 - 跨执行进程只多一个 link 方法 `set_instructions`，请求是两份可选文档，响应是实际装上了哪几份；create 与 restore 的 link 形状不变。
