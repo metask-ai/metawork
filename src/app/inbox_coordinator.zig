@@ -203,11 +203,15 @@ const Job = struct {
     thread: ?std.Thread = null,
     /// Main thread only: a newer Renderer request replaced this one.
     superseded: bool = false,
+    /// Main thread only: its Renderer request was already answered, when the
+    /// Bridge connection ended; the result is then dropped unsent.
+    replied: bool = false,
     failure: ?inbox.Failure = null,
+    /// The status of an answered request that was not a success.
+    status: ?u16 = null,
     unread: ?inbox.Unread = null,
     page: ?inbox.Messages = null,
     page_limit: u32 = 0,
-    latest: std.ArrayList(inbox.Messages) = .empty,
     detail: ?inbox.Task = null,
 
     fn run(self: *Job) void {
@@ -233,31 +237,14 @@ const Job = struct {
                 };
             },
             .list => |preparation| {
-                const query: inbox.MessagesQuery = switch (preparation.kind) {
+                // Product never prepares a continuation without its anchor;
+                // without one this is a first page, never a crash.
+                const query: inbox.MessagesQuery = if (preparation.anchor) |*anchor| switch (preparation.kind) {
                     .initial => .{},
-                    .newer => .{ .after = preparation.anchor.?.slice() },
-                    .earlier => .{ .before = preparation.anchor.?.slice() },
-                };
-                if (!try self.pageOf(query, inbox.Limits.list_page)) return;
-                // Best effort: an unread conversation the page did not cover
-                // gets its latest message; a failure here leaves it unsummarised.
-                for (preparation.missing) |*peer| {
-                    if (self.pageCovers(peer.slice())) continue;
-                    const buffer = try self.allocator.alloc(u8, inbox.Limits.messages_bytes);
-                    defer self.allocator.free(buffer);
-                    const body = (self.fetch(.{ .messages = .{ .peer = peer.slice(), .limit = 1 } }, buffer) catch break) orelse {
-                        self.failure = null;
-                        break;
-                    };
-                    var latest = inbox.parseMessages(self.allocator, body) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        error.InvalidResponse => break,
-                    };
-                    self.latest.append(self.allocator, latest) catch |err| {
-                        latest.deinit();
-                        return err;
-                    };
-                }
+                    .newer => .{ .after = anchor.slice() },
+                    .earlier => .{ .before = anchor.slice() },
+                } else .{};
+                _ = try self.pageOf(query, inbox.Limits.list_page);
             },
             .conversation => |work| {
                 const query: inbox.MessagesQuery = switch (work.kind) {
@@ -309,13 +296,6 @@ const Job = struct {
         }
     }
 
-    fn pageCovers(self: *const Job, peer: []const u8) bool {
-        const page = self.page orelse return false;
-        for (page.items) |*message| for (message.peers()) |*item|
-            if (item.id.eql(peer)) return true;
-        return false;
-    }
-
     /// The body when the request was answered with success; null when it
     /// failed or was refused, with the failure recorded. `TooLarge` when the
     /// body did not fit.
@@ -330,6 +310,7 @@ const Job = struct {
         };
         if (inbox.statusFailure(response.status)) |failure| {
             self.failure = failure;
+            self.status = response.status;
             // The execution layer logs requests that failed on their way out;
             // an answered refusal is the one it cannot see. Typed facts only.
             std.log.warn("inbox request consumer=inbox request={s} status={d}", .{ @tagName(request), response.status });
@@ -353,10 +334,7 @@ const Job = struct {
         std.debug.assert(self.thread == null);
         if (self.unread) |*value| value.deinit(self.allocator);
         if (self.page) |*value| value.deinit();
-        for (self.latest.items) |*value| value.deinit();
-        self.latest.deinit(self.allocator);
         if (self.detail) |*value| value.deinit();
-        if (self.work == .list) self.allocator.free(self.work.list.missing);
         std.crypto.secureZero(u8, self.key);
         self.allocator.free(self.key);
         self.allocator.free(self.base);
@@ -519,32 +497,54 @@ pub const Coordinator = struct {
 
     fn startList(self: *Coordinator) void {
         if (self.list != null or self.bound == null) return;
-        const preparation = self.management.begin_list_fn(self.management.context, self.allocator) orelse return;
+        const preparation = self.management.begin_list_fn(self.management.context) orelse return;
         self.list = self.startJob(.{ .list = preparation }) catch {
-            self.allocator.free(preparation.missing);
             self.management.complete_list_fn(self.management.context, self.now(), preparation.id, preparation.kind, .{ .failed = .{ .@"unreachable" = null } });
             return;
         };
     }
 
-    /// While the inbox page is open the Renderer asks for a refresh: the
-    /// unread facts and the newer end of the list, regardless of backoff.
-    pub fn refresh(self: *Coordinator, binding: u64) inbox.CommandOutcome {
+    /// While the inbox page is open the Renderer asks for the newer end of
+    /// the list; Product decides whether an automatic ask runs at all. The
+    /// user's explicit retry also reads the unread facts at once, past any
+    /// retry delay or refusal.
+    pub fn refresh(self: *Coordinator, binding: u64, explicit: bool) inbox.CommandOutcome {
         self.assertMain();
         if (self.stopped) return .unavailable;
         if (self.bound == null) {
-            // A credential read that failed is retried now. Without a
-            // connection the open page asks every few seconds, and the
-            // credential store is not read for that: a new or changed
-            // connection is noticed from the MCP generation.
-            if (self.find_retry_at != null) self.observe(true);
+            // Only the user's retry reads the credential store again after a
+            // failed read; the timer retries later by itself, and a new or
+            // changed connection is noticed from the MCP generation.
+            if (explicit and self.find_retry_at != null) self.observe(true);
             self.reconcile();
             return .rejected;
         }
-        const outcome = self.management.request_refresh_fn(self.management.context, binding);
-        if (outcome == .accepted) self.startPoll();
+        const outcome = self.management.request_refresh_fn(self.management.context, self.now(), binding, explicit);
+        if (outcome == .accepted and explicit) self.startPoll();
         self.reconcile();
         return outcome;
+    }
+
+    /// The Bridge connection ended: every pending read is answered now, and
+    /// a result that arrives later is dropped instead of sent.
+    pub fn cancelReads(self: *Coordinator) void {
+        self.assertMain();
+        if (self.conversation_next) |work| respondConversationState(work.reply, work.peer.slice(), .superseded);
+        if (self.task_next) |work| respondTaskState(work.reply, .superseded);
+        self.conversation_next = null;
+        self.task_next = null;
+        if (self.conversation) |job| if (!job.replied) {
+            respondConversationState(job.work.conversation.reply, job.work.conversation.peer.slice(), .superseded);
+            job.replied = true;
+            job.superseded = true;
+            job.cancellation.cancel();
+        };
+        if (self.task) |job| if (!job.replied) {
+            respondTaskState(job.work.task.reply, .superseded);
+            job.replied = true;
+            job.superseded = true;
+            job.cancellation.cancel();
+        };
     }
 
     pub fn loadEarlier(self: *Coordinator, binding: u64) inbox.CommandOutcome {
@@ -585,10 +585,12 @@ pub const Coordinator = struct {
         const work: ConversationWork = .{ .reply = target, .peer = peer, .kind = request.kind, .anchor = anchor };
         if (self.conversation_next) |previous| respondConversationState(previous.reply, previous.peer.slice(), .superseded);
         self.conversation_next = work;
-        if (self.conversation) |job| {
+        if (self.conversation) |job| if (!job.replied) {
+            respondConversationState(job.work.conversation.reply, job.work.conversation.peer.slice(), .superseded);
+            job.replied = true;
             job.superseded = true;
             job.cancellation.cancel();
-        }
+        };
         self.reconcile();
         return true;
     }
@@ -597,6 +599,7 @@ pub const Coordinator = struct {
         self.assertMain();
         const target = reply(responder, bridge_id, request.binding, request.request_id) orelse return false;
         const task = inbox.Id.init(request.task) catch return false;
+        if (!inbox.validTaskId(task.slice())) return false;
         const state: ?inbox.TaskState = if (self.stopped or self.bound == null)
             .unavailable
         else if (!self.management.accepts_fn(self.management.context, request.binding))
@@ -609,10 +612,12 @@ pub const Coordinator = struct {
         }
         if (self.task_next) |previous| respondTaskState(previous.reply, .superseded);
         self.task_next = .{ .reply = target, .task = task };
-        if (self.task) |job| {
+        if (self.task) |job| if (!job.replied) {
+            respondTaskState(job.work.task.reply, .superseded);
+            job.replied = true;
             job.superseded = true;
             job.cancellation.cancel();
-        }
+        };
         self.reconcile();
         return true;
     }
@@ -644,18 +649,20 @@ pub const Coordinator = struct {
             job.join();
             self.conversation = null;
             const work = job.work.conversation;
-            if (job.superseded) {
+            if (job.replied) {
+                // Already answered; nothing is sent twice.
+            } else if (job.superseded) {
                 respondConversationState(work.reply, work.peer.slice(), .superseded);
             } else if (!self.management.accepts_fn(self.management.context, work.reply.binding)) {
                 // The connection changed while the request ran.
                 respondConversationState(work.reply, work.peer.slice(), .stale_binding);
             } else if (job.page) |page| {
-                self.management.complete_conversation_fn(self.management.context, now_ms, work.reply.binding, work.kind, page.items, null);
+                self.management.complete_conversation_fn(self.management.context, work.reply.binding, work.peer.slice(), work.kind, page.items);
                 self.respondConversation(work, page.items, job.page_limit);
             } else {
-                const failure = job.failure orelse inbox.Failure{ .@"unreachable" = null };
-                self.management.complete_conversation_fn(self.management.context, now_ms, work.reply.binding, work.kind, null, failure);
-                respondConversationState(work.reply, work.peer.slice(), failureState(inbox.ConversationState, failure));
+                // This request's own outcome; the connection state is the
+                // unread and list requests' to decide.
+                respondConversationState(work.reply, work.peer.slice(), requestState(inbox.ConversationState, job.status));
             }
             job.destroy();
         };
@@ -663,16 +670,16 @@ pub const Coordinator = struct {
             job.join();
             self.task = null;
             const work = job.work.task;
-            if (job.superseded) {
+            if (job.replied) {
+                // Already answered; nothing is sent twice.
+            } else if (job.superseded) {
                 respondTaskState(work.reply, .superseded);
             } else if (!self.management.accepts_fn(self.management.context, work.reply.binding)) {
                 respondTaskState(work.reply, .stale_binding);
             } else if (job.detail) |*detail| {
                 self.respondTask(work, detail);
             } else {
-                const failure = job.failure orelse inbox.Failure{ .@"unreachable" = null };
-                self.management.complete_task_fn(self.management.context, now_ms, work.reply.binding, failure);
-                respondTaskState(work.reply, failureState(inbox.TaskState, failure));
+                respondTaskState(work.reply, requestState(inbox.TaskState, job.status));
             }
             job.destroy();
         };
@@ -683,11 +690,7 @@ pub const Coordinator = struct {
             self.management.complete_list_fn(self.management.context, now_ms, preparation.id, preparation.kind, .{ .failed = job.failure orelse .{ .@"unreachable" = null } });
             return;
         };
-        var latest: std.ArrayList(inbox.Message) = .empty;
-        defer latest.deinit(self.allocator);
-        for (job.latest.items) |*messages| if (messages.items.len != 0)
-            latest.append(self.allocator, messages.items[messages.items.len - 1]) catch break;
-        self.management.complete_list_fn(self.management.context, now_ms, preparation.id, preparation.kind, .{ .page = .{ .messages = page.items, .limit = job.page_limit, .latest = latest.items } });
+        self.management.complete_list_fn(self.management.context, now_ms, preparation.id, preparation.kind, .{ .page = .{ .messages = page.items, .limit = job.page_limit } });
     }
 
     fn reconcile(self: *Coordinator) void {
@@ -699,14 +702,14 @@ pub const Coordinator = struct {
             if (self.conversation == null) if (self.conversation_next) |work| {
                 self.conversation_next = null;
                 self.conversation = self.startJob(.{ .conversation = work }) catch blk: {
-                    respondConversationState(work.reply, work.peer.slice(), .@"unreachable");
+                    respondConversationState(work.reply, work.peer.slice(), .failed);
                     break :blk null;
                 };
             };
             if (self.task == null) if (self.task_next) |work| {
                 self.task_next = null;
                 self.task = self.startJob(.{ .task = work }) catch blk: {
-                    respondTaskState(work.reply, .@"unreachable");
+                    respondTaskState(work.reply, .failed);
                     break :blk null;
                 };
             };
@@ -741,11 +744,11 @@ pub const Coordinator = struct {
         inline for (.{ "poll", "list", "conversation", "task" }) |name| if (@field(self, name)) |job| job.cancellation.cancel();
         inline for (.{ "poll", "list", "conversation", "task" }) |name| if (@field(self, name)) |job| {
             job.join();
-            switch (job.work) {
+            if (!job.replied) switch (job.work) {
                 .conversation => |work| respondConversationState(work.reply, work.peer.slice(), .unavailable),
                 .task => |work| respondTaskState(work.reply, .unavailable),
                 else => {},
-            }
+            };
             job.destroy();
             @field(self, name) = null;
         };
@@ -765,15 +768,15 @@ pub const Coordinator = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const output = arena.allocator().alloc(u8, native_sdk.bridge.max_result_bytes - 256) catch {
-            respondConversationState(work.reply, work.peer.slice(), .@"unreachable");
+            respondConversationState(work.reply, work.peer.slice(), .failed);
             return;
         };
         const views = messageViews(arena.allocator(), messages) catch {
-            respondConversationState(work.reply, work.peer.slice(), .@"unreachable");
+            respondConversationState(work.reply, work.peer.slice(), .failed);
             return;
         };
         const json = fitConversationPage(output, work, views, messages.len >= limit) orelse {
-            respondConversationState(work.reply, work.peer.slice(), .@"unreachable");
+            respondConversationState(work.reply, work.peer.slice(), .failed);
             return;
         };
         work.reply.responder.success(work.reply.bridge_id.slice(), json) catch {};
@@ -783,7 +786,7 @@ pub const Coordinator = struct {
     /// description is cut, the one field that can be long.
     fn respondTask(self: *Coordinator, work: TaskWork, detail: *const inbox.Task) void {
         const output = self.allocator.alloc(u8, native_sdk.bridge.max_result_bytes - 256) catch
-            return respondTaskState(work.reply, .@"unreachable");
+            return respondTaskState(work.reply, .failed);
         defer self.allocator.free(output);
         var view: inbox.TaskView = .{
             .id = if (detail.id) |*id| id.slice() else work.task.slice(),
@@ -806,16 +809,17 @@ pub const Coordinator = struct {
                 work.reply.responder.success(work.reply.bridge_id.slice(), writer.buffered()) catch {};
                 return;
             } else |_| {}
-            const description = view.description orelse return respondTaskState(work.reply, .@"unreachable");
+            const description = view.description orelse return respondTaskState(work.reply, .failed);
             view.description = if (description.len == 0) null else inbox.utf8Prefix(description, description.len / 2);
         }
     }
 };
 
-fn failureState(comptime State: type, failure: inbox.Failure) State {
-    return switch (failure) {
-        .reauthorize => .reauthorize,
-        .@"unreachable" => .@"unreachable",
+fn requestState(comptime State: type, status: ?u16) State {
+    return switch (inbox.requestFailure(status)) {
+        .forbidden => .forbidden,
+        .not_found => .not_found,
+        .failed => .failed,
     };
 }
 
@@ -932,7 +936,6 @@ const TestManagement = struct {
             .knows_peer_fn = knowsPeer,
             .accepts_fn = accepts,
             .complete_conversation_fn = completeConversation,
-            .complete_task_fn = completeTask,
             .stop_fn = stop,
         };
     }
@@ -963,14 +966,14 @@ const TestManagement = struct {
     fn completePoll(context: *anyopaque, now_ms: u64, wall_ms: u64, id: u64, completion: inbox.PollCompletion) void {
         _ = of(context).completePoll(now_ms, wall_ms, id, completion) catch unreachable;
     }
-    fn requestRefresh(context: *anyopaque, binding: u64) inbox.CommandOutcome {
-        return of(context).requestRefresh(binding);
+    fn requestRefresh(context: *anyopaque, now_ms: u64, binding: u64, explicit: bool) inbox.CommandOutcome {
+        return of(context).requestRefresh(now_ms, binding, explicit);
     }
     fn requestEarlier(context: *anyopaque, binding: u64) inbox.CommandOutcome {
         return of(context).requestEarlier(binding);
     }
-    fn beginList(context: *anyopaque, allocator: std.mem.Allocator) ?inbox.ListPreparation {
-        return of(context).beginList(allocator) catch unreachable;
+    fn beginList(context: *anyopaque) ?inbox.ListPreparation {
+        return of(context).beginList();
     }
     fn completeList(context: *anyopaque, now_ms: u64, id: u64, kind: inbox.ListKind, completion: inbox.ListCompletion) void {
         _ = of(context).completeList(now_ms, id, kind, completion) catch unreachable;
@@ -981,11 +984,8 @@ const TestManagement = struct {
     fn accepts(context: *anyopaque, binding: u64) bool {
         return of(context).accepts(binding);
     }
-    fn completeConversation(context: *anyopaque, now_ms: u64, binding: u64, kind: inbox.ConversationPageKind, messages: ?[]const inbox.Message, failure: ?inbox.Failure) void {
-        _ = of(context).completeConversation(now_ms, binding, kind, messages, failure) catch unreachable;
-    }
-    fn completeTask(context: *anyopaque, now_ms: u64, binding: u64, failure: ?inbox.Failure) void {
-        _ = of(context).completeTask(now_ms, binding, failure) catch unreachable;
+    fn completeConversation(context: *anyopaque, binding: u64, peer: []const u8, kind: inbox.ConversationPageKind, messages: []const inbox.Message) void {
+        _ = of(context).completeConversation(binding, peer, kind, messages) catch unreachable;
     }
     fn stop(context: *anyopaque) void {
         of(context).stop();
@@ -1049,6 +1049,11 @@ const TestTransport = struct {
     count: usize = 0,
     keys_ok: bool = true,
     status: u16 = 200,
+    /// Answers for one task or one member's conversation only.
+    task_status: u16 = 200,
+    peer_status: u16 = 200,
+    /// Holds every request until cleared, to keep a job in flight.
+    block: std.atomic.Value(bool) = .init(false),
     /// Answers with `ResponseTooLarge` while the requested limit is above this.
     fits_limit: u32 = std.math.maxInt(u32),
     unread: []const u8 = "{\"data\":{\"unread\":2,\"byPeer\":[{\"peer\":{\"id\":\"ann\",\"name\":\"Ann\"},\"unread\":2}]}}",
@@ -1060,6 +1065,7 @@ const TestTransport = struct {
     }
     fn perform(context: *anyopaque, target: http.Target, request: inbox.Request, output: []u8, _: *const http.Cancellation, _: *?inbox.Diagnostic) http.Error!http.Response {
         const self: *TestTransport = @ptrCast(@alignCast(context));
+        while (self.block.load(.acquire)) std.Thread.yield() catch {};
         self.mutex.lockUncancelable(testing.io);
         defer self.mutex.unlock(testing.io);
         if (!std.mem.eql(u8, target.key, sentinel_key)) self.keys_ok = false;
@@ -1070,6 +1076,8 @@ const TestTransport = struct {
             self.count += 1;
         }
         if (self.status != 200) return .{ .status = self.status };
+        if (request == .task and self.task_status != 200) return .{ .status = self.task_status };
+        if (request == .messages and request.messages.peer != null and self.peer_status != 200) return .{ .status = self.peer_status };
         if (request == .messages) if (request.messages.limit) |limit| if (limit > self.fits_limit) return error.ResponseTooLarge;
         const body = switch (request) {
             .unread => self.unread,
@@ -1192,7 +1200,10 @@ test "inbox coordinator: a refused key stops background polling until the user r
     try testing.expect(fixture.host.timer_ms == null);
     const binding = fixture.view().binding.value;
     fixture.transport.status = 200;
-    try testing.expectEqual(inbox.CommandOutcome.accepted, fixture.coordinator.refresh(binding));
+    // The page's automatic refresh respects the refusal; the user's retry does not.
+    try testing.expectEqual(inbox.CommandOutcome.rejected, fixture.coordinator.refresh(binding, false));
+    try testing.expect(fixture.coordinator.poll == null);
+    try testing.expectEqual(inbox.CommandOutcome.accepted, fixture.coordinator.refresh(binding, true));
     fixture.settle();
     try testing.expectEqual(inbox.State.ready, fixture.view().state);
 
@@ -1205,7 +1216,8 @@ test "inbox coordinator: a refused key stops background polling until the user r
     // Without a connection the open page keeps asking; the credential store
     // is not read for that.
     const quiet = fixture.source.finds;
-    try testing.expectEqual(inbox.CommandOutcome.rejected, fixture.coordinator.refresh(fixture.view().binding.value));
+    try testing.expectEqual(inbox.CommandOutcome.rejected, fixture.coordinator.refresh(fixture.view().binding.value, false));
+    try testing.expectEqual(inbox.CommandOutcome.rejected, fixture.coordinator.refresh(fixture.view().binding.value, true));
     try testing.expectEqual(quiet, fixture.source.finds);
 
     // A credential that cannot be read is reported and looked for again.
@@ -1214,8 +1226,11 @@ test "inbox coordinator: a refused key stops background polling until the user r
     fixture.coordinator.drain();
     try testing.expectEqual(inbox.State.@"unreachable", fixture.view().state);
     const finds = fixture.source.finds;
-    // The user retries at once; the timer retries later by itself.
-    _ = fixture.coordinator.refresh(fixture.view().binding.value);
+    // The page's automatic refresh does not read the store again; the
+    // user's retry does at once, and the timer later by itself.
+    _ = fixture.coordinator.refresh(fixture.view().binding.value, false);
+    try testing.expectEqual(finds, fixture.source.finds);
+    _ = fixture.coordinator.refresh(fixture.view().binding.value, true);
     try testing.expectEqual(finds + 1, fixture.source.finds);
     fixture.source.result = .found;
     fixture.host.now_ms += find_retry_ms;
@@ -1232,7 +1247,7 @@ test "inbox coordinator: list pages shrink until they fit, and conversations and
     fixture.settle();
     const binding = fixture.view().binding.value;
     fixture.transport.fits_limit = 50;
-    try testing.expectEqual(inbox.CommandOutcome.accepted, fixture.coordinator.refresh(binding));
+    try testing.expectEqual(inbox.CommandOutcome.accepted, fixture.coordinator.refresh(binding, false));
     fixture.settle();
     try testing.expect(fixture.view().conversationsLoaded);
     try testing.expectEqualStrings("ann", fixture.view().conversations[0].peerId);
@@ -1306,5 +1321,172 @@ test "inbox coordinator: the newest matching MCP connection is MetaTeam; others 
     }
     const none_states = [_]mcp_configuration.ServerPreparationState{ .disabled, .unapproved, .disabled, .eligible };
     result = selectDeviceEndpoint(testing.allocator, &servers, &none_states, &.{});
+    try testing.expect(result == .none);
+}
+
+test "inbox coordinator: an empty first page and a refresh after it start over" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.transport.messages = "{\"data\":{\"messages\":[]}}";
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    try testing.expectEqual(inbox.CommandOutcome.accepted, fixture.coordinator.refresh(binding, false));
+    fixture.settle();
+    try testing.expect(fixture.view().conversationsLoaded);
+    try testing.expectEqual(inbox.CommandOutcome.accepted, fixture.coordinator.refresh(binding, false));
+    fixture.settle();
+    var first_pages: usize = 0;
+    for (0..fixture.transport.count) |index| {
+        const value = fixture.transport.url(index);
+        if (std.mem.endsWith(u8, value, "messages?limit=200")) first_pages += 1;
+        try testing.expect(std.mem.indexOf(u8, value, "afterId") == null);
+    }
+    try testing.expectEqual(@as(usize, 2), first_pages);
+}
+
+test "inbox coordinator: a refused task or conversation answers that request only" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    _ = fixture.coordinator.refresh(binding, false);
+    fixture.settle();
+    const responder = fixture.capture.responder();
+    for ([_]struct { u16, []const u8 }{ .{ 403, "forbidden" }, .{ 401, "forbidden" }, .{ 404, "not_found" }, .{ 500, "failed" } }) |case| {
+        fixture.transport.task_status = case[0];
+        try testing.expect(fixture.coordinator.readTask(responder, "t", .{ .binding = binding, .request_id = 1, .task = "13066" }));
+        fixture.settle();
+        var expected: [64]u8 = undefined;
+        try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), try std.fmt.bufPrint(&expected, "\"state\":\"{s}\"", .{case[1]})) != null);
+        try testing.expectEqual(inbox.State.ready, fixture.view().state);
+        try testing.expectEqual(@as(u64, 2), fixture.view().unreadTotal.?.value);
+        try testing.expect(fixture.management.runtime.nextPoll() != null);
+    }
+    fixture.transport.task_status = 200;
+    fixture.transport.peer_status = 404;
+    try testing.expect(fixture.coordinator.readConversation(responder, "c", .{ .binding = binding, .request_id = 2, .peer = "ann", .kind = .latest, .anchor = null }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"not_found\"") != null);
+    try testing.expectEqual(inbox.State.ready, fixture.view().state);
+    // A dot segment never becomes a task path.
+    try testing.expect(!fixture.coordinator.readTask(responder, "t", .{ .binding = binding, .request_id = 3, .task = ".." }));
+}
+
+test "inbox coordinator: a new connection waits for the old request and drops its result" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const first = fixture.view().binding.value;
+    fixture.transport.block.store(true, .release);
+    _ = fixture.coordinator.refresh(first, true);
+    const old = fixture.coordinator.poll.?;
+    // The connection is replaced while the poll is still running.
+    fixture.source.fingerprint = @splat('b');
+    fixture.source.generation = 2;
+    fixture.coordinator.drain();
+    try testing.expect(fixture.view().binding.value != first);
+    try testing.expectEqual(inbox.State.checking, fixture.view().state);
+    try testing.expectEqual(old, fixture.coordinator.poll.?);
+    fixture.transport.block.store(false, .release);
+    old.join();
+    // The old result is dropped; the new connection's poll starts after it.
+    fixture.coordinator.drain();
+    try testing.expectEqual(inbox.State.checking, fixture.view().state);
+    try testing.expect(fixture.coordinator.poll != null);
+    fixture.settle();
+    try testing.expectEqual(inbox.State.ready, fixture.view().state);
+}
+
+test "inbox coordinator: a closed Bridge connection answers pending reads once" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    _ = fixture.coordinator.refresh(binding, false);
+    fixture.settle();
+    fixture.transport.block.store(true, .release);
+    const responder = fixture.capture.responder();
+    try testing.expect(fixture.coordinator.readConversation(responder, "c", .{ .binding = binding, .request_id = 7, .peer = "ann", .kind = .latest, .anchor = null }));
+    try testing.expect(fixture.coordinator.readTask(responder, "t", .{ .binding = binding, .request_id = 8, .task = "13066" }));
+    fixture.coordinator.cancelReads();
+    try testing.expectEqual(@as(usize, 2), fixture.capture.responses.items.len);
+    fixture.transport.block.store(false, .release);
+    fixture.settle();
+    try testing.expectEqual(@as(usize, 2), fixture.capture.responses.items.len);
+    for (fixture.capture.responses.items) |response|
+        try testing.expect(std.mem.indexOf(u8, response, "\"state\":\"superseded\"") != null);
+}
+
+test "inbox coordinator: the MCP source resolves a sensitive MetaTeam endpoint through the credential store" {
+    const harness = try native_sdk.TestHarness().create(testing.allocator, .{});
+    defer harness.destroy(testing.allocator);
+    var store: mcp_platform.CredentialStore = .{ .io = testing.io, .runtime = &harness.runtime, .main_thread_id = std.Thread.getCurrentId() };
+    const locator = "mcp/endpoint-1";
+    const url = "http://192.0.2.10:8080/team/agent/v1/mcp/k/" ++ sentinel_key;
+    const effects = store.effects();
+    try testing.expect(effects.create_fn(effects.context, locator, url));
+
+    var server: mcp_configuration.ServerWire = .{
+        .id = "server-1",
+        .namespace = "metateam",
+        .display_name = "MetaTeam",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 30_000,
+        .transport = .{ .kind = "streamable_http", .sensitive_endpoint = .{ .origin = "http://192.0.2.10:8080", .identity = locator, .credential_refs = &.{locator} } },
+        .auth = .{ .kind = "none", .oauth = null },
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    const fingerprint = mcp_configuration.connectionFingerprint(server);
+    server.connection_approval = .{ .fingerprint = &fingerprint };
+    var servers = [_]mcp_configuration.ServerWire{server};
+    var storage: [16 * 1024]u8 = undefined;
+    const bytes = try mcp_configuration.encode(&storage, .{ .schema_version = mcp_configuration.schema_version, .generation = 1, .oauth_operation = null, .servers = &servers }, mcp_startup.configuration_limits);
+
+    const Port = struct {
+        bytes: []const u8,
+        fn inspect(_: *anyopaque) ?mcp_configuration.ManagementInspection {
+            return .{ .health = .ready, .desired_generation = 1, .runtime_alignment = .current, .server_count = 1 };
+        }
+        fn write(context: *anyopaque, generation: u64, output: []u8) anyerror![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (generation != 1) return error.McpManagementUnavailable;
+            @memcpy(output[0..self.bytes.len], self.bytes);
+            return output[0..self.bytes.len];
+        }
+    };
+    var port_state: Port = .{ .bytes = bytes };
+    // Only the two capabilities the source uses are reachable.
+    var port: control_ports.McpManagementPort = undefined;
+    port.context = &port_state;
+    port.inspect_fn = Port.inspect;
+    port.write_desired_fn = Port.write;
+    var mcp: McpSource = .{ .port = port, .credential_store = &store };
+    const source = mcp.source();
+    try testing.expectEqual(@as(?u64, 1), source.generation_fn(source.context));
+    var result = source.find_fn(source.context, testing.allocator, 1);
+    switch (result) {
+        .found => |*found| {
+            defer found.release(testing.allocator);
+            try testing.expectEqualStrings("server-1", found.server_id);
+            try testing.expectEqualStrings("http://192.0.2.10:8080/team", found.base);
+            try testing.expectEqualStrings(sentinel_key, found.key);
+            try testing.expectEqualSlices(u8, &fingerprint, &found.fingerprint);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // A disabled connection is not MetaTeam for the inbox.
+    servers[0].enabled = false;
+    port_state.bytes = try mcp_configuration.encode(&storage, .{ .schema_version = mcp_configuration.schema_version, .generation = 1, .oauth_operation = null, .servers = &servers }, mcp_startup.configuration_limits);
+    result = source.find_fn(source.context, testing.allocator, 1);
     try testing.expect(result == .none);
 }

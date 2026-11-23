@@ -34,10 +34,12 @@ export type InboxClient = Pick<
   | "readInboxTask"
 >;
 
-type ConversationFailure = "reauthorize" | "unreachable" | "unavailable";
+/** One read's own outcome; the connection state stays the list's. */
+type ConversationFailure = "forbidden" | "not_found" | "failed" | "unavailable";
 
 export type OpenedConversation = {
   peerId: string;
+  name: string;
   messages: readonly InboxMessage[];
   hasEarlier: boolean;
   loading: boolean;
@@ -46,7 +48,7 @@ export type OpenedConversation = {
 
 export type OpenedTask = {
   taskId: string;
-  status: "loading" | "ready" | "failed";
+  status: "loading" | "ready" | "forbidden" | "not_found" | "failed";
   task: InboxTaskDetail["task"];
 };
 
@@ -99,9 +101,11 @@ export function useInbox(
 
   useEffect(() => {
     if (!open || disabled) return;
+    // An automatic refresh: the Host skips it in the background, while
+    // refused and before a failure's retry delay.
     const tick = () => {
       if (document.visibilityState !== "visible") return;
-      void client.refreshInbox(binding).catch(() => undefined);
+      void client.refreshInbox(binding, false).catch(() => undefined);
     };
     tick();
     const timer = window.setInterval(tick, inboxRefreshMs);
@@ -123,6 +127,7 @@ export function useInbox(
           ? { ...current, loading: true }
           : {
               peerId,
+              name: peerId,
               messages: [],
               hasEarlier: false,
               loading: true,
@@ -146,7 +151,7 @@ export function useInbox(
       setConversation((current) => {
         if (current?.peerId !== peerId) return current;
         if (answer === null)
-          return { ...current, loading: false, failure: "unreachable" };
+          return { ...current, loading: false, failure: "failed" };
         switch (answer.state) {
           case "superseded":
           case "stale_binding":
@@ -154,7 +159,7 @@ export function useInbox(
           case "ready":
             if (page === "latest")
               return {
-                peerId,
+                ...current,
                 messages: answer.messages,
                 hasEarlier: answer.hasEarlier,
                 loading: false,
@@ -209,10 +214,18 @@ export function useInbox(
     selectedId,
     conversation,
     task,
-    select(peerId: string) {
+    select(peerId: string, name: string) {
       setSelectedId(peerId);
       setTask(null);
       followed.current = null;
+      setConversation({
+        peerId,
+        name,
+        messages: [],
+        hasEarlier: false,
+        loading: true,
+        failure: null,
+      });
       void read(peerId, "latest", null);
     },
     loadEarlierMessages() {
@@ -223,8 +236,9 @@ export function useInbox(
     loadEarlierConversations() {
       void client.loadEarlierInbox(binding).catch(() => undefined);
     },
+    /** The user's own retry: past any retry delay or refusal. */
     retry() {
-      void client.refreshInbox(binding).catch(() => undefined);
+      void client.refreshInbox(binding, true).catch(() => undefined);
       if (conversation?.failure) void read(conversation.peerId, "latest", null);
     },
     async openTask(taskId: string) {
@@ -238,9 +252,13 @@ export function useInbox(
       setTask((current) => {
         if (current?.taskId !== taskId) return current;
         if (detail?.state === "superseded") return current;
-        return detail?.state === "ready"
-          ? { taskId, status: "ready", task: detail.task }
-          : { taskId, status: "failed", task: null };
+        if (detail?.state === "ready")
+          return { taskId, status: "ready", task: detail.task };
+        const status =
+          detail?.state === "forbidden" || detail?.state === "not_found"
+            ? detail.state
+            : "failed";
+        return { taskId, status, task: null };
       });
     },
     closeTask() {
@@ -483,7 +501,7 @@ export function InboxSidebar({
               conversation={conversation}
               selected={controller.selectedId === conversation.peerId}
               onSelect={() => {
-                controller.select(conversation.peerId);
+                controller.select(conversation.peerId, conversation.name);
                 onSelected?.();
               }}
             />
@@ -595,9 +613,15 @@ function InboxTaskDialog({
               {t("inbox.task_loading")}
             </Dialog.Description>
           )}
-          {task?.status === "failed" && (
+          {(task?.status === "failed" ||
+            task?.status === "forbidden" ||
+            task?.status === "not_found") && (
             <Dialog.Description className="inbox-task-description">
-              {t("inbox.task_failed")}
+              {task.status === "forbidden"
+                ? t("inbox.task_forbidden")
+                : task.status === "not_found"
+                  ? t("inbox.task_not_found")
+                  : t("inbox.task_failed")}
             </Dialog.Description>
           )}
           {detail && (
@@ -690,9 +714,11 @@ function InboxConversationView({
         {conversation.failure && (
           <div className="inbox-banner" role="status">
             <span>
-              {conversation.failure === "reauthorize"
-                ? t("inbox.reauthorize")
-                : t("inbox.conversation_failed")}
+              {conversation.failure === "forbidden"
+                ? t("inbox.conversation_forbidden")
+                : conversation.failure === "not_found"
+                  ? t("inbox.conversation_not_found")
+                  : t("inbox.conversation_failed")}
             </span>
             <Button type="button" size="sm" variant="ghost" onClick={onRetry}>
               {t("inbox.retry")}
@@ -849,9 +875,6 @@ export function InboxMain({
         {diagnostic}
       </InboxNotice>
     );
-  const selected = inbox.conversations.find(
-    (conversation) => conversation.peerId === controller.selectedId,
-  );
   return (
     <>
       {stale && (
@@ -876,9 +899,9 @@ export function InboxMain({
           {diagnostic}
         </div>
       )}
-      {controller.conversation && selected ? (
+      {controller.conversation ? (
         <InboxConversationView
-          name={selected.name}
+          name={controller.conversation.name}
           conversation={controller.conversation}
           onLoadEarlier={controller.loadEarlierMessages}
           onOpenTask={(taskId) => void controller.openTask(taskId)}

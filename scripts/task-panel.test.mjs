@@ -8676,6 +8676,11 @@ test("App shows the disconnected inbox and keeps workbench navigation state", as
   screen.getByRole("heading", { name: "MetaTeam messaging is not connected" });
   assert.equal(screen.queryByRole("textbox", { name: /^Reply to / }), null);
   assert.equal(document.querySelector(".commandbar-task"), null);
+  assert.equal(
+    screen.queryByRole("navigation", { name: "Workbench tools" }),
+    null,
+  );
+  assert.equal(screen.queryByRole("button", { name: /side panel/i }), null);
   assertTaskPanelShellHidden();
 
   fireEvent.click(workbench);

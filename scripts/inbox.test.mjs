@@ -126,12 +126,12 @@ function message(id, direction, text, taskIds = []) {
   };
 }
 
-function fakeClient({ pages = {}, task } = {}) {
+function fakeClient({ pages = {}, task, taskState } = {}) {
   const calls = [];
   return {
     calls,
-    async refreshInbox(binding) {
-      calls.push(["refresh", binding]);
+    async refreshInbox(binding, explicit) {
+      calls.push(["refresh", binding, explicit]);
       return { outcome: "accepted" };
     },
     async loadEarlierInbox(binding) {
@@ -158,7 +158,7 @@ function fakeClient({ pages = {}, task } = {}) {
       return {
         binding,
         requestId: String(calls.length),
-        state: task ? "ready" : "unreachable",
+        state: task ? "ready" : (taskState ?? "failed"),
         task: task ?? null,
       };
     },
@@ -245,10 +245,12 @@ test("each connection state says what is wrong and what can be done", async () =
   assert.ok(screen.getByText("Reconnect MetaTeam or confirm this device"));
   const before = client.calls.filter(([kind]) => kind === "refresh").length;
   await user.click(screen.getByRole("button", { name: "Retry" }));
+  // Retry is the user's own: it passes the background rules.
   assert.equal(
     client.calls.filter(([kind]) => kind === "refresh").length,
     before + 1,
   );
+  assert.deepEqual(client.calls.at(-1), ["refresh", "1", true]);
 
   rerender(
     element(
@@ -307,7 +309,10 @@ test("the open inbox refreshes, and a conversation is read only when it is opene
   closed.unmount();
 
   render(element(client, view()));
-  await waitFor(() => assert.deepEqual(client.calls[0], ["refresh", "1"]));
+  // The page's own refresh is automatic, so the Host keeps its rules.
+  await waitFor(() =>
+    assert.deepEqual(client.calls[0], ["refresh", "1", false]),
+  );
   assert.ok(screen.getByText("You: Done"));
   assert.ok(screen.getByText("Select a conversation"));
   assert.equal(client.calls.filter(([kind]) => kind === "read").length, 0);
@@ -398,4 +403,39 @@ test("the conversation list asks for earlier conversations at its end", async ()
     ),
   );
   assert.ok(screen.getByText("Loading conversations…"));
+});
+
+test("a refused task or a missing conversation is shown where it was asked for", async () => {
+  const user = userEvent.setup({ document });
+  const client = fakeClient({
+    taskState: "forbidden",
+    pages: {
+      "ann:latest:null": {
+        messages: [message("12", "in", "See the task", ["13066"])],
+      },
+      "bob:latest:null": { state: "not_found", messages: [] },
+    },
+  });
+  render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await waitFor(() =>
+    assert.equal(document.querySelectorAll(".inbox-bubble").length, 1),
+  );
+  await user.click(screen.getByRole("button", { name: /Task #13066/ }));
+  await waitFor(() =>
+    assert.ok(screen.getByText("This device may not view this task.")),
+  );
+  // The rest of the inbox is untouched.
+  assert.equal(
+    document.querySelector(".primary-navigation-unread").textContent,
+    "3",
+  );
+  await user.keyboard("{Escape}");
+
+  await user.click(screen.getByRole("button", { name: "Bob" }));
+  await waitFor(() =>
+    assert.ok(screen.getByText("MetaTeam can't find this conversation")),
+  );
+  assert.ok(screen.getByRole("heading", { name: "Bob" }));
+  assert.ok(screen.getByRole("button", { name: "Messages, 3 unread" }));
 });

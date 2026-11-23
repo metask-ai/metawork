@@ -304,9 +304,9 @@ export class BridgeClient {
     );
   }
   /** Asks the Host for the unread facts and newer conversations now. */
-  async refreshInbox(binding: string) {
+  async refreshInbox(binding: string, explicit: boolean) {
     return decodeInboxCommandResult(
-      await this.invoke(commands.inboxRefresh, { binding }),
+      await this.invoke(commands.inboxRefresh, { binding, explicit }),
     );
   }
   /** Extends the conversation list with earlier conversations. */
@@ -315,10 +315,15 @@ export class BridgeClient {
       await this.invoke(commands.inboxLoadEarlier, { binding }),
     );
   }
-  private inboxRequestId() {
+  private inboxRequest() {
+    const connection = this.attachmentConnection;
+    if (!connection) throw new Error("Host connection is unavailable");
     if (this.nextInboxRequest > 18446744073709551615n)
       throw new Error("Inbox request identity exhausted");
-    return String(this.nextInboxRequest++);
+    return {
+      generation: connection.generation,
+      requestId: String(this.nextInboxRequest++),
+    };
   }
   /**
    * One page of a conversation the user opened: the latest messages, the
@@ -330,9 +335,10 @@ export class BridgeClient {
     page: "latest" | "before" | "after",
     anchorId: string | null,
   ): Promise<InboxConversationPage> {
-    const requestId = this.inboxRequestId();
+    const { generation, requestId } = this.inboxRequest();
     const result = decodeInboxConversationPage(
       await this.invoke(commands.inboxReadConversation, {
+        generation,
         binding,
         requestId,
         peerId,
@@ -356,9 +362,14 @@ export class BridgeClient {
     binding: string,
     taskId: string,
   ): Promise<InboxTaskDetail> {
-    const requestId = this.inboxRequestId();
+    const { generation, requestId } = this.inboxRequest();
     const result = decodeInboxTaskDetail(
-      await this.invoke(commands.inboxReadTask, { binding, requestId, taskId }),
+      await this.invoke(commands.inboxReadTask, {
+        generation,
+        binding,
+        requestId,
+        taskId,
+      }),
     );
     if (result.binding !== binding || result.requestId !== requestId)
       throw new RendererBridgeContractError(

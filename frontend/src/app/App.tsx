@@ -5443,7 +5443,9 @@ export default function App() {
               unread={inboxUnread(snapshot.inbox)}
               onOpen={() => {
                 openWorkbenchPage("inbox");
-                dismissDrawer();
+                // A narrow window keeps the drawer open on the conversation
+                // list; with nothing to list it shows the inbox state instead.
+                if (snapshot.inbox.state === "unavailable") dismissDrawer();
               }}
             />
           </nav>

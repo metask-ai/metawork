@@ -218,6 +218,8 @@ export const enUS = {
   "inbox.loading_messages": "Loading messages…",
   "inbox.load_earlier_messages": "Load earlier messages",
   "inbox.conversation_failed": "This conversation can't be read right now",
+  "inbox.conversation_forbidden": "This device may not read this conversation",
+  "inbox.conversation_not_found": "MetaTeam can't find this conversation",
   "inbox.conversation_unread": "{name}, {count} unread",
   "inbox.pick_conversation": "Select a conversation",
   "inbox.pick_hint":
@@ -232,6 +234,9 @@ export const enUS = {
   "inbox.task_number": "Task #{id}",
   "inbox.task_loading": "Reading the task…",
   "inbox.task_failed": "This task can't be read right now.",
+  "inbox.task_forbidden": "This device may not view this task.",
+  "inbox.task_not_found":
+    "MetaTeam can't find this task; it may have been deleted.",
   "inbox.task_id": "Number",
   "inbox.task_status": "Progress",
   "inbox.task_assignees": "Assignees",

@@ -267,7 +267,14 @@ pub const InboxBinding = struct {
     binding: []const u8,
 };
 
+pub const InboxRefresh = struct {
+    binding: []const u8,
+    /// The user's own retry; an automatic refresh keeps the background rules.
+    explicit: bool,
+};
+
 pub const InboxConversationRead = struct {
+    generation: []const u8,
     binding: []const u8,
     requestId: []const u8,
     peerId: []const u8,
@@ -276,6 +283,7 @@ pub const InboxConversationRead = struct {
 };
 
 pub const InboxTaskRead = struct {
+    generation: []const u8,
     binding: []const u8,
     requestId: []const u8,
     taskId: []const u8,

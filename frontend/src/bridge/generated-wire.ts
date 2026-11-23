@@ -409,8 +409,9 @@ export type InboxConversationPageWire = {
     | "unknown_peer"
     | "superseded"
     | "unavailable"
-    | "reauthorize"
-    | "unreachable";
+    | "forbidden"
+    | "not_found"
+    | "failed";
   peerId: string;
   messages: readonly {
     id: string;
@@ -451,8 +452,9 @@ export function decodeInboxConversationPageWire(
       "unknown_peer",
       "superseded",
       "unavailable",
-      "reauthorize",
-      "unreachable",
+      "forbidden",
+      "not_found",
+      "failed",
     ] as const),
     peerId: stringValue(item.peerId, path + ".peerId"),
     messages: arrayValue(
@@ -515,8 +517,9 @@ export type InboxTaskDetailWire = {
     | "stale_binding"
     | "superseded"
     | "unavailable"
-    | "reauthorize"
-    | "unreachable";
+    | "forbidden"
+    | "not_found"
+    | "failed";
   task: {
     id: string;
     name: string;
@@ -541,8 +544,9 @@ export function decodeInboxTaskDetailWire(
       "stale_binding",
       "superseded",
       "unavailable",
-      "reauthorize",
-      "unreachable",
+      "forbidden",
+      "not_found",
+      "failed",
     ] as const),
     task:
       item.task === null

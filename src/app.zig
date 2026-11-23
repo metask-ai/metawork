@@ -458,7 +458,7 @@ const App = struct {
                 .host = .{ .context = host.context, .now_ns_fn = host.now_fn, .wake_fn = host.wake_fn, .start_timer_fn = host.start_timer_fn, .cancel_timer_fn = host.cancel_timer_fn, .on_main_thread_fn = host.on_main_thread_fn },
             };
             self.inbox.?.start(native_runtime.app_active);
-            self.dispatcher.?.setInboxHost(.{ .context = self, .refresh_fn = refreshInbox, .load_earlier_fn = loadEarlierInbox, .read_conversation_fn = readInboxConversation, .read_task_fn = readInboxTask });
+            self.dispatcher.?.setInboxHost(.{ .context = self, .refresh_fn = refreshInbox, .load_earlier_fn = loadEarlierInbox, .read_conversation_fn = readInboxConversation, .read_task_fn = readInboxTask, .cancel_fn = cancelInboxReads });
         }
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
     }
@@ -475,9 +475,13 @@ const App = struct {
         const self: *App = @ptrCast(@alignCast(context));
         return if (self.updates) |*coordinator| coordinator.openWebsite() else false;
     }
-    fn refreshInbox(context: *anyopaque, binding: u64) product_inbox.CommandOutcome {
+    fn refreshInbox(context: *anyopaque, binding: u64, explicit: bool) product_inbox.CommandOutcome {
         const self: *App = @ptrCast(@alignCast(context));
-        return if (self.inbox) |*coordinator| coordinator.refresh(binding) else .unavailable;
+        return if (self.inbox) |*coordinator| coordinator.refresh(binding, explicit) else .unavailable;
+    }
+    fn cancelInboxReads(context: *anyopaque) void {
+        const self: *App = @ptrCast(@alignCast(context));
+        if (self.inbox) |*coordinator| coordinator.cancelReads();
     }
     fn loadEarlierInbox(context: *anyopaque, binding: u64) product_inbox.CommandOutcome {
         const self: *App = @ptrCast(@alignCast(context));

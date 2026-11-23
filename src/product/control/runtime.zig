@@ -10186,7 +10186,6 @@ pub const Runtime = struct {
             .knows_peer_fn = inboxKnowsPeer,
             .accepts_fn = inboxAccepts,
             .complete_conversation_fn = inboxCompleteConversation,
-            .complete_task_fn = inboxCompleteTask,
             .stop_fn = inboxStop,
         };
     }
@@ -10237,18 +10236,18 @@ pub const Runtime = struct {
         const self = inboxOwner(context);
         self.inboxSettle(self.inbox.completePoll(now_ms, wall_ms, id, completion));
     }
-    fn inboxRequestRefresh(context: *anyopaque, binding: u64) inbox.CommandOutcome {
+    fn inboxRequestRefresh(context: *anyopaque, now_ms: u64, binding: u64, explicit: bool) inbox.CommandOutcome {
         const self = inboxOwner(context);
-        return if (self.shutting_down) .unavailable else self.inbox.requestRefresh(binding);
+        return if (self.shutting_down) .unavailable else self.inbox.requestRefresh(now_ms, binding, explicit);
     }
     fn inboxRequestEarlier(context: *anyopaque, binding: u64) inbox.CommandOutcome {
         const self = inboxOwner(context);
         return if (self.shutting_down) .unavailable else self.inbox.requestEarlier(binding);
     }
-    fn inboxBeginList(context: *anyopaque, allocator: std.mem.Allocator) ?inbox.ListPreparation {
+    fn inboxBeginList(context: *anyopaque) ?inbox.ListPreparation {
         const self = inboxOwner(context);
         if (self.shutting_down) return null;
-        const preparation = (self.inbox.beginList(allocator) catch return null) orelse return null;
+        const preparation = self.inbox.beginList() orelse return null;
         self.updateChanged();
         return preparation;
     }
@@ -10264,13 +10263,9 @@ pub const Runtime = struct {
         const self = inboxOwner(context);
         return !self.shutting_down and self.inbox.accepts(binding);
     }
-    fn inboxCompleteConversation(context: *anyopaque, now_ms: u64, binding: u64, kind: inbox.ConversationPageKind, messages: ?[]const inbox.Message, failure: ?inbox.Failure) void {
+    fn inboxCompleteConversation(context: *anyopaque, binding: u64, peer: []const u8, kind: inbox.ConversationPageKind, messages: []const inbox.Message) void {
         const self = inboxOwner(context);
-        self.inboxSettle(self.inbox.completeConversation(now_ms, binding, kind, messages, failure));
-    }
-    fn inboxCompleteTask(context: *anyopaque, now_ms: u64, binding: u64, failure: ?inbox.Failure) void {
-        const self = inboxOwner(context);
-        self.inboxSettle(self.inbox.completeTask(now_ms, binding, failure));
+        self.inboxSettle(self.inbox.completeConversation(binding, peer, kind, messages));
     }
     fn inboxStop(context: *anyopaque) void {
         const self = inboxOwner(context);

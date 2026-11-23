@@ -932,6 +932,7 @@ fn addRendererWireGenerator(b: *std.Build) void {
     module.addImport("product_update", update);
     const inbox = b.createModule(.{ .root_source_file = b.path("src/product/inbox.zig"), .target = b.graph.host });
     inbox.addImport("metawork_http_contract", existingImport(update, "metawork_http_contract"));
+    inbox.addImport("metawork_product_update", update);
     module.addImport("product_inbox", inbox);
     const generator = b.addExecutable(.{ .name = "metawork-renderer-wire-generator", .root_module = module });
     b.step("generate-renderer-wire", "Generate Renderer structures from actual Host wire types").dependOn(&b.addRunArtifact(generator).step);
@@ -2001,6 +2002,7 @@ fn wireAgentCore(
     // stays Application-only.
     product_update.addImport("metawork_http_contract", metawork_http_contract);
     product_inbox.addImport("metawork_http_contract", metawork_http_contract);
+    product_inbox.addImport("metawork_product_update", product_update);
     metawork_oauth_loopback_transport.addImport("metawork_select_start", metawork_select_start);
     metawork_oauth_loopback_transport.addImport("metawork_oauth_loopback", metawork_oauth_loopback);
     const metask_transport = b.createModule(.{
