@@ -21,6 +21,7 @@ pub fn main(init: std.process.Init) !void {
     try emit(inbox.ConversationPage, "InboxConversationPageWire", writer);
     try emit(inbox.TaskDetail, "InboxTaskDetailWire", writer);
     try emit(inbox.FileOpen, "InboxFileOpenWire", writer);
+    try emit(inbox.SendResult, "InboxSendResultWire", writer);
     try writer.flush();
 }
 

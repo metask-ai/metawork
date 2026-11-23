@@ -458,7 +458,7 @@ const App = struct {
                 .host = .{ .context = host.context, .now_ns_fn = host.now_fn, .wake_fn = host.wake_fn, .start_timer_fn = host.start_timer_fn, .cancel_timer_fn = host.cancel_timer_fn, .open_fn = host.open_external_url_fn, .on_main_thread_fn = host.on_main_thread_fn },
             };
             self.inbox.?.start(native_runtime.app_active);
-            self.dispatcher.?.setInboxHost(.{ .context = self, .refresh_fn = refreshInbox, .load_earlier_fn = loadEarlierInbox, .read_conversation_fn = readInboxConversation, .read_task_fn = readInboxTask, .open_file_fn = openInboxFile, .cancel_fn = cancelInboxReads });
+            self.dispatcher.?.setInboxHost(.{ .context = self, .refresh_fn = refreshInbox, .load_earlier_fn = loadEarlierInbox, .read_conversation_fn = readInboxConversation, .read_task_fn = readInboxTask, .open_file_fn = openInboxFile, .send_fn = sendInboxMessage, .cancel_fn = cancelInboxReads });
         }
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
     }
@@ -498,6 +498,10 @@ const App = struct {
     fn openInboxFile(context: *anyopaque, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: product_inbox.FileOpenRequest) bool {
         const self: *App = @ptrCast(@alignCast(context));
         return if (self.inbox) |*coordinator| coordinator.openFile(responder, bridge_id, request) else false;
+    }
+    fn sendInboxMessage(context: *anyopaque, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: product_inbox.SendRequest) bool {
+        const self: *App = @ptrCast(@alignCast(context));
+        return if (self.inbox) |*coordinator| coordinator.sendMessage(responder, bridge_id, request) else false;
     }
     fn cancelUpdateDownload(context: *anyopaque) void {
         const self: *App = @ptrCast(@alignCast(context));

@@ -10185,6 +10185,7 @@ pub const Runtime = struct {
             .complete_list_fn = inboxCompleteList,
             .knows_peer_fn = inboxKnowsPeer,
             .accepts_fn = inboxAccepts,
+            .peer_address_fn = inboxPeerAddress,
             .complete_conversation_fn = inboxCompleteConversation,
             .stop_fn = inboxStop,
         };
@@ -10262,6 +10263,10 @@ pub const Runtime = struct {
     fn inboxAccepts(context: *anyopaque, binding: u64) bool {
         const self = inboxOwner(context);
         return !self.shutting_down and self.inbox.accepts(binding);
+    }
+    fn inboxPeerAddress(context: *anyopaque, binding: u64, peer: []const u8) ?inbox.Address {
+        const self = inboxOwner(context);
+        return if (self.shutting_down) null else self.inbox.peerAddress(binding, peer);
     }
     fn inboxCompleteConversation(context: *anyopaque, binding: u64, peer: []const u8, kind: inbox.ConversationPageKind, messages: []const inbox.Message) void {
         const self = inboxOwner(context);

@@ -171,6 +171,19 @@ export const zhCN: Record<MessageId, string> = {
   "inbox.unreachable_stale":
     "暂时无法读取 MetaTeam 消息，下面是 {time} 的内容。",
   "inbox.retry": "重试",
+  "inbox.composer_label": "发消息给 {name}",
+  "inbox.composer_placeholder": "写消息。Enter 发送，Shift+Enter 换行。",
+  "inbox.send": "发送",
+  "inbox.sending": "正在发送…",
+  "inbox.send_failed":
+    "消息没有发出，或 MetaTeam 没有确认收到。重试不会重复发送。",
+  "inbox.send_busy": "还有一条消息正在发送。",
+  "inbox.send_unavailable": "现在没有连上 MetaTeam。",
+  "inbox.send_unknown_peer":
+    "MetaTeam 没有提供这位成员的用户名，暂时不能回复。",
+  "inbox.send_rejected": "MetaTeam 拒绝了这条消息。修改后可以再发。",
+  "inbox.send_forbidden": "这台设备无权发送这条消息。",
+  "inbox.send_not_found": "MetaTeam 找不到这个收件人。",
   "inbox.diagnostics": "请求详情",
   "inbox.no_conversations": "暂无会话",
   "inbox.loading_conversations": "正在加载会话…",

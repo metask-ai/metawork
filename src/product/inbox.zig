@@ -16,6 +16,8 @@ pub const Limits = struct {
     pub const messages_bytes = 4 * 1024 * 1024;
     /// A shared text file brings up to 200 KB of content, escaped.
     pub const detail_bytes = 1024 * 1024;
+    /// A send answers with the names it reached.
+    pub const send_bytes = 64 * 1024;
     pub const json_depth = 16;
     /// The conversation list is built from the most recent messages and grows
     /// backwards on request; a page is a transfer unit, never a visibility cap.
@@ -162,19 +164,68 @@ pub const MessagesQuery = struct {
     limit: ?u32 = null,
 };
 
+/// A message to send: the JSON body and the request identity MetaTeam
+/// deduplicates by. Borrowed for the call.
+pub const Send = struct {
+    body: []const u8,
+    request_key: []const u8,
+};
+
 pub const Request = union(enum) {
     unread,
     messages: MessagesQuery,
     task: []const u8,
+    /// `POST /agent/v1/notify`. Never resent by this client on its own:
+    /// only the user's retry sends it again, under the same request key.
+    send: Send,
 
     pub fn maxBytes(self: Request) usize {
         return switch (self) {
             .unread => Limits.unread_bytes,
             .messages => Limits.messages_bytes,
             .task => Limits.detail_bytes,
+            .send => Limits.send_bytes,
         };
     }
 };
+
+/// Who a message goes to. MetaTeam addresses members by username only; a
+/// member id is not accepted.
+pub const Address = union(enum) {
+    self,
+    member: Name,
+};
+
+/// `{"to":["<username>"]|"me","text":"..."}`.
+pub fn writeSendBody(writer: *std.Io.Writer, address: Address, text: []const u8) std.Io.Writer.Error!void {
+    var json: std.json.Stringify = .{ .writer = writer };
+    try json.beginObject();
+    try json.objectField("to");
+    switch (address) {
+        .self => try json.write(self_peer_id),
+        .member => |username| {
+            try json.beginArray();
+            try json.write(username.slice());
+            try json.endArray();
+        },
+    }
+    try json.objectField("text");
+    try json.write(text);
+    try json.endObject();
+}
+
+/// A request key becomes the `X-Request-Id` header: a UUID or any other
+/// short run of letters, digits and dashes.
+pub fn validRequestKey(key: []const u8) bool {
+    if (key.len < 8 or key.len > 64) return false;
+    for (key) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-') return false;
+    return true;
+}
+
+/// A message is sent only with something in it.
+pub fn sendableText(text: []const u8) bool {
+    return std.mem.trim(u8, text, " \t\r\n").len != 0 and std.unicode.utf8ValidateSlice(text);
+}
 
 /// The full request URL: the base of the bound connection plus the open API
 /// path and query. Never carries the key; it travels as a Bearer header.
@@ -182,6 +233,7 @@ pub fn writeUrl(writer: *std.Io.Writer, base: []const u8, request: Request) std.
     try writer.writeAll(base);
     switch (request) {
         .unread => try writer.writeAll("/open/v1/unread"),
+        .send => try writer.writeAll("/agent/v1/notify"),
         .task => |id| {
             try writer.writeAll("/open/v1/tasks/");
             try writeComponent(writer, id);
@@ -221,6 +273,39 @@ pub fn requestFailure(status: ?u16) RequestFailure {
         404, 410 => .not_found,
         else => .failed,
     };
+}
+
+/// What one send's answer means. MetaTeam keeps the answer to a request key
+/// and replays it for the same key, except a server error: so only `failed`
+/// (no answer, or a server error) can turn out differently when the same
+/// request is sent again. A refusal is the request's own outcome and never
+/// the connection's.
+pub fn sendState(status: ?u16) SendState {
+    const value = status orelse return .failed;
+    return switch (value) {
+        200...299 => .sent,
+        401, 403 => .forbidden,
+        404, 410 => .not_found,
+        400, 402, 405...409, 411...499 => .rejected,
+        else => .failed,
+    };
+}
+
+/// The names a send reached, when MetaTeam reports them; an answer without
+/// them is still a sent message.
+pub fn parseSent(allocator: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}![]Name {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const data = parseData(arena.allocator(), bytes, Limits.send_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidResponse => return allocator.alloc(Name, 0),
+    };
+    const list = if (data == .object) field(data.object, "sent") else null;
+    const items: []const std.json.Value = if (list) |value| if (value == .array) value.array.items else &.{} else &.{};
+    var names: std.ArrayList(Name) = .empty;
+    errdefer names.deinit(allocator);
+    for (items) |item| if (item == .string and item.string.len != 0) try names.append(allocator, .truncated(item.string));
+    return names.toOwnedSlice(allocator);
 }
 
 /// A task id becomes one path segment. Every byte is percent-encoded except
@@ -1390,6 +1475,17 @@ pub const Runtime = struct {
         return self.available and self.bound and binding == self.binding;
     }
 
+    /// Where a reply in this conversation goes: `me`, or the member's exact
+    /// username as MetaTeam reported it. Null when the list does not know
+    /// the conversation or MetaTeam gave no username.
+    pub fn peerAddress(self: *const Runtime, binding: u64, peer: []const u8) ?Address {
+        if (!self.accepts(binding)) return null;
+        if (std.mem.eql(u8, peer, self_peer_id)) return .self;
+        if (self.summaryIndex(peer)) |index| if (self.summaries.items[index].peer.username) |username| return .{ .member = username };
+        if (self.unreadOf(peer)) |entry| if (entry.peer.username) |username| return .{ .member = username };
+        return null;
+    }
+
     /// A conversation page the user read keeps the list's summary current
     /// and marks whose page is open. A failed read changes nothing here: its
     /// outcome belongs to that request alone.
@@ -1604,6 +1700,36 @@ pub const FileOpen = struct {
     state: FileOpenState,
 };
 
+/// A Renderer request to send one message in a conversation it has open.
+/// Borrowed for the call.
+pub const SendRequest = struct {
+    binding: u64,
+    request_id: u64,
+    /// The conversation: a member's id or `me`.
+    peer: []const u8,
+    text: []const u8,
+    /// The `X-Request-Id`; the Renderer sends it again only for a retry.
+    request_key: []const u8,
+};
+
+/// - `sent`: MetaTeam took the message.
+/// - `failed`: no answer, or a server error; the same request may be sent
+///   again under the same key.
+/// - `forbidden`, `not_found`, `rejected`: MetaTeam refused it; it keeps
+///   that answer for the same key.
+/// - `busy`: another message is still being sent; nothing was sent.
+/// - `unknown_peer`: the conversation has no address to send to.
+/// - `superseded`: the Bridge connection ended before the answer.
+pub const SendState = enum { sent, stale_binding, unknown_peer, busy, superseded, unavailable, forbidden, not_found, rejected, failed };
+
+pub const SendResult = struct {
+    binding: U64,
+    requestId: U64,
+    state: SendState,
+    /// The names MetaTeam reports it reached.
+    sent: []const []const u8,
+};
+
 /// Application receives only these lifecycle capabilities, never the Control
 /// owner or a mutable aggregate pointer. All callbacks run on its thread.
 pub const Management = struct {
@@ -1622,6 +1748,7 @@ pub const Management = struct {
     complete_list_fn: *const fn (*anyopaque, u64, u64, ListKind, ListCompletion) void,
     knows_peer_fn: *const fn (*anyopaque, u64, []const u8) bool,
     accepts_fn: *const fn (*anyopaque, u64) bool,
+    peer_address_fn: *const fn (*anyopaque, u64, []const u8) ?Address,
     complete_conversation_fn: *const fn (*anyopaque, u64, []const u8, ConversationPageKind, []const Message) void,
     stop_fn: *const fn (*anyopaque) void,
 };
@@ -1799,6 +1926,55 @@ test "a linked id is a task, a shared file or a project, told apart by its field
     defer listed.deinit();
     try testing.expectEqual(@as(usize, 1), listed.kind.project.file_tags.len);
     try testing.expectEqual(@as(u64, 3), listed.kind.project.file_tags[0].count);
+}
+
+test "a message goes to a username or to me, and its answer is typed" {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeSendBody(&writer, .{ .member = try .init("ann") }, "hi \"there\"\n");
+    try testing.expectEqualStrings("{\"to\":[\"ann\"],\"text\":\"hi \\\"there\\\"\\n\"}", writer.buffered());
+    writer = .fixed(&buffer);
+    try writeSendBody(&writer, .self, "note");
+    try testing.expectEqualStrings("{\"to\":\"me\",\"text\":\"note\"}", writer.buffered());
+
+    try testing.expect(validRequestKey("0b6f7c2e-7d1a-4c55-9f0e-2a4b6c8d0e1f"));
+    for ([_][]const u8{ "", "short", "has space-1234", "a\r\nX-Evil:-1", "x" ** 65 }) |key| try testing.expect(!validRequestKey(key));
+    try testing.expect(sendableText(" ok "));
+    try testing.expect(!sendableText(" \r\n\t"));
+
+    try testing.expectEqual(SendState.sent, sendState(200));
+    try testing.expectEqual(SendState.forbidden, sendState(401));
+    try testing.expectEqual(SendState.forbidden, sendState(403));
+    try testing.expectEqual(SendState.not_found, sendState(404));
+    try testing.expectEqual(SendState.rejected, sendState(400));
+    try testing.expectEqual(SendState.rejected, sendState(422));
+    try testing.expectEqual(SendState.failed, sendState(500));
+    try testing.expectEqual(SendState.failed, sendState(null));
+
+    const names = try parseSent(testing.allocator, "{\"data\":{\"sent\":[\"Ann\",\"\",3,\"Bob\"]}}");
+    defer testing.allocator.free(names);
+    try testing.expectEqual(@as(usize, 2), names.len);
+    try testing.expectEqualStrings("Bob", names[1].slice());
+    const none = try parseSent(testing.allocator, "not json");
+    defer testing.allocator.free(none);
+    try testing.expectEqual(@as(usize, 0), none.len);
+
+    // A reply's address comes from what the list knows about the member.
+    var runtime: Runtime = .init(testing.allocator);
+    defer runtime.deinit();
+    runtime.start(true);
+    _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
+    var unread = try parseUnread(testing.allocator,
+        \\{"data":{"unread":2,"byPeer":[{"peer":{"id":"u-1","username":"ann","name":"Ann"},"unread":1},{"peer":{"id":"u-2","name":"Bob"},"unread":1}]}}
+    );
+    defer unread.deinit(testing.allocator);
+    _ = try runtime.completePoll(0, 1, runtime.beginPoll().?, .{ .unread = &unread });
+    const binding = runtime.binding;
+    try testing.expectEqualStrings("ann", runtime.peerAddress(binding, "u-1").?.member.slice());
+    try testing.expect(runtime.peerAddress(binding, "u-2") == null);
+    try testing.expect(runtime.peerAddress(binding, self_peer_id).? == .self);
+    try testing.expect(runtime.peerAddress(binding, "nobody") == null);
+    try testing.expect(runtime.peerAddress(binding + 1, "u-1") == null);
 }
 
 test "only a credential-free web address without the key is handed to the browser" {

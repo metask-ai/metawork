@@ -926,3 +926,46 @@ export function decodeInboxFileOpenWire(
     ] as const),
   };
 }
+export type InboxSendResultWire = {
+  binding: string;
+  requestId: string;
+  state:
+    | "sent"
+    | "stale_binding"
+    | "unknown_peer"
+    | "busy"
+    | "superseded"
+    | "unavailable"
+    | "forbidden"
+    | "not_found"
+    | "rejected"
+    | "failed";
+  sent: readonly string[];
+};
+export function decodeInboxSendResultWire(
+  value: unknown,
+  path: string,
+): InboxSendResultWire {
+  const item = object(value, path, ["binding", "requestId", "state", "sent"]);
+  return {
+    binding: u64WireInteger(item.binding, path + ".binding"),
+    requestId: u64WireInteger(item.requestId, path + ".requestId"),
+    state: enumValue(item.state, path + ".state", [
+      "sent",
+      "stale_binding",
+      "unknown_peer",
+      "busy",
+      "superseded",
+      "unavailable",
+      "forbidden",
+      "not_found",
+      "rejected",
+      "failed",
+    ] as const),
+    sent: arrayValue(
+      item.sent,
+      path + ".sent",
+      (entry: unknown, entryPath: string) => stringValue(entry, entryPath),
+    ),
+  };
+}

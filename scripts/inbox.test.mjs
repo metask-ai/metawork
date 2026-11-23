@@ -157,10 +157,23 @@ function fakeClient({
   taskState,
   details = {},
   fileState = "opened",
+  sendStates = [],
+  sendGate = null,
 } = {}) {
   const calls = [];
   return {
     calls,
+    async sendInboxMessage(binding, peerId, text, requestKey) {
+      calls.push(["send", binding, peerId, text, requestKey]);
+      if (sendGate) await sendGate;
+      const state = sendStates.shift() ?? "sent";
+      return {
+        binding,
+        requestId: String(calls.length),
+        state,
+        sent: state === "sent" ? ["Ann"] : [],
+      };
+    },
     async openInboxFile(binding, fileId) {
       calls.push(["file", binding, fileId]);
       return { binding, requestId: String(calls.length), state: fileState };
@@ -641,6 +654,98 @@ test("a linked file, project or task shows its own details, opens nested items a
     assert.ok(screen.getByRole("heading", { name: "Write docs" })),
   );
   assert.deepEqual(client.calls.at(-1), ["task", "1", "9801"]);
+});
+
+test("a reply is sent once, shown from the newer messages, and retried under the same request key", async () => {
+  const user = userEvent.setup({ document });
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const client = fakeClient({
+    sendGate: gate,
+    sendStates: ["failed", "sent"],
+    pages: {
+      "ann:latest:null": { messages: [message("12", "in", "Can you review?")] },
+      "ann:after:12": { messages: [message("13", "out", "Looking now")] },
+    },
+  });
+  render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await waitFor(() =>
+    assert.equal(document.querySelectorAll(".inbox-bubble").length, 1),
+  );
+  const box = screen.getByRole("textbox", { name: "Message Ann" });
+  const sendButton = screen.getByRole("button", { name: "Send" });
+  assert.equal(sendButton.disabled, true);
+  // Shift+Enter is a new line; Enter sends.
+  await user.type(box, "Looking{Shift>}{Enter}{/Shift}now");
+  assert.equal(box.value, "Looking\nnow");
+  await user.clear(box);
+  await user.type(box, "Looking now{Enter}");
+  await waitFor(() =>
+    assert.ok(screen.getByRole("button", { name: "Sending…" })),
+  );
+  // While it is on its way nothing else is submitted.
+  assert.equal(box.readOnly, true);
+  await user.type(box, "{Enter}");
+  assert.equal(client.calls.filter(([kind]) => kind === "send").length, 1);
+  release();
+  await waitFor(() =>
+    assert.ok(screen.getByText(/Retrying won't send it twice/)),
+  );
+  const first = client.calls.find(([kind]) => kind === "send");
+  assert.deepEqual(first.slice(0, 4), ["send", "1", "ann", "Looking now"]);
+  assert.match(
+    first[4],
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
+  assert.equal(box.value, "Looking now");
+
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => assert.ok(screen.getByText("Looking now")));
+  const sends = client.calls.filter(([kind]) => kind === "send");
+  assert.equal(sends.length, 2);
+  assert.equal(sends[1][4], first[4]);
+  // Sent: the box empties and the newer messages are read.
+  assert.equal(box.value, "");
+  assert.ok(
+    client.calls.some(
+      (call) => call[0] === "read" && call[3] === "after" && call[4] === "12",
+    ),
+  );
+  assert.equal(document.querySelector(".inbox-composer-failure"), null);
+});
+
+test("a refused reply is not retried as is; a changed message gets a new request key", async () => {
+  const user = userEvent.setup({ document });
+  const client = fakeClient({
+    sendStates: ["rejected", "sent"],
+    pages: {
+      "ann:latest:null": { messages: [message("12", "in", "Can you review?")] },
+    },
+  });
+  render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await waitFor(() =>
+    assert.equal(document.querySelectorAll(".inbox-bubble").length, 1),
+  );
+  const box = screen.getByRole("textbox", { name: "Message Ann" });
+  await user.type(box, "Hi");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() =>
+    assert.ok(
+      screen.getByText(
+        "MetaTeam refused this message. Change it to send again.",
+      ),
+    ),
+  );
+  assert.equal(screen.queryByRole("button", { name: "Retry" }), null);
+  await user.type(box, "!");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => assert.equal(box.value, ""));
+  const sends = client.calls.filter(([kind]) => kind === "send");
+  assert.equal(sends.length, 2);
+  assert.equal(sends[1][3], "Hi!");
+  assert.notEqual(sends[1][4], sends[0][4]);
 });
 
 test("a refused task or a missing conversation is shown where it was asked for", async () => {

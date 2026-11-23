@@ -289,6 +289,18 @@ pub const InboxTaskRead = struct {
     taskId: []const u8,
 };
 
+/// One message in a conversation the Renderer has open. The Host decides
+/// the address from the conversation; `requestKey` is the request identity
+/// MetaTeam deduplicates by, sent again only by the user's retry.
+pub const InboxSend = struct {
+    generation: []const u8,
+    binding: []const u8,
+    requestId: []const u8,
+    peerId: []const u8,
+    text: []const u8,
+    requestKey: []const u8,
+};
+
 pub const InboxFileOpen = struct {
     generation: []const u8,
     binding: []const u8,

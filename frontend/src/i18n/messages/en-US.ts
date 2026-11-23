@@ -211,6 +211,21 @@ export const enUS = {
   "inbox.unreachable_stale":
     "MetaTeam messages can't be read right now. Showing what was read at {time}.",
   "inbox.retry": "Retry",
+  "inbox.composer_label": "Message {name}",
+  "inbox.composer_placeholder":
+    "Write a message. Enter sends, Shift+Enter adds a line.",
+  "inbox.send": "Send",
+  "inbox.sending": "Sending…",
+  "inbox.send_failed":
+    "The message wasn't sent, or MetaTeam didn't confirm it. Retrying won't send it twice.",
+  "inbox.send_busy": "Another message is still being sent.",
+  "inbox.send_unavailable": "MetaTeam isn't connected right now.",
+  "inbox.send_unknown_peer":
+    "MetaTeam gave no username for this member, so this conversation can't be replied to yet.",
+  "inbox.send_rejected":
+    "MetaTeam refused this message. Change it to send again.",
+  "inbox.send_forbidden": "This device may not send this message.",
+  "inbox.send_not_found": "MetaTeam can't find this recipient.",
   "inbox.diagnostics": "Request details",
   "inbox.no_conversations": "No conversations yet",
   "inbox.loading_conversations": "Loading conversations…",

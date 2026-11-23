@@ -23,6 +23,7 @@ import {
   decodeInboxConversationPageWire,
   decodeInboxTaskDetailWire,
   decodeInboxFileOpenWire,
+  decodeInboxSendResultWire,
 } from "./generated-wire.ts";
 import {
   exactKeys,
@@ -5968,6 +5969,12 @@ export function decodeInboxTaskDetail(value: unknown) {
 }
 export function decodeInboxFileOpen(value: unknown) {
   return decodeInboxFileOpenWire(value, "$.result");
+}
+export function decodeInboxSendResult(value: unknown) {
+  const result = decodeInboxSendResultWire(value, "$.result");
+  if (result.state !== "sent" && result.sent.length !== 0)
+    fail("$.result", "recipients without a sent message");
+  return result;
 }
 export function decodeUpdateView(value: unknown) {
   const path = "$.updates";

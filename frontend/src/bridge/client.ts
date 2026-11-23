@@ -44,6 +44,7 @@ import type {
   InboxConversationPage,
   InboxTaskDetail,
   InboxFileOpen,
+  InboxSendResult,
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
@@ -60,6 +61,7 @@ import {
   decodeInboxConversationPage,
   decodeInboxTaskDetail,
   decodeInboxFileOpen,
+  decodeInboxSendResult,
   decodeExecutionCommandResult,
   decodeCatalogRefreshResult,
   decodeWorkspaceRemovalResult,
@@ -377,6 +379,35 @@ export class BridgeClient {
       throw new RendererBridgeContractError(
         "invalid_response",
         "Inbox task identity mismatch",
+      );
+    return result;
+  }
+  /**
+   * Sends one message in an open conversation. `requestKey` identifies the
+   * message to MetaTeam: a retry of the same message passes the same key,
+   * so MetaTeam takes it at most once.
+   */
+  async sendInboxMessage(
+    binding: string,
+    peerId: string,
+    text: string,
+    requestKey: string,
+  ): Promise<InboxSendResult> {
+    const { generation, requestId } = this.inboxRequest();
+    const result = decodeInboxSendResult(
+      await this.invoke(commands.inboxSend, {
+        generation,
+        binding,
+        requestId,
+        peerId,
+        text,
+        requestKey,
+      }),
+    );
+    if (result.binding !== binding || result.requestId !== requestId)
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Inbox send identity mismatch",
       );
     return result;
   }

@@ -185,6 +185,29 @@ const TaskWork = struct {
     task: inbox.Id,
 };
 
+const RequestKey = struct {
+    bytes: [64]u8 = undefined,
+    len: usize = 0,
+
+    fn init(value: []const u8) ?RequestKey {
+        if (!inbox.validRequestKey(value)) return null;
+        var key: RequestKey = .{ .len = value.len };
+        @memcpy(key.bytes[0..value.len], value);
+        return key;
+    }
+
+    fn slice(self: *const RequestKey) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+const SendWork = struct {
+    reply: Reply,
+    /// The JSON body, owned by the work.
+    body: []u8,
+    request_key: RequestKey,
+};
+
 const Work = union(enum) {
     poll: u64,
     list: inbox.ListPreparation,
@@ -192,6 +215,7 @@ const Work = union(enum) {
     task: TaskWork,
     /// Reads the file's detail for a fresh download address to open.
     file: TaskWork,
+    send: SendWork,
 };
 
 const Job = struct {
@@ -218,6 +242,8 @@ const Job = struct {
     page: ?inbox.Messages = null,
     page_limit: u32 = 0,
     detail: ?inbox.Detail = null,
+    /// The names a send reached, when MetaTeam took it.
+    sent: ?[]inbox.Name = null,
 
     fn run(self: *Job) void {
         defer {
@@ -258,6 +284,29 @@ const Job = struct {
                     .after => .{ .peer = work.peer.slice(), .after = work.anchor.?.slice() },
                 };
                 _ = try self.pageOf(query, inbox.Limits.conversation_page);
+            },
+            .send => |work| {
+                const buffer = try self.allocator.alloc(u8, inbox.Limits.send_bytes);
+                defer self.allocator.free(buffer);
+                var diagnostic: ?inbox.Diagnostic = null;
+                const response = self.transport.perform_fn(self.transport.context, .{ .base = self.base, .key = self.key, .isolation = self.isolation }, .{ .send = .{ .body = work.body, .request_key = work.request_key.slice() } }, buffer, &self.cancellation, &diagnostic) catch |err| switch (err) {
+                    // Only a success has its body read: it was taken.
+                    error.ResponseTooLarge => {
+                        self.status = 200;
+                        self.sent = try self.allocator.alloc(inbox.Name, 0);
+                        return;
+                    },
+                    // No answer: whether it arrived is unknown, and only the
+                    // user's retry sends it again, under the same key.
+                    else => {
+                        self.failure = .{ .@"unreachable" = diagnostic };
+                        return;
+                    },
+                };
+                self.status = response.status;
+                if (inbox.sendState(response.status) == .sent) {
+                    self.sent = try inbox.parseSent(self.allocator, buffer[0..response.body_len]);
+                } else std.log.warn("inbox request consumer=inbox request=send status={d}", .{response.status});
             },
             .task, .file => |work| {
                 const buffer = try self.allocator.alloc(u8, inbox.Limits.detail_bytes);
@@ -340,6 +389,8 @@ const Job = struct {
         if (self.unread) |*value| value.deinit(self.allocator);
         if (self.page) |*value| value.deinit();
         if (self.detail) |*value| value.deinit();
+        if (self.sent) |names| self.allocator.free(names);
+        if (self.work == .send) self.allocator.free(self.work.send.body);
         std.crypto.secureZero(u8, self.key);
         self.allocator.free(self.key);
         self.allocator.free(self.base);
@@ -369,9 +420,14 @@ pub const Coordinator = struct {
     task_next: ?TaskWork = null,
     file: ?*Job = null,
     file_next: ?TaskWork = null,
+    /// One message at a time. Never replaced, and never cancelled by a
+    /// changed connection: a send in flight may already have arrived.
+    send: ?*Job = null,
 
     /// Every request slot, for what applies to all of them alike.
-    const slots = .{ "poll", "list", "conversation", "task", "file" };
+    const slots = .{ "poll", "list", "conversation", "task", "file", "send" };
+    /// The requests whose result a changed connection makes worthless.
+    const read_slots = .{ "poll", "list", "conversation", "task", "file" };
 
     fn now(self: *const Coordinator) u64 {
         return self.host.now_ns_fn(self.host.context) / std.time.ns_per_ms;
@@ -459,7 +515,7 @@ pub const Coordinator = struct {
         self.bound = null;
         self.retire_fn(self.retire_context, current.isolation);
         current.release(self.allocator);
-        inline for (slots) |name| if (@field(self, name)) |job| job.cancellation.cancel();
+        inline for (read_slots) |name| if (@field(self, name)) |job| job.cancellation.cancel();
         if (self.conversation_next) |work| {
             self.conversation_next = null;
             respondConversationState(work.reply, work.peer.slice(), .stale_binding);
@@ -567,6 +623,56 @@ pub const Coordinator = struct {
             job.superseded = true;
             job.cancellation.cancel();
         };
+        // A send runs to its end; only its answer is no longer sent.
+        if (self.send) |job| if (!job.replied) {
+            respondSendState(job.work.send.reply, .superseded);
+            job.replied = true;
+        };
+    }
+
+    /// Sends one message to a conversation the list knows. Returns false
+    /// when the request cannot be answered at all; the caller then fails it
+    /// as a Bridge error.
+    pub fn sendMessage(self: *Coordinator, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: inbox.SendRequest) bool {
+        self.assertMain();
+        const target = reply(responder, bridge_id, request.binding, request.request_id) orelse return false;
+        _ = inbox.Id.init(request.peer) catch return false;
+        if (!inbox.sendableText(request.text)) return false;
+        const request_key = RequestKey.init(request.request_key) orelse return false;
+        if (self.stopped or self.bound == null) {
+            respondSendState(target, .unavailable);
+            return true;
+        }
+        if (!self.management.accepts_fn(self.management.context, request.binding)) {
+            respondSendState(target, .stale_binding);
+            return true;
+        }
+        const address = self.management.peer_address_fn(self.management.context, request.binding, request.peer) orelse {
+            respondSendState(target, .unknown_peer);
+            return true;
+        };
+        if (self.send != null) {
+            respondSendState(target, .busy);
+            return true;
+        }
+        var body: std.Io.Writer.Allocating = .init(self.allocator);
+        inbox.writeSendBody(&body.writer, address, request.text) catch {
+            body.deinit();
+            respondSendState(target, .failed);
+            return true;
+        };
+        const owned = body.toOwnedSlice() catch {
+            body.deinit();
+            respondSendState(target, .failed);
+            return true;
+        };
+        self.send = self.startJob(.{ .send = .{ .reply = target, .body = owned, .request_key = request_key } }) catch {
+            self.allocator.free(owned);
+            respondSendState(target, .failed);
+            return true;
+        };
+        self.reconcileTimer();
+        return true;
     }
 
     pub fn loadEarlier(self: *Coordinator, binding: u64) inbox.CommandOutcome {
@@ -682,6 +788,7 @@ pub const Coordinator = struct {
 
     fn settle(self: *Coordinator) void {
         const now_ms = self.now();
+        self.settleSend();
         if (self.poll) |job| if (job.finished.load(.acquire)) {
             job.join();
             self.poll = null;
@@ -751,6 +858,17 @@ pub const Coordinator = struct {
             }
             job.destroy();
         };
+    }
+
+    /// What MetaTeam answered is a fact about the message, so it is
+    /// answered even when the connection changed meanwhile.
+    fn settleSend(self: *Coordinator) void {
+        const job = self.send orelse return;
+        if (!job.finished.load(.acquire)) return;
+        job.join();
+        self.send = null;
+        if (!job.replied) respondSend(self.allocator, job.work.send.reply, inbox.sendState(job.status), job.sent orelse &.{});
+        job.destroy();
     }
 
     fn openDownload(self: *Coordinator, detail: *const inbox.Detail, key: []const u8) inbox.FileOpenState {
@@ -838,6 +956,8 @@ pub const Coordinator = struct {
                 .conversation => |work| respondConversationState(work.reply, work.peer.slice(), .unavailable),
                 .task => |work| respondTaskState(work.reply, .unavailable),
                 .file => |work| respondFileState(work.reply, .unavailable),
+                // Cancelled on its way: whether it arrived is unknown.
+                .send => |work| respondSendState(work.reply, .failed),
                 else => {},
             };
             job.destroy();
@@ -1132,6 +1252,30 @@ fn respondTaskState(target: Reply, state: inbox.TaskState) void {
     target.responder.success(target.bridge_id.slice(), writer.buffered()) catch {};
 }
 
+fn respondSendState(target: Reply, state: inbox.SendState) void {
+    var buffer: [1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+    respondSend(fixed.allocator(), target, state, &.{});
+}
+
+fn respondSend(allocator: std.mem.Allocator, target: Reply, state: inbox.SendState, names: []const inbox.Name) void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const sent = arena.allocator().alloc([]const u8, names.len) catch return target.responder.fail(target.bridge_id.slice(), .internal_error, "Inbox response encoding failed") catch {};
+    for (names, sent) |*name, *view| view.* = name.slice();
+    var writer: std.Io.Writer.Allocating = .init(arena.allocator());
+    std.json.Stringify.value(inbox.SendResult{
+        .binding = .{ .value = target.binding },
+        .requestId = .{ .value = target.request_id },
+        .state = state,
+        .sent = sent,
+    }, .{}, &writer.writer) catch {
+        target.responder.fail(target.bridge_id.slice(), .internal_error, "Inbox response encoding failed") catch {};
+        return;
+    };
+    target.responder.success(target.bridge_id.slice(), writer.written()) catch {};
+}
+
 fn respondFileState(target: Reply, state: inbox.FileOpenState) void {
     var buffer: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -1173,6 +1317,7 @@ const TestManagement = struct {
             .complete_list_fn = completeList,
             .knows_peer_fn = knowsPeer,
             .accepts_fn = accepts,
+            .peer_address_fn = peerAddress,
             .complete_conversation_fn = completeConversation,
             .stop_fn = stop,
         };
@@ -1221,6 +1366,9 @@ const TestManagement = struct {
     }
     fn accepts(context: *anyopaque, binding: u64) bool {
         return of(context).accepts(binding);
+    }
+    fn peerAddress(context: *anyopaque, binding: u64, peer: []const u8) ?inbox.Address {
+        return of(context).peerAddress(binding, peer);
     }
     fn completeConversation(context: *anyopaque, binding: u64, peer: []const u8, kind: inbox.ConversationPageKind, messages: []const inbox.Message) void {
         _ = of(context).completeConversation(binding, peer, kind, messages) catch unreachable;
@@ -1303,7 +1451,14 @@ const TestTransport = struct {
     block: std.atomic.Value(bool) = .init(false),
     /// Answers with `ResponseTooLarge` while the requested limit is above this.
     fits_limit: u32 = std.math.maxInt(u32),
-    unread: []const u8 = "{\"data\":{\"unread\":2,\"byPeer\":[{\"peer\":{\"id\":\"ann\",\"name\":\"Ann\"},\"unread\":2}]}}",
+    /// What a send is answered with; `null` drops it without an answer.
+    send_status: ?u16 = 200,
+    sends: usize = 0,
+    send_body: [256]u8 = undefined,
+    send_body_len: usize = 0,
+    send_key: [64]u8 = undefined,
+    send_key_len: usize = 0,
+    unread: []const u8 = "{\"data\":{\"unread\":2,\"byPeer\":[{\"peer\":{\"id\":\"ann\",\"username\":\"ann_u\",\"name\":\"Ann\"},\"unread\":2}]}}",
     messages: []const u8 = "{\"data\":{\"messages\":[{\"id\":7,\"time\":1795428968292,\"direction\":\"in\",\"from\":{\"id\":\"ann\",\"name\":\"Ann\"},\"text\":\"hello\",\"taskIds\":[13066]}]}}",
     task: []const u8 = "{\"data\":{\"id\":13066,\"name\":\"Inbox\",\"progress\":\"doing\"}}",
 
@@ -1322,6 +1477,18 @@ const TestTransport = struct {
             self.url_lens[self.count] = writer.buffered().len;
             self.count += 1;
         }
+        if (request == .send) {
+            self.sends += 1;
+            self.send_body_len = @min(request.send.body.len, self.send_body.len);
+            @memcpy(self.send_body[0..self.send_body_len], request.send.body[0..self.send_body_len]);
+            self.send_key_len = request.send.request_key.len;
+            @memcpy(self.send_key[0..self.send_key_len], request.send.request_key);
+            const status = self.send_status orelse return error.Network;
+            if (status != 200) return .{ .status = status };
+            const answer = "{\"data\":{\"sent\":[\"Ann\"]}}";
+            @memcpy(output[0..answer.len], answer);
+            return .{ .status = 200, .body_len = answer.len };
+        }
         if (self.status != 200) return .{ .status = self.status };
         if (request == .task and self.task_status != 200) return .{ .status = self.task_status };
         if (request == .messages and request.messages.peer != null and self.peer_status != 200) return .{ .status = self.peer_status };
@@ -1330,6 +1497,7 @@ const TestTransport = struct {
             .unread => self.unread,
             .messages => self.messages,
             .task => self.task,
+            .send => unreachable,
         };
         @memcpy(output[0..body.len], body);
         return .{ .status = 200, .body_len = body.len };
@@ -1753,6 +1921,108 @@ test "inbox coordinator: a detail larger than one Bridge result is cut, longest 
     try testing.expect(answer.len < native_sdk.bridge.max_result_bytes);
     try testing.expect(std.mem.indexOf(u8, answer, "\"state\":\"ready\"") != null);
     try testing.expect(std.mem.indexOf(u8, answer, "\"contentTruncated\":true") != null);
+}
+
+test "inbox coordinator: a reply goes to the member's username once per user action, and a retry reuses its request key" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    const responder = fixture.capture.responder();
+    const key_a = "11111111-2222-4333-8444-555555555555";
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .peer = "ann", .text = "On it \"now\"", .request_key = key_a }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"requestId\":\"1\",\"state\":\"sent\",\"sent\":[\"Ann\"]}") != null);
+    try testing.expectEqualStrings("{\"to\":[\"ann_u\"],\"text\":\"On it \\\"now\\\"\"}", fixture.transport.send_body[0..fixture.transport.send_body_len]);
+    try testing.expectEqualStrings(key_a, fixture.transport.send_key[0..fixture.transport.send_key_len]);
+    try testing.expectEqualStrings("http://192.0.2.10:8080/team/agent/v1/notify", fixture.transport.url(fixture.transport.count - 1));
+
+    // The user's own conversation goes to `me`.
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 2, .peer = inbox.self_peer_id, .text = "note", .request_key = "22222222-2222-4333-8444-555555555555" }));
+    fixture.settle();
+    try testing.expectEqualStrings("{\"to\":\"me\",\"text\":\"note\"}", fixture.transport.send_body[0..fixture.transport.send_body_len]);
+
+    // No answer, then the user's retry: one request each, the same key.
+    fixture.transport.send_status = null;
+    const sends = fixture.transport.sends;
+    const key_b = "33333333-2222-4333-8444-555555555555";
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s3", .{ .binding = binding, .request_id = 3, .peer = "ann", .text = "again", .request_key = key_b }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"failed\"") != null);
+    try testing.expectEqual(sends + 1, fixture.transport.sends);
+    fixture.transport.send_status = 200;
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s4", .{ .binding = binding, .request_id = 4, .peer = "ann", .text = "again", .request_key = key_b }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"sent\"") != null);
+    try testing.expectEqual(sends + 2, fixture.transport.sends);
+    try testing.expectEqualStrings(key_b, fixture.transport.send_key[0..fixture.transport.send_key_len]);
+
+    // A refusal is that message's outcome only.
+    for ([_]struct { u16, []const u8 }{ .{ 400, "rejected" }, .{ 403, "forbidden" }, .{ 401, "forbidden" }, .{ 404, "not_found" }, .{ 503, "failed" } }) |case| {
+        fixture.transport.send_status = case[0];
+        try testing.expect(fixture.coordinator.sendMessage(responder, "s5", .{ .binding = binding, .request_id = 5, .peer = "ann", .text = "x", .request_key = "44444444-2222-4333-8444-555555555555" }));
+        fixture.settle();
+        var expected: [64]u8 = undefined;
+        try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), try std.fmt.bufPrint(&expected, "\"state\":\"{s}\"", .{case[1]})) != null);
+        try testing.expectEqual(inbox.State.ready, fixture.view().state);
+        try testing.expect(fixture.management.runtime.nextPoll() != null);
+    }
+    fixture.transport.send_status = 200;
+
+    // Nothing is sent without an address, text or a usable request key.
+    const before = fixture.transport.sends;
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s6", .{ .binding = binding, .request_id = 6, .peer = "nobody", .text = "x", .request_key = key_a }));
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"unknown_peer\"") != null);
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s7", .{ .binding = binding + 1, .request_id = 7, .peer = "ann", .text = "x", .request_key = key_a }));
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"stale_binding\"") != null);
+    try testing.expect(!fixture.coordinator.sendMessage(responder, "s8", .{ .binding = binding, .request_id = 8, .peer = "ann", .text = " \n ", .request_key = key_a }));
+    try testing.expect(!fixture.coordinator.sendMessage(responder, "s9", .{ .binding = binding, .request_id = 9, .peer = "ann", .text = "x", .request_key = "bad\r\nkey-value" }));
+    fixture.settle();
+    try testing.expectEqual(before, fixture.transport.sends);
+    for (fixture.capture.responses.items) |response| {
+        try testing.expect(std.mem.indexOf(u8, response, sentinel_key) == null);
+        try testing.expect(std.mem.indexOf(u8, response, "192.0.2.10") == null);
+    }
+}
+
+test "inbox coordinator: one message at a time, and a changed connection never cancels one in flight" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    const responder = fixture.capture.responder();
+    fixture.transport.block.store(true, .release);
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .peer = "ann", .text = "first", .request_key = "11111111-2222-4333-8444-555555555555" }));
+    const job = fixture.coordinator.send.?;
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 2, .peer = "ann", .text = "second", .request_key = "22222222-2222-4333-8444-555555555555" }));
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"busy\"") != null);
+    // The connection is replaced while the message is on its way.
+    fixture.source.fingerprint = @splat('b');
+    fixture.source.generation = 2;
+    fixture.coordinator.drain();
+    try testing.expect(fixture.view().binding.value != binding);
+    try testing.expectEqual(@as(u32, 0), job.cancellation.state.load(.acquire));
+    fixture.transport.block.store(false, .release);
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"requestId\":\"1\",\"state\":\"sent\"") != null);
+    try testing.expectEqual(@as(usize, 1), fixture.transport.sends);
+
+    // A closed Bridge connection answers it at once; the send still finishes.
+    const now = fixture.view().binding.value;
+    fixture.settle();
+    fixture.transport.block.store(true, .release);
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s3", .{ .binding = now, .request_id = 3, .peer = "ann", .text = "third", .request_key = "33333333-2222-4333-8444-555555555555" }));
+    fixture.coordinator.cancelReads();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"requestId\":\"3\",\"state\":\"superseded\"") != null);
+    const answers = fixture.capture.responses.items.len;
+    fixture.transport.block.store(false, .release);
+    fixture.settle();
+    try testing.expectEqual(answers, fixture.capture.responses.items.len);
+    try testing.expectEqual(@as(usize, 2), fixture.transport.sends);
 }
 
 test "inbox coordinator: the MCP source resolves a sensitive MetaTeam endpoint through the credential store" {

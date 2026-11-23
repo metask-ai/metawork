@@ -19,6 +19,7 @@ export const commands = {
   inboxReadConversation: "metawork.inbox.readConversation",
   inboxReadTask: "metawork.inbox.readTask",
   inboxOpenFile: "metawork.inbox.openFile",
+  inboxSend: "metawork.inbox.send",
   addProject: "metawork.workspaces.addProject",
   chooseWorkspace: "metawork.workspaces.choose",
   openWorkspace: "metawork.workspaces.open",

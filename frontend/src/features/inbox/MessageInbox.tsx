@@ -36,7 +36,65 @@ export type InboxClient = Pick<
   | "readInboxConversation"
   | "readInboxTask"
   | "openInboxFile"
+  | "sendInboxMessage"
 >;
+
+/**
+ * Why a message was not sent. `failed` may have reached MetaTeam: its retry
+ * sends the same request again, which MetaTeam takes at most once. A
+ * refusal (`rejected`, `forbidden`, `not_found`) is kept by MetaTeam for
+ * that request, so only a changed message is sent again.
+ */
+export type SendFailure =
+  | "failed"
+  | "busy"
+  | "unavailable"
+  | "unknown_peer"
+  | "rejected"
+  | "forbidden"
+  | "not_found";
+
+/** The reply being written in the open conversation. */
+export type Composer = {
+  peerId: string;
+  text: string;
+  sending: boolean;
+  failure: SendFailure | null;
+  /** The identity of the last attempt, kept while its retry may reuse it. */
+  requestKey: string | null;
+};
+
+export function sendRetryable(failure: SendFailure) {
+  return (
+    failure !== "rejected" && failure !== "forbidden" && failure !== "not_found"
+  );
+}
+
+/** A random UUID; also where `crypto.randomUUID` is not offered. */
+function newRequestKey() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function sendFailure(state: string): SendFailure {
+  switch (state) {
+    case "busy":
+    case "unavailable":
+    case "unknown_peer":
+    case "rejected":
+    case "forbidden":
+    case "not_found":
+      return state;
+    default:
+      // No answer, a server error, or an answer that never came back.
+      return "failed";
+  }
+}
 
 /** One read's own outcome; the connection state stays the list's. */
 type ConversationFailure = "forbidden" | "not_found" | "failed" | "unavailable";
@@ -113,6 +171,9 @@ export function useInbox(
     null,
   );
   const [task, setTask] = useState<OpenedTask | null>(null);
+  const [composer, setComposer] = useState<Composer | null>(null);
+  const conversationRef = useRef(conversation);
+  conversationRef.current = conversation;
   const readRef = useRef<
     (
       peerId: string,
@@ -127,6 +188,7 @@ export function useInbox(
     setSelectedId(null);
     setConversation(null);
     setTask(null);
+    setComposer(null);
     followed.current = null;
   }, [binding]);
 
@@ -245,9 +307,76 @@ export function useInbox(
     selectedId,
     conversation,
     task,
+    composer,
+    /** A changed message is a new message: it gets a new identity. */
+    setDraft(text: string) {
+      setComposer((current) =>
+        current === null || current.sending || current.text === text
+          ? current
+          : { ...current, text, failure: null, requestKey: null },
+      );
+    },
+    async send() {
+      const draft = composer;
+      if (!draft || draft.sending || draft.text.trim() === "") return;
+      const { peerId, text } = draft;
+      const requestKey = draft.requestKey ?? newRequestKey();
+      setComposer({ ...draft, sending: true, failure: null, requestKey });
+      let state = "failed";
+      try {
+        state = (
+          await client.sendInboxMessage(binding, peerId, text, requestKey)
+        ).state;
+      } catch {
+        state = "failed";
+      }
+      if (state === "sent") {
+        setComposer((current) =>
+          current?.peerId === peerId
+            ? {
+                peerId,
+                text: "",
+                sending: false,
+                failure: null,
+                requestKey: null,
+              }
+            : current,
+        );
+        // Show it: what came after the newest message on screen.
+        const open = conversationRef.current;
+        if (open?.peerId === peerId) {
+          const last = open.messages.at(-1);
+          await read(peerId, last ? "after" : "latest", last?.id ?? null);
+        }
+        return;
+      }
+      const failure = sendFailure(state);
+      setComposer((current) =>
+        current?.peerId === peerId
+          ? {
+              ...current,
+              sending: false,
+              failure,
+              requestKey: sendRetryable(failure) ? requestKey : null,
+            }
+          : current,
+      );
+    },
     select(peerId: string, name: string) {
       setSelectedId(peerId);
       setTask(null);
+      // Opening the same conversation again keeps what was being written.
+      setComposer((current) =>
+        current?.peerId === peerId
+          ? current
+          : {
+              peerId,
+              text: "",
+              sending: false,
+              failure: null,
+              requestKey: null,
+            },
+      );
       followed.current = null;
       setConversation({
         peerId,
@@ -1115,18 +1244,118 @@ function ReadReceipts({
   );
 }
 
+function sendFailureText(failure: SendFailure, t: Translate) {
+  switch (failure) {
+    case "failed":
+      return t("inbox.send_failed");
+    case "busy":
+      return t("inbox.send_busy");
+    case "unavailable":
+      return t("inbox.send_unavailable");
+    case "unknown_peer":
+      return t("inbox.send_unknown_peer");
+    case "rejected":
+      return t("inbox.send_rejected");
+    case "forbidden":
+      return t("inbox.send_forbidden");
+    case "not_found":
+      return t("inbox.send_not_found");
+  }
+}
+
+/**
+ * The reply box. Enter sends and Shift+Enter starts a new line; nothing is
+ * sent while an input method is composing or a message is on its way.
+ */
+export function InboxComposer({
+  name,
+  text,
+  sending,
+  failure,
+  onChange,
+  onSend,
+}: {
+  name: string;
+  text: string;
+  sending: boolean;
+  failure: SendFailure | null;
+  onChange: (text: string) => void;
+  onSend: () => void;
+}) {
+  const { t } = useI18n();
+  const empty = text.trim() === "";
+  return (
+    <form
+      className="inbox-composer"
+      aria-busy={sending || undefined}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!sending && !empty) onSend();
+      }}
+    >
+      {failure && (
+        <div className="inbox-composer-failure" role="alert">
+          <span>{sendFailureText(failure, t)}</span>
+          {sendRetryable(failure) && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={sending}
+              onClick={onSend}
+            >
+              {t("inbox.retry")}
+            </Button>
+          )}
+        </div>
+      )}
+      <div className="inbox-composer-row">
+        <textarea
+          className="inbox-composer-input focus-ring"
+          aria-label={t("inbox.composer_label", { name })}
+          placeholder={t("inbox.composer_placeholder")}
+          rows={2}
+          value={text}
+          readOnly={sending}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (
+              event.key !== "Enter" ||
+              event.shiftKey ||
+              event.nativeEvent.isComposing
+            )
+              return;
+            event.preventDefault();
+            if (!sending && !empty) onSend();
+          }}
+        />
+        <Button type="submit" size="md" disabled={sending || empty}>
+          <Icon name="send" />
+          {sending ? t("inbox.sending") : t("inbox.send")}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 function InboxConversationView({
   name,
   conversation,
+  composer,
   onLoadEarlier,
   onOpenTask,
   onRetry,
+  onDraft,
+  onSend,
 }: {
   name: string;
   conversation: OpenedConversation;
+  composer: Composer | null;
   onLoadEarlier: () => void;
   onOpenTask: (taskId: string) => void;
   onRetry: () => void;
+  onDraft: (text: string) => void;
+  onSend: () => void;
 }) {
   const { t } = useI18n();
   const formats = useTimeFormats();
@@ -1250,13 +1479,23 @@ function InboxConversationView({
           })}
         </ol>
       </div>
+      {composer?.peerId === conversation.peerId && (
+        <InboxComposer
+          name={name}
+          text={composer.text}
+          sending={composer.sending}
+          failure={composer.failure}
+          onChange={onDraft}
+          onSend={onSend}
+        />
+      )}
     </section>
   );
 }
 
 /**
  * The reading area: the connection state when there is nothing to read,
- * otherwise the selected conversation. Read only: there is no reply box.
+ * otherwise the selected conversation and its reply box.
  */
 export function InboxMain({
   inbox,
@@ -1348,9 +1587,12 @@ export function InboxMain({
         <InboxConversationView
           name={controller.conversation.name}
           conversation={controller.conversation}
+          composer={controller.composer}
           onLoadEarlier={controller.loadEarlierMessages}
           onOpenTask={(taskId) => void controller.openTask(taskId)}
           onRetry={controller.retry}
+          onDraft={controller.setDraft}
+          onSend={() => void controller.send()}
         />
       ) : (
         <InboxNotice
