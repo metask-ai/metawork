@@ -1256,6 +1256,10 @@ fn writeRunFileReferences(writer: *std.Io.Writer, text: TextProjection, run: *co
     var complete = true;
     for (candidates.items) |candidate| {
         const reference = candidate.reference;
+        // The Renderer keys links by the path it receives. Two different
+        // paths read the same only once a credential in them is hidden, so a
+        // path holding one is no link: what body text could name is hidden.
+        if (text.containsSensitive(reference.display_path)) continue;
         const known = try seen.getOrPut(scratch, reference.display_path);
         if (known.found_existing) continue;
         const bytes = reference.id.len + reference.title.len + reference.display_path.len + file_link_entry_bytes;
@@ -2217,6 +2221,55 @@ const ExcerptTestText = struct {
         return writer.buffered();
     }
 };
+
+test "file links leave out paths holding a known credential, so no two read the same" {
+    // Stored paths can still hold a credential the projection knows; once it
+    // is hidden, two different paths would reach the Renderer as one.
+    const text: ExcerptTestText = .{ .secret = "sk-known-secret" };
+    var refs: [3][1]?task_state.FileReferenceView = undefined;
+    var tools: [3]?task_state.ToolView = undefined;
+    for ([_][]const u8{ "src/plain.txt", "src/alpha-sk-known-secret.txt", "src/omega-sk-known-secret.txt" }, 0..) |path, index| {
+        refs[index] = .{.{
+            .id = @constCast(path),
+            .title = @constCast("file"),
+            .display_path = @constCast(path),
+            .kind = @constCast("read"),
+            .locator_kind = .workspace_path,
+            .locator = @constCast(path),
+        }};
+        tools[index] = .{
+            .route_digest = agent.toolRouteDigest(path),
+            .id = @constCast("tool"),
+            .name = @constCast("Read"),
+            .order = index + 1,
+            .input = @constCast(""),
+            .progress = @constCast(""),
+            .content = @constCast(""),
+            .state = .completed,
+            .file_refs = &refs[index],
+        };
+    }
+    var run: task_state.RunRecord = .{
+        .id = 4,
+        .generation = 1,
+        .execution_generation = 1,
+        .execution_protocol = .anthropic_messages,
+        .execution_model = @constCast("model"),
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
+        .input = .{ .text = .{ .value = @constCast("input") } },
+        .commentary_ends = @constCast(&[_]u64{}),
+        .tools = &tools,
+        .terminal_diagnostic = @constCast(""),
+    };
+    var storage: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try writeRunFileReferences(&writer, text.projection(), &run, std.testing.allocator);
+    try std.testing.expectEqualStrings(
+        ",\"fileReferences\":{\"media\":[],\"links\":[{\"id\":\"src/plain.txt\",\"title\":\"file\",\"displayPath\":\"src/plain.txt\"}],\"linksComplete\":true}",
+        writer.buffered(),
+    );
+}
 
 test "a manifest excerpt is the readable input with whitespace folded" {
     const text: ExcerptTestText = .{ .secret = "sk-known-secret" };
