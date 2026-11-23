@@ -98,10 +98,10 @@ const HttpFixture = struct {
     }
 
     fn startWithBearer(protocol_version: []const u8, framing: []const u8, trace_path: []const u8, ttl_ms: u64, result_kind: []const u8, gate_path: []const u8, delay_ms: u32, bearer: []const u8) !HttpFixture {
-        return startForInstallation(protocol_version, framing, trace_path, ttl_ms, result_kind, gate_path, delay_ms, bearer, "", "", "");
+        return startForInstallation(protocol_version, framing, trace_path, ttl_ms, result_kind, gate_path, delay_ms, bearer, "", "", "", "");
     }
 
-    fn startForInstallation(protocol_version: []const u8, framing: []const u8, trace_path: []const u8, ttl_ms: u64, result_kind: []const u8, gate_path: []const u8, delay_ms: u32, bearer: []const u8, query: []const u8, request_file: []const u8, empty_catalog_file: []const u8) !HttpFixture {
+    fn startForInstallation(protocol_version: []const u8, framing: []const u8, trace_path: []const u8, ttl_ms: u64, result_kind: []const u8, gate_path: []const u8, delay_ms: u32, bearer: []const u8, query: []const u8, path_key: []const u8, request_file: []const u8, empty_catalog_file: []const u8) !HttpFixture {
         var delay_storage: [32]u8 = undefined;
         const delay = try std.fmt.bufPrint(&delay_storage, "{d}", .{delay_ms});
         var ttl_storage: [32]u8 = undefined;
@@ -129,6 +129,8 @@ const HttpFixture = struct {
             bearer,
             "--expected-query",
             query,
+            "--path-key",
+            path_key,
             "--install-request-file",
             request_file,
             "--empty-catalog-file",
@@ -4618,7 +4620,11 @@ const InstallationTestHost = struct {
     }
 };
 
-const AutomaticInstallationCase = enum { public_http, failed_retry, no_tools_retry, catalog_refresh, manual_credential, oauth_cancel, credential_template, stdio_environment };
+const AutomaticInstallationCase = enum { public_http, plain_http_key_path, plain_http_page_request, failed_retry, no_tools_retry, catalog_refresh, manual_credential, oauth_cancel, credential_template, stdio_environment };
+/// The connection key an installation page hands out inside the MCP URL path.
+const plain_http_path_key = "page-issued-path-key";
+/// A non-local plain HTTP installation page. Host never fetches the source URL.
+const plain_http_source_url = "http://192.0.2.10:10210/mcp";
 fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
     var http_engine: @import("metawork_http_transport").Engine = undefined;
     http_engine.init(std.testing.allocator, std.testing.io);
@@ -4637,16 +4643,26 @@ fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
     if (mode == .no_tools_retry) try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "catalog.empty", .data = "empty" });
     const refresh_gate = try std.fmt.allocPrint(a, "{s}/refresh", .{root});
     defer a.free(refresh_gate);
-    var fixture = try HttpFixture.startForInstallation("2026-07-28", "json", trace, 60_000, "text", if (mode == .catalog_refresh) refresh_gate else "", 0, "", if (mode == .credential_template or mode == .manual_credential) "mcp-static-fixture-secret" else "", request_file, empty_catalog_file);
+    const plain_http_page = mode == .plain_http_key_path or mode == .plain_http_page_request;
+    var fixture = try HttpFixture.startForInstallation("2026-07-28", "json", trace, 60_000, "text", if (mode == .catalog_refresh) refresh_gate else "", 0, "", if (mode == .credential_template or mode == .manual_credential) "mcp-static-fixture-secret" else "", if (plain_http_page) plain_http_path_key else "", request_file, empty_catalog_file);
     defer fixture.deinit();
-    const source_url = try std.fmt.allocPrint(a, "{s}#agent-install", .{fixture.endpoint});
+    const source_url = if (plain_http_page) try a.dupe(u8, plain_http_source_url) else try std.fmt.allocPrint(a, "{s}#agent-install", .{fixture.endpoint});
     defer a.free(source_url);
+    // The installation is authorized by the tool call's permission decision,
+    // so any wording of the user's request installs without a Host prompt.
+    const request_text = if (mode == .plain_http_page_request) try std.fmt.allocPrint(a, "按这个页面把 MetaTeam 装上：{s}", .{source_url}) else try a.dupe(u8, source_url);
+    defer a.free(request_text);
     const template = try std.fmt.allocPrint(a, "{s}?api_key={{credential:token}}", .{fixture.endpoint});
     defer a.free(template);
     const invalid_endpoint = try std.fmt.allocPrint(a, "{s}/missing", .{fixture.endpoint});
     defer a.free(invalid_endpoint);
+    const key_path_endpoint = try std.fmt.allocPrint(a, "{s}/k/{s}", .{ fixture.endpoint, plain_http_path_key });
+    defer a.free(key_path_endpoint);
     const json = switch (mode) {
         .public_http, .failed_retry, .no_tools_retry, .catalog_refresh => try std.json.Stringify.valueAlloc(a, .{ .sourceUrl = source_url, .connection = .{ .displayName = "Automatic HTTP", .transport = "streamable_http", .endpoint = if (mode == .failed_retry) invalid_endpoint else fixture.endpoint, .authMode = "none" } }, .{}),
+        // The literal connection URL obtained from an installation page, as
+        // `claude mcp add --transport http <name> <url>` would take it.
+        .plain_http_key_path, .plain_http_page_request => try std.json.Stringify.valueAlloc(a, .{ .sourceUrl = source_url, .connection = .{ .displayName = "Page HTTP", .transport = "streamable_http", .endpoint = key_path_endpoint, .authMode = "none" } }, .{}),
         .manual_credential => try std.json.Stringify.valueAlloc(a, .{ .sourceUrl = source_url, .connection = .{ .displayName = "Manual credential", .transport = "streamable_http", .endpoint = template, .authMode = "none" }, .credentials = .{.{ .slot = "token", .kind = "user_input", .target = "endpoint" }} }, .{}),
         .oauth_cancel => try std.json.Stringify.valueAlloc(a, .{ .sourceUrl = source_url, .connection = .{ .displayName = "Automatic OAuth", .transport = "streamable_http", .endpoint = "https://mcp.example.test/mcp", .authMode = "oauth" } }, .{}),
         .credential_template => try std.json.Stringify.valueAlloc(a, .{ .sourceUrl = source_url, .connection = .{ .displayName = "Automatic template", .transport = "streamable_http", .endpoint = template, .authMode = "none" }, .credentials = .{.{ .slot = "token", .kind = "http_json", .url = "https://credentials.example/key", .jsonPointer = "/data/key", .target = "endpoint" }} }, .{}),
@@ -4710,7 +4726,7 @@ fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
     };
     const source_task = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), install_model, initial_catalog.revision, initial_catalog.selection_revision, .{ .interactive = .full_access });
     try std.testing.expectEqual(.ready_without_selection, try control.taskMcpAuthority(source_task));
-    _ = try executeTaskSwitchRun(&control, source_task, .{ .text = source_url }, .allow_once);
+    _ = try executeTaskSwitchRun(&control, source_task, .{ .text = request_text }, .allow_once);
     var authorizations: mcp_platform.HttpAuthorizations = .{ .allocator = a };
     defer authorizations.deinit();
     var host: InstallationTestHost = .{ .refuse = mode == .oauth_cancel };
@@ -4764,7 +4780,10 @@ fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
             }
         };
     } else {
-        const registry = control.mcp.?.state.management.?.desiredRegistry().?;
+        // A refused request creates no server; fail without panicking so the
+        // fixture child is still reaped.
+        const registry = control.mcp.?.state.management.?.desiredRegistry() orelse return error.InstallationNotAccepted;
+        if (registry.servers.len == 0) return error.InstallationNotAccepted;
         std.debug.print("installation timed out: phase={any}, enabled={}, consent={}, flow={}, authorization={any}\n", .{ registry.servers[0].installation.?.phase, registry.servers[0].enabled, host.confirmations, coordinator.flow != null, control.mcpAuthorizationOperation() });
         return error.InstallationDidNotComplete;
     }
@@ -4779,6 +4798,9 @@ fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
     try std.testing.expectEqual(@as(usize, if (uses_credentials) 1 else 0), host.fetches.load(.acquire));
     try std.testing.expectEqual(@as(usize, if (uses_credentials) 1 else 0), host.confirmations);
     try std.testing.expect(std.mem.indexOf(u8, durable.storage[0..durable.len], "mcp-static-fixture-secret") == null);
+    // The full endpoint is stored as a sensitive address, so its path key stays
+    // out of the public registry just like a planned credential.
+    try std.testing.expect(std.mem.indexOf(u8, durable.storage[0..durable.len], plain_http_path_key) == null);
     try std.testing.expectEqual(.ready_without_selection, try control.taskMcpAuthority(source_task));
     const call_model = try configureTaskSwitchProvider(&control, fixture.provider_endpoint, "call-model", .anthropic_messages);
     const next_task = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), call_model, null, null, .{ .interactive = .manual });
@@ -4847,6 +4869,12 @@ fn expectAutomaticInstallation(mode: AutomaticInstallationCase) !void {
 
 test "automatic installation public HTTP gives a new Task a real callable tool" {
     try expectAutomaticInstallation(.public_http);
+}
+test "automatic installation takes a page's plain HTTP URL with its key in the path without any prompt" {
+    try expectAutomaticInstallation(.plain_http_key_path);
+}
+test "automatic installation from a request in the user's own words needs no Host confirmation" {
+    try expectAutomaticInstallation(.plain_http_page_request);
 }
 test "automatic installation credential template keeps keys private and calls from a new Task" {
     try expectAutomaticInstallation(.credential_template);

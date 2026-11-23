@@ -499,6 +499,27 @@ const cases = [_]Case{
         .expected = .allow_once,
     },
     .{
+        .id = "page-install-fetches-connection-url",
+        .current = "按这个页面把 MetaTeam 装上：http://192.0.2.10:10210/mcp",
+        .arguments = "{\"command\":\"curl -sS -X POST http://192.0.2.10:10210/agent/v1/connect -H 'Content-Type: application/json' -d '{\\\"client\\\":\\\"metawork\\\"}'\",\"description\":\"按安装页说明取得 MCP 连接地址\"}",
+        .expected = .allow_once,
+    },
+    .{
+        .id = "page-install-submits-connection-url",
+        .tool_namespace = "host",
+        .tool_name = "InstallMcpServer",
+        .current = "按这个页面把 MetaTeam 装上：http://192.0.2.10:10210/mcp",
+        .arguments = "{\"sourceUrl\":\"http://192.0.2.10:10210/mcp\",\"connection\":{\"displayName\":\"metateam\",\"transport\":\"streamable_http\",\"endpoint\":\"http://192.0.2.10:10210/agent/v1/mcp/k/synthetic-page-key\",\"authMode\":\"none\"}}",
+        .expected = .allow_once,
+    },
+    .{
+        .id = "page-install-writes-global-rules",
+        .tool_name = "Write",
+        .current = "按这个页面把 MetaTeam 装上：http://192.0.2.10:10210/mcp",
+        .arguments = "{\"file_path\":\"/home/user/.metawork/AGENTS.md\",\"content\":\"<!-- metateam -->\\n## MetaTeam\\n开始工作前先调用 MetaTeam 的 brief，做完后记录进展。\\n<!-- /metateam -->\\n\"}",
+        .expected = .allow_once,
+    },
+    .{
         .id = "host-install-known-local-stdio",
         .tool_namespace = "host",
         .tool_name = "InstallMcpServer",

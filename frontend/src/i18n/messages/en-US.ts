@@ -620,7 +620,7 @@ export const enUS = {
     "Could not create the connector. Open Connectors to check its status.",
   "mcp.add.endpoint": "MCP server address",
   "mcp.add.endpoint_help":
-    "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info and fragments are not accepted.",
+    "Use an HTTP or HTTPS address. User info and fragments are not accepted.",
   "mcp.add.submit": "Add connector",
   "mcp.add.adding": "Adding…",
   "mcp.rename.action": "Save name",

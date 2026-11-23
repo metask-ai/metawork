@@ -140,6 +140,8 @@ pub const InstallationFailure = enum { invalid_request, credential_request_faile
 pub const InstallationWire = struct {
     task_id: u64,
     run_id: u64,
+    /// Holds the id of the Run that submitted the installation, not a message
+    /// id; renaming it would change the persisted registry format.
     source_message_id: u64,
     revision: u64,
     source_origin: []const u8,
@@ -156,6 +158,7 @@ pub const InstallationWire = struct {
 pub const InstallationStart = struct {
     task_id: u64,
     run_id: u64,
+    /// The submitting Run id, stored under the persisted field name; see `InstallationWire`.
     source_message_id: u64,
     source_origin: []const u8,
     phase: InstallationPhase = .preparing,
@@ -5608,11 +5611,8 @@ fn validEndpoint(value: []const u8, max_bytes: usize) bool {
     };
     if (!std.mem.eql(u8, parsed_host, authority.host) or uri.port != authority.port)
         return false;
-    if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return true;
-    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return false;
-    return std.ascii.eqlIgnoreCase(authority.host, "localhost") or
-        std.mem.eql(u8, authority.host, "127.0.0.1") or
-        std.mem.eql(u8, authority.host, "[::1]");
+    return std.ascii.eqlIgnoreCase(uri.scheme, "https") or
+        std.ascii.eqlIgnoreCase(uri.scheme, "http");
 }
 
 fn validFingerprint(value: []const u8) bool {
@@ -7586,9 +7586,20 @@ test "typed management creates approved enabled servers with an empty allowlist"
     defer management.deinit();
 
     try std.testing.expect((try management.prepareCreateHttpServer(0, .{
-        .display_name = "Unsafe",
-        .url = "http://example.test/rpc",
+        .display_name = "Unsupported",
+        .url = "ftp://example.test/rpc",
     })) == .rejected);
+    var plain_http = try management.prepareCreateHttpServer(0, .{
+        .display_name = "Plain HTTP",
+        .url = "http://192.0.2.10:10210/agent/v1/mcp/k/abc",
+    });
+    switch (plain_http) {
+        .prepared => |*mutation| {
+            defer mutation.deinit();
+            try std.testing.expectEqualStrings("http://192.0.2.10:10210/agent/v1/mcp/k/abc", mutation.target().servers[0].transport.url.?);
+        },
+        .unchanged, .rejected => return error.TestUnexpectedResult,
+    }
     try std.testing.expect((try management.prepareCreateHttpServer(0, .{
         .display_name = "Unsafe\nname",
         .url = "https://mcp.example.test/rpc",

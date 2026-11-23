@@ -5963,9 +5963,10 @@ test "Session creation OOM leaves Runtime reusable and credential process-only" 
 
 fn expectMetaWorkProfile(profile: fixture.FakePromptProfile) !void {
     // Identity replacements first, then the host additions: the download
-    // constraints on Windows builds and the result guidance on every build.
+    // constraints on Windows builds, then the global instructions guidance and
+    // the result guidance on every build.
     const downloads: usize = if (builtin.target.os.tag == .windows) 1 else 0;
-    try std.testing.expectEqual(@as(usize, 2) + downloads + 1, profile.count);
+    try std.testing.expectEqual(@as(usize, 2) + downloads + 2, profile.count);
     try std.testing.expectEqualStrings("metacodes:identity", profile.sectionId(0));
     try std.testing.expectEqualStrings("metacodes:subagent", profile.sectionId(1));
     for (0..2) |i| {
@@ -5987,10 +5988,18 @@ fn expectMetaWorkProfile(profile: fixture.FakePromptProfile) !void {
         try std.testing.expectEqual(@as(i64, 1100), profile.orders[2]);
         try std.testing.expect(std.mem.indexOf(u8, text, "curl.exe") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "-UseBasicParsing") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "--data-binary @<file>") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "WebFetch") == null);
     }
-    // The result guidance: an ADD after the download constraints, on every platform.
-    const outputs = 2 + downloads;
+    // The global instructions guidance: an ADD after the download constraints,
+    // on every platform.
+    const instructions = 2 + downloads;
+    try std.testing.expectEqualStrings("host:global-instructions", profile.sectionId(instructions));
+    try std.testing.expectEqual(wire.PROMPT_OP_ADD, profile.ops[instructions]);
+    try std.testing.expectEqual(@as(i64, 1150), profile.orders[instructions]);
+    try std.testing.expect(std.mem.indexOf(u8, profile.sectionText(instructions), "~/.metawork/AGENTS.md") != null);
+    // The result guidance: the last ADD, on every platform.
+    const outputs = instructions + 1;
     try std.testing.expectEqualStrings("host:outputs", profile.sectionId(outputs));
     try std.testing.expectEqual(wire.PROMPT_OP_ADD, profile.ops[outputs]);
     try std.testing.expectEqual(@as(i64, 1200), profile.orders[outputs]);

@@ -28,9 +28,23 @@ const windows_downloads_text =
     "Avoid `Invoke-WebRequest` and `Invoke-RestMethod`: their default parsing path can be intercepted " ++
     "by local security software, which blocks the command behind a modal prompt. " ++
     "If one of them is unavoidable, pass `-UseBasicParsing`. " ++
-    "Fetch several files in one command rather than one command per file.";
+    "Fetch several files in one command rather than one command per file. " ++
+    "Windows PowerShell strips double quotes from arguments passed to native programs such as `curl.exe`: " ++
+    "to send a JSON request body, write it to a file and pass it with `--data-binary @<file>`, or through stdin, " ++
+    "rather than putting the JSON directly in a `-d` argument.";
 
 pub const outputs_id = "host:outputs";
+
+pub const global_instructions_id = "host:global-instructions";
+pub const global_instructions_order: i64 = 1150;
+
+const global_instructions_text =
+    "MetaWork's global instructions file is `~/.metawork/AGENTS.md`; the user can also edit it in Settings → Global instructions. " ++
+    "When the user asks you to install something and its installation instructions ask to add rules to the global rules or instructions file, " ++
+    "write them directly into `~/.metawork/AGENTS.md`, also when the instructions name another client's file. " ++
+    "Create the file if it does not exist. If it already has a rule section from the same source, replace that whole section instead of appending another copy. " ++
+    "Leave the rest of the file unchanged. " ++
+    "Read or change another client's configuration, such as `~/.claude` or `~/.codex`, only when the user explicitly requests it.";
 
 /// It refines when a Host tool is used, so it follows `metacodes:using-tools`
 /// (1000) and the Windows download constraints (1100) and stays before
@@ -63,6 +77,7 @@ const outputs_text =
     "When several files make up the result, deliver all of them once they are final.";
 
 const common_sections = [_]wire.PromptSectionV1{
+    addition(global_instructions_id, global_instructions_order, global_instructions_text),
     addition(outputs_id, outputs_order, outputs_text),
 };
 
@@ -111,12 +126,15 @@ fn expectWellFormed(section: wire.PromptSectionV1, id: []const u8, order: i64) !
 
 test "only Windows carries the download constraints, and they stay well-formed ADD sections" {
     const windows = sectionsFor(.windows);
-    try std.testing.expectEqual(@as(usize, 2), windows.len);
+    try std.testing.expectEqual(@as(usize, 3), windows.len);
     const text = try expectWellFormed(windows[0], windows_downloads_id, windows_downloads_order);
     // The three constraints the Windows interception evidence asks for.
     try std.testing.expect(std.mem.indexOf(u8, text, "curl.exe") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "-UseBasicParsing") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "one command") != null);
+    // PowerShell 5.1 strips the quotes of an inline JSON body passed to curl.exe.
+    try std.testing.expect(std.mem.indexOf(u8, text, "strips double quotes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "--data-binary @<file>") != null);
     // WebFetch cannot write bytes to a path, so it is never offered here.
     try std.testing.expect(std.mem.indexOf(u8, text, "WebFetch") == null);
 
@@ -129,7 +147,22 @@ test "only Windows carries the download constraints, and they stay well-formed A
 test "every platform carries the result guidance after the download constraints" {
     for ([_]std.Target.Os.Tag{ .windows, .macos, .linux }) |os| {
         const list = sectionsFor(os);
-        try std.testing.expectEqual(@as(usize, if (os == .windows) 2 else 1), list.len);
+        try std.testing.expectEqual(@as(usize, if (os == .windows) 3 else 2), list.len);
+        const instructions = try expectWellFormed(list[list.len - 2], global_instructions_id, global_instructions_order);
+        for ([_][]const u8{
+            "~/.metawork/AGENTS.md",
+            "Settings → Global instructions",
+            "write them directly",
+            "Create the file if it does not exist",
+            "replace that whole section",
+            "Leave the rest of the file unchanged",
+            "~/.claude",
+            "~/.codex",
+            "explicitly requests",
+        }) |required| try std.testing.expect(std.mem.indexOf(u8, instructions, required) != null);
+        // An installation's rules are written by the Agent, not deferred to the Settings editor.
+        for ([_][]const u8{ "page alone", "Save rules only when", "Settings editor for saving", "general file or shell tools" }) |retired|
+            try std.testing.expect(std.mem.indexOf(u8, instructions, retired) == null);
         // Windows renders the download constraints first; outputs is always last.
         const text = try expectWellFormed(list[list.len - 1], outputs_id, outputs_order);
         for ([_][]const u8{

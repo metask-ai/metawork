@@ -166,7 +166,7 @@ UI callback 的 answered bytes 由官方 encoder 构造并按 SDK ownership 释�
 
 ### Host tools
 
-`InstallMcpServer` 接收有界的结构化单服务请求：sourceUrl、typed connection、公开凭据获取/输入计划和可选 serverId；不接收秘密值、credential locator、allowlist 或模型声称的来源身份。Agent 工具合同拥有严格 schema 与编码上限。callback 验证当前 RunContext、Session generation 和终止状态，通过冻结 capability 非阻塞交接 owned 请求并立即返回 `in_progress` 与 requestId；竞争、关闭或拒绝分别返回有界分类，不等待主线程、安装 worker 或 UI，不提供查询轮询工具。请求 id 不是成功证明或 server identity，最终结果直接消费 Product 状态卡；同一 Task 的显式修复由 Host 绑定唯一失败目标。Run 正常结束不取消已接纳安装；主动 Stop 在可信终止路径取消未完成操作，shutdown 先关闭入口再释放 owner。工具说明要求使用 Host 凭据计划，不让模型用 shell/WebFetch 取 Key 或猜写客户端私有配置；工具调用仍使用现有权限，网页不授予安装权限。Product 和 Application 的安装、凭据、来源及恢复语义分别由对应领域合同拥有。
+`InstallMcpServer` 接收有界的结构化单服务请求：sourceUrl、typed connection、可选的公开凭据获取/输入计划和可选 serverId；endpoint 可以原样带 key，此外不接收单独的秘密值、credential locator、allowlist 或模型声称的来源身份。Agent 工具合同拥有严格 schema 与编码上限。callback 验证当前 RunContext、Session generation 和终止状态，通过冻结 capability 非阻塞交接 owned 请求并立即返回 `in_progress` 与 requestId；竞争、关闭或拒绝分别返回有界分类，不等待主线程、安装 worker 或 UI，不提供查询轮询工具。请求 id 不是成功证明或 server identity，最终结果直接消费 Product 状态卡；同一 Task 的显式修复由 Host 绑定唯一失败目标。Run 正常结束不取消已接纳安装；主动 Stop 在可信终止路径取消未完成操作，shutdown 先关闭入口再释放 owner。工具说明让模型按安装说明取得连接地址并原样作为 endpoint 提交，地址自带 key 时使用 `authMode = none` 且不带凭据计划；凭据计划是可选路径。工具说明不让模型猜写客户端私有配置。安装授权就是这次工具调用的权限判断：`accept_edits` 下每次调用都发同步 permission request，由用户或自动评审回答；`full_access` 不发请求，即用户已授权直接执行。Host 不再从用户消息另判来源意图，网页不授予安装权限。Product 和 Application 的安装、凭据、来源及恢复语义分别由对应领域合同拥有。
 
 普通 Runtime 固定注册 `GenerateImage`、`DeliverFile`、`InstallMcpServer`、`GenerateVideo`，fresh 与 restore Session 使用相同的 built-in 加 Host tool allowlist。注册、schema 和 wire name 由 Agent 拥有，Product Control 和 Application 只交付执行输入，不按 Account、Models 或 Office 状态增删工具，也不开放任意工具 registry 或运行时能力开关。callback 必须携带并验证 `RunContext`。`GenerateImage` 只接收 `prompt`，一次调用请求一张图片，按内容签名与有界容器结构校验接纳 PNG、JPEG 或静态 WebP，返回 owning Workspace 的真实文件引用或有界分类结果，不接收模型提供的 endpoint、model、credential 或输出路径。
 
@@ -212,13 +212,15 @@ profile 的 owned copy、子代理与 isolated Skill 继承、checkpoint 编码�
 - 这类注入改变的是模型倾向，不构成保证，也不是能力或权限控制的替代品。必须被阻止的事情由 built-in tool 选择与 Task-owned `PermissionProfile` 决定，不靠提示段；
 - 段文字进入每个 Session 的 system prompt，长度有真实成本：写成约束，不写成教程。
 
-首个段是 `host:windows-downloads`（仅 Windows 构建携带）：联网取字节优先 `curl.exe`（`curl` 是 PowerShell 的 `Invoke-WebRequest` 别名，必须带 `.exe`）；确需 `Invoke-WebRequest` / `Invoke-RestMethod` 时必须带 `-UseBasicParsing`；多个文件合并为单条命令。依据是 PowerShell 5.1 的 web cmdlet 默认走旧 Internet Explorer 解析路径，本机安全软件会在该路径上按命令粒度弹出模态框并阻塞命令，无人值守场景直接挂起。指引降低写出被拦命令的概率；拦截是否消失取决于本机安全软件，不在 MetaWork 可验证的范围内，验收只固定“段按平台到达 provider 的 system 内容”，见[验证规范](validation.md)。
+首个段是 `host:windows-downloads`（仅 Windows 构建携带）：联网取字节优先 `curl.exe`（`curl` 是 PowerShell 的 `Invoke-WebRequest` 别名，必须带 `.exe`）；确需 `Invoke-WebRequest` / `Invoke-RestMethod` 时必须带 `-UseBasicParsing`；多个文件合并为单条命令；Windows PowerShell 会去掉传给原生程序的参数里的双引号，所以发送 JSON 请求体时先写进文件，再用 `--data-binary @<file>`（或 stdin）传，不把 JSON 直接放进 `-d` 参数。依据是 PowerShell 5.1 的 web cmdlet 默认走旧 Internet Explorer 解析路径，本机安全软件会在该路径上按命令粒度弹出模态框并阻塞命令，无人值守场景直接挂起。指引降低写出被拦命令的概率；拦截是否消失取决于本机安全软件，不在 MetaWork 可验证的范围内，验收只固定“段按平台到达 provider 的 system 内容”，见[验证规范](validation.md)。
 
 第二个段是 `host:outputs`（所有平台携带）：判断依据是用户要不要打开这个文件才能用上本轮结果，与文件怎样产生无关。要打开才能用的文件（网页、报告、表格、演示文稿、PDF、图表图片、视频，以及修改过的 Office 文档）用 `DeliverFile` 交付；回复正文已给出的结果、用户只需审查改动的代码/配置/文本修改、过程文件（脚本、中间稿、临时数据、日志）不交付；代码文件只在用户明确要求交付该文件时交付，网页属于成果；生成的图片或视频只在用户要的就是它本身时交付，当素材使用时交付用它做成的文件。交付的前提只有文件已是本轮最终版本，不要求也不表示内容经过检查，Skill 要求的检查各自进行；多个文件构成结果时全部交付，不规定交付顺序。验收同样只固定“段到达 provider 的 system 内容且在所有平台出现”，模型据此交付哪些文件不在验收范围内。
 
 ### 用户指令段
 
 用户自己写的指令（全局 `~/.metawork/AGENTS.md` 与 Task 实际工作目录根部的 `AGENTS.md`）由 Product 读取，以指令文档（来源路径、正文、是否截断）交给 Agent。段的 id、order、段首文字与 `interpolate` 都由 Agent 决定，Product 只能整体替换这两份文档，不能写入任意段。读取范围、上限与失败分类归 Product。
+
+编译期 Host 指引在新建和恢复 Session 中说明全局指令的路径与设置入口，文件缺失时同样提供。用户要求安装、而安装说明要求把规则加进全局规则文件时，Agent 直接写进 `~/.metawork/AGENTS.md`（安装说明点名其他客户端的文件时也写这里）：文件不存在就新建，已有同一来源的规则段就整段替换而不重复追加，其余内容保持原样。读写 `~/.claude`、`~/.codex` 等其他客户端配置须用户明确要求。该指引约束模型行为，实际工具授权由当前权限与执行边界控制。
 
 - 两个 `PROMPT_OP_ADD` 段：`host:user-instructions-global`（order 10000）与 `host:user-instructions-project`（order 10100）。0.15.0-fork.1 实测内核段最大 order 是 `metacodes:env` 的 9000，两段排在所有内核段与 host 行为指引之后，项目段在全局段之后。验收以探针断言“渲染位置在所有 kernel 段之后”为准，不依赖这个数；内核出现更大的 order 时调高这两个值；
 - 段首依次是标题、`Source: <路径>`、优先级说明（冲突时项目指令优先于全局指令）与“不改变安全、权限和审批规则，也不授予这些规则未给的能力”，随后是原样正文；截断时段尾注明只包含了前多少字节。正文与路径分别以 32 KiB 和 4096 字节为上限，路径不含控制字符，正文不含 NUL；路径规则以 `validInstructionPath` 公开，调用方读文件前逐份检查，一份路径不合格只影响它自己；最坏情况在编译期断言不超过 ABI 的单段、整份与段数上限；
