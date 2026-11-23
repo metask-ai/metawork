@@ -527,8 +527,15 @@
   padding: 0;
 }
 
-.inbox-composer-toolbar {
+/* The shared toolbar spreads its controls apart; with the send button its
+   only control, the button still belongs in the right corner. Scoped to
+   the inbox and independent of stylesheet order. */
+.inbox-composer .inbox-composer-toolbar {
   justify-content: flex-end;
+}
+
+.inbox-composer .inbox-composer-toolbar > .composer-send {
+  margin-inline-start: auto;
 }
 
 .inbox-composer .ai-composer textarea[readonly] {
