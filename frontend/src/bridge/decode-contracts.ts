@@ -3,7 +3,8 @@ import {
   skillMutationReasons,
   skillImportEffects,
   skillImportPhases,
-  outputActionStates,
+  fileActionStates,
+  fileOpenKinds,
   maxPreviewVideoBytes,
   maxAttachmentThumbnailBytes,
   maxAttachmentThumbnailSide,
@@ -155,6 +156,7 @@ import {
   type TaskModelSelectionResult,
   type ToolView,
   type FileReferenceView,
+  type FileDescriptionResult,
   type FilePreviewResponse,
   type FileChangeDiffResult,
   type UiRecord,
@@ -166,15 +168,15 @@ import {
   workspaceOpenFailureReasons,
 } from "./contracts.ts";
 type JsonObject = Record<string, unknown>;
-export function decodeOutputActionResult(value: unknown) {
+export function decodeFileActionResult(value: unknown) {
   const item = object(value, "$", ["generation", "operationId", "state"]);
   return {
     generation: positiveU64WireId(item.generation, "$.generation"),
     operationId: positiveU64WireId(item.operationId, "$.operationId"),
-    state: enumValue(item.state, "$.state", outputActionStates),
+    state: enumValue(item.state, "$.state", fileActionStates),
   };
 }
-export function decodeOutputActionCancel(value: unknown) {
+export function decodeFileActionCancel(value: unknown) {
   const item = object(value, "$", ["generation", "operationId", "cancelled"]);
   return {
     generation: positiveU64WireId(item.generation, "$.generation"),
@@ -2065,6 +2067,65 @@ export function decodeWorkspaceDirectory(
     fail("$", "non-ready directory contains content");
   return { state, entries, truncated, redacted };
 }
+export function decodeFileDescription(
+  value: unknown,
+): FileDescriptionResult | { state: "busy"; file: null } {
+  const item = object(value, "$", ["state", "file"]);
+  const state = enumValue(item.state, "$.state", [
+    "ready",
+    "busy",
+    "missing",
+    "restricted",
+    "changing",
+    "error",
+  ] as const);
+  if (state !== "ready") {
+    if (item.file !== null) fail("$.file", "only a ready answer has a file");
+    return { state, file: null };
+  }
+  const kind = enumValue(record(item.file, "$.file").kind, "$.file.kind", [
+    "image",
+    "video",
+    "file",
+  ] as const);
+  const file = object(item.file, "$.file", [
+    "kind",
+    "sizeBytes",
+    ...(kind === "image" ? ["width", "height"] : []),
+    ...(kind === "file" ? ["previewable"] : []),
+  ]);
+  const sizeBytes = u64WireInteger(file.sizeBytes, "$.file.sizeBytes");
+  if (kind === "image") {
+    const side = (value: unknown, path: string) => {
+      if (
+        typeof value !== "number" ||
+        !Number.isInteger(value) ||
+        value < 1 ||
+        value > 8192
+      )
+        fail(path, "invalid image dimension");
+      return value;
+    };
+    return {
+      state,
+      file: {
+        kind,
+        sizeBytes,
+        width: side(file.width, "$.file.width"),
+        height: side(file.height, "$.file.height"),
+      },
+    };
+  }
+  if (kind === "video") return { state, file: { kind, sizeBytes } };
+  return {
+    state,
+    file: {
+      kind,
+      sizeBytes,
+      previewable: booleanValue(file.previewable, "$.file.previewable"),
+    },
+  };
+}
 export function decodeFilePreview(value: unknown): FilePreviewResponse {
   const raw = record(value, "$");
   const hasImage = Object.hasOwn(raw, "image");
@@ -3220,7 +3281,9 @@ function decodeDeliveredOutputs(
     const item = object(
       raw,
       itemPath,
-      updated ? [...outputFields, "updated"] : outputFields,
+      updated
+        ? [...presentOutputFields(raw, itemPath), "updated"]
+        : presentOutputFields(raw, itemPath),
     );
     if (updated && item.updated !== true)
       fail(itemPath, "invalid output update flag");
@@ -3233,6 +3296,11 @@ function decodeDeliveredOutputs(
   });
 }
 const outputFields = ["id", "displayPath", "sizeBytes", "redacted"] as const;
+function presentOutputFields(raw: unknown, itemPath: string) {
+  return Object.hasOwn(record(raw, itemPath), "open")
+    ? ([...outputFields, "open"] as const)
+    : outputFields;
+}
 function decodeOutputFields(item: Record<string, unknown>, itemPath: string) {
   const id = stringValue(item.id, `${itemPath}.id`);
   if (!/^[0-9a-f]{32}$/.test(id) || /^0+$/.test(id))
@@ -3253,11 +3321,16 @@ function decodeOutputFields(item: Record<string, unknown>, itemPath: string) {
           )
   )
     fail(itemPath, "invalid output display path");
+  if (redacted && Object.hasOwn(item, "open"))
+    fail(itemPath, "a hidden output cannot be opened");
   return {
     id,
     displayPath,
     sizeBytes: u64WireInteger(item.sizeBytes, `${itemPath}.sizeBytes`),
     redacted,
+    ...(Object.hasOwn(item, "open")
+      ? { open: enumValue(item.open, `${itemPath}.open`, fileOpenKinds) }
+      : {}),
   };
 }
 function decodeConversationOutputs(
@@ -3269,7 +3342,10 @@ function decodeConversationOutputs(
   const ids = new Set<string>();
   const paths = new Set<string>();
   return arrayValue(value, path, (raw, itemPath) => {
-    const item = object(raw, itemPath, [...outputFields, "runId"]);
+    const item = object(raw, itemPath, [
+      ...presentOutputFields(raw, itemPath),
+      "runId",
+    ]);
     const output = decodeOutputFields(item, itemPath);
     const runId = positiveWireId(item.runId, `${itemPath}.runId`);
     if (
@@ -3974,12 +4050,6 @@ function decodeTask(
     ...(Object.hasOwn(record(value, path), "conversationOutputs")
       ? ["conversationOutputs"]
       : []),
-    ...(Object.hasOwn(record(value, path), "officeOutputsOpen")
-      ? ["officeOutputsOpen"]
-      : []),
-    ...(Object.hasOwn(record(value, path), "browserOutputsOpen")
-      ? ["browserOutputsOpen"]
-      : []),
     ...(Object.hasOwn(record(value, path), "sessionCloseRetryAvailable")
       ? ["sessionCloseRetryAvailable"]
       : []),
@@ -4026,16 +4096,6 @@ function decodeTask(
     "pendingUi",
     "uiHistory",
   ]);
-  if (
-    Object.hasOwn(item, "officeOutputsOpen") &&
-    item.officeOutputsOpen !== true
-  )
-    fail(path, "invalid Office output availability");
-  if (
-    Object.hasOwn(item, "browserOutputsOpen") &&
-    item.browserOutputsOpen !== true
-  )
-    fail(path, "invalid browser output availability");
   const bindingItem = object(item.binding, `${path}.binding`, [
     "epoch",
     "availability",
@@ -4639,12 +4699,6 @@ function decodeTask(
     currentRunPhase,
     context,
     runs,
-    ...(item.officeOutputsOpen === true
-      ? { officeOutputsOpen: true as const }
-      : {}),
-    ...(item.browserOutputsOpen === true
-      ? { browserOutputsOpen: true as const }
-      : {}),
     ...(item.conversationOutputs === undefined
       ? {}
       : {

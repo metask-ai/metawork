@@ -47,6 +47,7 @@ const output = {
   sizeBytes: "42",
   redacted: false,
 };
+const target = { kind: "output", taskId: "3", runId: "7", outputId: output.id };
 const view = (props = {}) =>
   createElement(
     I18nContext.Provider,
@@ -83,15 +84,15 @@ test("Output actions show checked states and always submit identity intent anew"
     }),
   );
   fireEvent.click(screen.getByRole("button", { name: "Check file" }));
-  assert.deepEqual(calls[0].slice(0, 4), ["3", "7", output.id, "check"]);
+  assert.deepEqual(calls[0].slice(0, 2), [target, "check"]);
   assert.equal(
-    screen.getByRole("button", { name: "Show in folder" }).disabled,
+    screen.getByRole("button", { name: "Open folder" }).disabled,
     true,
   );
   resolve("changed");
   await screen.findByText("Changed since delivery");
-  fireEvent.click(screen.getByRole("button", { name: "Show in folder" }));
-  assert.equal(calls[1][3], "reveal");
+  fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
+  assert.equal(calls[1][1], "reveal");
   resolve("revealed");
   await screen.findByText("Requested location in file manager");
   assert.equal(screen.queryByRole("link"), null);
@@ -101,7 +102,7 @@ test("Output cancellation aborts the Host request and ignores its late success",
   let resolve;
   render(
     view({
-      onAction: async (_t, _r, _o, _a, s) => {
+      onAction: async (_target, _action, s) => {
         signal = s;
         return new Promise((r) => {
           resolve = r;
@@ -109,7 +110,7 @@ test("Output cancellation aborts the Host request and ignores its late success",
       },
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Show in folder" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   assert.equal(signal.aborted, true);
   resolve("revealed");
@@ -124,14 +125,14 @@ test("Output cancellation aborts the Host request and ignores its late success",
 test("Task replacement and disconnection invalidate in-flight results; hidden paths cannot act", async () => {
   let signal;
   let resolve;
-  const onAction = async (_t, _r, _o, _a, s) => {
+  const onAction = async (_target, _action, s) => {
     signal = s;
     return new Promise((r) => {
       resolve = r;
     });
   };
   const mounted = render(view({ onAction }));
-  fireEvent.click(screen.getByRole("button", { name: "Show in folder" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
   mounted.rerender(view({ taskId: "4", onAction }));
   assert.equal(signal.aborted, true);
   resolve("revealed");
@@ -152,7 +153,7 @@ test("Task replacement and disconnection invalidate in-flight results; hidden pa
     true,
   );
   assert.equal(
-    screen.getByRole("button", { name: "Show in folder" }).disabled,
+    screen.getByRole("button", { name: "Open folder" }).disabled,
     true,
   );
   assert.equal(screen.queryByText("年度报告.docx"), null);
@@ -163,7 +164,7 @@ test("Save cancellation waits for the actual Host result and preserves a committ
   let finish;
   render(
     view({
-      onAction: async (_t, _r, _o, action, s) => {
+      onAction: async (_target, action, s) => {
         assert.equal(action, "save");
         signal = s;
         return new Promise((resolve) => {
@@ -205,7 +206,7 @@ test("Save transport failure after cancel does not claim the destination was unt
   assert.equal(screen.queryByText("Operation cancelled"), null);
 });
 
-test("Continue editing waits for the scoped Host check before preparing a draft and never submits", async () => {
+test("Referencing a file in the conversation waits for the scoped Host check before preparing a draft and never submits", async () => {
   let complete;
   const checks = [];
   const prepared = [];
@@ -217,85 +218,90 @@ test("Continue editing waits for the scoped Host check before preparing a draft 
           complete = resolve;
         });
       },
-      onPrepareEdit: (...args) => {
+      onReference: (...args) => {
         prepared.push(args);
         return "edit_prepared";
       },
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
-  assert.deepEqual(checks[0].slice(0, 4), [
-    "3",
-    "7",
-    output.id,
-    "check_current",
-  ]);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reference in conversation" }),
+  );
+  assert.deepEqual(checks[0].slice(0, 2), [target, "check_current"]);
   assert.deepEqual(prepared, []);
   complete("ready");
-  await screen.findByText(
-    "File reference added. Enter your requested changes.",
-  );
-  assert.deepEqual(prepared, [["3", "7", output.id]]);
+  await screen.findByText("File reference added to the input.");
+  assert.deepEqual(prepared, [[target, output.displayPath]]);
   assert.equal(checks.length, 1);
 });
-test("Continue editing preserves a conflicting draft and cannot prepare a changed source", async () => {
+test("Referencing a file in the conversation preserves a conflicting draft and cannot prepare a changed source", async () => {
   let result = "changed";
   let preparations = 0;
   render(
     view({
       onAction: async () => result,
-      onPrepareEdit: () => {
+      onReference: () => {
         preparations++;
         return "edit_draft_busy";
       },
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
-  await screen.findByText("Changed since delivery");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reference in conversation" }),
+  );
+  await screen.findByText("The file changed during the operation. Try again.");
   assert.equal(preparations, 0);
   result = "ready";
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reference in conversation" }),
+  );
   await screen.findByText(
     "Skill draft preserved. Finish the current input first.",
   );
   assert.equal(preparations, 1);
 });
-test("Continue editing discards a late check after switching Tasks or disabling the source", async () => {
+test("Referencing a file in the conversation discards a late check after switching Tasks or disabling the source", async () => {
   let complete;
   let signal;
   let preparations = 0;
-  const onAction = async (_t, _r, _o, _a, s) => {
+  const onAction = async (_target, _action, s) => {
     signal = s;
     return new Promise((resolve) => {
       complete = resolve;
     });
   };
-  const onPrepareEdit = () => {
+  const onReference = () => {
     preparations++;
     return "edit_prepared";
   };
-  const mounted = render(view({ onAction, onPrepareEdit }));
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
-  mounted.rerender(view({ taskId: "4", onAction, onPrepareEdit }));
+  const mounted = render(view({ onAction, onReference }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reference in conversation" }),
+  );
+  mounted.rerender(view({ taskId: "4", onAction, onReference }));
   assert.equal(signal.aborted, true);
   complete("ready");
   await waitFor(() => assert.equal(screen.queryByRole("status"), null));
   assert.equal(preparations, 0);
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reference in conversation" }),
+  );
   mounted.rerender(
-    view({ taskId: "4", disabled: true, onAction, onPrepareEdit }),
+    view({ taskId: "4", disabled: true, onAction, onReference }),
   );
   assert.equal(signal.aborted, true);
   complete("ready");
   await waitFor(() => assert.equal(screen.queryByRole("status"), null));
   assert.equal(preparations, 0);
-  mounted.rerender(view({ taskId: "4", onAction, onPrepareEdit }));
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  mounted.rerender(view({ taskId: "4", onAction, onReference }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reference in conversation" }),
+  );
   mounted.rerender(
     view({
       taskId: "4",
       onAction,
-      onPrepareEdit,
+      onReference,
       outputs: [{ ...output, redacted: true, displayPath: "" }],
     }),
   );
@@ -304,7 +310,55 @@ test("Continue editing discards a late check after switching Tasks or disabling 
   await waitFor(() => assert.equal(screen.queryByRole("status"), null));
   assert.equal(preparations, 0);
   assert.equal(
-    screen.getByRole("button", { name: "Continue editing" }).disabled,
+    screen.getByRole("button", { name: "Reference in conversation" }).disabled,
     true,
   );
+});
+
+test("Referencing a file is offered only while the conversation can take it", () => {
+  const mounted = render(view({ onAction: async () => "ready" }));
+  assert.equal(
+    screen.queryByRole("button", { name: "Reference in conversation" }),
+    null,
+  );
+  mounted.rerender(
+    view({
+      onAction: async () => "ready",
+      onReference: () => "edit_prepared",
+    }),
+  );
+  assert.ok(screen.getByRole("button", { name: "Reference in conversation" }));
+});
+
+test("Opening an output is offered only where the Host opens it, by its own name", async () => {
+  const actions = [];
+  const onAction = async (_target, action) => {
+    actions.push(action);
+    return action === "open" ? "open_failed" : "ready";
+  };
+  const buttons = () =>
+    screen.getAllByRole("button").map((button) => button.textContent);
+  const names = ["Check file", "Open folder", "Save as…"];
+  const rows = (value) =>
+    view({
+      onAction,
+      onPreview: () => {},
+      outputs: [{ ...output, ...value }],
+    });
+  // The extension says nothing: only the projection does.
+  const mounted = render(rows({ displayPath: "results/report.html" }));
+  assert.deepEqual(buttons(), names);
+  mounted.rerender(
+    rows({ displayPath: "results/report.html", open: "browser" }),
+  );
+  assert.deepEqual(buttons(), ["Open in browser", "View source", ...names]);
+  mounted.rerender(
+    rows({ displayPath: "results/report.pdf", open: "default_app" }),
+  );
+  assert.deepEqual(buttons(), ["Open in default app", ...names]);
+  fireEvent.click(screen.getByRole("button", { name: "Open in default app" }));
+  await screen.findByText(
+    "The system did not open this file. It may have no associated app.",
+  );
+  assert.deepEqual(actions, ["open"]);
 });

@@ -7,9 +7,11 @@ import type { NativeSdkJson } from "@native-sdk/cli";
 import { maxPreviewVideoBytes } from "./contracts.ts";
 import type {
   AttachmentThumbnailResult,
+  FileDescriptionResult,
   FilePreview,
   FilePreviewLoadOptions,
   FilePreviewResponse,
+  FileTarget,
   MediaTarget,
   FilePreviewVideo,
   WorkspaceDirectory,
@@ -17,6 +19,7 @@ import type {
 import { commands } from "./commands.ts";
 import {
   decodeAttachmentThumbnail,
+  decodeFileDescription,
   decodeFilePreview,
   decodePreviewChunk,
   decodePreviewRelease,
@@ -133,12 +136,10 @@ export class FilePreviewLoader {
     });
   }
   load(
-    taskId: string,
-    runId: string,
-    fileReferenceId: string,
+    target: FileTarget,
     options: FilePreviewLoadOptions = {},
   ): Promise<FilePreview> {
-    return this.loadTarget(taskId, { runId, fileReferenceId }, options);
+    return this.loadTarget(commands.previewFile, target, options);
   }
   /// The viewer tier for a registered image: the original, under the same
   /// grant, chunk transfer, capacity and security rules as any other preview.
@@ -146,7 +147,7 @@ export class FilePreviewLoader {
     target: MediaTarget,
     options: FilePreviewLoadOptions = {},
   ): Promise<FilePreview> {
-    return this.loadTarget(null, { media: target }, options);
+    return this.loadTarget(commands.mediaPreview, target, options);
   }
   /// The thumbnail tier: one request, one response, no Host grant to release.
   /// The derived pixels register in the same image pool, so the security epoch
@@ -224,26 +225,48 @@ export class FilePreviewLoader {
       options.signal?.removeEventListener("abort", abort);
     }
   }
-  loadWorkspace(
-    taskId: string,
-    workspaceId: string,
-    workspaceEpoch: string,
-    path: string,
-    options: FilePreviewLoadOptions = {},
-  ): Promise<FilePreview> {
-    return this.loadTarget(
-      taskId,
-      { workspaceId, workspaceEpoch, path },
-      options,
-    );
-  }
-  async listDirectory(
+  listDirectory(
     taskId: string,
     workspaceId: string,
     workspaceEpoch: string,
     path: string,
     options: FilePreviewLoadOptions = {},
   ): Promise<WorkspaceDirectory> {
+    return this.ask(
+      commands.listDirectory,
+      { taskId, workspaceId, workspaceEpoch, path },
+      (value) => {
+        const result = decodeWorkspaceDirectory(value);
+        return result.state === "busy" ? null : result;
+      },
+      { ...options, priority: "interactive" },
+    );
+  }
+  /// What a file is right now. The same request shape, ids and preparation
+  /// slots as a preview of it, and nothing to release afterwards.
+  describe(
+    target: FileTarget,
+    options: FilePreviewLoadOptions = {},
+  ): Promise<FileDescriptionResult> {
+    return this.ask(
+      commands.describeFile,
+      { target },
+      (value) => {
+        const result = decodeFileDescription(value);
+        return result.state === "busy" ? null : result;
+      },
+      options,
+    );
+  }
+  /// One answer that holds no Host resource: cancelled with its caller, asked
+  /// again while the Host is busy, and over with its own deadline.
+  private async ask<Result>(
+    command: string,
+    request: Record<string, NativeSdkJson>,
+    /// Null while the Host is busy.
+    decode: (value: unknown) => Result | null,
+    options: FilePreviewLoadOptions,
+  ): Promise<Result> {
     const controller = new AbortController();
     const session = this.session.signal;
     const abort = () => controller.abort();
@@ -258,35 +281,33 @@ export class FilePreviewLoader {
       for (;;) {
         check(controller.signal);
         if (generation !== this.generation()) throw abortError();
-        const release = await this.preparations.acquire(
-          controller.signal,
-          true,
-        );
-        const previewId = String(this.nextId++);
-        const cancel = () => {
-          void this.invoke(commands.releasePreview, {
-            generation,
-            previewId,
-          }).catch(() => {});
-        };
-        controller.signal.addEventListener("abort", cancel, { once: true });
-        try {
-          check(controller.signal);
-          const result = decodeWorkspaceDirectory(
-            await this.invoke(commands.listDirectory, {
+        // A full queue in this window reads as a busy Host: ask again later.
+        const release = await this.preparations
+          .acquire(controller.signal, options.priority === "interactive")
+          .catch((error: unknown) => {
+            if (error instanceof Capacity) return null;
+            throw error;
+          });
+        if (release) {
+          const previewId = String(this.nextId++);
+          const cancel = () => {
+            void this.invoke(commands.releasePreview, {
               generation,
               previewId,
-              taskId,
-              workspaceId,
-              workspaceEpoch,
-              path,
-            }),
-          );
-          check(controller.signal);
-          if (result.state !== "busy") return result;
-        } finally {
-          release();
-          controller.signal.removeEventListener("abort", cancel);
+            }).catch(() => {});
+          };
+          controller.signal.addEventListener("abort", cancel, { once: true });
+          try {
+            check(controller.signal);
+            const result = decode(
+              await this.invoke(command, { generation, previewId, ...request }),
+            );
+            check(controller.signal);
+            if (result !== null) return result;
+          } finally {
+            release();
+            controller.signal.removeEventListener("abort", cancel);
+          }
         }
         await delay(
           Math.min(1000, 100 * 2 ** Math.min(busy++, 4)),
@@ -300,11 +321,8 @@ export class FilePreviewLoader {
     }
   }
   private async loadTarget(
-    taskId: string | null,
-    target:
-      | { runId: string; fileReferenceId: string }
-      | { workspaceId: string; workspaceEpoch: string; path: string }
-      | { media: MediaTarget },
+    command: typeof commands.previewFile | typeof commands.mediaPreview,
+    target: FileTarget | MediaTarget,
     options: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
     const controller = new AbortController();
@@ -354,16 +372,7 @@ export class FilePreviewLoader {
         signal.addEventListener("abort", cancelHost, { once: true });
         try {
           const response = decodeFilePreview(
-            await this.invoke(
-              "media" in target
-                ? commands.mediaPreview
-                : "runId" in target
-                  ? commands.previewFile
-                  : commands.previewWorkspaceFile,
-              "media" in target
-                ? { ...key, target: target.media }
-                : { ...key, taskId, ...target },
-            ),
+            await this.invoke(command, { ...key, target }),
           );
           releasePreparation();
           check(signal);

@@ -197,7 +197,7 @@ try {
   );
   await webview.evaluate(`(() => {
     const panel=document.querySelector('#conversation-fixture');
-    const image=panel.querySelector('.generated-image-preview');
+    const image=panel.querySelector('.reply-image');
     const user=panel.querySelector('[data-operation-id=blue]');
     const text=panel.querySelector('[data-output-identity] p');
     const range=document.createRange();range.selectNodeContents(text);getSelection().removeAllRanges();getSelection().addRange(range);
@@ -218,7 +218,7 @@ try {
     );
     const observed = await webview.evaluate(`(() => {
       const panel=document.querySelector('#conversation-fixture'),before=window.__conversationObserved;
-      const image=panel.querySelector('.generated-image-preview'),user=panel.querySelector('[data-operation-id=blue]');
+      const image=panel.querySelector('.reply-image'),user=panel.querySelector('[data-operation-id=blue]');
       return {sameImage:image===before.image,sameUser:user===before.user,role:image.closest('.ai-message').dataset.role,before:!!(image.compareDocumentPosition(user)&Node.DOCUMENT_POSITION_FOLLOWING),loads:conversationFixture.loads(),selection:getSelection().toString()===before.selection,focus:document.activeElement===panel.querySelector('textarea'),shift:Math.abs(before.text.getBoundingClientRect().top-before.top)};
     })()`);
     assert.deepEqual(
@@ -256,7 +256,7 @@ try {
   assert.equal(tail.copies, 1);
   assert.equal(tail.detailsBefore, true);
   await webview.evaluate(
-    `document.querySelector('#conversation-fixture .generated-image-preview').scrollIntoView({block:'center'})`,
+    `document.querySelector('#conversation-fixture .reply-image').scrollIntoView({block:'center'})`,
   );
   for (const width of [1320, 390]) {
     await webview.send("Emulation.setDeviceMetricsOverride", {

@@ -74,6 +74,7 @@ export class PreviewImagePool {
         return source;
       },
       valid: () => valid,
+      current: () => this.epoch === descriptor.securityEpoch,
       subscribe: (listener) => {
         listeners.add(listener);
         return () => {

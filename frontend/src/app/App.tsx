@@ -8,7 +8,18 @@ import {
   SkillMessageBody,
   UserInputMessage,
 } from "../features/tasks/UserInputMessage.tsx";
-import type { OutputEditResult } from "../features/tasks/RunOutputs.tsx";
+import type { FileReferenceResult } from "../features/tasks/RunOutputs.tsx";
+import {
+  FileMenuProvider,
+  type FileMenuHandler,
+  type MenuFile,
+} from "../components/FileMenu.tsx";
+import {
+  fileMenuOutcome,
+  fileTargetShown,
+  menuFile,
+  menuFileTarget,
+} from "../features/tasks/reply-files.ts";
 import {
   historyProgress,
   earlierHistoryGoal,
@@ -129,6 +140,8 @@ import {
   createTaskPanelWorkspaceTab,
   createTaskPanelReviewTab,
   createTaskPanelOutputsTab,
+  taskPanelFileTarget,
+  type TaskPanelTab,
 } from "../features/task-panel/task-panel-state.ts";
 import {
   WorkspaceFileTree,
@@ -215,6 +228,7 @@ import type {
   ModelRef,
   TaskSummary,
   FileReferenceView,
+  FileTarget,
   FileChangeDiffResult,
   FileChangeView,
   RunFileChanges,
@@ -353,6 +367,13 @@ import {
   ArchiveNotice,
   type ArchiveNoticeValue,
 } from "../features/tasks/ArchiveNotice.tsx";
+
+function taskPanelFile(tab: TaskPanelTab): MenuFile | null {
+  const target = taskPanelFileTarget(tab);
+  return target && "displayPath" in tab
+    ? menuFile(target, tab.displayPath)
+    : null;
+}
 
 export default function App() {
   const { t } = useI18n();
@@ -1417,34 +1438,28 @@ export default function App() {
   );
   const loadFilePreview = useCallback(
     (
-      taskId: string,
-      runId: string,
-      referenceId: string,
+      target: FileTarget,
       options?: import("../bridge/contracts.ts").FilePreviewLoadOptions,
-    ) => client.previewFile(taskId, runId, referenceId, options),
+    ) => client.previewFile(target, options),
+    [client],
+  );
+  const describeFile = useCallback(
+    (
+      target: FileTarget,
+      options?: import("../bridge/contracts.ts").FilePreviewLoadOptions,
+    ) => client.describeFile(target, options),
+    [client],
+  );
+  const runFileAction = useCallback<
+    import("../bridge/contracts.ts").FileActionHandler
+  >(
+    (target, action, signal) => client.fileAction(target, action, signal),
     [client],
   );
   const filePreviewTabs = useFilePreviewTabs(
     route === "workbench" ? workbench.activeTaskId : null,
     previewTabIds,
     loadFilePreview,
-    useCallback(
-      (
-        taskId: string,
-        workspaceId: string,
-        workspaceEpoch: string,
-        path: string,
-        options?: import("../bridge/contracts.ts").FilePreviewLoadOptions,
-      ) =>
-        client.previewWorkspaceFile(
-          taskId,
-          workspaceId,
-          workspaceEpoch,
-          path,
-          options,
-        ),
-      [client],
-    ),
   );
   const workspaceFilesAvailable = Boolean(
     panelTask &&
@@ -1510,6 +1525,19 @@ export default function App() {
       path,
     );
     focusTaskPanelTab(tab.tabId);
+  }
+  function workspaceTreeFile(path: string): MenuFile | null {
+    if (!workspaceFilesAvailable || !panelTask || !panelWorkspace) return null;
+    return menuFile(
+      {
+        kind: "workspace",
+        taskId: panelTask.id,
+        workspaceId: panelWorkspace.id,
+        workspaceEpoch: panelWorkspace.epoch,
+        path,
+      },
+      path,
+    );
   }
   function openConversationWorkspaceFile(
     taskId: string,
@@ -1813,6 +1841,7 @@ export default function App() {
     allowed: taskCanCompose && !newTaskDraftActive && !bridgeUnavailable,
     prepareRunInput: !taskOperationInFlight,
     audience: attachmentAudience.current,
+    workspaces: snapshot.workspaces,
   };
   const taskDraftActionContext = useRef(taskDraftAction);
   taskDraftActionContext.current = taskDraftAction;
@@ -4454,33 +4483,32 @@ export default function App() {
     acceptUiResponse(identity);
     await refreshCommittedView();
   }
-  const outputEditAudience = attachmentAudience.current;
-  function prepareOutputEdit(
-    taskId: string,
-    runId: string,
-    outputId: string,
-  ): OutputEditResult {
+  const fileReferenceAudience = attachmentAudience.current;
+  const fileReferenceAllowed = taskCanCompose && !newTaskDraftActive;
+  /**
+   * Puts the path the interface shows for a file into the Task's draft. The
+   * Host has just reached the file; what is asked again here is only whether
+   * the interface still shows it and the draft still belongs to this Task.
+   */
+  function prepareFileReference(
+    target: FileTarget,
+    displayPath: string,
+  ): FileReferenceResult {
+    const { taskId } = target;
     const current = taskDraftActionContext.current;
     if (
-      current.audience !== outputEditAudience ||
+      current.audience !== fileReferenceAudience ||
       !current.allowed ||
-      current.task?.id !== taskId ||
-      composerDraftScopeRef.current !== `task:${taskId}`
+      !current.task ||
+      composerDraftScopeRef.current !== `task:${taskId}` ||
+      !fileTargetShown(current.task, current.workspaces, target)
     )
       return "edit_unavailable";
-    const output =
-      current.task.runs
-        .find((run) => run.id === runId)
-        ?.outputs.find((record) => record.id === outputId) ??
-      current.task.conversationOutputs?.find(
-        (record) => record.id === outputId && record.runId === runId,
-      );
-    if (!output || output.redacted) return "edit_unavailable";
     const draft = taskDrafts.currentDraft(taskId);
     if (!draft) return "edit_unavailable";
     const prepared = prepareOutputEditDraft(
       draft,
-      t("outputs.edit_reference", { path: JSON.stringify(output.displayPath) }),
+      t("outputs.edit_reference", { path: JSON.stringify(displayPath) }),
     );
     if (prepared.kind === "preserved") return "edit_draft_busy";
     if (prepared.kind === "too_long") return "edit_too_long";
@@ -4490,7 +4518,7 @@ export default function App() {
     window.requestAnimationFrame(() => {
       const latest = taskDraftActionContext.current;
       if (
-        latest.audience === outputEditAudience &&
+        latest.audience === fileReferenceAudience &&
         latest.allowed &&
         latest.task?.id === taskId
       ) {
@@ -4501,6 +4529,43 @@ export default function App() {
     });
     return "edit_prepared";
   }
+  const prepareFileReferenceRef = useRef(prepareFileReference);
+  prepareFileReferenceRef.current = prepareFileReference;
+  const fileMenuHandler = useMemo<FileMenuHandler>(
+    () => ({
+      connected: !bridgeUnavailable,
+      canReference: fileReferenceAllowed,
+      perform: async (file, action, signal) => {
+        const target = menuFileTarget(file);
+        // The draft this was asked for is the one open now, not the one open
+        // when the Host answers.
+        const reference = prepareFileReferenceRef.current;
+        try {
+          const state = await runFileAction(
+            target,
+            action === "reference" ? "check_current" : action,
+            signal,
+          );
+          return fileMenuOutcome(
+            action,
+            action === "reference" && state === "ready"
+              ? reference(target, file.displayPath)
+              : state,
+          );
+        } catch {
+          return {
+            message:
+              action === "save"
+                ? "outputs.state.save_unknown"
+                : signal.aborted
+                  ? "outputs.state.cancelled"
+                  : "outputs.state.failed",
+          };
+        }
+      },
+    }),
+    [bridgeUnavailable, fileReferenceAllowed, runFileAction],
+  );
   function prepareRetry(input: RunInputView, taskId: string, runId: string) {
     const current = taskDraftActionContext.current;
     const task = current.task;
@@ -5211,17 +5276,20 @@ export default function App() {
   const activePanelView = taskPanel.activeTab
     ? taskPanelViews.stateFor(taskPanel.activeTab.tabId)
     : null;
+  const previewTarget = activePreview?.target;
   const previewMatchesTarget =
     panelTarget.kind !== "empty" &&
-    activePreview !== undefined &&
-    panelTarget.taskId === activePreview.taskId &&
+    previewTarget !== undefined &&
+    panelTarget.taskId === previewTarget.taskId &&
     ((panelTarget.kind === "preview" &&
-      panelTarget.runId === activePreview.runId &&
-      panelTarget.referenceId === activePreview.reference.id) ||
+      previewTarget.kind === "reference" &&
+      panelTarget.runId === previewTarget.runId &&
+      panelTarget.referenceId === previewTarget.fileReferenceId) ||
       (panelTarget.kind === "workspace" &&
-        panelTarget.workspaceId === activePreview.workspaceId &&
-        panelTarget.workspaceEpoch === activePreview.workspaceEpoch &&
-        panelTarget.path === activePreview.reference.displayPath));
+        previewTarget.kind === "workspace" &&
+        panelTarget.workspaceId === previewTarget.workspaceId &&
+        panelTarget.workspaceEpoch === previewTarget.workspaceEpoch &&
+        panelTarget.path === previewTarget.path));
   const reviewMatchesTarget =
     panelTarget.kind === "review" &&
     fileChanges.kind !== "closed" &&
@@ -5250,7 +5318,7 @@ export default function App() {
           : previewMatchesTarget && filePreviewViewState
             ? filePreviewViewState.selected.displayPath
             : t("file_preview.title");
-  return (
+  const shell = (
     <AppShell
       taskTitle={
         settingsOpen
@@ -5663,8 +5731,10 @@ export default function App() {
                     : null
                 }
                 onOpen={openWorkspaceFile}
+                fileOf={workspaceTreeFile}
               />
             }
+            fileOf={taskPanelFile}
             tabs={taskPanel.session.tabs}
             activeTabId={taskPanel.session.activeTabId}
             attention={pendingLocator}
@@ -5696,6 +5766,11 @@ export default function App() {
               filePreviewViewState ? (
               <FilePreviewView
                 state={filePreviewViewState}
+                file={
+                  taskPanel.activeTab
+                    ? taskPanelFile(taskPanel.activeTab)
+                    : null
+                }
                 webLink={markdownWebLink}
                 mode={activePanelView?.previewMode ?? "preview"}
                 scrollTop={activePanelView?.scrollTop ?? 0}
@@ -5719,10 +5794,7 @@ export default function App() {
               panelTask?.conversationOutputs ? (
               <div className="task-panel-review">
                 <RunOutputs
-                  layout="conversation"
                   outputs={panelTask.conversationOutputs}
-                  officeOpen={panelTask.officeOutputsOpen}
-                  browserOpen={panelTask.browserOutputsOpen}
                   taskId={panelTask.id}
                   disabled={bridgeUnavailable}
                   onPreview={
@@ -5730,13 +5802,9 @@ export default function App() {
                       ? openConversationWorkspaceFile
                       : undefined
                   }
-                  onAction={(taskId, runId, outputId, action, signal) =>
-                    client.outputAction(taskId, runId, outputId, action, signal)
-                  }
-                  onPrepareEdit={
-                    taskCanCompose && !newTaskDraftActive
-                      ? prepareOutputEdit
-                      : undefined
+                  onAction={runFileAction}
+                  onReference={
+                    fileReferenceAllowed ? prepareFileReference : undefined
                   }
                 />
               </div>
@@ -5776,11 +5844,10 @@ export default function App() {
                 onRegister={
                   client
                     ? (changeId, signal) =>
-                        client.outputAction(
+                        client.registerOutput(
                           fileChanges.taskId,
                           fileChanges.runId,
                           changeId,
-                          "register",
                           signal,
                         )
                     : undefined
@@ -6335,14 +6402,6 @@ export default function App() {
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
                 outputsEnabled={snapshot.capabilities.typedOutputs}
                 onShowOutputs={showConversationOutputs}
-                onOutputAction={(taskId, runId, outputId, action, signal) =>
-                  client.outputAction(taskId, runId, outputId, action, signal)
-                }
-                onPrepareOutputEdit={
-                  taskCanCompose && !newTaskDraftActive
-                    ? prepareOutputEdit
-                    : undefined
-                }
                 onPrepareRetry={prepareRetry}
                 onRetryInput={(taskId, operationId) =>
                   void actOnFailedInput(taskId, operationId, false)
@@ -6365,12 +6424,21 @@ export default function App() {
                     ? panelWorkspace.canonicalRoot || null
                     : null
                 }
+                workspaceIdentity={
+                  workspaceFilesAvailable && panelWorkspace
+                    ? {
+                        workspaceId: panelWorkspace.id,
+                        workspaceEpoch: panelWorkspace.epoch,
+                      }
+                    : null
+                }
                 onPreviewWorkspaceFile={
                   workspaceFilesAvailable
                     ? openConversationWorkspaceFile
                     : undefined
                 }
                 loadFilePreview={loadFilePreview}
+                describeFile={describeFile}
                 loadAttachmentThumbnail={loadAttachmentThumbnail}
                 onOpenSentAttachment={(target, name, opener) => {
                   attachmentViewerOpener.current = opener;
@@ -6641,4 +6709,5 @@ export default function App() {
       />
     </AppShell>
   );
+  return <FileMenuProvider value={fileMenuHandler}>{shell}</FileMenuProvider>;
 }

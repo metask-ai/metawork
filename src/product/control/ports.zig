@@ -438,26 +438,28 @@ pub const NativeDialog = struct {
     };
 };
 
-/// Main-loop effect for a currently authorized, hash-verified Output only.
-pub const OutputFileReveal = struct {
+pub const FileEffect = enum { locate, reveal, copy_path, open };
+pub const FileOpenKind = product_task.FileOpenKind;
+
+/// Effects on one currently authorized Workspace file. `inspect_fn` runs on the
+/// worker and proves which file the name is without publishing anything;
+/// `perform_fn` runs on the main loop, only after Product resolved the same
+/// target again, and only once.
+pub const FileEffects = struct {
     context: *anyopaque,
-    reveal_fn: *const fn (*anyopaque, []const u8, []const u8) anyerror!void,
+    /// Whether, and where, a file of this name may be opened. The one answer
+    /// the projection, the admission of `open` and its effect all use.
+    open_kind_fn: *const fn (*anyopaque, []const u8) ?FileOpenKind,
+    prepare_fn: *const fn (*anyopaque, []const u8, []const u8, FileEffect) anyerror!OwnedFileEffect,
 };
 
-pub const OutputFileOpen = struct {
-    context: *anyopaque,
-    office: bool,
-    browser: bool,
-    prepare_fn: *const fn (*anyopaque, []const u8, []const u8) anyerror!OwnedOutputOpen,
-};
-
-pub const OwnedOutputOpen = struct {
+pub const OwnedFileEffect = struct {
     context: *anyopaque,
     inspect_fn: *const fn (*anyopaque, *const std.atomic.Value(bool)) anyerror!void,
-    open_fn: *const fn (*anyopaque) anyerror!void,
+    perform_fn: *const fn (*anyopaque) anyerror!void,
     release_fn: *const fn (*anyopaque) void,
 
-    pub fn deinit(self: *OwnedOutputOpen) void {
+    pub fn deinit(self: *OwnedFileEffect) void {
         self.release_fn(self.context);
         self.* = undefined;
     }
@@ -465,34 +467,35 @@ pub const OwnedOutputOpen = struct {
 
 /// Callback-scoped source identity. The Application copies this and the picker
 /// selection into an owned effect before returning; no Product pointer escapes.
-pub const OutputFileSaveInput = struct {
+pub const FileSaveInput = struct {
     io: std.Io,
     workspace_root: []const u8,
     relative_path: []const u8,
-    size_bytes: u64,
-    sha256: [32]u8,
 };
-pub const OutputFileSave = struct {
-    pub const Result = union(enum) { selected: OwnedOutputSave, cancelled, failed: anyerror };
+pub const FileSave = struct {
+    pub const Result = union(enum) { selected: OwnedFileSave, cancelled, failed: anyerror };
     pub const Completion = struct {
         context: *anyopaque,
-        borrow_source_fn: *const fn (*anyopaque, u64) anyerror!OutputFileSaveInput,
+        borrow_source_fn: *const fn (*anyopaque, u64) anyerror!FileSaveInput,
         complete_fn: *const fn (*anyopaque, u64, Result) void,
     };
     context: *anyopaque,
+    /// Whether a file of this name can be saved at all, asked before the user
+    /// is asked where to.
+    validate_path_fn: *const fn ([]const u8) error{InvalidOutputPath}!void,
     begin_fn: *const fn (*anyopaque, u64, u64, []const u8, *const Completion) anyerror!u64,
     cancel_fn: *const fn (*anyopaque, u64) void,
 };
 /// Owned exception to the borrowed coordination ports above. Stage, publish
 /// and discard run only on the worker; release runs after quiescence on main.
 /// Stage/publish must close and discard resources on failure, or report cleanup.
-pub const OwnedOutputSave = struct {
+pub const OwnedFileSave = struct {
     context: *anyopaque,
     stage_fn: *const fn (*anyopaque, *const std.atomic.Value(bool)) anyerror!void,
     publish_fn: *const fn (*anyopaque) anyerror!void,
     discard_fn: *const fn (*anyopaque) anyerror!void,
     release_fn: *const fn (*anyopaque) void,
-    pub fn deinit(self: *OwnedOutputSave) void {
+    pub fn deinit(self: *OwnedFileSave) void {
         self.release_fn(self.context);
         self.* = undefined;
     }

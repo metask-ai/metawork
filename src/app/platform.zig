@@ -119,13 +119,13 @@ pub const Adapter = struct {
         return required_wake.request();
     }
 
-    pub fn outputFileSave(self: *Adapter) control_ports.OutputFileSave {
-        return .{ .context = self, .begin_fn = prepareOutputSave, .cancel_fn = cancelOutputSave };
+    pub fn fileSave(self: *Adapter) control_ports.FileSave {
+        return .{ .context = self, .validate_path_fn = output_file.validateTargetPath, .begin_fn = prepareFileSave, .cancel_fn = cancelFileSave };
     }
 
     const OwnedSave = struct {
         main_thread_id: std.Thread.Id,
-        value: @import("app_output_file").Save,
+        value: output_file.Save,
         fn stage(context: *anyopaque, cancelled: *const std.atomic.Value(bool)) !void {
             const self: *OwnedSave = @ptrCast(@alignCast(context));
             try self.value.stage(cancelled);
@@ -146,20 +146,20 @@ pub const Adapter = struct {
         }
     };
 
-    fn prepareOutputSave(context: *anyopaque, operation: u64, parent: u64, default_name: []const u8, completion: *const control_ports.OutputFileSave.Completion) !u64 {
+    fn prepareFileSave(context: *anyopaque, operation: u64, parent: u64, default_name: []const u8, completion: *const control_ports.FileSave.Completion) !u64 {
         const self: *Adapter = @ptrCast(@alignCast(context));
         if (std.Thread.getCurrentId() != self.main_thread_id) return error.InvalidThread;
         const runtime = self.native_runtime orelse return error.RuntimeUnavailable;
         if (!self.supportsAsyncDialogs()) return error.UnsupportedService;
         var tag: [8]u8 = undefined;
         std.mem.writeInt(u64, &tag, operation, .little);
-        return runtime.requestSaveDialog(.{ .default_name = default_name }, parent, .{ .context = @constCast(completion), .tag = &tag, .on_result = outputSaveResult });
+        return runtime.requestSaveDialog(.{ .default_name = default_name }, parent, .{ .context = @constCast(completion), .tag = &tag, .on_result = fileSaveResult });
     }
-    fn cancelOutputSave(context: *anyopaque, handle: u64) void {
+    fn cancelFileSave(context: *anyopaque, handle: u64) void {
         cancelDialog(context, handle);
     }
-    fn outputSaveResult(context: *anyopaque, _: *native_sdk.Runtime, tag: []const u8, result: native_sdk.platform.DialogResult) !void {
-        const completion: *const control_ports.OutputFileSave.Completion = @ptrCast(@alignCast(context));
+    fn fileSaveResult(context: *anyopaque, _: *native_sdk.Runtime, tag: []const u8, result: native_sdk.platform.DialogResult) !void {
+        const completion: *const control_ports.FileSave.Completion = @ptrCast(@alignCast(context));
         const operation = std.mem.readInt(u64, tag[0..8], .little);
         switch (result.outcome) {
             .cancelled => completion.complete_fn(completion.context, operation, .cancelled),
@@ -177,7 +177,7 @@ pub const Adapter = struct {
                     completion.complete_fn(completion.context, operation, .{ .failed = err });
                     return;
                 };
-                owned.* = .{ .main_thread_id = std.Thread.getCurrentId(), .value = @import("app_output_file").Save.init(std.heap.c_allocator, source.io, .{ .workspace_root = source.workspace_root, .relative_path = source.relative_path, .main_thread_id = std.Thread.getCurrentId() }, result.paths, .{ .size_bytes = source.size_bytes, .sha256 = source.sha256 }) catch |err| {
+                owned.* = .{ .main_thread_id = std.Thread.getCurrentId(), .value = output_file.Save.init(std.heap.c_allocator, source.io, .{ .workspace_root = source.workspace_root, .relative_path = source.relative_path, .main_thread_id = std.Thread.getCurrentId() }, result.paths) catch |err| {
                     std.heap.c_allocator.destroy(owned);
                     completion.complete_fn(completion.context, operation, .{ .failed = err });
                     return;
@@ -187,61 +187,114 @@ pub const Adapter = struct {
         }
     }
 
-    pub fn outputFileReveal(self: *Adapter) control_ports.OutputFileReveal {
-        return .{ .context = self, .reveal_fn = revealOutputFile };
+    pub fn fileEffects(self: *Adapter) control_ports.FileEffects {
+        return .{ .context = self, .open_kind_fn = fileOpenKind, .prepare_fn = prepareFileEffect };
     }
 
-    fn revealOutputFile(context: *anyopaque, root: []const u8, relative: []const u8) !void {
+    /// The list says which types may be opened; this adds what the platform
+    /// can hand them to.
+    fn fileOpenKind(context: *anyopaque, relative: []const u8) ?control_ports.FileOpenKind {
         const self: *Adapter = @ptrCast(@alignCast(context));
-        if (std.Thread.getCurrentId() != self.main_thread_id) return error.InvalidThread;
-        if (!std.fs.path.isAbsolute(root)) return error.InvalidPath;
-        const path = try @import("app_output_file").absolutePath(std.heap.c_allocator, root, relative);
-        defer std.heap.c_allocator.free(path);
-        try (self.native_runtime orelse return error.RuntimeUnavailable).revealPath(path);
+        const system_opens = if (self.platform_services) |services_value| services_value.open_external_url_fn != null else false;
+        return openKindOn(builtin.os.tag, system_opens, relative);
     }
 
-    pub fn outputFileOpen(self: *Adapter) control_ports.OutputFileOpen {
-        return .{
-            .context = self,
-            // macOS Office support awaits opening and saving with a registered handler.
-            .office = builtin.os.tag == .windows,
-            .browser = output_browser_handoff.supported,
-            .prepare_fn = prepareOutputOpen,
+    /// The list holds because the extension alone decides what opens a file.
+    /// On macOS an extended attribute or a Finder alias can name another
+    /// application, so nothing is handed to the default one there until that
+    /// is verified. HTML names the application it goes to.
+    fn openKindOn(os: std.Target.Os.Tag, system_opens: bool, relative: []const u8) ?control_ports.FileOpenKind {
+        return switch (output_file.openKind(relative) orelse return null) {
+            .browser => if (output_browser_handoff.supported) .browser else null,
+            .office, .app => if (os == .windows and system_opens) .default_app else null,
         };
     }
 
-    const OutputOpen = struct {
+    const FileEffect = struct {
         adapter: *Adapter,
+        kind: control_ports.FileEffect,
         root: []u8,
         relative: []u8,
-        proof: ?output_file.OpenProof = null,
+        proof: ?output_file.Proof = null,
 
-        fn request(self: *const OutputOpen) output_file.Request {
+        fn request(self: *const FileEffect) output_file.Request {
             return .{ .workspace_root = self.root, .relative_path = self.relative, .main_thread_id = self.adapter.main_thread_id };
         }
 
         fn inspect(context: *anyopaque, cancelled: *const std.atomic.Value(bool)) !void {
-            const self: *OutputOpen = @ptrCast(@alignCast(context));
-            self.proof = try output_file.inspectOpen(self.adapter.io, self.request(), cancelled);
+            const self: *FileEffect = @ptrCast(@alignCast(context));
+            self.proof = switch (self.kind) {
+                .locate, .reveal, .copy_path => try output_file.locate(self.adapter.io, self.request(), cancelled),
+                .open => try output_file.inspectOpen(self.adapter.io, self.request(), cancelled),
+            };
         }
 
-        fn open(context: *anyopaque) !void {
-            const self: *OutputOpen = @ptrCast(@alignCast(context));
-            const allocator = std.heap.c_allocator;
+        fn perform(context: *anyopaque) !void {
+            const self: *FileEffect = @ptrCast(@alignCast(context));
             if (std.Thread.getCurrentId() != self.adapter.main_thread_id) return error.InvalidThread;
             const proof = self.proof orelse return error.RestrictedOutput;
-            try output_file.revalidateOpenName(self.adapter.io, self.request(), proof);
+            switch (self.kind) {
+                .locate => {},
+                .reveal => try self.reveal(),
+                .copy_path => try self.copyPath(),
+                .open => try self.open(proof),
+            }
+        }
+
+        fn reveal(self: *FileEffect) !void {
+            const path = try output_file.absolutePath(std.heap.c_allocator, self.root, self.relative);
+            defer std.heap.c_allocator.free(path);
+            try (self.adapter.native_runtime orelse return error.RuntimeUnavailable).revealPath(path);
+        }
+
+        /// The Host's only clipboard write: the path the user asked for, in
+        /// the system's own form, and nothing else. It leaves this process only
+        /// for the clipboard, never for the Bridge or a log.
+        fn copyPath(self: *FileEffect) !void {
+            const allocator = std.heap.c_allocator;
+            const absolute = try output_file.absolutePath(allocator, self.root, self.relative);
+            defer {
+                std.crypto.secureZero(u8, absolute);
+                allocator.free(absolute);
+            }
+            const path = try nativePath(allocator, if (builtin.os.tag == .windows) .windows else .posix, absolute);
+            defer {
+                std.crypto.secureZero(u8, path);
+                allocator.free(path);
+            }
+            const runtime = self.adapter.native_runtime orelse return error.RuntimeUnavailable;
+            const services_value = &runtime.options.platform.services;
+            if (services_value.write_clipboard_data_fn == null and services_value.write_clipboard_fn == null)
+                return error.UnsupportedService;
+            // The system platforms answer a write the clipboard did not take
+            // with `UnsupportedService` too.
+            runtime.writeClipboardData(.{ .mime_type = "text/plain", .bytes = path }) catch return error.ClipboardWriteFailed;
+        }
+
+        /// The only effect that hands the file to another program by name, so
+        /// the only one that asks on the main loop whether the name still is
+        /// the inspected file.
+        fn open(self: *FileEffect, proof: output_file.Proof) !void {
+            const allocator = std.heap.c_allocator;
+            try output_file.revalidateName(self.adapter.io, self.request(), proof);
             const absolute = try output_file.absolutePath(allocator, self.root, self.relative);
             defer allocator.free(absolute);
             var buffer: [native_sdk.platform.max_external_url_bytes]u8 = undefined;
             const url = try directoryFileUrl(if (builtin.os.tag == .windows) .windows else .posix, absolute, &buffer);
-            if (output_file.htmlCandidate(self.relative)) return output_browser_handoff.openHtml(url);
-            const services_value = self.adapter.platform_services orelse return error.RuntimeUnavailable;
-            try services_value.openExternalUrl(url);
+            // Whether there is anything to hand it to is settled by the kind, so
+            // any error after that says the system did not take it: the system
+            // platforms report that as `UnsupportedService`.
+            switch (fileOpenKind(self.adapter, self.relative) orelse return error.UnsupportedService) {
+                .browser => output_browser_handoff.openHtml(url) catch return error.FileOpenFailed,
+                .default_app => {
+                    const services_value = self.adapter.platform_services orelse return error.RuntimeUnavailable;
+                    services_value.openExternalUrl(url) catch return error.FileOpenFailed;
+                },
+            }
         }
 
         fn release(context: *anyopaque) void {
-            const self: *OutputOpen = @ptrCast(@alignCast(context));
+            const self: *FileEffect = @ptrCast(@alignCast(context));
             std.debug.assert(std.Thread.getCurrentId() == self.adapter.main_thread_id);
             const allocator = std.heap.c_allocator;
             allocator.free(self.root);
@@ -250,24 +303,19 @@ pub const Adapter = struct {
         }
     };
 
-    fn prepareOutputOpen(context: *anyopaque, root: []const u8, relative: []const u8) !control_ports.OwnedOutputOpen {
+    fn prepareFileEffect(context: *anyopaque, root: []const u8, relative: []const u8, kind: control_ports.FileEffect) !control_ports.OwnedFileEffect {
         const self: *Adapter = @ptrCast(@alignCast(context));
         if (std.Thread.getCurrentId() != self.main_thread_id) return error.InvalidThread;
-        try output_file.validatePath(relative);
-        if (output_file.officeCandidate(relative)) {
-            if (!self.outputFileOpen().office) return error.UnsupportedService;
-            const services_value = self.platform_services orelse return error.RuntimeUnavailable;
-            if (services_value.open_external_url_fn == null) return error.UnsupportedService;
-        } else if (output_file.htmlCandidate(relative)) {
-            if (!self.outputFileOpen().browser) return error.UnsupportedService;
-        } else return error.RestrictedOutput;
+        if (!std.fs.path.isAbsolute(root)) return error.InvalidWorkspaceRoot;
+        try output_file.validateTargetPath(relative);
+        if (kind == .open and fileOpenKind(self, relative) == null) return error.UnsupportedService;
         const allocator = std.heap.c_allocator;
-        const job = try allocator.create(OutputOpen);
+        const job = try allocator.create(FileEffect);
         errdefer allocator.destroy(job);
         const root_copy = try allocator.dupe(u8, root);
         errdefer allocator.free(root_copy);
-        job.* = .{ .adapter = self, .root = root_copy, .relative = try allocator.dupe(u8, relative) };
-        return .{ .context = job, .inspect_fn = OutputOpen.inspect, .open_fn = OutputOpen.open, .release_fn = OutputOpen.release };
+        job.* = .{ .adapter = self, .kind = kind, .root = root_copy, .relative = try allocator.dupe(u8, relative) };
+        return .{ .context = job, .inspect_fn = FileEffect.inspect, .perform_fn = FileEffect.perform, .release_fn = FileEffect.release };
     }
 
     pub fn services(self: *const Adapter) ?native_sdk.platform.PlatformServices {
@@ -727,23 +775,47 @@ pub const Adapter = struct {
     }
 };
 
-const DirectoryUrlStyle = enum { posix, windows };
+const PathStyle = enum { posix, windows };
+
+/// A canonical path without the verbatim prefix Windows may give it, and
+/// whether that prefix named a server.
+fn withoutVerbatimPrefix(style: PathStyle, canonical: []const u8) struct { path: []const u8, unc: bool } {
+    if (style == .windows) {
+        if (startsWithSeparated(canonical, "//?/UNC/")) return .{ .path = canonical[8..], .unc = true };
+        if (startsWithSeparated(canonical, "//?/")) return .{ .path = canonical[4..], .unc = false };
+    }
+    return .{ .path = canonical, .unc = false };
+}
+
+/// Whether a Windows path starts with `expected`, in which `/` stands for
+/// either separator.
+fn startsWithSeparated(value: []const u8, comptime expected: []const u8) bool {
+    if (value.len < expected.len) return false;
+    for (expected, value[0..expected.len]) |want, byte| {
+        if (if (want == '/') byte != '/' and byte != '\\' else want != byte) return false;
+    }
+    return true;
+}
+
+/// The path as the user would write it for another program: the system's own
+/// separators (`absolutePath` already used them), no verbatim prefix, nothing
+/// around it. Text a clipboard cannot hold exactly is refused, because a
+/// platform may otherwise write an empty string and report success.
+fn nativePath(allocator: std.mem.Allocator, style: PathStyle, canonical: []const u8) ![]u8 {
+    const plain = withoutVerbatimPrefix(style, canonical);
+    if (plain.path.len == 0 or !std.unicode.utf8ValidateSlice(plain.path)) return error.InvalidOutputPath;
+    for (plain.path) |byte| if (std.ascii.isControl(byte)) return error.InvalidOutputPath;
+    return std.mem.concat(allocator, u8, &.{ if (plain.unc) "\\\\" else "", plain.path });
+}
 
 /// Builds the `file:` URL that the system opener receives for a canonical
 /// directory. Windows decodes percent escapes in file URLs with the ANSI code
 /// page, so non-ASCII UTF-8 stays literal there (the SDK widens it to UTF-16)
 /// and only ASCII outside the RFC 3986 path set is escaped.
-fn directoryFileUrl(style: DirectoryUrlStyle, canonical: []const u8, output: []u8) error{ InvalidPath, WriteFailed }![]const u8 {
+fn directoryFileUrl(style: PathStyle, canonical: []const u8, output: []u8) error{ InvalidPath, WriteFailed }![]const u8 {
     const Path = struct {
-        fn separator(url_style: DirectoryUrlStyle, byte: u8) bool {
+        fn separator(url_style: PathStyle, byte: u8) bool {
             return byte == '/' or (url_style == .windows and byte == '\\');
-        }
-        fn prefix(value: []const u8, comptime expected: []const u8) bool {
-            if (value.len < expected.len) return false;
-            for (expected, value[0..expected.len]) |want, byte| {
-                if (if (want == '/') !separator(.windows, byte) else want != byte) return false;
-            }
-            return true;
         }
         fn literal(byte: u8) bool {
             return byte >= 0x80 or std.ascii.isAlphanumeric(byte) or switch (byte) {
@@ -752,17 +824,11 @@ fn directoryFileUrl(style: DirectoryUrlStyle, canonical: []const u8, output: []u
             };
         }
     };
-    var path = canonical;
-    var authority = false;
-    if (style == .windows) {
-        if (Path.prefix(path, "//?/UNC/")) {
-            path = path[8..];
-            authority = true;
-        } else if (Path.prefix(path, "//?/")) path = path[4..];
-    }
+    const plain = withoutVerbatimPrefix(style, canonical);
+    const path = plain.path;
     if (path.len == 0) return error.InvalidPath;
     var url = std.Io.Writer.fixed(output);
-    if (authority) {
+    if (plain.unc) {
         try url.writeAll("file://");
     } else if (path.len >= 2 and Path.separator(style, path[0]) and Path.separator(style, path[1])) {
         try url.writeAll("file:");
@@ -955,6 +1021,76 @@ test "directory file URLs keep the POSIX UTF-8 percent encoding" {
     }) |case| try std.testing.expectEqualStrings(case[1], try directoryFileUrl(.posix, case[0], &storage));
 }
 
+test "SDK consumption copied paths are the system's own form without a verbatim prefix" {
+    for ([_]struct { PathStyle, []const u8, []const u8 }{
+        .{ .windows, "C:\\工作 区\\docs\\报告 (1).docx", "C:\\工作 区\\docs\\报告 (1).docx" },
+        .{ .windows, "\\\\?\\C:\\工作区\\a.md", "C:\\工作区\\a.md" },
+        .{ .windows, "\\\\?\\UNC\\server\\share\\a b.md", "\\\\server\\share\\a b.md" },
+        .{ .windows, "\\\\server\\share\\a.md", "\\\\server\\share\\a.md" },
+        .{ .posix, "/Users/x/工作 区/a'\"b.md", "/Users/x/工作 区/a'\"b.md" },
+        .{ .posix, "//?/C:/a.md", "//?/C:/a.md" },
+    }) |case| {
+        const path = try nativePath(std.testing.allocator, case[0], case[1]);
+        defer std.testing.allocator.free(path);
+        try std.testing.expectEqualStrings(case[2], path);
+    }
+    for ([_][]const u8{ "", "\\\\?\\", "/a/\xff.md", "/a/line\nbreak", "/a/\x00" }) |path|
+        try std.testing.expectError(error.InvalidOutputPath, nativePath(std.testing.allocator, .windows, path));
+}
+
+test "SDK consumption copying a path writes exactly that text to the clipboard and reports what the platform refused" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "结果 1", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "结果 1/报告.md", .data = "text" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var adapter = Adapter.init(io, std.Thread.getCurrentId());
+    adapter.native_runtime = &harness.runtime;
+    const port = adapter.fileEffects();
+    var effect = try port.prepare_fn(port.context, root, "结果 1/报告.md", .copy_path);
+    defer effect.deinit();
+    var worker: TestFileEffect = .{ .effect = &effect };
+    try std.testing.expectError(error.RestrictedOutput, effect.perform_fn(effect.context));
+    try worker.inspect();
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.clipboard_write_count);
+    try effect.perform_fn(effect.context);
+    const expected = try std.fs.path.join(std.testing.allocator, &.{ root, "结果 1", "报告.md" });
+    defer std.testing.allocator.free(expected);
+    var buffer: [4096]u8 = undefined;
+    try std.testing.expectEqualStrings(expected, try harness.runtime.readClipboardData("text/plain", &buffer));
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.clipboard_write_count);
+
+    // Only the main thread performs it, and only a written clipboard is success.
+    const Foreign = struct {
+        effect: *control_ports.OwnedFileEffect,
+        result: anyerror!void = error.NotStarted,
+        fn run(self: *@This()) void {
+            self.result = self.effect.perform_fn(self.effect.context);
+        }
+        // What both system platforms answer when the clipboard did not take it.
+        fn refused(_: ?*anyopaque, _: native_sdk.platform.ClipboardData) anyerror!void {
+            return error.UnsupportedService;
+        }
+    };
+    var foreign: Foreign = .{ .effect = &effect };
+    const thread = try std.Thread.spawn(.{}, Foreign.run, .{&foreign});
+    thread.join();
+    try std.testing.expectError(error.InvalidThread, foreign.result);
+    harness.runtime.options.platform.services.write_clipboard_data_fn = Foreign.refused;
+    try std.testing.expectError(error.ClipboardWriteFailed, effect.perform_fn(effect.context));
+    // A platform with no clipboard at all has not refused anything.
+    harness.runtime.options.platform.services.write_clipboard_data_fn = null;
+    harness.runtime.options.platform.services.write_clipboard_fn = null;
+    try std.testing.expectError(error.UnsupportedService, effect.perform_fn(effect.context));
+    adapter.native_runtime = null;
+    try std.testing.expectError(error.RuntimeUnavailable, effect.perform_fn(effect.context));
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.clipboard_write_count);
+}
+
 test "SDK consumption project directory opening classifies failures and preserves navigation policy" {
     const Spy = struct {
         var calls: usize = 0;
@@ -1092,7 +1228,22 @@ test "SDK consumption timers preserve producer IDs and explicit failures" {
     try std.testing.expectError(error.RuntimeUnavailable, port.start_timer_fn(port.context, 99, 1, false));
 }
 
-test "Output location uses the SDK Runtime reveal boundary and rejects invalid input before the platform" {
+const TestFileEffect = struct {
+    effect: *control_ports.OwnedFileEffect,
+    cancelled: std.atomic.Value(bool) = .init(false),
+    result: anyerror!void = error.NotStarted,
+
+    fn run(self: *@This()) void {
+        self.result = self.effect.inspect_fn(self.effect.context, &self.cancelled);
+    }
+    fn inspect(self: *@This()) !void {
+        const thread = try std.Thread.spawn(.{}, run, .{self});
+        thread.join();
+        return self.result;
+    }
+};
+
+test "SDK consumption file location uses the Runtime reveal boundary and rejects invalid input before the platform" {
     const Spy = struct {
         var calls: usize = 0;
         var fail: bool = false;
@@ -1104,35 +1255,135 @@ test "Output location uses the SDK Runtime reveal boundary and rejects invalid i
     };
     Spy.calls = 0;
     Spy.fail = false;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "report.docx", .data = "not an OOXML package" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
     const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
     harness.runtime.options.platform.services.reveal_path_fn = Spy.reveal;
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
     adapter.native_runtime = &harness.runtime;
-    const port = adapter.outputFileReveal();
-    const root = if (builtin.os.tag == .windows) "C:\\workspace" else "/tmp/workspace";
-    try port.reveal_fn(port.context, root, "report.docx");
-    try std.testing.expectEqual(@as(usize, 1), Spy.calls);
-    try std.testing.expectError(error.InvalidOutputPath, port.reveal_fn(port.context, root, "../report.docx"));
-    try std.testing.expectError(error.InvalidPath, port.reveal_fn(port.context, "relative", "report.docx"));
+    const port = adapter.fileEffects();
+    try std.testing.expectError(error.InvalidOutputPath, port.prepare_fn(port.context, root, "../report.docx", .reveal));
+    try std.testing.expectError(error.InvalidWorkspaceRoot, port.prepare_fn(port.context, "relative", "report.docx", .reveal));
+    var effect = try port.prepare_fn(port.context, root, "report.docx", .reveal);
+    defer effect.deinit();
+    // Nothing is revealed that was not located first.
+    try std.testing.expectError(error.RestrictedOutput, effect.perform_fn(effect.context));
+    var worker: TestFileEffect = .{ .effect = &effect };
+    try worker.inspect();
+    try std.testing.expectEqual(@as(usize, 0), Spy.calls);
+    try effect.perform_fn(effect.context);
     try std.testing.expectEqual(@as(usize, 1), Spy.calls);
     Spy.fail = true;
-    try std.testing.expectError(error.InjectedRevealFailure, port.reveal_fn(port.context, root, "report.docx"));
+    try std.testing.expectError(error.InjectedRevealFailure, effect.perform_fn(effect.context));
     adapter.native_runtime = null;
-    try std.testing.expectError(error.RuntimeUnavailable, port.reveal_fn(port.context, root, "report.docx"));
+    try std.testing.expectError(error.RuntimeUnavailable, effect.perform_fn(effect.context));
+    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
+
+    // Locating alone never touches the platform, and a name that is no longer
+    // a file stops before it.
+    var located = try port.prepare_fn(port.context, root, "report.docx", .locate);
+    defer located.deinit();
+    var locator: TestFileEffect = .{ .effect = &located };
+    try locator.inspect();
+    try located.perform_fn(located.context);
+    try tmp.dir.deleteFile(std.testing.io, "report.docx");
+    try std.testing.expectError(error.FileNotFound, worker.inspect());
+    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
+}
+
+test "SDK consumption file open hands a listed type to the system once and nothing else to it" {
+    const Spy = struct {
+        var calls: usize = 0;
+        var fail: bool = false;
+        fn open(_: ?*anyopaque, url: []const u8) !void {
+            calls += 1;
+            try std.testing.expect(std.mem.startsWith(u8, url, "file://"));
+            // What both system platforms answer when nothing took the file.
+            if (fail) return error.UnsupportedService;
+        }
+    };
+    Spy.calls = 0;
+    Spy.fail = false;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "a.pdf", "a.docx", "a.exe", "a.xml", "README" }) |name|
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "plain text" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var adapter = Adapter.init(io, std.Thread.getCurrentId());
+    adapter.native_runtime = &harness.runtime;
+    const port = adapter.fileEffects();
+
+    // Without the system's own hand-off nothing opens; with it, only the list.
+    try std.testing.expectEqual(@as(?control_ports.FileOpenKind, null), port.open_kind_fn(port.context, "a.pdf"));
+    try std.testing.expectError(error.UnsupportedService, port.prepare_fn(port.context, root, "a.pdf", .open));
+    adapter.platform_services = harness.runtime.options.platform.services;
+    adapter.platform_services.?.open_external_url_fn = null;
+    try std.testing.expectEqual(@as(?control_ports.FileOpenKind, null), port.open_kind_fn(port.context, "a.pdf"));
+    adapter.platform_services.?.open_external_url_fn = Spy.open;
+    const default_app: ?control_ports.FileOpenKind = if (builtin.os.tag == .windows) .default_app else null;
+    for ([_][]const u8{ "a.pdf", "a.docx" }) |name| {
+        try std.testing.expectEqual(default_app, port.open_kind_fn(port.context, name));
+        try std.testing.expectEqual(@as(?control_ports.FileOpenKind, .default_app), Adapter.openKindOn(.windows, true, name));
+        try std.testing.expectEqual(@as(?control_ports.FileOpenKind, null), Adapter.openKindOn(.macos, true, name));
+    }
+    const browser: ?control_ports.FileOpenKind = if (output_browser_handoff.supported) .browser else null;
+    try std.testing.expectEqual(browser, port.open_kind_fn(port.context, "a.html"));
+    for ([_]std.Target.Os.Tag{ .windows, .macos }) |os|
+        try std.testing.expectEqual(browser, Adapter.openKindOn(os, false, "a.html"));
+    for ([_][]const u8{ "a.exe", "a.xml", "README" }) |name| {
+        try std.testing.expectEqual(@as(?control_ports.FileOpenKind, null), port.open_kind_fn(port.context, name));
+        try std.testing.expectError(error.UnsupportedService, port.prepare_fn(port.context, root, name, .open));
+    }
+
+    if (default_app == null) {
+        for ([_][]const u8{ "a.pdf", "a.docx" }) |name|
+            try std.testing.expectError(error.UnsupportedService, port.prepare_fn(port.context, root, name, .open));
+        try std.testing.expectEqual(@as(usize, 0), Spy.calls);
+        return;
+    }
+    var effect = try port.prepare_fn(port.context, root, "a.pdf", .open);
+    defer effect.deinit();
+    var worker: TestFileEffect = .{ .effect = &effect };
+    try std.testing.expectError(error.RestrictedOutput, effect.perform_fn(effect.context));
+    try worker.inspect();
+    try std.testing.expectEqual(@as(usize, 0), Spy.calls);
+    try effect.perform_fn(effect.context);
+    try std.testing.expectEqual(@as(usize, 1), Spy.calls);
+    Spy.fail = true;
+    try std.testing.expectError(error.FileOpenFailed, effect.perform_fn(effect.context));
+    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
+    Spy.fail = false;
+    // The name now is another file: what was inspected is not what would open.
+    try tmp.dir.writeFile(io, .{ .sub_path = "other.pdf", .data = "other text" });
+    try tmp.dir.rename("other.pdf", tmp.dir, "a.pdf", io);
+    try std.testing.expectError(error.OutputChanged, effect.perform_fn(effect.context));
+    // A package that is not the document its name says stops on the worker.
+    var document = try port.prepare_fn(port.context, root, "a.docx", .open);
+    defer document.deinit();
+    var document_worker: TestFileEffect = .{ .effect = &document };
+    try std.testing.expectError(error.RestrictedOutput, document_worker.inspect());
+    try std.testing.expectError(error.RestrictedOutput, document.perform_fn(document.context));
     try std.testing.expectEqual(@as(usize, 2), Spy.calls);
 }
 
 test "SDK consumption Output Save picker freezes selected path for worker publication" {
     const Probe = struct {
-        source: control_ports.OutputFileSaveInput,
-        effect: ?control_ports.OwnedOutputSave = null,
+        source: control_ports.FileSaveInput,
+        effect: ?control_ports.OwnedFileSave = null,
         cancelled: bool = false,
-        fn borrow(raw: *anyopaque, _: u64) !control_ports.OutputFileSaveInput {
+        fn borrow(raw: *anyopaque, _: u64) !control_ports.FileSaveInput {
             const self: *@This() = @ptrCast(@alignCast(raw));
             return self.source;
         }
-        fn complete(raw: *anyopaque, _: u64, result: control_ports.OutputFileSave.Result) void {
+        fn complete(raw: *anyopaque, _: u64, result: control_ports.FileSave.Result) void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             switch (result) {
                 .selected => |effect| self.effect = effect,
@@ -1142,7 +1393,7 @@ test "SDK consumption Output Save picker freezes selected path for worker public
         }
     };
     const Worker = struct {
-        effect: *control_ports.OwnedOutputSave,
+        effect: *control_ports.OwnedFileSave,
         operation: enum { stage, publish },
         cancelled: std.atomic.Value(bool) = .init(false),
         result: anyerror!void = error.NotStarted,
@@ -1173,11 +1424,9 @@ test "SDK consumption Output Save picker freezes selected path for worker public
     harness.null_platform.useAsyncDialogs(&harness.runtime.options.platform.services);
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
     adapter.native_runtime = &harness.runtime;
-    const port = adapter.outputFileSave();
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash("abc", &hash, .{});
-    var probe: Probe = .{ .source = .{ .io = std.testing.io, .workspace_root = root, .relative_path = "source.txt", .size_bytes = 3, .sha256 = hash } };
-    const completion: control_ports.OutputFileSave.Completion = .{ .context = &probe, .borrow_source_fn = Probe.borrow, .complete_fn = Probe.complete };
+    const port = adapter.fileSave();
+    var probe: Probe = .{ .source = .{ .io = std.testing.io, .workspace_root = root, .relative_path = "source.txt" } };
+    const completion: control_ports.FileSave.Completion = .{ .context = &probe, .borrow_source_fn = Probe.borrow, .complete_fn = Probe.complete };
     const cancelled = try port.begin_fn(port.context, 1, 1, "source.txt", &completion);
     try harness.null_platform.finishDialog(cancelled, .cancelled, "", .primary);
     while (harness.null_platform.takeWake()) |event| try harness.runtime.dispatchPlatformEvent(app, event);
@@ -1263,13 +1512,13 @@ test "SDK consumption Save As borrows the frozen source only during selected com
         completions: usize = 0,
         outcome: enum { none, selected, cancelled, failed } = .none,
         reject_source: bool = false,
-        fn borrow(context: *anyopaque, _: u64) !control_ports.OutputFileSaveInput {
+        fn borrow(context: *anyopaque, _: u64) !control_ports.FileSaveInput {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.borrows += 1;
-            if (self.reject_source) return error.UnknownOutput;
-            return .{ .io = std.testing.io, .workspace_root = if (builtin.os.tag == .windows) "C:\\workspace" else "/tmp/workspace", .relative_path = "report.txt", .size_bytes = 42, .sha256 = @splat(2) };
+            if (self.reject_source) return error.UnknownFile;
+            return .{ .io = std.testing.io, .workspace_root = if (builtin.os.tag == .windows) "C:\\workspace" else "/tmp/workspace", .relative_path = "report.txt" };
         }
-        fn complete(context: *anyopaque, _: u64, result: control_ports.OutputFileSave.Result) void {
+        fn complete(context: *anyopaque, _: u64, result: control_ports.FileSave.Result) void {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.completions += 1;
             self.outcome = switch (result) {
@@ -1291,9 +1540,9 @@ test "SDK consumption Save As borrows the frozen source only during selected com
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
     adapter.native_runtime = &harness.runtime;
     defer adapter.native_runtime = null;
-    const port = adapter.outputFileSave();
+    const port = adapter.fileSave();
     var probe: Probe = .{};
-    const completion: control_ports.OutputFileSave.Completion = .{ .context = &probe, .borrow_source_fn = Probe.borrow, .complete_fn = Probe.complete };
+    const completion: control_ports.FileSave.Completion = .{ .context = &probe, .borrow_source_fn = Probe.borrow, .complete_fn = Probe.complete };
     const cancelled = try port.begin_fn(port.context, 1, 1, "report.txt", &completion);
     try std.testing.expectEqual(@as(usize, 0), probe.borrows);
     try harness.null_platform.finishDialog(cancelled, .cancelled, "", .primary);

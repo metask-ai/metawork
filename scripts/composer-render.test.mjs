@@ -236,8 +236,6 @@ function renderCompletedSurface(
     conversationCoverage = "included",
     outputs = [],
     outputsEnabled = false,
-    onOutputAction,
-    onPrepareOutputEdit,
     loadAttachmentThumbnail,
     onOpenSentAttachment,
   } = {},
@@ -329,8 +327,6 @@ function renderCompletedSurface(
         responseDisabled: false,
         fileChangesEnabled: false,
         outputsEnabled,
-        onOutputAction,
-        onPrepareOutputEdit,
         onPrepareRetry() {},
         onPreviewFile() {},
         loadAttachmentThumbnail,
@@ -1619,18 +1615,19 @@ test("Task shows only explicit delivered Output records and hides redacted paths
     redacted: false,
   };
   const empty = renderCompletedSurface();
-  assert.doesNotMatch(empty, /class="run-outputs"/);
+  assert.doesNotMatch(empty, /class="run-files"/);
   const disabled = renderCompletedSurface("Final report", undefined, [], {
     outputs: [output],
   });
-  assert.doesNotMatch(disabled, /class="run-outputs"/);
+  assert.doesNotMatch(disabled, /class="run-files"/);
   const visible = renderCompletedSurface("Final report", undefined, [], {
     outputs: [output],
     outputsEnabled: true,
   });
-  assert.match(visible, /aria-label="Delivered files"/);
+  assert.match(visible, /class="run-files"/);
   assert.match(visible, /年度报告.docx/);
-  assert.match(visible, /Delivered · 42 bytes/);
+  // Its size is what the file holds now, so nothing is said before it is read.
+  assert.doesNotMatch(visible, /42/);
   assert.doesNotMatch(visible, /href="(?:file:|results)/);
   assert.doesNotMatch(visible, /SHA-256|sha256|locator/);
   const hidden = renderCompletedSurface("Final report", undefined, [], {
@@ -1639,34 +1636,6 @@ test("Task shows only explicit delivered Output records and hides redacted paths
   });
   assert.match(hidden, /File path hidden/);
   assert.doesNotMatch(hidden, /年度报告|results\//);
-});
-
-test("Task passes the continue-edit action to its delivered files only when preparation is available", () => {
-  const options = {
-    outputs: [
-      {
-        id: "01".repeat(16),
-        displayPath: "results/report.docx",
-        sizeBytes: "42",
-        redacted: false,
-      },
-    ],
-    outputsEnabled: true,
-    onOutputAction: async () => "ready",
-  };
-  const withoutPreparation = renderCompletedSurface(
-    "Done",
-    undefined,
-    [],
-    options,
-  );
-  assert.match(withoutPreparation, />Check file</);
-  assert.doesNotMatch(withoutPreparation, />Continue editing</);
-  const available = renderCompletedSurface("Done", undefined, [], {
-    ...options,
-    onPrepareOutputEdit: () => "edit_prepared",
-  });
-  assert.match(available, />Continue editing</);
 });
 
 test("A failed queued resume names the Task blocking its Session", () => {

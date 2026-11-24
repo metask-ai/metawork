@@ -354,14 +354,17 @@ export async function runNativeDialogsVertical({
     assert.equal(run.outputs.length, 1);
     const save = {
       generation: connection,
-      taskId: outputTask.id,
-      runId: run.id,
-      outputId: run.outputs[0].id,
+      target: {
+        kind: "output",
+        taskId: outputTask.id,
+        runId: run.id,
+        outputId: run.outputs[0].id,
+      },
       action: "save",
     };
     const saved = await openWithProgress(
       "save-confirm",
-      "metawork.outputs.action",
+      "metawork.files.action",
       { ...save, operationId: "1" },
       `save to ${join(workspaceRoot, "saved-output.txt")}`,
     );
@@ -372,7 +375,7 @@ export async function runNativeDialogsVertical({
     );
     const saveCancelled = await openWithProgress(
       "save-cancel",
-      "metawork.outputs.action",
+      "metawork.files.action",
       { ...save, operationId: "2" },
       "Cancel",
     );

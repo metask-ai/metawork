@@ -10,9 +10,12 @@ const vite = await createServer({
   server: { middlewareMode: true },
 });
 
-const { writePlainClipboard, writeRichClipboard } = await vite.ssrLoadModule(
-  "/src/platform/clipboard.ts",
-);
+const {
+  imageClipboardAvailable,
+  writeImageClipboard,
+  writePlainClipboard,
+  writeRichClipboard,
+} = await vite.ssrLoadModule("/src/platform/clipboard.ts");
 const {
   copyRunInput,
   latestCopyableResponseId,
@@ -365,4 +368,60 @@ test("only frozen non-empty final or partial responses are copyable", () => {
     ]),
     "latest",
   );
+});
+
+test("an image is written as one PNG item before it is encoded, or not at all", async () => {
+  const items = [];
+  installClipboard(
+    {
+      async write(written) {
+        items.push(...written);
+        await Promise.all(written.map((item) => item.getType("image/png")));
+      },
+    },
+    MockClipboardItem,
+  );
+  let finish;
+  const writing = writeImageClipboard(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  // The clipboard only takes it within the user's own action.
+  assert.equal(items.length, 1);
+  assert.deepEqual(items[0].types, ["image/png"]);
+  const png = new Blob(["png"], { type: "image/png" });
+  await Promise.resolve();
+  finish(png);
+  await writing;
+  assert.equal(await items[0].getType("image/png"), png);
+  await assert.rejects(
+    writeImageClipboard(async () => {
+      throw new Error("not encoded");
+    }),
+    /not encoded/,
+  );
+});
+
+test("an image is only offered where the clipboard takes a PNG", () => {
+  const write = async () => {};
+  class Item {}
+  class Refusing {
+    static supports = () => false;
+  }
+  class Accepting {
+    static supports = (type) => type === "image/png";
+  }
+  for (const [clipboard, item, available] of [
+    [undefined, Accepting, false],
+    [{}, Accepting, false],
+    [{ write }, undefined, false],
+    [{ write }, Refusing, false],
+    [{ write }, Item, true],
+    [{ write }, Accepting, true],
+  ]) {
+    installClipboard(clipboard, item);
+    assert.equal(imageClipboardAvailable(), available);
+  }
 });

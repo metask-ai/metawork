@@ -13,8 +13,9 @@ const account_projection = @import("product_control_account_projection");
 const execution_state = @import("product_control_execution_state");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
+const file_target = @import("product_control_file_target");
 const media_source = @import("product_control_media_source");
-const output_check = @import("output_check.zig");
+const file_action = @import("file_action.zig");
 const permission_job = @import("permission_job.zig");
 const agent_protocol = @import("product_agent_protocol_adapter");
 const attachment_staging = @import("product_attachment_staging");
@@ -1065,54 +1066,152 @@ fn formatFileReferenceId(
     ) catch unreachable;
 }
 
-fn absoluteReferenceRelativePath(
+const PathPlatform = enum {
+    windows,
+    posix,
+
+    const host: PathPlatform = if (builtin.os.tag == .windows) .windows else .posix;
+
+    fn separates(self: PathPlatform, byte: u8) bool {
+        return byte == '/' or (self == .windows and byte == '\\');
+    }
+
+    fn same(self: PathPlatform, left: u8, right: u8) bool {
+        if (self == .posix) return left == right;
+        return std.ascii.toLower(left) == std.ascii.toLower(right) or (self.separates(left) and self.separates(right));
+    }
+};
+
+/// A recorded locator written the way every other identity names a file: below
+/// the root, with one `/` between the names. The Core does not say which
+/// separator it writes on Windows, so both are taken there; elsewhere a
+/// backslash is a character of a name. Nor does it say that it leaves out `.`
+/// and repeated separators, which change nothing about where the path leads.
+/// `..` stays in it: whether the path may be used at all is asked after.
+fn referenceRelativePath(
+    platform: PathPlatform,
     root: []const u8,
-    absolute: []const u8,
+    locator: union(enum) { relative: []const u8, absolute: []const u8 },
     storage: []u8,
 ) ?[]const u8 {
-    if (!std.fs.path.isAbsolute(absolute) or absolute.len <= root.len) return null;
-    const same = if (builtin.os.tag == .windows)
-        std.ascii.eqlIgnoreCase(root, absolute[0..root.len])
-    else
-        std.mem.eql(u8, root, absolute[0..root.len]);
-    if (!same) return null;
-    const separator = absolute[root.len];
-    if (separator != '/' and separator != '\\') return null;
-    const relative = absolute[root.len + 1 ..];
-    if (relative.len == 0 or relative.len > storage.len) return null;
-    @memcpy(storage[0..relative.len], relative);
-    return storage[0..relative.len];
+    const path = switch (locator) {
+        // What begins at a root is not below this one.
+        .relative => |value| if (value.len != 0 and platform.separates(value[0])) return null else value,
+        .absolute => |value| below: {
+            const absolute = switch (platform) {
+                .windows => std.fs.path.isAbsoluteWindows(value),
+                .posix => std.fs.path.isAbsolutePosix(value),
+            };
+            var length = root.len;
+            while (length > 1 and platform.separates(root[length - 1])) length -= 1;
+            if (!absolute or value.len <= length or !platform.separates(value[length])) return null;
+            for (root[0..length], value[0..length]) |left, right| if (!platform.same(left, right)) return null;
+            break :below value[length + 1 ..];
+        },
+    };
+    if (path.len > storage.len) return null;
+    var written: usize = 0;
+    var start: usize = 0;
+    for (0..path.len + 1) |index| {
+        if (index != path.len and !platform.separates(path[index])) continue;
+        const name = path[start..index];
+        start = index + 1;
+        if (name.len == 0 or std.mem.eql(u8, name, ".")) {
+            // What ends here is a directory, and never a file.
+            if (index == path.len) return null;
+            continue;
+        }
+        if (written != 0) {
+            storage[written] = '/';
+            written += 1;
+        }
+        @memcpy(storage[written..][0..name.len], name);
+        written += name.len;
+    }
+    return storage[0..written];
 }
 
-pub const OutputFileTarget = output_check.Target;
+test "a reference is one path whichever separator its locator was written with" {
+    var storage: [64]u8 = undefined;
+    for ([_]struct { PathPlatform, []const u8, []const u8, ?[]const u8 }{
+        .{ .windows, "C:\\ws", "C:\\ws\\docs\\a.md", "docs/a.md" },
+        .{ .windows, "C:\\ws", "C:/ws/docs/a.md", "docs/a.md" },
+        .{ .windows, "C:\\ws", "c:\\WS/docs\\a.md", "docs/a.md" },
+        .{ .windows, "C:\\ws\\", "C:\\ws\\a.md", "a.md" },
+        .{ .windows, "C:\\ws", "C:\\ws\\\\docs\\.\\a.md", "docs/a.md" },
+        // Where it leads is the path rule's to say.
+        .{ .windows, "C:\\ws", "C:\\ws\\..\\a.md", "../a.md" },
+        .{ .windows, "C:\\ws", "C:\\ws-other\\a.md", null },
+        .{ .windows, "C:\\ws", "C:\\ws", null },
+        .{ .windows, "C:\\ws", "ws\\a.md", null },
+        .{ .posix, "/ws", "/ws/docs/a.md", "docs/a.md" },
+        .{ .posix, "/ws", "/ws//docs/./a.md", "docs/a.md" },
+        .{ .posix, "/ws", "/ws/./../a.md", "../a.md" },
+        .{ .posix, "/ws", "/ws/a\\b.md", "a\\b.md" },
+        .{ .posix, "/ws", "/ws\\a.md", null },
+        .{ .posix, "/ws", "/WS/a.md", null },
+        .{ .posix, "/ws", "ws/a.md", null },
+    }) |case| {
+        const actual = referenceRelativePath(case[0], case[1], .{ .absolute = case[2] }, &storage);
+        if (case[3]) |expected| try std.testing.expectEqualStrings(expected, actual.?) else try std.testing.expect(actual == null);
+    }
+    for ([_]struct { PathPlatform, []const u8, ?[]const u8 }{
+        .{ .windows, "src\\a.zig", "src/a.zig" },
+        .{ .windows, "src/a.zig", "src/a.zig" },
+        .{ .windows, ".\\src\\\\a.zig", "src/a.zig" },
+        .{ .posix, "src/a.zig", "src/a.zig" },
+        .{ .posix, "./src/a.zig", "src/a.zig" },
+        .{ .posix, "src//./a.zig", "src/a.zig" },
+        .{ .posix, "./../a.zig", "../a.zig" },
+        .{ .posix, "src\\a.zig", "src\\a.zig" },
+        // What begins at a root is not below this one, and what ends at a
+        // directory names no file.
+        .{ .posix, "/src/a.zig", null },
+        .{ .windows, "\\src\\a.zig", null },
+        .{ .windows, "\\\\server\\share\\a.zig", null },
+        .{ .posix, "src/a.zig/", null },
+        .{ .posix, "src/.", null },
+        .{ .posix, "", null },
+    }) |case| {
+        const actual = referenceRelativePath(case[0], "unused", .{ .relative = case[1] }, &storage);
+        if (case[2]) |expected| try std.testing.expectEqualStrings(expected, actual.?) else try std.testing.expect(actual == null);
+    }
+    try std.testing.expect(referenceRelativePath(.posix, "/ws", .{ .relative = "a" ** 65 }, &storage) == null);
+}
+
+pub const FileTarget = file_target.Target;
+pub const max_file_target_path_bytes = file_target.max_path_bytes;
+pub const FileAction = file_action.Action;
 pub const NativeDialog = control_ports.NativeDialog;
 pub const McpApproval = control_ports.McpApproval;
 pub const McpHostOutcome = control_ports.McpHostOutcome;
-pub const OutputSavePort = control_ports.OutputFileSave;
-pub const OutputSaveInput = control_ports.OutputFileSaveInput;
-pub const OutputCancel = enum { pending_cancelled, job_cancelling, committed, not_found };
-pub const OutputCheckState = output_check.State;
-pub const OutputCheckKind = output_check.Kind;
-pub const OutputCheckResult = struct { completion_id: u64, state: OutputCheckState, committed: bool = false };
-pub const OutputCheckSink = struct { context: *anyopaque, request_active_fn: *const fn (*anyopaque, u64) bool, complete_fn: *const fn (*anyopaque, OutputCheckResult) void };
+pub const FileSavePort = control_ports.FileSave;
+pub const FileSaveInput = control_ports.FileSaveInput;
+pub const FileActionCancel = enum { pending_cancelled, job_cancelling, committed, not_found };
+pub const FileActionState = file_action.State;
+pub const FileActionResult = struct { completion_id: u64, state: FileActionState, committed: bool = false };
+pub const FileActionSink = struct { context: *anyopaque, request_active_fn: *const fn (*anyopaque, u64) bool, complete_fn: *const fn (*anyopaque, FileActionResult) void };
 
-pub const OutputFileAuthorityError = error{
-    UnknownOutput,
-    RestrictedOutput,
-    StaleSecurityEpoch,
-    ExecutorShuttingDown,
-};
-
-fn outputCheckAuthorityState(err: anyerror) OutputCheckState {
+fn fileActionAuthorityState(err: file_target.Error) FileActionState {
     return switch (err) {
-        error.UnknownOutput => .missing,
-        error.RestrictedOutput => .restricted,
+        error.UnknownFile => .missing,
+        error.RestrictedFile, error.UnsupportedFile => .restricted,
         error.StaleSecurityEpoch => .stale_security,
-        else => .failed,
+        error.ShuttingDown => .failed,
     };
 }
 
 pub const FilePreviewState = file_preview.State;
+
+fn filePreviewAuthorityState(err: file_target.Error) FilePreviewState {
+    return switch (err) {
+        error.ShuttingDown, error.StaleSecurityEpoch => .failed,
+        error.UnknownFile => .missing,
+        error.RestrictedFile => .restricted,
+        error.UnsupportedFile => .unsupported,
+    };
+}
+
 pub const ToolPage = task_runtime.ToolPage;
 pub const ToolPageState = task_runtime.ToolPageState;
 /// Source text one Tool page formats on the main thread. A page always
@@ -1134,7 +1233,18 @@ pub const FilePreviewMedia = struct {
     media_type: []const u8,
     security_epoch: u64,
 };
+pub const FileDescription = file_preview.Description;
+
+comptime {
+    // A generated video and a delivered one are played by the same element
+    // from the same slot, so there is one size to hold.
+    if (file_preview.max_video_bytes != lifecycle.max_generated_video_bytes)
+        @compileError("a generated video and a recognized one no longer share a size limit");
+}
+
 pub const FilePreviewResult = struct {
+    /// Of a description request that is ready, and only of that.
+    description: ?FileDescription = null,
     entries: []const DirectoryEntry = &.{},
     media: ?FilePreviewMedia = null,
     completion_id: u64,
@@ -1413,11 +1523,10 @@ pub const Runtime = struct {
     video_run_preparation: ?control_ports.VideoRunPreparation = null,
     metask_authorization_check: ?control_ports.MetaskAuthorizationCheck = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
-    output_checks: output_check.Lane = .{},
-    output_file_reveal: ?control_ports.OutputFileReveal = null,
-    output_file_open: ?control_ports.OutputFileOpen = null,
-    output_file_save: ?control_ports.OutputFileSave = null,
-    pending_output_saves: [output_check.max_in_flight]?struct { id: u64, target: OutputFileTarget } = @splat(null),
+    file_actions: file_action.Lane = .{},
+    file_effects: ?control_ports.FileEffects = null,
+    file_save: ?control_ports.FileSave = null,
+    pending_file_saves: [file_action.max_in_flight]?struct { id: u64, input: file_action.Input } = @splat(null),
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
@@ -1753,6 +1862,88 @@ pub const Runtime = struct {
         return control;
     }
 
+    /// The one place a Workspace file's identity becomes a location: bounded
+    /// identity and authority work on the main thread, no file effect. The
+    /// result borrows Product state and `scratch`. A caller that waits keeps
+    /// its own copy and resolves the same target again before any effect.
+    fn resolveFileTarget(self: *const Runtime, target: FileTarget, scratch: *[file_target.max_path_bytes]u8) file_target.Error!file_target.Location {
+        try self.requireFileAuthority();
+        const location = switch (target) {
+            .reference => |value| try self.referenceLocation(value, scratch),
+            .output => |value| try self.outputLocation(value),
+            .workspace => |value| try self.workspaceLocation(value, false),
+        };
+        try self.requireFileLocation(location);
+        return location;
+    }
+
+    /// The directory listing's half of the same rule. The root itself is a
+    /// valid directory, and never a valid file.
+    fn resolveDirectory(self: *const Runtime, target: FileTarget.Workspace) file_target.Error!file_target.Location {
+        try self.requireFileAuthority();
+        const location = try self.workspaceLocation(target, true);
+        try self.requireFileLocation(location);
+        return location;
+    }
+
+    fn requireFileAuthority(self: *const Runtime) file_target.Error!void {
+        if (self.shutting_down) return error.ShuttingDown;
+        if (self.projection_security_epoch == 0) return error.StaleSecurityEpoch;
+    }
+
+    fn requireFileLocation(self: *const Runtime, location: file_target.Location) file_target.Error!void {
+        if (!self.workspace.filePreviewAuthorized(location.workspace_id, location.workspace_epoch, location.root) or
+            self.containsKnownCredential(location.relative) or self.containsKnownCredential(location.root))
+            return error.RestrictedFile;
+    }
+
+    fn referenceLocation(self: *const Runtime, target: FileTarget.Reference, scratch: *[file_target.max_path_bytes]u8) file_target.Error!file_target.Location {
+        const reference = self.task_runtime.fileReference(target.task_id, target.run_id, target.id) orelse return error.UnknownFile;
+        if (reference.generated_video and reference.locator_kind != .workspace_path) return error.UnsupportedFile;
+        const relative = referenceRelativePath(.host, reference.workspace_root, switch (reference.locator_kind) {
+            .workspace_path => .{ .relative = reference.locator },
+            .absolute_path => .{ .absolute = reference.locator },
+            .uri => return error.UnsupportedFile,
+        }, scratch) orelse return error.RestrictedFile;
+        if (!file_preview.validWorkspacePath(relative, false)) return error.RestrictedFile;
+        return .{
+            .workspace_id = reference.workspace_id,
+            .workspace_epoch = reference.workspace_epoch,
+            .root = reference.workspace_root,
+            .relative = relative,
+            .generated_video = reference.generated_video,
+        };
+    }
+
+    fn outputLocation(self: *const Runtime, target: FileTarget.Output) file_target.Error!file_target.Location {
+        const reference = self.task_runtime.outputFileReference(target.task_id, target.run_id, target.id) orelse return error.UnknownFile;
+        if (reference.redacted) return error.RestrictedFile;
+        // Persisted/projection bytes must still be a valid delivery locator.
+        _ = lifecycle.FileDeliveryReceipt.init(reference.id, reference.locator, reference.size_bytes, reference.sha256) catch
+            return error.RestrictedFile;
+        return .{
+            .workspace_id = reference.workspace_id,
+            .workspace_epoch = reference.workspace_epoch,
+            .root = reference.workspace_root,
+            .relative = reference.locator,
+            .delivered = .{ .size_bytes = reference.size_bytes, .sha256 = reference.sha256 },
+        };
+    }
+
+    fn workspaceLocation(self: *const Runtime, target: FileTarget.Workspace, allow_root: bool) file_target.Error!file_target.Location {
+        if (target.task_id == 0) return error.RestrictedFile;
+        const binding = self.workspace.binding(target.workspace_id) orelse return error.UnknownFile;
+        if (binding.epoch != target.workspace_epoch or
+            !self.task_runtime.workspaceFileTaskMatches(target.task_id, target.workspace_id) or
+            !file_preview.validWorkspacePath(target.path, allow_root)) return error.RestrictedFile;
+        return .{
+            .workspace_id = target.workspace_id,
+            .workspace_epoch = binding.epoch,
+            .root = binding.canonical_root,
+            .relative = target.path,
+        };
+    }
+
     fn workspaceStorage(self: *Runtime) product_workspace.Storage {
         return .{
             .context = self,
@@ -1763,178 +1954,129 @@ pub const Runtime = struct {
         };
     }
 
-    /// Main-loop admission only; does no file I/O and copies the exact trusted
-    /// record for a caller-owned, bounded asynchronous operation.
-    pub fn copyOutputFileTarget(
-        self: *const Runtime,
-        allocator: std.mem.Allocator,
-        task_id: u64,
-        run_id: u64,
-        output_id: [16]u8,
-    ) (OutputFileAuthorityError || std.mem.Allocator.Error)!OutputFileTarget {
-        const reference = try self.outputFileAuthority(task_id, run_id, output_id);
-        const storage = try allocator.alloc(u8, reference.workspace_root.len + reference.locator.len);
-        const root = storage[0..reference.workspace_root.len];
-        const locator = storage[reference.workspace_root.len..];
-        @memcpy(root, reference.workspace_root);
-        @memcpy(locator, reference.locator);
-        return .{
-            .allocator = allocator,
-            .storage = storage,
-            .task_id = task_id,
-            .run_id = run_id,
-            .output_id = reference.id,
-            .workspace_id = reference.workspace_id,
-            .workspace_epoch = reference.workspace_epoch,
-            .security_epoch = self.projection_security_epoch,
-            .workspace_root = root,
-            .relative_path = locator,
-            .size_bytes = reference.size_bytes,
-            .sha256 = reference.sha256,
-        };
-    }
+    pub const FileActionAdmission = union(enum) { choosing, queued, immediate: FileActionState };
 
-    /// Must run again after worker completion, before any result becomes usable.
-    /// Content hashing separately proves the actual bytes; neither check alone
-    /// authorizes Save As, reveal, preview or a continuation input.
-    pub fn revalidateOutputFileTarget(self: *const Runtime, target: *const OutputFileTarget) OutputFileAuthorityError!void {
-        if (target.security_epoch == 0 or target.security_epoch != self.projection_security_epoch)
-            return error.StaleSecurityEpoch;
-        const current = try self.outputFileAuthority(target.task_id, target.run_id, target.output_id);
-        if (current.workspace_id != target.workspace_id or current.workspace_epoch != target.workspace_epoch or
-            !std.mem.eql(u8, current.workspace_root, target.workspace_root) or
-            !std.mem.eql(u8, current.locator, target.relative_path) or
-            current.size_bytes != target.size_bytes or !std.mem.eql(u8, &current.sha256, &target.sha256))
-            return error.RestrictedOutput;
-    }
-
-    fn outputFileAuthority(self: *const Runtime, task_id: u64, run_id: u64, output_id: [16]u8) OutputFileAuthorityError!task_runtime.OutputFileReference {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.projection_security_epoch == 0) return error.StaleSecurityEpoch;
-        const reference = self.task_runtime.outputFileReference(task_id, run_id, output_id) orelse return error.UnknownOutput;
-        if (reference.redacted or !self.workspace.filePreviewAuthorized(reference.workspace_id, reference.workspace_epoch, reference.workspace_root) or
-            self.containsKnownCredential(reference.locator) or self.containsKnownCredential(reference.workspace_root))
-            return error.RestrictedOutput;
-        // Persisted/projection bytes must still be a valid delivery locator.
-        _ = lifecycle.FileDeliveryReceipt.init(reference.id, reference.locator, reference.size_bytes, reference.sha256) catch
-            return error.RestrictedOutput;
-        return reference;
-    }
-
-    pub const OutputCheckAdmission = union(enum) { choosing, queued, immediate: OutputCheckState };
-
-    pub fn beginOutputCheck(self: *Runtime, completion_id: u64, task_id: u64, run_id: u64, output_id: [16]u8, kind: OutputCheckKind) OutputCheckAdmission {
-        if (self.shutting_down or self.output_checks.stopping) return .{ .immediate = .failed };
-        if (kind == .register) return .{ .immediate = .restricted };
-        var target = self.copyOutputFileTarget(self.allocator, task_id, run_id, output_id) catch |err|
-            return .{ .immediate = outputCheckAuthorityState(err) };
-        var target_owned = true;
-        defer if (target_owned) target.deinit();
-        if (kind == .save) {
-            if (self.output_file_save == null) return .{ .immediate = .unavailable };
+    /// Main-loop admission only: no file I/O. The operation keeps an owned copy
+    /// of what the target resolved to, and nothing else.
+    pub fn beginFileAction(self: *Runtime, completion_id: u64, target: FileTarget, action: FileAction) FileActionAdmission {
+        if (self.shutting_down or self.file_actions.stopping) return .{ .immediate = .failed };
+        if (!action.accepts(target)) return .{ .immediate = .restricted };
+        var scratch: [file_target.max_path_bytes]u8 = undefined;
+        const location = self.resolveFileTarget(target, &scratch) catch |err|
+            return .{ .immediate = fileActionAuthorityState(err) };
+        if (action == .open) {
+            const effects = self.file_effects orelse return .{ .immediate = .unavailable };
+            if (effects.open_kind_fn(effects.context, location.relative) == null) return .{ .immediate = .open_unsupported };
+        }
+        var input = file_action.Input.init(self.allocator, .{ .file = .{ .target = target, .action = action } }, location, self.projection_security_epoch) catch
+            return .{ .immediate = .failed };
+        var input_owned = true;
+        defer if (input_owned) input.deinit();
+        if (action == .save) {
+            const save = self.file_save orelse return .{ .immediate = .unavailable };
+            save.validate_path_fn(location.relative) catch return .{ .immediate = .restricted };
             var total: usize = 0;
-            for (self.pending_output_saves) |pending| if (pending != null) {
+            for (self.pending_file_saves) |pending| if (pending != null) {
                 total += 1;
             };
-            for (self.output_checks.jobs) |job| if (job != null) {
+            for (self.file_actions.jobs) |job| if (job != null) {
                 total += 1;
             };
-            if (total >= output_check.max_in_flight) return .{ .immediate = .busy };
-            for (&self.pending_output_saves) |*slot| if (slot.* == null) {
-                slot.* = .{ .id = completion_id, .target = target };
-                target_owned = false;
+            if (total >= file_action.max_in_flight) return .{ .immediate = .busy };
+            for (&self.pending_file_saves) |*slot| if (slot.* == null) {
+                slot.* = .{ .id = completion_id, .input = input };
+                input_owned = false;
                 return .choosing;
             };
             return .{ .immediate = .busy };
         }
-        const result = self.queueOutputInspection(completion_id, kind, target);
-        if (result == .queued) target_owned = false;
+        const result = self.queueFileAction(completion_id, input);
+        if (result == .queued) input_owned = false;
         return result;
     }
 
-    fn outputRegistrationAuthority(self: *const Runtime, task_id: u64, run_id: u64, change_id: []const u8) OutputFileAuthorityError!task_runtime.OutputRegistrationReference {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.projection_security_epoch == 0) return error.StaleSecurityEpoch;
-        const reference = self.task_runtime.outputRegistrationReference(task_id, run_id, change_id) orelse return error.RestrictedOutput;
-        const preparation = self.file_delivery_preparation orelse return error.RestrictedOutput;
-        const validate_path = preparation.validate_path_fn orelse return error.RestrictedOutput;
-        validate_path(reference.locator) catch return error.RestrictedOutput;
-        if (!self.workspace.filePreviewAuthorized(reference.workspace_id, reference.workspace_epoch, reference.workspace_root) or
-            self.containsKnownCredential(reference.locator) or self.containsKnownCredential(reference.workspace_root))
-            return error.RestrictedOutput;
-        return reference;
-    }
-
-    pub fn beginOutputRegistration(self: *Runtime, completion_id: u64, task_id: u64, run_id: u64, change_id: []const u8) OutputCheckAdmission {
-        if (self.requiredHistoryBlocked()) return .{ .immediate = .busy };
-        const reference = self.outputRegistrationAuthority(task_id, run_id, change_id) catch |err|
-            return .{ .immediate = outputCheckAuthorityState(err) };
-        const root_end = reference.workspace_root.len;
-        const locator_end = root_end + reference.locator.len;
-        const storage = self.allocator.alloc(u8, locator_end + change_id.len) catch return .{ .immediate = .failed };
-        @memcpy(storage[0..root_end], reference.workspace_root);
-        @memcpy(storage[root_end..locator_end], reference.locator);
-        @memcpy(storage[locator_end..], change_id);
-        var target: OutputFileTarget = .{
-            .allocator = self.allocator,
-            .storage = storage,
-            .task_id = task_id,
-            .run_id = run_id,
-            .output_id = @splat(0),
-            .change_id = storage[locator_end..],
+    fn registrationLocation(self: *const Runtime, registration: file_action.Subject.Registration) file_target.Error!file_target.Location {
+        try self.requireFileAuthority();
+        const reference = self.task_runtime.outputRegistrationReference(registration.task_id, registration.run_id, registration.change_id) orelse return error.RestrictedFile;
+        const preparation = self.file_delivery_preparation orelse return error.RestrictedFile;
+        const validate_path = preparation.validate_path_fn orelse return error.RestrictedFile;
+        validate_path(reference.locator) catch return error.RestrictedFile;
+        const location: file_target.Location = .{
             .workspace_id = reference.workspace_id,
             .workspace_epoch = reference.workspace_epoch,
-            .security_epoch = self.projection_security_epoch,
-            .workspace_root = storage[0..root_end],
-            .relative_path = storage[root_end..locator_end],
-            .size_bytes = 0,
-            .sha256 = @splat(0),
+            .root = reference.workspace_root,
+            .relative = reference.locator,
         };
-        const result = self.queueOutputInspection(completion_id, .register, target);
-        if (result != .queued) target.deinit();
+        try self.requireFileLocation(location);
+        return location;
+    }
+
+    pub fn beginOutputRegistration(self: *Runtime, completion_id: u64, task_id: u64, run_id: u64, change_id: []const u8) FileActionAdmission {
+        if (self.requiredHistoryBlocked()) return .{ .immediate = .busy };
+        const registration: file_action.Subject.Registration = .{ .task_id = task_id, .run_id = run_id, .change_id = change_id };
+        const location = self.registrationLocation(registration) catch |err|
+            return .{ .immediate = fileActionAuthorityState(err) };
+        var input = file_action.Input.init(self.allocator, .{ .registration = registration }, location, self.projection_security_epoch) catch
+            return .{ .immediate = .failed };
+        const result = self.queueFileAction(completion_id, input);
+        if (result != .queued) input.deinit();
         return result;
     }
 
-    fn revalidateOutputInspection(self: *const Runtime, target: *const OutputFileTarget) OutputFileAuthorityError!void {
-        const change_id = target.change_id orelse return self.revalidateOutputFileTarget(target);
-        if (target.security_epoch != self.projection_security_epoch) return error.StaleSecurityEpoch;
-        const current = try self.outputRegistrationAuthority(target.task_id, target.run_id, change_id);
-        if (current.workspace_id != target.workspace_id or current.workspace_epoch != target.workspace_epoch or
-            !std.mem.eql(u8, current.workspace_root, target.workspace_root) or
-            !std.mem.eql(u8, current.locator, target.relative_path))
-            return error.RestrictedOutput;
+    /// Runs again after the worker, before any result becomes usable: the same
+    /// subject must still resolve to exactly what was admitted. What the worker
+    /// proved about the file is a separate fact; neither authorizes alone.
+    fn revalidateFileAction(self: *const Runtime, input: *const file_action.Input) file_target.Error!void {
+        if (input.security_epoch == 0 or input.security_epoch != self.projection_security_epoch)
+            return error.StaleSecurityEpoch;
+        var scratch: [file_target.max_path_bytes]u8 = undefined;
+        const current = switch (input.subject) {
+            .file => |value| try self.resolveFileTarget(value.target, &scratch),
+            .registration => |value| try self.registrationLocation(value),
+        };
+        if (!current.eql(input.location)) return error.RestrictedFile;
     }
 
-    fn queueOutputInspection(self: *Runtime, completion_id: u64, kind: OutputCheckKind, target: OutputFileTarget) OutputCheckAdmission {
-        var work: output_check.Work = inspect: {
-            if (kind == .open) {
-                const open = self.output_file_open orelse return .{ .immediate = .unavailable };
-                const owned = open.prepare_fn(open.context, target.workspace_root, target.relative_path) catch |err|
-                    return .{ .immediate = output_check.openFailure(err) };
-                break :inspect .{ .open = owned };
-            }
+    fn queueFileAction(self: *Runtime, completion_id: u64, input: file_action.Input) FileActionAdmission {
+        const effect: ?control_ports.FileEffect = switch (input.subject) {
+            .registration => null,
+            .file => |value| switch (value.action) {
+                .check => null,
+                .open => .open,
+                .reveal => .reveal,
+                .copy_path => .copy_path,
+                .check_current => .locate,
+                .save => unreachable,
+            },
+        };
+        var work: file_action.Work = if (effect) |kind| prepared: {
+            const effects = self.file_effects orelse return .{ .immediate = .unavailable };
+            break :prepared .{ .effect = effects.prepare_fn(effects.context, input.location.root, input.location.relative, kind) catch |err|
+                return .{ .immediate = file_action.effectFailure(err) } };
+        } else prepared: {
             const preparation = self.file_delivery_preparation orelse return .{ .immediate = .unavailable };
-            const workspace = self.workspace.recoveryBinding(target.workspace_id) orelse unreachable;
-            break :inspect .{ .inspect = preparation.prepare(workspace) orelse return .{ .immediate = .unavailable } };
+            const workspace = self.workspace.recoveryBinding(input.location.workspace_id) orelse unreachable;
+            break :prepared .{ .inspect = preparation.prepare(workspace) orelse return .{ .immediate = .unavailable } };
         };
         var work_owned = true;
         defer if (work_owned) work.deinit();
-        self.revalidateOutputInspection(&target) catch |err| return .{ .immediate = outputCheckAuthorityState(err) };
-        self.output_checks.begin(self.io, self.allocator, .{
+        self.revalidateFileAction(&input) catch |err| return .{ .immediate = fileActionAuthorityState(err) };
+        self.file_actions.begin(self.io, self.allocator, .{
             .context = self.change_notifier.context,
             .wake_fn = self.change_notifier.wake,
-        }, completion_id, kind, target, work) catch |err|
+        }, completion_id, input, work) catch |err|
             return .{ .immediate = if (err == error.Capacity) .busy else .failed };
         work_owned = false;
         return .queued;
     }
 
-    fn registerInspectedOutput(self: *Runtime, target: *const OutputFileTarget) OutputCheckState {
+    fn registerInspectedOutput(self: *Runtime, input: *const file_action.Input, inspected: file_target.Delivered) FileActionState {
         if (self.requiredHistoryBlocked()) return .busy;
-        self.revalidateOutputInspection(target) catch |err| return outputCheckAuthorityState(err);
+        self.revalidateFileAction(input) catch |err| return fileActionAuthorityState(err);
+        const target = input.subject.registration;
         var id: [16]u8 = undefined;
         std.Io.randomSecure(self.io, &id) catch return .failed;
-        const receipt = lifecycle.FileDeliveryReceipt.init(id, target.relative_path, target.size_bytes, target.sha256) catch return .restricted;
+        const receipt = lifecycle.FileDeliveryReceipt.init(id, input.location.relative, inspected.size_bytes, inspected.sha256) catch return .restricted;
         const added = self.task_runtime.addUserOutput(target.task_id, target.run_id, &receipt, self.taskEventEffects()) catch |err|
             return if (err == error.ToolCapacity) .busy else .failed;
         if (!added and self.task_persistence_health == .ready) return .registered;
@@ -1953,122 +2095,120 @@ pub const Runtime = struct {
         return .registered;
     }
 
-    pub fn requestOutputSave(self: *Runtime, id: u64, parent: u64, completion: *const OutputSavePort.Completion) !u64 {
-        const source = try self.borrowOutputSaveSource(id);
-        const port = self.output_file_save orelse return error.UnsupportedService;
+    pub fn requestFileSave(self: *Runtime, id: u64, parent: u64, completion: *const FileSavePort.Completion) !u64 {
+        const source = try self.borrowFileSaveSource(id);
+        const port = self.file_save orelse return error.UnsupportedService;
         return port.begin_fn(port.context, id, parent, std.fs.path.basename(source.relative_path), completion);
     }
 
-    pub fn cancelOutputDialog(self: *Runtime, handle: u64) void {
-        if (self.output_file_save) |port| port.cancel_fn(port.context, handle);
+    pub fn cancelFileSaveDialog(self: *Runtime, handle: u64) void {
+        if (self.file_save) |port| port.cancel_fn(port.context, handle);
     }
 
-    pub fn borrowOutputSaveSource(self: *Runtime, id: u64) !control_ports.OutputFileSaveInput {
-        for (&self.pending_output_saves) |*slot| if (slot.*) |*pending| {
+    pub fn borrowFileSaveSource(self: *Runtime, id: u64) file_target.Error!control_ports.FileSaveInput {
+        for (&self.pending_file_saves) |*slot| if (slot.*) |*pending| {
             if (pending.id != id) continue;
-            try self.revalidateOutputFileTarget(&pending.target);
-            return .{ .io = self.io, .workspace_root = pending.target.workspace_root, .relative_path = pending.target.relative_path, .size_bytes = pending.target.size_bytes, .sha256 = pending.target.sha256 };
+            try self.revalidateFileAction(&pending.input);
+            return .{ .io = self.io, .workspace_root = pending.input.location.root, .relative_path = pending.input.location.relative };
         };
-        return error.UnknownOutput;
+        return error.UnknownFile;
     }
 
-    pub fn completeOutputSave(self: *Runtime, id: u64, result: OutputSavePort.Result) OutputCheckAdmission {
+    pub fn completeFileSave(self: *Runtime, id: u64, result: FileSavePort.Result) FileActionAdmission {
         var effect_owned = result == .selected;
         defer if (effect_owned) {
             var effect = result.selected;
             effect.deinit();
         };
-        for (&self.pending_output_saves) |*slot| if (slot.*) |pending| {
+        for (&self.pending_file_saves) |*slot| if (slot.*) |pending| {
             if (pending.id != id) continue;
-            var target = pending.target;
+            var input = pending.input;
             slot.* = null;
-            var target_owned = true;
-            defer if (target_owned) target.deinit();
+            var input_owned = true;
+            defer if (input_owned) input.deinit();
             switch (result) {
                 .cancelled => return .{ .immediate = .cancelled },
                 .failed => |err| return .{ .immediate = switch (err) {
                     error.UnsupportedService, error.RuntimeUnavailable => .unavailable,
-                    error.UnknownOutput, error.RestrictedOutput, error.StaleSecurityEpoch, error.ExecutorShuttingDown => outputCheckAuthorityState(err),
+                    error.UnknownFile, error.RestrictedFile, error.UnsupportedFile, error.StaleSecurityEpoch, error.ShuttingDown => |authority| fileActionAuthorityState(authority),
                     else => .save_failed,
                 } },
                 .selected => {},
             }
-            self.revalidateOutputFileTarget(&target) catch |err| return .{ .immediate = outputCheckAuthorityState(err) };
-            self.output_checks.begin(self.io, self.allocator, .{ .context = self.change_notifier.context, .wake_fn = self.change_notifier.wake }, id, .save, target, .{ .save = result.selected }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
-            target_owned = false;
+            self.revalidateFileAction(&input) catch |err| return .{ .immediate = fileActionAuthorityState(err) };
+            self.file_actions.begin(self.io, self.allocator, .{ .context = self.change_notifier.context, .wake_fn = self.change_notifier.wake }, id, input, .{ .save = result.selected }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
+            input_owned = false;
             effect_owned = false;
             return .queued;
         };
         return .{ .immediate = .cancelled };
     }
 
-    pub fn cancelOutputCheck(self: *Runtime, completion_id: u64) OutputCancel {
-        for (&self.pending_output_saves) |*slot| if (slot.*) |pending| {
+    pub fn cancelFileAction(self: *Runtime, completion_id: u64) FileActionCancel {
+        for (&self.pending_file_saves) |*slot| if (slot.*) |pending| {
             if (pending.id != completion_id) continue;
-            var target = pending.target;
+            var input = pending.input;
             slot.* = null;
-            target.deinit();
+            input.deinit();
             return .pending_cancelled;
         };
-        if (self.output_checks.publicationCommitted(completion_id)) return .committed;
-        return if (self.output_checks.cancel(completion_id)) .job_cancelling else .not_found;
+        if (self.file_actions.publicationCommitted(completion_id)) return .committed;
+        return if (self.file_actions.cancel(completion_id)) .job_cancelling else .not_found;
     }
 
-    pub fn hasOutputChecks(self: *const Runtime) bool {
-        return self.output_checks.hasPending();
+    pub fn hasFileActions(self: *const Runtime) bool {
+        return self.file_actions.hasPending();
     }
 
-    pub fn drainOutputChecks(self: *Runtime, sink: OutputCheckSink) void {
-        self.output_checks.expire(self.io);
-        while (self.output_checks.awaitingPublication()) |publication| {
-            const state = if (!sink.request_active_fn(sink.context, publication.completion_id)) OutputCheckState.cancelled else if (self.revalidateOutputFileTarget(publication.target)) |_| OutputCheckState.ready else |err| outputCheckAuthorityState(err);
-            self.output_checks.decide(publication, state);
+    pub fn drainFileActions(self: *Runtime, sink: FileActionSink) void {
+        self.file_actions.expire(self.io);
+        while (self.file_actions.awaitingPublication()) |publication| {
+            const state = if (!sink.request_active_fn(sink.context, publication.completion_id)) FileActionState.cancelled else if (self.revalidateFileAction(publication.input)) |_| FileActionState.ready else |err| fileActionAuthorityState(err);
+            self.file_actions.decide(publication, state);
         }
-        while (self.output_checks.take(self.io)) |taken| {
-            var state = if (taken.committed or taken.state == .cleanup_failed) taken.state else if (!sink.request_active_fn(sink.context, taken.completion_id)) OutputCheckState.cancelled else if (self.revalidateOutputInspection(taken.target)) |_| taken.state else |err| outputCheckAuthorityState(err);
-            if (state == .ready and taken.kind == .register) state = self.registerInspectedOutput(taken.target);
-            if (state == .ready and taken.kind == .open) {
-                const open = taken.job.work.open;
-                state = if (open.open_fn(open.context)) |_| .opened else |err| output_check.openFailure(err);
-            }
-            if (state == .ready and taken.kind == .reveal) {
-                state = if (self.output_file_reveal) |reveal| result: {
-                    reveal.reveal_fn(reveal.context, taken.target.workspace_root, taken.target.relative_path) catch |err| break :result switch (err) {
-                        error.UnsupportedService, error.RuntimeUnavailable => OutputCheckState.unavailable,
-                        else => OutputCheckState.failed,
+        while (self.file_actions.take(self.io)) |taken| {
+            var state = if (taken.committed or taken.state == .cleanup_failed) taken.state else if (!sink.request_active_fn(sink.context, taken.completion_id)) FileActionState.cancelled else if (self.revalidateFileAction(taken.input)) |_| taken.state else |err| fileActionAuthorityState(err);
+            if (state == .ready) state = switch (taken.input.subject) {
+                .registration => self.registerInspectedOutput(taken.input, taken.job.inspected.?),
+                .file => |value| performed: {
+                    if (taken.job.work == .effect) {
+                        const effect = taken.job.work.effect;
+                        effect.perform_fn(effect.context) catch |err| break :performed file_action.effectFailure(err);
+                    }
+                    break :performed switch (value.action) {
+                        .open => .opened,
+                        .reveal => .revealed,
+                        .copy_path => .path_copied,
+                        .check, .check_current => .ready,
+                        .save => unreachable,
                     };
-                    break :result .revealed;
-                } else .unavailable;
-            }
+                },
+            };
             const completion_id = taken.completion_id;
-            self.output_checks.release(taken);
+            self.file_actions.release(taken);
             sink.complete_fn(sink.context, .{ .completion_id = completion_id, .state = state, .committed = taken.committed });
         }
     }
 
-    pub fn outputPublicationCommitted(self: *const Runtime, completion_id: u64) bool {
-        return self.output_checks.publicationCommitted(completion_id);
+    pub fn fileSaveCommitted(self: *const Runtime, completion_id: u64) bool {
+        return self.file_actions.publicationCommitted(completion_id);
     }
 
-    pub fn setOutputFileSave(self: *Runtime, save: control_ports.OutputFileSave) void {
-        self.output_file_save = save;
+    pub fn setFileSave(self: *Runtime, save: control_ports.FileSave) void {
+        self.file_save = save;
     }
 
-    pub fn setOutputFileReveal(self: *Runtime, reveal: control_ports.OutputFileReveal) void {
-        self.output_file_reveal = reveal;
+    pub fn setFileEffects(self: *Runtime, effects: control_ports.FileEffects) void {
+        self.file_effects = effects;
     }
 
-    pub fn setOutputFileOpen(self: *Runtime, open: control_ports.OutputFileOpen) void {
-        self.output_file_open = open;
-    }
-
-    pub fn shutdownOutputChecks(self: *Runtime) void {
-        for (&self.pending_output_saves) |*slot| if (slot.*) |pending| {
-            var target = pending.target;
+    pub fn shutdownFileActions(self: *Runtime) void {
+        for (&self.pending_file_saves) |*slot| if (slot.*) |pending| {
+            var input = pending.input;
             slot.* = null;
-            target.deinit();
+            input.deinit();
         };
-        self.output_checks.shutdown();
+        self.file_actions.shutdown();
     }
 
     pub const FilePreviewAdmission = union(enum) {
@@ -2115,49 +2255,36 @@ pub const Runtime = struct {
     /// Performs only bounded identity/authority work on the main thread and
     /// submits immutable Host-only input to the preview lane. File I/O never
     /// occurs in this call.
-    pub fn beginFilePreview(
-        self: *Runtime,
-        completion_id: u64,
-        task_id: u64,
-        run_id: u64,
-        reference_id: []const u8,
-    ) FilePreviewAdmission {
-        if (self.shutting_down or self.preview_executor_shutdown)
-            return .{ .immediate = .failed };
-        const reference = self.task_runtime.fileReference(
-            task_id,
-            run_id,
-            reference_id,
-        ) orelse return .{ .immediate = .missing };
-        if (!self.filePreviewWorkspaceAuthorized(reference))
-            return .{ .immediate = .restricted };
-        if (reference.locator_kind == .uri or (reference.generated_video and reference.locator_kind != .workspace_path))
-            return .{ .immediate = .unsupported };
+    pub fn beginFilePreview(self: *Runtime, completion_id: u64, target: FileTarget) FilePreviewAdmission {
+        var scratch: [file_target.max_path_bytes]u8 = undefined;
+        const location = self.resolveFileTarget(target, &scratch) catch |err|
+            return .{ .immediate = filePreviewAuthorityState(err) };
+        return self.queueFilePreview(completion_id, .deliver, .{ .file = target }, location);
+    }
 
-        var relative_storage: [4096]u8 = undefined;
-        const relative = switch (reference.locator_kind) {
-            .workspace_path => reference.locator,
-            .absolute_path => absoluteReferenceRelativePath(
-                reference.workspace_root,
-                reference.locator,
-                &relative_storage,
-            ) orelse return .{ .immediate = .restricted },
-            .uri => unreachable,
-        };
-        if (relative.len == 0 or relative.len > relative_storage.len)
-            return .{ .immediate = .restricted };
+    /// What a file is right now, from the same read and the same judgement a
+    /// preview of it makes, and nothing of its content.
+    pub fn beginFileDescription(self: *Runtime, completion_id: u64, target: FileTarget) FilePreviewAdmission {
+        var scratch: [file_target.max_path_bytes]u8 = undefined;
+        const location = self.resolveFileTarget(target, &scratch) catch |err|
+            return .{ .immediate = filePreviewAuthorityState(err) };
+        return self.queueFilePreview(completion_id, .describe, .{ .file = target }, location);
+    }
 
+    pub fn beginDirectory(self: *Runtime, completion_id: u64, target: FileTarget.Workspace) FilePreviewAdmission {
+        const location = self.resolveDirectory(target) catch |err|
+            return .{ .immediate = filePreviewAuthorityState(err) };
+        return self.queueFilePreview(completion_id, .deliver, .{ .directory = target }, location);
+    }
+
+    fn queueFilePreview(self: *Runtime, completion_id: u64, mode: file_preview.Mode, subject: file_preview.Subject, location: file_target.Location) FilePreviewAdmission {
+        if (self.preview_executor_shutdown) return .{ .immediate = .failed };
         self.preview_lane.begin(.{
+            .mode = mode,
+            .subject = subject,
+            .location = location,
             .completion_id = completion_id,
-            .generated_video = reference.generated_video,
-            .task_id = task_id,
-            .run_id = run_id,
-            .workspace_id = reference.workspace_id,
-            .workspace_epoch = reference.workspace_epoch,
-            .reference_id = reference.id,
-            .workspace_root = reference.workspace_root,
-            .relative_path = relative,
-            .max_bytes = if (reference.generated_video) lifecycle.max_generated_video_bytes else self.limits.max_file_preview_bytes,
+            .max_bytes = self.limits.max_file_preview_bytes,
             .max_lines = self.limits.max_file_preview_lines,
             .max_line_bytes = self.limits.max_file_preview_line_bytes,
         }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
@@ -2168,10 +2295,10 @@ pub const Runtime = struct {
     /// again at every chunk. A batch that was borrowed for a Task in the
     /// meantime stops resolving, so the grant is released instead of reading a
     /// file that now belongs to Task ownership.
-    fn attachmentOriginalAuthority(self: *Runtime, raw: file_preview.Completion) FilePreviewState {
+    fn attachmentOriginalAuthority(self: *Runtime, attachment_id: u64, location: file_target.Location) FilePreviewState {
         var relative: [product_attachment.max_original_relative_bytes]u8 = undefined;
         const resolution = media_source.resolve(
-            .{ .draft_attachment = raw.attachment_id },
+            .{ .draft_attachment = attachment_id },
             .viewer,
             .{ .staging = &self.attachments },
             &relative,
@@ -2181,8 +2308,8 @@ pub const Runtime = struct {
             .derived => unreachable,
             .unavailable => |availability| return mediaUnavailableState(availability),
         };
-        if (!std.mem.eql(u8, stored.directory, raw.workspace_root) or
-            !std.mem.eql(u8, stored.relative, raw.relative_path)) return .missing;
+        if (!std.mem.eql(u8, stored.directory, location.root) or
+            !std.mem.eql(u8, stored.relative, location.relative)) return .missing;
         return .ready;
     }
 
@@ -2193,8 +2320,8 @@ pub const Runtime = struct {
     /// the projection security epoch, which the existing delivery and chunk
     /// checks already refuse on. A file that is gone fails the read as
     /// `missing` without this having to predict it.
-    fn taskAttachmentOriginalAuthority(self: *Runtime, raw: file_preview.Completion) FilePreviewState {
-        return if (self.task_runtime.mediaReadable(raw.task_id)) .ready else .missing;
+    fn taskAttachmentOriginalAuthority(self: *Runtime, task_id: u64) FilePreviewState {
+        return if (self.task_runtime.mediaReadable(task_id)) .ready else .missing;
     }
 
     /// Derived pixels for one chip, answered on the main thread: no decode, no
@@ -2240,7 +2367,7 @@ pub const Runtime = struct {
     /// The viewer tier for a registered image: the original, read inside the
     /// existing bounded lane and charged to the existing original-image budget.
     pub fn beginMediaPreview(self: *Runtime, completion_id: u64, target: MediaTarget) FilePreviewAdmission {
-        if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
+        if (self.shutting_down) return .{ .immediate = .failed };
         var relative: [product_attachment.max_original_relative_bytes]u8 = undefined;
         const resolution = media_source.resolve(
             target,
@@ -2253,26 +2380,11 @@ pub const Runtime = struct {
             .derived => unreachable,
             .unavailable => |availability| return .{ .immediate = mediaUnavailableState(availability) },
         };
-        self.preview_lane.begin(.{
-            .source = if (target == .draft_attachment) .attachment else .task_attachment,
-            .completion_id = completion_id,
-            .attachment_id = if (target == .draft_attachment) target.draft_attachment else 0,
-            .task_id = switch (target) {
-                .draft_attachment => 0,
-                .run_attachment => |value| value.task_id,
-                .submission_attachment => |value| value.task_id,
-            },
-            .run_id = 0,
-            .workspace_id = 0,
-            .workspace_epoch = 0,
-            .reference_id = "",
-            .workspace_root = stored.directory,
-            .relative_path = stored.relative,
-            .max_bytes = self.limits.max_file_preview_bytes,
-            .max_lines = self.limits.max_file_preview_lines,
-            .max_line_bytes = self.limits.max_file_preview_line_bytes,
-        }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
-        return .queued;
+        return self.queueFilePreview(completion_id, .deliver, switch (target) {
+            .draft_attachment => |attachment_id| .{ .draft_attachment = attachment_id },
+            .run_attachment => |value| .{ .task_attachment = value.task_id },
+            .submission_attachment => |value| .{ .task_attachment = value.task_id },
+        }, .{ .workspace_id = 0, .workspace_epoch = 0, .root = stored.directory, .relative = stored.relative });
     }
 
     /// The record a Task-owned target names, asked of the Task that owns it.
@@ -2303,38 +2415,12 @@ pub const Runtime = struct {
         };
     }
 
-    pub fn beginWorkspaceFile(self: *Runtime, completion_id: u64, task_id: u64, workspace_id: u64, workspace_epoch: u64, path: []const u8, directory: bool) FilePreviewAdmission {
-        if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
-        if (task_id == 0) return .{ .immediate = .restricted };
-        const binding = self.workspace.binding(workspace_id) orelse return .{ .immediate = .missing };
-        if (binding.epoch != workspace_epoch or !self.workspaceFileAuthorized(task_id, workspace_id, binding.epoch, binding.canonical_root) or !file_preview.validWorkspacePath(path, directory) or self.workspacePathHasCredential(path)) return .{ .immediate = .restricted };
-        self.preview_lane.begin(.{
-            .source = if (directory) .directory else .workspace,
-            .completion_id = completion_id,
-            .task_id = task_id,
-            .run_id = 0,
-            .workspace_id = workspace_id,
-            .workspace_epoch = binding.epoch,
-            .reference_id = "",
-            .workspace_root = binding.canonical_root,
-            .relative_path = path,
-            .max_bytes = self.limits.max_file_preview_bytes,
-            .max_lines = self.limits.max_file_preview_lines,
-            .max_line_bytes = self.limits.max_file_preview_line_bytes,
-        }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
-        return .queued;
-    }
-
     fn mediaUnavailableState(availability: media_source.Availability) FilePreviewState {
         return switch (availability) {
             .missing => .missing,
             .restricted => .restricted,
             .unsupported => .unsupported,
         };
-    }
-
-    fn workspaceFileAuthorized(self: *const Runtime, task_id: u64, workspace_id: u64, epoch: u64, root: []const u8) bool {
-        return self.task_runtime.workspaceFileTaskMatches(task_id, workspace_id) and self.workspace.filePreviewAuthorized(workspace_id, epoch, root);
     }
 
     fn workspacePathHasCredential(self: *const Runtime, path: []const u8) bool {
@@ -2346,20 +2432,14 @@ pub const Runtime = struct {
     }
 
     fn filePreviewAuthority(self: *Runtime, raw: file_preview.Completion) FilePreviewState {
-        if (raw.source == .attachment) return self.attachmentOriginalAuthority(raw);
-        if (raw.source == .task_attachment) return self.taskAttachmentOriginalAuthority(raw);
-        if (raw.source != .reference) return if (self.workspaceFileAuthorized(raw.task_id, raw.workspace_id, raw.workspace_epoch, raw.workspace_root) and !self.workspacePathHasCredential(raw.relative_path)) .ready else .restricted;
-        const reference = self.task_runtime.fileReference(raw.task_id, raw.run_id, raw.reference_id) orelse return .missing;
-        if (reference.workspace_id != raw.workspace_id or reference.workspace_epoch != raw.workspace_epoch or
-            !std.mem.eql(u8, reference.workspace_root, raw.workspace_root) or !self.filePreviewWorkspaceAuthorized(reference)) return .restricted;
-        var relative_storage: [4096]u8 = undefined;
-        const relative = switch (reference.locator_kind) {
-            .workspace_path => reference.locator,
-            .absolute_path => absoluteReferenceRelativePath(reference.workspace_root, reference.locator, &relative_storage) orelse return .restricted,
-            .uri => return .restricted,
-        };
-        if (reference.generated_video != raw.generated_video or !std.mem.eql(u8, relative, raw.relative_path)) return .restricted;
-        return .ready;
+        var scratch: [file_target.max_path_bytes]u8 = undefined;
+        const location = switch (raw.subject) {
+            .draft_attachment => |attachment_id| return self.attachmentOriginalAuthority(attachment_id, raw.location),
+            .task_attachment => |task_id| return self.taskAttachmentOriginalAuthority(task_id),
+            .file => |target| self.resolveFileTarget(target, &scratch),
+            .directory => |target| self.resolveDirectory(target),
+        } catch |err| return filePreviewAuthorityState(err);
+        return if (location.eql(raw.location)) .ready else .restricted;
     }
 
     /// Complete raw reads on the main loop; image buffers stay in their Product
@@ -2371,13 +2451,20 @@ pub const Runtime = struct {
             var state = self.filePreviewAuthority(raw);
             if (state == .ready) state = raw.state;
             if (self.shutting_down or self.preview_executor_shutdown or self.preview_lane.wasCancelled(taken)) state = .failed;
-            if (raw.source == .directory) {
+            if (raw.mode == .describe) {
+                // Nothing the file holds leaves the lane, so there is nothing
+                // to scan: a preview of it still makes its own checks.
+                sink.complete_fn(sink.context, .{ .completion_id = raw.completion_id, .state = state, .content = "", .description = if (state == .ready) raw.description else null, .truncated = false, .redacted = false });
+                self.preview_lane.release(taken);
+                continue;
+            }
+            if (raw.subject == .directory) {
                 var safe_entries: [file_preview.max_directory_entries]DirectoryEntry = undefined;
                 var count: usize = 0;
                 var redacted = false;
                 if (state == .ready) for (raw.entries) |entry| {
                     var path_buffer: [4096]u8 = undefined;
-                    const path = std.fmt.bufPrint(&path_buffer, "{s}{s}{s}", .{ raw.relative_path, if (raw.relative_path.len == 0) @as([]const u8, "") else "/", entry.name }) catch {
+                    const path = std.fmt.bufPrint(&path_buffer, "{s}{s}{s}", .{ raw.location.relative, if (raw.location.relative.len == 0) @as([]const u8, "") else "/", entry.name }) catch {
                         redacted = true;
                         continue;
                     };
@@ -2392,7 +2479,7 @@ pub const Runtime = struct {
                 self.preview_lane.release(taken);
                 continue;
             }
-            if (state == .ready and (raw.image_info != null or raw.generated_video)) {
+            if (state == .ready and (raw.image_info != null or raw.video)) {
                 if (self.projection_security_epoch == 0) state = .failed else {
                     const overlap = self.filePreviewCredentialOverlap() catch {
                         self.preview_lane.release(taken);
@@ -2716,17 +2803,6 @@ pub const Runtime = struct {
                 },
             }
         }
-    }
-
-    fn filePreviewWorkspaceAuthorized(
-        self: *const Runtime,
-        reference: task_runtime.FileReference,
-    ) bool {
-        return self.workspace.filePreviewAuthorized(
-            reference.workspace_id,
-            reference.workspace_epoch,
-            reference.workspace_root,
-        );
     }
 
     const PreviewProjection = struct {
@@ -4994,7 +5070,7 @@ pub const Runtime = struct {
         if (self.mcp) |*runtime| runtime.closeInstallation(self.io);
         self.updates.stop();
         self.inbox.stop();
-        self.output_checks.stopAdmission();
+        self.file_actions.stopAdmission();
         self.cancelSnapshot();
         self.shutting_down = true;
         self.task_runtime.cancelWaitingInputsForShutdown();
@@ -7574,8 +7650,8 @@ pub const Runtime = struct {
         self.custom_providers.deinit();
         self.account_projection.deinit();
         std.debug.assert(self.projection_bytes == 0);
-        self.shutdownOutputChecks();
-        self.output_checks.deinit();
+        self.shutdownFileActions();
+        self.file_actions.deinit();
         self.executor.deinit();
         self.approval_executor.deinit();
         if (self.mcp_executor) |lane| lane.deinit();
@@ -7625,7 +7701,7 @@ pub const Runtime = struct {
         self.shutdownAttachmentStagingExecutor();
         self.shutdownFilePreviewExecutor();
         self.shutdownFileChangeExecutor();
-        self.shutdownOutputChecks();
+        self.shutdownFileActions();
         self.drainFileChangeCompletions(.{
             .context = self,
             .complete_fn = discardFileChangeDiffCompletion,
@@ -7913,8 +7989,7 @@ pub const Runtime = struct {
             .authority_fn = taskProjectionAuthority,
             .text = text.task(),
             .output_path_validator = if (self.file_delivery_preparation) |preparation| preparation.validate_path_fn else null,
-            .office_outputs_open = if (self.output_file_open) |open| open.office else false,
-            .browser_outputs_open = if (self.output_file_open) |open| open.browser else false,
+            .file_open = if (self.file_effects) |effects| .{ .context = effects.context, .kind_fn = effects.open_kind_fn } else null,
             .catalog = .{
                 .context = text,
                 .write_fn = writeTaskCatalogProjection,
@@ -10384,16 +10459,15 @@ pub const TestSupport = if (builtin.is_test) struct {
     pub fn initHistoryFixture(allocator: std.mem.Allocator, control: *Runtime, limits: Limits, configuration: Configuration) !void {
         control.* = try Runtime.init(allocator, std.testing.io, test_agent_port, limits, configuration);
     }
-    pub const OutputFileEffect = OutputCheckHarness;
+    pub const FileActionEffect = FileActionHarness;
 
-    pub const OutputSaveEffect = OutputSaveHarness;
-    pub fn bindOutputSaveEffect(control: *Runtime, effect: *OutputSaveEffect) void {
+    pub const FileSaveEffect = FileSaveHarness;
+    pub fn bindFileSaveEffect(control: *Runtime, effect: *FileSaveEffect) void {
         effect.bind(control);
     }
 
-    pub fn bindOutputFileEffect(control: *Runtime, effect: *OutputFileEffect) void {
+    pub fn bindFileActionEffect(control: *Runtime, effect: *FileActionEffect) void {
         effect.bind(control);
-        control.setOutputFileReveal(.{ .context = effect, .reveal_fn = OutputCheckHarness.reveal });
     }
 
     pub fn recordDeliveredOutputFixture(control: *Runtime) !void {
@@ -12838,35 +12912,133 @@ test "hidden Workspace record with Task history cannot be reused" {
 test "File Preview Workspace authority requires exact identity epoch and root" {
     var control = try testRuntime();
     defer control.deinit();
-    const exact: task_runtime.FileReference = .{
-        .workspace_id = 1,
-        .workspace_epoch = 1,
-        .workspace_root = "/tmp/metawork-test",
-        .id = "ref-1",
-        .title = "fixture",
-        .display_path = "fixture.txt",
-        .kind = "file",
-        .locator_kind = .workspace_path,
-        .locator = "fixture.txt",
-        .range = null,
-    };
-    try std.testing.expect(control.filePreviewWorkspaceAuthorized(exact));
+    const exact: file_target.Location = .{ .workspace_id = 1, .workspace_epoch = 1, .root = "/tmp/metawork-test", .relative = "fixture.txt" };
+    try control.requireFileLocation(exact);
 
-    var stale_id = exact;
-    stale_id.workspace_id = 2;
-    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(stale_id));
-    var stale_epoch = exact;
-    stale_epoch.workspace_epoch = 2;
-    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(stale_epoch));
-    var stale_root = exact;
-    stale_root.workspace_root = "/tmp/other";
-    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(stale_root));
+    inline for (.{
+        .{ "workspace_id", @as(u64, 2) },
+        .{ "workspace_epoch", @as(u64, 2) },
+        .{ "root", @as([]const u8, "/tmp/other") },
+        .{ "relative", @as([]const u8, "SECRET-KEY/fixture.txt") },
+    }) |change| {
+        var other = exact;
+        @field(other, change[0]) = change[1];
+        try std.testing.expectError(error.RestrictedFile, control.requireFileLocation(other));
+    }
     product_workspace.testing.setAuthorization(
         &control.workspace,
         1,
         .removing,
     );
-    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(exact));
+    try std.testing.expectError(error.RestrictedFile, control.requireFileLocation(exact));
+}
+
+test "File Preview resolves a reference and a Workspace path by one rule" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
+    defer control.deinit();
+    const task = control.testTaskSlots()[0].?;
+    const run = &task.durable.runs[0].?;
+    const reference = found: for (run.tools) |*entry| {
+        const tool = &(entry.* orelse continue);
+        const refs = tool.file_refs orelse continue;
+        for (refs) |*slot| if (slot.*) |*value| break :found value;
+    } else return error.TestUnexpectedResult;
+
+    var scratch: [file_target.max_path_bytes]u8 = undefined;
+    const by_reference = testReference(7, reference.id);
+    const by_path: FileTarget = .{ .workspace = testWorkspacePath(3, 1, "image.jpg") };
+    const expected: file_target.Location = .{ .workspace_id = 2, .workspace_epoch = 1, .root = root, .relative = "image.jpg" };
+    for ([_]FileTarget{ by_reference, by_path }) |target|
+        try std.testing.expect(expected.eql(try control.resolveFileTarget(target, &scratch)));
+
+    // An absolute locator inside the root is the same file; outside it, or a
+    // URI, is no Workspace file at all.
+    const separator = std.fs.path.sep_str;
+    const inside = try std.mem.concat(std.testing.allocator, u8, &.{ root, separator, "docs", separator, "a.md" });
+    defer std.testing.allocator.free(inside);
+    const outside = try std.mem.concat(std.testing.allocator, u8, &.{ root, "-other", separator, "a.md" });
+    defer std.testing.allocator.free(outside);
+    reference.locator_kind = .absolute_path;
+    try control.replaceTracked(&reference.locator, inside, 4096);
+    try std.testing.expectEqualStrings("docs/a.md", (try control.resolveFileTarget(by_reference, &scratch)).relative);
+    try control.replaceTracked(&reference.locator, outside, 4096);
+    try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_reference, &scratch));
+    reference.locator_kind = .uri;
+    try std.testing.expectError(error.UnsupportedFile, control.resolveFileTarget(by_reference, &scratch));
+    // Where the locator leads is judged after its separators are one: what
+    // steps out of the root is refused, and so is a path no other identity
+    // could name.
+    reference.locator_kind = .absolute_path;
+    const escaping = try std.mem.concat(std.testing.allocator, u8, &.{ root, separator, "..", separator, "a.md" });
+    defer std.testing.allocator.free(escaping);
+    try control.replaceTracked(&reference.locator, escaping, 4096);
+    try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_reference, &scratch));
+    reference.locator_kind = .workspace_path;
+    for ([_][]const u8{ "../a.md", "docs/../../a.md", "./../a.md", "/docs/a.md", "docs/a.md/", "a\x01.md", "file:stream" }) |locator| {
+        try control.replaceTracked(&reference.locator, locator, 4096);
+        try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_reference, &scratch));
+    }
+    for ([_][]const u8{ "docs/sub/a.md", "./docs/sub/a.md", "docs//sub/./a.md" }) |locator| {
+        try control.replaceTracked(&reference.locator, locator, 4096);
+        try std.testing.expectEqualStrings("docs/sub/a.md", (try control.resolveFileTarget(by_reference, &scratch)).relative);
+    }
+    // The Core does not say which separator it writes on Windows.
+    try control.replaceTracked(&reference.locator, "docs\\sub\\a.md", 4096);
+    if (builtin.os.tag == .windows)
+        try std.testing.expectEqualStrings("docs/sub/a.md", (try control.resolveFileTarget(by_reference, &scratch)).relative)
+    else
+        try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_reference, &scratch));
+    reference.locator_kind = .workspace_path;
+    try control.replaceTracked(&reference.locator, "SECRET-KEY/image.jpg", 4096);
+    try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_reference, &scratch));
+    try control.replaceTracked(&reference.locator, "image.jpg", 4096);
+
+    for ([_]FileTarget{
+        .{ .reference = .{ .task_id = 4, .run_id = 7, .id = reference.id } },
+        testReference(8, reference.id),
+        testReference(7, "file-3-1-1-9"),
+        .{ .workspace = .{ .task_id = 3, .workspace_id = 9, .workspace_epoch = 1, .path = "image.jpg" } },
+    }) |target| try std.testing.expectError(error.UnknownFile, control.resolveFileTarget(target, &scratch));
+    for ([_]FileTarget.Workspace{
+        testWorkspacePath(0, 1, "image.jpg"),
+        testWorkspacePath(4, 1, "image.jpg"),
+        testWorkspacePath(3, 2, "image.jpg"),
+        testWorkspacePath(3, 1, "../image.jpg"),
+        testWorkspacePath(3, 1, ""),
+        testWorkspacePath(3, 1, "SECRET-KEY.jpg"),
+        // Another of this Task's identities never lends its Workspace.
+        .{ .task_id = 3, .workspace_id = 1, .workspace_epoch = 1, .path = "image.jpg" },
+    }) |target| try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(.{ .workspace = target }, &scratch));
+    // Only a directory may be the root.
+    _ = try control.resolveDirectory(testWorkspacePath(3, 1, ""));
+
+    // Every fact that held at admission is asked again at completion, so each
+    // one has to turn the answer by itself.
+    const targets = [_]FileTarget{ by_reference, by_path };
+    task.deletion = .deleting;
+    try std.testing.expectError(error.UnknownFile, control.resolveFileTarget(by_reference, &scratch));
+    try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_path, &scratch));
+    task.deletion = .idle;
+    run.superseded_by_run_id = 99;
+    try std.testing.expectError(error.UnknownFile, control.resolveFileTarget(by_reference, &scratch));
+    run.superseded_by_run_id = null;
+    product_workspace.testing.setAuthorization(&control.workspace, 2, .removing);
+    for (targets) |target| try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(target, &scratch));
+    product_workspace.testing.setAuthorization(&control.workspace, 2, .available);
+    const epoch = control.projection_security_epoch;
+    control.projection_security_epoch = 0;
+    for (targets) |target| try std.testing.expectError(error.StaleSecurityEpoch, control.resolveFileTarget(target, &scratch));
+    control.projection_security_epoch = epoch;
+    control.shutting_down = true;
+    for (targets) |target| try std.testing.expectError(error.ShuttingDown, control.resolveFileTarget(target, &scratch));
+    control.shutting_down = false;
+    for (targets) |target| try std.testing.expect(expected.eql(try control.resolveFileTarget(target, &scratch)));
 }
 
 test "Workspace projection derives aggregate Task signals and removal preserves history" {
@@ -20247,15 +20419,25 @@ fn testImagePreviewRuntime(control: *Runtime, root: []const u8) !void {
     try control.applyEvent(&event);
 }
 
+fn testReference(run_id: u64, id: []const u8) FileTarget {
+    return .{ .reference = .{ .task_id = 3, .run_id = run_id, .id = id } };
+}
+
+fn testWorkspacePath(task_id: u64, workspace_epoch: u64, path: []const u8) FileTarget.Workspace {
+    return .{ .task_id = task_id, .workspace_id = 2, .workspace_epoch = workspace_epoch, .path = path };
+}
+
 const PreviewTestCapture = struct {
     calls: usize = 0,
     state: FilePreviewState = .failed,
     image: ?FilePreviewMedia = null,
+    description: ?FileDescription = null,
     fn receive(context: *anyopaque, result: FilePreviewResult) void {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.calls += 1;
         self.state = result.state;
         self.image = result.media;
+        self.description = result.description;
         std.debug.assert(result.content.len == 0);
     }
     fn sink(self: *@This()) FilePreviewSink {
@@ -20298,9 +20480,9 @@ test "file preview opens the trusted generated MP4 reference and rejects malform
             for (refs) |ref| if (ref) |value| if (value.generated_video) break :found value.id;
         };
     } else return error.MissingGeneratedVideo;
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .missing }, control.beginFilePreview(1, 3, 8, id));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .missing }, control.beginFilePreview(1, testReference(8, id)));
 
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(2, 3, 7, id));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(2, testReference(7, id)));
     var capture: PreviewTestCapture = .{};
     try capture.wait(control);
     try std.testing.expectEqual(FilePreviewState.ready, capture.state);
@@ -20314,16 +20496,87 @@ test "file preview opens the trusted generated MP4 reference and rejects malform
     bytes[4] = 'b';
     try tmp.dir.writeFile(io, .{ .sub_path = path, .data = bytes });
     capture = .{};
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(3, 3, 7, id));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(3, testReference(7, id)));
     try capture.wait(control);
     try std.testing.expectEqual(FilePreviewState.unsupported, capture.state);
     try std.testing.expect(capture.image == null);
     try tmp.dir.deleteFile(io, path);
     capture = .{};
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(4, 3, 7, id));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(4, testReference(7, id)));
     try capture.wait(control);
     try std.testing.expectEqual(FilePreviewState.missing, capture.state);
     try std.testing.expect(!control.hasFilePreviews());
+}
+
+test "file preview delivers nothing when the same target resolves to another file at completion" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = "readable text" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "other.jpg", .data = "another file" });
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
+    defer control.deinit();
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
+    const reference = found: for (run.tools) |*entry| {
+        const tool = &(entry.* orelse continue);
+        const refs = tool.file_refs orelse continue;
+        for (refs) |*slot| if (slot.*) |*value| break :found value;
+    } else return error.TestUnexpectedResult;
+    var capture: PreviewTestCapture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(1, testReference(7, reference.id)));
+    try control.replaceTracked(&reference.locator, "other.jpg", 4096);
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.restricted, capture.state);
+    try std.testing.expect(!control.hasFilePreviews());
+}
+
+test "file preview describes and delivers a delivered video in place and leaves a Workspace path as a file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const bytes = "\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2 SECRET-KEY is never read to describe";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "clip.mp4", .data = bytes });
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
+    defer control.deinit();
+    try recordTestOutput(control, @splat(3), "clip.mp4");
+    const output: FileTarget = .{ .output = .{ .task_id = 3, .run_id = 7, .id = @splat(3) } };
+    var capture: PreviewTestCapture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFileDescription(1, output));
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.ready, capture.state);
+    try std.testing.expectEqualDeep(FileDescription{ .size_bytes = bytes.len, .kind = .video }, capture.description.?);
+    try std.testing.expect(capture.image == null and !control.hasFilePreviews());
+    capture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFileDescription(2, .{ .workspace = testWorkspacePath(3, 1, "clip.mp4") }));
+    try capture.wait(control);
+    try std.testing.expectEqualDeep(FileDescription{ .size_bytes = bytes.len, .kind = .{ .file = .{ .previewable = false } } }, capture.description.?);
+    // Delivering it still scans every byte the video holds.
+    capture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(3, output));
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.restricted, capture.state);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "clip.mp4", .data = bytes[0..24] });
+    capture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(4, output));
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.ready, capture.state);
+    try std.testing.expectEqualStrings("video/mp4", capture.image.?.media_type);
+    try std.testing.expect(control.releaseFilePreview(4));
+
+    // A description answers to the same authority as the file itself.
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .missing }, control.beginFileDescription(5, .{ .output = .{ .task_id = 3, .run_id = 7, .id = @splat(4) } }));
+    capture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFileDescription(6, output));
+    product_workspace.testing.setAuthorization(&control.workspace, 2, .removing);
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.restricted, capture.state);
+    try std.testing.expect(capture.description == null and !control.hasFilePreviews());
 }
 
 test "file preview workspace directory authority redacts names and rejects stale workspace bindings" {
@@ -20337,11 +20590,11 @@ test "file preview workspace directory authority redacts names and rejects stale
     defer std.testing.allocator.destroy(control);
     try testImagePreviewRuntime(control, root);
     defer control.deinit();
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 3, 2, 2, "", true));
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 99, 2, 1, "", true));
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 3, 2, 1, "../outside", true));
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 0, 2, 1, "visible.txt", false));
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 0, 2, 1, "", true));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginDirectory(90, testWorkspacePath(3, 2, "")));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginDirectory(90, testWorkspacePath(99, 1, "")));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginDirectory(90, testWorkspacePath(3, 1, "../outside")));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginFilePreview(90, .{ .workspace = testWorkspacePath(0, 1, "visible.txt") }));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginDirectory(90, testWorkspacePath(0, 1, "")));
     const Capture = struct {
         calls: usize = 0,
         state: FilePreviewState = .failed,
@@ -20360,7 +20613,7 @@ test "file preview workspace directory authority redacts names and rejects stale
         }
     };
     var capture = Capture{};
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginWorkspaceFile(91, 3, 2, 1, "", true));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginDirectory(91, testWorkspacePath(3, 1, "")));
     for (0..5000) |_| {
         control.drainFilePreviewCompletions(capture.sink());
         if (capture.calls != 0) break;
@@ -20371,7 +20624,7 @@ test "file preview workspace directory authority redacts names and rejects stale
     try std.testing.expectEqual(@as(usize, 1), capture.count);
     try std.testing.expect(capture.redacted);
     capture = .{};
-    _ = control.beginWorkspaceFile(92, 3, 2, 1, "", true);
+    _ = control.beginDirectory(92, testWorkspacePath(3, 1, ""));
     control.testTaskSlots()[0].?.durable.workspace_id = 1;
     for (0..5000) |_| {
         control.drainFilePreviewCompletions(capture.sink());
@@ -20400,7 +20653,7 @@ test "file preview scans all original bytes including a credential across the sc
     try testImagePreviewRuntime(control, root);
     defer control.deinit();
     var capture: PreviewTestCapture = .{};
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(71, 3, 7, "file-3-1-1-1"));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(71, testReference(7, "file-3-1-1-1")));
     for (0..5000) |_| {
         control.drainFilePreviewCompletions(capture.sink());
         if (capture.calls != 0) break;
@@ -20428,7 +20681,7 @@ test "file preview immutable original transfer is sequential and revoked by secu
     try testImagePreviewRuntime(control, root);
     defer control.deinit();
     var capture: PreviewTestCapture = .{};
-    _ = control.beginFilePreview(72, 3, 7, "file-3-1-1-1");
+    _ = control.beginFilePreview(72, testReference(7, "file-3-1-1-1"));
     for (0..5000) |_| {
         control.drainFilePreviewCompletions(capture.sink());
         if (capture.calls != 0) break;
@@ -21226,7 +21479,7 @@ test "Tool slots grow while a snapshot read and a file preview are in flight" {
     defer std.testing.allocator.free(output);
     var read = try control.writeSnapshot(output, .{ .task_id = 3 });
     var capture: PreviewTestCapture = .{};
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(81, 3, 7, "file-3-1-1-1"));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(81, testReference(7, "file-3-1-1-1")));
     // Records arrive until the slots move to a larger array.
     for (1..capacity + 2) |index| try applyLongRunTool(control, 3, 7, index, "grown", false);
     try std.testing.expect(run.tools.len > capacity);
@@ -23948,6 +24201,8 @@ test "late credential discovery revokes Output locators in current and durable p
 test "delivered Output projection matches the strict Renderer fixture without exposing file authority" {
     var control = try testRuntime();
     defer control.deinit();
+    var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    harness.bind(&control);
     var expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, contract_fixture.delivered_output, .{});
     defer expected.deinit();
     const row = expected.value.object;
@@ -23965,7 +24220,7 @@ test "delivered Output projection matches the strict Renderer fixture without ex
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, output, .{});
     defer std.testing.allocator.free(encoded);
     try std.testing.expectEqualStrings(std.mem.trim(u8, contract_fixture.delivered_output, " \r\n\t"), encoded);
-    try std.testing.expectEqual(@as(usize, 4), output.object.count());
+    try std.testing.expectEqual(@as(usize, 5), output.object.count());
     try std.testing.expect(output.object.get("locator") == null);
     try std.testing.expect(output.object.get("sha256") == null);
     // Even an inconsistent stale flag must not expose a newly known credential.
@@ -23977,6 +24232,7 @@ test "delivered Output projection matches the strict Renderer fixture without ex
     defer redacted.deinit();
     const hidden = redacted.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("outputs").?.array.items[0];
     try std.testing.expect(hidden.object.get("redacted").?.bool);
+    try std.testing.expect(hidden.object.get("open") == null);
     try std.testing.expectEqualStrings("", hidden.object.get("displayPath").?.string);
 }
 
@@ -23987,86 +24243,98 @@ fn recordTestOutput(control: *Runtime, id: [16]u8, path: []const u8) !void {
     try control.applyEvent(&envelope);
 }
 
+fn testOutput(id: [16]u8) FileTarget {
+    return .{ .output = .{ .task_id = 3, .run_id = 7, .id = id } };
+}
+
+fn testFileInput(control: *const Runtime, target: FileTarget) !file_action.Input {
+    var scratch: [file_target.max_path_bytes]u8 = undefined;
+    const location = try control.resolveFileTarget(target, &scratch);
+    return file_action.Input.init(std.testing.allocator, .{ .file = .{ .target = target, .action = .check } }, location, control.projection_security_epoch);
+}
+
 test "Output file target requires an explicit receipt in the exact owning Task and Run" {
     var control = try testRuntime();
     defer control.deinit();
     const id: [16]u8 = @splat(3);
-    try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, id));
+    try std.testing.expectError(error.UnknownFile, testFileInput(&control, testOutput(id)));
     try recordTestOutput(&control, id, "results/年度报告.docx");
-    var target = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, id);
+    var target = try testFileInput(&control, testOutput(id));
     defer target.deinit();
-    try std.testing.expectEqualStrings("/tmp/metawork-test", target.workspace_root);
-    try std.testing.expectEqualStrings("results/年度报告.docx", target.relative_path);
-    try std.testing.expectEqual(@as(u64, 42), target.size_bytes);
-    try std.testing.expectEqual([_]u8{2} ** 32, target.sha256);
-    try control.revalidateOutputFileTarget(&target);
+    try std.testing.expectEqualStrings("/tmp/metawork-test", target.location.root);
+    try std.testing.expectEqualStrings("results/年度报告.docx", target.location.relative);
+    try std.testing.expectEqual(@as(u64, 42), target.location.delivered.?.size_bytes);
+    try std.testing.expectEqual([_]u8{2} ** 32, target.location.delivered.?.sha256);
+    try control.revalidateFileAction(&target);
     for ([_][2]u64{ .{ 0, 7 }, .{ 4, 7 }, .{ 3, 0 }, .{ 3, 8 } }) |scope|
-        try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, scope[0], scope[1], id));
-    try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(0)));
-    try std.testing.expectError(error.UnknownOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(4)));
+        try std.testing.expectError(error.UnknownFile, testFileInput(&control, .{ .output = .{ .task_id = scope[0], .run_id = scope[1], .id = id } }));
+    try std.testing.expectError(error.UnknownFile, testFileInput(&control, testOutput(@splat(0))));
+    try std.testing.expectError(error.UnknownFile, testFileInput(&control, testOutput(@splat(4))));
 
     const task = control.testTaskSlots()[0].?;
     const record = &task.durable.runs[0].?.outputs[0].?;
-    try std.testing.expect(target.relative_path.ptr != record.locator.ptr);
-    try std.testing.expect(target.workspace_root.ptr != task.durable.workspace_root.ptr);
+    try std.testing.expect(target.location.relative.ptr != record.locator.ptr);
+    try std.testing.expect(target.location.root.ptr != task.durable.workspace_root.ptr);
     // The worker keeps stable input, while completion must reject changed facts.
     record.locator[0] = 'R';
-    try std.testing.expectEqualStrings("results/年度报告.docx", target.relative_path);
-    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    try std.testing.expectEqualStrings("results/年度报告.docx", target.location.relative);
+    try std.testing.expectError(error.RestrictedFile, control.revalidateFileAction(&target));
     record.locator[0] = 'r';
     record.sha256[0] ^= 1;
-    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    try std.testing.expectError(error.RestrictedFile, control.revalidateFileAction(&target));
     record.sha256[0] ^= 1;
     record.size_bytes += 1;
-    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    try std.testing.expectError(error.RestrictedFile, control.revalidateFileAction(&target));
     record.size_bytes -= 1;
     task.durable.workspace_epoch += 1;
-    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    try std.testing.expectError(error.RestrictedFile, control.revalidateFileAction(&target));
     task.durable.workspace_epoch -= 1;
-    try control.revalidateOutputFileTarget(&target);
+    try control.revalidateFileAction(&target);
 }
 
 test "Output file target rechecks revocation deletion redaction and security before use" {
     var control = try testRuntime();
     defer control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
-    var target = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3));
+    var target = try testFileInput(&control, testOutput(@splat(3)));
     defer target.deinit();
     const task = control.testTaskSlots()[0].?;
     const record = &task.durable.runs[0].?.outputs[0].?;
     product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
-    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
-    try std.testing.expectError(error.RestrictedOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3)));
+    try std.testing.expectError(error.RestrictedFile, control.revalidateFileAction(&target));
+    try std.testing.expectError(error.RestrictedFile, testFileInput(&control, testOutput(@splat(3))));
     product_workspace.testing.setAuthorization(&control.workspace, 1, .available);
     task.deletion = .deleting;
-    try std.testing.expectError(error.UnknownOutput, control.revalidateOutputFileTarget(&target));
+    try std.testing.expectError(error.UnknownFile, control.revalidateFileAction(&target));
     task.deletion = .idle;
     record.redacted = true;
-    try std.testing.expectError(error.RestrictedOutput, control.revalidateOutputFileTarget(&target));
+    try std.testing.expectError(error.RestrictedFile, control.revalidateFileAction(&target));
     record.redacted = false;
     // A stale redacted flag cannot confer authority over a sensitive locator.
     @memcpy(record.locator[0.."SECRET-KEY/".len], "SECRET-KEY/");
-    try std.testing.expectError(error.RestrictedOutput, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3)));
-    @memcpy(record.locator, target.relative_path);
-    try control.revalidateOutputFileTarget(&target);
+    try std.testing.expectError(error.RestrictedFile, testFileInput(&control, testOutput(@splat(3))));
+    @memcpy(record.locator, target.location.relative);
+    try control.revalidateFileAction(&target);
     control.learnProjectionCredential("new-file-operation-security-boundary");
-    try std.testing.expectError(error.StaleSecurityEpoch, control.revalidateOutputFileTarget(&target));
-    var fresh = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3));
+    try std.testing.expectError(error.StaleSecurityEpoch, control.revalidateFileAction(&target));
+    var fresh = try testFileInput(&control, testOutput(@splat(3)));
     defer fresh.deinit();
-    try control.revalidateOutputFileTarget(&fresh);
+    try control.revalidateFileAction(&fresh);
     control.shutting_down = true;
-    try std.testing.expectError(error.ExecutorShuttingDown, control.revalidateOutputFileTarget(&fresh));
+    try std.testing.expectError(error.ShuttingDown, control.revalidateFileAction(&fresh));
     control.shutting_down = false;
     control.projection_security_epoch = 0;
-    try std.testing.expectError(error.StaleSecurityEpoch, control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3)));
+    try std.testing.expectError(error.StaleSecurityEpoch, testFileInput(&control, testOutput(@splat(3))));
 }
 
 test "Output file target owns its input after the aggregate is released and handles allocation failure" {
     const Harness = struct {
         fn copy(allocator: std.mem.Allocator, control: *const Runtime) !void {
-            var target = try control.copyOutputFileTarget(allocator, 3, 7, @splat(3));
+            var scratch: [file_target.max_path_bytes]u8 = undefined;
+            const output = testOutput(@splat(3));
+            var target = try file_action.Input.init(allocator, .{ .file = .{ .target = output, .action = .check } }, try control.resolveFileTarget(output, &scratch), control.projection_security_epoch);
             defer target.deinit();
-            try control.revalidateOutputFileTarget(&target);
+            try control.revalidateFileAction(&target);
         }
     };
     var control = try testRuntime();
@@ -24074,31 +24342,40 @@ test "Output file target owns its input after the aggregate is released and hand
     defer if (live) control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.copy, .{&control});
-    var target = try control.copyOutputFileTarget(std.testing.allocator, 3, 7, @splat(3));
+    var target = try testFileInput(&control, testOutput(@splat(3)));
     defer target.deinit();
     control.deinit();
     live = false;
-    try std.testing.expectEqualStrings("/tmp/metawork-test", target.workspace_root);
-    try std.testing.expectEqualStrings("results/年度报告.docx", target.relative_path);
-    try std.testing.expectEqual(@as(u64, 42), target.size_bytes);
+    try std.testing.expectEqualStrings("/tmp/metawork-test", target.location.root);
+    try std.testing.expectEqualStrings("results/年度报告.docx", target.location.relative);
+    try std.testing.expectEqual(@as(u64, 42), target.location.delivered.?.size_bytes);
 }
 
-const OutputCheckHarness = struct {
+const FileActionHarness = struct {
     main_thread_id: std.Thread.Id,
     workspace_id: u64 = 1,
+    relative: []const u8 = "results/年度报告.docx",
     outcome: lifecycle.FileDeliveryInspection = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(2) } },
+    locate_error: ?anyerror = null,
     entered: std.atomic.Value(bool) = .init(false),
     blocked: std.atomic.Value(bool) = .init(false),
+    /// Whole-file digest reads.
     inspections: std.atomic.Value(usize) = .init(0),
+    /// Reads of the name only.
+    locates: std.atomic.Value(usize) = .init(0),
     prepares: usize = 0,
     releases: usize = 0,
     requester_active: bool = true,
+    kind: control_ports.FileEffect = .locate,
     reveals: usize = 0,
-    results: [16]?OutputCheckResult = @splat(null),
+    copies: usize = 0,
+    copy_error: ?anyerror = null,
+    opens: usize = 0,
+    results: [32]?FileActionResult = @splat(null),
     count: usize = 0,
 
     fn prepare(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedFileDelivery {
-        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        const self: *FileActionHarness = @ptrCast(@alignCast(context));
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
         std.debug.assert(workspace.id == self.workspace_id and workspace.epoch == 1);
         self.prepares += 1;
@@ -24106,47 +24383,84 @@ const OutputCheckHarness = struct {
     }
 
     fn inspect(context: *anyopaque, path: []const u8, cancelled: *const std.atomic.Value(bool)) lifecycle.FileDeliveryInspection {
-        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        const self: *FileActionHarness = @ptrCast(@alignCast(context));
         std.debug.assert(std.Thread.getCurrentId() != self.main_thread_id);
-        std.debug.assert(std.mem.eql(u8, path, "results/年度报告.docx"));
+        std.debug.assert(std.mem.eql(u8, path, self.relative));
         _ = self.inspections.fetchAdd(1, .acq_rel);
-        self.entered.store(true, .release);
-        while (self.blocked.load(.acquire) and !cancelled.load(.acquire)) std.Thread.yield() catch {};
+        self.hold(cancelled);
         return if (cancelled.load(.acquire)) .{ .failed = .cancelled } else self.outcome;
     }
 
+    fn prepareEffect(context: *anyopaque, _: []const u8, relative: []const u8, kind: control_ports.FileEffect) anyerror!control_ports.OwnedFileEffect {
+        const self: *FileActionHarness = @ptrCast(@alignCast(context));
+        try std.testing.expectEqual(self.main_thread_id, std.Thread.getCurrentId());
+        try std.testing.expectEqualStrings(self.relative, relative);
+        self.prepares += 1;
+        self.kind = kind;
+        return .{ .context = self, .inspect_fn = locate, .perform_fn = perform, .release_fn = release };
+    }
+
+    /// A list of its own: what it names has nothing to do with the real one.
+    pub fn openKind(_: *anyopaque, relative: []const u8) ?control_ports.FileOpenKind {
+        if (std.mem.endsWith(u8, relative, ".docx") or std.mem.endsWith(u8, relative, ".jpg")) return .default_app;
+        return if (std.mem.endsWith(u8, relative, ".html")) .browser else null;
+    }
+
+    fn locate(context: *anyopaque, cancelled: *const std.atomic.Value(bool)) anyerror!void {
+        const self: *FileActionHarness = @ptrCast(@alignCast(context));
+        std.debug.assert(std.Thread.getCurrentId() != self.main_thread_id);
+        _ = self.locates.fetchAdd(1, .acq_rel);
+        self.hold(cancelled);
+        if (cancelled.load(.acquire)) return error.Cancelled;
+        if (self.locate_error) |err| return err;
+    }
+
+    fn perform(context: *anyopaque) anyerror!void {
+        const self: *FileActionHarness = @ptrCast(@alignCast(context));
+        try std.testing.expectEqual(self.main_thread_id, std.Thread.getCurrentId());
+        switch (self.kind) {
+            .locate => {},
+            .reveal => self.reveals += 1,
+            .copy_path => {
+                if (self.copy_error) |err| return err;
+                self.copies += 1;
+            },
+            .open => self.opens += 1,
+        }
+    }
+
+    fn hold(self: *FileActionHarness, cancelled: *const std.atomic.Value(bool)) void {
+        self.entered.store(true, .release);
+        while (self.blocked.load(.acquire) and !cancelled.load(.acquire)) std.Thread.yield() catch {};
+    }
+
     fn release(context: *anyopaque) void {
-        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        const self: *FileActionHarness = @ptrCast(@alignCast(context));
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
         self.releases += 1;
     }
 
-    fn complete(context: *anyopaque, result: OutputCheckResult) void {
-        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+    fn complete(context: *anyopaque, result: FileActionResult) void {
+        const self: *FileActionHarness = @ptrCast(@alignCast(context));
         self.results[self.count] = result;
         self.count += 1;
     }
 
-    fn sink(self: *OutputCheckHarness) OutputCheckSink {
+    fn sink(self: *FileActionHarness) FileActionSink {
         return .{ .context = self, .request_active_fn = requestActive, .complete_fn = complete };
     }
 
     fn requestActive(context: *anyopaque, _: u64) bool {
-        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
+        const self: *FileActionHarness = @ptrCast(@alignCast(context));
         return self.requester_active;
     }
-    fn reveal(context: *anyopaque, _: []const u8, path: []const u8) !void {
-        const self: *OutputCheckHarness = @ptrCast(@alignCast(context));
-        try std.testing.expectEqual(self.main_thread_id, std.Thread.getCurrentId());
-        try std.testing.expectEqualStrings("results/年度报告.docx", path);
-        self.reveals += 1;
-    }
 
-    fn bind(self: *OutputCheckHarness, control: *Runtime) void {
+    fn bind(self: *FileActionHarness, control: *Runtime) void {
         control.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepare });
+        control.setFileEffects(.{ .context = self, .open_kind_fn = openKind, .prepare_fn = prepareEffect });
     }
 
-    fn waitEntered(self: *OutputCheckHarness) !void {
+    fn waitEntered(self: *FileActionHarness) !void {
         for (0..5000) |_| {
             if (self.entered.load(.acquire)) return;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
@@ -24154,25 +24468,29 @@ const OutputCheckHarness = struct {
         return error.TestTimeout;
     }
 
-    fn drainAll(self: *OutputCheckHarness, control: *Runtime) !void {
+    fn drainAll(self: *FileActionHarness, control: *Runtime) !void {
         for (0..5000) |_| {
-            control.drainOutputChecks(self.sink());
-            if (!control.hasOutputChecks()) return;
+            control.drainFileActions(self.sink());
+            if (!control.hasFileActions()) return;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         }
         return error.TestTimeout;
     }
+
+    fn lastState(self: *const FileActionHarness) FileActionState {
+        return self.results[self.count - 1].?.state;
+    }
 };
 
 test "Output check worker distinguishes current bytes from changed or unavailable files" {
-    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     var control = try testRuntime();
     defer control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
-    try std.testing.expectEqual(OutputCheckState.unavailable, control.beginOutputCheck(1, 3, 7, @splat(3), .check).immediate);
-    try std.testing.expect(control.output_checks.executor == null);
+    try std.testing.expectEqual(FileActionState.unavailable, control.beginFileAction(1, testOutput(@splat(3)), .check).immediate);
+    try std.testing.expect(control.file_actions.executor == null);
     harness.bind(&control);
-    const Case = struct { outcome: lifecycle.FileDeliveryInspection, expected: OutputCheckState };
+    const Case = struct { outcome: lifecycle.FileDeliveryInspection, expected: FileActionState };
     const cases = [_]Case{
         .{ .outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(2) } }, .expected = .ready },
         .{ .outcome = .{ .verified = .{ .size_bytes = 43, .sha256 = @splat(2) } }, .expected = .changed },
@@ -24184,17 +24502,19 @@ test "Output check worker distinguishes current bytes from changed or unavailabl
     };
     for (cases, 0..) |case, i| {
         harness.outcome = case.outcome;
-        try std.testing.expect(control.beginOutputCheck(i + 1, 3, 7, @splat(3), .check) == .queued);
+        try std.testing.expect(control.beginFileAction(i + 1, testOutput(@splat(3)), .check) == .queued);
         try harness.drainAll(&control);
         try std.testing.expectEqual(case.expected, harness.results[i].?.state);
         try std.testing.expectEqual(i + 1, harness.results[i].?.completion_id);
         try std.testing.expectEqual(i + 1, harness.releases);
     }
     try std.testing.expectEqual(cases.len, harness.inspections.load(.acquire));
+    // Only `check` compares with the delivery, and only it reads the content.
     harness.outcome = .{ .verified = .{ .size_bytes = 43, .sha256 = @splat(4) } };
-    try std.testing.expect(control.beginOutputCheck(cases.len + 1, 3, 7, @splat(3), .check_current) == .queued);
+    try std.testing.expect(control.beginFileAction(cases.len + 1, testOutput(@splat(3)), .check_current) == .queued);
     try harness.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.ready, harness.results[cases.len].?.state);
+    try std.testing.expectEqual(FileActionState.ready, harness.results[cases.len].?.state);
+    try std.testing.expectEqual(cases.len, harness.inspections.load(.acquire));
 }
 
 test "Output registration waits for terminal receipt drain, deduplicates, and persists the inspected bytes" {
@@ -24203,28 +24523,28 @@ test "Output registration waits for terminal receipt drain, deduplicates, and pe
             if (!std.mem.eql(u8, path, "results/年度报告.docx")) return error.InvalidOutputPath;
         }
     };
-    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId(), .outcome = .{ .verified = .{ .size_bytes = 51, .sha256 = @splat(9) } } };
+    var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId(), .outcome = .{ .verified = .{ .size_bytes = 51, .sha256 = @splat(9) } } };
     var storage: [256 * 1024]u8 = undefined;
     var history = TestTaskPersistence{ .storage = &storage };
     var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
     defer control.deinit();
-    control.setFileDeliveryPreparation(.{ .context = &harness, .prepare_fn = OutputCheckHarness.prepare, .validate_path_fn = Validator.validate });
+    control.setFileDeliveryPreparation(.{ .context = &harness, .prepare_fn = FileActionHarness.prepare, .validate_path_fn = Validator.validate });
 
     var event = try testEnvelope(3, 7, "{\"file_changes\":{\"id\":\"tool-1\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"results/年度报告.docx\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-1\",\"agent_depth\":0,\"before_bytes\":42,\"after_bytes\":51,\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}");
     defer event.deinit();
     try control.applyEvent(&event);
     const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     const change_id = run.file_changes[0].?.id;
-    try std.testing.expectEqual(OutputCheckState.restricted, control.beginOutputRegistration(1, 3, 7, change_id).immediate);
+    try std.testing.expectEqual(FileActionState.restricted, control.beginOutputRegistration(1, 3, 7, change_id).immediate);
     try std.testing.expect(commitTerminal(run, .completed, .completed, null, .reusable, "", false));
-    try std.testing.expectEqual(OutputCheckState.restricted, control.beginOutputRegistration(2, 3, 7, change_id).immediate);
+    try std.testing.expectEqual(FileActionState.restricted, control.beginOutputRegistration(2, 3, 7, change_id).immediate);
     control.markTerminalRunsBeforeEventDrain();
     finalizeTestTerminalDrain(&control);
-    try std.testing.expectEqual(OutputCheckState.restricted, control.beginOutputRegistration(3, 3, 7, "other-change").immediate);
+    try std.testing.expectEqual(FileActionState.restricted, control.beginOutputRegistration(3, 3, 7, "other-change").immediate);
     for ([_]u64{ 4, 5 }, 0..) |id, index| {
         try std.testing.expect(control.beginOutputRegistration(id, 3, 7, change_id) == .queued);
         try harness.drainAll(&control);
-        try std.testing.expectEqual(OutputCheckState.registered, harness.results[index].?.state);
+        try std.testing.expectEqual(FileActionState.registered, harness.results[index].?.state);
     }
     try std.testing.expect(run.outputs[0] != null and run.outputs[1] == null);
     const id = run.outputs[0].?.id;
@@ -24239,104 +24559,307 @@ test "Output registration waits for terminal receipt drain, deduplicates, and pe
 }
 
 test "Output check cancellation bounds active and queued work without retaining effects" {
-    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     harness.blocked.store(true, .release);
     var control = try testRuntime();
     defer control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     harness.bind(&control);
-    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .check) == .queued);
+    try std.testing.expect(control.beginFileAction(1, testOutput(@splat(3)), .check) == .queued);
     try harness.waitEntered();
-    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .check) == .queued);
-    try std.testing.expectEqual(OutputCheckState.busy, control.beginOutputCheck(3, 3, 7, @splat(3), .check).immediate);
+    try std.testing.expect(control.beginFileAction(2, testOutput(@splat(3)), .check) == .queued);
+    try std.testing.expectEqual(FileActionState.busy, control.beginFileAction(3, testOutput(@splat(3)), .check).immediate);
     try std.testing.expectEqual(@as(usize, 1), harness.releases);
-    try std.testing.expectEqual(OutputCancel.job_cancelling, control.cancelOutputCheck(2));
-    try std.testing.expectEqual(OutputCancel.job_cancelling, control.cancelOutputCheck(1));
-    try std.testing.expectEqual(OutputCancel.not_found, control.cancelOutputCheck(3));
+    try std.testing.expectEqual(FileActionCancel.job_cancelling, control.cancelFileAction(2));
+    try std.testing.expectEqual(FileActionCancel.job_cancelling, control.cancelFileAction(1));
+    try std.testing.expectEqual(FileActionCancel.not_found, control.cancelFileAction(3));
     try harness.drainAll(&control);
     try std.testing.expectEqual(@as(usize, 2), harness.count);
-    for (harness.results[0..harness.count]) |result| try std.testing.expectEqual(OutputCheckState.cancelled, result.?.state);
+    for (harness.results[0..harness.count]) |result| try std.testing.expectEqual(FileActionState.cancelled, result.?.state);
     try std.testing.expectEqual(@as(usize, 1), harness.inspections.load(.acquire));
     try std.testing.expectEqual(@as(usize, 3), harness.releases);
 }
 
 test "Output check completion revalidates authority changed while the worker was active" {
-    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     var control = try testRuntime();
     defer control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     harness.bind(&control);
     harness.blocked.store(true, .release);
-    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .check) == .queued);
+    try std.testing.expect(control.beginFileAction(1, testOutput(@splat(3)), .check) == .queued);
     try harness.waitEntered();
     product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
     harness.blocked.store(false, .release);
     try harness.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.restricted, harness.results[0].?.state);
+    try std.testing.expectEqual(FileActionState.restricted, harness.results[0].?.state);
     product_workspace.testing.setAuthorization(&control.workspace, 1, .available);
     harness.entered.store(false, .release);
     harness.blocked.store(true, .release);
-    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .check) == .queued);
+    try std.testing.expect(control.beginFileAction(2, testOutput(@splat(3)), .check) == .queued);
     try harness.waitEntered();
     control.learnProjectionCredential("new-check-security-boundary");
     harness.blocked.store(false, .release);
     try harness.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.stale_security, harness.results[1].?.state);
+    try std.testing.expectEqual(FileActionState.stale_security, harness.results[1].?.state);
     try std.testing.expectEqual(@as(usize, 2), harness.releases);
 }
 
 test "Output check deadline and shutdown cancel then join before releasing frozen effects" {
-    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     var control = try testRuntime();
     defer control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     harness.bind(&control);
     harness.blocked.store(true, .release);
-    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .check) == .queued);
+    try std.testing.expect(control.beginFileAction(1, testOutput(@splat(3)), .check) == .queued);
     try harness.waitEntered();
-    control.output_checks.jobs[0].?.created_at.nanoseconds -= 31 * std.time.ns_per_s;
+    control.file_actions.jobs[0].?.created_at.nanoseconds -= 31 * std.time.ns_per_s;
     try harness.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.timed_out, harness.results[0].?.state);
+    try std.testing.expectEqual(FileActionState.timed_out, harness.results[0].?.state);
     try std.testing.expectEqual(@as(usize, 1), harness.releases);
     harness.entered.store(false, .release);
-    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .check) == .queued);
+    try std.testing.expect(control.beginFileAction(2, testOutput(@splat(3)), .check) == .queued);
     try harness.waitEntered();
-    try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3), .check) == .queued);
-    control.shutdownOutputChecks();
+    try std.testing.expect(control.beginFileAction(3, testOutput(@splat(3)), .check) == .queued);
+    control.shutdownFileActions();
     // Joined jobs retain their owned effects until the main loop drains them.
     try std.testing.expectEqual(@as(usize, 1), harness.releases);
     try harness.drainAll(&control);
     try std.testing.expectEqual(@as(usize, 3), harness.releases);
-    try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[1].?.state);
-    try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[2].?.state);
-    try std.testing.expectEqual(OutputCheckState.failed, control.beginOutputCheck(4, 3, 7, @splat(3), .check).immediate);
+    try std.testing.expectEqual(FileActionState.cancelled, harness.results[1].?.state);
+    try std.testing.expectEqual(FileActionState.cancelled, harness.results[2].?.state);
+    try std.testing.expectEqual(FileActionState.failed, control.beginFileAction(4, testOutput(@splat(3)), .check).immediate);
 }
 
-test "Output reveal requires both verified bytes and an active requester immediately before the main loop effect" {
-    var harness: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+test "File actions accept each identity exactly as declared" {
+    const targets = [_]FileTarget{ testReference(7, "file-3-1-1-1"), testOutput(@splat(3)), .{ .workspace = testWorkspacePath(3, 1, "image.jpg") } };
+    for (targets) |target| for (std.enums.values(FileAction)) |action| {
+        try std.testing.expectEqual(action != .check or target == .output, action.accepts(target));
+    };
+    var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     var control = try testRuntime();
     defer control.deinit();
-    try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     harness.bind(&control);
-    control.setOutputFileReveal(.{ .context = &harness, .reveal_fn = OutputCheckHarness.reveal });
-    try std.testing.expect(control.beginOutputCheck(1, 3, 7, @splat(3), .reveal) == .queued);
-    try harness.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.revealed, harness.results[0].?.state);
-    try std.testing.expectEqual(@as(usize, 1), harness.reveals);
-    harness.outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(4) } };
-    try std.testing.expect(control.beginOutputCheck(2, 3, 7, @splat(3), .reveal) == .queued);
-    try harness.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.revealed, harness.results[1].?.state);
-    try std.testing.expectEqual(@as(usize, 2), harness.reveals);
-    harness.outcome = .{ .verified = .{ .size_bytes = 42, .sha256 = @splat(2) } };
-    harness.requester_active = false;
-    try std.testing.expect(control.beginOutputCheck(3, 3, 7, @splat(3), .reveal) == .queued);
-    try harness.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.cancelled, harness.results[2].?.state);
-    try std.testing.expectEqual(@as(usize, 2), harness.reveals);
+    for (targets) |target| for (std.enums.values(FileAction)) |action| {
+        if (action.accepts(target)) continue;
+        try std.testing.expectEqual(FileActionState.restricted, control.beginFileAction(1, target, action).immediate);
+    };
+    try std.testing.expectEqual(@as(usize, 0), harness.prepares);
 }
 
-const OutputSaveHarness = struct {
+test "File actions locate any identity without reading it, and act once on the main loop" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
+    defer control.deinit();
+    try recordTestOutput(control, @splat(3), "image.jpg");
+    var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId(), .workspace_id = 2, .relative = "image.jpg" };
+    harness.bind(control);
+    const targets = [_]FileTarget{ testReference(7, "file-3-1-1-1"), testOutput(@splat(3)), .{ .workspace = testWorkspacePath(3, 1, "image.jpg") } };
+    var id: u64 = 0;
+    for (targets, 1..) |target, index| {
+        id += 1;
+        try std.testing.expect(control.beginFileAction(id, target, .reveal) == .queued);
+        try harness.drainAll(control);
+        try std.testing.expectEqual(FileActionState.revealed, harness.lastState());
+        try std.testing.expectEqual(index, harness.reveals);
+        id += 1;
+        try std.testing.expect(control.beginFileAction(id, target, .check_current) == .queued);
+        try harness.drainAll(control);
+        try std.testing.expectEqual(FileActionState.ready, harness.lastState());
+        id += 1;
+        try std.testing.expect(control.beginFileAction(id, target, .open) == .queued);
+        try harness.drainAll(control);
+        try std.testing.expectEqual(FileActionState.opened, harness.lastState());
+        try std.testing.expectEqual(index, harness.opens);
+        id += 1;
+        try std.testing.expect(control.beginFileAction(id, target, .copy_path) == .queued);
+        try harness.drainAll(control);
+        try std.testing.expectEqual(FileActionState.path_copied, harness.lastState());
+        try std.testing.expectEqual(index, harness.copies);
+    }
+    try std.testing.expectEqual(targets.len, harness.reveals);
+    // A refused clipboard is told apart from a file that could not be reached.
+    harness.copy_error = error.ClipboardWriteFailed;
+    id += 1;
+    try std.testing.expect(control.beginFileAction(id, targets[0], .copy_path) == .queued);
+    try harness.drainAll(control);
+    try std.testing.expectEqual(FileActionState.copy_failed, harness.lastState());
+    try std.testing.expectEqual(targets.len, harness.copies);
+    harness.copy_error = null;
+    try std.testing.expectEqual(@as(usize, 0), harness.inspections.load(.acquire));
+    try std.testing.expectEqual(id, harness.locates.load(.acquire));
+    try std.testing.expectEqual(id, harness.releases);
+
+    const Failure = struct { err: anyerror, expected: FileActionState };
+    for ([_]Failure{
+        .{ .err = error.FileNotFound, .expected = .missing },
+        .{ .err = error.SymLinkLoop, .expected = .restricted },
+        .{ .err = error.OutputChanged, .expected = .changed },
+        .{ .err = error.RuntimeUnavailable, .expected = .unavailable },
+        .{ .err = error.FileOpenFailed, .expected = .open_failed },
+        .{ .err = error.InputOutput, .expected = .failed },
+    }) |failure| {
+        harness.locate_error = failure.err;
+        id += 1;
+        try std.testing.expect(control.beginFileAction(id, targets[2], .reveal) == .queued);
+        try harness.drainAll(control);
+        try std.testing.expectEqual(failure.expected, harness.lastState());
+    }
+    try std.testing.expectEqual(targets.len, harness.reveals);
+}
+
+test "File actions refuse to open an unlisted type before any worker exists, and the projection says the same" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const workspace_file = struct {
+        fn at(path: []const u8) FileTarget {
+            return .{ .workspace = .{ .task_id = 3, .workspace_id = 1, .workspace_epoch = 1, .path = path } };
+        }
+    };
+    try std.testing.expectEqual(FileActionState.unavailable, control.beginFileAction(1, workspace_file.at("image.jpg"), .open).immediate);
+    var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    harness.bind(&control);
+    const Delivered = struct { path: []const u8, open: ?[]const u8 };
+    const delivered = comptime [_]Delivered{
+        .{ .path = "results/report.docx", .open = "default_app" },
+        .{ .path = "results/report.html", .open = "browser" },
+        .{ .path = "results/report.exe", .open = null },
+        .{ .path = "results/README", .open = null },
+    };
+    for (delivered, 1..) |entry, index| {
+        var buffer: [256]u8 = undefined;
+        var envelope = try testEnvelope(3, 7, try std.fmt.bufPrint(&buffer, "{{\"tool_result\":{{\"id\":\"deliver-{d}\",\"name\":\"DeliverFile\",\"input\":\"{{}}\",\"content\":\"delivered\",\"is_error\":false,\"elapsed_ms\":1}}}}", .{index}));
+        defer envelope.deinit();
+        envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(@intCast(index)), entry.path, 42, @splat(2));
+        try control.applyEvent(&envelope);
+    }
+    const task = control.testTaskSlots()[0].?;
+    const Projected = struct {
+        /// `open` of every delivery, as the Run and the conversation list it.
+        fn opens(runtime: *Runtime, list: enum { run, conversation }) ![delivered.len]?[]const u8 {
+            const storage = try std.testing.allocator.alloc(u8, 256 * 1024);
+            defer std.testing.allocator.free(storage);
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try runtime.writeAggregateFixture(storage), .{});
+            defer parsed.deinit();
+            const view = parsed.value.object.get("tasks").?.array.items[0].object;
+            try std.testing.expect(view.get("officeOutputsOpen") == null and view.get("browserOutputsOpen") == null);
+            const outputs = switch (list) {
+                .run => view.get("runs").?.array.items[0].object.get("outputs").?,
+                .conversation => view.get("conversationOutputs").?,
+            };
+            try std.testing.expectEqual(delivered.len, outputs.array.items.len);
+            var values: [delivered.len]?[]const u8 = undefined;
+            for (outputs.array.items, &values) |output, *value| value.* = if (output.object.get("open")) |open|
+                (if (std.mem.eql(u8, open.string, "browser")) "browser" else if (std.mem.eql(u8, open.string, "default_app")) "default_app" else return error.TestUnexpectedResult)
+            else
+                null;
+            return values;
+        }
+    };
+    inline for (.{ .run, .conversation }) |list| {
+        for (delivered, try Projected.opens(&control, list)) |entry, open| {
+            try std.testing.expectEqual(entry.open == null, open == null);
+            if (entry.open) |expected| try std.testing.expectEqualStrings(expected, open.?);
+        }
+    }
+    // Nothing is offered that the Task could not do: an identity that no longer
+    // matches, a hidden path, a Host that is stopping.
+    task.durable.workspace_epoch += 1;
+    inline for (.{ .run, .conversation }) |list| for (try Projected.opens(&control, list)) |open| try std.testing.expect(open == null);
+    task.durable.workspace_epoch -= 1;
+    const record = &task.durable.runs[0].?.outputs[0].?;
+    record.redacted = true;
+    try std.testing.expect((try Projected.opens(&control, .run))[0] == null);
+    try std.testing.expect((try Projected.opens(&control, .run))[1] != null);
+    record.redacted = false;
+
+    // What the projection does not offer is refused at once, on the same
+    // answer, and no worker is ever made for it.
+    for (delivered, 1..) |entry, index| {
+        if (entry.open != null) continue;
+        try std.testing.expectEqual(FileActionState.open_unsupported, control.beginFileAction(index, testOutput(@splat(@intCast(index))), .open).immediate);
+        try std.testing.expectEqual(FileActionState.open_unsupported, control.beginFileAction(index, workspace_file.at(entry.path), .open).immediate);
+    }
+    try std.testing.expectEqual(@as(usize, 0), harness.prepares);
+    try std.testing.expect(control.file_actions.executor == null);
+    // Who may reach a file is decided before what may be done with it.
+    try std.testing.expectEqual(FileActionState.missing, control.beginFileAction(9, testOutput(@splat(9)), .open).immediate);
+    for (delivered, 1..) |entry, index| {
+        if (entry.open == null) continue;
+        harness.relative = entry.path;
+        try std.testing.expect(control.beginFileAction(index, testOutput(@splat(@intCast(index))), .open) == .queued);
+        try harness.drainAll(&control);
+        try std.testing.expectEqual(FileActionState.opened, harness.lastState());
+    }
+}
+
+test "File actions drop their effect when anything admitted changed before the main loop" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
+    defer control.deinit();
+    try recordTestOutput(control, @splat(3), "image.jpg");
+    var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId(), .workspace_id = 2, .relative = "image.jpg" };
+    harness.bind(control);
+    const task = control.testTaskSlots()[0].?;
+    const reference: FileTarget = testReference(7, "file-3-1-1-1");
+    const workspace: FileTarget = .{ .workspace = testWorkspacePath(3, 1, "image.jpg") };
+    const Change = enum { deletion, authorization, security, requester, cancelled };
+    const Request = struct { target: FileTarget, action: FileAction };
+    var id: u64 = 0;
+    for ([_]Request{
+        .{ .target = reference, .action = .reveal },
+        .{ .target = workspace, .action = .reveal },
+        .{ .target = testOutput(@splat(3)), .action = .reveal },
+        .{ .target = reference, .action = .copy_path },
+        .{ .target = workspace, .action = .copy_path },
+        .{ .target = testOutput(@splat(3)), .action = .copy_path },
+        .{ .target = reference, .action = .open },
+        .{ .target = workspace, .action = .open },
+        .{ .target = testOutput(@splat(3)), .action = .open },
+    }) |request| for (std.enums.values(Change)) |change| {
+        harness.count = 0;
+        harness.entered.store(false, .release);
+        harness.blocked.store(true, .release);
+        id += 1;
+        try std.testing.expect(control.beginFileAction(id, request.target, request.action) == .queued);
+        try harness.waitEntered();
+        switch (change) {
+            .deletion => task.deletion = .deleting,
+            .authorization => product_workspace.testing.setAuthorization(&control.workspace, 2, .removing),
+            .security => control.invalidateProjectionSecurity(),
+            .requester => harness.requester_active = false,
+            .cancelled => try std.testing.expectEqual(FileActionCancel.job_cancelling, control.cancelFileAction(id)),
+        }
+        harness.blocked.store(false, .release);
+        try harness.drainAll(control);
+        try std.testing.expectEqual(switch (change) {
+            .deletion => if (request.target == .workspace) FileActionState.restricted else .missing,
+            .authorization => .restricted,
+            .security => .stale_security,
+            .requester, .cancelled => .cancelled,
+        }, harness.lastState());
+        task.deletion = .idle;
+        product_workspace.testing.setAuthorization(&control.workspace, 2, .available);
+        harness.requester_active = true;
+    };
+    try std.testing.expectEqual(@as(usize, 0), harness.reveals);
+    try std.testing.expectEqual(@as(usize, 0), harness.copies);
+    try std.testing.expectEqual(@as(usize, 0), harness.opens);
+    try std.testing.expectEqual(id, harness.releases);
+}
+
+const FileSaveHarness = struct {
     main_thread_id: std.Thread.Id,
     stage_entered: std.atomic.Value(bool) = .init(false),
     publish_entered: std.atomic.Value(bool) = .init(false),
@@ -24345,24 +24868,24 @@ const OutputSaveHarness = struct {
     discarded: std.atomic.Value(usize) = .init(0),
     releases: usize = 0,
     picker_cancel: bool = false,
-    completion: ?*const OutputSavePort.Completion = null,
+    completion: ?*const FileSavePort.Completion = null,
     operation: u64 = 0,
     publish_error: bool = false,
-    fn prepare(context: *anyopaque, input: control_ports.OutputFileSaveInput) !?control_ports.OwnedOutputSave {
-        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+    fn prepare(context: *anyopaque, input: control_ports.FileSaveInput) !?control_ports.OwnedFileSave {
+        const self: *FileSaveHarness = @ptrCast(@alignCast(context));
         try std.testing.expectEqual(self.main_thread_id, std.Thread.getCurrentId());
-        try std.testing.expectEqual(@as(u64, 42), input.size_bytes);
+        try std.testing.expectEqualStrings("results/年度报告.docx", input.relative_path);
         if (self.picker_cancel) return null;
         return .{ .context = self, .stage_fn = stage, .publish_fn = publish, .discard_fn = discard, .release_fn = release };
     }
     fn stage(context: *anyopaque, cancelled: *const std.atomic.Value(bool)) !void {
-        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        const self: *FileSaveHarness = @ptrCast(@alignCast(context));
         try std.testing.expect(std.Thread.getCurrentId() != self.main_thread_id);
         if (cancelled.load(.acquire)) return error.Cancelled;
         self.stage_entered.store(true, .release);
     }
     fn publish(context: *anyopaque) !void {
-        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        const self: *FileSaveHarness = @ptrCast(@alignCast(context));
         try std.testing.expect(std.Thread.getCurrentId() != self.main_thread_id);
         self.publish_entered.store(true, .release);
         while (self.publishing_blocked.load(.acquire)) std.Thread.yield() catch {};
@@ -24370,25 +24893,28 @@ const OutputSaveHarness = struct {
         _ = self.published.fetchAdd(1, .acq_rel);
     }
     fn discard(context: *anyopaque) !void {
-        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        const self: *FileSaveHarness = @ptrCast(@alignCast(context));
         try std.testing.expect(std.Thread.getCurrentId() != self.main_thread_id);
         _ = self.discarded.fetchAdd(1, .acq_rel);
     }
     fn release(context: *anyopaque) void {
-        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+        const self: *FileSaveHarness = @ptrCast(@alignCast(context));
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
         self.releases += 1;
     }
-    fn bind(self: *OutputSaveHarness, control: *Runtime) void {
-        control.setOutputFileSave(.{ .context = self, .begin_fn = request, .cancel_fn = cancel });
+    fn bind(self: *FileSaveHarness, control: *Runtime) void {
+        control.setFileSave(.{ .context = self, .validate_path_fn = validate, .begin_fn = request, .cancel_fn = cancel });
     }
-    fn request(context: *anyopaque, id: u64, _: u64, _: []const u8, completion: *const OutputSavePort.Completion) !u64 {
-        const self: *OutputSaveHarness = @ptrCast(@alignCast(context));
+    fn validate(path: []const u8) error{InvalidOutputPath}!void {
+        if (std.mem.startsWith(u8, path, "unsavable/")) return error.InvalidOutputPath;
+    }
+    fn request(context: *anyopaque, id: u64, _: u64, _: []const u8, completion: *const FileSavePort.Completion) !u64 {
+        const self: *FileSaveHarness = @ptrCast(@alignCast(context));
         self.completion = completion;
         self.operation = id;
         return id;
     }
-    pub fn finish(self: *OutputSaveHarness) !void {
+    pub fn finish(self: *FileSaveHarness) !void {
         const completion = self.completion orelse return error.NoPendingDialog;
         self.completion = null;
         const source = try completion.borrow_source_fn(completion.context, self.operation);
@@ -24396,74 +24922,86 @@ const OutputSaveHarness = struct {
         completion.complete_fn(completion.context, self.operation, if (effect) |owned| .{ .selected = owned } else .cancelled);
     }
     fn cancel(_: *anyopaque, _: u64) void {}
-    fn begin(self: *OutputSaveHarness, control: *Runtime, id: u64) !Runtime.OutputCheckAdmission {
-        const admission = control.beginOutputCheck(id, 3, 7, @splat(3), .save);
+    fn begin(self: *FileSaveHarness, control: *Runtime, id: u64) !Runtime.FileActionAdmission {
+        const admission = control.beginFileAction(id, testOutput(@splat(3)), .save);
         if (admission != .choosing) return admission;
-        const source = try control.borrowOutputSaveSource(id);
+        const source = try control.borrowFileSaveSource(id);
         const effect = try prepare(self, source);
-        return control.completeOutputSave(id, if (effect) |owned| .{ .selected = owned } else .cancelled);
+        return control.completeFileSave(id, if (effect) |owned| .{ .selected = owned } else .cancelled);
     }
     fn waitApproval(control: *Runtime) !void {
         for (0..5000) |_| {
-            if (control.output_checks.awaitingPublication() != null) return;
+            if (control.file_actions.awaitingPublication() != null) return;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         }
         return error.TestTimeout;
     }
 };
 
+test "Save As refuses a name it cannot save before it asks where to" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "unsavable/a.docx");
+    var save: FileSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    save.bind(&control);
+    const admission = control.beginFileAction(1, testOutput(@splat(3)), .save);
+    try std.testing.expectEqual(FileActionState.restricted, admission.immediate);
+    try std.testing.expectError(error.UnknownFile, control.borrowFileSaveSource(1));
+    try std.testing.expect(save.completion == null and !control.hasFileActions());
+}
+
 test "Save As pending dialog cancellation and failed choice release frozen targets without jobs" {
     var control = try testRuntime();
     defer control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
-    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save: FileSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     save.bind(&control);
     for (1..65) |id| {
-        try std.testing.expect(control.beginOutputCheck(id, 3, 7, @splat(3), .save) == .choosing);
-        try std.testing.expect(!control.hasOutputChecks());
+        try std.testing.expect(control.beginFileAction(id, testOutput(@splat(3)), .save) == .choosing);
+        try std.testing.expect(!control.hasFileActions());
         if (id % 3 == 0) {
-            try std.testing.expectEqual(OutputCancel.pending_cancelled, control.cancelOutputCheck(id));
+            try std.testing.expectEqual(FileActionCancel.pending_cancelled, control.cancelFileAction(id));
         } else {
-            const outcome = control.completeOutputSave(id, if (id % 3 == 1) .cancelled else .{ .failed = error.DialogFailed });
-            try std.testing.expectEqual(if (id % 3 == 1) OutputCheckState.cancelled else OutputCheckState.save_failed, outcome.immediate);
+            const outcome = control.completeFileSave(id, if (id % 3 == 1) .cancelled else .{ .failed = error.DialogFailed });
+            try std.testing.expectEqual(if (id % 3 == 1) FileActionState.cancelled else FileActionState.save_failed, outcome.immediate);
         }
-        for (control.pending_output_saves) |entry| try std.testing.expect(entry == null);
-        try std.testing.expectEqual(OutputCancel.not_found, control.cancelOutputCheck(id));
+        for (control.pending_file_saves) |entry| try std.testing.expect(entry == null);
+        try std.testing.expectEqual(FileActionCancel.not_found, control.cancelFileAction(id));
     }
-    try std.testing.expect(control.beginOutputCheck(100, 3, 7, @splat(3), .save) == .choosing);
-    control.shutdownOutputChecks();
-    for (control.pending_output_saves) |entry| try std.testing.expect(entry == null);
+    try std.testing.expect(control.beginFileAction(100, testOutput(@splat(3)), .save) == .choosing);
+    control.shutdownFileActions();
+    for (control.pending_file_saves) |entry| try std.testing.expect(entry == null);
 }
 
 test "Save As waits for current publication authority and discards staged bytes when revoked" {
-    var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
-    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var requester: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save: FileSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     var control = try testRuntime();
     defer control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     save.bind(&control);
     try std.testing.expect((try save.begin(&control, 1)) == .queued);
-    try OutputSaveHarness.waitApproval(&control);
+    try FileSaveHarness.waitApproval(&control);
     try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
     product_workspace.testing.setAuthorization(&control.workspace, 1, .removing);
     try requester.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.restricted, requester.results[0].?.state);
+    try std.testing.expectEqual(FileActionState.restricted, requester.results[0].?.state);
     try std.testing.expectEqual(@as(usize, 1), save.discarded.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), save.releases);
     product_workspace.testing.setAuthorization(&control.workspace, 1, .available);
     try std.testing.expect((try save.begin(&control, 2)) == .queued);
-    try OutputSaveHarness.waitApproval(&control);
+    try FileSaveHarness.waitApproval(&control);
     requester.requester_active = false;
     try requester.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.cancelled, requester.results[1].?.state);
+    try std.testing.expectEqual(FileActionState.cancelled, requester.results[1].?.state);
     try std.testing.expectEqual(@as(usize, 2), save.discarded.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), save.releases);
 }
 
 test "Save As accepted publication refuses late cancellation and reports its actual terminal result" {
-    var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
-    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var requester: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save: FileSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     save.publishing_blocked.store(true, .release);
     var control = try testRuntime();
     defer control.deinit();
@@ -24471,19 +25009,19 @@ test "Save As accepted publication refuses late cancellation and reports its act
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     save.bind(&control);
     try std.testing.expect((try save.begin(&control, 1)) == .queued);
-    try OutputSaveHarness.waitApproval(&control);
-    control.drainOutputChecks(requester.sink());
+    try FileSaveHarness.waitApproval(&control);
+    control.drainFileActions(requester.sink());
     for (0..5000) |_| {
         if (save.publish_entered.load(.acquire)) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestTimeout;
-    try std.testing.expect(control.outputPublicationCommitted(1));
-    try std.testing.expectEqual(OutputCancel.committed, control.cancelOutputCheck(1));
+    try std.testing.expect(control.fileSaveCommitted(1));
+    try std.testing.expectEqual(FileActionCancel.committed, control.cancelFileAction(1));
     control.learnProjectionCredential("changed-after-save-commit");
     requester.requester_active = false;
     save.publishing_blocked.store(false, .release);
     try requester.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.saved, requester.results[0].?.state);
+    try std.testing.expectEqual(FileActionState.saved, requester.results[0].?.state);
     try std.testing.expect(requester.results[0].?.committed);
     try std.testing.expectEqual(@as(usize, 1), save.published.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), save.discarded.load(.acquire));
@@ -24491,34 +25029,34 @@ test "Save As accepted publication refuses late cancellation and reports its act
 }
 
 test "Save As picker cancellation deadline and shutdown preserve the pre-publication boundary" {
-    var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
-    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var requester: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save: FileSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     var control = try testRuntime();
     defer control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     save.bind(&control);
     save.picker_cancel = true;
-    try std.testing.expectEqual(OutputCheckState.cancelled, (try save.begin(&control, 1)).immediate);
-    try std.testing.expect(!control.hasOutputChecks());
+    try std.testing.expectEqual(FileActionState.cancelled, (try save.begin(&control, 1)).immediate);
+    try std.testing.expect(!control.hasFileActions());
     save.picker_cancel = false;
     try std.testing.expect((try save.begin(&control, 2)) == .queued);
-    try OutputSaveHarness.waitApproval(&control);
-    control.output_checks.decide(control.output_checks.awaitingPublication().?, .timed_out);
+    try FileSaveHarness.waitApproval(&control);
+    control.file_actions.decide(control.file_actions.awaitingPublication().?, .timed_out);
     try requester.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.timed_out, requester.results[0].?.state);
+    try std.testing.expectEqual(FileActionState.timed_out, requester.results[0].?.state);
     try std.testing.expectEqual(@as(usize, 1), save.discarded.load(.acquire));
     try std.testing.expect((try save.begin(&control, 3)) == .queued);
-    try OutputSaveHarness.waitApproval(&control);
-    control.shutdownOutputChecks();
+    try FileSaveHarness.waitApproval(&control);
+    control.shutdownFileActions();
     try requester.drainAll(&control);
-    try std.testing.expectEqual(OutputCheckState.cancelled, requester.results[1].?.state);
+    try std.testing.expectEqual(FileActionState.cancelled, requester.results[1].?.state);
     try std.testing.expectEqual(@as(usize, 2), save.discarded.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), save.published.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), save.releases);
 }
 
 test {
-    _ = output_check;
+    _ = file_action;
 }
 
 test "Save As keeps waiting for its decision through waits that end early" {
@@ -24526,26 +25064,26 @@ test "Save As keeps waiting for its decision through waits that end early" {
     // deadline: std allows `Event.waitTimeout` to wake spuriously. A wake
     // without a set is that early end on every platform: the staged save must
     // still be waiting afterwards, and the decision must end the wait at once.
-    var requester: OutputCheckHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
-    var save: OutputSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var requester: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save: FileSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     var control = try testRuntime();
     defer control.deinit();
     try recordTestOutput(&control, @splat(3), "results/年度报告.docx");
     save.bind(&control);
     try std.testing.expect((try save.begin(&control, 1)) == .queued);
-    try OutputSaveHarness.waitApproval(&control);
-    const job = control.output_checks.jobs[0].?;
+    try FileSaveHarness.waitApproval(&control);
+    const job = control.file_actions.jobs[0].?;
     for (0..20) |_| {
         try std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake);
         std.testing.io.futexWake(std.Io.Event, &job.decided, 1);
     }
-    try std.testing.expect(control.output_checks.awaitingPublication() != null);
+    try std.testing.expect(control.file_actions.awaitingPublication() != null);
     try std.testing.expect(!job.done.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), save.discarded.load(.acquire));
     const decided_at = std.Io.Timestamp.now(std.testing.io, .awake);
     try requester.drainAll(&control);
     const elapsed = decided_at.durationTo(.now(std.testing.io, .awake));
-    try std.testing.expectEqual(OutputCheckState.saved, requester.results[0].?.state);
+    try std.testing.expectEqual(FileActionState.saved, requester.results[0].?.state);
     try std.testing.expectEqual(@as(usize, 1), save.published.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), save.discarded.load(.acquire));
     try std.testing.expect(elapsed.toSeconds() < 10);

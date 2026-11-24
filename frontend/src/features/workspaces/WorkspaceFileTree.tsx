@@ -3,6 +3,12 @@ import type {
   FilePreviewLoadOptions,
   WorkspaceDirectory,
 } from "../../bridge/contracts.ts";
+import {
+  FileMenuScope,
+  useOpenFileMenu,
+  type MenuFile,
+} from "../../components/FileMenu.tsx";
+import { contextMenuProps } from "../../components/ui/context-menu-anchor.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
@@ -124,18 +130,32 @@ export function useWorkspaceFileTree(
   };
 }
 
-export function WorkspaceFileTree({
-  tree,
-  available,
-  selectedPath,
-  onOpen,
-}: {
+type WorkspaceFileTreeProps = {
   tree: ReturnType<typeof useWorkspaceFileTree>;
   available: boolean;
   selectedPath: string | null;
   onOpen: (path: string, opener: HTMLButtonElement) => void;
-}) {
+  /** The file at a path, whose menu its entry opens. A directory has none. */
+  fileOf?: (path: string) => MenuFile | null;
+};
+
+export function WorkspaceFileTree(props: WorkspaceFileTreeProps) {
+  return (
+    <FileMenuScope resetKey={String(props.available)}>
+      <FileTree {...props} />
+    </FileMenuScope>
+  );
+}
+
+function FileTree({
+  tree,
+  available,
+  selectedPath,
+  onOpen,
+  fileOf,
+}: WorkspaceFileTreeProps) {
   const { t } = useI18n();
+  const openMenu = useOpenFileMenu();
   const treeId = useId();
   const [focused, setFocused] = useState<string | null>(null);
   function renderDirectory(path: string, depth: number) {
@@ -184,6 +204,7 @@ export function WorkspaceFileTree({
           const child = path ? `${path}/${entry.name}` : entry.name;
           const folder = entry.kind === "directory";
           const open = tree.expanded.has(child);
+          const file = folder ? null : fileOf?.(child);
           return (
             <li role="none" key={child}>
               <button
@@ -213,6 +234,9 @@ export function WorkspaceFileTree({
                     ? tree.toggle(child)
                     : onOpen(child, event.currentTarget)
                 }
+                {...contextMenuProps(
+                  openMenu && file && ((event) => openMenu(file, event)),
+                )}
               >
                 <span
                   className="task-panel-tree-indent"

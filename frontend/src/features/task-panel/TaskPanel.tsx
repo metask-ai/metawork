@@ -8,6 +8,12 @@ import {
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import {
+  FileMenuScope,
+  useOpenFileMenu,
+  type MenuFile,
+} from "../../components/FileMenu.tsx";
+import { contextMenuProps } from "../../components/ui/context-menu-anchor.ts";
 import type { TaskPanelTab } from "./task-panel-state.ts";
 
 function pathSegments(path: string): string[] {
@@ -64,23 +70,12 @@ export function taskPanelTabLabels(tabs: TaskPanelTab[]): Map<string, string> {
   return labels;
 }
 
-export function TaskPanel({
-  title,
-  tabs,
-  activeTabId,
-  fileTreeOpen,
-  onToggleFileTree,
-  fileTree,
-  children,
-  attention,
-  actions,
-  onSelectTab,
-  onCloseTab,
-  onClose,
-}: {
+type TaskPanelProps = {
   title: string;
   tabs: TaskPanelTab[];
   activeTabId: string | null;
+  /** The file a tab shows, whose menu its button opens. */
+  fileOf?: (tab: TaskPanelTab) => MenuFile | null;
   fileTreeOpen: boolean;
   onToggleFileTree: () => void;
   fileTree?: ReactNode;
@@ -90,8 +85,37 @@ export function TaskPanel({
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
   onClose: () => void;
-}) {
+};
+
+export function TaskPanel(props: TaskPanelProps) {
+  return (
+    <FileMenuScope
+      className="task-panel-scope"
+      resetKey={props.tabs[0]?.taskId}
+      noticeKey={props.activeTabId ?? ""}
+    >
+      <TaskPanelFrame {...props} />
+    </FileMenuScope>
+  );
+}
+
+function TaskPanelFrame({
+  title,
+  tabs,
+  activeTabId,
+  fileOf,
+  fileTreeOpen,
+  onToggleFileTree,
+  fileTree,
+  children,
+  attention,
+  actions,
+  onSelectTab,
+  onCloseTab,
+  onClose,
+}: TaskPanelProps) {
   const { t } = useI18n();
+  const openMenu = useOpenFileMenu();
   const labels = taskPanelTabLabels(tabs);
   const fileTreeToggleLabel = t(
     fileTreeOpen ? "task_panel.hide_file_tree" : "task_panel.show_file_tree",
@@ -165,6 +189,10 @@ export function TaskPanel({
               const active = tab.tabId === activeTabId;
               const label = labelFor(tab);
               const tabDomId = `task-panel-tab-${index}`;
+              const file = fileOf?.(tab);
+              const menu = contextMenuProps(
+                openMenu && file && ((event) => openMenu(file, event)),
+              );
               return (
                 <div
                   className="task-panel-tab-item"
@@ -189,7 +217,9 @@ export function TaskPanel({
                     title={"displayPath" in tab ? tab.displayPath : label}
                     onFocus={() => setFocusedTabId(tab.tabId)}
                     onClick={() => onSelectTab(tab.tabId)}
+                    {...menu}
                     onKeyDown={(event) => {
+                      menu.onKeyDown?.(event);
                       if (
                         !["ArrowLeft", "ArrowRight", "Home", "End"].includes(
                           event.key,

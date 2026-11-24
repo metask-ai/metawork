@@ -52,13 +52,13 @@ const global_instructions_text =
 /// handing a file over must not read as a step of checking the work.
 pub const outputs_order: i64 = 1200;
 
-/// The user opens a turn's result files from result cards, so the test is
+/// A turn's result files appear in its reply, so the test is
 /// whether the user has to open the file to use the result, whatever made it.
 /// Delivery only hands the final version over; checks stay with whoever asks
 /// for them.
 const outputs_text =
     "Results for the user: hand over with DeliverFile every file the user has to open to use this turn's result; " ++
-    "the product shows each one as a result card. Judge every file by that test alone, however it was made: " ++
+    "the file appears in your reply: images and videos inline, other files as a card. Judge every file by that test alone, however it was made: " ++
     "written directly, produced by a script or a Skill, generated with GenerateImage or GenerateVideo, or edited in place.\n" ++
     "- Deliver files the user will read, view, play, present or pass on, for example a new web page, report, spreadsheet, " ++
     "presentation, PDF, chart image or video, and a Word, Excel or PowerPoint file you edited.\n" ++

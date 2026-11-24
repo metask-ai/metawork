@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   FileChangeDiffResult,
   FileChangeView,
-  OutputActionState,
+  FileActionState,
   RunFileChanges,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -182,7 +182,7 @@ function groupedKind(changes: FileChangeView[]): FileChangeView["kind"] {
 type RegisterOutput = (
   changeId: string,
   signal: AbortSignal,
-) => Promise<OutputActionState>;
+) => Promise<FileActionState>;
 
 function RegisterOutputButton({
   changeId,
@@ -194,7 +194,7 @@ function RegisterOutputButton({
   const { t } = useI18n();
   const active = useRef<AbortController | null>(null);
   const [working, setWorking] = useState(false);
-  const [result, setResult] = useState<OutputActionState | null>(null);
+  const [result, setResult] = useState<FileActionState | null>(null);
   useEffect(() => () => active.current?.abort(), []);
 
   async function addOutput() {
