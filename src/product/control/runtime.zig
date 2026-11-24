@@ -1066,24 +1066,80 @@ fn formatFileReferenceId(
     ) catch unreachable;
 }
 
-fn absoluteReferenceRelativePath(
+const PathPlatform = enum {
+    windows,
+    posix,
+
+    const host: PathPlatform = if (builtin.os.tag == .windows) .windows else .posix;
+
+    fn separates(self: PathPlatform, byte: u8) bool {
+        return byte == '/' or (self == .windows and byte == '\\');
+    }
+
+    fn same(self: PathPlatform, left: u8, right: u8) bool {
+        if (self == .posix) return left == right;
+        return std.ascii.toLower(left) == std.ascii.toLower(right) or (self.separates(left) and self.separates(right));
+    }
+};
+
+/// A recorded locator written the way every other identity names a file: below
+/// the root, with `/` between the names. The Core does not say which separator
+/// it writes on Windows, so both are taken there; elsewhere a backslash is a
+/// character of a name. Whether the path may be used at all is asked after.
+fn referenceRelativePath(
+    platform: PathPlatform,
     root: []const u8,
-    absolute: []const u8,
+    locator: union(enum) { relative: []const u8, absolute: []const u8 },
     storage: []u8,
 ) ?[]const u8 {
-    if (!std.fs.path.isAbsolute(absolute) or absolute.len <= root.len) return null;
-    const same = if (builtin.os.tag == .windows)
-        std.ascii.eqlIgnoreCase(root, absolute[0..root.len])
-    else
-        std.mem.eql(u8, root, absolute[0..root.len]);
-    if (!same) return null;
-    const separator = absolute[root.len];
-    if (separator != '/' and separator != '\\') return null;
-    const relative = absolute[root.len + 1 ..];
-    if (relative.len == 0 or relative.len > storage.len) return null;
-    @memcpy(storage[0..relative.len], relative);
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, storage[0..relative.len], '\\', '/');
-    return storage[0..relative.len];
+    const path = switch (locator) {
+        .relative => |value| value,
+        .absolute => |value| below: {
+            const absolute = switch (platform) {
+                .windows => std.fs.path.isAbsoluteWindows(value),
+                .posix => std.fs.path.isAbsolutePosix(value),
+            };
+            var length = root.len;
+            while (length > 1 and platform.separates(root[length - 1])) length -= 1;
+            if (!absolute or value.len <= length or !platform.separates(value[length])) return null;
+            for (root[0..length], value[0..length]) |left, right| if (!platform.same(left, right)) return null;
+            break :below value[length + 1 ..];
+        },
+    };
+    if (path.len > storage.len) return null;
+    @memcpy(storage[0..path.len], path);
+    if (platform == .windows) std.mem.replaceScalar(u8, storage[0..path.len], '\\', '/');
+    return storage[0..path.len];
+}
+
+test "a reference is one path whichever separator its locator was written with" {
+    var storage: [64]u8 = undefined;
+    for ([_]struct { PathPlatform, []const u8, []const u8, ?[]const u8 }{
+        .{ .windows, "C:\\ws", "C:\\ws\\docs\\a.md", "docs/a.md" },
+        .{ .windows, "C:\\ws", "C:/ws/docs/a.md", "docs/a.md" },
+        .{ .windows, "C:\\ws", "c:\\WS/docs\\a.md", "docs/a.md" },
+        .{ .windows, "C:\\ws\\", "C:\\ws\\a.md", "a.md" },
+        // Where it leads is the path rule's to say.
+        .{ .windows, "C:\\ws", "C:\\ws\\..\\a.md", "../a.md" },
+        .{ .windows, "C:\\ws", "C:\\ws-other\\a.md", null },
+        .{ .windows, "C:\\ws", "C:\\ws", null },
+        .{ .windows, "C:\\ws", "ws\\a.md", null },
+        .{ .posix, "/ws", "/ws/docs/a.md", "docs/a.md" },
+        .{ .posix, "/ws", "/ws/a\\b.md", "a\\b.md" },
+        .{ .posix, "/ws", "/ws\\a.md", null },
+        .{ .posix, "/ws", "/WS/a.md", null },
+        .{ .posix, "/ws", "ws/a.md", null },
+    }) |case| {
+        const actual = referenceRelativePath(case[0], case[1], .{ .absolute = case[2] }, &storage);
+        if (case[3]) |expected| try std.testing.expectEqualStrings(expected, actual.?) else try std.testing.expect(actual == null);
+    }
+    for ([_]struct { PathPlatform, []const u8, []const u8 }{
+        .{ .windows, "src\\a.zig", "src/a.zig" },
+        .{ .windows, "src/a.zig", "src/a.zig" },
+        .{ .posix, "src/a.zig", "src/a.zig" },
+        .{ .posix, "src\\a.zig", "src\\a.zig" },
+    }) |case| try std.testing.expectEqualStrings(case[2], referenceRelativePath(case[0], "unused", .{ .relative = case[1] }, &storage).?);
+    try std.testing.expect(referenceRelativePath(.posix, "/ws", .{ .relative = "a" ** 65 }, &storage) == null);
 }
 
 pub const FileTarget = file_target.Target;
@@ -1807,12 +1863,12 @@ pub const Runtime = struct {
     fn referenceLocation(self: *const Runtime, target: FileTarget.Reference, scratch: *[file_target.max_path_bytes]u8) file_target.Error!file_target.Location {
         const reference = self.task_runtime.fileReference(target.task_id, target.run_id, target.id) orelse return error.UnknownFile;
         if (reference.generated_video and reference.locator_kind != .workspace_path) return error.UnsupportedFile;
-        const relative = switch (reference.locator_kind) {
-            .workspace_path => reference.locator,
-            .absolute_path => absoluteReferenceRelativePath(reference.workspace_root, reference.locator, scratch) orelse return error.RestrictedFile,
+        const relative = referenceRelativePath(.host, reference.workspace_root, switch (reference.locator_kind) {
+            .workspace_path => .{ .relative = reference.locator },
+            .absolute_path => .{ .absolute = reference.locator },
             .uri => return error.UnsupportedFile,
-        };
-        if (relative.len == 0 or relative.len > scratch.len) return error.RestrictedFile;
+        }, scratch) orelse return error.RestrictedFile;
+        if (!file_preview.validWorkspacePath(relative, false)) return error.RestrictedFile;
         return .{
             .workspace_id = reference.workspace_id,
             .workspace_epoch = reference.workspace_epoch,
@@ -12878,6 +12934,27 @@ test "File Preview resolves a reference and a Workspace path by one rule" {
     try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_reference, &scratch));
     reference.locator_kind = .uri;
     try std.testing.expectError(error.UnsupportedFile, control.resolveFileTarget(by_reference, &scratch));
+    // Where the locator leads is judged after its separators are one: what
+    // steps out of the root is refused, and so is a path no other identity
+    // could name.
+    reference.locator_kind = .absolute_path;
+    const escaping = try std.mem.concat(std.testing.allocator, u8, &.{ root, separator, "..", separator, "a.md" });
+    defer std.testing.allocator.free(escaping);
+    try control.replaceTracked(&reference.locator, escaping, 4096);
+    try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_reference, &scratch));
+    reference.locator_kind = .workspace_path;
+    for ([_][]const u8{ "../a.md", "docs/../../a.md", "docs//a.md", "a\x01.md", "file:stream" }) |locator| {
+        try control.replaceTracked(&reference.locator, locator, 4096);
+        try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_reference, &scratch));
+    }
+    // The Core does not say which separator it writes on Windows.
+    try control.replaceTracked(&reference.locator, "docs/sub/a.md", 4096);
+    try std.testing.expectEqualStrings("docs/sub/a.md", (try control.resolveFileTarget(by_reference, &scratch)).relative);
+    try control.replaceTracked(&reference.locator, "docs\\sub\\a.md", 4096);
+    if (builtin.os.tag == .windows)
+        try std.testing.expectEqualStrings("docs/sub/a.md", (try control.resolveFileTarget(by_reference, &scratch)).relative)
+    else
+        try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_reference, &scratch));
     reference.locator_kind = .workspace_path;
     try control.replaceTracked(&reference.locator, "SECRET-KEY/image.jpg", 4096);
     try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_reference, &scratch));

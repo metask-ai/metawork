@@ -708,7 +708,12 @@ fn openScopedFile(io: std.Io, root: std.Io.Dir, path: []const u8) !std.Io.File {
             owned = true;
         }
     }
-    return current.openFile(io, path[if (last) |index| index + 1 else 0..], .{
+    const name = path[if (last) |index| index + 1 else 0..];
+    // Opening a pipe waits for whoever writes to it and would hold the worker.
+    // No Windows directory holds one.
+    if (builtin.os.tag != .windows and (try current.statFile(io, name, .{ .follow_symlinks = false })).kind != .file)
+        return error.NotRegularOutput;
+    return current.openFile(io, name, .{
         .allow_directory = false,
         .follow_symlinks = false,
         .resolve_beneath = true,
@@ -786,6 +791,24 @@ test "a file action may name what a receipt cannot, and refuses only what its pl
         try std.testing.expectError(error.InvalidOutputPath, validateTargetPathFor(.windows, value));
         try std.testing.expectError(error.InvalidOutputPath, validatePath(value));
     }
+}
+
+test "a file action never opens a pipe" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const path = try std.fs.path.joinZ(std.testing.allocator, &.{ root, "pipe.txt" });
+    defer std.testing.allocator.free(path);
+    const create = struct {
+        extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+    };
+    if (create.mkfifo(path, 0o600) != 0) return error.SkipZigTest;
+    // Nothing writes to it: opening it would never return.
+    var locating: TestLocate = .{ .request = .{ .workspace_root = root, .relative_path = "pipe.txt", .main_thread_id = std.Thread.getCurrentId() } };
+    try std.testing.expectError(error.NotRegularOutput, locating.execute());
 }
 
 test "a file action reaches the names and depths the Workspace shows" {

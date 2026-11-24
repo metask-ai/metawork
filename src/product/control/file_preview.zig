@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const image_container = @import("image_container");
 const file_target = @import("product_control_file_target");
 
@@ -40,16 +41,6 @@ pub const Subject = union(enum) {
         return switch (self) {
             .file => |target| if (location.generated_video) .generated else if (target == .output) .recognized else .none,
             .directory, .draft_attachment, .task_attachment => .none,
-        };
-    }
-
-    /// A recorded reference opens its locator as it was recorded. Every other
-    /// subject is a Workspace-relative path and is walked one component at a
-    /// time.
-    fn walked(self: Subject, location: file_target.Location) bool {
-        return switch (self) {
-            .file => |target| target != .reference or location.generated_video,
-            .directory, .draft_attachment, .task_attachment => true,
         };
     }
 
@@ -316,7 +307,6 @@ const Job = struct {
             self.state = .failed;
             return .completed;
         }
-        const generated_video = self.location.generated_video;
         var root = std.Io.Dir.openDirAbsolute(self.lane.io, self.location.root, .{
             .access_sub_paths = true,
             .follow_symlinks = false,
@@ -326,45 +316,52 @@ const Job = struct {
         };
         defer root.close(self.lane.io);
         if (self.subject == .directory) return self.readDirectory(root);
-        const walked = self.subject.walked(self.location);
-        if (walked and !validWorkspacePath(self.location.relative, false)) {
+        // Every file is reached one component at a time, so no link in the
+        // middle leads elsewhere.
+        const path = self.location.relative;
+        if (!validWorkspacePath(path, false)) {
             self.state = .restricted;
             return .completed;
         }
-        var parent: ?std.Io.Dir = null;
-        defer if (parent) |*dir| dir.close(self.lane.io);
-        var file_path: []const u8 = self.location.relative;
-        if (walked) {
-            const split = std.mem.lastIndexOfScalar(u8, file_path, '/');
-            parent = openWorkspaceDirectory(self.lane.io, root, if (split) |index| file_path[0..index] else "") catch |err| {
-                self.state = if (generated_video and (err == error.FileNotFound or err == error.NotDir)) .missing else .restricted;
+        const split = std.mem.lastIndexOfScalar(u8, path, '/');
+        var parent = openWorkspaceDirectory(self.lane.io, root, if (split) |index| path[0..index] else "") catch |err| {
+            self.state = openFailure(err);
+            return .completed;
+        };
+        defer parent.close(self.lane.io);
+        const name = path[if (split) |index| index + 1 else 0..];
+        // Opening a pipe waits for whoever writes to it and would hold this
+        // worker. No Windows directory holds one.
+        if (builtin.os.tag != .windows) {
+            const named = parent.statFile(self.lane.io, name, .{ .follow_symlinks = false }) catch |err| {
+                self.state = openFailure(err);
                 return .completed;
             };
-            if (split) |index| file_path = file_path[index + 1 ..];
+            switch (named.kind) {
+                .file => {},
+                .directory, .sym_link => {
+                    self.state = .restricted;
+                    return .completed;
+                },
+                else => return self.notRegular(),
+            }
         }
-        var file = (parent orelse root).openFile(self.lane.io, file_path, .{
+        var file = parent.openFile(self.lane.io, name, .{
             .allow_directory = false,
             .follow_symlinks = false,
             .resolve_beneath = true,
         }) catch |err| {
-            self.state = switch (err) {
-                error.FileNotFound, error.NotDir => .missing,
-                else => .restricted,
-            };
+            self.state = openFailure(err);
             return .completed;
         };
         defer file.close(self.lane.io);
-        if (@import("builtin").os.tag == .windows) file.flags.nonblocking = true;
+        if (builtin.os.tag == .windows) file.flags.nonblocking = true;
 
         const before = file.stat(self.lane.io) catch {
             self.state = .failed;
             return .completed;
         };
-        if (before.kind != .file) {
-            // It has no size and no content to describe.
-            self.state = if (self.mode == .describe) .restricted else .unsupported;
-            return .completed;
-        }
+        if (before.kind != .file) return self.notRegular();
         self.size_bytes = before.size;
         var header: [30]u8 = undefined;
         const header_len: usize = @intCast(@min(before.size, header.len));
@@ -498,9 +495,22 @@ const Job = struct {
         return .completed;
     }
 
+    fn openFailure(err: anyerror) State {
+        return switch (err) {
+            error.FileNotFound, error.NotDir => .missing,
+            else => .restricted,
+        };
+    }
+
+    /// It has no size and no content to describe.
+    fn notRegular(self: *Job) ReadOutcome {
+        self.state = if (self.mode == .describe) .restricted else .unsupported;
+        return .completed;
+    }
+
     fn readDirectory(self: *Job, root: std.Io.Dir) ReadOutcome {
         var directory = openWorkspaceDirectory(self.lane.io, root, self.location.relative) catch |err| {
-            self.state = if (err == error.FileNotFound or err == error.NotDir) .missing else .restricted;
+            self.state = openFailure(err);
             return .completed;
         };
         defer directory.close(self.lane.io);
@@ -1324,11 +1334,41 @@ test "file preview descriptions say nothing of a file that was not reached" {
     defer std.testing.allocator.free(root);
     const lane = try TestLane.init();
     defer lane.deinit();
-    for ([_]struct { []const u8, State }{ .{ "missing.txt", .missing }, .{ "folder", .restricted }, .{ "../outside.txt", .restricted } }) |case| {
-        const described = try lane.read(.describe, test_output, root, case[0]);
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "text" });
+    for ([_]struct { []const u8, State }{
+        .{ "missing.txt", .missing },
+        // A parent that is gone, or is a file by now, is a file that is gone.
+        .{ "gone/a.txt", .missing },
+        .{ "a.txt/b.txt", .missing },
+        .{ "folder", .restricted },
+        .{ "../outside.txt", .restricted },
+    }) |case| for ([_]file_target.Target{ test_output, test_reference.file }) |target| {
+        const described = try lane.read(.describe, target, root, case[0]);
         try std.testing.expectEqual(case[1], described.state);
         try std.testing.expect(described.description == null);
-    }
+    };
+}
+
+test "file preview never opens a pipe" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const path = try std.fs.path.joinZ(std.testing.allocator, &.{ root, "pipe.txt" });
+    defer std.testing.allocator.free(path);
+    const create = struct {
+        extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+    };
+    if (create.mkfifo(path, 0o600) != 0) return error.SkipZigTest;
+    const lane = try TestLane.init();
+    defer lane.deinit();
+    // Nothing writes to it: opening it would never return.
+    const described = try lane.read(.describe, test_reference.file, root, "pipe.txt");
+    try std.testing.expectEqual(State.restricted, described.state);
+    const delivered = try lane.read(.deliver, test_reference.file, root, "pipe.txt");
+    try std.testing.expectEqual(State.unsupported, delivered.state);
 }
 
 test "file preview descriptions return their slots and never hold the video slot" {
