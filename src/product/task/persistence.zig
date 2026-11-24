@@ -61,8 +61,15 @@ pub const Commit = enum {
 pub const CommitToken = [32]u8;
 
 /// Borrowed for a synchronous call. Token/failure are outputs; records are read-only.
+pub const HeaderScope = struct {
+    task_ids: []const u64,
+    /// Creation also allocates counters and touches the chosen workspace.
+    created_workspace: ?u64 = null,
+};
+
 pub const Candidate = struct {
     value: StateWire,
+    header_scope: ?HeaderScope = null,
     preserved: PreservedFrames = .{},
     token: ?CommitToken = null,
     failure: ?ValidationFailure = null,
@@ -175,6 +182,7 @@ pub const Capability = struct {
     context: ?*anyopaque = null,
     enabled: bool = false,
     restore_fn: ?*const fn (?*anyopaque) anyerror!?RecoveredState = null,
+    instance_fn: ?*const fn (?*anyopaque) ?[32]u8 = null,
     restore_failed: bool = false,
     restore_degraded: bool = false,
     restore_incompatible: bool = false,
@@ -720,6 +728,8 @@ pub const TaskWire = struct {
     recent_order: u64,
     completion_seen_run_id: ?u64 = null,
     project_id: ?u64 = null,
+    handoff: ?task_state.HandoffLink = null,
+    creation_receipt: ?[32]u8 = null,
     workspace_id: u64,
     workspace_epoch: u64,
     workspace_root: []const u8,
@@ -1445,6 +1455,8 @@ pub fn projectTask(
         .recent_order = task.durable.recent_order,
         .completion_seen_run_id = task.durable.completion_seen_run_id,
         .project_id = task.durable.project_id,
+        .handoff = task.durable.handoff,
+        .creation_receipt = task.durable.creation_receipt,
         .workspace_id = task.durable.workspace_id,
         .workspace_epoch = task.durable.workspace_epoch,
         .workspace_root = task.durable.workspace_root,
@@ -2035,6 +2047,8 @@ pub fn restoreTask(
     else
         null;
     errdefer if (model_intent) |*intent| intent.deinit(projection.allocator);
+    const handoff = if (wire.handoff) |link| try link.clone(projection.allocator) else null;
+    errdefer if (handoff) |link| link.deinit(projection.allocator);
     const workspace_root = try projection.copy(
         wire.workspace_root,
         projection.limits.max_workspace_bytes,
@@ -2127,6 +2141,8 @@ pub fn restoreTask(
             .model_intent = model_intent,
             .binding_epoch = wire.binding.epoch,
             .project_id = wire.project_id,
+            .handoff = handoff,
+            .creation_receipt = wire.creation_receipt,
             .workspace_id = wire.workspace_id,
             .workspace_epoch = wire.workspace_epoch,
             .workspace_root = workspace_root,
@@ -3940,6 +3956,7 @@ fn validatePresentationItem(task: TaskWire, state: ?[]const u8, order: ?u64, cou
 }
 
 fn validateTask(task: TaskWire, limits: Limits) !void {
+    if (task.handoff) |link| if (!link.valid()) return error.Invalid;
     try validatePresentation(task, limits);
     if (task.input_submissions.len > limits.max_pending_inputs_per_task) return error.Invalid;
     for (task.input_submissions, 0..) |record, index| {

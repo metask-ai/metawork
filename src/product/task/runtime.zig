@@ -239,6 +239,7 @@ pub const attachment_media_max_thumbnail_bytes = task_state.attachment_media_max
 pub const attachment_media_max_thumbnail_side = task_state.attachment_media_max_thumbnail_side;
 pub const RunInput = task_state.RunInput;
 pub const SkillReference = task_state.SkillReference;
+pub const HandoffLink = task_state.HandoffLink;
 pub const Submission = task_state.Submission;
 pub const InputSubmission = task_state.InputSubmission;
 
@@ -784,6 +785,20 @@ pub const PreparedCreate = struct {
     release: ReleaseEffects,
     active: bool = true,
 
+    /// Keep an unconfirmed create alive and reserve its slot without publishing it.
+    pub fn conceal(self: *PreparedCreate) void {
+        std.debug.assert(self.runtime.held_create == null);
+        self.runtime.held_create = .{ .slot = self.slot, .task = self.runtime.tasks[self.slot].? };
+        self.runtime.tasks[self.slot] = null;
+    }
+
+    pub fn reveal(self: *PreparedCreate) void {
+        const held = self.runtime.held_create.?;
+        std.debug.assert(held.slot == self.slot and self.runtime.tasks[self.slot] == null);
+        self.runtime.tasks[self.slot] = held.task;
+        self.runtime.held_create = null;
+    }
+
     pub fn id(self: *const PreparedCreate) u64 {
         return self.task_id;
     }
@@ -799,8 +814,9 @@ pub const PreparedCreate = struct {
         std.debug.assert(self.active);
         const removed = self.runtime.tasks[self.slot].?;
         self.runtime.tasks[self.slot] = null;
-        self.runtime.next_task_id = self.task_id;
-        self.runtime.next_recent_order = self.previous_next_recent_order;
+        if (self.runtime.next_task_id == self.task_id + 1) self.runtime.next_task_id = self.task_id;
+        if (self.runtime.next_recent_order == self.previous_next_recent_order + 1)
+            self.runtime.next_recent_order = self.previous_next_recent_order;
         deinitTask(self.runtime, removed, self.release);
         self.runtime.allocator.destroy(removed);
         self.active = false;
@@ -1387,6 +1403,7 @@ pub const Runtime = struct {
     approval_cleanup_leases: worker_lease.WorkerLeaseSet = .{},
     approval_jobs: [approval_job.max_operations]?struct { recipient: ApprovalJobRecipient, job: *approval_job.Job } = @splat(null),
     pending_model_intent: ?PreparedModelIntent = null,
+    held_create: ?struct { slot: usize, task: *task_state.Task } = null,
 
     pub const testing = if (@import("builtin").is_test) struct {
         pub fn findTask(self: *Runtime, task_id: u64) ?*task_state.Task {
@@ -2259,7 +2276,10 @@ pub const Runtime = struct {
     }
 
     pub fn emptyIndex(self: *const Runtime) ?usize {
-        for (self.tasks, 0..) |entry, index| if (entry == null) return index;
+        for (self.tasks, 0..) |entry, index| {
+            if (self.held_create) |held| if (held.slot == index) continue;
+            if (entry == null) return index;
+        }
         return null;
     }
 
@@ -4521,7 +4541,7 @@ pub const Runtime = struct {
     }
 
     pub fn taskCountInWorkspace(self: *const Runtime, workspace_id: u64) usize {
-        var count: usize = 0;
+        var count: usize = if (self.held_create) |held| @intFromBool(held.task.durable.workspace_id == workspace_id) else 0;
         for (self.tasks) |entry| if (entry) |task|
             if (task.durable.workspace_id == workspace_id) {
                 count += 1;
@@ -5167,6 +5187,53 @@ pub const Runtime = struct {
         task.skills_unavailable = true;
     }
 
+    pub fn taskForReceipt(self: *const Runtime, receipt: [32]u8) ?u64 {
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            const saved = task.durable.creation_receipt orelse continue;
+            if (std.mem.eql(u8, &saved, &receipt)) return task.durable.id;
+        }
+        return null;
+    }
+
+    pub const LinkedTask = struct { task_id: u64, link: HandoffLink };
+
+    pub fn linkedTasks(self: *const Runtime, a: std.mem.Allocator, account: []const u8, first: []const u8, second: []const u8) ![]LinkedTask {
+        var result: std.ArrayList(LinkedTask) = .empty;
+        errdefer result.deinit(a);
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            const link = task.durable.handoff orelse continue;
+            if (std.mem.eql(u8, link.account, account) and (link.contains(first) or link.contains(second))) {
+                try result.append(a, .{ .task_id = task.durable.id, .link = link });
+            }
+        }
+        return result.toOwnedSlice(a);
+    }
+
+    pub fn checkHandoffTarget(self: *Runtime, task_id: u64, allow_archived: bool) MutationError!?HandoffLink {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.read_only_history != null or (!allow_archived and task.durable.archived) or task.durable.permission_interaction != .interactive)
+            return error.TaskReadOnly;
+        if (task.deletion != .idle or task.runtime.close_requested) return error.TaskBusy;
+        return task.durable.handoff;
+    }
+
+    /// Transfers ownership after the history transaction. A Task deleted
+    /// while the receipt was pending also lost its association.
+    pub fn adoptHandoff(self: *Runtime, task_id: u64, link: ?HandoffLink) void {
+        const task = self.find(task_id) orelse {
+            if (link) |owned| owned.deinit(self.allocator);
+            return;
+        };
+        if (task.durable.handoff) |old| old.deinit(self.allocator);
+        task.durable.handoff = link;
+    }
+
+    pub fn setCreationReceipt(self: *Runtime, task_id: u64, receipt: [32]u8) void {
+        self.find(task_id).?.durable.creation_receipt = receipt;
+    }
+
     pub fn taskProjectId(self: *const Runtime, task_id: u64) MutationError!?u64 {
         return (self.findConst(task_id) orelse return error.UnknownTask).durable.project_id;
     }
@@ -5502,6 +5569,7 @@ pub const Runtime = struct {
     }
 
     pub fn workspaceHasTasks(self: *const Runtime, workspace_id: u64) bool {
+        if (self.held_create) |held| if (held.task.durable.workspace_id == workspace_id) return true;
         for (self.tasks) |entry| if (entry) |task|
             if (task.durable.workspace_id == workspace_id) return true;
         return false;
@@ -11845,6 +11913,7 @@ fn deinitTask(
     self.allocator.free(task.durable.ui_history);
     if (task.durable.model_intent) |*intent| intent.deinit(self.allocator);
     releaseProjectedSlice(self, effects, task.durable.execution_model);
+    if (task.durable.handoff) |link| link.deinit(self.allocator);
     releaseProjectedSlice(self, effects, task.durable.workspace_root);
     releaseProjectedSlice(self, effects, task.durable.title);
     if (task.durable.checkpoint) |*checkpoint|

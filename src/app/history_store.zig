@@ -347,9 +347,11 @@ pub const Store = struct {
     fn commitLocked(self: *Store, candidate: *wire.Candidate, confirmed: bool) wire.Commit {
         candidate.token = null;
         candidate.failure = null;
-        if (self.pending_publication != null) return .outcome_unknown;
+        // A scoped request refused before prepare has not written any rows.
+        const blocked: wire.Commit = if (candidate.header_scope != null) .failed else .outcome_unknown;
+        if (self.pending_publication != null) return blocked;
         if (self.incompatible or self.restore_failed) return .failed;
-        if (self.pending != null and self.resolvePending() == .outcome_unknown) return .outcome_unknown;
+        if (self.pending != null and self.resolvePending() == .outcome_unknown) return blocked;
         if ((self.database == null or self.requires_reopen) and !self.refreshConfirmed()) return .failed;
         if (self.credential_capacity_failed) return .failed;
         for (self.credentials.items) |slot| if (slot.length != 0) {
@@ -357,7 +359,7 @@ pub const Store = struct {
                 (wire.security.contains(self.allocator, candidate.preserved, slot.bytes[0..slot.length]) catch true)) return .failed;
         };
         const token = self.newToken() catch return .failed;
-        var prepared = self.repository.?.prepare(candidate.value, candidate.preserved, token) catch |err| {
+        var prepared = self.repository.?.prepareHeaders(candidate.value, candidate.preserved, token, candidate.header_scope) catch |err| {
             if (err != error.OutOfMemory) candidate.failure = wire.diagnoseCandidate(self.allocator, &candidate.value, self.limits);
             return .failed;
         };
@@ -535,6 +537,14 @@ pub const Store = struct {
             }
         }
         return true;
+    }
+
+    pub fn instance(self: *Store) ?[32]u8 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.pending != null or self.pending_publication != null or self.restore_failed or self.incompatible) return null;
+        if ((self.database == null or self.requires_reopen) and !self.refreshConfirmed()) return null;
+        return self.repository.?.instance();
     }
 
     fn refreshConfirmed(self: *Store) bool {
@@ -1304,7 +1314,7 @@ test "SQLite history from before 0014 refuses a store whose Run keeps more than 
     {
         // The last build before 0014 knows the migrations up to 0013 and
         // would take a Run with more than 32 records for a corrupt store.
-        const unbounded = product.history_migrations.len - 1;
+        const unbounded = 13;
         try std.testing.expectEqualStrings("unbounded_run_tools", product.history_migrations[unbounded].name);
         var store = try Store.init(std.testing.io, a, directory);
         defer store.deinit();

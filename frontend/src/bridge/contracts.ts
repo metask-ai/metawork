@@ -2197,7 +2197,18 @@ export type TaskProjectResult =
         | "shutting_down";
     };
 
+export type HandoffSource = {
+  binding: string;
+  account: string;
+  referenced: string;
+  canonical: string;
+};
+export type HandoffCreate = { source: HandoffSource; storeId: string; operationId: string };
+export type HandoffSessions = { storeId: string; sessions: { taskId: string; preferred: boolean }[] };
+
 export type TaskCreateReason =
+  | "handoff_changed"
+  | "history_unavailable"
   | "project_unavailable"
   | "project_capacity"
   | "execution_unavailable"
@@ -2219,6 +2230,7 @@ export type TaskCreateReason =
 export type TaskCreateResult =
   | {
       accepted: true;
+      existing?: true;
       projectId: string | null;
       taskId: string;
       bindingEpoch: string;

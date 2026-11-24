@@ -6338,6 +6338,76 @@ test "Workspace incomplete catalog refresh preserves the committed last-good aut
     try std.testing.expectEqualStrings(before.skills[0].skill_id, after.skills[0].skill_id);
 }
 
+test "handoff uses the persisted create receipt and only confirmed task headers across retries" {
+    const a = std.testing.allocator;
+    const bytes = try a.alloc(u8, 1024 * 1024);
+    defer a.free(bytes);
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 3 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var persistence: TaskPersistenceProbe = .{ .storage = bytes };
+    var configuration = productControlConfiguration();
+    configuration.task_persistence = persistence.capability();
+    var control = try product_control.Runtime.init(a, std.testing.io, runtime.runtimePort(), .{ .max_tasks = 3 }, configuration);
+    defer control.deinit();
+    try installControlExecution(&control);
+    const wid = try control.openWorkspace(productControlTaskInput());
+    const epoch = try control.workspaceEpoch(wid);
+    const model = try product_control.TestSupport.fixtureModelSelection(&control);
+    const prior = try control.createTaskInWorkspace(wid, epoch, model, null, null, .{ .interactive = .manual });
+    const Identity = struct {
+        fn get(_: ?*anyopaque) ?[32]u8 {
+            return @splat('c');
+        }
+    };
+    control.task_persistence.instance_fn = Identity.get;
+    control.task_persistence_health = .ready;
+    control.inbox.start(true);
+    _ = try control.inbox.bind(0, .{ .server_id = "s", .service = @splat(3), .fingerprint = @splat('a') });
+    const binding = control.inbox.binding;
+    _ = try control.inbox.setOwner(binding, try .init("member"));
+    var source: product_control.HandoffSource = .{ .binding = binding, .account = &control.inbox.account_scope.?, .referenced = "101", .canonical = "104" };
+    try std.testing.expect(control.inbox.recordDetail(binding, try .init(source.referenced), try .init(source.canonical)));
+    try control.changeHandoff(source, .link, prior);
+    try std.testing.expect(control.testTask(prior).?.durable.handoff.?.preferred);
+    const workspace: product_control.TaskWorkspaceRequest = .{ .manual = .{ .workspace_id = wid, .expected_epoch = epoch } };
+    const instance = try control.handoffInstance();
+    persistence.result = .failed;
+    try std.testing.expectError(error.TaskPersistenceFailed, control.createHandoffTask(source, &instance, "create-1", workspace, null, model, null, null, .manual));
+    try std.testing.expect(try control.lookupHandoffReceipt(binding, source.account, &instance, "create-1") == null);
+    persistence.store_on_outcome_unknown = true;
+    persistence.result = .outcome_unknown;
+    try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, control.createHandoffTask(source, &instance, "create-1", workspace, null, model, null, null, .manual));
+    try std.testing.expect(control.pending_handoff != null);
+    try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, control.lookupHandoffReceipt(binding, source.account, &instance, "create-1"));
+    persistence.result = .committed;
+    const id = (try control.lookupHandoffReceipt(binding, source.account, &instance, "create-1")).?;
+    persistence.result = .committed;
+    const replay = try control.createHandoffTask(source, &instance, "create-1", workspace, null, model, null, null, .manual);
+    try std.testing.expect(replay.existing and replay.id == id);
+    source.referenced = "104";
+    source.canonical = "109";
+    try std.testing.expect(control.inboxManagement().record_detail_fn(&control, binding, try .init("104"), try .init("109")));
+    const links = try control.listHandoff(a, binding, source.account, "101");
+    defer a.free(links);
+    try std.testing.expectEqual(@as(usize, 2), links.len);
+    try control.changeHandoff(source, .prefer, id);
+    try control.changeHandoff(source, .unlink, prior);
+    const restored = try product_task.history.decode(a, bytes[0..persistence.len], product_control.persistenceLimits(.{}, 16));
+    defer {
+        var owned = restored;
+        owned.deinit();
+    }
+    for (restored.value.tasks) |record| {
+        if (record.id == prior) try std.testing.expect(record.handoff == null);
+        if (record.id == id) try std.testing.expect(record.handoff.?.preferred and record.handoff.?.contains("101") and record.handoff.?.contains("109"));
+    }
+    try std.testing.expectError(error.TaskPersistenceUnavailable, control.lookupHandoffReceipt(binding, source.account, "another-store", "create-1"));
+}
+
 test "Manual Task persistence failure keeps Product Task usable in memory" {
     fake_core.reset();
     const runtime = try createTestComposition(.{

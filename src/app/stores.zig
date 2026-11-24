@@ -189,6 +189,12 @@ pub fn commitTaskStoreGeneration(context: ?*anyopaque, candidate: *product_task.
     return store.commitGeneration(candidate, epoch, confirmed);
 }
 
+pub fn taskStoreInstance(context: ?*anyopaque) ?[32]u8 {
+    const stores: *Stores = @ptrCast(@alignCast(context orelse return null));
+    const store = if (stores.task) |*value| value else return null;
+    return store.instance();
+}
+
 pub fn resolveTaskStoreCommit(context: ?*anyopaque, token: product_task.history.CommitToken) product_task.history.Commit {
     const stores: *Stores = @ptrCast(@alignCast(context orelse return .outcome_unknown));
     const store = if (stores.task) |*value| value else return .outcome_unknown;

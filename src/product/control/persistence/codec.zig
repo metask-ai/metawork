@@ -662,6 +662,8 @@ fn writeTask(batch: *Batch, v: wire.TaskWire) !void {
         .recent_order = try batch.u(v.recent_order),
         .completion_seen_run_id = try batch.ou(v.completion_seen_run_id),
         .project_id = try batch.ou(v.project_id),
+        .handoff_json = try batch.ojson(v.handoff),
+        .creation_receipt = try batch.ojson(v.creation_receipt),
         .workspace_id = try batch.u(v.workspace_id),
         .workspace_epoch = try batch.u(v.workspace_epoch),
         .workspace_root = b(v.workspace_root),
@@ -705,6 +707,8 @@ fn readTask(row: Record) !wire.TaskWire {
     v.recent_order = try row.u("recent_order");
     v.completion_seen_run_id = try row.ou("completion_seen_run_id");
     v.project_id = try row.ou("project_id");
+    v.handoff = try row.ojson(@typeInfo(@TypeOf(v.handoff)).optional.child, "handoff_json");
+    v.creation_receipt = try row.ojson([32]u8, "creation_receipt");
     v.workspace_id = try row.u("workspace_id");
     v.workspace_epoch = try row.u("workspace_epoch");
     v.workspace_root = try row.b("workspace_root");
@@ -927,7 +931,7 @@ comptime {
     if (std.meta.fields(wire.StateWire).len != 9) @compileError("Review every history SQL field mapping after StateWire changes");
     if (std.meta.fields(wire.TaskFailureWire).len != 3) @compileError("Review every history SQL field mapping after TaskFailureWire changes");
     if (std.meta.fields(wire.WorkspaceWire).len != 8) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
-    if (std.meta.fields(wire.TaskWire).len != 28) @compileError("Review every history SQL field mapping after TaskWire changes");
+    if (std.meta.fields(wire.TaskWire).len != 30) @compileError("Review every history SQL field mapping after TaskWire changes");
     if (std.meta.fields(wire.ModelIntentWire).len != 3) @compileError("Review every history SQL field mapping after ModelIntentWire changes");
     // model_error is a nullable typed JSON value read and written with its Run.
     if (std.meta.fields(wire.RunWire).len != 36) @compileError("Review every history SQL field mapping after RunWire changes");

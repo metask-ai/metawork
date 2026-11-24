@@ -1359,6 +1359,48 @@ test "Task model intent owns independent bounded identity and revision" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Checks.create, .{});
 }
 
+/// A task's external source. The first identifier is the most recently
+/// confirmed one; all other identifiers were observed for that same task.
+pub const HandoffLink = struct {
+    account: []const u8,
+    ids: []const []const u8,
+    preferred: bool,
+
+    pub fn contains(self: HandoffLink, id: []const u8) bool {
+        for (self.ids) |known| if (std.mem.eql(u8, known, id)) return true;
+        return false;
+    }
+
+    pub fn valid(self: HandoffLink) bool {
+        if (self.account.len != 64 or self.ids.len == 0 or self.ids.len > 256) return false;
+        for (self.account) |c| if (!std.ascii.isHex(c) or std.ascii.isUpper(c)) return false;
+        for (self.ids, 0..) |id, i| {
+            if (id.len == 0 or id.len > 128 or std.mem.eql(u8, id, ".") or std.mem.eql(u8, id, "..")) return false;
+            for (id) |c| if (c < 0x21 or c > 0x7e) return false;
+            for (self.ids[0..i]) |seen| if (std.mem.eql(u8, seen, id)) return false;
+        }
+        return true;
+    }
+
+    pub fn clone(self: HandoffLink, a: std.mem.Allocator) !HandoffLink {
+        const account = try a.dupe(u8, self.account);
+        errdefer a.free(account);
+        const ids = try a.alloc([]const u8, self.ids.len);
+        errdefer a.free(ids);
+        for (self.ids, 0..) |id, i| {
+            errdefer for (ids[0..i]) |owned| a.free(owned);
+            ids[i] = try a.dupe(u8, id);
+        }
+        return .{ .account = account, .ids = ids, .preferred = self.preferred };
+    }
+
+    pub fn deinit(self: HandoffLink, a: std.mem.Allocator) void {
+        for (self.ids) |id| a.free(id);
+        a.free(self.ids);
+        a.free(self.account);
+    }
+};
+
 pub const DurableTaskRecord = struct {
     /// What a fresh Task's binding epoch is.
     ///
@@ -1383,6 +1425,9 @@ pub const DurableTaskRecord = struct {
     /// Persisted current Task delegation; Run authority is captured separately.
     permission_review_delegated: bool = false,
     project_id: ?u64 = null,
+    handoff: ?HandoffLink = null,
+    /// Independent of subsequent unlink/relink. Scoped to the creating account.
+    creation_receipt: ?[32]u8 = null,
     workspace_id: u64,
     workspace_epoch: u64 = 1,
     workspace_root: []u8,

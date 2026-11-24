@@ -118,6 +118,7 @@
             .{ .name = "metawork.models.customModels.add", .origins = .{"zero://app"} },
             .{ .name = "metawork.models.customModels.replace", .origins = .{"zero://app"} },
             .{ .name = "metawork.models.customModels.remove", .origins = .{"zero://app"} },
+            .{ .name = "metawork.tasks.handoff", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.create", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.run", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.sendInput", .origins = .{"zero://app"} },

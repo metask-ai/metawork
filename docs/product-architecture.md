@@ -430,6 +430,8 @@ Inbox aggregate（`src/product/inbox.zig`）独占 MetaTeam 连接的识别规�
 - **响应**：MetaTeam 未公布响应 schema，只读用到的字段，未知字段忽略，缺失或类型错误按不可用响应处理。数字 id 保留 JSON 原文作为字符串，只用于判等与原样回传，不经过浮点；时间接受 Unix 毫秒或 ISO 8601；晚于 JavaScript 能表示的时刻（8.64e15 毫秒）时，可选时间只丢这一项，消息自身的时间按不可用响应处理。新消息没有报告成员用户名、或会话窗口重建时，保留已知的用户名，回复仍有地址。正文有界读取：messages 4 MiB，关联项与成员列表各 1 MiB（文本文件内容可达 200 KB，转义后更长），unread 256 KiB，发送的答复 64 KiB；带 `limit` 的读取超出时减半重取，只有单条消息超出才算不可用。发送的答复只读 `sent` 名称，读不出也仍是已发送。成员只保留有可用用户名的，按用户名去重。放不进一个 Bridge 结果的详情按长短裁剪：文件内容、描述、最早的进展、子任务、项目文件列表，并分别标注。
 - **关闭**：coordinator 在 Bridge 证明静止之前关闭：撤销 timer，取消并 join 所有 worker，给未决读请求回 `unavailable`、未完成的发送回 `failed`，清零 key，retire 连接，最后通知 Inbox 停止。
 
+工作台交接以 MetaTeam 服务身份、已核实的成员 ID 和详情返回的任务 ID 为依据。Product Task 拥有关联，一个本地会话最多关联一个远端任务，同一远端任务可有多个本地会话。Host 随关联保存消息引用过的编号别名。首次关联设为默认，打开其他会话保留默认，同一任务不同编号合并后若出现两个默认则清除歧义，由用户指定。关联、解除、设置默认及创建回执均须由任务历史确认提交后发布。创建和首次关联共享一次限定范围的事务，创建操作仅固定成功结果，数据库重建后旧草稿不能按重用的本地编号寻址。
+
 ## 3. 并发与生命周期
 
 - 每个 Agent Session 至多一个 in-flight operation；Run、manual compact、Session mutation 与 destroy 互斥。Conversation recovery 按 §2.2 的 Task-owned active-operation 槽互斥，成功提交后才形成新的 Session attachment；
@@ -589,6 +591,8 @@ completion receipt 是上述 best-effort Task projection 的低频视图事实�
 Host 重启从通过校验的 store 重建 durable history 和 detached attachment。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具、permission 或结果不确定 mutation；所有在进程终止时仍为 `pending` 的 Run/compact 都原子转为 `excluded`，terminal operation 保留原 phase/outcome，non-terminal operation 再收口为 interrupted。其 File Changes `collecting` 若存在必须收口为 `incomplete` 并保留已记录项。旧历史缺少 Run 提交时间或 File Changes 字段时恢复为 `null`，不能伪造时间或空观测。未完成 Tool 不进入恢复 projection，已经 durable 完成的 Tool result 保留。
 
 #### 4.3.1 History schema
+
+工作台会话关联与创建回执由 Task 历史库持有，随 Task 行删除。回执在同一历史库内唯一，每个库具有独立持久身份，用于区分原库重开与库重建。会话创建、远端编号别名和默认会话选择的变更在同一 SQLite 事务提交。既有会话迁移后没有交接来源。
 
 Product Control 统一拥有同一个 history 数据库的结构和有序迁移清单，业务 aggregate 不独立执行迁移。schema 是无状态模块，直接产出 Storage 的 `sql.Migration`；版本从清单推导，新建与升级共用同一条迁移链。清单在编译期校验连续版本和有效 UTF-8/LF 字节，已成为需保留数据库身份的历史迁移不得原地改写。唯一建表 SQL 拥有精确列、约束与索引定义，文档不维护第二份字段表。
 

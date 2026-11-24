@@ -33,6 +33,8 @@ export const enUS = {
     "Your model preference could not be saved. Confirmed task choices are unchanged.",
   "mutation.reason.schedule_persistence_unavailable":
     "Schedule storage is unavailable. Open Scheduled tasks to recover it before trying again.",
+  "mutation.reason.handoff_changed": "The task or account changed. Reopen task details.",
+  "mutation.reason.history_unavailable": "Session history could not be saved. Try again shortly.",
   "mutation.reason.schedule_persistence_failed":
     "Schedule storage could not be updated. Open Scheduled tasks to recover it before trying again.",
   "mutation.reason.schedule_persistence_outcome_unknown":

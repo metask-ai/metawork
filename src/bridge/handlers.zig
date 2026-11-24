@@ -469,7 +469,19 @@ pub const NewTaskModelSelection = struct {
     expectedSourceGeneration: []const u8,
     expectedCatalogGeneration: []const u8,
 };
+pub const HandoffReference = struct {
+    binding: WireId,
+    account: WireText,
+    referenced: WireText,
+    canonical: WireText,
+
+    pub fn source(self: HandoffReference) product_control.HandoffSource {
+        return .{ .binding = self.binding.value, .account = self.account.value, .referenced = self.referenced.value, .canonical = self.canonical.value };
+    }
+};
+
 pub const TaskCreate = struct {
+    handoff: ?struct { source: HandoffReference, operationId: WireText, storeId: WireText } = null,
     projectId: ?[]const u8,
     workspace: TaskWorkspaceIntent,
     modelSelection: NewTaskModelSelection,

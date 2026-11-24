@@ -268,6 +268,21 @@ pub const Repository = struct {
         self.index = null;
     }
 
+    pub fn instance(self: *const Repository) ?[32]u8 {
+        const Receiver = struct {
+            id: ?[32]u8 = null,
+            fn read(ctx: *anyopaque, row: sql.Row) void {
+                const target: *@This() = @ptrCast(@alignCast(ctx));
+                const value = row.value(0);
+                if (value == .blob and value.blob.len == 16)
+                    target.id = std.fmt.bytesToHex(value.blob[0..16].*, .lower);
+            }
+        };
+        var receiver: Receiver = .{};
+        if (self.database.query("SELECT identity FROM handoff_store_identity WHERE singleton=1", &.{}, .{ .context = &receiver, .receive_fn = Receiver.read }) != .ok) return null;
+        return receiver.id;
+    }
+
     pub fn seed(self: *Repository, state: wire.StateWire, preserved: wire.PreservedFrames) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
@@ -281,6 +296,10 @@ pub const Repository = struct {
     }
 
     pub fn prepare(self: *Repository, state: wire.StateWire, preserved: wire.PreservedFrames, digest: [32]u8) !Prepared {
+        return self.prepareHeaders(state, preserved, digest, null);
+    }
+
+    pub fn prepareHeaders(self: *Repository, state: wire.StateWire, preserved: wire.PreservedFrames, digest: [32]u8, scope: ?wire.HeaderScope) !Prepared {
         const arena = try self.allocator.create(std.heap.ArenaAllocator);
         arena.* = .init(self.allocator);
         errdefer {
@@ -305,6 +324,7 @@ pub const Repository = struct {
                 }
             }
             if (missing.items.len != 0) {
+                if (scope != null) return error.OutsideCommitScope;
                 try appendDeletes(a, &mutations, missing.items);
                 deleted += missing.items.len;
             }
@@ -318,6 +338,16 @@ pub const Repository = struct {
                     if (std.mem.eql(u8, &entry.digest, &row.digest)) continue;
                     if (row.position() != null and entry.position != row.position()) try moved.append(a, row);
                 };
+                if (scope) |headers| {
+                    if (std.mem.eql(u8, table, "history_state")) {
+                        if (headers.created_workspace == null) return error.OutsideCommitScope;
+                    } else if (std.mem.eql(u8, table, "tasks") or std.mem.eql(u8, table, "workspaces")) {
+                        const id = std.mem.readInt(u64, row.values[row.primary[0]].blob[0..8], .big);
+                        if (std.mem.eql(u8, table, "tasks")) {
+                            if (std.mem.indexOfScalar(u64, headers.task_ids, id) == null) return error.OutsideCommitScope;
+                        } else if (headers.created_workspace != id) return error.OutsideCommitScope;
+                    } else return error.OutsideCommitScope;
+                }
                 // Opaque legacy payloads can approach 16MiB. Bind them as BLOB,
                 // rather than doubling them through the bulk hex transport.
                 if (std.mem.eql(u8, table, "retained_records")) {

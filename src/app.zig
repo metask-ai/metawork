@@ -1079,6 +1079,7 @@ pub fn run(init: std.process.Init) !void {
             .credentials_fn = app_stores.taskStoreCredentials,
             .generation_commit_fn = app_stores.commitTaskStoreGeneration,
             .resolve_commit_fn = app_stores.resolveTaskStoreCommit,
+            .instance_fn = app_stores.taskStoreInstance,
             .recover_fn = app_stores.recoverTaskStore,
         },
         .checkpoint_store = .{

@@ -20,6 +20,7 @@ pub const search_snippet_bytes = runtime.search_snippet_bytes;
 pub const writeSearchCursor = runtime.writeSearchCursor;
 pub const CreateTaskInput = runtime.CreateTaskInput;
 pub const PreparedCreate = runtime.PreparedCreate;
+pub const HandoffLink = runtime.HandoffLink;
 pub const PreparedModelIntent = runtime.PreparedModelIntent;
 pub const ModelIntentError = runtime.ModelIntentError;
 pub const PreparedRun = runtime.PreparedRun;

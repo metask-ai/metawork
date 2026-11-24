@@ -3,6 +3,9 @@ const credential_match = @import("product_credential_match");
 const builtin = @import("builtin");
 const update = @import("metawork_product_update");
 const inbox = @import("metawork_product_inbox");
+const handoff = @import("handoff.zig");
+pub const HandoffAction = handoff.Action;
+pub const HandoffSource = struct { binding: u64, account: []const u8, referenced: []const u8, canonical: []const u8 };
 const product_identity = @import("metawork_product_identity");
 const lifecycle = @import("metawork_agent_contract");
 const account_contract = @import("metawork_account_contract");
@@ -83,6 +86,7 @@ pub const Error = view_plan.Error || view_cache.Error || task_runtime.RunError |
     InvalidTaskTitle,
     InvalidScheduledTaskInput,
     ScheduleTimerUnavailable,
+    HandoffConflict,
     ScheduledTaskPersistenceUnavailable,
     ScheduledTaskPersistenceFailed,
     ScheduledTaskPersistenceOutcomeUnknown,
@@ -683,6 +687,12 @@ const PreparedTaskCreate = struct {
         if (control.mcp) |*mcp| mcp.releaseTaskReference(task_id);
         if (self.order.isActive()) control.workspace.rollbackOrder(&self.order);
     }
+};
+
+const HandoffTransaction = struct {
+    plan: handoff.Plan,
+    created: ?PreparedTaskCreate = null,
+    workspace: ?u64 = null,
 };
 
 const PreparedAutomaticBinding = struct {
@@ -1356,6 +1366,7 @@ pub const Runtime = struct {
     approval_history_dirty: bool = false,
     approval_history_unknown: ?task_persistence.CommitToken = null,
     ordinary_history_unknown: ?task_persistence.CommitToken = null,
+    pending_handoff: ?HandoffTransaction = null,
     /// Bounded diagnostic count of canonical Agent events that arrived after
     /// their Run's terminal drain was finalized. Runtime-only evidence for
     /// the Stop-barrier investigation; never persisted or published.
@@ -4006,6 +4017,106 @@ pub const Runtime = struct {
         return task_id;
     }
 
+    fn handoffReady(self: *Runtime) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (!self.task_persistence.enabled or self.task_persistence_health == .degraded or
+            !self.task_persistence_health.allowsWrite(.after_readback)) return error.TaskPersistenceUnavailable;
+        if (!self.resolveOrdinaryHistoryCommit() or self.pending_handoff != null) return error.TaskPersistenceOutcomeUnknown;
+        if (self.requiredHistoryBlocked() or self.task_runtime.approvalChangePending()) return error.TaskBusy;
+    }
+
+    pub fn handoffInstance(self: *Runtime) Error![32]u8 {
+        try self.handoffReady();
+        const instance = self.task_persistence.instance_fn orelse return error.TaskPersistenceUnavailable;
+        return instance(self.task_persistence.context) orelse error.TaskPersistenceUnavailable;
+    }
+
+    fn checkHandoffAccount(self: *Runtime, binding: u64, account: []const u8) Error!void {
+        if (!self.inbox.accepts(binding) or self.inbox.state == .reauthorize or self.inbox.account_scope == null or
+            !std.mem.eql(u8, &self.inbox.account_scope.?, account)) return error.HandoffConflict;
+    }
+
+    fn checkHandoffSource(self: *Runtime, source: HandoffSource) Error!void {
+        try self.checkHandoffAccount(source.binding, source.account);
+        const detail = self.inbox.verified_task orelse return error.HandoffConflict;
+        if (!detail.requested.eql(source.referenced) or !detail.canonical.eql(source.canonical) or
+            self.containsKnownCredential(source.referenced) or self.containsKnownCredential(source.canonical)) return error.HandoffConflict;
+    }
+
+    pub fn lookupHandoffReceipt(self: *Runtime, binding: u64, account: []const u8, instance: []const u8, operation: []const u8) Error!?u64 {
+        try self.checkHandoffAccount(binding, account);
+        const actual = try self.handoffInstance();
+        if (!std.mem.eql(u8, &actual, instance)) return error.TaskPersistenceUnavailable;
+        return self.task_runtime.taskForReceipt(handoff.receipt(account, operation));
+    }
+
+    pub const LinkedSession = struct { taskId: inbox.U64, preferred: bool };
+
+    pub fn listHandoff(self: *Runtime, a: std.mem.Allocator, binding: u64, account: []const u8, referenced: []const u8) Error![]LinkedSession {
+        try self.checkHandoffAccount(binding, account);
+        try self.handoffReady();
+        const matches = try self.task_runtime.linkedTasks(a, account, referenced, referenced);
+        defer a.free(matches);
+        const result = try a.alloc(LinkedSession, matches.len);
+        for (matches, result) |item, *out| out.* = .{ .taskId = .{ .value = item.task_id }, .preferred = item.link.preferred };
+        return result;
+    }
+
+    pub fn changeHandoff(self: *Runtime, source: HandoffSource, action: HandoffAction, target: ?u64) Error!void {
+        try self.checkHandoffSource(source);
+        try self.handoffReady();
+        const plan = try handoff.prepare(&self.task_runtime, self.allocator, source.account, source.referenced, source.canonical, action, target);
+        var transaction: HandoffTransaction = .{ .plan = plan };
+        try self.commitHandoff(&transaction);
+    }
+
+    pub fn createHandoffTask(self: *Runtime, source: HandoffSource, instance: []const u8, operation: []const u8, workspace: TaskWorkspaceRequest, project_id: ?u64, selection: NewTaskModelSelectionInput, catalog: ?[]const u8, skills: ?u64, approval: ApprovalMode) Error!struct { id: u64, existing: bool } {
+        if (try self.lookupHandoffReceipt(source.binding, source.account, instance, operation)) |id| return .{ .id = id, .existing = true };
+        try self.checkHandoffSource(source);
+        if (workspace != .manual) return error.InvalidWorkspace;
+        try self.validateProject(project_id);
+        const manual = workspace.manual;
+        const facts = self.workspace.facts(manual.workspace_id) orelse return error.UnknownWorkspace;
+        var created = try self.prepareTaskInWorkspaceInternal(manual.workspace_id, manual.expected_epoch, selection, catalog, skills, .{ .interactive = approval }, false);
+        const id = created.id();
+        const plan = handoff.prepare(&self.task_runtime, self.allocator, source.account, source.referenced, source.canonical, .link, id) catch |err| {
+            created.rollback(self);
+            return err;
+        };
+        _ = self.task_runtime.setProject(id, project_id orelse if (facts.project_entry) facts.id else null) catch unreachable;
+        self.task_runtime.setCreationReceipt(id, handoff.receipt(source.account, operation));
+        var transaction: HandoffTransaction = .{ .plan = plan, .created = created, .workspace = facts.id };
+        try self.commitHandoff(&transaction);
+        self.rememberTaskModelPreference(id);
+        return .{ .id = id, .existing = false };
+    }
+
+    fn finishHandoff(self: *Runtime, transaction: *HandoffTransaction, committed: bool) void {
+        if (committed) transaction.plan.apply(&self.task_runtime);
+        transaction.plan.deinit(self.allocator);
+        if (transaction.created) |*created| {
+            if (committed) {
+                _ = created.complete(self);
+            } else created.rollback(self);
+        }
+    }
+
+    fn commitHandoff(self: *Runtime, transaction: *HandoffTransaction) Error!void {
+        if (transaction.plan.ids.items.len == 0) {
+            transaction.plan.deinit(self.allocator);
+            return;
+        }
+        self.commitTaskHistory(null, .required, transaction) catch |err| {
+            if (err == error.TaskPersistenceOutcomeUnknown) {
+                if (transaction.created) |*created| created.task.conceal();
+                self.pending_handoff = transaction.*;
+            } else self.finishHandoff(transaction, false);
+            return err;
+        };
+        self.finishHandoff(transaction, true);
+        self.bumpRevision();
+    }
+
     fn prepareTaskInWorkspaceInternal(
         self: *Runtime,
         workspace_id: u64,
@@ -4493,16 +4604,24 @@ pub const Runtime = struct {
     }
 
     fn resolveOrdinaryHistoryCommit(self: *Runtime) bool {
-        const token = self.ordinary_history_unknown orelse return true;
+        const token = self.ordinary_history_unknown orelse return self.pending_handoff == null;
         self.syncHistoryCredentials(null, null);
-        if (self.task_persistence.resolveCommit(token) == .outcome_unknown) return false;
+        const outcome = self.task_persistence.resolveCommit(token);
+        if (outcome == .outcome_unknown) return false;
         self.ordinary_history_unknown = null;
+        if (self.pending_handoff) |*transaction| {
+            if (transaction.created) |*created| created.task.reveal();
+            self.finishHandoff(transaction, outcome == .committed);
+            self.pending_handoff = null;
+            self.task_persistence_health = if (outcome == .committed) .ready else .write_failed;
+            self.bumpRevision();
+        }
         return true;
     }
 
     fn requiredHistoryBlocked(self: *Runtime) bool {
         if (self.backgroundHistoryBlocked()) return true;
-        if (self.ordinary_history_unknown == null) return false;
+        if (self.ordinary_history_unknown == null) return self.pending_handoff != null;
         if (!self.resolveOrdinaryHistoryCommit()) return true;
         if (!self.shutting_down) _ = self.change_notifier.notify();
         return false;
@@ -7556,6 +7675,12 @@ pub const Runtime = struct {
         self.cancelSnapshot();
         self.encoded_views.clear(self.allocator);
         self.inbox.deinit();
+        if (self.pending_handoff) |*tx| {
+            // The database witness decides on the next launch. Release the
+            // staged Session before its runtime goes away.
+            if (tx.created) |*created| created.task.reveal();
+            self.finishHandoff(tx, false);
+        }
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
         self.attachments.deinit();
@@ -8913,6 +9038,10 @@ pub const Runtime = struct {
         checkpoint_override: ?CheckpointPersistenceOverride,
         purpose: HistoryWritePurpose,
     ) Error!void {
+        return self.commitTaskHistory(checkpoint_override, purpose, null);
+    }
+
+    fn commitTaskHistory(self: *Runtime, checkpoint_override: ?CheckpointPersistenceOverride, purpose: HistoryWritePurpose, transaction: ?*HandoffTransaction) Error!void {
         if (purpose == .required and self.requiredHistoryBlocked()) return error.TaskBusy;
         const resolved_pending = self.ordinary_history_unknown != null;
         if (!self.resolveOrdinaryHistoryCommit()) return error.TaskPersistenceOutcomeUnknown;
@@ -8935,6 +9064,7 @@ pub const Runtime = struct {
             return err;
         };
         defer scratch.deinit();
+        if (transaction) |tx| tx.plan.project(scratch.state.tasks);
         const persistence_limits = self.taskPersistenceLimits();
         if (task_persistence.validateCandidate(&scratch.state, persistence_limits)) |failure| {
             if (!builtin.is_test) std.log.err(
@@ -8949,7 +9079,9 @@ pub const Runtime = struct {
             return error.TaskStoreEncodeFailed;
         }
         var candidate: task_persistence.Candidate = .{ .value = scratch.state, .preserved = scratch.preserved };
-        switch (self.task_persistence.commit(&candidate)) {
+        if (transaction) |tx| candidate.header_scope = .{ .task_ids = tx.plan.ids.items, .created_workspace = tx.workspace };
+        const outcome = if (transaction != null) self.task_persistence.commitConfirmed(&candidate) else self.task_persistence.commit(&candidate);
+        switch (outcome) {
             .committed => {
                 self.approval_history_dirty = false;
                 if (self.task_persistence_health != .ready) {
@@ -10268,7 +10400,14 @@ pub const Runtime = struct {
     }
     fn inboxRecordDetail(context: *anyopaque, binding: u64, requested: inbox.Id, canonical: ?inbox.Id) bool {
         const self = inboxOwner(context);
-        return !self.shutting_down and self.inbox.recordDetail(binding, requested, canonical);
+        if (self.shutting_down or !self.inbox.recordDetail(binding, requested, canonical)) return false;
+        const scope = self.inbox.account_scope.?;
+        const source: HandoffSource = .{ .binding = binding, .account = &scope, .referenced = requested.slice(), .canonical = canonical.?.slice() };
+        self.changeHandoff(source, .observe, null) catch {
+            self.inbox.verified_task = null;
+            return false;
+        };
+        return true;
     }
     fn inboxSetOwner(context: *anyopaque, binding: u64, id: inbox.Id) void {
         const self = inboxOwner(context);

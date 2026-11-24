@@ -31,6 +31,8 @@ export const zhCN: Record<MessageId, string> = {
     "未能记住模型偏好，已确认的任务模型选择不受影响。",
   "mutation.reason.schedule_persistence_unavailable":
     "定时任务存储不可用，请先在定时任务页恢复后再重试。",
+  "mutation.reason.handoff_changed": "任务或账号已变更，请重新打开任务详情。",
+  "mutation.reason.history_unavailable": "工作会话历史暂时无法保存，请稍后重试。",
   "mutation.reason.schedule_persistence_failed":
     "定时任务存储更新失败，请先在定时任务页恢复后再重试。",
   "mutation.reason.schedule_persistence_outcome_unknown":

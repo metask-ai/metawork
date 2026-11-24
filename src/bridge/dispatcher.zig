@@ -519,6 +519,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.custom_model_remove, .function = customModelRemove },
             .{ .name = commands.account_logout, .function = accountLogout },
             .{ .name = commands.create_task, .function = createTask },
+            .{ .name = commands.task_handoff, .function = taskHandoff },
             .{ .name = commands.run, .function = runTask },
             .{ .name = commands.send_input, .function = sendInput },
             .{ .name = commands.retry_input, .function = retryInput },
@@ -3975,6 +3976,67 @@ pub const Dispatcher = struct {
         return generation;
     }
 
+    fn taskHandoff(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        const control = try self.requireProductControl();
+        const Payload = struct {
+            action: enum { list, reconcile, link, prefer, unlink },
+            binding: handlers.WireId,
+            account: handlers.WireText,
+            referenced: handlers.WireText,
+            canonical: ?handlers.WireText = null,
+            taskId: ?handlers.WireId = null,
+            operationId: ?handlers.WireText = null,
+            storeId: ?handlers.WireText = null,
+        };
+        var parsed = try handlers.parsePayload(Payload, invocation.request.payload);
+        defer parsed.deinit();
+        const request = parsed.value;
+        if (request.binding.value == 0 or request.account.value.len != 64 or request.referenced.value.len == 0 or request.referenced.value.len > 128)
+            return error.InvalidBridgePayload;
+        var writer = std.Io.Writer.fixed(output);
+        switch (request.action) {
+            .list => {
+                if (request.operationId != null or request.storeId != null or request.taskId != null or request.canonical != null) return error.InvalidBridgePayload;
+                const sessions = try control.listHandoff(self.allocator, request.binding.value, request.account.value, request.referenced.value);
+                defer self.allocator.free(sessions);
+                const instance = try control.handoffInstance();
+                try std.json.Stringify.value(.{ .sessions = sessions, .storeId = @as([]const u8, &instance) }, .{}, &writer);
+            },
+            .reconcile => {
+                const operation = request.operationId orelse return error.InvalidBridgePayload;
+                const instance = request.storeId orelse return error.InvalidBridgePayload;
+                if (request.taskId != null or request.canonical != null) return error.InvalidBridgePayload;
+                try handlers.validateInputOperationId(operation.value);
+                if (try control.lookupHandoffReceipt(request.binding.value, request.account.value, instance.value, operation.value)) |id|
+                    try writer.print("{{\"taskId\":\"{d}\"}}", .{id})
+                else
+                    try writer.writeAll("{\"taskId\":null}");
+            },
+            .link, .prefer, .unlink => {
+                const current = request.canonical orelse return error.InvalidBridgePayload;
+                const target = request.taskId orelse return error.InvalidBridgePayload;
+                const expected_store = request.storeId orelse return error.InvalidBridgePayload;
+                if (request.operationId != null or target.value == 0) return error.InvalidBridgePayload;
+                const actual_store = try control.handoffInstance();
+                if (!std.mem.eql(u8, expected_store.value, &actual_store)) return error.TaskPersistenceUnavailable;
+                const action: product_control.HandoffAction = switch (request.action) {
+                    .link => .link,
+                    .prefer => .prefer,
+                    .unlink => .unlink,
+                    else => unreachable,
+                };
+                try control.changeHandoff(.{ .binding = request.binding.value, .account = request.account.value, .referenced = request.referenced.value, .canonical = current.value }, action, target.value);
+                self.notifyCommitted();
+                try writer.writeAll("{\"saved\":true}");
+            },
+        }
+        return writer.buffered();
+    }
+
     fn createTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
@@ -4028,7 +4090,15 @@ pub const Dispatcher = struct {
         if (project_id == 0) return error.InvalidBridgeId;
         if (parsed.value.workspace.ensureProjectEntry and project_id != null)
             return error.InvalidBridgePayload;
-        const task_id = workbench.createTaskForWorkspace(workspace_request, project_id, model_selection, parsed.value.expectedSkillCatalogRevision, skill_selection_revision, .{ .interactive = approval_mode }) catch |err| {
+        var existing = false;
+        const creation = if (parsed.value.handoff) |request| block: {
+            try handlers.validateInputOperationId(request.operationId.value);
+            const result = workbench.createHandoffTask(request.source.source(), request.storeId.value, request.operationId.value, workspace_request, project_id, model_selection, parsed.value.expectedSkillCatalogRevision, skill_selection_revision, approval_mode) catch |err| break :block @as(product_control.Error!u64, err);
+            existing = result.existing;
+            break :block @as(product_control.Error!u64, result.id);
+        } else workbench.createTaskForWorkspace(workspace_request, project_id, model_selection, parsed.value.expectedSkillCatalogRevision, skill_selection_revision, .{ .interactive = approval_mode });
+        const task_id = creation catch |err| {
+            if (err == error.TaskBusy and parsed.value.handoff != null) return encodeTaskCreateResult(output, false, null, null, null, "history_unavailable", null, null);
             if (taskCreateRejection(err)) |reason|
                 return encodeTaskCreateResult(output, false, null, null, null, reason, if (err == error.SessionReleaseFailed) workbench.sessionReleaseFailureTaskId() else null, null);
             return err;
@@ -4037,7 +4107,11 @@ pub const Dispatcher = struct {
         const mcp_authority = try workbench.taskMcpAuthority(task_id);
         const actual_project_id = try workbench.taskProjectId(task_id);
         self.notifyCommitted();
-        return encodeTaskCreateResult(output, true, task_id, binding_epoch, mcp_authority, null, null, actual_project_id);
+        const result = try encodeTaskCreateResult(output, true, task_id, binding_epoch, mcp_authority, null, null, actual_project_id);
+        if (!existing) return result;
+        var writer = std.Io.Writer.fixed(output[result.len - 1 ..]);
+        try writer.writeAll(",\"existing\":true}");
+        return output[0 .. result.len - 1 + writer.buffered().len];
     }
 
     fn runTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -6301,6 +6375,9 @@ fn taskCreateRejection(err: anyerror) ?[]const u8 {
         error.ScheduledTaskPersistenceUnavailable => "schedule_persistence_unavailable",
         error.ScheduledTaskPersistenceFailed => "schedule_persistence_failed",
         error.ScheduledTaskPersistenceOutcomeUnknown => "schedule_persistence_outcome_unknown",
+        error.HandoffConflict => "handoff_changed",
+        error.TaskPersistenceUnavailable, error.TaskPersistenceFailed => "history_unavailable",
+        error.InvalidWorkspace => "workspace_unavailable",
         error.ProjectUnavailable => "project_unavailable",
         error.ProjectCapacity => "project_capacity",
         error.WorkspaceEpochMismatch => "workspace_changed",
