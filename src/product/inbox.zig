@@ -1151,7 +1151,7 @@ pub const ListPage = struct { summaries: []const Summary, has_earlier: bool };
 pub const ListCompletion = union(enum) { page: ListPage, failed: Failure };
 pub const PollCompletion = union(enum) { unread: *const Unread, failed: Failure };
 pub const CommandOutcome = enum { accepted, rejected, unavailable };
-pub const ConversationPageKind = enum { latest, before, after };
+pub const ConversationPageKind = enum { latest, refresh, before, after };
 
 /// A Renderer read of one conversation page. Borrowed for the call.
 pub const ConversationRequest = struct {

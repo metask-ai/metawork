@@ -8963,6 +8963,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         const responder: native_sdk.bridge.AsyncResponder = .{ .context = &capture, .source = source, .respond_fn = InboxCapture.receive };
         for ([_]struct { []const u8, bool }{
             .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"page\":\"before\",\"anchorId\":\"12\"}", true },
+            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"page\":\"refresh\",\"anchorId\":null}", true },
             .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"0\",\"peerId\":\"ann\",\"page\":\"latest\",\"anchorId\":null}", false },
             .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"page\":\"sideways\",\"anchorId\":null}", false },
             .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"page\":\"latest\"}", false },

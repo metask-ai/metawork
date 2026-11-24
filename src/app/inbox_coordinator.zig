@@ -308,7 +308,7 @@ const Job = struct {
                     }
                 }
                 const query: inbox.MessagesQuery = switch (work.kind) {
-                    .latest => .{ .peer = work.peer.slice() },
+                    .latest, .refresh => .{ .peer = work.peer.slice() },
                     .before => .{ .peer = work.peer.slice(), .before = work.anchor.?.slice() },
                     .after => .{ .peer = work.peer.slice(), .after = work.anchor.?.slice() },
                 };
@@ -827,7 +827,7 @@ pub const Coordinator = struct {
         const target = reply(responder, bridge_id, request.binding, request.request_id) orelse return false;
         const peer = inbox.Id.init(request.peer) catch return false;
         const anchor: ?inbox.Id = if (request.anchor) |value| inbox.Id.init(value) catch return false else null;
-        if ((request.kind == .latest) != (anchor == null)) return false;
+        if ((request.kind == .before or request.kind == .after) != (anchor != null)) return false;
         const state: ?inbox.ConversationState = if (self.stopped or self.bound == null)
             .unavailable
         else if (!self.management.accepts_fn(self.management.context, request.binding))
@@ -2031,11 +2031,17 @@ test "inbox coordinator: only the opened peer is read, and their messages surviv
     f.transport.messages =
         \\{"data":{"messages":[{"id":"7","time":7,"direction":"in","from":{"id":"ann","name":"Ann"},"text":"first","new":false}]}}
     ;
-    try testing.expect(f.coordinator.readConversation(f.capture.responder(), "earlier", .{ .binding = binding, .request_id = 4, .peer = "ann", .kind = .before, .anchor = "8" }));
+    try testing.expect(f.coordinator.readConversation(f.capture.responder(), "reopen", .{ .binding = binding, .request_id = 2, .peer = "ann", .kind = .refresh, .anchor = null }));
     f.settle();
     try testing.expect(std.mem.indexOf(u8, f.capture.last(), "\"isNew\":true") != null);
     try testing.expectEqual(@as(usize, 2), f.transport.count);
-    try testing.expect(std.mem.endsWith(u8, f.transport.url(1), "/messages?peer=ann&beforeId=8&limit=50"));
+    try testing.expect(std.mem.endsWith(u8, f.transport.url(1), "/messages?peer=ann&limit=50"));
+    try testing.expect(!f.coordinator.readConversation(f.capture.responder(), "invalid", .{ .binding = binding, .request_id = 3, .peer = "ann", .kind = .refresh, .anchor = "7" }));
+    try testing.expect(f.coordinator.readConversation(f.capture.responder(), "earlier", .{ .binding = binding, .request_id = 4, .peer = "ann", .kind = .before, .anchor = "8" }));
+    f.settle();
+    try testing.expect(std.mem.indexOf(u8, f.capture.last(), "\"isNew\":true") != null);
+    try testing.expectEqual(@as(usize, 3), f.transport.count);
+    try testing.expect(std.mem.endsWith(u8, f.transport.url(2), "/messages?peer=ann&beforeId=8&limit=50"));
     f.source.generation = 2;
     f.source.fingerprint = @splat('b');
     f.coordinator.drain();
@@ -2157,7 +2163,7 @@ test "inbox group messages share one receipt history but only materialize the qu
     defer bob.deinit();
     try cache.save(testing.allocator, "b", null, .latest, null, &bob, 50);
     // A stale null must not undo the positive receipt from the other timeline.
-    try cache.save(testing.allocator, "a", null, .latest, null, &ann, 50);
+    try cache.save(testing.allocator, "a", null, .refresh, null, &ann, 50);
     try testing.expectEqual(@as(?u64, 21), ann.items[0].recipients[0].read_at_ms);
     var saved = (try cache.latest(testing.allocator, "b")).?;
     defer saved.page.deinit();

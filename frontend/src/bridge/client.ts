@@ -339,7 +339,7 @@ export class BridgeClient {
   async readInboxConversation(
     binding: string,
     peerId: string,
-    page: "latest" | "before" | "after",
+    page: "latest" | "refresh" | "before" | "after",
     anchorId: string | null,
   ): Promise<InboxConversationPage> {
     const { generation, requestId } = this.inboxRequest();

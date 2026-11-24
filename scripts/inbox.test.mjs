@@ -206,9 +206,10 @@ function fakeClient({
     },
     async readInboxConversation(binding, peerId, page, anchorId) {
       calls.push(["read", binding, peerId, page, anchorId]);
-      const answer = pages[`${peerId}:${page}:${anchorId}`] ?? {
-        messages: [],
-      };
+      const answer = pages[`${peerId}:${page}:${anchorId}`] ??
+        (page === "refresh" ? pages[`${peerId}:latest:null`] : undefined) ?? {
+          messages: [],
+        };
       return {
         binding,
         requestId: String(calls.length),
@@ -469,6 +470,46 @@ test("the timer follows only the open conversation even with zero unread, and a 
 
   rerender(element(client, view({ binding: "2" })));
   await waitFor(() => assert.ok(screen.getByText("Select a conversation")));
+});
+
+test("reopening a saved conversation refreshes receipts even when there are no new message ids", async () => {
+  const user = userEvent.setup({ document });
+  const sent = message("12", "out", "Delivered yesterday");
+  const confirmed = {
+    ...sent,
+    recipients: [
+      {
+        peerId: "ann",
+        name: "Ann",
+        read: true,
+        readAtMs: at("2026-11-23T08:00:00Z"),
+      },
+    ],
+  };
+  const client = fakeClient({
+    pages: {
+      "ann:latest:null": { messages: [sent] },
+      "ann:refresh:null": { messages: [confirmed] },
+    },
+  });
+  render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".inbox-message-receipt")?.dataset.read,
+      "true",
+    ),
+  );
+  assert.deepEqual(
+    client.calls
+      .filter(([kind]) => kind === "read")
+      .map((call) => call.slice(2)),
+    [
+      ["ann", "latest", null],
+      ["ann", "refresh", null],
+    ],
+  );
+  assert.equal(screen.getAllByText("Delivered yesterday").length, 1);
 });
 
 test("the conversation list asks for earlier conversations at its end", async () => {

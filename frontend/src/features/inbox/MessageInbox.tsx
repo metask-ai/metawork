@@ -213,8 +213,9 @@ export function useInbox(
   const readRef = useRef<
     (
       peerId: string,
-      page: "latest" | "before" | "after",
+      page: Parameters<InboxClient["readInboxConversation"]>[2],
       anchor: string | null,
+      catchUp?: boolean,
     ) => Promise<void>
   >(async () => {});
   const readEpoch = useRef(0);
@@ -269,8 +270,9 @@ export function useInbox(
   const read = useCallback(
     async (
       peerId: string,
-      page: "latest" | "before" | "after",
+      page: Parameters<InboxClient["readInboxConversation"]>[2],
       anchor: string | null,
+      catchUp = false,
     ) => {
       const epoch = ++readEpoch.current;
       setConversation((current) =>
@@ -309,7 +311,7 @@ export function useInbox(
           case "stale_binding":
             return { ...current, loading: false };
           case "ready":
-            if (page === "latest")
+            if (page === "latest" || page === "refresh")
               return {
                 ...current,
                 messages: answer.messages,
@@ -342,6 +344,10 @@ export function useInbox(
       if (!shown.current || document.visibilityState !== "visible") return;
       if (answer?.state === "ready" && page === "after" && !answer.complete)
         await readRef.current(peerId, "latest", null);
+      else if (catchUp && answer?.state === "ready" && answer.messages.length) {
+        // A receipt may have changed on a message already on this screen.
+        await readRef.current(peerId, "refresh", null);
+      }
     },
     [client, binding],
   );
@@ -350,6 +356,9 @@ export function useInbox(
   function select(peerId: string, name: string) {
     setSelectedId(peerId);
     setTask(null);
+    const cached = inbox.conversations.some(
+      (c) => c.peerId === peerId && c.latest !== null,
+    );
     setConversation({
       peerId,
       name,
@@ -358,7 +367,7 @@ export function useInbox(
       loading: true,
       failure: null,
     });
-    void read(peerId, "latest", null);
+    void read(peerId, "latest", null, cached);
   }
 
   async function openTask(taskId: string, trail: readonly string[] = []) {
