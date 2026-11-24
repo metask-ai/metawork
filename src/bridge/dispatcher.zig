@@ -10467,6 +10467,27 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try capture.invoke(native, "{\"generation\":\"1\",\"operationId\":\"5\",\"target\":{\"kind\":\"workspace\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"results/年度报告.docx\"},\"action\":\"check_current\"}", 3);
     try capture.wait(control, &boundary, 8);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"ready\"") != null);
+    // A copied path reaches the clipboard and nothing else: the answer is the
+    // same three fields, whatever identity asked.
+    for ([_][]const u8{
+        "{\"kind\":\"output\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\"}",
+        "{\"kind\":\"workspace\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"results/年度报告.docx\"}",
+    }, 6..) |target, operation| {
+        const copies = effect.copies;
+        const before = capture.count;
+        var copy_buffer: [512]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&copy_buffer, "{{\"generation\":\"1\",\"operationId\":\"{d}\",\"target\":{s},\"action\":\"copy_path\"}}", .{ operation, target });
+        try capture.invoke(native, payload, 3);
+        try capture.wait(control, &boundary, before + 1);
+        try std.testing.expectEqual(copies + 1, effect.copies);
+        var answer = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+        defer answer.deinit();
+        const fields = answer.value.object.get("result").?.object;
+        try std.testing.expectEqual(@as(usize, 3), fields.count());
+        try std.testing.expectEqualStrings("path_copied", fields.get("state").?.string);
+        try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "metawork-test") == null);
+        try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "报告") == null);
+    }
     // Registration spends the same ids: one it already passed is refused.
     const register = native.async_registry.find(commands.register_output).?;
     const register_source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
@@ -10503,7 +10524,7 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     effect.blocked.store(true, .release);
     try capture.invoke(native, fourth, 3);
     boundary.breakConnection();
-    try capture.wait(control, &boundary, 43);
+    try capture.wait(control, &boundary, 45);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.reveals);
     try std.testing.expect(!control.hasFileActions());

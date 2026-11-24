@@ -156,6 +156,7 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 | action | reference | output | workspace | worker | 主线程 |
 | --- | --- | --- | --- | --- | --- |
 | `reveal` | ✓ | ✓ | ✓ | 定位 | 再解析，请系统在文件管理器中选中该文件 |
+| `copy_path` | ✓ | ✓ | ✓ | 定位 | 再解析，把完整路径写入系统剪贴板 |
 | `check_current` | ✓ | ✓ | ✓ | 定位 | 再解析 |
 | `save` | ✓ | ✓ | ✓ | 复制当前内容 | 再解析，作出一次性发布决定 |
 | `open` | ✓ | ✓ | ✓ | 定位，Office 另核 OOXML | 再解析，按名字复核是同一文件，交给浏览器或默认应用 |
@@ -165,9 +166,11 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 
 `metawork.outputs.register` 是异步请求，精确输入 `{ generation, operationId, taskId, runId, changeId }`，与 `metawork.files.action` 共用 operationId 空间和在途名额。changeId 是所属 Run 的 File Change 身份，长度 1–128 bytes。Host 对可提交登记的记录追加 `outputRegistrationAdmitted: true`，其余记录省略该字段。登记成功只返回 `registered`，不运输成果字节或新的文件 authority；通过正常 Task 投影返回成果。
 
-两个请求的结果精确为 `{ generation, operationId, state }`，身份与请求一致。state 为 `ready | revealed | saved | registered | opened | open_unsupported | open_failed | save_failed | target_changed | cleanup_failed | busy | missing | restricted | changed | too_large | cancelled | timed_out | stale_security | unavailable | failed`。每种请求只有一个成功状态：`open` 为 `opened`，`reveal` 为 `revealed`，`check_current` 与 `check` 为 `ready`，`save` 为 `saved`，登记为 `registered`。`revealed` 与 `opened` 只表示系统接收了请求，`saved` 只证明选定目标已原子发布。`changed` 在 `check` 中表示与交付时不同，在其他请求中表示操作期间文件变化。save_failed、target_changed 与 cleanup_failed 分别说明保存失败、目标身份已变化及临时文件清理未完成，只出现在保存请求。后续每次操作都重新校验。
+两个请求的结果精确为 `{ generation, operationId, state }`，身份与请求一致。state 为 `ready | revealed | saved | registered | opened | open_unsupported | open_failed | path_copied | copy_failed | save_failed | target_changed | cleanup_failed | busy | missing | restricted | changed | too_large | cancelled | timed_out | stale_security | unavailable | failed`。每种请求只有一个成功状态：`open` 为 `opened`，`reveal` 为 `revealed`，`copy_path` 为 `path_copied`，`check_current` 与 `check` 为 `ready`，`save` 为 `saved`，登记为 `registered`。`revealed` 与 `opened` 只表示系统接收了请求，`saved` 只证明选定目标已原子发布。`changed` 在 `check` 中表示与交付时不同，在其他请求中表示操作期间文件变化。save_failed、target_changed 与 cleanup_failed 分别说明保存失败、目标身份已变化及临时文件清理未完成，只出现在保存请求。后续每次操作都重新校验。
 
 `open` 只接受 Host 名单内的类型，按最后一个扩展名判定、ASCII 大小写不敏感，Renderer 不持有名单。身份解析通过之后、排入 worker 之前判定：类型不在名单或平台没有对应能力时立即返回 `open_unsupported`。HTML 交给系统默认浏览器，其余交给系统默认应用；DOCX、XLSX、PPTX 另在 worker 核对 OOXML 主部件与扩展名一致，上限 256 MiB，其余类型不读内容。系统没有接受交接时返回 `open_failed`。
+
+`copy_path` 由 Application 在主线程把系统原生格式的完整路径以 `text/plain` 写入系统剪贴板，Windows 为反斜杠且不带 `\\?\` 前缀，不加引号和换行；路径不是合法 UTF-8 或含控制字符时拒绝。系统拒绝写入时返回 `copy_failed`，不重试。响应仍只有三个字段，路径不进入响应、Snapshot 或日志。
 
 Bridge 与 Product 分别有界限制在途请求；文件读取在独立 worker，不能占普通 File Preview worker。worker 完成后 Product 以同一身份再解析一次，结果与接纳时不同即不再继续；发布结果或执行 Application 的文件 effect 前，Bridge 还必须再次证明该请求的 connection/window 仍有效且未取消。取消、断连或安全代次变化之后不补做系统动作。Renderer 换 Task、身份失效、断连或组件卸载时丢弃旧响应并取消在途请求，不持久化检查状态。`metawork.files.cancelAction` 精确输入 `{ generation, operationId }`，同步结果精确为 `{ generation, operationId, cancelled }`；boolean 只表示该连接下仍存在的请求已接受取消，不证明 worker 已物理退出；保存发布决定一旦提交，取消返回 false，不能再把实际保存结果改写为 cancelled。原异步请求只在 worker 静止后完成并释放 owned effect；关闭应用须 join 后逐一结算 responder。文件工作期限覆盖排队、复制和等待发布决定；系统保存对话框的用户选择时间不计算为文件工作。save 的 Renderer transport 不使用普通短 command timeout 催促用户选位置。超时或 transport 失败不自动重放系统动作。
 

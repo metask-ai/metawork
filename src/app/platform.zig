@@ -218,7 +218,7 @@ pub const Adapter = struct {
         fn inspect(context: *anyopaque, cancelled: *const std.atomic.Value(bool)) !void {
             const self: *FileEffect = @ptrCast(@alignCast(context));
             self.proof = switch (self.kind) {
-                .locate, .reveal => try output_file.locate(self.adapter.io, self.request(), cancelled),
+                .locate, .reveal, .copy_path => try output_file.locate(self.adapter.io, self.request(), cancelled),
                 .open => try output_file.inspectOpen(self.adapter.io, self.request(), cancelled),
             };
         }
@@ -230,6 +230,7 @@ pub const Adapter = struct {
             switch (self.kind) {
                 .locate => {},
                 .reveal => try self.reveal(),
+                .copy_path => try self.copyPath(),
                 .open => try self.open(proof),
             }
         }
@@ -238,6 +239,26 @@ pub const Adapter = struct {
             const path = try output_file.absolutePath(std.heap.c_allocator, self.root, self.relative);
             defer std.heap.c_allocator.free(path);
             try (self.adapter.native_runtime orelse return error.RuntimeUnavailable).revealPath(path);
+        }
+
+        /// The Host's only clipboard write: the path the user asked for, in
+        /// the system's own form, and nothing else. It leaves this process only
+        /// for the clipboard, never for the Bridge or a log.
+        fn copyPath(self: *FileEffect) !void {
+            const allocator = std.heap.c_allocator;
+            const absolute = try output_file.absolutePath(allocator, self.root, self.relative);
+            defer {
+                std.crypto.secureZero(u8, absolute);
+                allocator.free(absolute);
+            }
+            const path = try nativePath(allocator, if (builtin.os.tag == .windows) .windows else .posix, absolute);
+            defer {
+                std.crypto.secureZero(u8, path);
+                allocator.free(path);
+            }
+            const runtime = self.adapter.native_runtime orelse return error.RuntimeUnavailable;
+            runtime.writeClipboardData(.{ .mime_type = "text/plain", .bytes = path }) catch |err|
+                return if (err == error.UnsupportedService) err else error.ClipboardWriteFailed;
         }
 
         /// The only effect that hands the file to another program by name, so
@@ -746,23 +767,47 @@ pub const Adapter = struct {
     }
 };
 
-const DirectoryUrlStyle = enum { posix, windows };
+const PathStyle = enum { posix, windows };
+
+/// A canonical path without the verbatim prefix Windows may give it, and
+/// whether that prefix named a server.
+fn withoutVerbatimPrefix(style: PathStyle, canonical: []const u8) struct { path: []const u8, unc: bool } {
+    if (style == .windows) {
+        if (startsWithSeparated(canonical, "//?/UNC/")) return .{ .path = canonical[8..], .unc = true };
+        if (startsWithSeparated(canonical, "//?/")) return .{ .path = canonical[4..], .unc = false };
+    }
+    return .{ .path = canonical, .unc = false };
+}
+
+/// Whether a Windows path starts with `expected`, in which `/` stands for
+/// either separator.
+fn startsWithSeparated(value: []const u8, comptime expected: []const u8) bool {
+    if (value.len < expected.len) return false;
+    for (expected, value[0..expected.len]) |want, byte| {
+        if (if (want == '/') byte != '/' and byte != '\\' else want != byte) return false;
+    }
+    return true;
+}
+
+/// The path as the user would write it for another program: the system's own
+/// separators (`absolutePath` already used them), no verbatim prefix, nothing
+/// around it. Text a clipboard cannot hold exactly is refused, because a
+/// platform may otherwise write an empty string and report success.
+fn nativePath(allocator: std.mem.Allocator, style: PathStyle, canonical: []const u8) ![]u8 {
+    const plain = withoutVerbatimPrefix(style, canonical);
+    if (plain.path.len == 0 or !std.unicode.utf8ValidateSlice(plain.path)) return error.InvalidOutputPath;
+    for (plain.path) |byte| if (std.ascii.isControl(byte)) return error.InvalidOutputPath;
+    return std.mem.concat(allocator, u8, &.{ if (plain.unc) "\\\\" else "", plain.path });
+}
 
 /// Builds the `file:` URL that the system opener receives for a canonical
 /// directory. Windows decodes percent escapes in file URLs with the ANSI code
 /// page, so non-ASCII UTF-8 stays literal there (the SDK widens it to UTF-16)
 /// and only ASCII outside the RFC 3986 path set is escaped.
-fn directoryFileUrl(style: DirectoryUrlStyle, canonical: []const u8, output: []u8) error{ InvalidPath, WriteFailed }![]const u8 {
+fn directoryFileUrl(style: PathStyle, canonical: []const u8, output: []u8) error{ InvalidPath, WriteFailed }![]const u8 {
     const Path = struct {
-        fn separator(url_style: DirectoryUrlStyle, byte: u8) bool {
+        fn separator(url_style: PathStyle, byte: u8) bool {
             return byte == '/' or (url_style == .windows and byte == '\\');
-        }
-        fn prefix(value: []const u8, comptime expected: []const u8) bool {
-            if (value.len < expected.len) return false;
-            for (expected, value[0..expected.len]) |want, byte| {
-                if (if (want == '/') !separator(.windows, byte) else want != byte) return false;
-            }
-            return true;
         }
         fn literal(byte: u8) bool {
             return byte >= 0x80 or std.ascii.isAlphanumeric(byte) or switch (byte) {
@@ -771,17 +816,11 @@ fn directoryFileUrl(style: DirectoryUrlStyle, canonical: []const u8, output: []u
             };
         }
     };
-    var path = canonical;
-    var authority = false;
-    if (style == .windows) {
-        if (Path.prefix(path, "//?/UNC/")) {
-            path = path[8..];
-            authority = true;
-        } else if (Path.prefix(path, "//?/")) path = path[4..];
-    }
+    const plain = withoutVerbatimPrefix(style, canonical);
+    const path = plain.path;
     if (path.len == 0) return error.InvalidPath;
     var url = std.Io.Writer.fixed(output);
-    if (authority) {
+    if (plain.unc) {
         try url.writeAll("file://");
     } else if (path.len >= 2 and Path.separator(style, path[0]) and Path.separator(style, path[1])) {
         try url.writeAll("file:");
@@ -972,6 +1011,71 @@ test "directory file URLs keep the POSIX UTF-8 percent encoding" {
         .{ "/Users/x/a\\b", "file:///Users/x/a%5Cb" },
         .{ "//network/share", "file://network/share" },
     }) |case| try std.testing.expectEqualStrings(case[1], try directoryFileUrl(.posix, case[0], &storage));
+}
+
+test "SDK consumption copied paths are the system's own form without a verbatim prefix" {
+    for ([_]struct { PathStyle, []const u8, []const u8 }{
+        .{ .windows, "C:\\工作 区\\docs\\报告 (1).docx", "C:\\工作 区\\docs\\报告 (1).docx" },
+        .{ .windows, "\\\\?\\C:\\工作区\\a.md", "C:\\工作区\\a.md" },
+        .{ .windows, "\\\\?\\UNC\\server\\share\\a b.md", "\\\\server\\share\\a b.md" },
+        .{ .windows, "\\\\server\\share\\a.md", "\\\\server\\share\\a.md" },
+        .{ .posix, "/Users/x/工作 区/a'\"b.md", "/Users/x/工作 区/a'\"b.md" },
+        .{ .posix, "//?/C:/a.md", "//?/C:/a.md" },
+    }) |case| {
+        const path = try nativePath(std.testing.allocator, case[0], case[1]);
+        defer std.testing.allocator.free(path);
+        try std.testing.expectEqualStrings(case[2], path);
+    }
+    for ([_][]const u8{ "", "\\\\?\\", "/a/\xff.md", "/a/line\nbreak", "/a/\x00" }) |path|
+        try std.testing.expectError(error.InvalidOutputPath, nativePath(std.testing.allocator, .windows, path));
+}
+
+test "SDK consumption copying a path writes exactly that text to the clipboard and reports what the platform refused" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "结果 1", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "结果 1/报告.md", .data = "text" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var adapter = Adapter.init(io, std.Thread.getCurrentId());
+    adapter.native_runtime = &harness.runtime;
+    const port = adapter.fileEffects();
+    var effect = try port.prepare_fn(port.context, root, "结果 1/报告.md", .copy_path);
+    defer effect.deinit();
+    var worker: TestFileEffect = .{ .effect = &effect };
+    try std.testing.expectError(error.RestrictedOutput, effect.perform_fn(effect.context));
+    try worker.inspect();
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.clipboard_write_count);
+    try effect.perform_fn(effect.context);
+    const expected = try std.fs.path.join(std.testing.allocator, &.{ root, "结果 1", "报告.md" });
+    defer std.testing.allocator.free(expected);
+    var buffer: [4096]u8 = undefined;
+    try std.testing.expectEqualStrings(expected, try harness.runtime.readClipboardData("text/plain", &buffer));
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.clipboard_write_count);
+
+    // Only the main thread performs it, and only a written clipboard is success.
+    const Foreign = struct {
+        effect: *control_ports.OwnedFileEffect,
+        result: anyerror!void = error.NotStarted,
+        fn run(self: *@This()) void {
+            self.result = self.effect.perform_fn(self.effect.context);
+        }
+        fn refused(_: ?*anyopaque, _: native_sdk.platform.ClipboardData) anyerror!void {
+            return error.ClipboardFailed;
+        }
+    };
+    var foreign: Foreign = .{ .effect = &effect };
+    const thread = try std.Thread.spawn(.{}, Foreign.run, .{&foreign});
+    thread.join();
+    try std.testing.expectError(error.InvalidThread, foreign.result);
+    harness.runtime.options.platform.services.write_clipboard_data_fn = Foreign.refused;
+    try std.testing.expectError(error.ClipboardWriteFailed, effect.perform_fn(effect.context));
+    adapter.native_runtime = null;
+    try std.testing.expectError(error.RuntimeUnavailable, effect.perform_fn(effect.context));
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.clipboard_write_count);
 }
 
 test "SDK consumption project directory opening classifies failures and preserves navigation policy" {

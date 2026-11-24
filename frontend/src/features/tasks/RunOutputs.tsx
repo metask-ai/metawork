@@ -16,7 +16,8 @@ export type OutputEditHandler = (
   runId: string,
   outputId: string,
 ) => OutputEditResult;
-type RowAction = Exclude<FileAction, "check_current"> | "edit" | "preview";
+type RowAction =
+  Exclude<FileAction, "check_current" | "copy_path"> | "edit" | "preview";
 type OutputPreview = (
   taskId: string,
   path: string,

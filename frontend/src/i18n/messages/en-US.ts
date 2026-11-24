@@ -1363,6 +1363,8 @@ export const enUS = {
     "This type of file cannot be opened in the default app. Use “Open folder”.",
   "outputs.state.open_failed":
     "The system did not open this file. It may have no associated app.",
+  "outputs.state.path_copied": "Path copied",
+  "outputs.state.copy_failed": "Could not copy. Try again.",
   "outputs.state.opened": "Sent to the default application",
   "outputs.updated": "File changed during this turn",
   "outputs.hidden_path": "File path hidden",

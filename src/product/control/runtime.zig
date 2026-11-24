@@ -1939,6 +1939,7 @@ pub const Runtime = struct {
                 .check => null,
                 .open => .open,
                 .reveal => .reveal,
+                .copy_path => .copy_path,
                 .check_current => .locate,
                 .save => unreachable,
             },
@@ -2072,6 +2073,7 @@ pub const Runtime = struct {
                     break :performed switch (value.action) {
                         .open => .opened,
                         .reveal => .revealed,
+                        .copy_path => .path_copied,
                         .check, .check_current => .ready,
                         .save => unreachable,
                     };
@@ -24173,6 +24175,8 @@ const FileActionHarness = struct {
     requester_active: bool = true,
     kind: control_ports.FileEffect = .locate,
     reveals: usize = 0,
+    copies: usize = 0,
+    copy_error: ?anyerror = null,
     opens: usize = 0,
     results: [32]?FileActionResult = @splat(null),
     count: usize = 0,
@@ -24224,6 +24228,10 @@ const FileActionHarness = struct {
         switch (self.kind) {
             .locate => {},
             .reveal => self.reveals += 1,
+            .copy_path => {
+                if (self.copy_error) |err| return err;
+                self.copies += 1;
+            },
             .open => self.opens += 1,
         }
     }
@@ -24476,8 +24484,21 @@ test "File actions locate any identity without reading it, and act once on the m
         try harness.drainAll(control);
         try std.testing.expectEqual(FileActionState.opened, harness.lastState());
         try std.testing.expectEqual(index, harness.opens);
+        id += 1;
+        try std.testing.expect(control.beginFileAction(id, target, .copy_path) == .queued);
+        try harness.drainAll(control);
+        try std.testing.expectEqual(FileActionState.path_copied, harness.lastState());
+        try std.testing.expectEqual(index, harness.copies);
     }
     try std.testing.expectEqual(targets.len, harness.reveals);
+    // A refused clipboard is told apart from a file that could not be reached.
+    harness.copy_error = error.ClipboardWriteFailed;
+    id += 1;
+    try std.testing.expect(control.beginFileAction(id, targets[0], .copy_path) == .queued);
+    try harness.drainAll(control);
+    try std.testing.expectEqual(FileActionState.copy_failed, harness.lastState());
+    try std.testing.expectEqual(targets.len, harness.copies);
+    harness.copy_error = null;
     try std.testing.expectEqual(@as(usize, 0), harness.inspections.load(.acquire));
     try std.testing.expectEqual(id, harness.locates.load(.acquire));
     try std.testing.expectEqual(id, harness.releases);
@@ -24607,6 +24628,9 @@ test "File actions drop their effect when anything admitted changed before the m
         .{ .target = reference, .action = .reveal },
         .{ .target = workspace, .action = .reveal },
         .{ .target = testOutput(@splat(3)), .action = .reveal },
+        .{ .target = reference, .action = .copy_path },
+        .{ .target = workspace, .action = .copy_path },
+        .{ .target = testOutput(@splat(3)), .action = .copy_path },
         .{ .target = reference, .action = .open },
         .{ .target = workspace, .action = .open },
         .{ .target = testOutput(@splat(3)), .action = .open },
@@ -24637,6 +24661,7 @@ test "File actions drop their effect when anything admitted changed before the m
         harness.requester_active = true;
     };
     try std.testing.expectEqual(@as(usize, 0), harness.reveals);
+    try std.testing.expectEqual(@as(usize, 0), harness.copies);
     try std.testing.expectEqual(@as(usize, 0), harness.opens);
     try std.testing.expectEqual(id, harness.releases);
 }

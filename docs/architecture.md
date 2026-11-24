@@ -74,6 +74,8 @@ Renderer 是随 MetaWork 桌面应用一同构建、签名和发布的可信 UI 
 
 Renderer 唯一可直接执行的标准 WebView 系统写入是 secure packaged origin 内、由用户手势触发的 Clipboard API 写入。它只承载已经进入 canonical Product projection 的 terminal final/partial response Markdown、由同一 Markdown 安全渲染得到的语义 HTML，或该 response 内可见代码块的纯文本；不得主动读取系统剪贴板、写入 provisional/commentary/Tool/状态、从页面 DOM 反取内容、截断后报告成功，或把这条登记扩展为任意 Web API 系统 effect。双格式写入必须由一个 `ClipboardItem` 原子提交；只有运行环境明确缺少多 MIME 能力时才可完整降级为 `writeText(Markdown)`，权限、容量、转换或系统拒绝必须显式失败。
 
+Host 只有一种系统剪贴板写入：用户从文件菜单显式选择复制路径后，Application 在原生主线程经 Native SDK Runtime API 以 `text/plain` 写入该工作区文件的完整路径，系统原生格式，不带 Windows 的 `\\?\` 前缀。写入前 Product 以同一文件身份再解析一次，Bridge 再确认请求仍有效；Host 不读取系统剪贴板，路径不进入 Bridge 响应、Renderer、Snapshot 或日志，失败显式返回。
+
 标准 WebView `paste` 事件只允许 Renderer 在普通 Composer 的用户显式粘贴处理中取得本次交付的图片 File，并按[文件附件合同](renderer-bridge-contract.md#文件-attachment-commands)传入既有有界字节接收链路。数据不得进入持久化草稿或日志；不开放主动 Clipboard API read、全局剪贴板监听、HTML 解析或远程资源读取，不授予路径、系统 effect 或 Product authority。
 
 ### 3.2 Bridge

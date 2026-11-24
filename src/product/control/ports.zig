@@ -438,7 +438,7 @@ pub const NativeDialog = struct {
     };
 };
 
-pub const FileEffect = enum { locate, reveal, open };
+pub const FileEffect = enum { locate, reveal, copy_path, open };
 pub const FileOpenKind = product_task.FileOpenKind;
 
 /// Effects on one currently authorized Workspace file. `inspect_fn` runs on the

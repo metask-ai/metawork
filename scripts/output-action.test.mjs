@@ -85,6 +85,7 @@ test("File actions address every identity by the same command and carry no path 
   const done = {
     open: "opened",
     reveal: "revealed",
+    copy_path: "path_copied",
     check_current: "ready",
     save: "saved",
     check: "ready",
@@ -135,12 +136,20 @@ test("File actions address every identity by the same command and carry no path 
 });
 
 test("A file action accepts only its own success and the failures it can have", async () => {
-  const success = ["opened", "revealed", "ready", "saved", "registered"];
+  const success = [
+    "opened",
+    "revealed",
+    "path_copied",
+    "ready",
+    "saved",
+    "registered",
+  ];
   const saveOnly = ["save_failed", "target_changed", "cleanup_failed"];
   const shared = ["busy", "missing", "restricted", "changed", "failed"];
   const done = {
     open: "opened",
     reveal: "revealed",
+    copy_path: "path_copied",
     check_current: "ready",
     save: "saved",
     check: "ready",

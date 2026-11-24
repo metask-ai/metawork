@@ -129,6 +129,7 @@ const defaultCommandTimeoutMs = 10000;
 const completedFileState: Record<FileAction | "register", FileActionState> = {
   open: "opened",
   reveal: "revealed",
+  copy_path: "path_copied",
   check_current: "ready",
   save: "saved",
   check: "ready",

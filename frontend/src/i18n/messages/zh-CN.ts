@@ -1179,6 +1179,8 @@ export const zhCN: Record<MessageId, string> = {
   "outputs.state.open_unsupported":
     "这种类型的文件不能在默认应用打开，请用“打开文件夹”。",
   "outputs.state.open_failed": "系统没有打开这个文件，可能没有关联的应用。",
+  "outputs.state.path_copied": "已复制路径",
+  "outputs.state.copy_failed": "复制失败，请重试。",
   "outputs.state.opened": "已交给默认应用",
   "outputs.updated": "本轮期间文件已更新",
   "outputs.hidden_path": "文件路径已隐藏",

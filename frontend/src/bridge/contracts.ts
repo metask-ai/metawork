@@ -981,6 +981,8 @@ export const fileActionStates = [
   "opened",
   "open_unsupported",
   "open_failed",
+  "path_copied",
+  "copy_failed",
   "save_failed",
   "target_changed",
   "cleanup_failed",
@@ -996,7 +998,8 @@ export const fileActionStates = [
   "failed",
 ] as const;
 export type FileActionState = (typeof fileActionStates)[number];
-export type FileAction = "open" | "reveal" | "check_current" | "save" | "check";
+export type FileAction =
+  "open" | "reveal" | "copy_path" | "check_current" | "save" | "check";
 export type FileActionHandler = (
   target: FileTarget,
   action: FileAction,
