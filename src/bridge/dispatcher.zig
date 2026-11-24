@@ -22,7 +22,7 @@ const attachment_grant = @import("attachment_grant.zig");
 const notification_text = @import("notification_text.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 27;
+const async_product_handler_count = 28;
 const file_action_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
@@ -283,7 +283,7 @@ pub const Dispatcher = struct {
     };
     const PreviewMedia = struct { token: []const u8, media: product_control.FilePreviewMedia };
     const PreviewInFlight = struct {
-        directory: bool = false,
+        answer: enum { preview, directory, description } = .preview,
         active: bool = false,
         generation: u64 = 0,
         window_id: native_sdk.platform.WindowId = 0,
@@ -585,6 +585,7 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[8] = .{ .name = commands.release_preview, .context = self, .invoke_fn = releasePreview };
         self.registered_async_handlers[9] = .{ .name = commands.file_action, .context = self, .invoke_fn = fileAction };
         self.registered_async_handlers[26] = .{ .name = commands.register_output, .context = self, .invoke_fn = registerOutput };
+        self.registered_async_handlers[27] = .{ .name = commands.describe_file, .context = self, .invoke_fn = describeFile };
         self.registered_async_handlers[10] = .{ .name = commands.list_directory, .context = self, .invoke_fn = listDirectory };
         self.registered_async_handlers[12] = .{ .name = commands.choose_workspace, .context = self, .invoke_fn = chooseWorkspace };
         self.registered_async_handlers[13] = .{ .name = commands.choose_automatic_workspace_root, .context = self, .invoke_fn = chooseAutomaticWorkspaceRoot };
@@ -1669,6 +1670,37 @@ pub const Dispatcher = struct {
             .immediate => |state| self.completeFilePreview(.{ .completion_id = id, .state = state, .content = "", .truncated = false, .redacted = false }),
         }
     }
+    fn describeFile(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginDescription(invocation, responder) catch {
+            respondFileDescription(responder, invocation.request.id, .failed, null);
+        };
+    }
+    fn beginDescription(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.FilePreviewRequest, invocation.request.payload);
+        defer parsed.deinit();
+        const key = try self.requirePreviewKey(invocation, parsed.value.generation, parsed.value.previewId);
+        if (key.preview_id <= self.preview_high_water) return error.InvalidBridgePayload;
+        self.preview_high_water = key.preview_id;
+        const control = try self.requireProductControl();
+        const id = self.reserveFilePreview(responder, invocation.request.id) orelse {
+            respondFileDescription(responder, invocation.request.id, .busy, null);
+            return;
+        };
+        for (&self.preview_in_flight) |*slot| if (slot.active and slot.completion_id == id) {
+            slot.generation = key.generation;
+            slot.preview_id = key.preview_id;
+            slot.window_id = invocation.source.window_id;
+            slot.answer = .description;
+            break;
+        };
+        switch (control.beginFileDescription(id, parsed.value.target.value)) {
+            .queued => self.updatePreviewTimer(),
+            .immediate => |state| self.completeFilePreview(.{ .completion_id = id, .state = state, .content = "", .truncated = false, .redacted = false }),
+        }
+    }
     fn listDirectory(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         self.beginListDirectory(invocation, responder) catch {
@@ -1696,7 +1728,7 @@ pub const Dispatcher = struct {
             slot.generation = key.generation;
             slot.preview_id = key.preview_id;
             slot.window_id = invocation.source.window_id;
-            slot.directory = true;
+            slot.answer = .directory;
             break;
         };
         switch (control.beginDirectory(id, .{ .task_id = task_id, .workspace_id = workspace_id, .workspace_epoch = workspace_epoch, .path = parsed.value.path })) {
@@ -1747,7 +1779,7 @@ pub const Dispatcher = struct {
                     _ = control.releaseFilePreview(media.id);
                 };
             }
-            if (pending.directory) respondDirectory(pending.responder, pending.request_id_storage[0..pending.request_id_len], state, result.entries, result.truncated, result.redacted) else respondFilePreview(pending.responder, pending.request_id_storage[0..pending.request_id_len], state, result.content, result.truncated, result.redacted, descriptor);
+            answerPreview(&pending, state, result, descriptor);
             if (pending.release_waiter) |waiter| respondPreviewRelease(waiter.responder, waiter.request_id[0..waiter.request_len], pending.generation, pending.preview_id);
             self.updatePreviewTimer();
             return;
@@ -1755,6 +1787,15 @@ pub const Dispatcher = struct {
         if (result.media) |media| if (self.control) |control| {
             _ = control.releaseFilePreview(media.id);
         };
+    }
+    /// One request, one answer, in the shape it asked for.
+    fn answerPreview(pending: *const PreviewInFlight, state: product_control.FilePreviewState, result: product_control.FilePreviewResult, media: ?PreviewMedia) void {
+        const request_id = pending.request_id_storage[0..pending.request_id_len];
+        switch (pending.answer) {
+            .preview => respondFilePreview(pending.responder, request_id, state, result.content, result.truncated, result.redacted, media),
+            .directory => respondDirectory(pending.responder, request_id, state, result.entries, result.truncated, result.redacted),
+            .description => respondFileDescription(pending.responder, request_id, state, result.description),
+        }
     }
     fn respondPreviewRelease(responder: native_sdk.bridge.AsyncResponder, id: []const u8, generation: u64, preview_id: u64) void {
         var buffer: [180]u8 = undefined;
@@ -2007,7 +2048,7 @@ pub const Dispatcher = struct {
             if (!slot.active) continue;
             const pending = slot.*;
             slot.* = .{};
-            if (pending.directory) respondDirectory(pending.responder, pending.request_id_storage[0..pending.request_id_len], .failed, &.{}, false, false) else respondFilePreview(pending.responder, pending.request_id_storage[0..pending.request_id_len], .failed, "", false, false, null);
+            answerPreview(&pending, .failed, .{ .completion_id = pending.completion_id, .state = .failed, .content = "", .truncated = false, .redacted = false }, null);
             if (pending.release_waiter) |waiter| respondPreviewRelease(waiter.responder, waiter.request_id[0..waiter.request_len], pending.generation, pending.preview_id);
         }
     }
@@ -2042,6 +2083,42 @@ pub const Dispatcher = struct {
             .unsupported, .image_limit, .animated_image => "unsupported",
             .changing => "changing",
             .failed => "error",
+        };
+    }
+
+    /// `ready` is the only state with a file, and the file carries no content,
+    /// path or digest.
+    fn respondFileDescription(responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, state: product_control.FilePreviewState, description: ?product_control.FileDescription) void {
+        var buffer: [256]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        const described = if (state == .ready) description else null;
+        writeFileDescription(&writer, if (state == .ready and described == null) .failed else state, described) catch unreachable;
+        responder.success(request_id, writer.buffered()) catch {};
+    }
+
+    fn writeFileDescription(writer: *std.Io.Writer, state: product_control.FilePreviewState, description: ?product_control.FileDescription) !void {
+        try writer.print("{{\"state\":\"{s}\",\"file\":", .{fileDescriptionStateName(state)});
+        if (description) |file| {
+            try writer.print("{{\"kind\":\"{s}\",\"sizeBytes\":\"{d}\"", .{ @tagName(file.kind), file.size_bytes });
+            switch (file.kind) {
+                .image => |image| try writer.print(",\"width\":{d},\"height\":{d}", .{ image.width, image.height }),
+                .video => {},
+                .file => |value| try writer.print(",\"previewable\":{}", .{value.previewable}),
+            }
+            try writer.writeAll("}}");
+        } else try writer.writeAll("null}");
+    }
+
+    /// Every content outcome is a ready description, so the states left are
+    /// about reaching the file.
+    fn fileDescriptionStateName(state: product_control.FilePreviewState) []const u8 {
+        return switch (state) {
+            .ready => "ready",
+            .busy => "busy",
+            .missing => "missing",
+            .restricted, .unsupported, .image_limit, .animated_image => "restricted",
+            .changing => "changing",
+            .stale_security, .failed => "error",
         };
     }
 
@@ -7396,13 +7473,26 @@ test "file preview native grants bind authority and cancellation and expire with
     try opened.wait(&boundary, 8);
     try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"image\"") != null);
     try released.invoke(native, commands.release_preview, "{\"generation\":\"2\",\"previewId\":\"8\"}");
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"9\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
+    // A description shares the id space and the lane, and holds no grant: the
+    // one still open here is the preview before it.
+    try released.invoke(native, commands.release_preview, "{\"generation\":\"2\",\"previewId\":\"6\"}");
+    try std.testing.expect(!control.hasFilePreviews());
+    const describe = "{\"generation\":\"2\",\"previewId\":\"10\",\"target\":{\"kind\":\"workspace\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"image.jpg\"}}";
+    try opened.invoke(native, commands.describe_file, describe);
+    try opened.wait(&boundary, 9);
+    try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"file\":{\"kind\":\"image\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "token") == null and std.mem.indexOf(u8, opened.response.?, "image.jpg") == null);
+    try std.testing.expect(!control.hasFilePreviews());
+    for (boundary.preview_grants) |entry| try std.testing.expect(entry == null);
+    try opened.invoke(native, commands.describe_file, describe);
+    try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"state\":\"error\",\"file\":null") != null);
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"11\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     control.beginShutdown();
     boundary.stopIngress();
     control.shutdownFilePreviewExecutor();
     control.drainFilePreviewCompletions(boundary.filePreviewSink());
     boundary.settleFilePreviewsForShutdown();
-    try std.testing.expectEqual(@as(usize, 9), opened.calls);
+    try std.testing.expectEqual(@as(usize, 11), opened.calls);
     try std.testing.expect(!control.hasFilePreviews());
     boundary.assertQuiescent();
 }
@@ -7637,6 +7727,36 @@ test "file preview async response preserves the exact bounded wire shape" {
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, video.value.object.get("result").?, .{});
     defer std.testing.allocator.free(encoded);
     try std.testing.expectEqualStrings(std.mem.trimEnd(u8, @embedFile("file_preview_video.fixture"), "\r\n"), encoded);
+
+    const described = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("file_description.fixture"), .{});
+    defer described.deinit();
+    const Description = product_control.FileDescription;
+    const Described = struct { name: []const u8, state: product_control.FilePreviewState, description: ?Description = null };
+    for ([_]Described{
+        .{ .name = "image", .state = .ready, .description = .{ .size_bytes = 10 * 1024 * 1024, .kind = .{ .image = .{ .width = 1600, .height = 1200 } } } },
+        .{ .name = "video", .state = .ready, .description = .{ .size_bytes = 1546, .kind = .video } },
+        .{ .name = "text", .state = .ready, .description = .{ .size_bytes = 0, .kind = .{ .file = .{ .previewable = true } } } },
+        .{ .name = "opaque", .state = .ready, .description = .{ .size_bytes = std.math.maxInt(u64), .kind = .{ .file = .{ .previewable = false } } } },
+        // Only a ready answer carries a file, whatever came with another one.
+        .{ .name = "busy", .state = .busy, .description = .{ .size_bytes = 1, .kind = .video } },
+        .{ .name = "missing", .state = .missing },
+        .{ .name = "restricted", .state = .restricted },
+        .{ .name = "restricted", .state = .unsupported },
+        .{ .name = "changing", .state = .changing },
+        .{ .name = "error", .state = .failed },
+        .{ .name = "error", .state = .stale_security },
+        .{ .name = "error", .state = .ready },
+    }) |case| {
+        capture.reset();
+        Dispatcher.respondFileDescription(responder, "describe", case.state, case.description);
+        var answer = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+        defer answer.deinit();
+        const actual = try std.json.Stringify.valueAlloc(std.testing.allocator, answer.value.object.get("result").?, .{});
+        defer std.testing.allocator.free(actual);
+        const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, described.value.object.get(case.name).?, .{});
+        defer std.testing.allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
 }
 
 test "file preview workspace directory response matches the cross language fixture" {

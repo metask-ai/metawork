@@ -7,6 +7,7 @@ import type { NativeSdkJson } from "@native-sdk/cli";
 import { maxPreviewVideoBytes } from "./contracts.ts";
 import type {
   AttachmentThumbnailResult,
+  FileDescriptionResult,
   FilePreview,
   FilePreviewLoadOptions,
   FilePreviewResponse,
@@ -18,6 +19,7 @@ import type {
 import { commands } from "./commands.ts";
 import {
   decodeAttachmentThumbnail,
+  decodeFileDescription,
   decodeFilePreview,
   decodePreviewChunk,
   decodePreviewRelease,
@@ -223,13 +225,48 @@ export class FilePreviewLoader {
       options.signal?.removeEventListener("abort", abort);
     }
   }
-  async listDirectory(
+  listDirectory(
     taskId: string,
     workspaceId: string,
     workspaceEpoch: string,
     path: string,
     options: FilePreviewLoadOptions = {},
   ): Promise<WorkspaceDirectory> {
+    return this.ask(
+      commands.listDirectory,
+      { taskId, workspaceId, workspaceEpoch, path },
+      (value) => {
+        const result = decodeWorkspaceDirectory(value);
+        return result.state === "busy" ? null : result;
+      },
+      { ...options, priority: "interactive" },
+    );
+  }
+  /// What a file is right now. The same request shape, ids and preparation
+  /// slots as a preview of it, and nothing to release afterwards.
+  describe(
+    target: FileTarget,
+    options: FilePreviewLoadOptions = {},
+  ): Promise<FileDescriptionResult> {
+    return this.ask(
+      commands.describeFile,
+      { target },
+      (value) => {
+        const result = decodeFileDescription(value);
+        return result.state === "busy" ? null : result;
+      },
+      options,
+    );
+  }
+  /// One answer that holds no Host resource: cancelled with its caller, asked
+  /// again while the Host is busy, and over with its own deadline.
+  private async ask<Result>(
+    command: string,
+    request: Record<string, NativeSdkJson>,
+    /// Null while the Host is busy.
+    decode: (value: unknown) => Result | null,
+    options: FilePreviewLoadOptions,
+  ): Promise<Result> {
     const controller = new AbortController();
     const session = this.session.signal;
     const abort = () => controller.abort();
@@ -244,35 +281,33 @@ export class FilePreviewLoader {
       for (;;) {
         check(controller.signal);
         if (generation !== this.generation()) throw abortError();
-        const release = await this.preparations.acquire(
-          controller.signal,
-          true,
-        );
-        const previewId = String(this.nextId++);
-        const cancel = () => {
-          void this.invoke(commands.releasePreview, {
-            generation,
-            previewId,
-          }).catch(() => {});
-        };
-        controller.signal.addEventListener("abort", cancel, { once: true });
-        try {
-          check(controller.signal);
-          const result = decodeWorkspaceDirectory(
-            await this.invoke(commands.listDirectory, {
+        // A full queue in this window reads as a busy Host: ask again later.
+        const release = await this.preparations
+          .acquire(controller.signal, options.priority === "interactive")
+          .catch((error: unknown) => {
+            if (error instanceof Capacity) return null;
+            throw error;
+          });
+        if (release) {
+          const previewId = String(this.nextId++);
+          const cancel = () => {
+            void this.invoke(commands.releasePreview, {
               generation,
               previewId,
-              taskId,
-              workspaceId,
-              workspaceEpoch,
-              path,
-            }),
-          );
-          check(controller.signal);
-          if (result.state !== "busy") return result;
-        } finally {
-          release();
-          controller.signal.removeEventListener("abort", cancel);
+            }).catch(() => {});
+          };
+          controller.signal.addEventListener("abort", cancel, { once: true });
+          try {
+            check(controller.signal);
+            const result = decode(
+              await this.invoke(command, { generation, previewId, ...request }),
+            );
+            check(controller.signal);
+            if (result !== null) return result;
+          } finally {
+            release();
+            controller.signal.removeEventListener("abort", cancel);
+          }
         }
         await delay(
           Math.min(1000, 100 * 2 ** Math.min(busy++, 4)),

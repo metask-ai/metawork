@@ -63,6 +63,7 @@ pub const ViewReceiptQuery = runtime_impl.ViewReceiptQuery;
 pub const TestSupport = runtime_impl.TestSupport;
 pub const ChangeNotifier = runtime_impl.ChangeNotifier;
 pub const FileAction = runtime_impl.FileAction;
+pub const FileDescription = runtime_impl.FileDescription;
 pub const NativeDialog = runtime_impl.NativeDialog;
 pub const McpApproval = runtime_impl.McpApproval;
 pub const McpHostOutcome = runtime_impl.McpHostOutcome;

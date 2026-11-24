@@ -1140,7 +1140,18 @@ pub const FilePreviewMedia = struct {
     media_type: []const u8,
     security_epoch: u64,
 };
+pub const FileDescription = file_preview.Description;
+
+comptime {
+    // A generated video and a delivered one are played by the same element
+    // from the same slot, so there is one size to hold.
+    if (file_preview.max_video_bytes != lifecycle.max_generated_video_bytes)
+        @compileError("a generated video and a recognized one no longer share a size limit");
+}
+
 pub const FilePreviewResult = struct {
+    /// Of a description request that is ready, and only of that.
+    description: ?FileDescription = null,
     entries: []const DirectoryEntry = &.{},
     media: ?FilePreviewMedia = null,
     completion_id: u64,
@@ -2154,22 +2165,32 @@ pub const Runtime = struct {
         var scratch: [file_target.max_path_bytes]u8 = undefined;
         const location = self.resolveFileTarget(target, &scratch) catch |err|
             return .{ .immediate = filePreviewAuthorityState(err) };
-        return self.queueFilePreview(completion_id, .{ .file = target }, location);
+        return self.queueFilePreview(completion_id, .deliver, .{ .file = target }, location);
+    }
+
+    /// What a file is right now, from the same read and the same judgement a
+    /// preview of it makes, and nothing of its content.
+    pub fn beginFileDescription(self: *Runtime, completion_id: u64, target: FileTarget) FilePreviewAdmission {
+        var scratch: [file_target.max_path_bytes]u8 = undefined;
+        const location = self.resolveFileTarget(target, &scratch) catch |err|
+            return .{ .immediate = filePreviewAuthorityState(err) };
+        return self.queueFilePreview(completion_id, .describe, .{ .file = target }, location);
     }
 
     pub fn beginDirectory(self: *Runtime, completion_id: u64, target: FileTarget.Workspace) FilePreviewAdmission {
         const location = self.resolveDirectory(target) catch |err|
             return .{ .immediate = filePreviewAuthorityState(err) };
-        return self.queueFilePreview(completion_id, .{ .directory = target }, location);
+        return self.queueFilePreview(completion_id, .deliver, .{ .directory = target }, location);
     }
 
-    fn queueFilePreview(self: *Runtime, completion_id: u64, subject: file_preview.Subject, location: file_target.Location) FilePreviewAdmission {
+    fn queueFilePreview(self: *Runtime, completion_id: u64, mode: file_preview.Mode, subject: file_preview.Subject, location: file_target.Location) FilePreviewAdmission {
         if (self.preview_executor_shutdown) return .{ .immediate = .failed };
         self.preview_lane.begin(.{
+            .mode = mode,
             .subject = subject,
             .location = location,
             .completion_id = completion_id,
-            .max_bytes = if (location.generated_video) lifecycle.max_generated_video_bytes else self.limits.max_file_preview_bytes,
+            .max_bytes = self.limits.max_file_preview_bytes,
             .max_lines = self.limits.max_file_preview_lines,
             .max_line_bytes = self.limits.max_file_preview_line_bytes,
         }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
@@ -2265,7 +2286,7 @@ pub const Runtime = struct {
             .derived => unreachable,
             .unavailable => |availability| return .{ .immediate = mediaUnavailableState(availability) },
         };
-        return self.queueFilePreview(completion_id, switch (target) {
+        return self.queueFilePreview(completion_id, .deliver, switch (target) {
             .draft_attachment => |attachment_id| .{ .draft_attachment = attachment_id },
             .run_attachment => |value| .{ .task_attachment = value.task_id },
             .submission_attachment => |value| .{ .task_attachment = value.task_id },
@@ -2336,6 +2357,13 @@ pub const Runtime = struct {
             var state = self.filePreviewAuthority(raw);
             if (state == .ready) state = raw.state;
             if (self.shutting_down or self.preview_executor_shutdown or self.preview_lane.wasCancelled(taken)) state = .failed;
+            if (raw.mode == .describe) {
+                // Nothing the file holds leaves the lane, so there is nothing
+                // to scan: a preview of it still makes its own checks.
+                sink.complete_fn(sink.context, .{ .completion_id = raw.completion_id, .state = state, .content = "", .description = if (state == .ready) raw.description else null, .truncated = false, .redacted = false });
+                self.preview_lane.release(taken);
+                continue;
+            }
             if (raw.subject == .directory) {
                 var safe_entries: [file_preview.max_directory_entries]DirectoryEntry = undefined;
                 var count: usize = 0;
@@ -2357,7 +2385,7 @@ pub const Runtime = struct {
                 self.preview_lane.release(taken);
                 continue;
             }
-            if (state == .ready and (raw.image_info != null or raw.location.generated_video)) {
+            if (state == .ready and (raw.image_info != null or raw.video)) {
                 if (self.projection_security_epoch == 0) state = .failed else {
                     const overlap = self.filePreviewCredentialOverlap() catch {
                         self.preview_lane.release(taken);
@@ -20286,11 +20314,13 @@ const PreviewTestCapture = struct {
     calls: usize = 0,
     state: FilePreviewState = .failed,
     image: ?FilePreviewMedia = null,
+    description: ?FileDescription = null,
     fn receive(context: *anyopaque, result: FilePreviewResult) void {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.calls += 1;
         self.state = result.state;
         self.image = result.media;
+        self.description = result.description;
         std.debug.assert(result.content.len == 0);
     }
     fn sink(self: *@This()) FilePreviewSink {
@@ -20384,6 +20414,52 @@ test "file preview delivers nothing when the same target resolves to another fil
     try capture.wait(control);
     try std.testing.expectEqual(FilePreviewState.restricted, capture.state);
     try std.testing.expect(!control.hasFilePreviews());
+}
+
+test "file preview describes and delivers a delivered video in place and leaves a Workspace path as a file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const bytes = "\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2 SECRET-KEY is never read to describe";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "clip.mp4", .data = bytes });
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
+    defer control.deinit();
+    try recordTestOutput(control, @splat(3), "clip.mp4");
+    const output: FileTarget = .{ .output = .{ .task_id = 3, .run_id = 7, .id = @splat(3) } };
+    var capture: PreviewTestCapture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFileDescription(1, output));
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.ready, capture.state);
+    try std.testing.expectEqualDeep(FileDescription{ .size_bytes = bytes.len, .kind = .video }, capture.description.?);
+    try std.testing.expect(capture.image == null and !control.hasFilePreviews());
+    capture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFileDescription(2, .{ .workspace = testWorkspacePath(3, 1, "clip.mp4") }));
+    try capture.wait(control);
+    try std.testing.expectEqualDeep(FileDescription{ .size_bytes = bytes.len, .kind = .{ .file = .{ .previewable = false } } }, capture.description.?);
+    // Delivering it still scans every byte the video holds.
+    capture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(3, output));
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.restricted, capture.state);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "clip.mp4", .data = bytes[0..24] });
+    capture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(4, output));
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.ready, capture.state);
+    try std.testing.expectEqualStrings("video/mp4", capture.image.?.media_type);
+    try std.testing.expect(control.releaseFilePreview(4));
+
+    // A description answers to the same authority as the file itself.
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .missing }, control.beginFileDescription(5, .{ .output = .{ .task_id = 3, .run_id = 7, .id = @splat(4) } }));
+    capture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFileDescription(6, output));
+    product_workspace.testing.setAuthorization(&control.workspace, 2, .removing);
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.restricted, capture.state);
+    try std.testing.expect(capture.description == null and !control.hasFilePreviews());
 }
 
 test "file preview workspace directory authority redacts names and rejects stale workspace bindings" {

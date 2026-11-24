@@ -9,6 +9,8 @@ pub const max_image_slots: usize = 2;
 pub const max_image_held_bytes: usize = max_image_slots * max_image_source_bytes;
 pub const max_image_pixels: u64 = 4096 * 4096;
 pub const max_image_side: u32 = 8192;
+pub const min_video_bytes: u64 = 16;
+pub const max_video_bytes: u64 = 64 * 1024 * 1024;
 pub const media_chunk_bytes: usize = 262143;
 pub const max_media_slots: usize = max_image_slots + 1;
 pub const ImageInfo = image_container.Info;
@@ -29,6 +31,16 @@ pub const Subject = union(enum) {
     /// still be the image staging classified.
     fn storeOwned(self: Subject) bool {
         return self == .draft_attachment or self == .task_attachment;
+    }
+
+    /// Only an identity the reply plays in place is read as a video. A path
+    /// in the file tree or a plain link shows one the way it shows any file it
+    /// cannot show.
+    fn video(self: Subject, location: file_target.Location) VideoRule {
+        return switch (self) {
+            .file => |target| if (location.generated_video) .generated else if (target == .output) .recognized else .none,
+            .directory, .draft_attachment, .task_attachment => .none,
+        };
     }
 
     /// A recorded reference opens its locator as it was recorded. Every other
@@ -111,7 +123,24 @@ pub const State = enum {
     failed,
 };
 
+/// Delivering a preview and describing the same file are one read and one
+/// judgement. Describing keeps what was found and none of the bytes.
+pub const Mode = enum { deliver, describe };
+
+/// What a file is, by the content it holds right now. `previewable` is whether
+/// a Workspace preview of it would show anything; an image always does, and a
+/// video is played where it is.
+pub const Description = struct {
+    size_bytes: u64,
+    kind: union(enum) {
+        image: struct { width: u32, height: u32 },
+        video,
+        file: struct { previewable: bool },
+    },
+};
+
 pub const Input = struct {
+    mode: Mode = .deliver,
     subject: Subject,
     /// Frozen at admission. A store-owned subject has no Workspace id or epoch.
     location: file_target.Location,
@@ -122,8 +151,13 @@ pub const Input = struct {
 };
 
 pub const Completion = struct {
+    mode: Mode = .deliver,
     subject: Subject,
     location: file_target.Location,
+    /// Of a `describe` whose state is ready, and only of that.
+    description: ?Description = null,
+    /// The content is an MP4 to be played, not an image or text.
+    video: bool = false,
     entries: []const DirectoryEntry = &.{},
     completion_id: u64,
     state: State,
@@ -165,12 +199,40 @@ pub const Executor = struct {
     }
 };
 
+/// How an MP4 is recognized for a subject. `generated` is the Host's own
+/// record that it wrote one; it is the only subject that has no other reading.
+const VideoRule = enum { none, recognized, generated };
+
+/// The major brands of an MP4 a video element plays. HEIC, AVIF, QuickTime and
+/// M4A open with the same box, so the box alone says nothing.
+const video_brands = [_]*const [4]u8{ "isom", "iso2", "iso4", "iso5", "iso6", "mp41", "mp42", "avc1", "M4V ", "dash", "MSNV" };
+
+const HeaderKind = enum { image, image_limit, animated_image, video, unsupported, text };
+
+/// The one decision about which way a file is read, from its first bytes and
+/// its size. What those bytes promise is checked when the whole file is read.
+fn classifyHeader(header: []const u8, size: u64, video: VideoRule) HeaderKind {
+    const boxed = header.len >= min_video_bytes and size <= max_video_bytes and std.mem.eql(u8, header[4..8], "ftyp");
+    switch (video) {
+        .none => {},
+        .generated => return if (boxed) .video else .unsupported,
+        .recognized => if (boxed) for (video_brands) |brand| {
+            if (std.mem.eql(u8, header[8..12], brand)) return .video;
+        },
+    }
+    if (header.len >= 21 and std.mem.eql(u8, header[0..4], "RIFF") and std.mem.eql(u8, header[8..16], "WEBPVP8X") and header[20] & 2 != 0)
+        return .animated_image;
+    if (isImage(header)) return if (size > max_image_source_bytes) .image_limit else .image;
+    return .text;
+}
+
 fn isImage(bytes: []const u8) bool {
     return std.mem.startsWith(u8, bytes, "\x89PNG\r\n\x1a\n") or std.mem.startsWith(u8, bytes, "\xff\xd8\xff") or
         (bytes.len >= 12 and std.mem.eql(u8, bytes[0..4], "RIFF") and std.mem.eql(u8, bytes[8..12], "WEBP"));
 }
 
 const Job = struct {
+    mode: Mode,
     subject: Subject,
     location: file_target.Location,
     entries: [max_directory_entries]DirectoryEntry = undefined,
@@ -183,6 +245,9 @@ const Job = struct {
     image_info: ?ImageInfo = null,
     reserved_image_bytes: usize = 0,
     reserved_video: bool = false,
+    video: bool = false,
+    size_bytes: u64 = 0,
+    description: ?Description = null,
     cancelled: std.atomic.Value(bool) = .init(false),
     created_at: std.Io.Timestamp,
     state: State = .failed,
@@ -193,11 +258,30 @@ const Job = struct {
     fn execute(context: *anyopaque) void {
         const self: *Job = @ptrCast(@alignCast(context));
         self.readWithRetry();
+        if (self.mode == .describe) self.describe();
         if (self.cancelled.load(.acquire)) {
             self.clearContent();
+            self.description = null;
             self.state = .failed;
         }
         self.lane.publish(self);
+    }
+
+    /// Turns the outcome of the read every preview makes into what was found,
+    /// and gives up its bytes and its slot on the worker.
+    fn describe(self: *Job) void {
+        self.description = switch (self.state) {
+            .ready => .{ .size_bytes = self.size_bytes, .kind = if (self.video)
+                .video
+            else if (self.image_info) |info|
+                .{ .image = .{ .width = info.width, .height = info.height } }
+            else
+                .{ .file = .{ .previewable = true } } },
+            .unsupported, .image_limit, .animated_image => .{ .size_bytes = self.size_bytes, .kind = .{ .file = .{ .previewable = false } } },
+            .busy, .stale_security, .missing, .restricted, .changing, .failed => null,
+        };
+        if (self.description != null) self.state = .ready;
+        self.clearContent();
     }
 
     fn cancel(context: *anyopaque) void {
@@ -277,43 +361,57 @@ const Job = struct {
             return .completed;
         };
         if (before.kind != .file) {
-            self.state = .unsupported;
+            // It has no size and no content to describe.
+            self.state = if (self.mode == .describe) .restricted else .unsupported;
             return .completed;
         }
+        self.size_bytes = before.size;
         var header: [30]u8 = undefined;
         const header_len: usize = @intCast(@min(before.size, header.len));
         const header_read = file.readPositionalAll(self.lane.io, header[0..header_len], 0) catch {
             self.state = .failed;
             return .completed;
         };
-        if (generated_video) {
-            if (header_read < 16 or before.size > self.max_bytes or !std.mem.eql(u8, header[4..8], "ftyp")) {
+        const kind = classifyHeader(header[0..header_read], before.size, self.subject.video(self.location));
+        switch (kind) {
+            .image => {},
+            .text => if (self.subject.storeOwned()) {
+                // An attachment original was classified as an image when it was
+                // staged. If it no longer looks like one it has changed
+                // underneath us, and this source must never fall through to
+                // the text body path.
                 self.state = .unsupported;
                 return .completed;
-            }
-            if (!self.lane.reserveVideo()) {
-                self.state = .busy;
+            },
+            .video => {
+                self.video = true;
+                // The header is all there is to say about a video without
+                // playing it, so describing one takes no slot and reads none.
+                if (self.mode == .describe) {
+                    self.state = .ready;
+                    return .completed;
+                }
+                if (!self.lane.reserveVideo()) {
+                    self.state = .busy;
+                    return .completed;
+                }
+                self.reserved_video = true;
+            },
+            .unsupported => {
+                self.state = .unsupported;
                 return .completed;
-            }
-            self.reserved_video = true;
+            },
+            .animated_image => {
+                self.state = .animated_image;
+                return .completed;
+            },
+            .image_limit => {
+                self.state = .image_limit;
+                return .completed;
+            },
         }
-        if (header_read >= 21 and std.mem.eql(u8, header[0..4], "RIFF") and std.mem.eql(u8, header[8..16], "WEBPVP8X") and header[20] & 2 != 0) {
-            self.state = .animated_image;
-            return .completed;
-        }
-        const image = isImage(header[0..header_read]);
-        // An attachment original was classified as an image when it was staged.
-        // If it no longer looks like one it has changed underneath us, and this
-        // source must never fall through to the text body path.
-        if (self.subject.storeOwned() and !image) {
-            self.state = .unsupported;
-            return .completed;
-        }
-        if (image and before.size > max_image_source_bytes) {
-            self.state = .image_limit;
-            return .completed;
-        }
-        const wanted: usize = @intCast(if (image or generated_video) before.size else @min(before.size, self.max_bytes));
+        const image = kind == .image;
+        const wanted: usize = @intCast(if (image or self.video) before.size else @min(before.size, self.max_bytes));
         if (image) {
             if (!self.lane.reserveImage(wanted)) {
                 self.state = .busy;
@@ -361,7 +459,7 @@ const Job = struct {
         };
         if (read != wanted or metadataChanged(before, after)) return .changed;
 
-        if (generated_video) {
+        if (self.video) {
             if (!std.mem.eql(u8, bytes[4..8], "ftyp")) return .changed;
             self.state = .ready;
             return .completed;
@@ -450,6 +548,7 @@ const Job = struct {
         self.content = &.{};
         self.truncated = false;
         self.image_info = null;
+        self.video = false;
         if (self.reserved_image_bytes != 0) self.lane.releaseImage(self.reserved_image_bytes);
         self.reserved_image_bytes = 0;
         if (self.reserved_video) self.lane.releaseVideo();
@@ -523,6 +622,7 @@ pub const Lane = struct {
         const location = try input.location.clone(self.allocator);
         errdefer location.free(self.allocator);
         job.* = .{
+            .mode = input.mode,
             .subject = subject,
             .location = location,
             .lane = self,
@@ -587,8 +687,11 @@ pub const Lane = struct {
         return .{
             .job = job,
             .completion = .{
+                .mode = job.mode,
                 .subject = job.subject,
                 .location = job.location,
+                .description = job.description,
+                .video = job.video,
                 .entries = job.entries[0..job.entry_count],
                 .completion_id = job.completion_id,
                 .state = job.state,
@@ -1017,4 +1120,248 @@ test "cancelled queued reads publish once without opening or reserving an image"
     lane.release(taken);
     try std.testing.expect(!lane.hasActive());
     try std.testing.expect(lane.take() == null);
+}
+
+const TestLane = struct {
+    lane: *Lane,
+
+    fn wake(_: ?*anyopaque) bool {
+        return true;
+    }
+    fn enqueue(_: *anyopaque, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
+        job.execute_fn(job.context);
+    }
+    var context: u8 = 0;
+
+    fn init() !TestLane {
+        return .{ .lane = try Lane.create(std.testing.io, std.testing.allocator, .{ .wake_fn = wake }, .{ .context = &context, .enqueue_fn = enqueue }) };
+    }
+    fn deinit(self: TestLane) void {
+        self.lane.stopAdmission();
+        self.lane.deinit();
+    }
+
+    const Outcome = struct { state: State, image: bool, video: bool, description: ?Description, content_len: usize };
+
+    fn read(self: TestLane, mode: Mode, target: file_target.Target, root: []const u8, relative: []const u8) !Outcome {
+        var input = testInput(.{ .file = target }, root, relative);
+        input.mode = mode;
+        input.max_bytes = 256 * 1024;
+        input.max_lines = 10_000;
+        input.max_line_bytes = 256 * 1024;
+        try self.lane.begin(input);
+        const taken = self.lane.take().?;
+        defer self.lane.release(taken);
+        return .{
+            .state = taken.completion.state,
+            .image = taken.completion.image_info != null,
+            .video = taken.completion.video,
+            .description = taken.completion.description,
+            .content_len = taken.completion.content.len,
+        };
+    }
+};
+
+const test_output: file_target.Target = .{ .output = .{ .task_id = 1, .run_id = 1, .id = @splat(1) } };
+const test_workspace: file_target.Target = .{ .workspace = .{ .task_id = 1, .workspace_id = 1, .workspace_epoch = 1, .path = "sample" } };
+const test_jpeg = "\xff\xd8\xff\xc0\x00\x0b\x08\x00\x02\x00\x03\x01\x01\x11\x00" ++ "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x01\xff\xd9";
+const test_webp = "RIFF\x12\x00\x00\x00WEBPVP8L\x05\x00\x00\x00\x2f\x02\x40\x00\x00\x00";
+
+fn testJpeg(comptime height: u16, comptime width: u16) *const [test_jpeg.len]u8 {
+    return comptime jpeg: {
+        var bytes = test_jpeg.*;
+        std.mem.writeInt(u16, bytes[7..9], height, .big);
+        std.mem.writeInt(u16, bytes[9..11], width, .big);
+        const frozen = bytes;
+        break :jpeg &frozen;
+    };
+}
+
+fn testPng(allocator: std.mem.Allocator, animated: bool) ![]u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    try bytes.appendSlice(allocator, "\x89PNG\r\n\x1a\n");
+    const Chunk = struct { kind: *const [4]u8, data: []const u8 };
+    const header = "\x00\x00\x00\x02\x00\x00\x00\x01\x08\x06\x00\x00\x00";
+    const chunks = [_]Chunk{ .{ .kind = "IHDR", .data = header }, .{ .kind = "acTL", .data = "\x00\x00\x00\x02\x00\x00\x00\x00" }, .{ .kind = "IDAT", .data = "data" }, .{ .kind = "IEND", .data = "" } };
+    for (chunks) |chunk| {
+        if (!animated and std.mem.eql(u8, chunk.kind, "acTL")) continue;
+        var word: [4]u8 = undefined;
+        std.mem.writeInt(u32, &word, @intCast(chunk.data.len), .big);
+        try bytes.appendSlice(allocator, &word);
+        const start = bytes.items.len;
+        try bytes.appendSlice(allocator, chunk.kind);
+        try bytes.appendSlice(allocator, chunk.data);
+        std.mem.writeInt(u32, &word, std.hash.Crc32.hash(bytes.items[start..]), .big);
+        try bytes.appendSlice(allocator, &word);
+    }
+    return bytes.toOwnedSlice(allocator);
+}
+
+test "file preview describes every file as previewing it would turn out" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const lane = try TestLane.init();
+    defer lane.deinit();
+
+    const png = try testPng(allocator, false);
+    defer allocator.free(png);
+    const apng = try testPng(allocator, true);
+    defer allocator.free(apng);
+    // 256 KiB of text whose last character is cut by the read limit, and the
+    // same with a byte no text has just past it.
+    const cut = try allocator.alloc(u8, 256 * 1024 + 2);
+    defer allocator.free(cut);
+    @memset(cut, 'a');
+    @memcpy(cut[256 * 1024 - 1 ..][0..3], "中");
+    const beyond = try allocator.alloc(u8, 256 * 1024 + 4);
+    defer allocator.free(beyond);
+    @memset(beyond, 'a');
+    beyond[beyond.len - 1] = 0;
+
+    const Kind = enum { image, video, text, opaque_file };
+    const Sample = struct { name: []const u8, bytes: []const u8, size: u64 = 0, kind: Kind };
+    const brand = struct {
+        fn box(comptime name: *const [4]u8) []const u8 {
+            return "\x00\x00\x00\x18ftyp" ++ name ++ "\x00\x00\x02\x00isomiso2 rest of the file";
+        }
+    };
+    const samples = [_]Sample{
+        .{ .name = "a.png", .bytes = png, .kind = .image },
+        .{ .name = "a.jpg", .bytes = test_jpeg ++ "trailing motion data", .kind = .image },
+        .{ .name = "a.webp", .bytes = test_webp, .kind = .image },
+        .{ .name = "apng.png", .bytes = apng, .kind = .opaque_file },
+        .{ .name = "moving.webp", .bytes = "RIFF\x16\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x02\x00\x00\x00\x01\x00\x00\x00\x00\x00 and more", .kind = .opaque_file },
+        .{ .name = "bytes.png", .bytes = "\x89PNG\r\n\x1a\n", .size = max_image_source_bytes + 1, .kind = .opaque_file },
+        .{ .name = "pixels.jpg", .bytes = testJpeg(8000, 3000), .kind = .opaque_file },
+        .{ .name = "side.jpg", .bytes = testJpeg(2, 8193), .kind = .opaque_file },
+        .{ .name = "cut.png", .bytes = png[0 .. png.len - 4], .kind = .opaque_file },
+        .{ .name = "a.gif", .bytes = "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00", .kind = .opaque_file },
+        .{ .name = "isom.mp4", .bytes = brand.box("isom"), .kind = .video },
+        .{ .name = "iso2.mp4", .bytes = brand.box("iso2"), .kind = .video },
+        .{ .name = "iso4.mp4", .bytes = brand.box("iso4"), .kind = .video },
+        .{ .name = "iso5.mp4", .bytes = brand.box("iso5"), .kind = .video },
+        .{ .name = "iso6.mp4", .bytes = brand.box("iso6"), .kind = .video },
+        .{ .name = "mp41.mp4", .bytes = brand.box("mp41"), .kind = .video },
+        .{ .name = "mp42.mp4", .bytes = brand.box("mp42"), .kind = .video },
+        .{ .name = "avc1.mp4", .bytes = brand.box("avc1"), .kind = .video },
+        .{ .name = "m4v.m4v", .bytes = brand.box("M4V "), .kind = .video },
+        .{ .name = "dash.mp4", .bytes = brand.box("dash"), .kind = .video },
+        .{ .name = "msnv.mp4", .bytes = brand.box("MSNV"), .kind = .video },
+        .{ .name = "named.txt", .bytes = brand.box("isom"), .kind = .video },
+        .{ .name = "a.heic", .bytes = brand.box("heic"), .kind = .opaque_file },
+        .{ .name = "a.avif", .bytes = brand.box("avif"), .kind = .opaque_file },
+        .{ .name = "a.mov", .bytes = brand.box("qt  "), .kind = .opaque_file },
+        .{ .name = "a.m4a", .bytes = brand.box("M4A "), .kind = .opaque_file },
+        .{ .name = "short.mp4", .bytes = "\x00\x00\x00\x10ftypisom\x00\x00\x02", .kind = .opaque_file },
+        .{ .name = "large.mp4", .bytes = brand.box("isom"), .size = max_video_bytes + 1, .kind = .opaque_file },
+        .{ .name = "empty.txt", .bytes = "", .kind = .text },
+        .{ .name = "a.md", .bytes = "# 标题\n\ttext\r\n", .kind = .text },
+        .{ .name = "cut.txt", .bytes = cut, .kind = .text },
+        .{ .name = "beyond.txt", .bytes = beyond, .kind = .text },
+        .{ .name = "nul.txt", .bytes = "text\x00more", .kind = .opaque_file },
+        .{ .name = "gbk.txt", .bytes = "\xd6\xd0\xce\xc4", .kind = .opaque_file },
+        .{ .name = "utf16.txt", .bytes = "\xff\xfea\x00b\x00", .kind = .opaque_file },
+        .{ .name = "a.docx", .bytes = "PK\x03\x04\x14\x00\x00\x00", .kind = .opaque_file },
+        .{ .name = "a.pdf", .bytes = "%PDF-1.7\n%\xe2\xe3\xcf\xd3\n", .kind = .opaque_file },
+        .{ .name = "image.txt", .bytes = png, .kind = .image },
+        .{ .name = "text.png", .bytes = "not an image", .kind = .text },
+    };
+    for (samples) |sample| {
+        errdefer std.debug.print("sample {s}\n", .{sample.name});
+        const file = try tmp.dir.createFile(io, sample.name, .{});
+        try file.writeStreamingAll(io, sample.bytes);
+        if (sample.size != 0) try file.setLength(io, sample.size);
+        file.close(io);
+        const size = if (sample.size != 0) sample.size else sample.bytes.len;
+
+        // The identity a reply shows: what is described is what is delivered.
+        const previewed = try lane.read(.deliver, test_output, root, sample.name);
+        const described = try lane.read(.describe, test_output, root, sample.name);
+        try std.testing.expectEqual(State.ready, described.state);
+        try std.testing.expectEqual(@as(usize, 0), described.content_len);
+        const description = described.description.?;
+        try std.testing.expectEqual(size, description.size_bytes);
+        const delivered: Kind = if (previewed.state != .ready) .opaque_file else if (previewed.image) .image else if (previewed.video) .video else .text;
+        try std.testing.expectEqual(sample.kind, delivered);
+        try std.testing.expectEqual(sample.kind, @as(Kind, switch (description.kind) {
+            .image => .image,
+            .video => .video,
+            .file => |value| if (value.previewable) .text else .opaque_file,
+        }));
+
+        // A card that is not played or shown in place opens the Workspace tab
+        // of the same file. Whether it may be clicked is whether that tab
+        // would show anything.
+        const tab = try lane.read(.deliver, test_workspace, root, sample.name);
+        if (description.kind == .file)
+            try std.testing.expectEqual(tab.state == .ready, description.kind.file.previewable);
+        try std.testing.expectEqual(tab.state == .ready, sample.kind == .image or sample.kind == .text);
+        // Only an identity played in place is read as a video at all.
+        try std.testing.expect(!tab.video);
+        const listed = try lane.read(.describe, test_workspace, root, sample.name);
+        const shown: bool = switch (listed.description.?.kind) {
+            .image => true,
+            .video => return error.TestUnexpectedResult,
+            .file => |value| value.previewable,
+        };
+        try std.testing.expectEqual(tab.state == .ready, shown);
+    }
+    try std.testing.expectEqual(@as(usize, 0), lane.lane.image_count);
+    try std.testing.expect(!lane.lane.video_reserved);
+}
+
+test "file preview descriptions say nothing of a file that was not reached" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "folder", .default_dir);
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const lane = try TestLane.init();
+    defer lane.deinit();
+    for ([_]struct { []const u8, State }{ .{ "missing.txt", .missing }, .{ "folder", .restricted }, .{ "../outside.txt", .restricted } }) |case| {
+        const described = try lane.read(.describe, test_output, root, case[0]);
+        try std.testing.expectEqual(case[1], described.state);
+        try std.testing.expect(described.description == null);
+    }
+}
+
+test "file preview descriptions return their slots and never hold the video slot" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.jpg", .data = test_jpeg });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.mp4", .data = "\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const lane = try TestLane.init();
+    defer lane.deinit();
+    // Both image slots are held by deliveries, and so is the video slot.
+    var held: [3]Taken = undefined;
+    for (&held, 0..) |*slot, index| {
+        var input = testInput(.{ .file = test_output }, root, if (index == 2) "a.mp4" else "a.jpg");
+        input.completion_id = index + 1;
+        try lane.lane.begin(input);
+        slot.* = lane.lane.take().?;
+        try std.testing.expectEqual(State.ready, slot.completion.state);
+    }
+    const busy = try lane.read(.describe, test_output, root, "a.jpg");
+    try std.testing.expectEqual(State.busy, busy.state);
+    try std.testing.expect(busy.description == null);
+    // A video is described without its slot.
+    const video = try lane.read(.describe, test_output, root, "a.mp4");
+    try std.testing.expectEqual(State.ready, video.state);
+    try std.testing.expect(video.description.?.kind == .video);
+    for (held) |taken| lane.lane.release(taken);
+    for (0..3) |_| {
+        const image = try lane.read(.describe, test_output, root, "a.jpg");
+        try std.testing.expectEqual(Description{ .size_bytes = test_jpeg.len, .kind = .{ .image = .{ .width = 3, .height = 2 } } }, image.description.?);
+    }
+    try std.testing.expectEqual(@as(usize, 0), lane.lane.image_count);
+    try std.testing.expectEqual(@as(usize, 0), lane.lane.image_bytes);
 }

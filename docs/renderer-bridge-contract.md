@@ -265,11 +265,29 @@ Renderer 完整接收后释放 Host grant，以受限 MIME 的 data URL 交给�
 
 Tool `fileRefs[]`（及 Run `fileReferences` 的条目）普通 entry 精确包含 `{ id, title, displayPath }`；仅经 Agent 验证的 Host 生图凭据派生的 entry 额外包含 `generatedImage: true` 及必填 nullable `presentationAnchor: { afterOutputCount, presentationOrder } | null`。afterOutputCount 为不超过输出槽位容量的非负整数，presentationOrder 为非零 canonical u64 string；null 只表示旧历史位置未知。缺失表示无此来源，不从内容或路径推断。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
 
-### Generated MP4 preview
+### MP4 preview
 
-Tool `fileRefs[]` 中的可信 Host 生视频引用精确增加 `generatedVideo: true` 和非空 `presentationAnchor`，沿用生图锚点语义。两种来源标记互斥。Renderer 通过同一个 `metawork.files.preview` 请求精确 Task、Run 和 reference，Host 按该来源及当前 Workspace 授权读取 16 字节至 64 MiB 的 MP4，检查容器标识并对完整字节执行有界凭据检查。文件变化、缺失、受限或格式不支持分别使用既有预览状态。
+Tool `fileRefs[]` 中的可信 Host 生视频引用精确增加 `generatedVideo: true` 和非空 `presentationAnchor`，沿用生图锚点语义。两种来源标记互斥。Renderer 通过同一个 `metawork.files.preview` 请求该 reference，Host 按该来源及当前 Workspace 授权读取 16 字节至 64 MiB 的 MP4，检查容器标识并对完整字节执行有界凭据检查。`output` 身份按内容识别 MP4：16 字节至 64 MiB、`ftyp` 容器，且主品牌为 `isom`、`iso2`、`iso4`、`iso5`、`iso6`、`mp41`、`mp42`、`avc1`、`M4V `、`dash`、`MSNV` 之一；HEIC、AVIF、QuickTime 与 M4A 也是 `ftyp`，不算视频。`workspace` 身份和普通引用不识别视频，MP4 走文本判定，结果为 `unsupported`。文件变化、缺失、受限或格式不支持分别使用既有预览状态。
 
 成功响应沿用空正文的 `ready` shape，额外且精确携带 `video: { token, mediaType, sizeBytes, chunkBytes, securityEpoch }`，其中 mediaType 固定为 `video/mp4`。token、字段编码与分块长度沿用图片 grant；`metawork.files.preview.readVideoChunk` 复用相同的 request、response、连续 offset 和授权校验，并且只接受视频 grant。取消及释放使用既有 `metawork.files.preview.release`。Host 至多保留一份视频资源，复用预览期限与安全代次失效规则。Renderer 至多保留四份且合计不超过 64 MiB 编码字节，完整收到并释放 grant 后才以本地 blob URL 提供给播放器。离开保留区域、Task 或引用失效、断连及安全代次改变时撤销 URL。文件原件与 URL 不持久化。
+
+## File description command
+
+`metawork.files.describe` 是异步 command，request 与 File preview command 相同，精确为 `{ generation, previewId, target }`，`previewId` 共享连接内单调递增空间；取消使用 `metawork.files.preview.release`，没有 grant。它回答这个文件现在是图片、视频还是文件、多大、能不能预览，结果精确为：
+
+```json
+{ "state": "ready | busy | missing | restricted | changing | error", "file": null }
+```
+
+只有 `ready` 携带 `file`，按 `kind` 精确取下列一种，`sizeBytes` 是 canonical decimal `u64` string，尺寸是 1–8192 的整数：
+
+```json
+{ "kind": "image", "sizeBytes": "10485760", "width": 1600, "height": 1200 }
+{ "kind": "video", "sizeBytes": "1546" }
+{ "kind": "file", "sizeBytes": "51712", "previewable": true }
+```
+
+描述就是不交付正文的预览：同一个 lane、同一次读取、同一段判定，读完只留下结论，正文和图片字节在 worker 上清零释放。图片是能内联显示的那些；视频按 [MP4 preview](#mp4-preview) 的规则，只看头部，不读正文、不占视频资源；其余都是文件，`previewable` 表示同一文件的 `workspace` 预览能不能显示内容，超限图片、动图和不合格的文本为 false。不是普通文件、路径或授权不符为 `restricted`。判断只看当前内容，不看扩展名；结果不携带正文、路径、摘要，也不携带能否在默认应用打开。描述不做正文凭据扫描，因为没有正文离开 Host；真正预览时的脱敏与拒绝不变。描述图片占用与预览相同的图片名额直到 worker 判完，名额满时为 `busy`，Renderer 退避重试。
 
 ## Workspace file browsing commands
 

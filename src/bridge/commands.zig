@@ -69,6 +69,7 @@ pub const cancel_file_action = "metawork.files.cancelAction";
 pub const register_output = "metawork.outputs.register";
 pub const read_run_tools = "metawork.tasks.tools";
 pub const preview_file = "metawork.files.preview";
+pub const describe_file = "metawork.files.describe";
 pub const list_directory = "metawork.files.listDirectory";
 pub const read_preview_image = "metawork.files.preview.readImageChunk";
 pub const read_preview_video = "metawork.files.preview.readVideoChunk";
@@ -201,6 +202,7 @@ pub const product = [_][]const u8{
     register_output,
     read_run_tools,
     preview_file,
+    describe_file,
     list_directory,
     read_preview_image,
     read_preview_video,

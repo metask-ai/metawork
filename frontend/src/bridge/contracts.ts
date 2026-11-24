@@ -403,6 +403,19 @@ export type FileTarget =
       workspaceEpoch: string;
       path: string;
     };
+/// What one file is right now, by its content. `previewable` is whether the
+/// Workspace preview of it shows anything; an image always does, and a video is
+/// played where it is.
+export type FileDescription =
+  | { kind: "image"; sizeBytes: string; width: number; height: number }
+  | { kind: "video"; sizeBytes: string }
+  | { kind: "file"; sizeBytes: string; previewable: boolean };
+export type FileDescriptionResult =
+  | { state: "ready"; file: FileDescription }
+  | {
+      state: "missing" | "restricted" | "changing" | "error";
+      file: null;
+    };
 /// A registered media target, in the shape its kind declares. A draft is owned
 /// by the staged grant that issued its token; a sent image is owned by the
 /// message it was accepted with, which is addressed by the Task, the message

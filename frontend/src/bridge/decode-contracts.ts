@@ -156,6 +156,7 @@ import {
   type TaskModelSelectionResult,
   type ToolView,
   type FileReferenceView,
+  type FileDescriptionResult,
   type FilePreviewResponse,
   type FileChangeDiffResult,
   type UiRecord,
@@ -2065,6 +2066,65 @@ export function decodeWorkspaceDirectory(
   if (state !== "ready" && (entries.length || truncated || redacted))
     fail("$", "non-ready directory contains content");
   return { state, entries, truncated, redacted };
+}
+export function decodeFileDescription(
+  value: unknown,
+): FileDescriptionResult | { state: "busy"; file: null } {
+  const item = object(value, "$", ["state", "file"]);
+  const state = enumValue(item.state, "$.state", [
+    "ready",
+    "busy",
+    "missing",
+    "restricted",
+    "changing",
+    "error",
+  ] as const);
+  if (state !== "ready") {
+    if (item.file !== null) fail("$.file", "only a ready answer has a file");
+    return { state, file: null };
+  }
+  const kind = enumValue(record(item.file, "$.file").kind, "$.file.kind", [
+    "image",
+    "video",
+    "file",
+  ] as const);
+  const file = object(item.file, "$.file", [
+    "kind",
+    "sizeBytes",
+    ...(kind === "image" ? ["width", "height"] : []),
+    ...(kind === "file" ? ["previewable"] : []),
+  ]);
+  const sizeBytes = u64WireInteger(file.sizeBytes, "$.file.sizeBytes");
+  if (kind === "image") {
+    const side = (value: unknown, path: string) => {
+      if (
+        typeof value !== "number" ||
+        !Number.isInteger(value) ||
+        value < 1 ||
+        value > 8192
+      )
+        fail(path, "invalid image dimension");
+      return value;
+    };
+    return {
+      state,
+      file: {
+        kind,
+        sizeBytes,
+        width: side(file.width, "$.file.width"),
+        height: side(file.height, "$.file.height"),
+      },
+    };
+  }
+  if (kind === "video") return { state, file: { kind, sizeBytes } };
+  return {
+    state,
+    file: {
+      kind,
+      sizeBytes,
+      previewable: booleanValue(file.previewable, "$.file.previewable"),
+    },
+  };
 }
 export function decodeFilePreview(value: unknown): FilePreviewResponse {
   const raw = record(value, "$");

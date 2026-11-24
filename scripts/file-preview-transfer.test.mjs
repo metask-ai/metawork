@@ -3,6 +3,7 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import {
   decodeAttachmentThumbnail,
+  decodeFileDescription,
   decodeFilePreview,
   decodeWorkspaceDirectory,
 } from "../frontend/src/bridge/decode-contracts.ts";
@@ -628,4 +629,108 @@ test("a sent image uses the same two tiers under its own target", async () => {
   assert.equal(host.active.size, 0);
   first.release();
   second.release();
+});
+
+test("file descriptions decode the Host fixture exactly and carry no content", async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      new URL("../src/bridge/file_description.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  for (const value of Object.values(fixture))
+    assert.deepEqual(decodeFileDescription(value), value);
+  const { image, video, text, missing } = fixture;
+  for (const bad of [
+    { ...missing, file: video.file },
+    { ...video, file: null },
+    { ...video, state: "unsupported" },
+    { ...video, content: "" },
+    { ...video, file: { ...video.file, sizeBytes: 1546 } },
+    { ...video, file: { ...video.file, previewable: true } },
+    { ...text, file: { ...text.file, previewable: "true" } },
+    { ...text, file: { kind: "file", sizeBytes: "1" } },
+    { ...text, file: { ...text.file, path: "C:/secret" } },
+    { ...text, file: { ...text.file, open: "default_app" } },
+    { ...image, file: { ...image.file, width: 0 } },
+    { ...image, file: { ...image.file, height: 8193 } },
+    { ...image, file: { ...image.file, sizeBytes: "01" } },
+    { ...image, file: { ...image.file, kind: "audio" } },
+  ])
+    assert.throws(() => decodeFileDescription(bad));
+});
+
+test("a description waits out a busy Host and is cancelled with its caller", async () => {
+  const calls = [];
+  let busy = 1;
+  let pending;
+  const loader = new FilePreviewLoader(
+    async (command, payload) => {
+      calls.push({ command, payload });
+      if (command === commands.releasePreview)
+        return { ...payload, released: true };
+      if (busy-- > 0) return { state: "busy", file: null };
+      if (payload.target.outputId === "held")
+        return new Promise((resolve) => {
+          pending = resolve;
+        });
+      return {
+        state: "ready",
+        file: { kind: "file", sizeBytes: "3", previewable: false },
+      };
+    },
+    () => "1",
+  );
+  const target = { kind: "output", taskId: "3", runId: "7", outputId: "done" };
+  assert.deepEqual(await loader.describe(target), {
+    state: "ready",
+    file: { kind: "file", sizeBytes: "3", previewable: false },
+  });
+  assert.deepEqual(
+    calls.map((call) => [call.command, call.payload]),
+    [
+      [commands.describeFile, { generation: "1", previewId: "1", target }],
+      [commands.describeFile, { generation: "1", previewId: "2", target }],
+    ],
+  );
+  const controller = new AbortController();
+  const held = loader.describe(
+    { ...target, outputId: "held" },
+    { signal: controller.signal },
+  );
+  while (!pending) await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  assert.deepEqual(calls.at(-1).payload, { generation: "1", previewId: "3" });
+  pending({ state: "ready", file: { kind: "video", sizeBytes: "20" } });
+  await assert.rejects(held, { name: "AbortError" });
+});
+
+test("descriptions wait out a full window queue instead of failing", async () => {
+  const held = [];
+  let described = 0;
+  const loader = new FilePreviewLoader(
+    (command, payload) =>
+      command === commands.describeFile
+        ? new Promise((resolve) => {
+            described++;
+            held.push(() =>
+              resolve({
+                state: "ready",
+                file: { kind: "video", sizeBytes: "20" },
+              }),
+            );
+          })
+        : Promise.resolve({ ...payload, released: true }),
+    () => "1",
+  );
+  const target = { kind: "output", taskId: "3", runId: "7", outputId: "a" };
+  // Two in flight and eight waiting is a full queue; the rest keep asking.
+  const asked = Array.from({ length: 14 }, () => loader.describe(target));
+  let settled = 0;
+  for (const request of asked) void request.then(() => settled++);
+  while (settled < asked.length) {
+    for (const finish of held.splice(0)) finish();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(described, 14);
 });

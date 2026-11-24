@@ -35,6 +35,7 @@ import type {
   UiResponsePayload,
   WorkspaceChoice,
   AttachmentThumbnailResult,
+  FileDescriptionResult,
   FilePreview,
   FileTarget,
   FilePreviewLoadOptions,
@@ -624,6 +625,12 @@ export class BridgeClient {
     options?: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
     return this.previews.load(target, options);
+  }
+  describeFile(
+    target: FileTarget,
+    options?: FilePreviewLoadOptions,
+  ): Promise<FileDescriptionResult> {
+    return this.previews.describe(target, options);
   }
   /// The viewer tier for a registered image, draft or sent.
   previewAttachment(
