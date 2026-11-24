@@ -5,6 +5,7 @@
 //! Product state, the credential store or a Native Runtime.
 const std = @import("std");
 const native_sdk = @import("native_sdk");
+const cache_store = @import("message_store.zig");
 const inbox = @import("metawork_product_inbox");
 const control_ports = @import("metawork_product_control_ports");
 const mcp_configuration = @import("metawork_product_mcp").contract;
@@ -181,6 +182,7 @@ const ConversationWork = struct {
     peer: inbox.Id,
     kind: inbox.ConversationPageKind,
     anchor: ?inbox.Id,
+    username: ?inbox.Name = null,
 };
 
 const TaskWork = struct {
@@ -235,6 +237,9 @@ const Job = struct {
     base: []u8,
     key: []u8,
     isolation: @import("metawork_http_transport").Isolation,
+    cache: ?cache_store.Store,
+    page_mutex: *std.Io.Mutex,
+    cached_has_earlier: ?bool = null,
     work: Work,
     cancellation: http.Cancellation,
     wake_context: ?*anyopaque,
@@ -266,7 +271,7 @@ const Job = struct {
             self.wake_fn(self.wake_context) catch {};
         }
         self.execute() catch {
-            // Only memory can fail here; the request outcome is recorded.
+            // A failed cache or allocation produces a bounded failure for this job.
             self.failure = .{ .@"unreachable" = null };
         };
     }
@@ -293,12 +298,30 @@ const Job = struct {
                 _ = try self.pageOf(query, inbox.Limits.list_page);
             },
             .conversation => |work| {
+                const cache = self.cache orelse return error.CacheUnavailable;
+                // A post-send lookup can read this same timeline from a second
+                // worker. Commit pages in the order in which we fetch them.
+                self.page_mutex.lockUncancelable(self.cancellation.io);
+                defer self.page_mutex.unlock(self.cancellation.io);
+                if (work.kind == .latest) {
+                    if (try cache.latest(self.allocator, work.peer.slice())) |saved| {
+                        self.page = saved.page;
+                        self.cached_has_earlier = saved.has_earlier;
+                        return;
+                    }
+                }
                 const query: inbox.MessagesQuery = switch (work.kind) {
                     .latest => .{ .peer = work.peer.slice() },
                     .before => .{ .peer = work.peer.slice(), .before = work.anchor.?.slice() },
                     .after => .{ .peer = work.peer.slice(), .after = work.anchor.?.slice() },
                 };
-                _ = try self.pageOf(query, inbox.Limits.conversation_page);
+                if (try self.pageOf(query, inbox.Limits.conversation_page)) {
+                    cache.save(self.allocator, work.peer.slice(), work.username, work.kind, work.anchor, &self.page.?, self.page_limit) catch |err| {
+                        self.page.?.deinit();
+                        self.page = null;
+                        return err;
+                    };
+                }
             },
             .send => |work| {
                 const buffer = try self.allocator.alloc(u8, inbox.Limits.send_bytes);
@@ -328,7 +351,20 @@ const Job = struct {
                 }
                 // A new conversation: MetaTeam's newest message with that
                 // member tells which conversation it is.
-                if (work.resolve) |*username| _ = try self.pageOf(.{ .peer = username.slice() }, 1);
+                if (work.resolve) |*username| {
+                    self.page_mutex.lockUncancelable(self.cancellation.io);
+                    defer self.page_mutex.unlock(self.cancellation.io);
+                    if (try self.pageOf(.{ .peer = username.slice() }, 1)) {
+                        if (inbox.conversationOf(self.page.?.items, username.slice())) |peer| {
+                            const cache = self.cache orelse return error.CacheUnavailable;
+                            cache.save(self.allocator, peer.id.slice(), username.*, .latest, null, &self.page.?, 1) catch |err| {
+                                self.page.?.deinit();
+                                self.page = null;
+                                return err;
+                            };
+                        }
+                    }
+                }
             },
             .people => {
                 const buffer = try self.allocator.alloc(u8, inbox.Limits.people_bytes);
@@ -458,6 +494,8 @@ pub const Coordinator = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     management: inbox.Management,
+    database: ?@import("metawork_storage_sql").Database,
+    page_mutex: std.Io.Mutex = .init,
     transport: http.Transport,
     retire_fn: *const fn (*anyopaque, @import("metawork_http_transport").Isolation) void,
     retire_context: *anyopaque,
@@ -608,6 +646,8 @@ pub const Coordinator = struct {
             .transport = self.transport,
             .base = base,
             .key = key,
+            .cache = if (self.database) |db| .{ .db = db, .scope = bound.isolation.digest } else null,
+            .page_mutex = &self.page_mutex,
             .isolation = bound.isolation,
             .work = work,
             .cancellation = .{ .io = self.io },
@@ -793,7 +833,11 @@ pub const Coordinator = struct {
             respondConversationState(target, request.peer, value);
             return true;
         }
-        const work: ConversationWork = .{ .reply = target, .peer = peer, .kind = request.kind, .anchor = anchor };
+        const address = self.management.peer_address_fn(self.management.context, request.binding, request.peer);
+        const work: ConversationWork = .{ .reply = target, .peer = peer, .kind = request.kind, .anchor = anchor, .username = if (address) |v| switch (v) {
+            .member => |name| name,
+            .self => null,
+        } else null };
         if (self.conversation_next) |previous| respondConversationState(previous.reply, previous.peer.slice(), .superseded);
         self.conversation_next = work;
         if (self.conversation) |job| if (!job.replied) {
@@ -899,7 +943,7 @@ pub const Coordinator = struct {
                 respondConversationState(work.reply, work.peer.slice(), .stale_binding);
             } else if (job.page) |page| {
                 self.management.complete_conversation_fn(self.management.context, work.reply.binding, work.peer.slice(), work.kind, page.items);
-                self.respondConversation(work, page.items, job.page_limit);
+                self.respondConversation(work, page.items, job.cached_has_earlier orelse (page.items.len >= job.page_limit));
             } else {
                 // This request's own outcome; the connection state is the
                 // unread and list requests' to decide.
@@ -1129,7 +1173,7 @@ pub const Coordinator = struct {
         self.management.stop_fn(self.management.context);
     }
 
-    fn respondConversation(self: *Coordinator, work: ConversationWork, messages: []const inbox.Message, limit: u32) void {
+    fn respondConversation(self: *Coordinator, work: ConversationWork, messages: []const inbox.Message, full: bool) void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const output = arena.allocator().alloc(u8, native_sdk.bridge.max_result_bytes - 256) catch {
@@ -1140,7 +1184,7 @@ pub const Coordinator = struct {
             respondConversationState(work.reply, work.peer.slice(), .failed);
             return;
         };
-        const json = fitConversationPage(output, work, views, messages.len >= limit) orelse {
+        const json = fitConversationPage(output, work, views, full) orelse {
             respondConversationState(work.reply, work.peer.slice(), .failed);
             return;
         };
@@ -1730,12 +1774,19 @@ const Fixture = struct {
     transport: TestTransport = .{},
     capture: Capture = .{},
     coordinator: Coordinator = undefined,
+    db: *@import("metawork_storage_sqlite").Database = undefined,
 
     fn init(self: *Fixture) void {
+        self.initTarget(.memory) catch unreachable;
+    }
+
+    fn initTarget(self: *Fixture, target: @import("metawork_storage_sqlite").Target) !void {
+        self.db = try @import("metawork_storage_sqlite").Database.create(testing.io, testing.allocator, target, &cache_store.migrations);
         self.coordinator = .{
             .allocator = testing.allocator,
             .io = testing.io,
             .management = self.management.management(),
+            .database = self.db.capability(),
             .transport = self.transport.transport(),
             .retire_fn = noRetire,
             .retire_context = self,
@@ -1745,6 +1796,7 @@ const Fixture = struct {
     }
     fn deinit(self: *Fixture) void {
         self.coordinator.shutdown();
+        self.db.destroy() catch unreachable;
         self.management.runtime.deinit();
         self.capture.deinit();
     }
@@ -1916,6 +1968,101 @@ test "inbox response protection recognizes a JSON-escaped device key" {
     try testing.expect(!responseContainsKey(testing.allocator,
         \\{"text":"ordinary\nmessage"}
     , "fixture"));
+}
+
+test "inbox history resumes at a same-millisecond gap after reopening and reconnects pages in service order" {
+    var temp = testing.tmpDir(.{});
+    defer temp.cleanup();
+    const dir = try temp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(dir);
+    var db = try cache_store.open(testing.io, testing.allocator, dir);
+    var cache: cache_store.Store = .{ .db = db.capability(), .scope = @splat(1) };
+    var db_open = true;
+    defer if (db_open) db.destroy() catch unreachable;
+    var first = try inbox.parseMessages(testing.allocator,
+        \\{"data":{"messages":[{"id":"1","time":1,"direction":"in","from":{"id":"a"},"text":"original","new":true}]}}
+    );
+    defer first.deinit();
+    try cache.save(testing.allocator, "a", null, .latest, null, &first, 50);
+    var repeat = try inbox.parseMessages(testing.allocator,
+        \\{"data":{"messages":[{"id":"1","time":1,"direction":"in","from":{"id":"a"},"text":"original","new":false}]}}
+    );
+    defer repeat.deinit();
+    try cache.save(testing.allocator, "a", null, .before, try .init("3"), &repeat, 50);
+    try testing.expect(repeat.items[0].is_new);
+    var newer = try inbox.parseMessages(testing.allocator,
+        \\{"data":{"messages":[{"id":"8","time":8,"direction":"in","from":{"id":"a"},"text":"later"},{"id":"9","time":8,"direction":"in","from":{"id":"a"},"text":"same millisecond"}]}}
+    );
+    defer newer.deinit();
+    try cache.save(testing.allocator, "a", null, .after, try .init("1"), &newer, 2);
+    try db.destroy();
+    db_open = false;
+    db = try cache_store.open(testing.io, testing.allocator, dir);
+    db_open = true;
+    cache.db = db.capability();
+    var last = (try cache.latest(testing.allocator, "a")).?;
+    defer last.page.deinit();
+    try testing.expect(last.has_earlier);
+    try testing.expectEqual(@as(usize, 2), last.page.items.len);
+    try testing.expect(last.page.items[0].id.eql("8") and last.page.items[1].id.eql("9"));
+    var missing = try inbox.parseMessages(testing.allocator,
+        \\{"data":{"messages":[{"id":"z","time":8,"direction":"in","from":{"id":"a"},"text":"second"},{"id":"a","time":8,"direction":"in","from":{"id":"a"},"text":"third"}]}}
+    );
+    defer missing.deinit();
+    try cache.save(testing.allocator, "a", null, .before, try .init("8"), &missing, 2);
+    var partial = (try cache.latest(testing.allocator, "a")).?;
+    defer partial.page.deinit();
+    try testing.expect(partial.has_earlier);
+    try testing.expectEqual(@as(usize, 4), partial.page.items.len);
+    // Only this next response proves adjacency to the entry cached before the gap.
+    try cache.save(testing.allocator, "a", null, .before, try .init("z"), &first, 2);
+    var joined = (try cache.latest(testing.allocator, "a")).?;
+    defer joined.page.deinit();
+    try testing.expect(!joined.has_earlier);
+    const ids = [_][]const u8{ "1", "z", "a", "8", "9" };
+    try testing.expectEqual(ids.len, joined.page.items.len);
+    for (ids, joined.page.items) |id, msg| try testing.expect(msg.id.eql(id));
+}
+
+test "inbox group messages share one receipt history but only materialize the queried peer timeline" {
+    const db = try @import("metawork_storage_sqlite").Database.create(testing.io, testing.allocator, .memory, &cache_store.migrations);
+    defer db.destroy() catch unreachable;
+    const cache: cache_store.Store = .{ .db = db.capability(), .scope = @splat(1) };
+    const group =
+        \\{"id":"group","time":8,"direction":"out","from":{"id":"me"},"text":"same","recipients":[{"id":"a","readAt":null},{"id":"b","readAt":null}]}
+    ;
+    var ann = try inbox.parseMessages(testing.allocator, "{\"data\":{\"messages\":[" ++ group ++ "]}}");
+    defer ann.deinit();
+    try cache.save(testing.allocator, "a", null, .latest, null, &ann, 50);
+    try testing.expect(try cache.latest(testing.allocator, "b") == null);
+    const bob_json =
+        \\{"data":{"messages":[{"id":"private","time":8,"direction":"in","from":{"id":"b"},"text":"same","new":true},
+        \\{"id":"group","time":8,"direction":"out","from":{"id":"me"},"text":"same","recipients":[{"id":"a","readAt":21},{"id":"b","readAt":null}]}]}}
+    ;
+    var bob = try inbox.parseMessages(testing.allocator, bob_json);
+    defer bob.deinit();
+    try cache.save(testing.allocator, "b", null, .latest, null, &bob, 50);
+    // A stale null must not undo the positive receipt from the other timeline.
+    try cache.save(testing.allocator, "a", null, .latest, null, &ann, 50);
+    try testing.expectEqual(@as(?u64, 21), ann.items[0].recipients[0].read_at_ms);
+    var saved = (try cache.latest(testing.allocator, "b")).?;
+    defer saved.page.deinit();
+    try testing.expectEqual(@as(usize, 2), saved.page.items.len);
+    try testing.expect(saved.page.items[0].id.eql("private") and saved.page.items[0].is_new);
+    try testing.expect(saved.page.items[1].id.eql("group") and !saved.page.items[1].recipients[1].read);
+    const sql = @import("metawork_storage_sql");
+    const Counts = struct {
+        values: [3]i64 = @splat(0),
+        fn receive(raw: *anyopaque, row: sql.Row) void {
+            const counts: *@This() = @ptrCast(@alignCast(raw));
+            for (&counts.values, 0..) |*value, i| value.* = row.value(i).integer;
+        }
+    };
+    var counts: Counts = .{};
+    try testing.expectEqual(.ok, cache.db.query("SELECT (SELECT count(*) FROM conversations),(SELECT count(*) FROM messages),(SELECT count(*) FROM conversation_messages)", &.{}, .{ .context = &counts, .receive_fn = Counts.receive }));
+    try testing.expectEqual([3]i64{ 2, 2, 3 }, counts.values);
+    const another: cache_store.Store = .{ .db = db.capability(), .scope = @splat(2) };
+    try testing.expect(try another.latest(testing.allocator, "b") == null);
 }
 
 test "inbox coordinator: the newest matching MCP connection is MetaTeam; others are not" {
@@ -2469,7 +2616,10 @@ test "inbox coordinator: against a local MetaTeam over real HTTP, with the key r
     var host: TestHost = .{ .main_thread = std.Thread.getCurrentId() };
     var capture: Capture = .{};
     defer capture.deinit();
+    const local_db = try @import("metawork_storage_sqlite").Database.create(testing.io, testing.allocator, .memory, &cache_store.migrations);
+    defer local_db.destroy() catch unreachable;
     var coordinator: Coordinator = .{
+        .database = local_db.capability(),
         .allocator = testing.allocator,
         .io = testing.io,
         .management = management.management(),

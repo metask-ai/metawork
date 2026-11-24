@@ -204,6 +204,7 @@ const App = struct {
     update_transport: ?update_http.Adapter = null,
     updates: ?update_coordinator.Coordinator = null,
     inbox_transport: ?inbox_http.Adapter = null,
+    inbox_database: ?@import("metawork_storage_sql").Database = null,
     inbox_source: ?inbox_coordinator.McpSource = null,
     inbox: ?inbox_coordinator.Coordinator = null,
     history_restore_owner: ?*app_stores.Stores = null,
@@ -451,6 +452,7 @@ const App = struct {
                 .allocator = std.heap.c_allocator,
                 .io = self.io,
                 .management = control_storage.inboxManagement(),
+                .database = self.inbox_database,
                 .transport = self.inbox_transport.?.transport(),
                 .retire_fn = inbox_http.Adapter.retire,
                 .retire_context = &self.inbox_transport.?,
@@ -1013,6 +1015,7 @@ pub fn run(init: std.process.Init) !void {
     var stores_state: app_stores.Stores = undefined;
     stores_state.init(init.io, std.heap.c_allocator, &paths_state);
     defer stores_state.deinit();
+    app.inbox_database = if (stores_state.inbox) |db| db.capability() else null;
     app.mcp_configuration_store = if (stores_state.mcp_configuration) |*store| store else null;
 
     // The Application Account coordinator and Dispatcher need stable Product Control addresses before

@@ -3,10 +3,13 @@
 //! connection. Application resolves that authorization and runs the timer,
 //! workers and HTTP; this aggregate owns which connection is MetaTeam, the
 //! connection state, the unread facts, the conversation summaries and when to
-//! ask again. It never holds the device key, and nothing here is persisted.
+//! ask again. It never holds the device key. Opened conversations are cached per binding.
 const std = @import("std");
 const http = @import("metawork_http_contract");
 const update = @import("metawork_product_update");
+
+pub const database_name = "message.sqlite";
+pub const database_schema = @embedFile("message/schema.sql");
 
 pub const Limits = struct {
     /// Response bodies are parsed whole. These bound what is read from the
@@ -45,6 +48,16 @@ fn Text(comptime capacity: usize) type {
         len: usize = 0,
 
         pub const max = capacity;
+
+        pub fn jsonStringify(self: @This(), writer: *std.json.Stringify) !void {
+            try writer.write(self.slice());
+        }
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            const value = try std.json.innerParse([]const u8, allocator, source, options);
+            if (value.len > capacity) return error.InvalidCharacter;
+            return truncated(value);
+        }
 
         /// Exact copy; an identity that does not fit is not this identity.
         pub fn init(value: []const u8) error{InvalidResponse}!@This() {
@@ -466,6 +479,18 @@ pub fn selfPeer(from: Peer) Peer {
     return .{ .id = Id.init(self_peer_id) catch unreachable, .name = from.name };
 }
 
+pub fn conversationPeers(a: std.mem.Allocator, kind: Direction, from: Peer, recipients: []const Recipient) ![]const Peer {
+    if (kind == .in) return try a.dupe(Peer, &.{from});
+    var peers: std.ArrayList(Peer) = .empty;
+    if (kind == .self) try peers.append(a, selfPeer(from));
+    for (recipients) |recipient| {
+        const peer = recipient.peer;
+        if (kind == .self and (peer.id.eql(from.id.slice()) or peer.id.eql(self_peer_id))) continue;
+        try peers.append(a, peer);
+    }
+    return peers.items;
+}
+
 pub const Messages = struct {
     arena: std.heap.ArenaAllocator,
     items: []const Message,
@@ -751,7 +776,6 @@ pub fn parseMessages(allocator: std.mem.Allocator, bytes: []const u8) ParseError
         } else &.{};
         // Repeated recipients, task ids or messages are kept once: each is a
         // key on the Renderer side.
-        const peer_list = try arena.alloc(Peer, recipients.len);
         const recipient_list = try arena.alloc(Recipient, recipients.len);
         var peers: usize = 0;
         for (recipients) |entry| {
@@ -767,7 +791,6 @@ pub fn parseMessages(allocator: std.mem.Allocator, bytes: []const u8) ParseError
                     break;
                 }
             } else {
-                peer_list[peers] = peer;
                 recipient_list[peers] = .{ .peer = peer, .read = read, .read_at_ms = at };
                 peers += 1;
             }
@@ -785,23 +808,6 @@ pub fn parseMessages(allocator: std.mem.Allocator, bytes: []const u8) ParseError
         }
         const from = try peerValue(object.get("from") orelse return error.InvalidResponse);
         const kind = std.meta.stringToEnum(Direction, direction) orelse return error.InvalidResponse;
-        const conversations: []const Peer = switch (kind) {
-            .in => (try arena.dupe(Peer, &.{from})),
-            .out => peer_list[0..peers],
-            .self => self: {
-                // A group message that also went to the user is theirs and
-                // every other recipient's.
-                const mine = try arena.alloc(Peer, peers + 1);
-                mine[0] = selfPeer(from);
-                var count_self: usize = 1;
-                for (peer_list[0..peers]) |peer| {
-                    if (peer.id.eql(from.id.slice()) or peer.id.eql(self_peer_id)) continue;
-                    mine[count_self] = peer;
-                    count_self += 1;
-                }
-                break :self mine[0..count_self];
-            },
-        };
         message.* = .{
             .id = try idValue(object.get("id") orelse return error.InvalidResponse),
             .sent_at_ms = try timeValue(object.get("time") orelse return error.InvalidResponse),
@@ -817,7 +823,7 @@ pub fn parseMessages(allocator: std.mem.Allocator, bytes: []const u8) ParseError
                 .string => |agent| Name.truncated(if (agent.len == 0) "agent" else agent),
                 else => Name.truncated("agent"),
             } else null,
-            .conversations = conversations,
+            .conversations = try conversationPeers(arena, kind, from, recipient_list[0..peers]),
         };
         // An outgoing message without recipients belongs to no conversation.
         if (message.direction == .out and peers == 0) return error.InvalidResponse;
@@ -1173,17 +1179,27 @@ pub const TaskRequest = struct {
     task: []const u8,
 };
 
-const Latest = struct {
+pub const Latest = struct {
     id: Id,
     direction: Direction,
     preview: Preview,
     sent_at_ms: u64,
 };
 
-const Summary = struct {
+pub const Summary = struct {
     peer: Peer,
     latest: Latest,
 };
+
+pub fn openedSummary(peer_id: []const u8, message: *const Message, known_username: ?Name) ?Summary {
+    for (message.peers()) |peer| {
+        if (!peer.id.eql(peer_id)) continue;
+        var member = peer;
+        if (member.username == null) member.username = known_username;
+        return .{ .peer = member, .latest = .{ .id = message.id, .direction = message.direction, .preview = preview(message.text), .sent_at_ms = message.sent_at_ms } };
+    }
+    return null;
+}
 
 pub const LatestView = struct {
     id: []const u8,
