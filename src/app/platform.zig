@@ -195,12 +195,18 @@ pub const Adapter = struct {
     /// can hand them to.
     fn fileOpenKind(context: *anyopaque, relative: []const u8) ?control_ports.FileOpenKind {
         const self: *Adapter = @ptrCast(@alignCast(context));
+        const system_opens = if (self.platform_services) |services_value| services_value.open_external_url_fn != null else false;
+        return openKindOn(builtin.os.tag, system_opens, relative);
+    }
+
+    /// The list holds because the extension alone decides what opens a file.
+    /// On macOS an extended attribute or a Finder alias can name another
+    /// application, so nothing is handed to the default one there until that
+    /// is verified. HTML names the application it goes to.
+    fn openKindOn(os: std.Target.Os.Tag, system_opens: bool, relative: []const u8) ?control_ports.FileOpenKind {
         return switch (output_file.openKind(relative) orelse return null) {
             .browser => if (output_browser_handoff.supported) .browser else null,
-            .office, .app => if (self.platform_services) |services_value|
-                (if (services_value.open_external_url_fn != null) .default_app else null)
-            else
-                null,
+            .office, .app => if (os == .windows and system_opens) .default_app else null,
         };
     }
 
@@ -1322,14 +1328,27 @@ test "SDK consumption file open hands a listed type to the system once and nothi
     adapter.platform_services.?.open_external_url_fn = null;
     try std.testing.expectEqual(@as(?control_ports.FileOpenKind, null), port.open_kind_fn(port.context, "a.pdf"));
     adapter.platform_services.?.open_external_url_fn = Spy.open;
-    try std.testing.expectEqual(@as(?control_ports.FileOpenKind, .default_app), port.open_kind_fn(port.context, "a.pdf"));
-    try std.testing.expectEqual(@as(?control_ports.FileOpenKind, .default_app), port.open_kind_fn(port.context, "a.docx"));
-    try std.testing.expectEqual(@as(?control_ports.FileOpenKind, if (output_browser_handoff.supported) .browser else null), port.open_kind_fn(port.context, "a.html"));
+    const default_app: ?control_ports.FileOpenKind = if (builtin.os.tag == .windows) .default_app else null;
+    for ([_][]const u8{ "a.pdf", "a.docx" }) |name| {
+        try std.testing.expectEqual(default_app, port.open_kind_fn(port.context, name));
+        try std.testing.expectEqual(@as(?control_ports.FileOpenKind, .default_app), Adapter.openKindOn(.windows, true, name));
+        try std.testing.expectEqual(@as(?control_ports.FileOpenKind, null), Adapter.openKindOn(.macos, true, name));
+    }
+    const browser: ?control_ports.FileOpenKind = if (output_browser_handoff.supported) .browser else null;
+    try std.testing.expectEqual(browser, port.open_kind_fn(port.context, "a.html"));
+    for ([_]std.Target.Os.Tag{ .windows, .macos }) |os|
+        try std.testing.expectEqual(browser, Adapter.openKindOn(os, false, "a.html"));
     for ([_][]const u8{ "a.exe", "a.xml", "README" }) |name| {
         try std.testing.expectEqual(@as(?control_ports.FileOpenKind, null), port.open_kind_fn(port.context, name));
         try std.testing.expectError(error.UnsupportedService, port.prepare_fn(port.context, root, name, .open));
     }
 
+    if (default_app == null) {
+        for ([_][]const u8{ "a.pdf", "a.docx" }) |name|
+            try std.testing.expectError(error.UnsupportedService, port.prepare_fn(port.context, root, name, .open));
+        try std.testing.expectEqual(@as(usize, 0), Spy.calls);
+        return;
+    }
     var effect = try port.prepare_fn(port.context, root, "a.pdf", .open);
     defer effect.deinit();
     var worker: TestFileEffect = .{ .effect = &effect };

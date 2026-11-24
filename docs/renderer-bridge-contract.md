@@ -170,7 +170,7 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 
 两个请求的结果精确为 `{ generation, operationId, state }`，身份与请求一致。state 为 `ready | revealed | saved | registered | opened | open_unsupported | open_failed | path_copied | copy_failed | save_failed | target_changed | cleanup_failed | busy | missing | restricted | changed | too_large | cancelled | timed_out | stale_security | unavailable | failed`。每种请求只有一个成功状态：`open` 为 `opened`，`reveal` 为 `revealed`，`copy_path` 为 `path_copied`，`check_current` 与 `check` 为 `ready`，`save` 为 `saved`，登记为 `registered`。`revealed` 与 `opened` 只表示系统接收了请求，`saved` 只证明选定目标已原子发布。`changed` 在 `check` 中表示与交付时不同，在其他请求中表示操作期间文件变化。save_failed、target_changed 与 cleanup_failed 分别说明保存失败、目标身份已变化及临时文件清理未完成，只出现在保存请求。后续每次操作都重新校验。
 
-`open` 只接受 Host 名单内的类型，按最后一个扩展名判定、ASCII 大小写不敏感，Renderer 不持有名单。身份解析通过之后、排入 worker 之前判定：类型不在名单或平台没有对应能力时立即返回 `open_unsupported`。HTML 交给系统默认浏览器，其余交给系统默认应用；DOCX、XLSX、PPTX 另在 worker 核对 OOXML 主部件与扩展名一致，上限 256 MiB，其余类型不读内容。系统没有接受交接时返回 `open_failed`。
+`open` 只接受 Host 名单内的类型，按最后一个扩展名判定、ASCII 大小写不敏感，Renderer 不持有名单。身份解析通过之后、排入 worker 之前判定：类型不在名单或平台没有对应能力时立即返回 `open_unsupported`。HTML 交给系统默认浏览器，其余交给系统默认应用；macOS 没有交给默认应用的能力，名单内除 HTML 外都是 `open_unsupported`，成果也不投影 `open`；DOCX、XLSX、PPTX 另在 worker 核对 OOXML 主部件与扩展名一致，上限 256 MiB，其余类型不读内容。系统没有接受交接时返回 `open_failed`。
 
 `copy_path` 由 Application 在主线程把系统原生格式的完整路径以 `text/plain` 写入系统剪贴板，Windows 为反斜杠且不带 `\\?\` 前缀，不加引号和换行；路径不是合法 UTF-8 或含控制字符时拒绝。系统拒绝写入时返回 `copy_failed`，不重试。响应仍只有三个字段，路径不进入响应、Snapshot 或日志。
 

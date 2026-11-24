@@ -83,11 +83,11 @@ const OfficeKind = enum {
     excel,
     powerpoint,
 
-    fn fromPath(path: []const u8) OfficeKind {
+    fn fromPath(path: []const u8) ?OfficeKind {
         const extension = std.fs.path.extension(path);
-        if (std.ascii.eqlIgnoreCase(extension, ".docx")) return .word;
-        if (std.ascii.eqlIgnoreCase(extension, ".xlsx")) return .excel;
-        return .powerpoint;
+        for ([_]struct { []const u8, OfficeKind }{ .{ ".docx", .word }, .{ ".xlsx", .excel }, .{ ".pptx", .powerpoint } }) |kind|
+            if (std.ascii.eqlIgnoreCase(extension, kind[0])) return kind[1];
+        return null;
     }
 
     fn contentType(self: OfficeKind) []const u8 {
@@ -111,7 +111,8 @@ pub fn locate(io: std.Io, request: Request, cancelled: *const std.atomic.Value(b
 /// to open there.
 pub fn inspectOpen(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool)) !Proof {
     const kind = openKind(request.relative_path) orelse return error.RestrictedOutput;
-    return locateAnd(io, request, cancelled, if (kind == .office) .fromPath(request.relative_path) else null);
+    const office: ?OfficeKind = if (kind == .office) OfficeKind.fromPath(request.relative_path) orelse return error.RestrictedOutput else null;
+    return locateAnd(io, request, cancelled, office);
 }
 
 fn locateAnd(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool), office: ?OfficeKind) !Proof {
@@ -896,6 +897,12 @@ test "the open list names every type once and decides by the last extension alon
     }
     for ([_][]const u8{ "README", ".png", ".html", "docs.png/README", "docs/.docx", "a.", "a.png.", "", "png" }) |path|
         try std.testing.expectEqual(@as(?OpenKind, null), openKind(path));
+    // Every Office type is checked against the package its name says.
+    for (open_types) |types| for (types.extensions) |extension| {
+        const name = try std.mem.concat(std.testing.allocator, u8, &.{ "a.", extension });
+        defer std.testing.allocator.free(name);
+        try std.testing.expectEqual(types.kind == .office, OfficeKind.fromPath(name) != null);
+    };
 }
 
 test "opening reads only Office documents and refuses what the list does not name" {
