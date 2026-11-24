@@ -1,7 +1,16 @@
 import { ReplyImage } from "./ReplyImage.tsx";
 import { ReplyVideo } from "./ReplyVideo.tsx";
 import { RunFiles } from "./RunFiles.tsx";
-import type { FileDescriber, FilePreviewLoader } from "./reply-files.ts";
+import {
+  menuFile,
+  type FileDescriber,
+  type FilePreviewLoader,
+} from "./reply-files.ts";
+import {
+  ReplyMarkdown,
+  type ReplyLocalLinks,
+  type ReplyReference,
+} from "./ReplyMarkdown.tsx";
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { SkillMessageBody, UserInputMessage } from "./UserInputMessage.tsx";
 import { AdditionalInput } from "./AdditionalInput.tsx";
@@ -51,11 +60,10 @@ import {
   Activity,
   Composer,
   Conversation,
-  Markdown,
-  type MarkdownLocalLinks,
   type MarkdownWebLink,
   Message,
 } from "../../components/ai/index.ts";
+import { FileMenuScope } from "../../components/FileMenu.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { useAutosizeTextarea } from "../../components/ui/textarea.tsx";
@@ -524,6 +532,7 @@ export function TaskContent({
   securityEpoch,
   runToolsCache,
   workspaceRoot = null,
+  workspaceIdentity = null,
   onPreviewWorkspaceFile,
   loadFilePreview,
   describeFile,
@@ -606,7 +615,8 @@ export function TaskContent({
   runToolsCache?: RunToolsCache;
   /** Publishable canonical root of the Task Workspace, for absolute links. */
   workspaceRoot?: string | null;
-  /** Present only while the Task Workspace files can be browsed. */
+  /** Present only while the Task Workspace files can be browsed, as is the next. */
+  workspaceIdentity?: { workspaceId: string; workspaceEpoch: string } | null;
   onPreviewWorkspaceFile?: (
     taskId: string,
     path: string,
@@ -1410,10 +1420,21 @@ export function TaskContent({
             />
           );
           const runLinks = runFileReferenceLinks(run);
-          const referenceLink = (reference: FileReferenceView) => ({
+          const referenceLink = (
+            reference: FileReferenceView,
+          ): ReplyReference => ({
             label: t("file_preview.open", { path: reference.displayPath }),
             onOpen: (opener: HTMLButtonElement) =>
               onPreviewFile(task.id, run.id, reference, opener),
+            file: menuFile(
+              {
+                kind: "reference",
+                taskId: task.id,
+                runId: run.id,
+                fileReferenceId: reference.id,
+              },
+              reference.displayPath,
+            ),
           });
           const references = new Map(
             [...runLinks].map(([text, reference]) => [
@@ -1421,7 +1442,7 @@ export function TaskContent({
               referenceLink(reference),
             ]),
           );
-          const localLinks: MarkdownLocalLinks = (destination) => {
+          const localLinks: ReplyLocalLinks = (destination) => {
             const link = resolveWorkspaceFileLink(destination, workspaceRoot);
             if (link.kind === "unavailable")
               return {
@@ -1431,7 +1452,7 @@ export function TaskContent({
             const reference = runLinks.get(link.path);
             if (reference?.displayPath === link.path)
               return referenceLink(reference);
-            if (!onPreviewWorkspaceFile)
+            if (!onPreviewWorkspaceFile || !workspaceIdentity)
               return {
                 unavailable: t(
                   "file_preview.link_unavailable.workspace_unavailable",
@@ -1441,6 +1462,15 @@ export function TaskContent({
               label: t("file_preview.open", { path: link.path }),
               onOpen: (opener) =>
                 onPreviewWorkspaceFile(task.id, link.path, opener),
+              file: menuFile(
+                {
+                  kind: "workspace",
+                  taskId: task.id,
+                  ...workspaceIdentity,
+                  path: link.path,
+                },
+                link.path,
+              ),
             };
           };
           const disclosureKey = `${task.id}:${run.id}`;
@@ -1825,46 +1855,54 @@ export function TaskContent({
                         role="assistant"
                         className="run-assistant-output"
                       >
-                        {entry.parts
-                          .filter((part) => part.content)
-                          .map((part) => {
-                            const streaming =
-                              part.disposition === "provisional";
-                            const response =
-                              part.disposition === "final" ||
-                              part.disposition === "partial";
-                            return (
-                              <Markdown
-                                className={`assistant-output-part ${
-                                  response
-                                    ? "agent-response"
-                                    : "run-commentary-item"
-                                }`}
-                                data-reading-id={part.identity}
-                                data-output-identity={part.identity}
-                                data-output-disposition={part.disposition}
-                                key={part.identity}
-                                references={streaming ? undefined : references}
-                                localLinks={streaming ? undefined : localLinks}
-                                interactive={!streaming}
-                                webLink={streaming ? undefined : webLink}
-                                streaming={streaming}
-                                onStreamingCommit={followDeferredOutput}
-                                codeCopy={
-                                  response && responseCopyable
-                                    ? {
-                                        label: t("copy.code"),
-                                        copiedLabel: t("copy.copied"),
-                                        failedLabel: t("copy.failed"),
-                                        onCopy: copyCodeText,
-                                      }
-                                    : undefined
-                                }
-                              >
-                                {part.content}
-                              </Markdown>
-                            );
-                          })}
+                        <FileMenuScope
+                          resetKey={`${task.id}:${entry.identity}`}
+                        >
+                          {entry.parts
+                            .filter((part) => part.content)
+                            .map((part) => {
+                              const streaming =
+                                part.disposition === "provisional";
+                              const response =
+                                part.disposition === "final" ||
+                                part.disposition === "partial";
+                              return (
+                                <ReplyMarkdown
+                                  className={`assistant-output-part ${
+                                    response
+                                      ? "agent-response"
+                                      : "run-commentary-item"
+                                  }`}
+                                  data-reading-id={part.identity}
+                                  data-output-identity={part.identity}
+                                  data-output-disposition={part.disposition}
+                                  key={part.identity}
+                                  references={
+                                    streaming ? undefined : references
+                                  }
+                                  localLinks={
+                                    streaming ? undefined : localLinks
+                                  }
+                                  interactive={!streaming}
+                                  webLink={streaming ? undefined : webLink}
+                                  streaming={streaming}
+                                  onStreamingCommit={followDeferredOutput}
+                                  codeCopy={
+                                    response && responseCopyable
+                                      ? {
+                                          label: t("copy.code"),
+                                          copiedLabel: t("copy.copied"),
+                                          failedLabel: t("copy.failed"),
+                                          onCopy: copyCodeText,
+                                        }
+                                      : undefined
+                                  }
+                                >
+                                  {part.content}
+                                </ReplyMarkdown>
+                              );
+                            })}
+                        </FileMenuScope>
                         {entry.redacted && (
                           <p className="projection-note">
                             {t("privacy.sensitive_hidden")}

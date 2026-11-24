@@ -12,10 +12,12 @@ import type { FileReferenceResult } from "../features/tasks/RunOutputs.tsx";
 import {
   FileMenuProvider,
   type FileMenuHandler,
+  type MenuFile,
 } from "../components/FileMenu.tsx";
 import {
   fileMenuOutcome,
   fileTargetShown,
+  menuFile,
   menuFileTarget,
 } from "../features/tasks/reply-files.ts";
 import {
@@ -138,6 +140,8 @@ import {
   createTaskPanelWorkspaceTab,
   createTaskPanelReviewTab,
   createTaskPanelOutputsTab,
+  taskPanelFileTarget,
+  type TaskPanelTab,
 } from "../features/task-panel/task-panel-state.ts";
 import {
   WorkspaceFileTree,
@@ -363,6 +367,13 @@ import {
   ArchiveNotice,
   type ArchiveNoticeValue,
 } from "../features/tasks/ArchiveNotice.tsx";
+
+function taskPanelFile(tab: TaskPanelTab): MenuFile | null {
+  const target = taskPanelFileTarget(tab);
+  return target && "displayPath" in tab
+    ? menuFile(target, tab.displayPath)
+    : null;
+}
 
 export default function App() {
   const { t } = useI18n();
@@ -1514,6 +1525,19 @@ export default function App() {
       path,
     );
     focusTaskPanelTab(tab.tabId);
+  }
+  function workspaceTreeFile(path: string): MenuFile | null {
+    if (!workspaceFilesAvailable || !panelTask || !panelWorkspace) return null;
+    return menuFile(
+      {
+        kind: "workspace",
+        taskId: panelTask.id,
+        workspaceId: panelWorkspace.id,
+        workspaceEpoch: panelWorkspace.epoch,
+        path,
+      },
+      path,
+    );
   }
   function openConversationWorkspaceFile(
     taskId: string,
@@ -5707,8 +5731,10 @@ export default function App() {
                     : null
                 }
                 onOpen={openWorkspaceFile}
+                fileOf={workspaceTreeFile}
               />
             }
+            fileOf={taskPanelFile}
             tabs={taskPanel.session.tabs}
             activeTabId={taskPanel.session.activeTabId}
             attention={pendingLocator}
@@ -5740,6 +5766,11 @@ export default function App() {
               filePreviewViewState ? (
               <FilePreviewView
                 state={filePreviewViewState}
+                file={
+                  taskPanel.activeTab
+                    ? taskPanelFile(taskPanel.activeTab)
+                    : null
+                }
                 webLink={markdownWebLink}
                 mode={activePanelView?.previewMode ?? "preview"}
                 scrollTop={activePanelView?.scrollTop ?? 0}
@@ -6391,6 +6422,14 @@ export default function App() {
                 workspaceRoot={
                   panelWorkspace && !panelWorkspace.redacted
                     ? panelWorkspace.canonicalRoot || null
+                    : null
+                }
+                workspaceIdentity={
+                  workspaceFilesAvailable && panelWorkspace
+                    ? {
+                        workspaceId: panelWorkspace.id,
+                        workspaceEpoch: panelWorkspace.epoch,
+                      }
                     : null
                 }
                 onPreviewWorkspaceFile={

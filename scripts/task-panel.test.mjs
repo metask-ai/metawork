@@ -100,6 +100,9 @@ const { ReplyVideo } = await vite.ssrLoadModule(
 const { FileChangesView } = await vite.ssrLoadModule(
   "/src/features/task-panel/FileChangesView.tsx",
 );
+const { FileMenuProvider } = await vite.ssrLoadModule(
+  "/src/components/FileMenu.tsx",
+);
 const { FilePreviewRefreshAction, FilePreviewView } = await vite.ssrLoadModule(
   "/src/features/task-panel/FilePreviewView.tsx",
 );
@@ -2026,6 +2029,7 @@ test("explicit Markdown file links open Workspace files without a Run reference"
       "1",
       {
         workspaceRoot: "/Users/me/My Work",
+        workspaceIdentity: { workspaceId: "1", workspaceEpoch: "2" },
         onPreviewFile: (taskId, runId, reference) =>
           opened.push([taskId, runId, reference.id]),
         onPreviewWorkspaceFile: (taskId, path, opener) =>
@@ -2076,6 +2080,113 @@ test("explicit Markdown file links open Workspace files without a Run reference"
   );
 });
 
+test("a file link opens the menu of the file it names", async () => {
+  const asked = [];
+  const previewed = [];
+  const handler = {
+    connected: true,
+    canReference: true,
+    perform: async (file, action) => {
+      asked.push([file.target, file.displayPath, action]);
+      return null;
+    },
+  };
+  render(
+    createElement(
+      FileMenuProvider,
+      { value: handler },
+      taskContentElement(
+        task({
+          currentRunId: "9",
+          runs: [
+            linkedRun(
+              [
+                "The report is p0-file-report.txt, see `p0-file-report.txt`",
+                "[sheet](notes/p0-file-manifest.csv)",
+                "[hosts](/etc/hosts) [site](https://example.com/)",
+              ].join("\n\n"),
+              [reportReference],
+            ),
+          ],
+        }),
+        "1",
+        {
+          workspaceRoot: "/Users/me/ws",
+          workspaceIdentity: { workspaceId: "1", workspaceEpoch: "2" },
+          webLink: { failedLabel: "failed", onOpen: async () => true },
+          onPreviewFile: (...args) => previewed.push(args),
+          onPreviewWorkspaceFile: (...args) => previewed.push(args),
+        },
+      ),
+    ),
+  );
+  const reference = [
+    {
+      kind: "reference",
+      taskId: "3",
+      runId: "9",
+      fileReferenceId: reportReference.id,
+    },
+    "p0-file-report.txt",
+    "reveal",
+  ];
+  const links = [
+    ...screen
+      .getAllByRole("button", { name: "Preview p0-file-report.txt" })
+      .map((link) => [link, reference]),
+    [
+      screen.getByRole("button", {
+        name: "Preview notes/p0-file-manifest.csv",
+      }),
+      [
+        {
+          kind: "workspace",
+          taskId: "3",
+          workspaceId: "1",
+          workspaceEpoch: "2",
+          path: "notes/p0-file-manifest.csv",
+        },
+        "notes/p0-file-manifest.csv",
+        "reveal",
+      ],
+    ],
+  ];
+  assert.equal(links.length, 3);
+  for (const [link, expected] of links) {
+    assert.equal(link.getAttribute("aria-keyshortcuts"), "Shift+F10");
+    await act(async () => fireEvent.keyDown(link, { key: "ContextMenu" }));
+    const menu = await screen.findByRole("menu", { name: "File actions" });
+    assert.deepEqual(
+      within(menu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+      [
+        "Open in default app",
+        "Open folder",
+        "Reference in conversation",
+        "Copy path",
+        "Save as…",
+      ],
+    );
+    await act(async () =>
+      fireEvent.click(
+        within(menu).getByRole("menuitem", { name: "Open folder" }),
+      ),
+    );
+    await waitFor(() => assert.ok(!screen.queryByRole("menu")));
+    assert.deepEqual(asked.at(-1), expected);
+  }
+  // Neither what cannot be opened nor the web has a file to act on.
+  for (const name of ["hosts", "site"]) {
+    const link = screen.getByRole("link", { name });
+    fireEvent.contextMenu(link);
+    assert.equal(link.hasAttribute("aria-keyshortcuts"), false);
+    assert.ok(!screen.queryByRole("menu"));
+  }
+  assert.equal(asked.length, 3);
+  assert.deepEqual(previewed, []);
+});
+
 test("Markdown file links follow Workspace availability without remounting output", () => {
   const value = task({
     currentRunId: "9",
@@ -2110,6 +2221,7 @@ test("Markdown file links follow Workspace availability without remounting outpu
       "2",
       {
         workspaceRoot: "/Users/me/ws",
+        workspaceIdentity: { workspaceId: "1", workspaceEpoch: "2" },
         onPreviewWorkspaceFile: (taskId, path) =>
           workspaceOpened.push([taskId, path]),
       },

@@ -1,5 +1,6 @@
 import type {
   FileReferenceView,
+  FileTarget,
   TaskView,
   RunManifest,
 } from "../../bridge/contracts.ts";
@@ -48,6 +49,29 @@ export type TaskPanelTab =
   | TaskPanelReviewTab
   | TaskPanelWorkspaceTab
   | { kind: "outputs"; taskId: string; tabId: string };
+
+/** The file a tab shows; a review and the outputs list are of no one file. */
+export function taskPanelFileTarget(tab: TaskPanelTab): FileTarget | null {
+  switch (tab.kind) {
+    case "preview":
+      return {
+        kind: "reference",
+        taskId: tab.taskId,
+        runId: tab.runId,
+        fileReferenceId: tab.referenceId,
+      };
+    case "workspace":
+      return {
+        kind: "workspace",
+        taskId: tab.taskId,
+        workspaceId: tab.workspaceId,
+        workspaceEpoch: tab.workspaceEpoch,
+        path: tab.path,
+      };
+    default:
+      return null;
+  }
+}
 
 export function createTaskPanelOutputsTab(taskId: string): TaskPanelTab {
   return { kind: "outputs", taskId, tabId: tabId(["outputs", taskId]) };

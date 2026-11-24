@@ -66,6 +66,18 @@ const { RunFiles } = await vite.ssrLoadModule(
 );
 const { fileMenuOutcome, fileTargetShown, menuFile, menuFileTarget } =
   await vite.ssrLoadModule("/src/features/tasks/reply-files.ts");
+const { FilePreviewView } = await vite.ssrLoadModule(
+  "/src/features/task-panel/FilePreviewView.tsx",
+);
+const { TaskPanel } = await vite.ssrLoadModule(
+  "/src/features/task-panel/TaskPanel.tsx",
+);
+const { taskPanelFileTarget } = await vite.ssrLoadModule(
+  "/src/features/task-panel/task-panel-state.ts",
+);
+const { WorkspaceFileTree } = await vite.ssrLoadModule(
+  "/src/features/workspaces/WorkspaceFileTree.tsx",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -1252,6 +1264,268 @@ test("a video the system cannot play keeps its place and its menu", async () => 
     translate("en-US", "video_preview.failed"),
   );
   await closeMenu(await openMenu(group, "menu key"));
+});
+
+const workspaceTarget = (path) => ({
+  kind: "workspace",
+  taskId: "3",
+  workspaceId: "1",
+  workspaceEpoch: "2",
+  path,
+});
+
+test("a file in the tree opens the same menu and a directory opens none", async () => {
+  const { handler, calls } = handlerFixture();
+  const opened = [];
+  const toggled = [];
+  const props = {
+    tree: {
+      directories: {
+        "": {
+          state: "ready",
+          entries: [
+            { name: "docs", kind: "directory" },
+            { name: "a.md", kind: "file" },
+            { name: "b.md", kind: "file" },
+          ],
+          truncated: false,
+          redacted: false,
+        },
+      },
+      expanded: new Set(),
+      capacity: false,
+      request() {},
+      refresh() {},
+      toggle: (path) => toggled.push(path),
+    },
+    available: true,
+    selectedPath: null,
+    onOpen: (path) => opened.push(path),
+    fileOf: (path) => menuFile(workspaceTarget(path), path),
+  };
+  const mounted = render(
+    view(handler, createElement(WorkspaceFileTree, props)),
+  );
+  const entry = (name) => screen.getByRole("treeitem", { name });
+  for (const how of ["pointer", "menu key", "Shift+F10"]) {
+    entry("b.md").focus();
+    const menu = await openMenu(entry("b.md"), how);
+    assert.deepEqual(
+      menuItems(menu).map((item) => item.name),
+      five,
+    );
+    assert.deepEqual(disabledItems(menu), []);
+    await closeMenu(menu);
+    await waitFor(() => assert.ok(document.activeElement === entry("b.md")));
+  }
+  fireEvent.contextMenu(entry("docs"));
+  fireEvent.keyDown(entry("docs"), { key: "F10", shiftKey: true });
+  assert.ok(!screen.queryByRole("menu"));
+  assert.equal(entry("docs").hasAttribute("aria-keyshortcuts"), false);
+
+  const menu = await openMenu(entry("a.md"));
+  await act(async () =>
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Copy path" })),
+  );
+  assert.deepEqual(
+    calls.map(({ target, action }) => [target, action]),
+    [[workspaceTarget("a.md"), "copy_path"]],
+  );
+  await waitFor(() => assert.ok(!screen.queryByRole("menu")));
+  // The keys of the tree are the ones it had.
+  entry("a.md").focus();
+  await act(async () => fireEvent.keyDown(entry("a.md"), { key: "ArrowDown" }));
+  assert.ok(document.activeElement === entry("b.md"));
+  await act(async () => fireEvent.keyDown(entry("b.md"), { key: "Home" }));
+  assert.ok(document.activeElement === entry("docs"));
+  fireEvent.click(entry("a.md"));
+  fireEvent.click(entry("docs"));
+  assert.deepEqual([opened, toggled], [["a.md"], ["docs"]]);
+  // Without a Workspace to act in there is nothing to open.
+  mounted.rerender(
+    view(
+      handler,
+      createElement(WorkspaceFileTree, { ...props, fileOf: () => null }),
+    ),
+  );
+  fireEvent.contextMenu(entry("a.md"));
+  assert.ok(!screen.queryByRole("menu"));
+});
+
+const panelTabs = [
+  {
+    kind: "preview",
+    tabId: "preview",
+    taskId: "3",
+    runId: "7",
+    referenceId: "file-3-1-1-1",
+    title: "a.md",
+    displayPath: "a.md",
+  },
+  {
+    tabId: "workspace",
+    title: "b.md",
+    displayPath: "b.md",
+    ...workspaceTarget("b.md"),
+  },
+  { kind: "review", tabId: "review", taskId: "3", runId: "7" },
+  { kind: "outputs", tabId: "outputs", taskId: "3" },
+];
+const panelFile = (tab) => {
+  const target = taskPanelFileTarget(tab);
+  return target && menuFile(target, tab.displayPath);
+};
+const panel = (props = {}, children = null) =>
+  createElement(
+    TaskPanel,
+    {
+      title: "Panel",
+      fileTreeOpen: false,
+      onToggleFileTree() {},
+      tabs: panelTabs,
+      activeTabId: "preview",
+      fileOf: panelFile,
+      attention: null,
+      onSelectTab() {},
+      onCloseTab() {},
+      onClose() {},
+      ...props,
+    },
+    children,
+  );
+
+test("the tab of a file opens its menu and a tab of no one file opens none", async () => {
+  const { handler, calls } = handlerFixture();
+  const selected = [];
+  render(
+    view(handler, panel({ onSelectTab: (tabId) => selected.push(tabId) })),
+  );
+  const tab = (name) => screen.getByRole("tab", { name });
+  const targets = [];
+  for (const name of ["a.md", "b.md"]) {
+    const menu = await openMenu(tab(name), "Shift+F10");
+    assert.deepEqual(
+      menuItems(menu).map((item) => item.name),
+      five,
+    );
+    await act(async () =>
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Save as…" })),
+    );
+    await waitFor(() => assert.ok(!screen.queryByRole("menu")));
+    targets.push(calls.at(-1).target);
+  }
+  assert.deepEqual(targets, [reference, workspaceTarget("b.md")]);
+  for (const name of ["Review changes", "Delivered files"]) {
+    fireEvent.contextMenu(tab(name));
+    assert.ok(!screen.queryByRole("menu"));
+    assert.equal(tab(name).hasAttribute("aria-keyshortcuts"), false);
+  }
+  // Opening a menu selects nothing, and the keys of the tabs still move.
+  assert.deepEqual(selected, []);
+  tab("a.md").focus();
+  await act(async () => fireEvent.keyDown(tab("a.md"), { key: "ArrowRight" }));
+  assert.ok(document.activeElement === tab("b.md"));
+});
+
+test("what a panel says about a file goes with its tab, and what it is doing does not", async () => {
+  const requests = [];
+  const { handler } = handlerFixture({
+    perform: (_file, _action, signal) =>
+      new Promise((resolve) => requests.push({ signal, resolve })),
+  });
+  const mounted = render(view(handler, panel()));
+  const choose = async (name) => {
+    const menu = await openMenu(screen.getByRole("tab", { name: "a.md" }));
+    await act(async () =>
+      fireEvent.click(within(menu).getByRole("menuitem", { name })),
+    );
+    await waitFor(() => assert.ok(!screen.queryByRole("menu")));
+  };
+  await choose("Save as…");
+  mounted.rerender(view(handler, panel({ activeTabId: "workspace" })));
+  assert.equal(requests[0].signal.aborted, false);
+  await act(async () =>
+    requests[0].resolve({ message: "outputs.state.saved" }),
+  );
+  assert.equal(screen.getByRole("status").textContent, "File saved");
+  mounted.rerender(view(handler, panel({ activeTabId: "preview" })));
+  assert.ok(!screen.queryByRole("status"));
+  await choose("Copy path");
+  mounted.rerender(
+    view(
+      handler,
+      panel({ tabs: panelTabs.map((tab) => ({ ...tab, taskId: "4" })) }),
+    ),
+  );
+  assert.equal(requests[1].signal.aborted, true);
+  await act(async () =>
+    requests[1].resolve({ message: "outputs.state.path_copied" }),
+  );
+  assert.ok(!screen.queryByRole("status"));
+});
+
+test("an image in the panel opens the menu of its tab with the image to copy, and text opens none", async (t) => {
+  const { writes } = installImageEncoding(t, { decode: async () => {} });
+  const { handler, calls } = handlerFixture();
+  const content = (preview) =>
+    createElement(FilePreviewView, {
+      state: {
+        selected: {
+          id: reference.fileReferenceId,
+          title: "",
+          displayPath: "a.png",
+        },
+        phase: "settled",
+        preview: {
+          state: "ready",
+          content: "",
+          truncated: false,
+          redacted: false,
+          ...preview,
+        },
+      },
+      file: menuFile(reference, "a.png"),
+      mode: "preview",
+      scrollTop: 0,
+      onModeChange() {},
+      onScrollTopChange() {},
+      onRetry() {},
+      webLink: { failedLabel: "", onOpen: async () => true },
+    });
+  const mounted = render(
+    view(handler, panel({}, content({ image: imageResource().image }))),
+  );
+  const group = screen.getByRole("group", { name: "a.png" });
+  assert.equal(group.tabIndex, 0);
+  let menu = await openMenu(group, "menu key");
+  assert.deepEqual(disabledItems(menu), ["Copy image"]);
+  await closeMenu(menu);
+  await waitFor(() =>
+    assert.ok(mounted.container.querySelector("img")?.getAttribute("src")),
+  );
+  await act(async () => fireEvent.load(mounted.container.querySelector("img")));
+  menu = await openMenu(group);
+  assert.deepEqual(
+    menuItems(menu).map((item) => item.name),
+    ["Copy image", ...five],
+  );
+  assert.deepEqual(disabledItems(menu), []);
+  await act(async () =>
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Copy image" })),
+  );
+  assert.equal(writes.length, 1);
+  await waitFor(() =>
+    assert.equal(screen.getByRole("status").textContent, "Image copied"),
+  );
+  assert.deepEqual(calls, []);
+  await waitFor(() => assert.ok(!screen.queryByRole("menu")));
+
+  // The secondary button stays with the text it selects.
+  mounted.rerender(
+    view(handler, panel({}, content({ content: "plain text" }))),
+  );
+  fireEvent.contextMenu(screen.getByText("plain text"));
+  assert.ok(!screen.queryByRole("menu"));
 });
 
 test("a reply shows each of its files once", () => {

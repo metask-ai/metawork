@@ -8830,11 +8830,28 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-micro);
 }
 
-.task-panel-frame {
+.task-panel-scope {
   display: flex;
   height: 100%;
   min-height: 0;
   flex-direction: column;
+}
+.task-panel-frame {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+.task-panel-scope > .file-menu-status {
+  flex: 0 0 auto;
+  padding: 0 16px 8px;
+  border-top: 1px solid var(--ui-border);
+}
+.task-panel-file-tree .file-menu-status {
+  position: sticky;
+  bottom: -16px;
+  padding: 0 0 8px;
+  background: var(--ui-surface-panel);
 }
 
 .task-panel-header {
@@ -8903,7 +8920,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-action-hover-surface);
   color: var(--ui-content-primary);
 }
-.task-panel-file-tree > ul,
+.task-panel-file-tree ul[role="tree"],
 .task-panel-file-tree ul[role="group"] {
   list-style: none;
   padding: 0;

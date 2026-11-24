@@ -30,11 +30,17 @@ import type {
 
 import { CodeBlock } from "./CodeBlock.tsx";
 import { Button } from "../ui/button.tsx";
+import {
+  contextMenuProps,
+  type ContextMenuEvent,
+} from "../ui/context-menu-anchor.ts";
 import { Tooltip } from "../ui/tooltip.tsx";
 
 export type MarkdownReference = {
   label: string;
   onOpen: (opener: HTMLButtonElement) => void;
+  /** Opens what else there is to do with it, where there is anything. */
+  onMenu?: (event: ContextMenuEvent) => void;
 };
 
 // Product features resolve an explicit local Markdown destination (path or
@@ -617,6 +623,7 @@ const components: Components = {
           title={reference.label}
           aria-label={reference.label}
           onClick={(event) => reference.onOpen(event.currentTarget)}
+          {...contextMenuProps(reference.onMenu)}
         >
           {content}
         </Button>

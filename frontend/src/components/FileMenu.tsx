@@ -5,15 +5,15 @@ import {
   useEffect,
   useRef,
   useState,
-  type KeyboardEvent,
-  type MouseEvent,
   type ReactNode,
 } from "react";
 import { useI18n, type MessageId } from "../i18n/context.ts";
 import { Button } from "./ui/button.tsx";
 import {
+  contextMenuProps,
   createContextMenuAnchor,
   type ContextMenuAnchor,
+  type ContextMenuEvent,
 } from "./ui/context-menu-anchor.ts";
 import { Icon } from "./ui/Icon.tsx";
 import { Menu } from "./ui/menu.tsx";
@@ -53,10 +53,7 @@ export type FileMenuHandler = {
 const FileMenuHandlerContext = createContext<FileMenuHandler | null>(null);
 export const FileMenuProvider = FileMenuHandlerContext.Provider;
 
-type OpenFileMenu = (
-  file: MenuFile,
-  event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>,
-) => void;
+export type OpenFileMenu = (file: MenuFile, event: ContextMenuEvent) => void;
 const OpenFileMenuContext = createContext<OpenFileMenu | null>(null);
 
 type MenuAction = FileMenuAction | "copy_image";
@@ -73,24 +70,17 @@ const items = [
   { action: "save", icon: "download", label: "outputs.save" },
 ] as const;
 
-/**
- * Everything an element needs to open the menu of its file: the secondary
- * button, the menu key and Shift+F10. Nothing without a scope or a file.
- */
+/** Opens the menu of a file in the nearest scope; null without one. */
+export function useOpenFileMenu(): OpenFileMenu | null {
+  return useContext(OpenFileMenuContext);
+}
+
+/** What an element needs to open the menu of its file. */
 export function useFileMenuTrigger(file: MenuFile | null) {
-  const openMenu = useContext(OpenFileMenuContext);
-  if (!openMenu || !file) return {};
-  return {
-    "aria-keyshortcuts": "Shift+F10",
-    onContextMenu: (event: MouseEvent<HTMLElement>) => openMenu(file, event),
-    onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
-      if (
-        event.key === "ContextMenu" ||
-        (event.shiftKey && event.key === "F10")
-      )
-        openMenu(file, event);
-    },
-  };
+  const openMenu = useOpenFileMenu();
+  return contextMenuProps(
+    openMenu && file && ((event) => openMenu(file, event)),
+  );
 }
 
 /**
@@ -101,11 +91,14 @@ export function useFileMenuTrigger(file: MenuFile | null) {
 export function FileMenuScope({
   className,
   resetKey = "",
+  noticeKey = "",
   children,
 }: {
   className?: string;
   /** A result belongs to what was asked; a change of this drops both. */
   resetKey?: string;
+  /** What is said about a finished action is said until this changes. */
+  noticeKey?: string;
   children: ReactNode;
 }) {
   const { t } = useI18n();
@@ -135,6 +128,7 @@ export function FileMenuScope({
     },
     [resetKey, connected],
   );
+  useEffect(() => setNotice(null), [noticeKey]);
   useEffect(() => {
     if (!notice?.brief) return;
     const timer = setTimeout(() => setNotice(null), 1200);
