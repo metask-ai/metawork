@@ -1,12 +1,12 @@
-//! Worker-only inspection of explicitly selected Workspace output files.
-//! This proves bytes at a locator; it does not register a Product Output or
+//! Worker-only effects on explicitly selected Workspace files. This proves a
+//! file, or the bytes, at a locator; it does not register a Product Output or
 //! infer delivery from ordinary file references or tool text.
 const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn absolutePath(allocator: std.mem.Allocator, root: []const u8, relative: []const u8) ![]u8 {
     if (!std.fs.path.isAbsolute(root)) return error.InvalidWorkspaceRoot;
-    try validatePath(relative);
+    try validateTargetPath(relative);
     const path = try std.fs.path.join(allocator, &.{ root, relative });
     if (builtin.os.tag == .windows) for (path) |*byte| {
         if (byte.* == '/') byte.* = '\\';
@@ -22,7 +22,10 @@ test "Windows reveal path normalizes nested Workspace separators" {
 }
 
 pub const max_file_bytes = 256 * 1024 * 1024;
+/// What a delivery receipt can carry.
 pub const max_path_bytes = 512;
+/// What a file action may name: the Workspace path limit the Bridge accepts.
+pub const max_target_path_bytes = 4096;
 pub const Inspection = struct { size_bytes: u64, sha256: [32]u8 };
 
 pub const Request = struct {
@@ -32,7 +35,8 @@ pub const Request = struct {
     test_after_chunk: if (builtin.is_test) ?Hook else void = if (builtin.is_test) null else {},
 };
 
-pub const OpenProof = struct {
+/// Which file a locator named when it was located.
+pub const Proof = struct {
     root_inode: std.Io.File.INode,
     file: std.Io.File.Stat,
 };
@@ -68,13 +72,23 @@ pub fn htmlCandidate(path: []const u8) bool {
     return std.ascii.eqlIgnoreCase(extension, ".html") or std.ascii.eqlIgnoreCase(extension, ".htm");
 }
 
-pub fn inspectOpen(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool)) !OpenProof {
-    if (std.Thread.getCurrentId() == request.main_thread_id) return error.MainThreadFileEffect;
-    if (cancelled.load(.acquire)) return error.Cancelled;
-    try validatePath(request.relative_path);
-    if (!std.fs.path.isAbsolute(request.workspace_root)) return error.InvalidWorkspaceRoot;
+/// Proves which regular file a locator names without reading it, so it has no
+/// size to bound.
+pub fn locate(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool)) !Proof {
+    return locateAnd(io, request, cancelled, null);
+}
+
+pub fn inspectOpen(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool)) !Proof {
     const office = OfficeKind.fromPath(request.relative_path);
     if (office == null and !htmlCandidate(request.relative_path)) return error.RestrictedOutput;
+    return locateAnd(io, request, cancelled, office);
+}
+
+fn locateAnd(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool), office: ?OfficeKind) !Proof {
+    if (std.Thread.getCurrentId() == request.main_thread_id) return error.MainThreadFileEffect;
+    if (cancelled.load(.acquire)) return error.Cancelled;
+    try validateTargetPath(request.relative_path);
+    if (!std.fs.path.isAbsolute(request.workspace_root)) return error.InvalidWorkspaceRoot;
     var root = try openRoot(io, request.workspace_root);
     defer root.close(io);
     var file = try openScopedFile(io, root, request.relative_path);
@@ -82,14 +96,16 @@ pub fn inspectOpen(io: std.Io, request: Request, cancelled: *const std.atomic.Va
     if (builtin.os.tag == .windows) file.flags.nonblocking = true;
     const stat = try file.stat(io);
     if (stat.kind != .file) return error.NotRegularOutput;
-    if (stat.size > max_file_bytes) return error.OutputTooLarge;
-    const proof: OpenProof = .{ .root_inode = (try root.stat(io)).inode, .file = stat };
-    if (office) |kind| try inspectOfficeParts(io, file, kind, stat.size, cancelled);
-    try revalidateOpenName(io, request, proof);
+    const proof: Proof = .{ .root_inode = (try root.stat(io)).inode, .file = stat };
+    if (office) |kind| {
+        if (stat.size > max_file_bytes) return error.OutputTooLarge;
+        try inspectOfficeParts(io, file, kind, stat.size, cancelled);
+    }
+    try revalidateName(io, request, proof);
     return proof;
 }
 
-pub fn revalidateOpenName(io: std.Io, request: Request, proof: OpenProof) !void {
+pub fn revalidateName(io: std.Io, request: Request, proof: Proof) !void {
     var root = try openRoot(io, request.workspace_root);
     defer root.close(io);
     if ((try root.stat(io)).inode != proof.root_inode) return error.OutputChanged;
@@ -338,7 +354,14 @@ fn officeContentType(bytes: []const u8, part: []const u8) ![]const u8 {
 }
 
 pub fn validatePath(path: []const u8) error{InvalidOutputPath}!void {
-    if (path.len == 0 or path.len > max_path_bytes or !std.unicode.utf8ValidateSlice(path))
+    if (path.len > max_path_bytes) return error.InvalidOutputPath;
+    try validateTargetPath(path);
+}
+
+/// The one rule for a Workspace-relative path that reaches a file effect.
+/// `validatePath` is the same rule within what a receipt can carry.
+pub fn validateTargetPath(path: []const u8) error{InvalidOutputPath}!void {
+    if (path.len == 0 or path.len > max_target_path_bytes or !std.unicode.utf8ValidateSlice(path))
         return error.InvalidOutputPath;
     for (path) |byte| if (std.ascii.isControl(byte) or std.mem.indexOfScalar(u8, "\\:<>\"|?*", byte) != null)
         return error.InvalidOutputPath;
@@ -362,19 +385,21 @@ pub fn validatePath(path: []const u8) error{InvalidOutputPath}!void {
 /// Borrowed request bytes and cancellation owner must live through this call.
 /// The admitting Product owner separately validates Task/Run/Workspace authority.
 pub fn inspect(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool)) !Inspection {
+    try validatePath(request.relative_path);
     return read(io, request, cancelled, null);
 }
 
-/// Copies and hashes the same actual read stream. Destination is a caller-owned
-/// empty temporary file, never the published Save As name. The caller discards
-/// it on every failure and publishes it only after authority is revalidated.
-pub fn copyVerified(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool), expected: Inspection, destination: std.Io.File) !void {
-    _ = try read(io, request, cancelled, .{ .expected = expected, .destination = destination });
+/// Copies the file as it is now, from one stable read. Destination is a
+/// caller-owned empty temporary file, never the published Save As name. The
+/// caller discards it on every failure and publishes it only after authority is
+/// revalidated. What was delivered earlier does not decide what is saved.
+pub fn copyCurrent(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool), destination: std.Io.File) !void {
+    _ = try read(io, request, cancelled, destination);
 }
 
 /// One selected Save As transaction. Construction and release only own bytes;
 /// stage/publish/discard perform all filesystem effects on a worker. The caller
-/// must authorize publication after stage verifies the actual copied stream.
+/// must authorize publication after stage copied one stable read.
 pub const Save = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -383,7 +408,6 @@ pub const Save = struct {
     root: []const u8,
     relative: []const u8,
     destination: []const u8,
-    expected: Inspection,
     pending: ?Pending = null,
 
     const Pending = struct {
@@ -394,10 +418,10 @@ pub const Save = struct {
         copied_identity: ?std.Io.File.Stat = null,
     };
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, request: Request, destination: []const u8, expected: Inspection) !Save {
-        try validatePath(request.relative_path);
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, request: Request, destination: []const u8) !Save {
+        try validateTargetPath(request.relative_path);
         if (request.workspace_root.len == 0 or request.workspace_root.len > std.Io.Dir.max_path_bytes or
-            !std.fs.path.isAbsolute(request.workspace_root) or !std.unicode.utf8ValidateSlice(request.workspace_root) or expected.size_bytes > max_file_bytes)
+            !std.fs.path.isAbsolute(request.workspace_root) or !std.unicode.utf8ValidateSlice(request.workspace_root))
             return error.InvalidWorkspaceRoot;
         if (!std.fs.path.isAbsolute(destination) or destination.len > 4096 or
             !std.unicode.utf8ValidateSlice(destination)) return error.InvalidOutputDestination;
@@ -410,7 +434,7 @@ pub const Save = struct {
         @memcpy(root, request.workspace_root);
         @memcpy(relative, request.relative_path);
         @memcpy(target, destination);
-        return .{ .allocator = allocator, .io = io, .main_thread_id = request.main_thread_id, .storage = storage, .root = root, .relative = relative, .destination = target, .expected = expected };
+        return .{ .allocator = allocator, .io = io, .main_thread_id = request.main_thread_id, .storage = storage, .root = root, .relative = relative, .destination = target };
     }
 
     pub fn deinit(self: *Save) void {
@@ -465,7 +489,7 @@ pub const Save = struct {
             self.pending.?.atomic_file.file.close(self.io);
             self.pending.?.atomic_file.file = readable;
         }
-        try copyVerified(self.io, .{ .workspace_root = self.root, .relative_path = self.relative, .main_thread_id = self.main_thread_id }, cancelled, self.expected, self.pending.?.atomic_file.file);
+        try copyCurrent(self.io, .{ .workspace_root = self.root, .relative_path = self.relative, .main_thread_id = self.main_thread_id }, cancelled, self.pending.?.atomic_file.file);
         self.pending.?.copied_identity = try self.pending.?.atomic_file.file.stat(self.io);
     }
 
@@ -499,7 +523,7 @@ pub const Save = struct {
         named_temporary.close(self.io);
         const copied_identity = try pending.atomic_file.file.stat(self.io);
         if (!stable(named_identity, copied_identity) or pending.copied_identity == null or
-            !stable(pending.copied_identity.?, copied_identity) or copied_identity.size != self.expected.size_bytes) return error.OutputCopyChanged;
+            !stable(pending.copied_identity.?, copied_identity)) return error.OutputCopyChanged;
         try pending.atomic_file.replace(self.io);
     }
 
@@ -543,11 +567,9 @@ fn destinationStat(io: std.Io, parent: std.Io.Dir, basename: []const u8) !?std.I
     return stat;
 }
 
-const Copy = struct { expected: Inspection, destination: std.Io.File };
-
-fn read(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool), copy: ?Copy) !Inspection {
+fn read(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool), copy: ?std.Io.File) !Inspection {
     if (std.Thread.getCurrentId() == request.main_thread_id) return error.MainThreadFileEffect;
-    try validatePath(request.relative_path);
+    try validateTargetPath(request.relative_path);
     if (request.workspace_root.len == 0 or request.workspace_root.len > std.Io.Dir.max_path_bytes or
         !std.fs.path.isAbsolute(request.workspace_root) or !std.unicode.utf8ValidateSlice(request.workspace_root))
         return error.InvalidWorkspaceRoot;
@@ -562,9 +584,8 @@ fn read(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool), 
     const before = try file.stat(io);
     if (before.kind != .file) return error.NotRegularOutput;
     if (before.size > max_file_bytes) return error.OutputTooLarge;
-    const destination_before: ?std.Io.File.Stat = if (copy) |value| destination: {
-        if (before.size != value.expected.size_bytes) return error.OutputChanged;
-        const stat = try value.destination.stat(io);
+    const destination_before: ?std.Io.File.Stat = if (copy) |destination| destination: {
+        const stat = try destination.stat(io);
         if (stat.kind != .file or stat.size != 0 or stat.inode == before.inode) return error.InvalidOutputDestination;
         break :destination stat;
     } else null;
@@ -577,7 +598,7 @@ fn read(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool), 
         const count = try file.readPositionalAll(io, buffer[0..amount], offset);
         if (count != amount) return error.OutputChanged;
         hash.update(buffer[0..count]);
-        if (copy) |value| try value.destination.writePositionalAll(io, buffer[0..count], offset);
+        if (copy) |destination| try destination.writePositionalAll(io, buffer[0..count], offset);
         offset += count;
         if (builtin.is_test) if (request.test_after_chunk) |hook| try hook.call_fn(hook.context);
     }
@@ -594,10 +615,9 @@ fn read(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool), 
     if (!stable(after, try named_file.stat(io))) return error.OutputChanged;
     if (cancelled.load(.acquire)) return error.Cancelled;
     const result: Inspection = .{ .size_bytes = offset, .sha256 = hash.finalResult() };
-    if (copy) |value| {
-        if (!std.mem.eql(u8, &result.sha256, &value.expected.sha256)) return error.OutputChanged;
-        try value.destination.sync(io);
-        const actual = try value.destination.stat(io);
+    if (copy) |destination| {
+        try destination.sync(io);
+        const actual = try destination.stat(io);
         if (actual.kind != .file or actual.inode != destination_before.?.inode or actual.size != result.size_bytes)
             return error.OutputCopyChanged;
         if (cancelled.load(.acquire)) return error.Cancelled;
@@ -659,7 +679,7 @@ const TestWork = struct {
     request: Request,
     cancelled: std.atomic.Value(bool) = .init(false),
     result: anyerror!Inspection = error.NotStarted,
-    copy: ?Copy = null,
+    copy: ?std.Io.File = null,
 
     fn run(self: *TestWork) void {
         self.result = read(std.testing.io, self.request, &self.cancelled, self.copy);
@@ -678,18 +698,81 @@ test "output paths reject escape, alternate streams, devices and ambiguous alias
     try validatePath("some folder/results.csv");
 }
 
-test "output copy verifies actual copied bytes and preserves existing destination files" {
+test "a file action may name a longer path than a receipt can carry, under the same rule" {
+    const part = "a" ** 200;
+    const receipt = part ++ "/" ++ part ++ "/" ++ ("b" ** 110);
+    comptime std.debug.assert(receipt.len == max_path_bytes);
+    try validatePath(receipt);
+    try std.testing.expectError(error.InvalidOutputPath, validatePath(receipt ++ "b"));
+    try validateTargetPath(receipt ++ "b");
+    const longest = (part ++ "/") ** 20 ++ ("c" ** 76);
+    comptime std.debug.assert(longest.len == max_target_path_bytes);
+    try validateTargetPath(longest);
+    try std.testing.expectError(error.InvalidOutputPath, validateTargetPath(longest ++ "c"));
+    for ([_][]const u8{ "", "/file", "../file", "a//file", "C:/file", "a\\file", "file:stream", "NUL.txt", "file.", "file ", "a/\x00b", "\xff" }) |value|
+        try std.testing.expectError(error.InvalidOutputPath, validateTargetPath(value));
+}
+
+const TestLocate = struct {
+    request: Request,
+    cancelled: std.atomic.Value(bool) = .init(false),
+    open: bool = false,
+    result: anyerror!Proof = error.NotStarted,
+
+    fn run(self: *TestLocate) void {
+        self.result = if (self.open) inspectOpen(std.testing.io, self.request, &self.cancelled) else locate(std.testing.io, self.request, &self.cancelled);
+    }
+    fn execute(self: *TestLocate) !Proof {
+        const thread = try std.Thread.spawn(.{}, run, .{self});
+        thread.join();
+        return self.result;
+    }
+};
+
+test "locating proves which file a name is without reading it or bounding its size" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "docs", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "docs/a.md", .data = "one" });
+    const large = try tmp.dir.createFile(io, "large.mp4", .{});
+    try large.setLength(io, max_file_bytes + 1);
+    large.close(io);
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var work: TestLocate = .{ .request = .{ .workspace_root = root, .relative_path = "docs/a.md", .main_thread_id = std.Thread.getCurrentId() } };
+    try std.testing.expectError(error.MainThreadFileEffect, locate(io, work.request, &work.cancelled));
+    const proof = try work.execute();
+    try std.testing.expectEqual(@as(u64, 3), proof.file.size);
+    try revalidateName(io, work.request, proof);
+    work.request.relative_path = "large.mp4";
+    try std.testing.expectEqual(@as(u64, max_file_bytes + 1), (try work.execute()).file.size);
+    work.request.relative_path = "docs";
+    if (work.execute()) |_| return error.DirectoryLocated else |_| {}
+    work.request.relative_path = "docs/missing.md";
+    try std.testing.expectError(error.FileNotFound, work.execute());
+    work.request.relative_path = "../docs/a.md";
+    try std.testing.expectError(error.InvalidOutputPath, work.execute());
+    work.request.relative_path = "docs/a.md";
+    work.cancelled.store(true, .release);
+    try std.testing.expectError(error.Cancelled, work.execute());
+    // The name is the same and the file is not.
+    try tmp.dir.writeFile(io, .{ .sub_path = "replacement.md", .data = "two" });
+    try tmp.dir.rename("replacement.md", tmp.dir, "docs/a.md", io);
+    try std.testing.expectError(error.OutputChanged, revalidateName(io, work.request, proof));
+}
+
+test "output copy takes the current bytes and preserves existing destination files" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "abc" });
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     var work: TestWork = .{ .request = .{ .workspace_root = root, .relative_path = "source.txt", .main_thread_id = std.Thread.getCurrentId() } };
-    const expected = try work.execute();
     const destination = try tmp.dir.createFile(std.testing.io, "new.tmp", .{ .read = true, .exclusive = true });
     defer destination.close(std.testing.io);
-    try std.testing.expectError(error.MainThreadFileEffect, copyVerified(std.testing.io, work.request, &work.cancelled, expected, destination));
-    work.copy = .{ .expected = expected, .destination = destination };
+    try std.testing.expectError(error.MainThreadFileEffect, copyCurrent(std.testing.io, work.request, &work.cancelled, destination));
+    work.copy = destination;
     _ = try work.execute();
     var bytes: [3]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 3), try destination.readPositionalAll(std.testing.io, &bytes, 0));
@@ -697,20 +780,20 @@ test "output copy verifies actual copied bytes and preserves existing destinatio
     const existing = try tmp.dir.createFile(std.testing.io, "existing.txt", .{ .read = true, .exclusive = true });
     defer existing.close(std.testing.io);
     try existing.writeStreamingAll(std.testing.io, "keep");
-    work.copy.?.destination = existing;
+    work.copy = existing;
     try std.testing.expectError(error.InvalidOutputDestination, work.execute());
     var kept: [4]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 4), try existing.readPositionalAll(std.testing.io, &kept, 0));
     try std.testing.expectEqualStrings("keep", &kept);
     // Caller must supply a fresh private file, never truncate an existing name.
-    work.copy.?.destination = destination;
+    work.copy = destination;
     try std.testing.expectError(error.InvalidOutputDestination, work.execute());
     const other = try tmp.dir.createFile(std.testing.io, "other.tmp", .{ .read = true, .exclusive = true });
     defer other.close(std.testing.io);
-    work.copy.?.destination = other;
-    // Same-size edits after delivery must fail against the copied stream's hash.
+    work.copy = other;
+    // The file as it is now is what is saved, whatever it was before.
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "abd" });
-    try std.testing.expectError(error.OutputChanged, work.execute());
+    _ = try work.execute();
     try std.testing.expectEqual(@as(usize, 3), try other.readPositionalAll(std.testing.io, &bytes, 0));
     try std.testing.expectEqualStrings("abd", &bytes);
 }
@@ -864,7 +947,7 @@ fn expectSaveFiles(dir: std.Io.Dir, expected: usize) !void {
     try std.testing.expectEqual(expected, count);
 }
 
-test "Save As stages verified bytes without changing the selected target then atomically publishes" {
+test "Save As stages the current bytes without changing the selected target then atomically publishes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "abc" });
@@ -874,21 +957,23 @@ test "Save As stages verified bytes without changing the selected target then at
     const selected = try std.fs.path.join(std.testing.allocator, &.{ root, "最终结果.txt" });
     defer std.testing.allocator.free(selected);
     var source: TestWork = .{ .request = .{ .workspace_root = root, .relative_path = "source.txt", .main_thread_id = std.Thread.getCurrentId() } };
-    const expected = try source.execute();
-    var save = try Save.init(std.testing.allocator, std.testing.io, source.request, selected, expected);
+    _ = try source.execute();
+    var save = try Save.init(std.testing.allocator, std.testing.io, source.request, selected);
     defer save.deinit();
     var stage: TestSave = .{ .save = &save, .operation = .stage };
+    // The file was inspected, and then edited again before it is saved.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "edited later" });
     try stage.execute();
     try expectSaveContents(tmp.dir, "最终结果.txt", "keep me");
     try expectSaveFiles(tmp.dir, 3);
     var publish: TestSave = .{ .save = &save, .operation = .publish };
     try publish.execute();
-    try expectSaveContents(tmp.dir, "最终结果.txt", "abc");
-    try expectSaveContents(tmp.dir, "source.txt", "abc");
+    try expectSaveContents(tmp.dir, "最终结果.txt", "edited later");
+    try expectSaveContents(tmp.dir, "source.txt", "edited later");
     try expectSaveFiles(tmp.dir, 2);
 }
 
-test "Save As cancellation discard and wrong digest preserve existing bytes and remove staging" {
+test "Save As cancellation, discard and a missing source preserve existing bytes and remove staging" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "abc" });
@@ -898,8 +983,8 @@ test "Save As cancellation discard and wrong digest preserve existing bytes and 
     const selected = try std.fs.path.join(std.testing.allocator, &.{ root, "target.txt" });
     defer std.testing.allocator.free(selected);
     var source: TestWork = .{ .request = .{ .workspace_root = root, .relative_path = "source.txt", .main_thread_id = std.Thread.getCurrentId() } };
-    var expected = try source.execute();
-    var save = try Save.init(std.testing.allocator, std.testing.io, source.request, selected, expected);
+    _ = try source.execute();
+    var save = try Save.init(std.testing.allocator, std.testing.io, source.request, selected);
     defer save.deinit();
     var stage: TestSave = .{ .save = &save, .operation = .stage };
     stage.cancelled.store(true, .release);
@@ -911,11 +996,10 @@ test "Save As cancellation discard and wrong digest preserve existing bytes and 
     try discard.execute();
     try expectSaveContents(tmp.dir, "target.txt", "original target");
     try expectSaveFiles(tmp.dir, 2);
-    expected.sha256[0] ^= 1;
-    save.expected = expected;
-    try std.testing.expectError(error.OutputChanged, stage.execute());
+    try tmp.dir.deleteFile(std.testing.io, "source.txt");
+    try std.testing.expectError(error.FileNotFound, stage.execute());
     try expectSaveContents(tmp.dir, "target.txt", "original target");
-    try expectSaveFiles(tmp.dir, 2);
+    try expectSaveFiles(tmp.dir, 1);
 }
 
 test "Save As refuses a target modified after selection or newly occupied before publication" {
@@ -927,8 +1011,8 @@ test "Save As refuses a target modified after selection or newly occupied before
     const selected = try std.fs.path.join(std.testing.allocator, &.{ root, "target.txt" });
     defer std.testing.allocator.free(selected);
     var source: TestWork = .{ .request = .{ .workspace_root = root, .relative_path = "source.txt", .main_thread_id = std.Thread.getCurrentId() } };
-    const expected = try source.execute();
-    var save = try Save.init(std.testing.allocator, std.testing.io, source.request, selected, expected);
+    _ = try source.execute();
+    var save = try Save.init(std.testing.allocator, std.testing.io, source.request, selected);
     defer save.deinit();
     var stage: TestSave = .{ .save = &save, .operation = .stage };
     var publish: TestSave = .{ .save = &save, .operation = .publish };
@@ -953,8 +1037,8 @@ test "Save As refuses source overwrite and main thread effects and releases allo
     const selected = try std.fs.path.join(std.testing.allocator, &.{ root, "source.txt" });
     defer std.testing.allocator.free(selected);
     var source: TestWork = .{ .request = .{ .workspace_root = root, .relative_path = "source.txt", .main_thread_id = std.Thread.getCurrentId() } };
-    const expected = try source.execute();
-    var save = try Save.init(std.testing.allocator, std.testing.io, source.request, selected, expected);
+    _ = try source.execute();
+    var save = try Save.init(std.testing.allocator, std.testing.io, source.request, selected);
     defer save.deinit();
     var stage: TestSave = .{ .save = &save, .operation = .stage };
     try std.testing.expectError(error.MainThreadFileEffect, save.stage(&stage.cancelled));
@@ -962,10 +1046,10 @@ test "Save As refuses source overwrite and main thread effects and releases allo
     try expectSaveContents(tmp.dir, "source.txt", "abc");
     try expectSaveFiles(tmp.dir, 1);
     const Harness = struct {
-        fn init(allocator: std.mem.Allocator, request: Request, path: []const u8, value: Inspection) !void {
-            var candidate = try Save.init(allocator, std.testing.io, request, path, value);
+        fn init(allocator: std.mem.Allocator, request: Request, path: []const u8) !void {
+            var candidate = try Save.init(allocator, std.testing.io, request, path);
             defer candidate.deinit();
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.init, .{ source.request, selected, expected });
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Harness.init, .{ source.request, selected });
 }

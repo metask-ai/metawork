@@ -169,7 +169,7 @@ export async function runOutputDeliveryVertical({
       transport.postMessage = function(message) {
         const envelope = typeof message === 'string' ? JSON.parse(message) : message;
         if (envelope.command === 'metawork.tasks.sendInput') window.__outputInputs.push(envelope.payload);
-        if (envelope.command === 'metawork.outputs.action') window.__outputActions.push(envelope.payload);
+        if (envelope.command === 'metawork.files.action') window.__outputActions.push(envelope.payload);
         return post.call(transport, message);
       };
     })()`);
@@ -371,9 +371,12 @@ export async function runOutputDeliveryVertical({
         5000,
         `Output ${action} request`,
       );
-      assert.equal(request.taskId, taskId);
-      assert.equal(request.runId, delivered.id);
-      assert.equal(request.outputId, output.id);
+      assert.deepEqual(request.target, {
+        kind: "output",
+        taskId,
+        runId: delivered.id,
+        outputId: output.id,
+      });
       await poll(
         () =>
           webview.evaluate(`(() => {
@@ -402,14 +405,16 @@ export async function runOutputDeliveryVertical({
         source,
         trigger: () => click("save", "cancelled"),
       });
-      await writeFile(source, `${content}changed before Save As`);
+      // What is saved is the file as it is now, not as it was delivered.
+      const edited = `${content}changed before Save As`;
+      await writeFile(source, edited);
       const changed = await nativeOutputProbe({
         mode: "save",
         source,
         destination,
-        trigger: () => click("save", "changed"),
+        trigger: () => click("save", "saved"),
       });
-      assert.deepEqual(await readFile(destination), bytes);
+      assert.equal(await readFile(destination, "utf8"), edited);
       assert.deepEqual(
         (await readdir(workspaceRoot)).sort(),
         [...beforeNative, path.basename(destination)].sort(),
@@ -429,7 +434,7 @@ export async function runOutputDeliveryVertical({
       evidence.native = {
         saved,
         cancelled,
-        changedSourcePreservedTarget: changed,
+        changedSourceSavedAsItIs: changed,
         revealed,
         savedSha256: createHash("sha256")
           .update(await readFile(destination))
@@ -721,7 +726,7 @@ export async function runOutputDeliveryVertical({
     const lastAction = await webview.evaluate(
       "window.__outputActions.at(-1).operationId",
     );
-    const denied = await invoke("metawork.outputs.action", {
+    const denied = await invoke("metawork.files.action", {
       ...checked,
       operationId: String(BigInt(lastAction) + 1n),
     });
@@ -816,12 +821,15 @@ export async function runOutputBrowserHostProbe({
     assert.equal(published.task.officeOutputsOpen, undefined);
     assert.equal(published.run.terminal.outcome, "completed");
     assert.equal(published.run.outputs[0].displayPath, relative);
-    const opened = await invoke("metawork.outputs.action", {
+    const opened = await invoke("metawork.files.action", {
       generation: "1",
       operationId: "1",
-      taskId: created.taskId,
-      runId: started.runId,
-      outputId: published.run.outputs[0].id,
+      target: {
+        kind: "output",
+        taskId: created.taskId,
+        runId: started.runId,
+        outputId: published.run.outputs[0].id,
+      },
       action: "open",
     });
     assert.equal(opened?.state, "opened");

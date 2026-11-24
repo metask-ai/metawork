@@ -38,7 +38,7 @@ import {
 import type {
   FileReferenceView,
   MediaTarget,
-  OutputActionHandler,
+  FileActionHandler,
   PendingUi,
   RunInputView,
   RunManifest,
@@ -514,7 +514,7 @@ export function TaskContent({
   responseDisabled,
   fileChangesEnabled,
   outputsEnabled,
-  onOutputAction,
+  onFileAction,
   onShowOutputs,
   onPrepareOutputEdit,
   webLink,
@@ -569,7 +569,7 @@ export function TaskContent({
   responseDisabled: boolean;
   fileChangesEnabled: boolean;
   outputsEnabled: boolean;
-  onOutputAction?: OutputActionHandler;
+  onFileAction?: FileActionHandler;
   onShowOutputs?: (opener: HTMLButtonElement) => void;
   onPrepareOutputEdit?: OutputEditHandler;
   webLink: MarkdownWebLink;
@@ -1511,14 +1511,14 @@ export function TaskContent({
             }
           }
           const deliveryActions = outputsEnabled &&
-            onOutputAction &&
+            onFileAction &&
             deliveredVideos.length > 0 && (
               <RunOutputs
                 outputs={deliveredVideos}
                 taskId={task.id}
                 runId={run.id}
                 disabled={responseDisabled || !synchronized}
-                onAction={onOutputAction}
+                onAction={onFileAction}
                 layout="file-actions"
               />
             );
@@ -1589,7 +1589,7 @@ export function TaskContent({
                   taskId={task.id}
                   runId={run.id}
                   disabled={responseDisabled || !synchronized}
-                  onAction={onOutputAction}
+                  onAction={onFileAction}
                   onPrepareEdit={onPrepareOutputEdit}
                   onPreview={onPreviewWorkspaceFile}
                   officeOpen={task.officeOutputsOpen}

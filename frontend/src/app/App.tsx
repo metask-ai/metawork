@@ -1422,6 +1422,12 @@ export default function App() {
     ) => client.previewFile(target, options),
     [client],
   );
+  const runFileAction = useCallback<
+    import("../bridge/contracts.ts").FileActionHandler
+  >(
+    (target, action, signal) => client.fileAction(target, action, signal),
+    [client],
+  );
   const filePreviewTabs = useFilePreviewTabs(
     route === "workbench" ? workbench.activeTaskId : null,
     previewTabIds,
@@ -5714,9 +5720,7 @@ export default function App() {
                       ? openConversationWorkspaceFile
                       : undefined
                   }
-                  onAction={(taskId, runId, outputId, action, signal) =>
-                    client.outputAction(taskId, runId, outputId, action, signal)
-                  }
+                  onAction={runFileAction}
                   onPrepareEdit={
                     taskCanCompose && !newTaskDraftActive
                       ? prepareOutputEdit
@@ -5760,11 +5764,10 @@ export default function App() {
                 onRegister={
                   client
                     ? (changeId, signal) =>
-                        client.outputAction(
+                        client.registerOutput(
                           fileChanges.taskId,
                           fileChanges.runId,
                           changeId,
-                          "register",
                           signal,
                         )
                     : undefined
@@ -6319,9 +6322,7 @@ export default function App() {
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
                 outputsEnabled={snapshot.capabilities.typedOutputs}
                 onShowOutputs={showConversationOutputs}
-                onOutputAction={(taskId, runId, outputId, action, signal) =>
-                  client.outputAction(taskId, runId, outputId, action, signal)
-                }
+                onFileAction={runFileAction}
                 onPrepareOutputEdit={
                   taskCanCompose && !newTaskDraftActive
                     ? prepareOutputEdit

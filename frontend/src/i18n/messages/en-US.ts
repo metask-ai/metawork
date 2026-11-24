@@ -1346,6 +1346,8 @@ export const enUS = {
   "outputs.state.missing": "The source file no longer exists",
   "outputs.state.restricted": "This file is not currently accessible",
   "outputs.state.changed": "Changed since delivery",
+  "outputs.state.file_changed":
+    "The file changed during the operation. Try again.",
   "outputs.state.too_large": "The file exceeds the processing limit",
   "outputs.state.cancelled": "Operation cancelled",
   "outputs.state.timed_out": "File check timed out",

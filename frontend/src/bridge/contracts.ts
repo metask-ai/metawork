@@ -386,8 +386,8 @@ export type FilePreviewResponse = Omit<
   };
 };
 /// One Workspace file, in the shape its kind declares: a file a Run already
-/// refers to, or a path in the Task's Workspace. The Host alone decides which
-/// file that is; no kind carries an absolute path.
+/// refers to, a delivered output, or a path in the Task's Workspace. The Host
+/// alone decides which file that is; no kind carries an absolute path.
 export type FileTarget =
   | {
       kind: "reference";
@@ -395,6 +395,7 @@ export type FileTarget =
       runId: string;
       fileReferenceId: string;
     }
+  | { kind: "output"; taskId: string; runId: string; outputId: string }
   | {
       kind: "workspace";
       taskId: string;
@@ -972,7 +973,7 @@ export type RunActivity =
       kind: "stopping";
     };
 export type ConversationCoverage = "included" | "excluded";
-export const outputActionStates = [
+export const fileActionStates = [
   "ready",
   "revealed",
   "saved",
@@ -992,16 +993,13 @@ export const outputActionStates = [
   "unavailable",
   "failed",
 ] as const;
-export type OutputActionState = (typeof outputActionStates)[number];
-export type OutputAction =
-  "check" | "check_current" | "reveal" | "save" | "open";
-export type OutputActionHandler = (
-  taskId: string,
-  runId: string,
-  outputId: string,
-  action: OutputAction,
+export type FileActionState = (typeof fileActionStates)[number];
+export type FileAction = "open" | "reveal" | "check_current" | "save" | "check";
+export type FileActionHandler = (
+  target: FileTarget,
+  action: FileAction,
   signal: AbortSignal,
-) => Promise<OutputActionState>;
+) => Promise<FileActionState>;
 export type DeliveredOutputView = {
   updated?: true;
   id: string;

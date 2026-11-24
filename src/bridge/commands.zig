@@ -64,8 +64,9 @@ pub const mcp_apply_configuration = "metawork.mcp.applyConfiguration";
 pub const mcp_refresh_catalog = "metawork.mcp.refreshCatalog";
 pub const snapshot = "metawork.workbench.snapshot";
 pub const snapshot_chunk = "metawork.workbench.snapshot.chunk";
-pub const output_action = "metawork.outputs.action";
-pub const output_action_cancel = "metawork.outputs.cancel";
+pub const file_action = "metawork.files.action";
+pub const cancel_file_action = "metawork.files.cancelAction";
+pub const register_output = "metawork.outputs.register";
 pub const read_run_tools = "metawork.tasks.tools";
 pub const preview_file = "metawork.files.preview";
 pub const list_directory = "metawork.files.listDirectory";
@@ -195,8 +196,9 @@ pub const product = [_][]const u8{
     mcp_refresh_catalog,
     snapshot,
     snapshot_chunk,
-    output_action,
-    output_action_cancel,
+    file_action,
+    cancel_file_action,
+    register_output,
     read_run_tools,
     preview_file,
     list_directory,

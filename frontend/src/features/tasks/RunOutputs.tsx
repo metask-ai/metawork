@@ -1,9 +1,9 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../components/ui/button.tsx";
 import type {
-  OutputAction,
-  OutputActionHandler,
-  OutputActionState,
+  FileAction,
+  FileActionHandler,
+  FileActionState,
   DeliveredOutputView,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -16,7 +16,7 @@ export type OutputEditHandler = (
   runId: string,
   outputId: string,
 ) => OutputEditResult;
-type RowAction = Exclude<OutputAction, "check_current"> | "edit" | "preview";
+type RowAction = Exclude<FileAction, "check_current"> | "edit" | "preview";
 type OutputPreview = (
   taskId: string,
   path: string,
@@ -38,7 +38,7 @@ export function RunOutputs({
   taskId?: string;
   runId?: string;
   disabled?: boolean;
-  onAction?: OutputActionHandler;
+  onAction?: FileActionHandler;
   onPrepareEdit?: OutputEditHandler;
   onPreview?: OutputPreview;
   officeOpen?: boolean;
@@ -91,7 +91,7 @@ function OutputRow({
   taskId?: string;
   runId?: string;
   disabled: boolean;
-  onAction?: OutputActionHandler;
+  onAction?: FileActionHandler;
   onPrepareEdit?: OutputEditHandler;
   onPreview?: OutputPreview;
   officeOpen: boolean;
@@ -104,7 +104,7 @@ function OutputRow({
   const [pending, setPending] = useState<RowAction | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [state, setState] = useState<
-    OutputActionState | "save_unknown" | OutputEditResult | null
+    FileActionState | "file_changed" | "save_unknown" | OutputEditResult | null
   >(null);
   const active = useRef<AbortController | null>(null);
   useEffect(() => {
@@ -142,9 +142,7 @@ function OutputRow({
     setState(null);
     try {
       const result = await onAction(
-        taskId,
-        runId,
-        output.id,
+        { kind: "output", taskId, runId, outputId: output.id },
         action === "edit" || action === "preview" ? "check_current" : action,
         controller.signal,
       );
@@ -171,7 +169,12 @@ function OutputRow({
       }
       if (active.current === controller)
         setState(
-          controller.signal.aborted && action !== "save" ? "cancelled" : result,
+          controller.signal.aborted && action !== "save"
+            ? "cancelled"
+            : // Only `check` compares with what was delivered.
+              result === "changed" && action !== "check"
+              ? "file_changed"
+              : result,
         );
     } catch {
       if (active.current === controller)

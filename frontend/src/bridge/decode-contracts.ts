@@ -3,7 +3,7 @@ import {
   skillMutationReasons,
   skillImportEffects,
   skillImportPhases,
-  outputActionStates,
+  fileActionStates,
   maxPreviewVideoBytes,
   maxAttachmentThumbnailBytes,
   maxAttachmentThumbnailSide,
@@ -166,15 +166,15 @@ import {
   workspaceOpenFailureReasons,
 } from "./contracts.ts";
 type JsonObject = Record<string, unknown>;
-export function decodeOutputActionResult(value: unknown) {
+export function decodeFileActionResult(value: unknown) {
   const item = object(value, "$", ["generation", "operationId", "state"]);
   return {
     generation: positiveU64WireId(item.generation, "$.generation"),
     operationId: positiveU64WireId(item.operationId, "$.operationId"),
-    state: enumValue(item.state, "$.state", outputActionStates),
+    state: enumValue(item.state, "$.state", fileActionStates),
   };
 }
-export function decodeOutputActionCancel(value: unknown) {
+export function decodeFileActionCancel(value: unknown) {
   const item = object(value, "$", ["generation", "operationId", "cancelled"]);
   return {
     generation: positiveU64WireId(item.generation, "$.generation"),

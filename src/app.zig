@@ -367,9 +367,8 @@ const App = struct {
         control_storage.setMetaskAuthorizationCheck(models_management.metaskAuthorizationCheck());
         models_management.setCredentialRenewal(control_storage.metaskCredentialRenewal());
         control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery, .validate_path_fn = output_file.validatePath });
-        control_storage.setOutputFileReveal(self.platform.outputFileReveal());
-        control_storage.setOutputFileOpen(self.platform.outputFileOpen());
-        control_storage.setOutputFileSave(self.platform.outputFileSave());
+        control_storage.setFileEffects(self.platform.fileEffects());
+        control_storage.setFileSave(self.platform.fileSave());
         models_management.setProbeNotifier(.{
             .context = &self.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,
@@ -528,15 +527,15 @@ const App = struct {
             control.shutdownAttachmentStagingExecutor();
             control.stopFilePreviewAdmission();
             control.shutdownFilePreviewExecutor();
-            control.shutdownOutputChecks();
+            control.shutdownFileActions();
             control.shutdownFileChangeExecutor();
             if (self.dispatcher) |dispatcher| {
                 control.drainFilePreviewCompletions(dispatcher.filePreviewSink());
-                control.drainOutputChecks(dispatcher.outputCheckSink());
+                control.drainFileActions(dispatcher.fileActionSink());
                 control.drainFileChangeCompletions(dispatcher.fileChangeDiffSink());
                 dispatcher.settleAttachmentStagingForShutdown();
                 dispatcher.settleFilePreviewsForShutdown();
-                dispatcher.settleOutputActionsForShutdown();
+                dispatcher.settleFileActionsForShutdown();
                 dispatcher.settleFileChangeDiffsForShutdown();
             }
         }
@@ -612,7 +611,7 @@ const App = struct {
                         control.drainFilePreviewCompletions(
                             dispatcher.filePreviewSink(),
                         );
-                        control.drainOutputChecks(dispatcher.outputCheckSink());
+                        control.drainFileActions(dispatcher.fileActionSink());
                         control.drainAttachmentStagingCompletions(
                             dispatcher.attachmentStagingSink(),
                         );
@@ -1336,7 +1335,7 @@ test "SDK consumption dialog connection replacement settles Save As and reuses r
     try product_control.TestSupport.filePreviewFixture(control, "/tmp/metawork-dialog-test");
     defer control.deinit();
     try product_control.TestSupport.recordDeliveredOutputFixture(control);
-    control.setOutputFileSave(platform.outputFileSave());
+    control.setFileSave(platform.fileSave());
     var dispatcher = try bridge_api.Dispatcher.init(std.testing.allocator, control, undefined, undefined, platform.dispatcherPlatform(), .{}, 1);
     defer dispatcher.deinit();
     defer dispatcher.breakConnection();
@@ -1351,7 +1350,7 @@ test "SDK consumption dialog connection replacement settles Save As and reuses r
     for (0..80) |iteration| {
         const before = Responses.count;
         var storage: [512]u8 = undefined;
-        const save = try std.fmt.bufPrint(&storage, "{{\"id\":\"save\",\"command\":\"metawork.outputs.action\",\"payload\":{{\"generation\":\"{d}\",\"operationId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"save\"}}}}", .{dispatcher.productDelivery().connectedGeneration().?});
+        const save = try std.fmt.bufPrint(&storage, "{{\"id\":\"save\",\"command\":\"metawork.files.action\",\"payload\":{{\"generation\":\"{d}\",\"operationId\":\"1\",\"target\":{{\"kind\":\"output\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\"}},\"action\":\"save\"}}}}", .{dispatcher.productDelivery().connectedGeneration().?});
         try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{ .bytes = save, .origin = "zero://app", .window_id = 1 } });
         try harness.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{ .bytes = "{\"id\":\"workspace\",\"command\":\"metawork.workspaces.choose\",\"payload\":{}}", .origin = "zero://app", .window_id = 1 } });
         try std.testing.expectEqual(before, Responses.count);
@@ -1364,8 +1363,8 @@ test "SDK consumption dialog connection replacement settles Save As and reuses r
         try std.testing.expectEqual(before + 3, Responses.count);
         try std.testing.expect(Responses.valid_outcomes);
         try std.testing.expect(std.mem.indexOf(u8, harness.null_platform.lastBridgeResponse(), "\"accepted\":true") != null);
-        for (control.pending_output_saves) |pending| try std.testing.expect(pending == null);
-        for (dispatcher.output_in_flight) |pending| try std.testing.expect(pending == null);
+        for (control.pending_file_saves) |pending| try std.testing.expect(pending == null);
+        for (dispatcher.file_actions_in_flight) |pending| try std.testing.expect(pending == null);
         for (dispatcher.dialogs) |pending| try std.testing.expect(!pending.active);
         try std.testing.expectEqual(iteration + 1, harness.null_platform.dialog_cancel_count);
         try std.testing.expectEqual(@as(usize, 0), harness.null_platform.presentedDialogCount());

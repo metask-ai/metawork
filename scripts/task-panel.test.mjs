@@ -9898,9 +9898,9 @@ test("the assistant previews a generated video and exposes explicit file actions
     taskContentElement(task({ runs: [completed] }), "1", {
       ...props,
       loadFilePreview: async () => ({ state: "missing" }),
-      onOutputAction: async (taskId, runId, outputId, action, signal) => {
+      onFileAction: async (target, action, signal) => {
         assert.equal(signal.aborted, false);
-        actions.push([taskId, runId, outputId, action]);
+        actions.push([target, action]);
         return action === "save" ? "saved" : "revealed";
       },
     }),
@@ -9926,9 +9926,15 @@ test("the assistant previews a generated video and exposes explicit file actions
     within(delivery).getByRole("button", { name: "Show in folder" }),
   );
   await user.click(within(delivery).getByRole("button", { name: "Save as…" }));
+  const target = {
+    kind: "output",
+    taskId: task().id,
+    runId: completed.id,
+    outputId: duplicate.id,
+  };
   assert.deepEqual(actions, [
-    [task().id, completed.id, duplicate.id, "reveal"],
-    [task().id, completed.id, duplicate.id, "save"],
+    [target, "reveal"],
+    [target, "save"],
   ]);
 });
 

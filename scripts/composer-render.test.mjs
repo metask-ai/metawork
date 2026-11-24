@@ -236,7 +236,7 @@ function renderCompletedSurface(
     conversationCoverage = "included",
     outputs = [],
     outputsEnabled = false,
-    onOutputAction,
+    onFileAction,
     onPrepareOutputEdit,
     loadAttachmentThumbnail,
     onOpenSentAttachment,
@@ -329,7 +329,7 @@ function renderCompletedSurface(
         responseDisabled: false,
         fileChangesEnabled: false,
         outputsEnabled,
-        onOutputAction,
+        onFileAction,
         onPrepareOutputEdit,
         onPrepareRetry() {},
         onPreviewFile() {},
@@ -1652,7 +1652,7 @@ test("Task passes the continue-edit action to its delivered files only when prep
       },
     ],
     outputsEnabled: true,
-    onOutputAction: async () => "ready",
+    onFileAction: async () => "ready",
   };
   const withoutPreparation = renderCompletedSurface(
     "Done",

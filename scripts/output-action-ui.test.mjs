@@ -47,6 +47,7 @@ const output = {
   sizeBytes: "42",
   redacted: false,
 };
+const target = { kind: "output", taskId: "3", runId: "7", outputId: output.id };
 const view = (props = {}) =>
   createElement(
     I18nContext.Provider,
@@ -83,7 +84,7 @@ test("Output actions show checked states and always submit identity intent anew"
     }),
   );
   fireEvent.click(screen.getByRole("button", { name: "Check file" }));
-  assert.deepEqual(calls[0].slice(0, 4), ["3", "7", output.id, "check"]);
+  assert.deepEqual(calls[0].slice(0, 2), [target, "check"]);
   assert.equal(
     screen.getByRole("button", { name: "Show in folder" }).disabled,
     true,
@@ -91,7 +92,7 @@ test("Output actions show checked states and always submit identity intent anew"
   resolve("changed");
   await screen.findByText("Changed since delivery");
   fireEvent.click(screen.getByRole("button", { name: "Show in folder" }));
-  assert.equal(calls[1][3], "reveal");
+  assert.equal(calls[1][1], "reveal");
   resolve("revealed");
   await screen.findByText("Requested location in file manager");
   assert.equal(screen.queryByRole("link"), null);
@@ -101,7 +102,7 @@ test("Output cancellation aborts the Host request and ignores its late success",
   let resolve;
   render(
     view({
-      onAction: async (_t, _r, _o, _a, s) => {
+      onAction: async (_target, _action, s) => {
         signal = s;
         return new Promise((r) => {
           resolve = r;
@@ -124,7 +125,7 @@ test("Output cancellation aborts the Host request and ignores its late success",
 test("Task replacement and disconnection invalidate in-flight results; hidden paths cannot act", async () => {
   let signal;
   let resolve;
-  const onAction = async (_t, _r, _o, _a, s) => {
+  const onAction = async (_target, _action, s) => {
     signal = s;
     return new Promise((r) => {
       resolve = r;
@@ -163,7 +164,7 @@ test("Save cancellation waits for the actual Host result and preserves a committ
   let finish;
   render(
     view({
-      onAction: async (_t, _r, _o, action, s) => {
+      onAction: async (_target, action, s) => {
         assert.equal(action, "save");
         signal = s;
         return new Promise((resolve) => {
@@ -224,12 +225,7 @@ test("Continue editing waits for the scoped Host check before preparing a draft 
     }),
   );
   fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
-  assert.deepEqual(checks[0].slice(0, 4), [
-    "3",
-    "7",
-    output.id,
-    "check_current",
-  ]);
+  assert.deepEqual(checks[0].slice(0, 2), [target, "check_current"]);
   assert.deepEqual(prepared, []);
   complete("ready");
   await screen.findByText(
@@ -251,7 +247,7 @@ test("Continue editing preserves a conflicting draft and cannot prepare a change
     }),
   );
   fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
-  await screen.findByText("Changed since delivery");
+  await screen.findByText("The file changed during the operation. Try again.");
   assert.equal(preparations, 0);
   result = "ready";
   fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
@@ -264,7 +260,7 @@ test("Continue editing discards a late check after switching Tasks or disabling 
   let complete;
   let signal;
   let preparations = 0;
-  const onAction = async (_t, _r, _o, _a, s) => {
+  const onAction = async (_target, _action, s) => {
     signal = s;
     return new Promise((resolve) => {
       complete = resolve;

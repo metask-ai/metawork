@@ -1164,6 +1164,7 @@ export const zhCN: Record<MessageId, string> = {
   "outputs.state.missing": "源文件已不存在",
   "outputs.state.restricted": "当前无法访问此文件",
   "outputs.state.changed": "交付后已变更",
+  "outputs.state.file_changed": "文件在操作期间发生变化，请重试",
   "outputs.state.too_large": "文件超出处理容量",
   "outputs.state.cancelled": "操作已取消",
   "outputs.state.timed_out": "文件检查超时",
