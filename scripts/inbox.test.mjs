@@ -441,7 +441,12 @@ test("the open inbox refreshes, and a conversation is read only when it is opene
 
   await user.click(screen.getByRole("button", { name: /#13066/ }));
   await waitFor(() => assert.ok(screen.getByText("Read only")));
-  assert.ok(screen.getByText("In progress"));
+  assert.ok(
+    screen.getByText("metawork / #13066 · In progress · Assigned to Ann"),
+  );
+  const more = screen.getByText("More information");
+  assert.equal(more.parentElement.open, false);
+  await user.click(more);
   assert.ok(screen.getByText("metawork / Inbox"));
   assert.deepEqual(
     client.calls.find(([kind]) => kind === "task"),
@@ -705,6 +710,7 @@ test("a linked file, project or task shows its own details, opens nested items a
         task: taskView({
           id: "9749",
           name: "Open API",
+          path: "metawork / Open API",
           state: "closed",
           createdBy: "Lin",
           lastNote: { text: "Deployed", atMs: null, by: "Lin" },
@@ -752,9 +758,14 @@ test("a linked file, project or task shows its own details, opens nested items a
   await user.keyboard("{Escape}");
 
   await user.click(screen.getByRole("button", { name: /#9749/ }));
-  await waitFor(() => assert.ok(screen.getByText("Found it")));
-  assert.ok(screen.getByText("Closed"));
-  assert.ok(screen.getByText("Latest note"));
+  await screen.findByText("Latest note");
+  assert.ok(screen.getByText(/#9749 .* Closed .* Ann/));
+  assert.equal(screen.getAllByText("Deployed").length, 1);
+  const history = screen.getByText("Earlier notes (1)");
+  assert.equal(history.parentElement.open, false);
+  await user.click(history);
+  assert.ok(history.parentElement.contains(screen.getByText("Found it")));
+  await user.click(screen.getByText("Sub-tasks (1)"));
   await user.click(screen.getByRole("button", { name: /Write docs/ }));
   await waitFor(() =>
     assert.ok(screen.getByRole("heading", { name: "Write docs" })),

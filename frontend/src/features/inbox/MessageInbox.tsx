@@ -1113,84 +1113,118 @@ function TaskDetailBody({
 }) {
   const { t } = useI18n();
   const formats = useTimeFormats();
-  // The latest note already leads the list when MetaTeam includes it.
-  const notes = task.notes;
+  // MetaTeam returns the history oldest first and may also return its last entry separately.
+  const tail = task.notes.at(-1);
+  const latest = task.lastNote ?? tail;
+  const history =
+    tail &&
+    latest &&
+    tail.text === latest.text &&
+    tail.by === latest.by &&
+    tail.atMs === latest.atMs
+      ? task.notes.slice(0, -1)
+      : task.notes;
+  const parentPath = task.path?.endsWith(" / " + task.name)
+    ? task.path.slice(0, -(task.name.length + 3))
+    : null;
+  const project = parentPath?.split(" / ", 1)[0];
+  const summary = [
+    [project, t("inbox.item_number", { id: task.id })]
+      .filter(Boolean)
+      .join(" / "),
+    task.progress && progressLabel(task.progress, t),
+    task.state && task.state !== "active" && stateLabel(task.state, t),
+    task.assignees.length > 0 &&
+      t("inbox.task_assignees", {
+        names: task.assignees.join(t("inbox.list_separator")),
+      }),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const more =
+    task.path || task.createdBy || task.updatedAtMs || task.state === "active";
   return (
     <>
-      {task.description && (
-        <Dialog.Description className="inbox-task-description">
-          {task.description}
-        </Dialog.Description>
-      )}
-      <dl className="inbox-task-facts">
-        <Fact label={t("inbox.task_id")}>{task.id}</Fact>
-        {task.progress && (
-          <Fact label={t("inbox.task_status")}>
-            <Badge className="whitespace-nowrap">
-              {progressLabel(task.progress, t)}
-            </Badge>
-          </Fact>
-        )}
-        {task.state && (
-          <Fact label={t("inbox.task_state")}>{stateLabel(task.state, t)}</Fact>
-        )}
-        {task.assignees.length > 0 && (
-          <Fact label={t("inbox.task_assignees")}>
-            {task.assignees.join(t("inbox.list_separator"))}
-          </Fact>
-        )}
-        {task.createdBy && (
-          <Fact label={t("inbox.task_created_by")}>{task.createdBy}</Fact>
-        )}
-        {task.path && <Fact label={t("inbox.task_path")}>{task.path}</Fact>}
-        {task.updatedAtMs && (
-          <Fact label={t("inbox.task_updated")}>
-            {formats.dateTime.format(new Date(Number(task.updatedAtMs)))}
-          </Fact>
-        )}
-      </dl>
-      {task.lastNote && (
+      <Dialog.Description className="inbox-task-summary">
+        {summary}
+      </Dialog.Description>
+      {latest && (
         <section className="inbox-detail-section">
           <h3>{t("inbox.task_last_note")}</h3>
-          <NoteLine note={task.lastNote} />
+          <NoteLine note={latest} />
         </section>
       )}
-      {notes.length > 0 && (
-        <section className="inbox-detail-section">
-          <h3>{t("inbox.task_notes")}</h3>
-          <ol className="inbox-notes">
-            {notes.map((note, index) => (
-              <li key={index}>
-                <NoteLine note={note} />
-              </li>
-            ))}
-          </ol>
+      {task.description && (
+        <section className="inbox-task-overview">
+          <h3>{t("inbox.task_description")}</h3>
+          <p className="inbox-task-description">{task.description}</p>
         </section>
       )}
-      {task.children.length > 0 && (
-        <section className="inbox-detail-section">
-          <h3>{t("inbox.task_children")}</h3>
-          <ul className="inbox-detail-links">
-            {task.children.map((child) => (
-              <li key={child.id}>
-                <button
-                  type="button"
-                  className="inbox-detail-link focus-ring"
-                  onClick={() => onOpen(child.id)}
-                >
-                  <span>{child.name}</span>
-                  {child.progress && (
-                    <Badge className="whitespace-nowrap">
-                      {progressLabel(child.progress, t)}
-                    </Badge>
-                  )}
-                  <Icon name="chevron-right" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      <div className="inbox-task-disclosures">
+        {history.length > 0 && (
+          <details>
+            <summary className="focus-ring">
+              {t("inbox.task_notes")} ({history.length})
+            </summary>
+            <ol className="inbox-notes">
+              {history.map((note, index) => (
+                <li key={index}>
+                  <NoteLine note={note} />
+                </li>
+              ))}
+            </ol>
+          </details>
+        )}
+        {task.children.length > 0 && (
+          <details>
+            <summary className="focus-ring">
+              {t("inbox.task_children")} ({task.children.length})
+            </summary>
+            <ul className="inbox-detail-links">
+              {task.children.map((child) => (
+                <li key={child.id}>
+                  <button
+                    type="button"
+                    className="inbox-detail-link focus-ring"
+                    onClick={() => onOpen(child.id)}
+                  >
+                    <span>{child.name}</span>
+                    {child.progress && (
+                      <Badge className="whitespace-nowrap">
+                        {progressLabel(child.progress, t)}
+                      </Badge>
+                    )}
+                    <Icon name="chevron-right" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+        {more && (
+          <details>
+            <summary className="focus-ring">{t("inbox.task_more")}</summary>
+            <dl className="inbox-task-facts">
+              {task.createdBy && (
+                <Fact label={t("inbox.task_created_by")}>{task.createdBy}</Fact>
+              )}
+              {task.path && (
+                <Fact label={t("inbox.task_path")}>{task.path}</Fact>
+              )}
+              {task.updatedAtMs && (
+                <Fact label={t("inbox.task_updated")}>
+                  {formats.dateTime.format(new Date(Number(task.updatedAtMs)))}
+                </Fact>
+              )}
+              {task.state === "active" && (
+                <Fact label={t("inbox.task_state")}>
+                  {stateLabel(task.state, t)}
+                </Fact>
+              )}
+            </dl>
+          </details>
+        )}
+      </div>
     </>
   );
 }
@@ -1394,9 +1428,11 @@ function InboxTaskDialog({
                 <Icon name="arrow-left" />
               </button>
             )}
-            <span className="inbox-task-icon">
-              <Icon name={icon} />
-            </span>
+            {!detail?.task && (
+              <span className="inbox-task-icon">
+                <Icon name={icon} />
+              </span>
+            )}
             <Dialog.Title>
               {item?.name ??
                 (task ? t("inbox.item_number", { id: task.taskId }) : "")}

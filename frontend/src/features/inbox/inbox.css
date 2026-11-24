@@ -372,6 +372,9 @@
 
 .inbox-task-dialog-header .icon-button {
   flex: none;
+}
+
+.inbox-task-dialog-header .icon-button:last-child {
   margin-inline-start: auto;
 }
 
@@ -405,18 +408,59 @@
 .inbox-detail-body {
   display: grid;
   min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+  overflow-wrap: anywhere;
+}
+
+.inbox-detail-dialog:has(.inbox-task-summary) {
+  gap: 6px;
+}
+
+.inbox-task-summary {
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  overflow-wrap: anywhere;
+}
+
+.inbox-task-overview {
+  display: grid;
+  gap: 6px;
+  font-size: var(--text-control);
+}
+
+.inbox-task-disclosures {
+  border-top: 1px solid var(--ui-border);
+  padding-block-start: 8px;
+  font-size: var(--text-control);
+}
+
+.inbox-task-disclosures:empty {
+  display: none;
+}
+
+.inbox-task-disclosures summary {
+  padding-block: 6px;
+  color: var(--ui-content-muted);
+  cursor: pointer;
+}
+
+.inbox-task-disclosures details[open] > :last-child {
+  padding-block: 6px 12px;
+  border-top: 0;
 }
 
 .inbox-detail-section {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   padding-top: 12px;
   border-top: 1px solid var(--ui-border);
   font-size: var(--text-control);
 }
 
-.inbox-detail-section h3 {
+.inbox-detail-section h3,
+.inbox-task-overview h3 {
   color: var(--ui-content-muted);
   font-size: var(--text-label);
   font-weight: 600;
