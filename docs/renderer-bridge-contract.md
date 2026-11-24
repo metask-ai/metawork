@@ -226,7 +226,7 @@ inbox 的 command 都要求绑定窗口与主线程；格式错误、多余字�
 
 每种形状的字段均不可省略、为 null 或增加替代字段，未知 `kind` 直接拒绝；各 id 与 epoch 是非零 canonical decimal `u64` string，`fileReferenceId` 是 1–128 bytes 的 opaque identity，`outputId` 是非零、32 位小写十六进制的成果 ID。`reference` 是该 Run 的文件引用，`output` 是该 Run 呈现的成果，Host 都只在精确 Task + Run 内解析，不做全局扫描。`workspace` 是该 Task 所属工作区内的一个文件，`path` 只接受 UTF-8、最多 4096 bytes、最多 64 段的 `/` 分隔工作区相对路径，不接受空路径、空段、`.`、`..`、反斜杠、冒号、控制字符或绝对路径。Renderer 永不提交物理根路径、绝对路径、URI、shell command、range、Tool name 或 AgentCore handle。
 
-三种形状由 Product Control 在一处解析成工作区 id、epoch、根与相对路径，解析在主线程进行且不读文件。引用先把记录的定位写成根内的相对路径：Windows 上 `/` 与反斜杠都是分隔符并统一成 `/`，其他平台反斜杠是文件名字符；之后三种形状适用上面同一路径规则，worker 都逐段 no-follow 打开，文件或它的任一上级目录不存在为 `missing`。各身份按下表判定：
+三种形状由 Product Control 在一处解析成工作区 id、epoch、根与相对路径，解析在主线程进行且不读文件。引用先把记录的定位写成根内的相对路径：Windows 上 `/` 与反斜杠都是分隔符并统一成 `/`，其他平台反斜杠是文件名字符；`.` 段和重复的分隔符去掉，`..` 保留并由路径规则拒绝，以分隔符开头的相对定位和以目录结尾的定位不是文件；之后三种形状适用上面同一路径规则，worker 都逐段 no-follow 打开，文件或它的任一上级目录不存在为 `missing`。各身份按下表判定：
 
 | 事实 | reference | output | workspace |
 | --- | --- | --- | --- |
