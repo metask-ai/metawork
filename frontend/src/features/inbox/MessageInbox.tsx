@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -13,9 +14,7 @@ import type {
   InboxFileView,
   InboxMember,
   InboxMessage,
-  InboxPeople,
   InboxProjectView,
-  InboxSendResult,
   InboxTaskDetail,
   InboxTaskView,
   InboxView,
@@ -31,6 +30,7 @@ import {
   useAutosizeTextarea,
 } from "../../components/ui/textarea.tsx";
 import { Tooltip } from "../../components/ui/tooltip.tsx";
+import { controlFocus } from "../../components/ui/utils.ts";
 import { useI18n } from "../../i18n/context.ts";
 import { inboxDiagnosticText } from "./inbox-diagnostics.ts";
 
@@ -65,7 +65,7 @@ export type SendFailure =
 
 /** The reply being written in the open conversation. */
 export type Composer = {
-  peerId: string;
+  key: string;
   text: string;
   sending: boolean;
   failure: SendFailure | null;
@@ -73,8 +73,8 @@ export type Composer = {
   requestKey: string | null;
 };
 
-function emptyComposer(peerId: string): Composer {
-  return { peerId, text: "", sending: false, failure: null, requestKey: null };
+function emptyComposer(key: string): Composer {
+  return { key, text: "", sending: false, failure: null, requestKey: null };
 }
 
 export function sendRetryable(failure: SendFailure) {
@@ -112,9 +112,13 @@ function sendFailure(state: string): SendFailure {
 /** One read's own outcome; the connection state stays the list's. */
 type ConversationFailure = "forbidden" | "not_found" | "failed" | "unavailable";
 
-export type OpenedConversation = {
-  peerId: string;
+type Contact = {
+  key: string;
   name: string;
+  target: string | { username: string };
+};
+
+export type OpenedConversation = Contact & {
   messages: readonly InboxMessage[];
   hasEarlier: boolean;
   loading: boolean;
@@ -179,7 +183,6 @@ export function useInbox(
   disabled: boolean,
 ) {
   const binding = inbox.binding;
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [conversation, setConversation] = useState<OpenedConversation | null>(
     null,
   );
@@ -190,7 +193,7 @@ export function useInbox(
     Readonly<Record<string, Composer>>
   >({});
   const composer = conversation
-    ? (composers[conversation.peerId] ?? emptyComposer(conversation.peerId))
+    ? (composers[conversation.key] ?? emptyComposer(conversation.key))
     : null;
   // Set at once, before any render: a second submit in the same frame
   // still sees the first one on its way.
@@ -202,17 +205,59 @@ export function useInbox(
   const bindingRef = useRef(binding);
   bindingRef.current = binding;
   const updateComposer = (
-    peerId: string,
+    key: string,
     change: (current: Composer) => Composer,
   ) =>
     setComposers((all) => {
-      const current = all[peerId] ?? emptyComposer(peerId);
+      const current = all[key] ?? emptyComposer(key);
       const next = change(current);
-      return next === current ? all : { ...all, [peerId]: next };
+      return next === current ? all : { ...all, [key]: next };
     });
+  const usable =
+    open &&
+    !disabled &&
+    (inbox.state === "ready" || inbox.state === "unreachable");
+  const [directory, setDirectory] = useState<{
+    binding: string;
+    members: readonly InboxMember[];
+    phase: PeoplePhase;
+  } | null>(null);
+  const [directoryAttempt, retryDirectory] = useState(0);
+  useEffect(() => {
+    if (!usable) return;
+    let active = true;
+    setDirectory((current) => ({
+      binding,
+      members: current?.binding === binding ? current.members : [],
+      phase: "loading",
+    }));
+    void client
+      .listInboxPeople(binding)
+      .catch(() => null)
+      .then((answer) => {
+        if (!active) return;
+        setDirectory((current) => ({
+          binding,
+          members:
+            answer?.state === "ready"
+              ? answer.people
+              : (current?.members ?? []),
+          phase:
+            answer?.state === "ready"
+              ? "ready"
+              : answer?.state === "forbidden"
+                ? "forbidden"
+                : "failed",
+        }));
+      });
+    return () => {
+      active = false;
+    };
+  }, [client, binding, usable, directoryAttempt]);
+
   const readRef = useRef<
     (
-      peerId: string,
+      contact: Contact,
       page: Parameters<InboxClient["readInboxConversation"]>[2],
       anchor: string | null,
       catchUp?: boolean,
@@ -222,7 +267,6 @@ export function useInbox(
 
   // A different MetaTeam connection is a different inbox.
   useEffect(() => {
-    setSelectedId(null);
     conversationRef.current = null;
     setConversation(null);
     setTask(null);
@@ -252,7 +296,7 @@ export function useInbox(
         return;
       const last = current.messages.at(-1);
       await readRef.current(
-        current.peerId,
+        current,
         last ? "after" : "latest",
         last?.id ?? null,
       );
@@ -269,23 +313,21 @@ export function useInbox(
 
   const read = useCallback(
     async (
-      peerId: string,
+      contact: Contact,
       page: Parameters<InboxClient["readInboxConversation"]>[2],
       anchor: string | null,
       catchUp = false,
     ) => {
       const epoch = ++readEpoch.current;
       setConversation((current) =>
-        current?.peerId === peerId
-          ? { ...current, loading: true }
-          : {
-              peerId,
-              name: peerId,
-              messages: [],
-              hasEarlier: false,
+        current?.key === contact.key
+          ? {
+              ...current,
+              target: contact.target,
+              name: contact.name,
               loading: true,
-              failure: null,
-            },
+            }
+          : current,
       );
       let result: Awaited<
         ReturnType<InboxClient["readInboxConversation"]>
@@ -293,7 +335,7 @@ export function useInbox(
       try {
         result = await client.readInboxConversation(
           binding,
-          peerId,
+          contact.target,
           page,
           anchor,
         );
@@ -303,7 +345,7 @@ export function useInbox(
       if (epoch !== readEpoch.current || binding !== bindingRef.current) return;
       const answer = result;
       setConversation((current) => {
-        if (current?.peerId !== peerId) return current;
+        if (current?.key !== contact.key) return current;
         if (answer === null)
           return { ...current, loading: false, failure: "failed" };
         switch (answer.state) {
@@ -314,6 +356,7 @@ export function useInbox(
             if (page === "latest" || page === "refresh")
               return {
                 ...current,
+                target: answer.messages.length ? answer.peerId : contact.target,
                 messages: answer.messages,
                 hasEarlier: answer.hasEarlier,
                 loading: false,
@@ -343,31 +386,31 @@ export function useInbox(
       // guessing what lies in between.
       if (!shown.current || document.visibilityState !== "visible") return;
       if (answer?.state === "ready" && page === "after" && !answer.complete)
-        await readRef.current(peerId, "latest", null);
+        await readRef.current(contact, "latest", null);
       else if (catchUp && answer?.state === "ready" && answer.messages.length) {
         // A receipt may have changed on a message already on this screen.
-        await readRef.current(peerId, "refresh", null);
+        await readRef.current(contact, "refresh", null);
       }
     },
     [client, binding],
   );
   readRef.current = read;
 
-  function select(peerId: string, name: string) {
-    setSelectedId(peerId);
+  function select(contact: Contact) {
     setTask(null);
     const cached = inbox.conversations.some(
-      (c) => c.peerId === peerId && c.latest !== null,
+      (c) => c.peerId === contact.target && c.latest !== null,
     );
-    setConversation({
-      peerId,
-      name,
+    const opened = {
+      ...contact,
       messages: [],
       hasEarlier: false,
       loading: true,
       failure: null,
-    });
-    void read(peerId, "latest", null, cached);
+    };
+    conversationRef.current = opened;
+    setConversation(opened);
+    void read(contact, "latest", null, cached);
   }
 
   async function openTask(taskId: string, trail: readonly string[] = []) {
@@ -400,15 +443,16 @@ export function useInbox(
   return {
     /** The MetaTeam connection this inbox state belongs to. */
     binding,
-    selectedId,
+    directory: usable && directory?.binding === binding ? directory : null,
+    retryDirectory: () => retryDirectory((n) => n + 1),
     conversation,
     task,
     composer,
     /** A changed message is a new message: it gets a new identity. */
     setDraft(text: string) {
-      const peerId = conversationRef.current?.peerId;
-      if (peerId === undefined) return;
-      updateComposer(peerId, (current) =>
+      const key = conversationRef.current?.key;
+      if (key === undefined) return;
+      updateComposer(key, (current) =>
         current.sending || current.text === text
           ? current
           : { ...current, text, failure: null, requestKey: null },
@@ -416,28 +460,33 @@ export function useInbox(
     },
     async send() {
       const draft = composer;
-      if (!draft || draft.sending || draft.text.trim() === "") return;
-      const { peerId, text } = draft;
+      if (!conversation || !draft || draft.sending || draft.text.trim() === "")
+        return;
+      const { key, text } = draft;
       // One message at a time, as the Host sends them.
       if (sending.current) {
-        updateComposer(peerId, (current) => ({ ...current, failure: "busy" }));
+        updateComposer(key, (current) => ({ ...current, failure: "busy" }));
         return;
       }
       const requestKey = draft.requestKey ?? newRequestKey();
       sending.current = true;
-      updateComposer(peerId, (current) => ({
+      updateComposer(key, (current) => ({
         ...current,
         sending: true,
         failure: null,
         requestKey,
       }));
-      let state = "failed";
+      let result;
       try {
-        state = (
-          await client.sendInboxMessage(binding, { peerId }, text, requestKey)
-        ).state;
+        const target = conversation.target;
+        result = await client.sendInboxMessage(
+          binding,
+          typeof target === "string" ? { peerId: target } : target,
+          text,
+          requestKey,
+        );
       } catch {
-        state = "failed";
+        result = null;
       } finally {
         sending.current = false;
       }
@@ -446,20 +495,31 @@ export function useInbox(
       // The answer belongs to this attempt only.
       const mine = (current: Composer) =>
         current.sending && current.requestKey === requestKey;
-      if (state === "sent") {
-        updateComposer(peerId, (current) =>
-          mine(current) ? emptyComposer(peerId) : current,
+      if (result?.state === "sent") {
+        updateComposer(key, (current) =>
+          mine(current) ? emptyComposer(key) : current,
         );
         // Show it: what came after the newest message on screen.
         const open = conversationRef.current;
-        if (open?.peerId === peerId) {
+        if (open?.key === key && shown.current) {
           const last = open.messages.at(-1);
-          await read(peerId, last ? "after" : "latest", last?.id ?? null);
+          const contact = result.conversation
+            ? {
+                ...open,
+                name: result.conversation.name,
+                target: result.conversation.peerId,
+              }
+            : open;
+          await read(
+            contact,
+            last ? "after" : result.conversation ? "refresh" : "latest",
+            last?.id ?? null,
+          );
         }
         return;
       }
-      const failure = sendFailure(state);
-      updateComposer(peerId, (current) =>
+      const failure = sendFailure(result?.state ?? "failed");
+      updateComposer(key, (current) =>
         mine(current)
           ? {
               ...current,
@@ -471,44 +531,10 @@ export function useInbox(
       );
     },
     select,
-    /** The members a new conversation can start with, read when asked. */
-    async loadPeople(): Promise<InboxPeople | null> {
-      try {
-        return await client.listInboxPeople(binding);
-      } catch {
-        return null;
-      }
-    },
-    /**
-     * Sends the first message to a member picked by username. Once sent,
-     * the Host has put the conversation in the list; it is opened here.
-     */
-    async startConversation(
-      username: string,
-      text: string,
-      requestKey: string,
-    ): Promise<InboxSendResult | null> {
-      let result: InboxSendResult | null = null;
-      try {
-        result = await client.sendInboxMessage(
-          binding,
-          { username },
-          text,
-          requestKey,
-        );
-      } catch {
-        result = null;
-      }
-      // An answer for a connection that was replaced opens nothing.
-      if (bindingRef.current !== binding) return result;
-      if (result?.state === "sent" && result.conversation)
-        select(result.conversation.peerId, result.conversation.name);
-      return result;
-    },
     loadEarlierMessages() {
       const first = conversation?.messages[0];
       if (!conversation || !first || conversation.loading) return;
-      void read(conversation.peerId, "before", first.id);
+      void read(conversation, "before", first.id);
     },
     loadEarlierConversations() {
       void client.loadEarlierInbox(binding).catch(() => undefined);
@@ -518,11 +544,7 @@ export function useInbox(
       void client.refreshInbox(binding, true).catch(() => undefined);
       if (conversation?.failure) {
         const last = conversation.messages.at(-1);
-        void read(
-          conversation.peerId,
-          last ? "after" : "latest",
-          last?.id ?? null,
-        );
+        void read(conversation, last ? "after" : "latest", last?.id ?? null);
       }
     },
     openTask,
@@ -628,40 +650,48 @@ function InboxAvatar({ name }: { name: string }) {
 function useTimeFormats() {
   const { locale } = useI18n();
   const language = locale === "zh-CN" ? "zh-CN" : "en-US";
-  return {
-    time: new Intl.DateTimeFormat(language, {
-      hour: "numeric",
-      minute: "2-digit",
+  return useMemo(
+    () => ({
+      time: new Intl.DateTimeFormat(language, {
+        hour: "numeric",
+        minute: "2-digit",
+      }),
+      day: new Intl.DateTimeFormat(language, {
+        month: "numeric",
+        day: "numeric",
+      }),
+      date: new Intl.DateTimeFormat(language, { dateStyle: "medium" }),
+      dateTime: new Intl.DateTimeFormat(language, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }),
     }),
-    day: new Intl.DateTimeFormat(language, {
-      month: "numeric",
-      day: "numeric",
-    }),
-    date: new Intl.DateTimeFormat(language, { dateStyle: "medium" }),
-    dateTime: new Intl.DateTimeFormat(language, {
-      dateStyle: "medium",
-      timeStyle: "short",
-    }),
-  };
+    [language],
+  );
 }
 
 function ConversationRow({
+  formats,
+  hint,
   conversation,
+  name,
   selected,
   onSelect,
 }: {
-  conversation: InboxConversation;
+  formats: ReturnType<typeof useTimeFormats>;
+  hint: string | null;
+  conversation?: InboxConversation;
+  name: string;
   selected: boolean;
   onSelect: () => void;
 }) {
   const { t } = useI18n();
-  const formats = useTimeFormats();
-  const unread = Number(conversation.unread);
-  const latest = conversation.latest;
-  const name = conversationName(conversation.peerId, conversation.name, t);
+  const label = hint ? name + " @" + hint : name;
+  const unread = Number(conversation?.unread ?? 0);
+  const latest = conversation?.latest;
   // An unread member without a message in the list yet shows when their
   // latest unread message came.
-  const shownAt = latest?.sentAtMs ?? conversation.lastAtMs;
+  const shownAt = latest?.sentAtMs ?? conversation?.lastAtMs ?? null;
   const sentAt = shownAt === null ? null : new Date(Number(shownAt));
   const today = new Date().toDateString();
   const preview = latest
@@ -677,37 +707,43 @@ function ConversationRow({
         aria-label={
           unread > 0
             ? t("inbox.conversation_unread", {
-                name,
+                name: label,
                 count: unread,
               })
-            : name
+            : label
         }
         aria-current={selected ? "true" : undefined}
+        data-member-only={!conversation || undefined}
         data-unread={unread > 0}
         onClick={onSelect}
       >
         <InboxAvatar name={name} />
         <span className="inbox-row-copy">
-          <strong>{name}</strong>
-          <span>{preview}</span>
+          <strong title={label}>
+            {name}
+            {hint && <small className="inbox-member-username"> @{hint}</small>}
+          </strong>
+          {preview && <span>{preview}</span>}
         </span>
-        <span className="inbox-row-meta">
-          {sentAt && (
-            <time
-              dateTime={sentAt.toISOString()}
-              title={formats.dateTime.format(sentAt)}
-            >
-              {today === sentAt.toDateString()
-                ? formats.time.format(sentAt)
-                : formats.day.format(sentAt)}
-            </time>
-          )}
-          {unread > 0 && (
-            <span className="inbox-unread-badge" aria-hidden="true">
-              {countLabel(conversation.unread)}
-            </span>
-          )}
-        </span>
+        {conversation && (
+          <span className="inbox-row-meta">
+            {sentAt && (
+              <time
+                dateTime={sentAt.toISOString()}
+                title={formats.dateTime.format(sentAt)}
+              >
+                {today === sentAt.toDateString()
+                  ? formats.time.format(sentAt)
+                  : formats.day.format(sentAt)}
+              </time>
+            )}
+            {unread > 0 && (
+              <span className="inbox-unread-badge" aria-hidden="true">
+                {countLabel(conversation.unread)}
+              </span>
+            )}
+          </span>
+        )}
       </button>
     </li>
   );
@@ -762,204 +798,6 @@ function EarlierConversations({
 
 type PeoplePhase = "loading" | "ready" | "forbidden" | "failed";
 
-/** Whether a member matches what was typed: name or username, any case. */
-function memberMatches(member: InboxMember, query: string) {
-  const wanted = query.trim().toLocaleLowerCase();
-  if (wanted === "") return true;
-  return (
-    member.name.toLocaleLowerCase().includes(wanted) ||
-    member.username.toLocaleLowerCase().includes(wanted)
-  );
-}
-
-/**
- * Starts a conversation: pick a member, write the first message, send.
- * Members are read each time the picker opens, never polled.
- */
-export function NewMessageDialog({
-  open,
-  controller,
-  onClose,
-  onStarted,
-}: {
-  open: boolean;
-  controller: InboxController;
-  onClose: () => void;
-  onStarted?: () => void;
-}) {
-  const { t } = useI18n();
-  const [phase, setPhase] = useState<PeoplePhase>("loading");
-  const [members, setMembers] = useState<readonly InboxMember[]>([]);
-  const [query, setQuery] = useState("");
-  const [username, setUsername] = useState<string | null>(null);
-  const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
-  const [failure, setFailure] = useState<SendFailure | null>(null);
-  const [requestKey, setRequestKey] = useState<string | null>(null);
-  const loadPeople = controller.loadPeople;
-  // Only the latest read may change what the picker shows.
-  const reads = useRef(0);
-  const load = useCallback(async () => {
-    const read = ++reads.current;
-    setPhase("loading");
-    const answer = await loadPeople();
-    if (read !== reads.current) return;
-    if (answer?.state === "ready") {
-      setMembers(answer.people);
-      setPhase("ready");
-      return;
-    }
-    setPhase(answer?.state === "forbidden" ? "forbidden" : "failed");
-  }, [loadPeople]);
-  const loadRef = useRef(load);
-  loadRef.current = load;
-  useEffect(() => {
-    if (!open) return;
-    setQuery("");
-    setUsername(null);
-    setText("");
-    setFailure(null);
-    setRequestKey(null);
-    setSending(false);
-    void loadRef.current();
-  }, [open]);
-  const shown = members.filter((member) => memberMatches(member, query));
-  const picked = members.find((member) => member.username === username);
-  // Set at once, before any render, like the reply box.
-  const inFlight = useRef(false);
-  // The connection the picker was opened for. Its members, request key and
-  // failure mean nothing for another one: a different key would not be
-  // deduplicated, and a username may name someone else elsewhere.
-  const binding = useRef(controller.binding);
-  binding.current = controller.binding;
-  const send = async () => {
-    if (!picked || sending || inFlight.current || text.trim() === "") return;
-    const key = requestKey ?? newRequestKey();
-    const started = binding.current;
-    inFlight.current = true;
-    setSending(true);
-    setFailure(null);
-    setRequestKey(key);
-    const result = await controller.startConversation(
-      picked.username,
-      text,
-      key,
-    );
-    inFlight.current = false;
-    setSending(false);
-    if (binding.current !== started) return;
-    if (result?.state === "sent") {
-      onClose();
-      onStarted?.();
-      return;
-    }
-    const reason = sendFailure(result?.state ?? "failed");
-    setFailure(reason);
-    if (!sendRetryable(reason)) setRequestKey(null);
-  };
-  // A changed message or recipient is a new message.
-  const change = (next: () => void) => {
-    if (sending) return;
-    next();
-    setFailure(null);
-    setRequestKey(null);
-  };
-  return (
-    <Dialog.Root
-      open={open}
-      onOpenChange={(next) => {
-        if (!next && !sending) onClose();
-      }}
-    >
-      <Dialog.Portal>
-        <Dialog.Backdrop />
-        <Dialog.Popup className="inbox-new-message">
-          <div className="inbox-task-dialog-header">
-            <Dialog.Title>{t("inbox.new_message_title")}</Dialog.Title>
-            <Dialog.Close
-              className="icon-button"
-              aria-label={t("common.close")}
-              disabled={sending}
-            >
-              <Icon name="close" />
-            </Dialog.Close>
-          </div>
-          <div className="inbox-new-message-form">
-            <input
-              className="inbox-search-input focus-ring"
-              type="search"
-              aria-label={t("inbox.people_search")}
-              placeholder={t("inbox.people_search")}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-            {phase === "loading" && (
-              <p className="inbox-message-note">{t("inbox.people_loading")}</p>
-            )}
-            {(phase === "failed" || phase === "forbidden") && (
-              <p className="inbox-composer-note" role="alert">
-                <span>
-                  {phase === "forbidden"
-                    ? t("inbox.people_forbidden")
-                    : t("inbox.people_failed")}
-                </span>
-                <button
-                  type="button"
-                  className="inbox-composer-retry focus-ring"
-                  onClick={() => void load()}
-                >
-                  {t("inbox.retry")}
-                </button>
-              </p>
-            )}
-            {phase === "ready" && (
-              <ul className="inbox-people" aria-label={t("inbox.people_label")}>
-                {shown.length === 0 && (
-                  <li className="inbox-message-note">
-                    {t("inbox.people_none")}
-                  </li>
-                )}
-                {shown.map((member) => (
-                  <li key={member.username}>
-                    <button
-                      type="button"
-                      className="inbox-detail-link focus-ring"
-                      aria-pressed={member.username === username}
-                      onClick={() => change(() => setUsername(member.username))}
-                    >
-                      <span>{member.name}</span>
-                      <span className="inbox-detail-link-meta">
-                        {member.username}
-                        {member.online === true &&
-                          ` · ${t("inbox.people_online")}`}
-                      </span>
-                      {member.username === username && <Icon name="check" />}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <MessageBox
-              label={t("inbox.new_message_text")}
-              placeholder={
-                picked
-                  ? t("inbox.composer_placeholder")
-                  : t("inbox.new_message_pick")
-              }
-              text={text}
-              sending={sending}
-              ready={picked !== undefined}
-              failure={failure}
-              onChange={(value) => change(() => setText(value))}
-              onSend={() => void send()}
-            />
-          </div>
-        </Dialog.Popup>
-      </Dialog.Portal>
-    </Dialog.Root>
-  );
-}
-
 export function InboxSidebar({
   inbox,
   controller,
@@ -970,22 +808,81 @@ export function InboxSidebar({
   /** A narrow window closes the conversation drawer once one is chosen. */
   onSelected?: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const usable = inbox.state === "ready" || inbox.state === "unreachable";
-  const empty = inbox.conversations.length === 0;
+  const [query, setQuery] = useState("");
+  const directory = controller.directory;
+  const formats = useTimeFormats();
+  type ListRow = {
+    contact: Contact;
+    username: string | null;
+    conversation?: InboxConversation;
+  };
+  const { history, others, nameCounts } = useMemo(() => {
+    const members = new Map(
+      (directory?.members ?? []).map((member) => [
+        member.username.toLowerCase(),
+        member,
+      ]),
+    );
+    const history: ListRow[] = inbox.conversations.map((conversation) => {
+      const username = conversation.username;
+      const userKey = username?.toLowerCase();
+      const member = userKey ? members.get(userKey) : undefined;
+      if (userKey) members.delete(userKey);
+      const name = conversationName(
+        conversation.peerId,
+        member?.name ?? conversation.name,
+        t,
+      );
+      return {
+        contact: {
+          key: userKey ? "user:" + userKey : "peer:" + conversation.peerId,
+          target: conversation.peerId,
+          name,
+        },
+        username,
+        conversation,
+      };
+    });
+    const collator = new Intl.Collator(locale);
+    const others: ListRow[] = [...members.values()]
+      .sort(
+        (a, b) =>
+          collator.compare(a.name, b.name) ||
+          collator.compare(a.username, b.username),
+      )
+      .map(({ name, username }) => ({
+        contact: {
+          key: "user:" + username.toLowerCase(),
+          name,
+          target: { username },
+        },
+        username,
+      }));
+    const nameCounts = new Map<string, number>();
+    for (const { contact } of [...history, ...others])
+      nameCounts.set(contact.name, (nameCounts.get(contact.name) ?? 0) + 1);
+    return { history, others, nameCounts };
+  }, [directory?.members, inbox.conversations, locale, t]);
+  const wanted = query.trim().toLocaleLowerCase();
+  const matches = (row: ListRow) =>
+    [row.contact.name, row.username, row.conversation?.name].some((value) =>
+      value?.toLocaleLowerCase().includes(wanted),
+    );
+  const shownHistory = history.filter(matches);
+  const shownMembers = others.filter(matches);
   // A page of history can belong to a single busy sender and add no new
   // conversation, so the end of the list stays in view. Asking by itself
   // stops after such a page instead of walking the whole history; the
   // button still asks for more.
   const [automatic, setAutomatic] = useState(true);
   const countAtRequest = useRef<number | null>(null);
-  const [composing, setComposing] = useState(false);
   const count = inbox.conversations.length;
   useEffect(() => {
     setAutomatic(true);
     countAtRequest.current = null;
-    // A new message is written for one connection: another closes it.
-    setComposing(false);
+    setQuery("");
   }, [inbox.binding]);
   useEffect(() => {
     if (inbox.loadingConversations) return;
@@ -997,62 +894,87 @@ export function InboxSidebar({
     countAtRequest.current = count;
     controller.loadEarlierConversations();
   };
-  return (
-    <section className="inbox-list" aria-labelledby="inbox-list-title">
-      <div className="inbox-list-header">
-        <h2 id="inbox-list-title">{t("inbox.title")}</h2>
-        {usable && (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={() => setComposing(true)}
-          >
-            <Icon name="edit" />
-            {t("inbox.new_message_button")}
-          </Button>
-        )}
-      </div>
-      <NewMessageDialog
-        open={composing}
-        controller={controller}
-        onClose={() => setComposing(false)}
-        onStarted={onSelected}
+  function renderRow({ contact, conversation, username }: ListRow) {
+    return (
+      <ConversationRow
+        key={contact.key}
+        formats={formats}
+        hint={(nameCounts.get(contact.name) ?? 0) > 1 ? username : null}
+        name={contact.name}
+        conversation={conversation}
+        selected={controller.conversation?.key === contact.key}
+        onSelect={() => {
+          controller.select(contact);
+          onSelected?.();
+        }}
       />
-      {!empty && (
-        <ul className="inbox-list-scroll">
-          {inbox.conversations.map((conversation) => (
-            <ConversationRow
-              key={conversation.peerId}
-              conversation={conversation}
-              selected={controller.selectedId === conversation.peerId}
-              onSelect={() => {
-                controller.select(
-                  conversation.peerId,
-                  conversationName(conversation.peerId, conversation.name, t),
-                );
-                onSelected?.();
-              }}
-            />
-          ))}
-          {inbox.hasEarlier && (
-            <li>
-              <EarlierConversations
-                loading={inbox.loadingConversations}
-                automatic={automatic}
-                onLoad={loadEarlier}
-              />
-            </li>
-          )}
-        </ul>
+    );
+  }
+  return (
+    <section className="inbox-list" aria-label={t("inbox.title")}>
+      {usable && (
+        <div className="inbox-list-search">
+          <Icon name="search" />
+          <input
+            type="search"
+            className={controlFocus}
+            aria-label={t("inbox.people_search")}
+            placeholder={t("inbox.people_search")}
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+          />
+        </div>
       )}
-      {empty && usable && (
-        <p className="inbox-list-note">
-          {inbox.conversationsLoaded
-            ? t("inbox.no_conversations")
-            : t("inbox.loading_conversations")}
+      <ul className="inbox-list-scroll">
+        {shownHistory.map(renderRow)}
+        {inbox.hasEarlier && (
+          <li>
+            <EarlierConversations
+              loading={inbox.loadingConversations}
+              automatic={automatic}
+              onLoad={loadEarlier}
+            />
+          </li>
+        )}
+        {shownMembers.map(renderRow)}
+      </ul>
+      {usable && (!directory || directory.phase === "loading") && (
+        <p className="inbox-list-note" role="status">
+          {t("inbox.people_loading")}
         </p>
       )}
+      {directory &&
+        (directory.phase === "failed" || directory.phase === "forbidden") && (
+          <div className="inbox-list-note" role="status">
+            {t(
+              directory.phase === "forbidden"
+                ? "inbox.people_forbidden"
+                : "inbox.people_failed",
+            )}
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={controller.retryDirectory}
+            >
+              {t("inbox.retry")}
+            </Button>
+          </div>
+        )}
+      {usable &&
+        !inbox.conversationsLoaded &&
+        inbox.conversations.length === 0 && (
+          <p className="inbox-list-note" role="status">
+            {t("inbox.loading_conversations")}
+          </p>
+        )}
+      {inbox.conversationsLoaded &&
+        directory?.phase === "ready" &&
+        shownHistory.length + shownMembers.length === 0 && (
+          <p className="inbox-list-note">
+            {t(wanted ? "inbox.people_none" : "inbox.no_members")}
+          </p>
+        )}
     </section>
   );
 }
@@ -1737,10 +1659,10 @@ function InboxConversationView({
   useLayoutEffect(() => {
     const scroll = transcript.current;
     if (scroll) scroll.scrollTop = scroll.scrollHeight;
-  }, [conversation.peerId, lastId]);
+  }, [conversation.key, lastId]);
   return (
     <section
-      key={conversation.peerId}
+      key={conversation.key}
       className="inbox-detail"
       aria-labelledby="inbox-conversation-title"
       aria-busy={conversation.loading || undefined}
@@ -1851,7 +1773,7 @@ function InboxConversationView({
           })}
         </ol>
       </div>
-      {composer?.peerId === conversation.peerId && (
+      {composer?.key === conversation.key && (
         <InboxComposer
           name={name}
           text={composer.text}
@@ -1924,7 +1846,12 @@ export function InboxMain({
       </InboxNotice>
     );
   const stale = inbox.state === "unreachable";
-  if (stale && inbox.unreadTotal === null && inbox.conversations.length === 0)
+  if (
+    stale &&
+    inbox.unreadTotal === null &&
+    inbox.conversations.length === 0 &&
+    !controller.conversation
+  )
     return (
       <InboxNotice title={t("inbox.unreachable")}>
         {retry}
@@ -1958,7 +1885,9 @@ export function InboxMain({
       {controller.conversation ? (
         <InboxConversationView
           name={conversationName(
-            controller.conversation.peerId,
+            typeof controller.conversation.target === "string"
+              ? controller.conversation.target
+              : "",
             controller.conversation.name,
             t,
           )}

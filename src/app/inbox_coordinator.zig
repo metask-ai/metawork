@@ -1071,8 +1071,7 @@ pub const Coordinator = struct {
         respondSend(self.allocator, work.reply, state, job.sent orelse &.{}, conversation);
     }
 
-    /// The members a new conversation can start with, read when the picker
-    /// opens; a newer request replaces one still waiting or running.
+    /// Read the directory for the open inbox. A newer request replaces a pending read.
     pub fn listPeople(self: *Coordinator, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: inbox.PeopleRequest) bool {
         self.assertMain();
         const target = reply(responder, bridge_id, request.binding, request.request_id) orelse return false;

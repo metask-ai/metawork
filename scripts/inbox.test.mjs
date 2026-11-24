@@ -411,10 +411,13 @@ test("the open inbox refreshes, and a conversation is read only when it is opene
   assert.equal(timer.mock.calls[0].arguments[1], 10_000);
   // The page's own refresh is automatic, so the Host keeps its rules.
   await waitFor(() =>
-    assert.deepEqual(client.calls[0], ["refresh", "1", false]),
+    assert.deepEqual(
+      client.calls.find(([kind]) => kind === "refresh"),
+      ["refresh", "1", false],
+    ),
   );
   assert.ok(screen.getByText("You: Done"));
-  assert.ok(screen.getByText("Select a conversation"));
+  assert.ok(screen.getByText("Select a member"));
   assert.equal(client.calls.filter(([kind]) => kind === "read").length, 0);
 
   await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
@@ -473,7 +476,7 @@ test("the timer follows only the open conversation even with zero unread, and a 
   );
 
   rerender(element(client, view({ binding: "2" })));
-  await waitFor(() => assert.ok(screen.getByText("Select a conversation")));
+  await waitFor(() => assert.ok(screen.getByText("Select a member")));
 });
 
 test("reopening a saved conversation refreshes receipts even when there are no new message ids", async () => {
@@ -843,59 +846,102 @@ test("a refused reply is not retried as is; a changed message gets a new request
   assert.notEqual(sends[1][4], sends[0][4]);
 });
 
-test("a new message picks a member read on opening, and the conversation it starts opens", async () => {
+test("the searchable directory keeps recent conversations first and opens an empty chat in the same pane", async () => {
   const user = userEvent.setup({ document });
   const client = fakeClient({
-    sendStates: ["failed", "sent"],
     people: [
-      { username: "ann", name: "Ann", online: true },
-      { username: "bob", name: "Bob Li", online: false },
       { username: "cy", name: "Cy", online: null },
+      { username: "ann_u", name: "Ann", online: true },
+      { username: "alex", name: "Alex", online: false },
     ],
-    conversation: { peerId: "bob-id", name: "Bob Li" },
+    sendStates: ["failed", "sent"],
+    conversation: { peerId: "alex-id", name: "Alex" },
     pages: {
-      "bob-id:latest:null": { messages: [message("40", "out", "Hello Bob")] },
+      "alex-id:refresh:null": {
+        messages: [message("40", "out", "Hello Alex")],
+      },
+    },
+  });
+  const { rerender } = render(element(client, view()));
+  const names = () =>
+    Array.from(
+      document.querySelectorAll(".inbox-list-row strong"),
+      (el) => el.textContent,
+    );
+  await waitFor(() => assert.deepEqual(names(), ["Ann", "Bob", "Alex", "Cy"]));
+  assert.equal(screen.queryByRole("dialog"), null);
+  const search = screen.getByRole("searchbox", { name: "Search members" });
+  await user.type(search, "ANN_U");
+  assert.deepEqual(names(), ["Ann"]);
+  await user.clear(search);
+  await user.type(search, "unmatched");
+  assert.ok(screen.getByText("No matching members."));
+  await user.clear(search);
+  assert.equal(client.calls.filter(([kind]) => kind === "read").length, 0);
+  await user.click(screen.getByRole("button", { name: "Alex" }));
+  assert.deepEqual(
+    client.calls.filter(([kind]) => kind === "read"),
+    [["read", "1", "@alex", "latest", null]],
+  );
+  assert.deepEqual(names(), ["Ann", "Bob", "Alex", "Cy"]);
+  assert.equal(document.querySelectorAll(".inbox-bubble").length, 0);
+  await user.type(
+    screen.getByRole("textbox", { name: "Message Alex" }),
+    "Hello Alex{Enter}",
+  );
+  await user.click(await screen.findByRole("button", { name: "Retry" }));
+  await screen.findByText("Hello Alex");
+  const sends = client.calls.filter(([kind]) => kind === "send");
+  assert.equal(sends.length, 2);
+  assert.deepEqual(sends[0].slice(0, 4), ["send", "1", "@alex", "Hello Alex"]);
+  assert.equal(sends[1][4], sends[0][4]);
+  const next = view();
+  next.conversations.unshift({
+    ...next.conversations[0],
+    peerId: "alex-id",
+    username: "alex",
+    name: "Alex",
+    unread: "0",
+  });
+  rerender(element(client, next));
+  assert.deepEqual(names(), ["Alex", "Ann", "Bob", "Cy"]);
+  assert.equal(
+    screen.getByRole("button", { name: "Alex" }).getAttribute("aria-current"),
+    "true",
+  );
+  assert.equal(client.calls.filter(([kind]) => kind === "people").length, 1);
+});
+
+test("a directory member with remote history resolves to their own conversation before replying", async () => {
+  const user = userEvent.setup({ document });
+  const client = fakeClient({
+    people: [{ username: "ann2", name: "Ann", online: false }],
+    pages: {
+      "@ann2:latest:null": {
+        peerId: "42",
+        messages: [message("41", "in", "Older exchange")],
+      },
     },
   });
   render(element(client, view()));
-  assert.equal(client.calls.filter(([kind]) => kind === "people").length, 0);
-  await user.click(screen.getByRole("button", { name: "New message" }));
-  await waitFor(() => assert.ok(screen.getByRole("button", { name: /Ann/ })));
-  assert.equal(client.calls.filter(([kind]) => kind === "people").length, 1);
-
+  await user.type(screen.getByRole("searchbox"), "ann2");
+  await user.click(screen.getByRole("button", { name: "Ann @ann2" }));
+  await screen.findByText("Older exchange");
   await user.type(
-    screen.getByRole("searchbox", { name: "Search members" }),
-    "LI",
+    screen.getByRole("textbox", { name: "Message Ann" }),
+    "Reply{Enter}",
   );
-  assert.equal(screen.queryByRole("button", { name: /Ann/ }), null);
-  const send = screen.getByRole("button", { name: "Send" });
-  assert.equal(send.disabled, true);
-  await user.click(screen.getByRole("button", { name: /Bob Li/ }));
-  await user.type(
-    screen.getByRole("textbox", { name: "Message" }),
-    "Hello Bob",
-  );
-  await user.click(send);
-  await waitFor(() =>
-    assert.ok(screen.getByText(/Retrying won't send it twice/)),
-  );
-  await user.click(screen.getByRole("button", { name: "Retry" }));
-  await waitFor(() =>
-    assert.ok(screen.getByRole("heading", { name: "Bob Li" })),
-  );
-  const sends = client.calls.filter(([kind]) => kind === "send");
-  assert.equal(sends.length, 2);
-  assert.deepEqual(sends[0].slice(0, 4), ["send", "1", "@bob", "Hello Bob"]);
-  assert.equal(sends[1][4], sends[0][4]);
-  // The dialog closed and the new conversation is open and read.
-  assert.equal(screen.queryByRole("dialog"), null);
-  await waitFor(() => assert.ok(screen.getByText("Hello Bob")));
   assert.deepEqual(
-    client.calls.find(([kind]) => kind === "read"),
-    ["read", "1", "bob-id", "latest", null],
+    client.calls.filter(([kind]) => kind === "send")[0].slice(0, 4),
+    ["send", "1", "42", "Reply"],
   );
-  // The members are not asked for again until the picker opens again.
-  assert.equal(client.calls.filter(([kind]) => kind === "people").length, 1);
+  assert.deepEqual(client.calls.filter(([kind]) => kind === "read").at(-1), [
+    "read",
+    "1",
+    "42",
+    "after",
+    "41",
+  ]);
 });
 
 test("leaving a conversation while it sends keeps its reply box, and the answer lands only in that attempt", async () => {
@@ -953,7 +999,7 @@ test("leaving a conversation while it sends keeps its reply box, and the answer 
   );
 });
 
-test("a new message belongs to its connection: another one closes the picker and its late answer opens nothing", async () => {
+test("switching connections drops the selected member and ignores a late send answer", async () => {
   const user = userEvent.setup({ document });
   let release;
   const gate = new Promise((resolve) => (release = resolve));
@@ -963,9 +1009,11 @@ test("a new message belongs to its connection: another one closes the picker and
     conversation: { peerId: "bob-id", name: "Bob Li" },
   });
   const { rerender } = render(element(client, view()));
-  await user.click(screen.getByRole("button", { name: "New message" }));
   await user.click(await screen.findByRole("button", { name: /Bob Li/ }));
-  await user.type(screen.getByRole("textbox", { name: "Message" }), "Hi");
+  await user.type(
+    screen.getByRole("textbox", { name: "Message Bob Li" }),
+    "Hi",
+  );
   await user.click(screen.getByRole("button", { name: "Send" }));
   rerender(element(client, view({ binding: "2" })));
   await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
@@ -974,22 +1022,35 @@ test("a new message belongs to its connection: another one closes the picker and
     assert.equal(client.calls.filter(([kind]) => kind === "send").length, 1),
   );
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.ok(screen.getByText("Select a conversation"));
-  assert.equal(client.calls.filter(([kind]) => kind === "read").length, 0);
+  assert.ok(screen.getByText("Select a member"));
+  assert.deepEqual(
+    client.calls.filter(([kind]) => kind === "read"),
+    [["read", "1", "@bob", "latest", null]],
+  );
 });
 
-test("a new message to oneself opens the Me conversation", async () => {
+test("the existing Me history sends to its own recipient", async () => {
   const user = userEvent.setup({ document });
-  const client = fakeClient({
-    people: [{ username: "zj", name: "Zhu", online: true }],
-    conversation: { peerId: "me", name: "Zhu" },
-  });
-  render(element(client, view()));
-  await user.click(screen.getByRole("button", { name: "New message" }));
-  await user.click(await screen.findByRole("button", { name: /Zhu/ }));
-  await user.type(screen.getByRole("textbox", { name: "Message" }), "note");
+  const client = fakeClient();
+  const inbox = view();
+  inbox.conversations = [
+    {
+      ...inbox.conversations[0],
+      peerId: "me",
+      name: "Zhu",
+      username: "my_account",
+      unread: "0",
+    },
+  ];
+  render(element(client, inbox));
+  await user.click(screen.getByRole("button", { name: "Me" }));
+  await user.type(screen.getByRole("textbox", { name: "Message Me" }), "note");
   await user.click(screen.getByRole("button", { name: "Send" }));
-  await waitFor(() => assert.ok(screen.getByRole("heading", { name: "Me" })));
+  assert.deepEqual(client.calls.find(([kind]) => kind === "send").slice(1, 4), [
+    "1",
+    "me",
+    "note",
+  ]);
 });
 
 test("a refused task or a missing conversation is shown where it was asked for", async () => {
