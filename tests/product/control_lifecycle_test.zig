@@ -8154,6 +8154,61 @@ test "Product Control coverage saves a worker compact call error before terminal
     try expectWorkerFailureCoverage(true);
 }
 
+test "a terminal diagnostic Core cut or encoded badly never stops history" {
+    // The Host keeps 512 diagnostic bytes. The first two texts end inside a
+    // character there; the last one is not UTF-8 at all.
+    for ([_][]const u8{ "诊" ** 200, "a" ** 511 ++ "断", "not text \xA5\xE8\xAF" }) |text| for ([_]bool{ false, true }) |compact_operation| {
+        fake_core.reset();
+        if (!compact_operation) fake_core.setNextPlan(.resource_limit);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var persistence: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.task_persistence = persistence.capability();
+        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_compacts_per_task = 1,
+        }, configuration);
+        defer workbench.deinit();
+        try installControlExecution(&workbench);
+        const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
+        const task = workbench.testTask(task_id).?;
+        var diagnostic: []const u8 = undefined;
+        var truncated: bool = undefined;
+        if (compact_operation) {
+            _ = try runPreparedTask(&workbench, task_id, .{ .text = "establish Conversation" });
+            try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
+            fake_core.diagnostic_text = text;
+            fake_core.forceNextCompactStatus(wire.STATUS_CHECKPOINT_BUDGET_REQUIRED);
+            const operation_id = try workbench.compactTaskAtBinding(task_id, 1);
+            try waitControlSnapshot(&workbench, "\"phase\":\"failed\"");
+            const compact = task_state.findCompact(task.durable.compacts, operation_id).?;
+            const terminal = task_state.compactTerminalPayload(compact).?;
+            diagnostic = compact.terminal_diagnostic[0..terminal.diagnostic_len];
+            truncated = terminal.diagnostic_truncated;
+        } else {
+            fake_core.diagnostic_text = text;
+            const run_id = try runPreparedTask(&workbench, task_id, .{ .text = "fail with a diagnostic" });
+            try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"failed\"");
+            const run = task_state.findRun(task.durable.runs, run_id).?;
+            const terminal = task_state.terminalPayload(run).?;
+            diagnostic = run.terminal_diagnostic[0..terminal.diagnostic_len];
+            truncated = terminal.diagnostic_truncated;
+        }
+        try product_control.TestSupport.commitTaskHistory(&workbench);
+        try std.testing.expect(workbench.task_persistence_health == .ready);
+        try std.testing.expect(diagnostic.len != 0);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(diagnostic));
+        try std.testing.expectEqual(text.len > 512, truncated);
+    };
+}
+
 test "Product Control shutdown terminates a waiting UI Run before joining workers" {
     fake_core.reset();
     fake_core.setNextPlan(.ui_wait);

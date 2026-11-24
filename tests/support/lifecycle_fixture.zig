@@ -504,6 +504,9 @@ pub const FakeCore = struct {
     rewind_calls: usize = 0,
     last_abort_reason: ?u32 = null,
     buffer_releases: usize = 0,
+    /// What a failing call returns as its diagnostic; null is one byte that
+    /// is not UTF-8.
+    diagnostic_text: ?[]const u8 = null,
     credential_seen: bool = false,
     /// Models a provider rejecting one expired synthetic credential. This is
     /// an injected Core outcome, not evidence of an actual HTTP status.
@@ -1079,7 +1082,8 @@ const empty_mcp_catalog_json =
     "\"servers\":[],\"tools\":[],\"issues\":[]}";
 
 pub fn diagnostic(out: ?*wire.OwnedBytesV1) void {
-    if (out) |value| value.* = .{ .ptr = @ptrCast(&diagnostic_byte), .len = 1 };
+    const text: []const u8 = fake_core.diagnostic_text orelse std.mem.asBytes(&diagnostic_byte);
+    if (out) |value| value.* = .{ .ptr = @constCast(text.ptr), .len = text.len };
 }
 
 fn recordAllowedTools(

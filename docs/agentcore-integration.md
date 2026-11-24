@@ -384,7 +384,7 @@ RunControl / RunControlLease
 
 `TerminalResult.terminationEffect()` 区分未请求、调用前阻止、实际 aborted、受控关闭、未按请求中止及未知；abort OK 本身不证明本轮已停止。Agent 独立保留 `first_host_failure` 的有界类型，不因控制槽已被较早 Stop 占据而丢失真实 Host 故障。因关闭合法拒绝或唤醒 UI/Host 工具 callback 的事实以 `controlled_callback_close` 单独保留，不仅凭 fatal 回应推造 Host 故障；真实解码、身份或接管故障仍按原边界收口。Host 工具的实际 fatal 回应也在 callback lease 内记录，参与 fatal 后返回 OK 的合同检查；已观察到的真实故障优先于控制意图。Core 返回 CALLBACK_FAILED 且没有真实故障或受控关闭事实时，才以非 UI callback 故障提供后备归因，不覆盖已有事实。Product 的归因与恢复入口以 [Product 架构](product-architecture.md#31-产品视图与执行推进)为准。
 
-wire abort reason 只作为 AgentCore 中断机制。`TerminalResult` 同时保留 typed/raw ABI status、typed/raw StopReason、typed/raw abort status、最终 termination latch、completion-time Session disposition，以及 bounded owned diagnostic。产品 `RunOutcome` 与 durable cause 只由 Product Control 映射。Renderer transport 不是 active Run cause，不得写入 Agent termination latch。
+wire abort reason 只作为 AgentCore 中断机制。`TerminalResult` 同时保留 typed/raw ABI status、typed/raw StopReason、typed/raw abort status、最终 termination latch、completion-time Session disposition，以及 bounded owned diagnostic。诊断只解释终态、不参与判断：Agent 按完整字符截断，并把 Core 给出的非 UTF-8 字节替换掉，Product 收到的始终是合法 UTF-8；Compact 的诊断相同。产品 `RunOutcome` 与 durable cause 只由 Product Control 映射。Renderer transport 不是 active Run cause，不得写入 Agent termination latch。
 
 `TerminalResult.file_changes_lost` 是 monotonic、per-Session observation fact：只要任一 classifier-confirmed `file_changes` event 因单事件编码上限、decode-owned-copy 容量或 event-pump admission 容量未被完整保留，就置 true 并保持至 terminal publication。它不把成功 Run 改成失败，也不允许伪造或补采记录；Product 在固定 terminal drain 后据此把已有 `collecting` observation 收口为 `incomplete`。没有任何 typed observation 且没有已知丢失时继续投影 null；发生已知丢失时即使零记录也必须建立 incomplete observation。
 
