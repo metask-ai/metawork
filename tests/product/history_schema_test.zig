@@ -3,6 +3,7 @@ const schema = @import("product_control_history_schema");
 const sql = @import("metawork_storage_sql");
 const sqlite = @import("metawork_storage_sqlite");
 const fixture_support = @import("history_schema_fixture");
+const digest_key: schema.codec.DigestKey = "history-test-key".*;
 const history = struct {
     pub const wire = fixture_support.wire;
     pub const limits = fixture_support.limits;
@@ -74,7 +75,7 @@ fn insertAtVersion(
     state: history.wire.StateWire,
     version: usize,
 ) !void {
-    const rows = try schema.codec.rowsFor(a, state, .{}, history.limits);
+    const rows = try schema.codec.rowsFor(a, state, .{}, history.limits, &digest_key);
     var mutations: std.ArrayList(sql.Mutation) = .empty;
     for (rows) |row| {
         var columns: std.ArrayList(u8) = .empty;
@@ -268,7 +269,7 @@ test "model error history survives restart and credential sanitization with exac
     const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
     defer database.destroy() catch unreachable;
     try expectSame(a, database.capability(), state);
-    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits, digest_key);
     defer repository.deinit();
     try repository.seed(state, .{});
     try repository.sanitize("late-credential", @splat(3));
@@ -327,7 +328,7 @@ test "history SQL preserves manual and cancelled review summaries without review
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
         try expectSame(allocator, database.capability(), state);
-        var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+        var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits, digest_key);
         defer repository.deinit();
         try repository.seed(state, .{});
         try repository.sanitize("late-credential", @splat(3));
@@ -1687,7 +1688,7 @@ test "repository commits only changed rows and keeps witness atomic" {
     const a = arena.allocator();
     const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
-    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits, digest_key);
     defer repository.deinit();
     var state = try history.fixture(a);
     var first = try repository.prepare(state, .{}, @splat(1));
@@ -1769,7 +1770,7 @@ test "repository skips body-only position writes and vacates all swapped batches
     }
     const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
-    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits, digest_key);
     defer repository.deinit();
     var first = try repository.prepare(state, .{}, @splat(1));
     defer first.deinit();
@@ -1909,7 +1910,7 @@ test "repository Task deletion and insertion do not renumber unrelated identitie
     state.next_task_recent_order = 43;
     const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
-    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits, digest_key);
     defer repository.deinit();
     var first = try repository.prepare(state, .{}, @splat(1));
     defer first.deinit();
@@ -1947,7 +1948,7 @@ test "repository deletes Task descendants and backfills a previously failed chan
     const a = arena.allocator();
     const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
-    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits, digest_key);
     defer repository.deinit();
     var state = try history.fixture(a);
     var first = try repository.prepare(state, .{}, @splat(1));
@@ -1977,7 +1978,7 @@ test "repository preserves witness atomicity beyond 128 retained-record statemen
     const a = arena.allocator();
     const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
-    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits, digest_key);
     defer repository.deinit();
     var state = try history.fixture(a);
     const retained = try a.alloc(history.wire.RetainedRecord, 140);
@@ -2014,7 +2015,7 @@ test "repository preserves multiple opaque frame occurrences with the same ident
     };
     const database = try sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
-    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+    var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits, digest_key);
     defer repository.deinit();
     var prepared = try repository.prepare(state, .{ .retained = &records }, @splat(1));
     defer prepared.deinit();
@@ -2065,7 +2066,7 @@ test "project membership migration retains hidden identity and explicit null acr
         const upgraded = try history.load(a, database.capability());
         try std.testing.expectEqual(state.tasks[0].workspace_id, upgraded.tasks[0].project_id.?);
         try std.testing.expect(!upgraded.workspaces[1].project_entry);
-        var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits);
+        var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits, digest_key);
         defer repository.deinit();
         try repository.seed(upgraded, .{});
         state.tasks[0].project_id = hidden.id;

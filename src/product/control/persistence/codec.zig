@@ -14,13 +14,20 @@ fn validateState(allocator: std.mem.Allocator, state: wire.StateWire, limits: wi
     for (state.tasks) |task| try wire.validateRestorableTask(allocator, task, limits);
 }
 
+/// Row digests only tell a changed row from a confirmed one inside this
+/// process and are never stored. The key keeps row content, which outside
+/// parties write, from choosing which rows collide.
+const RowHash = std.crypto.auth.siphash.SipHash128(1, 4);
+pub const DigestKey = [RowHash.key_length]u8;
+pub const RowDigest = [RowHash.mac_length]u8;
+
 pub const Row = struct {
     table: []const u8,
     columns: []const []const u8,
     primary: []const usize,
     values: []const sql.Value,
     key: []const u8,
-    digest: [32]u8,
+    digest: RowDigest,
 
     pub fn position(self: Row) ?i64 {
         for (self.columns, self.values) |name, value| {
@@ -63,7 +70,7 @@ fn identityValue(allocator: std.mem.Allocator, bytes: *std.ArrayList(u8), value:
     }
 }
 
-fn rowFor(allocator: std.mem.Allocator, comptime table: []const u8, values: anytype) !Row {
+fn rowFor(allocator: std.mem.Allocator, digest_key: *const DigestKey, comptime table: []const u8, values: anytype) !Row {
     const fields = std.meta.fields(@TypeOf(values));
     const names = try allocator.alloc([]const u8, fields.len);
     const params = try allocator.alloc(sql.Value, fields.len);
@@ -86,7 +93,7 @@ fn rowFor(allocator: std.mem.Allocator, comptime table: []const u8, values: anyt
     try key.appendSlice(allocator, table);
     try key.append(allocator, 0);
     for (primary) |index| try identityValue(allocator, &key, params[index]);
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var hash = RowHash.init(digest_key);
     hash.update(key.items);
     for (params) |value| {
         const tag = [_]u8{@intFromEnum(std.meta.activeTag(value))};
@@ -117,15 +124,16 @@ fn rowFor(allocator: std.mem.Allocator, comptime table: []const u8, values: anyt
 pub const Batch = struct {
     allocator: std.mem.Allocator,
     mutations: std.ArrayList(sql.Mutation) = .empty,
-    capture: bool = false,
+    /// Collects rows digested under this key instead of writing statements.
+    capture: ?*const DigestKey = null,
     rows: std.ArrayList(Row) = .empty,
     pending_table: []const u8 = "",
     pending_sql: std.ArrayList(u8) = .empty,
     params: std.ArrayList(sql.Value) = .empty,
 
     fn add(self: *@This(), comptime table: []const u8, values: anytype) !void {
-        if (self.capture) {
-            try self.rows.append(self.allocator, try rowFor(self.allocator, table, values));
+        if (self.capture) |digest_key| {
+            try self.rows.append(self.allocator, try rowFor(self.allocator, digest_key, table, values));
             return;
         }
         const fields = std.meta.fields(@TypeOf(values));
@@ -432,15 +440,15 @@ pub fn batchFor(allocator: std.mem.Allocator, state: wire.StateWire, limits: wir
     return batchForPreserving(allocator, state, .{}, limits);
 }
 
-pub fn rowsFor(allocator: std.mem.Allocator, state: wire.StateWire, preserved: wire.PreservedFrames, limits: wire.Limits) ![]const Row {
-    return (try build(allocator, state, preserved, limits, true)).rows.items;
+pub fn rowsFor(allocator: std.mem.Allocator, state: wire.StateWire, preserved: wire.PreservedFrames, limits: wire.Limits, digest_key: *const DigestKey) ![]const Row {
+    return (try build(allocator, state, preserved, limits, digest_key)).rows.items;
 }
 
 pub fn batchForPreserving(allocator: std.mem.Allocator, state: wire.StateWire, preserved: wire.PreservedFrames, limits: wire.Limits) !Batch {
-    return build(allocator, state, preserved, limits, false);
+    return build(allocator, state, preserved, limits, null);
 }
 
-fn build(allocator: std.mem.Allocator, state: wire.StateWire, preserved: wire.PreservedFrames, limits: wire.Limits, capture: bool) !Batch {
+fn build(allocator: std.mem.Allocator, state: wire.StateWire, preserved: wire.PreservedFrames, limits: wire.Limits, capture: ?*const DigestKey) !Batch {
     try validateState(allocator, state, limits);
     try validatePreserved(allocator, state, preserved);
     var batch = Batch{ .allocator = allocator, .capture = capture };

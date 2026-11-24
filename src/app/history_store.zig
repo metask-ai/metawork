@@ -107,6 +107,7 @@ pub const Store = struct {
     mutex: std.Io.Mutex = .init,
     database: ?*sqlite.Database = null,
     repository: ?product.HistoryRepository = null,
+    digest_key: product.HistoryRepository.DigestKey,
     pending: ?product.PreparedHistoryCommit = null,
     pending_publication: ?[32]u8 = null,
     incompatible: bool = false,
@@ -131,7 +132,9 @@ pub const Store = struct {
         errdefer legacy.deinit();
         const path = try std.fs.path.join(allocator, &.{ directory, file_name });
         errdefer allocator.free(path);
-        return .{ .io = io, .allocator = allocator, .legacy = legacy, .path = path, .limits = product.persistenceLimits(.{}, (product.Limits{}).max_workspaces) };
+        var digest_key: product.HistoryRepository.DigestKey = undefined;
+        io.random(&digest_key);
+        return .{ .io = io, .allocator = allocator, .legacy = legacy, .path = path, .limits = product.persistenceLimits(.{}, (product.Limits{}).max_workspaces), .digest_key = digest_key };
     }
 
     pub fn deinit(self: *Store) void {
@@ -162,7 +165,7 @@ pub const Store = struct {
         self.database = database;
         if (self.repository) |*repository| {
             repository.database = database.capability();
-        } else self.repository = .init(self.allocator, database.capability(), self.limits);
+        } else self.repository = .init(self.allocator, database.capability(), self.limits, self.digest_key);
     }
 
     fn exists(self: *Store, name: []const u8) !bool {
@@ -281,7 +284,7 @@ pub const Store = struct {
         const candidate = try sqlite.Database.create(self.io, self.allocator, .{ .file = temporary }, self.migrations);
         var candidate_open = true;
         defer if (candidate_open) candidate.destroy() catch unreachable;
-        var repository = product.HistoryRepository.init(self.allocator, candidate.capability(), self.limits);
+        var repository = product.HistoryRepository.init(self.allocator, candidate.capability(), self.limits, self.digest_key);
         defer repository.deinit();
         var prepared = try repository.prepare(state, preserved, digest);
         defer prepared.deinit();
