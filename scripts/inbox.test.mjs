@@ -1157,22 +1157,30 @@ test("task controls keep draft choice separate from default session and verified
   const operations = [],
     opened = [],
     resumed = [];
+  let saveLink;
   const client = {
-    handoffSessions: async () => ({
+    handoffSessions: async (_binding, _account, id) => ({
       storeId,
-      sessions: [
-        { taskId: "1", preferred: true },
-        { taskId: "2", preferred: false },
-      ],
+      sessions:
+        id === "other"
+          ? [{ taskId: "5", preferred: true }]
+          : [
+              { taskId: "1", preferred: true },
+              { taskId: "2", preferred: false },
+            ],
     }),
     changeHandoff: async (...args) => {
       operations.push(args);
+      await new Promise((resolve, reject) => {
+        saveLink = { resolve, reject };
+      });
     },
   };
-  const tasks = ["1", "2", "3"].map((id) => ({
+  const tasks = ["1", "2", "3", "4", "5"].map((id) => ({
     id,
     title: "Session " + id,
     workspaceId: "1",
+    recentOrder: id,
     lifecycle: "open",
     deletionStatus: "idle",
     archived: id === "2",
@@ -1187,7 +1195,7 @@ test("task controls keep draft choice separate from default session and verified
     workspaces: [
       { id: "1", canonicalRoot: "/example", authorization: "available" },
     ],
-    ids: ["old"],
+    ids: ["old", "other"],
     revision: "1",
     onVerify() {},
     onOpen: (id) => opened.push(id),
@@ -1209,6 +1217,13 @@ test("task controls keep draft choice separate from default session and verified
         createElement(HandoffControls, {
           referenced: "old",
           canonical: detail ? "new" : undefined,
+          children: detail
+            ? createElement(
+                "details",
+                {},
+                createElement("summary", {}, "Past updates"),
+              )
+            : undefined,
         }),
       ),
     );
@@ -1232,12 +1247,49 @@ test("task controls keep draft choice separate from default session and verified
   await user.click(screen.getByRole("button", { name: "Resume draft 2" }));
   assert.deepEqual(resumed, [drafts[1].operationId]);
   rerender(draw(true));
-  await user.selectOptions(
-    screen.getByRole("combobox", { name: "Link session" }),
-    "3",
+  const past = screen.getByText("Past updates");
+  await user.click(past);
+  const openPicker = async () => {
+    await user.click(screen.getByRole("button", { name: "Other options" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Link session/ }),
+    );
+    return screen.getByRole("button", { name: "Confirm link and open" });
+  };
+  let confirm = await openPicker();
+  assert.ok(confirm.disabled);
+  assert.equal(past.closest("[hidden]") !== null, true);
+  const rows = screen.getAllByRole("radio");
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].closest("label").textContent, /Session 4/);
+  await user.click(rows[0]);
+  const search = screen.getByRole("searchbox");
+  await user.type(search, "missing");
+  assert.ok(confirm.disabled);
+  assert.ok(screen.getByText("No matching sessions"));
+  await user.clear(search);
+  await user.type(search, "/example");
+  assert.equal(screen.getAllByRole("radio").length, 2);
+  await user.click(screen.getByRole("radio", { name: /Session 3/ }));
+  await user.click(
+    screen.getByRole("button", {
+      name: translate("en-US", "inbox.detail_back"),
+    }),
   );
-  await user.click(screen.getByRole("button", { name: "Link session" }));
-  await waitFor(() =>
-    assert.deepEqual(operations, [[source, storeId, "link", "3"]]),
-  );
+  assert.equal(past.parentElement.open, true);
+  assert.equal(past.closest("[hidden]"), null);
+  assert.equal(operations.length, 0);
+  confirm = await openPicker();
+  assert.ok(confirm.disabled);
+  await user.click(screen.getByRole("radio", { name: /Session 3/ }));
+  await user.click(confirm);
+  assert.deepEqual(operations, [[source, storeId, "link", "3"]]);
+  assert.ok(confirm.disabled);
+  assert.deepEqual(opened, ["1"]);
+  saveLink.reject(new Error("failed"));
+  await screen.findByRole("alert");
+  assert.deepEqual(opened, ["1"]);
+  await user.click(confirm);
+  saveLink.resolve();
+  await waitFor(() => assert.deepEqual(opened, ["1", "3"]));
 });

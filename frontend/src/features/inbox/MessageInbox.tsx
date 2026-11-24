@@ -1461,21 +1461,19 @@ function InboxTaskDialog({
                     : t("inbox.task_failed")}
               </Dialog.Description>
             )}
-            {detail?.task && (
-              <>
+            {detail?.task && task && (
+              <HandoffControls
+                key={task.taskId}
+                referenced={task.taskId}
+                canonical={detail.task.canLink ? detail.task.id : undefined}
+                message={
+                  task.message?.taskIds.includes(task.taskId)
+                    ? task.message
+                    : undefined
+                }
+              >
                 <TaskDetailBody task={detail.task} onOpen={onOpen} />
-                {detail.task.canLink && task && (
-                  <HandoffControls
-                    referenced={task.taskId}
-                    canonical={detail.task.id}
-                    message={
-                      task.message?.taskIds.includes(task.taskId)
-                        ? task.message
-                        : undefined
-                    }
-                  />
-                )}
-              </>
+              </HandoffControls>
             )}
             {detail?.file && task && (
               <FileDetailBody

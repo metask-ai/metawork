@@ -310,6 +310,11 @@ export const enUS = {
   "handoff.new": "Start a work session",
   "handoff.link": "Link session",
   "handoff.pick": "Choose an existing session",
+  "handoff.other": "Other options",
+  "handoff.search": "Search sessions or directories",
+  "handoff.confirm_open": "Confirm link and open",
+  "handoff.no_matches": "No matching sessions",
+  "handoff.no_candidates": "No work sessions available to link",
   "handoff.change_failed":
     "Could not confirm the change. Reopen details to check.",
   "handoff.workdir": "Choose a working directory to send.",

@@ -450,6 +450,151 @@
   border-top: 0;
 }
 
+.inbox-detail-dialog:has(.inbox-task-reading) {
+  overflow: hidden;
+}
+
+.inbox-detail-dialog:has(.inbox-task-reading) .inbox-detail-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 12px;
+}
+
+.inbox-task-reading:not([hidden]) {
+  display: grid;
+  gap: 16px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.handoff-toolbar,
+.handoff-picker-footer {
+  display: flex;
+  flex: none;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--ui-border);
+  padding-top: 12px;
+}
+
+.handoff-primary {
+  max-width: 100%;
+  background: var(--ui-content-primary);
+  color: var(--ui-surface-panel);
+}
+.handoff-primary:hover {
+  background: color-mix(
+    in srgb,
+    var(--ui-content-primary) 85%,
+    var(--ui-surface-panel)
+  );
+}
+.handoff-primary:disabled,
+.handoff-primary[data-disabled] {
+  opacity: 0.45;
+}
+.handoff-toolbar .handoff-primary {
+  min-width: 0;
+  flex-shrink: 1;
+}
+.handoff-toolbar .handoff-primary span,
+.handoff-choice-text > *,
+.handoff-picker-footer small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.handoff-toolbar svg,
+.handoff-choice svg,
+.handoff-picker-heading svg {
+  width: 16px;
+  height: 16px;
+}
+.handoff-menu {
+  max-height: min(24rem, var(--available-height));
+  max-width: min(25rem, 85vw);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.handoff-picker {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 10px;
+}
+.handoff-picker-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-control);
+  font-weight: 600;
+}
+.handoff-picker-heading button {
+  width: 28px;
+  height: 28px;
+}
+.handoff-picker-heading small {
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  font-weight: 400;
+}
+.handoff-picker-list {
+  min-height: 0;
+  height: min(16rem, 36dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.handoff-picker-list > p {
+  text-align: center;
+  padding: 24px 8px;
+  color: var(--ui-content-muted);
+}
+.handoff-choice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.handoff-choice:hover,
+.handoff-choice:has(:checked) {
+  background: var(--ui-action-hover-surface);
+}
+.handoff-choice:has(:focus-visible) {
+  outline: 1px solid var(--ui-control-focus-border);
+  outline-offset: -1px;
+}
+.handoff-choice-text {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  font-size: var(--text-control);
+}
+.handoff-choice-text strong {
+  font-weight: 500;
+}
+.handoff-choice-text small,
+.handoff-picker-footer small {
+  font-size: var(--text-label);
+  color: var(--ui-content-muted);
+}
+.handoff-picker-footer small {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.handoff-picker [role="alert"] {
+  font-size: var(--text-control);
+  color: var(--ui-content-error);
+}
+
 .inbox-detail-section {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -707,13 +852,4 @@
 }
 .inbox-handoff-row {
   width: 100%;
-}
-.inbox-handoff select {
-  min-width: 0;
-  max-width: 100%;
-  color: var(--ui-content-primary);
-  background: var(--ui-surface-panel);
-  border: 1px solid var(--ui-border);
-  border-radius: 6px;
-  padding: 4px 6px;
 }

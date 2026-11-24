@@ -2,6 +2,8 @@ import {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -14,7 +16,10 @@ import type {
   WorkspaceView,
 } from "../../bridge/contracts.ts";
 import { Button } from "../../components/ui/button.tsx";
+import { Icon } from "../../components/ui/Icon.tsx";
+import { Menu } from "../../components/ui/menu.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import { HandoffSessionPicker } from "./HandoffSessionPicker.tsx";
 import { matchingDrafts, type HandoffDraft } from "./handoff-drafts.ts";
 
 type Actions = {
@@ -83,19 +88,53 @@ export function InboxHandoffProvider({
   );
 }
 
-export function HandoffControls({
-  referenced,
-  canonical,
-  message,
-}: {
+type ControlsProps = {
   referenced: string;
   canonical?: string;
   message?: InboxMessage;
-}) {
+  children?: ReactNode;
+};
+
+export function HandoffControls(props: ControlsProps) {
+  const api = useContext(Context);
+  return (
+    <HandoffView
+      key={JSON.stringify([
+        api?.binding,
+        api?.account,
+        props.referenced,
+        props.canonical,
+      ])}
+      {...props}
+    />
+  );
+}
+
+function HandoffView({
+  referenced,
+  canonical,
+  message,
+  children,
+}: ControlsProps) {
   const api = useContext(Context);
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
-  const [target, setTarget] = useState("");
+  const [picking, setPicking] = useState(false);
+  const moreTrigger = useRef<HTMLButtonElement>(null);
+  const focusOnReturn = useRef(false);
+  const mounted = useRef(false);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  useLayoutEffect(() => {
+    if (!picking && focusOnReturn.current && moreTrigger.current) {
+      focusOnReturn.current = false;
+      moreTrigger.current.focus();
+    }
+  });
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const list = api?.lists[referenced];
@@ -106,16 +145,29 @@ export function HandoffControls({
     if (onVerify && account && binding && canonical && list)
       onVerify({ binding, account, referenced, canonical }, list.storeId);
   }, [onVerify, account, binding, referenced, canonical, list]);
-  if (!api) return null;
+  const reading = children && (
+    <div className="inbox-task-reading" hidden={picking}>
+      {children}
+    </div>
+  );
+  if (!api || (children && !canonical)) return reading;
   if (!list || !api.account)
     return canonical ? (
-      <p role="status">
-        {t(
-          list === null || !api.account
-            ? "handoff.unavailable"
-            : "handoff.loading",
+      <>
+        {reading}
+        <p role="status">
+          {t(
+            list === null || !api.account
+              ? "handoff.unavailable"
+              : "handoff.loading",
+          )}
+        </p>
+        {picking && (
+          <Button size="sm" variant="ghost" onClick={() => setPicking(false)}>
+            {t("inbox.detail_back")}
+          </Button>
         )}
-      </p>
+      </>
     ) : null;
   const source = {
     binding: api.binding,
@@ -152,31 +204,21 @@ export function HandoffControls({
   const primary =
     active.find((s) => s.preferred) ??
     (sessions.length === 1 ? sessions[0] : undefined);
-  const eligible = api.tasks.filter(
-    (task) =>
-      !task.archived &&
-      !task.historyReadOnly &&
-      task.lifecycle === "open" &&
-      task.deletionStatus === "idle" &&
-      !sessions.some((s) => s.task.id === task.id),
-  );
   async function mutate(action: "link" | "prefer" | "unlink", id: string) {
     if (!api || !list || !canonical || busy) return;
     setBusy(true);
     setFailed(false);
     try {
       await api.client.changeHandoff(source, list.storeId, action, id);
-      setTarget("");
       api.refresh();
+      if (action === "link" && mounted.current) api.onOpen(id);
     } catch {
       setFailed(true);
-      api.refresh();
     } finally {
       setBusy(false);
     }
   }
   if (!canonical && !sessions.length && !drafts.length) return null;
-  const showSessions = canonical || expanded;
   function label(s: (typeof sessions)[number]) {
     return (
       t(
@@ -190,9 +232,169 @@ export function HandoffControls({
       s.task.title
     );
   }
+  if (canonical) {
+    if (picking) {
+      const linked = new Set(
+        Object.values(api.lists).flatMap(
+          (entry) => entry?.sessions.map((s) => s.taskId) ?? [],
+        ),
+      );
+      const eligible = api.tasks.filter(
+        (task) =>
+          !task.archived &&
+          !task.historyReadOnly &&
+          task.lifecycle === "open" &&
+          task.deletionStatus === "idle" &&
+          !linked.has(task.id),
+      );
+      return (
+        <>
+          {reading}
+          <HandoffSessionPicker
+            taskNumber={canonical}
+            tasks={eligible}
+            workspaces={api.workspaces}
+            busy={busy}
+            failed={failed}
+            onBack={() => {
+              focusOnReturn.current = true;
+              setPicking(false);
+              if (failed) api.refresh();
+              setFailed(false);
+            }}
+            onConfirm={(id) => void mutate("link", id)}
+          />
+        </>
+      );
+    }
+    const openPicker = () => {
+      setFailed(false);
+      setPicking(true);
+    };
+    const create = () => api.onCreate(source, list.storeId, message);
+    const current =
+      active.find((s) => s.preferred) ??
+      (active.length === 1 ? active[0] : undefined);
+    const choose =
+      !current &&
+      (drafts.length > 1 || (!drafts.length && sessions.length > 1));
+    const resume = !current && drafts.length === 1 ? drafts[0] : undefined;
+    const history =
+      !current && !drafts.length && sessions.length === 1
+        ? sessions[0]
+        : undefined;
+    const destination = current ?? history;
+    const newIsPrimary = !destination && !drafts.length && !sessions.length;
+    return (
+      <>
+        {reading}
+        <div className="handoff-toolbar">
+          {!choose && (
+            <Button
+              className="handoff-primary"
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                if (destination) api.onOpen(destination.task.id);
+                else if (resume) api.onResume(resume);
+                else create();
+              }}
+            >
+              <span>
+                {destination
+                  ? label(destination)
+                  : t(resume ? "handoff.resume" : "handoff.new")}
+              </span>
+            </Button>
+          )}
+          <Menu.Root>
+            <Menu.Trigger
+              ref={moreTrigger}
+              disabled={busy}
+              render={
+                <Button
+                  size="sm"
+                  className={choose ? "handoff-primary" : undefined}
+                  variant={choose ? "primary" : "ghost"}
+                />
+              }
+            >
+              {t(choose ? "handoff.choose" : "handoff.other")}
+              <Icon name="chevron" />
+            </Menu.Trigger>
+            <Menu.Portal>
+              <Menu.Positioner align="end">
+                <Menu.Popup className="handoff-menu">
+                  <Menu.Item onClick={openPicker}>
+                    {t("handoff.link")}…
+                  </Menu.Item>
+                  {!newIsPrimary && (
+                    <Menu.Item onClick={create}>
+                      {t("handoff.another")}
+                    </Menu.Item>
+                  )}
+                  {drafts
+                    .filter((d) => d !== resume)
+                    .map((draft) => (
+                      <Menu.Item
+                        key={draft.operationId}
+                        onClick={() => api.onResume(draft)}
+                      >
+                        {t("handoff.resume")}
+                        {drafts.length > 1 && " " + (drafts.indexOf(draft) + 1)}
+                      </Menu.Item>
+                    ))}
+                  {sessions.map((s) => (
+                    <Menu.Group key={s.task.id}>
+                      <Menu.Separator />
+                      <Menu.GroupLabel>
+                        {s.task.title}
+                        {s.preferred &&
+                          sessions.length > 1 &&
+                          " · " + t("handoff.default")}
+                      </Menu.GroupLabel>
+                      {s !== destination && (
+                        <Menu.Item onClick={() => api.onOpen(s.task.id)}>
+                          {label(s)}
+                        </Menu.Item>
+                      )}
+                      {message &&
+                        !s.task.archived &&
+                        !s.task.historyReadOnly && (
+                          <Menu.Item
+                            onClick={() =>
+                              api.onOpen(s.task.id, { message, id: canonical })
+                            }
+                          >
+                            {t("handoff.quote")}
+                          </Menu.Item>
+                        )}
+                      {!s.preferred && !s.task.archived && (
+                        <Menu.Item
+                          onClick={() => void mutate("prefer", s.task.id)}
+                        >
+                          {t("handoff.prefer")}
+                        </Menu.Item>
+                      )}
+                      <Menu.Item
+                        onClick={() => void mutate("unlink", s.task.id)}
+                      >
+                        {t("handoff.unlink")}
+                      </Menu.Item>
+                    </Menu.Group>
+                  ))}
+                </Menu.Popup>
+              </Menu.Positioner>
+            </Menu.Portal>
+          </Menu.Root>
+        </div>
+        {failed && <p role="alert">{t("handoff.change_failed")}</p>}
+      </>
+    );
+  }
   return (
     <div className="inbox-handoff">
-      {!canonical && (sessions.length > 1 || drafts.length > 1) && (
+      {(sessions.length > 1 || drafts.length > 1) && (
         <Button
           size="sm"
           variant="ghost"
@@ -202,7 +404,7 @@ export function HandoffControls({
           {t("handoff.choose")} ({sessions.length + drafts.length})
         </Button>
       )}
-      {!showSessions && primary && (
+      {!expanded && primary && (
         <Button
           size="sm"
           variant="ghost"
@@ -211,7 +413,7 @@ export function HandoffControls({
           {label(primary)}
         </Button>
       )}
-      {showSessions &&
+      {expanded &&
         sessions.map((s) => (
           <div className="inbox-handoff-row" key={s.task.id}>
             <Button
@@ -225,42 +427,9 @@ export function HandoffControls({
                 ? " · " + t("handoff.default")
                 : ""}
             </Button>
-            {canonical && (
-              <>
-                {message && !s.task.archived && !s.task.historyReadOnly && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() =>
-                      api.onOpen(s.task.id, { message, id: source.canonical })
-                    }
-                  >
-                    {t("handoff.quote")}
-                  </Button>
-                )}
-                {!s.preferred && !s.task.archived && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() => void mutate("prefer", s.task.id)}
-                  >
-                    {t("handoff.prefer")}
-                  </Button>
-                )}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={busy}
-                  onClick={() => void mutate("unlink", s.task.id)}
-                >
-                  {t("handoff.unlink")}
-                </Button>
-              </>
-            )}
           </div>
         ))}
-      {(showSessions || drafts.length === 1) &&
+      {(expanded || drafts.length === 1) &&
         drafts.map((draft, i) => (
           <Button
             size="sm"
@@ -272,47 +441,6 @@ export function HandoffControls({
             {drafts.length > 1 ? " " + (i + 1) : ""}
           </Button>
         ))}
-      {canonical && (
-        <>
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={busy}
-            onClick={() => api.onCreate(source, list.storeId, message)}
-          >
-            {t(drafts.length ? "handoff.another" : "handoff.new")}
-          </Button>
-          {eligible.length > 0 && (
-            <div className="inbox-handoff-row">
-              <select
-                aria-label={t("handoff.link")}
-                value={target}
-                onChange={(e) => setTarget(e.target.value)}
-              >
-                <option value="">{t("handoff.pick")}</option>
-                {eligible.map((task) => (
-                  <option key={task.id} value={task.id}>
-                    {task.title} ·{" "}
-                    {
-                      api.workspaces.find((w) => w.id === task.workspaceId)
-                        ?.canonicalRoot
-                    }
-                  </option>
-                ))}
-              </select>
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={busy || !target}
-                onClick={() => void mutate("link", target)}
-              >
-                {t("handoff.link")}
-              </Button>
-            </div>
-          )}
-        </>
-      )}
-      {failed && <p role="alert">{t("handoff.change_failed")}</p>}
     </div>
   );
 }
