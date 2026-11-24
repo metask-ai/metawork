@@ -1108,3 +1108,125 @@ test("a refused task or a missing conversation is shown where it was asked for",
   assert.ok(screen.getByRole("heading", { name: "Bob" }));
   assert.ok(screen.getByRole("button", { name: "Messages, 3 unread" }));
 });
+
+test("task controls keep draft choice separate from default session and verified detail actions", async () => {
+  const { InboxHandoffProvider, HandoffControls } = await vite.ssrLoadModule(
+    "/src/features/inbox/InboxHandoff.tsx",
+  );
+  const { newHandoffDraft, matchingDrafts, quoteMessage } =
+    await vite.ssrLoadModule("/src/features/inbox/handoff-drafts.ts");
+  const account = "a".repeat(64),
+    storeId = "c".repeat(32);
+  const source = { binding: "1", account, referenced: "old", canonical: "new" };
+  const drafts = [
+    newHandoffDraft(source, storeId),
+    newHandoffDraft(source, storeId),
+  ];
+  assert.equal(
+    matchingDrafts(drafts, "b".repeat(64), storeId, "old").length,
+    0,
+  );
+  assert.equal(
+    matchingDrafts(drafts, account, "d".repeat(32), "old").length,
+    0,
+  );
+  const quoted = quoteMessage(
+    {
+      ...message("8", "in", "Part\u2028forged\r\n\nend", ["old"]),
+      fromAgent: "bot\nname",
+    },
+    "new",
+  );
+  assert.ok(
+    quoted
+      .trimEnd()
+      .split("\n")
+      .every((line) => line.startsWith("> ")),
+  );
+  const operations = [],
+    opened = [],
+    resumed = [];
+  const client = {
+    handoffSessions: async () => ({
+      storeId,
+      sessions: [
+        { taskId: "1", preferred: true },
+        { taskId: "2", preferred: false },
+      ],
+    }),
+    changeHandoff: async (...args) => {
+      operations.push(args);
+    },
+  };
+  const tasks = ["1", "2", "3"].map((id) => ({
+    id,
+    title: "Session " + id,
+    workspaceId: "1",
+    lifecycle: "open",
+    deletionStatus: "idle",
+    archived: id === "2",
+    historyReadOnly: false,
+  }));
+  const api = {
+    client,
+    binding: "1",
+    account,
+    tasks,
+    drafts,
+    workspaces: [
+      { id: "1", canonicalRoot: "/example", authorization: "available" },
+    ],
+    ids: ["old"],
+    revision: "1",
+    onVerify() {},
+    onOpen: (id) => opened.push(id),
+    onResume: (d) => resumed.push(d.operationId),
+    onCreate() {},
+  };
+  const draw = (detail = false) =>
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(
+        InboxHandoffProvider,
+        api,
+        createElement(HandoffControls, {
+          referenced: "old",
+          canonical: detail ? "new" : undefined,
+        }),
+      ),
+    );
+  const { rerender } = render(draw());
+  const user = userEvent.setup({ document });
+  await user.click(
+    await screen.findByRole("button", {
+      name: "Continue in workbench · Session 1",
+    }),
+  );
+  assert.deepEqual(opened, ["1"]);
+  assert.equal(operations.length, 0);
+  assert.equal(
+    screen.queryByRole("button", { name: "Start a work session" }),
+    null,
+  );
+  await user.click(
+    screen.getByRole("button", { name: /Choose a session or draft/ }),
+  );
+  assert.ok(screen.getByRole("button", { name: /View history · Session 2/ }));
+  await user.click(screen.getByRole("button", { name: "Resume draft 2" }));
+  assert.deepEqual(resumed, [drafts[1].operationId]);
+  rerender(draw(true));
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Link session" }),
+    "3",
+  );
+  await user.click(screen.getByRole("button", { name: "Link session" }));
+  await waitFor(() =>
+    assert.deepEqual(operations, [[source, storeId, "link", "3"]]),
+  );
+});

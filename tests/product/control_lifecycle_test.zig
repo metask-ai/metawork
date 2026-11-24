@@ -6406,6 +6406,33 @@ test "handoff uses the persisted create receipt and only confirmed task headers 
         if (record.id == id) try std.testing.expect(record.handoff.?.preferred and record.handoff.?.contains("101") and record.handoff.?.contains("109"));
     }
     try std.testing.expectError(error.TaskPersistenceUnavailable, control.lookupHandoffReceipt(binding, source.account, "another-store", "create-1"));
+
+    // Link the released session to a separate task, then observe a redirect
+    // joining two previously independent defaults.
+    source.referenced = "207";
+    source.canonical = "207";
+    const port = control.inboxManagement();
+    try std.testing.expect(port.record_detail_fn(port.context, binding, try .init("207"), try .init("207")));
+    try control.changeHandoff(source, .link, prior);
+    try std.testing.expect(port.record_detail_fn(port.context, binding, try .init("207"), try .init("109")));
+    const merged = try control.listHandoff(a, binding, source.account, "207");
+    defer a.free(merged);
+    try std.testing.expectEqual(@as(usize, 2), merged.len);
+    for (merged) |session| try std.testing.expect(!session.preferred);
+    source.canonical = "109";
+    persistence.result = .failed;
+    try std.testing.expectError(error.TaskPersistenceFailed, control.changeHandoff(source, .prefer, id));
+    try std.testing.expect(!control.testTask(id).?.durable.handoff.?.preferred);
+    persistence.result = .committed;
+    try control.changeHandoff(source, .prefer, id);
+
+    const previous_account = control.inbox.account_scope.?;
+    _ = try control.inbox.setOwner(binding, try .init("another-member"));
+    try std.testing.expectError(error.HandoffConflict, control.listHandoff(a, binding, &previous_account, "109"));
+    const other = try control.listHandoff(a, binding, &control.inbox.account_scope.?, "109");
+    defer a.free(other);
+    try std.testing.expectEqual(@as(usize, 0), other.len);
+    try std.testing.expect(try control.lookupHandoffReceipt(binding, &control.inbox.account_scope.?, &instance, "create-1") == null);
 }
 
 test "Manual Task persistence failure keeps Product Task usable in memory" {

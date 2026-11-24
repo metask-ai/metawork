@@ -114,6 +114,7 @@ test "handoff headers migrate without inventing links and persist with the local
     const a = arena.allocator();
     const path = try temporaryPath(a, temp.dir);
     const state = try history.fixture(a);
+    var first_store: [32]u8 = undefined;
     {
         const old = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..14]);
         defer old.destroy() catch unreachable;
@@ -125,6 +126,7 @@ test "handoff headers migrate without inventing links and persist with the local
         try expectSame(a, current.capability(), state);
         var repo = schema.repository.Repository.init(std.testing.allocator, current.capability(), history.limits);
         defer repo.deinit();
+        first_store = repo.instance() orelse return error.MissingStoreIdentity;
         try repo.seed(state, .{});
         state.tasks[0].handoff = .{ .account = "a" ** 64, .ids = &.{ "new", "old" }, .preferred = true };
         state.tasks[0].creation_receipt = @splat(17);
@@ -136,6 +138,15 @@ test "handoff headers migrate without inventing links and persist with the local
     const reopened = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
     defer reopened.destroy() catch unreachable;
     try expectSame(a, reopened.capability(), state);
+    var repo = schema.repository.Repository.init(a, reopened.capability(), history.limits);
+    defer repo.deinit();
+    try std.testing.expectEqual(first_store, repo.instance().?);
+
+    const second = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = try std.mem.concat(a, u8, &.{ path, ".rebuilt" }) }, schema.migrations);
+    defer second.destroy() catch unreachable;
+    var fresh = schema.repository.Repository.init(a, second.capability(), history.limits);
+    defer fresh.deinit();
+    try std.testing.expect(!std.mem.eql(u8, &first_store, &fresh.instance().?));
 }
 
 fn modelErrorFixture() history.wire.ModelErrorWire {

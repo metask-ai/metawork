@@ -3162,7 +3162,7 @@ test("opening a project preserves the unscoped draft when the project draft alre
   assert.equal(fixture.textarea.value, "Keep the unscoped draft");
 });
 
-for (const path of ["fresh", "lost"]) {
+for (const path of ["fresh", "lost", "not-created"]) {
   test(
     "Inbox handoff takes the verified task into the workbench: " + path,
     async (ctx) => {
@@ -3225,7 +3225,7 @@ for (const path of ["fresh", "lost"]) {
         handoffSessions: async () => ({ storeId, sessions: [] }),
         reconcileHandoff: async (draft) => {
           calls.push(draft);
-          return fixture.task.id;
+          return path === "not-created" ? null : fixture.task.id;
         },
       }))
         ctx.mock.method(BridgeClient.prototype, name, fn);
@@ -3291,11 +3291,28 @@ for (const path of ["fresh", "lost"]) {
         });
         assert.equal(fixture.inputs.length, 0);
         assert.equal(area.disabled || area.readOnly, true);
-        fixture.snapshot.tasks = [fixture.task];
+        if (path === "lost") fixture.snapshot.tasks = [fixture.task];
         await user.click(check);
         await waitFor(() => assert.equal(calls.length, 1));
         await fixture.publish();
         assert.equal(calls[0].operationId, creation.operationId);
+        if (path === "not-created") {
+          assert.equal(fixture.creations(), 1);
+          assert.equal(fixture.inputs.length, 0);
+          await waitFor(() =>
+            assert.equal(area.disabled || area.readOnly, false),
+          );
+          fireEvent.keyDown(area, { key: "Enter", code: "Enter" });
+          await waitFor(() => assert.equal(fixture.creations(), 2));
+          assert.equal(
+            fixture.createRequests[1][6].operationId,
+            creation.operationId,
+          );
+          await fixture.created(fixture.task, 1);
+          await waitFor(() => assert.equal(fixture.inputs.length, 1));
+          await fixture.settle();
+          return;
+        }
         assert.equal(fixture.creations(), 1);
         assert.equal(fixture.inputs.length, 0);
         await waitFor(() =>
