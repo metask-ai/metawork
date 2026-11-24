@@ -718,9 +718,22 @@ test("a linked file, project or task shows its own details, opens nested items a
   });
   render(element(client, view()));
   await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
-  await waitFor(() => assert.ok(screen.getByText("See these")));
+  const body = await screen.findByText("See these");
+  const card = body.closest(".inbox-bubble");
+  const projectLink = screen.getByRole("button", { name: /#740/ });
+  assert.ok(card?.contains(projectLink));
+  const taskLink = screen.getByRole("button", { name: /#9749/ });
+  assert.ok(card.contains(taskLink));
+  await user.click(body);
+  assert.equal(
+    client.calls.some(([kind]) => kind === "task"),
+    false,
+  );
 
-  await user.click(screen.getByRole("button", { name: /#740/ }));
+  taskLink.focus();
+  await user.tab({ shift: true });
+  assert.equal(document.activeElement, projectLink);
+  await user.keyboard("{Enter}");
   await waitFor(() => assert.ok(screen.getByText("Desktop app")));
   assert.ok(screen.getByText("API · 1"));
   await user.click(screen.getByRole("button", { name: /metawork-api\.md/ }));

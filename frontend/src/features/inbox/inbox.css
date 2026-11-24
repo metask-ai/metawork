@@ -116,8 +116,7 @@
   background: var(--ui-surface-panel);
 }
 
-.inbox-row-copy,
-.inbox-task-caption {
+.inbox-row-copy {
   display: grid;
   min-width: 0;
   gap: 3px;
@@ -129,8 +128,7 @@
   white-space: nowrap;
 }
 
-.inbox-row-copy strong,
-.inbox-task-caption strong {
+.inbox-row-copy strong {
   font-size: var(--text-body);
   font-weight: 600;
 }
@@ -148,7 +146,6 @@
 .inbox-row-copy > span,
 .inbox-row-meta,
 .inbox-message-meta,
-.inbox-task-caption > span,
 .inbox-transcript-date {
   color: var(--ui-content-muted);
   font-size: var(--text-label);
@@ -259,8 +256,8 @@
   align-self: flex-start;
 }
 
-.inbox-message[data-linked-task="true"] {
-  width: 376px;
+.inbox-message[data-linked="true"] {
+  width: 440px;
 }
 
 .inbox-message[data-direction="outgoing"] {
@@ -312,25 +309,51 @@
   overflow-wrap: anywhere;
 }
 
-.inbox-task-card {
-  display: grid;
+.inbox-message[data-linked="true"] .inbox-bubble {
   width: 100%;
-  min-height: 64px;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  padding: 0;
+}
+
+.inbox-message[data-linked="true"] .inbox-bubble > p {
+  padding: 12px 16px;
+  user-select: text;
+}
+
+.inbox-linked-item {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
   align-items: center;
-  gap: 10px;
-  margin-top: 8px;
-  padding: 9px 10px;
-  border: 1px solid var(--ui-border);
-  border-radius: 12px;
-  background: var(--ui-surface-panel);
-  overflow-wrap: anywhere;
+  gap: 8px;
+  padding: 8px 16px;
+  background: var(--ui-surface-panel-2);
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
   text-align: start;
 }
 
-.inbox-task-card:hover {
-  border-color: var(--ui-control-focus-border);
+.inbox-linked-item:not(:first-child) {
+  border-top: 1px solid var(--ui-border);
+}
+
+.inbox-linked-item strong {
+  flex: 1;
+  min-width: 0;
+  color: var(--ui-content-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.inbox-linked-item:hover,
+.inbox-linked-item:active {
   background: var(--ui-action-hover-surface);
+}
+
+.inbox-linked-item:focus-visible {
+  outline: 2px solid var(--ui-control-focus-border);
+  outline-offset: -2px;
 }
 
 .inbox-task-icon {
@@ -338,13 +361,6 @@
   height: 36px;
   border-radius: 8px;
   font-size: 16px;
-}
-
-.inbox-task-end {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--ui-content-muted);
 }
 
 .inbox-task-dialog-header {

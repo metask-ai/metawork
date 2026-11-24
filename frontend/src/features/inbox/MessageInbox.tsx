@@ -1000,26 +1000,19 @@ function InboxNotice({
   );
 }
 
-function LinkedTask({
-  taskId,
-  onOpen,
-}: {
-  taskId: string;
-  onOpen: () => void;
-}) {
+function LinkedItem({ id, onOpen }: { id: string; onOpen: () => void }) {
   const { t } = useI18n();
   return (
-    <button type="button" className="inbox-task-card" onClick={onOpen}>
-      <span className="inbox-task-icon">
-        <Icon name="new-task" />
-      </span>
-      <span className="inbox-task-caption">
-        <span>{t("inbox.linked_item")}</span>
-        <strong>{t("inbox.item_number", { id: taskId })}</strong>
-      </span>
-      <span className="inbox-task-end">
-        <Icon name="chevron-right" />
-      </span>
+    <button
+      type="button"
+      className="inbox-linked-item"
+      aria-haspopup="dialog"
+      onClick={onOpen}
+    >
+      <Icon name="paperclip" />
+      <span>{t("inbox.linked_item")}</span>
+      <strong>{t("inbox.item_number", { id })}</strong>
+      <Icon name="chevron-right" />
     </button>
   );
 }
@@ -1729,7 +1722,7 @@ function InboxConversationView({
                 <div
                   className="inbox-message"
                   data-direction={outgoing ? "outgoing" : "incoming"}
-                  data-linked-task={message.taskIds.length > 0}
+                  data-linked={message.taskIds.length > 0}
                 >
                   <div className="inbox-message-meta">
                     <span>
@@ -1752,7 +1745,14 @@ function InboxConversationView({
                     )}
                   </div>
                   <div className="inbox-bubble">
-                    <p>{message.text}</p>
+                    {message.text && <p>{message.text}</p>}
+                    {message.taskIds.map((id) => (
+                      <LinkedItem
+                        key={id}
+                        id={id}
+                        onOpen={() => onOpenTask(id)}
+                      />
+                    ))}
                   </div>
                   <ReadReceipts recipients={receipts} />
                   {message.truncated && (
@@ -1760,13 +1760,6 @@ function InboxConversationView({
                       {t("inbox.message_truncated")}
                     </p>
                   )}
-                  {message.taskIds.map((taskId) => (
-                    <LinkedTask
-                      key={taskId}
-                      taskId={taskId}
-                      onOpen={() => onOpenTask(taskId)}
-                    />
-                  ))}
                 </div>
               </li>
             );
