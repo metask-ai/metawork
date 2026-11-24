@@ -119,7 +119,10 @@ pub fn selectDeviceEndpoint(
         var key_buffer: [4096]u8 = undefined;
         defer std.crypto.secureZero(u8, &key_buffer);
         const match = inbox.matchDeviceEndpoint(url, &key_buffer) orelse continue;
-        return foundCopy(allocator, server.id, mcp_configuration.connectionFingerprint(server), match.base, match.key) catch .unavailable;
+        var digest = std.crypto.hash.sha2.Sha256.init(.{});
+        digest.update(&mcp_configuration.connectionFingerprint(server));
+        digest.update(match.key);
+        return foundCopy(allocator, server.id, std.fmt.bytesToHex(digest.finalResult(), .lower), match.base, match.key) catch .unavailable;
     }
     return .none;
 }
@@ -398,7 +401,14 @@ const Job = struct {
             std.log.warn("inbox request consumer=inbox request={s} status={d}", .{ @tagName(request), response.status });
             return null;
         }
-        return buffer[0..response.body_len];
+        const body = buffer[0..response.body_len];
+        if (request == .unread or request == .messages or request == .people) {
+            if (responseContainsKey(self.allocator, body, self.key)) {
+                self.unusable(std.meta.activeTag(request), body.len);
+                return null;
+            }
+        }
+        return body;
     }
 
     /// An answered request whose body this client cannot use.
@@ -426,6 +436,23 @@ const Job = struct {
         self.allocator.destroy(self);
     }
 };
+
+/// Decode escaped JSON strings as well as scanning the ordinary spelling.
+fn responseContainsKey(a: std.mem.Allocator, body: []const u8, key: []const u8) bool {
+    if (std.mem.indexOf(u8, body, key) != null) return true;
+    if (std.mem.indexOfScalar(u8, body, '\\') == null) return false;
+    var scanner = std.json.Scanner.initCompleteInput(a, body);
+    defer scanner.deinit();
+    while (true) switch (scanner.nextAllocMax(a, .alloc_if_needed, body.len) catch return true) {
+        .allocated_string => |value| {
+            defer a.free(value);
+            if (std.mem.indexOf(u8, value, key) != null) return true;
+        },
+        .allocated_number => |value| a.free(value),
+        .end_of_document => return false,
+        else => {},
+    };
+}
 
 pub const Coordinator = struct {
     allocator: std.mem.Allocator,
@@ -696,6 +723,12 @@ pub const Coordinator = struct {
         if (!self.management.accepts_fn(self.management.context, request.binding)) {
             respondSendState(target, .stale_binding);
             return true;
+        }
+        if (picked) |username| {
+            if (std.mem.indexOf(u8, username.slice(), self.bound.?.key) != null) {
+                respondSendState(target, .unknown_peer);
+                return true;
+            }
         }
         const address: inbox.Address = if (picked) |username| .{ .member = username } else self.management.peer_address_fn(self.management.context, request.binding, request.to.peer) orelse {
             respondSendState(target, .unknown_peer);
@@ -1876,6 +1909,15 @@ test "inbox coordinator: list pages shrink until they fit, and conversations and
     try testing.expect(fixture.transport.keys_ok);
 }
 
+test "inbox response protection recognizes a JSON-escaped device key" {
+    try testing.expect(responseContainsKey(testing.allocator,
+        \\{"text":"fi\u0078ture"}
+    , "fixture"));
+    try testing.expect(!responseContainsKey(testing.allocator,
+        \\{"text":"ordinary\nmessage"}
+    , "fixture"));
+}
+
 test "inbox coordinator: the newest matching MCP connection is MetaTeam; others are not" {
     const auth: mcp_configuration.AuthWire = .{ .kind = "none", .oauth = null };
     const servers = [_]mcp_configuration.ServerWire{
@@ -2556,7 +2598,10 @@ test "inbox coordinator: the MCP source resolves a sensitive MetaTeam endpoint t
             try testing.expectEqualStrings("server-1", found.server_id);
             try testing.expectEqualStrings("http://192.0.2.10:8080/team", found.base);
             try testing.expectEqualStrings(sentinel_key, found.key);
-            try testing.expectEqualSlices(u8, &fingerprint, &found.fingerprint);
+            var expected = std.crypto.hash.sha2.Sha256.init(.{});
+            expected.update(&fingerprint);
+            expected.update(sentinel_key);
+            try testing.expectEqualSlices(u8, &std.fmt.bytesToHex(expected.finalResult(), .lower), &found.fingerprint);
         },
         else => return error.TestUnexpectedResult,
     }
