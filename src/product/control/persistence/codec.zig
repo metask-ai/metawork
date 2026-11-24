@@ -25,6 +25,7 @@ pub const Row = struct {
     table: []const u8,
     columns: []const []const u8,
     primary: []const usize,
+    primary_names: []const []const u8,
     values: []const sql.Value,
     key: []const u8,
     digest: RowDigest,
@@ -70,29 +71,30 @@ fn identityValue(allocator: std.mem.Allocator, bytes: *std.ArrayList(u8), value:
     }
 }
 
+/// Every row of a table has the same columns, so rows borrow them.
+fn RowShape(comptime table: []const u8, comptime Values: type) type {
+    return struct {
+        const columns = blk: {
+            var names: [std.meta.fields(Values).len][]const u8 = undefined;
+            for (&names, std.meta.fields(Values)) |*name, field| name.* = field.name;
+            break :blk names;
+        };
+        const primary = blk: {
+            var positions: [primaryNames(table).len]usize = undefined;
+            for (&positions, primaryNames(table)) |*position, name| position.* = std.meta.fieldIndex(Values, name) orelse @compileError(table ++ " row omits primary key " ++ name);
+            break :blk positions;
+        };
+    };
+}
+
 fn rowFor(allocator: std.mem.Allocator, digest_key: *const DigestKey, comptime table: []const u8, values: anytype) !Row {
-    const fields = std.meta.fields(@TypeOf(values));
-    const names = try allocator.alloc([]const u8, fields.len);
-    const params = try allocator.alloc(sql.Value, fields.len);
-    inline for (fields, 0..) |field, i| {
-        names[i] = field.name;
-        params[i] = @field(values, field.name);
-    }
-    const primary = try allocator.alloc(usize, primaryNames(table).len);
-    inline for (comptime primaryNames(table), 0..) |name, i| {
-        var found = false;
-        inline for (fields, 0..) |field, j| {
-            if (comptime std.mem.eql(u8, name, field.name)) {
-                primary[i] = j;
-                found = true;
-            }
-        }
-        if (!found) return error.Invalid;
-    }
+    const shape = RowShape(table, @TypeOf(values));
+    const params = try allocator.alloc(sql.Value, shape.columns.len);
+    inline for (shape.columns, 0..) |name, i| params[i] = @field(values, name);
     var key: std.ArrayList(u8) = .empty;
     try key.appendSlice(allocator, table);
     try key.append(allocator, 0);
-    for (primary) |index| try identityValue(allocator, &key, params[index]);
+    for (shape.primary) |index| try identityValue(allocator, &key, params[index]);
     var hash = RowHash.init(digest_key);
     hash.update(key.items);
     for (params) |value| {
@@ -118,7 +120,7 @@ fn rowFor(allocator: std.mem.Allocator, digest_key: *const DigestKey, comptime t
             },
         }
     }
-    return .{ .table = table, .columns = names, .primary = primary, .values = params, .key = try key.toOwnedSlice(allocator), .digest = hash.finalResult() };
+    return .{ .table = table, .columns = &shape.columns, .primary = &shape.primary, .primary_names = comptime primaryNames(table), .values = params, .key = try key.toOwnedSlice(allocator), .digest = hash.finalResult() };
 }
 
 pub const Batch = struct {

@@ -35,13 +35,9 @@ const Index = struct {
         const a = self.arena.allocator();
         try self.entries.ensureTotalCapacity(a, @intCast(rows.len));
         for (rows) |row| {
-            const names = try a.alloc([]const u8, row.primary.len);
             const primary = try a.alloc(sql.Value, row.primary.len);
-            for (row.primary, 0..) |field, i| {
-                names[i] = row.columns[field];
-                primary[i] = try copyValue(a, row.values[field]);
-            }
-            self.entries.putAssumeCapacity(try a.dupe(u8, row.key), .{ .table = row.table, .names = names, .primary = primary, .digest = row.digest, .position = row.position() });
+            for (row.primary, primary) |field, *value| value.* = try copyValue(a, row.values[field]);
+            self.entries.putAssumeCapacity(try a.dupe(u8, row.key), .{ .table = row.table, .names = row.primary_names, .primary = primary, .digest = row.digest, .position = row.position() });
         }
         return self;
     }
