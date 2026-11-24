@@ -480,6 +480,9 @@ pub const FileSave = struct {
         complete_fn: *const fn (*anyopaque, u64, Result) void,
     };
     context: *anyopaque,
+    /// Whether a file of this name can be saved at all, asked before the user
+    /// is asked where to.
+    validate_path_fn: *const fn ([]const u8) error{InvalidOutputPath}!void,
     begin_fn: *const fn (*anyopaque, u64, u64, []const u8, *const Completion) anyerror!u64,
     cancel_fn: *const fn (*anyopaque, u64) void,
 };

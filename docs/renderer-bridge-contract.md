@@ -162,7 +162,9 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 | `open` | ✓ | ✓ | ✓ | 定位，Office 另核 OOXML | 再解析，按名字复核是同一文件，交给浏览器或默认应用 |
 | `check` | — | ✓ | — | 整文件摘要，与交付时比对 | 再解析 |
 
-表中没有的组合是格式错误，直接拒绝且不消耗 operationId。**定位**指逐段 no-follow 打开、确认是普通文件、再按名字重新打开确认是同一文件：不读内容，也没有大小上限。
+表中没有的组合是格式错误，直接拒绝且不消耗 operationId。**定位**指逐段 no-follow 打开、确认是普通文件、再按名字重新打开确认是同一文件：不读内容，也没有大小上限。`save` 只复制 256 MiB 以内的文件，超出为 `too_large`。
+
+文件操作接受预览接受的路径，只拒绝本平台不能有的名字：Windows 不接受含 `<>"|?*`、以点或空格结尾、或是保留设备名的段，段长最多 255 个 UTF-16 单元；其他平台段长最多 255 字节。不满足时立即返回 `restricted`，`save` 不弹保存对话框；另存的目标文件名适用同一规则。成果登记的路径仍受回执规则约束，两个平台相同。
 
 `metawork.outputs.register` 是异步请求，精确输入 `{ generation, operationId, taskId, runId, changeId }`，与 `metawork.files.action` 共用 operationId 空间和在途名额。changeId 是所属 Run 的 File Change 身份，长度 1–128 bytes。Host 对可提交登记的记录追加 `outputRegistrationAdmitted: true`，其余记录省略该字段。登记成功只返回 `registered`，不运输成果字节或新的文件 authority；通过正常 Task 投影返回成果。
 

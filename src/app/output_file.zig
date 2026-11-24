@@ -24,8 +24,9 @@ test "Windows reveal path normalizes nested Workspace separators" {
 pub const max_file_bytes = 256 * 1024 * 1024;
 /// What a delivery receipt can carry.
 pub const max_path_bytes = 512;
-/// What a file action may name: the Workspace path limit the Bridge accepts.
+/// What a file action may name: the Workspace path limits the Bridge accepts.
 pub const max_target_path_bytes = 4096;
+const max_target_segments = 64;
 pub const Inspection = struct { size_bytes: u64, sha256: [32]u8 };
 
 pub const Request = struct {
@@ -382,33 +383,63 @@ fn officeContentType(bytes: []const u8, part: []const u8) ![]const u8 {
     return matching_override orelse matching_default orelse error.RestrictedOutput;
 }
 
+/// What a delivery receipt may name, the same wherever it was written: a
+/// Workspace on one platform may be read on the other.
 pub fn validatePath(path: []const u8) error{InvalidOutputPath}!void {
-    if (path.len > max_path_bytes) return error.InvalidOutputPath;
-    try validateTargetPath(path);
+    try validateSegments(path, max_path_bytes, 32);
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len > 255) return error.InvalidOutputPath;
+        try validateWindowsName(part);
+    }
 }
 
-/// The one rule for a Workspace-relative path that reaches a file effect.
-/// `validatePath` is the same rule within what a receipt can carry.
+/// What a file action may name on this platform: every path the Bridge and
+/// File Preview accept, except one the platform itself cannot hold.
 pub fn validateTargetPath(path: []const u8) error{InvalidOutputPath}!void {
-    if (path.len == 0 or path.len > max_target_path_bytes or !std.unicode.utf8ValidateSlice(path))
+    try validateTargetPathFor(if (builtin.os.tag == .windows) .windows else .posix, path);
+}
+
+const PathPlatform = enum { windows, posix };
+
+fn validateTargetPathFor(platform: PathPlatform, path: []const u8) error{InvalidOutputPath}!void {
+    try validateSegments(path, max_target_path_bytes, max_target_segments);
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| switch (platform) {
+        .posix => if (part.len > 255) return error.InvalidOutputPath,
+        .windows => {
+            const units = std.unicode.calcUtf16LeLen(part) catch return error.InvalidOutputPath;
+            if (units > 255) return error.InvalidOutputPath;
+            try validateWindowsName(part);
+        },
+    };
+}
+
+/// A relative path that stays below its root, on either platform.
+fn validateSegments(path: []const u8, max_bytes: usize, max_segments: usize) error{InvalidOutputPath}!void {
+    if (path.len == 0 or path.len > max_bytes or !std.unicode.utf8ValidateSlice(path))
         return error.InvalidOutputPath;
-    for (path) |byte| if (std.ascii.isControl(byte) or std.mem.indexOfScalar(u8, "\\:<>\"|?*", byte) != null)
+    for (path) |byte| if (std.ascii.isControl(byte) or byte == '\\' or byte == ':')
         return error.InvalidOutputPath;
     var parts = std.mem.splitScalar(u8, path, '/');
     var count: usize = 0;
     while (parts.next()) |part| {
         count += 1;
-        if (count > 32 or part.len == 0 or part.len > 255 or
-            std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..") or
-            part[part.len - 1] == '.' or part[part.len - 1] == ' ')
-            return error.InvalidOutputPath;
-        const base = part[0 .. std.mem.indexOfScalar(u8, part, '.') orelse part.len];
-        for ([_][]const u8{ "CON", "PRN", "AUX", "NUL" }) |device|
-            if (std.ascii.eqlIgnoreCase(base, device)) return error.InvalidOutputPath;
-        if (base.len == 4 and (std.ascii.eqlIgnoreCase(base[0..3], "COM") or
-            std.ascii.eqlIgnoreCase(base[0..3], "LPT")) and base[3] >= '1' and base[3] <= '9')
+        if (count > max_segments or part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, ".."))
             return error.InvalidOutputPath;
     }
+}
+
+/// Characters, endings and device names Win32 gives another meaning.
+fn validateWindowsName(name: []const u8) error{InvalidOutputPath}!void {
+    if (std.mem.indexOfAny(u8, name, "<>\"|?*") != null or name[name.len - 1] == '.' or name[name.len - 1] == ' ')
+        return error.InvalidOutputPath;
+    const base = name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len];
+    for ([_][]const u8{ "CON", "PRN", "AUX", "NUL" }) |device|
+        if (std.ascii.eqlIgnoreCase(base, device)) return error.InvalidOutputPath;
+    if (base.len == 4 and (std.ascii.eqlIgnoreCase(base[0..3], "COM") or
+        std.ascii.eqlIgnoreCase(base[0..3], "LPT")) and base[3] >= '1' and base[3] <= '9')
+        return error.InvalidOutputPath;
 }
 
 /// Borrowed request bytes and cancellation owner must live through this call.
@@ -455,7 +486,7 @@ pub const Save = struct {
         if (!std.fs.path.isAbsolute(destination) or destination.len > 4096 or
             !std.unicode.utf8ValidateSlice(destination)) return error.InvalidOutputDestination;
         for (destination) |byte| if (std.ascii.isControl(byte)) return error.InvalidOutputDestination;
-        try validatePath(std.fs.path.basename(destination));
+        try validateTargetPath(std.fs.path.basename(destination));
         const storage = try allocator.alloc(u8, request.workspace_root.len + request.relative_path.len + destination.len);
         const root = storage[0..request.workspace_root.len];
         const relative = storage[root.len..][0..request.relative_path.len];
@@ -727,19 +758,56 @@ test "output paths reject escape, alternate streams, devices and ambiguous alias
     try validatePath("some folder/results.csv");
 }
 
-test "a file action may name a longer path than a receipt can carry, under the same rule" {
+test "a file action may name what a receipt cannot, and refuses only what its platform does" {
     const part = "a" ** 200;
     const receipt = part ++ "/" ++ part ++ "/" ++ ("b" ** 110);
     comptime std.debug.assert(receipt.len == max_path_bytes);
     try validatePath(receipt);
     try std.testing.expectError(error.InvalidOutputPath, validatePath(receipt ++ "b"));
-    try validateTargetPath(receipt ++ "b");
+    try validatePath("d/" ** 31 ++ "a");
+    try std.testing.expectError(error.InvalidOutputPath, validatePath("d/" ** 32 ++ "a"));
     const longest = (part ++ "/") ** 20 ++ ("c" ** 76);
     comptime std.debug.assert(longest.len == max_target_path_bytes);
-    try validateTargetPath(longest);
-    try std.testing.expectError(error.InvalidOutputPath, validateTargetPath(longest ++ "c"));
-    for ([_][]const u8{ "", "/file", "../file", "a//file", "C:/file", "a\\file", "file:stream", "NUL.txt", "file.", "file ", "a/\x00b", "\xff" }) |value|
-        try std.testing.expectError(error.InvalidOutputPath, validateTargetPath(value));
+    for ([_]PathPlatform{ .windows, .posix }) |platform| {
+        for ([_][]const u8{ receipt ++ "b", longest, "d/" ** 63 ++ "a", "some folder/结果.csv", "a.b.c" }) |value|
+            try validateTargetPathFor(platform, value);
+        for ([_][]const u8{ "", longest ++ "c", "d/" ** 64 ++ "a", "/file", "../file", "a/../file", "a//file", "a/./file", "C:/file", "a\\file", "file:stream", "a/\x00b", "a\x7fb", "\xff" }) |value|
+            try std.testing.expectError(error.InvalidOutputPath, validateTargetPathFor(platform, value));
+    }
+    // A name is as long as its file system counts it.
+    try validateTargetPathFor(.windows, "中" ** 255);
+    try std.testing.expectError(error.InvalidOutputPath, validateTargetPathFor(.windows, "中" ** 256));
+    try validateTargetPathFor(.windows, "𠀀" ** 127);
+    try std.testing.expectError(error.InvalidOutputPath, validateTargetPathFor(.windows, "𠀀" ** 128));
+    try validateTargetPathFor(.posix, "中" ** 85);
+    try std.testing.expectError(error.InvalidOutputPath, validateTargetPathFor(.posix, "中" ** 86));
+    for ([_][]const u8{ "a?b", "a/*", "<a>", "a|b", "\"a\"", "NUL.txt", "com1", "a/aux", "file.", "file " }) |value| {
+        try validateTargetPathFor(.posix, value);
+        try std.testing.expectError(error.InvalidOutputPath, validateTargetPathFor(.windows, value));
+        try std.testing.expectError(error.InvalidOutputPath, validatePath(value));
+    }
+}
+
+test "a file action reaches the names and depths the Workspace shows" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // 85 of these fill a POSIX name; a Windows one holds three times as many.
+    const long_name = "中" ** (if (builtin.os.tag == .windows) 100 else 80) ++ ".md";
+    const deep = "d/" ** 40;
+    try tmp.dir.createDirPath(io, deep ++ "end");
+    try tmp.dir.writeFile(io, .{ .sub_path = long_name, .data = "text" });
+    try tmp.dir.writeFile(io, .{ .sub_path = deep ++ "end/a.md", .data = "text" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    for ([_][]const u8{ long_name, deep ++ "end/a.md" }) |name| {
+        var locating: TestLocate = .{ .request = .{ .workspace_root = root, .relative_path = name, .main_thread_id = std.Thread.getCurrentId() } };
+        _ = try locating.execute();
+        const destination = try std.fs.path.join(std.testing.allocator, &.{ root, "copy " ++ long_name });
+        defer std.testing.allocator.free(destination);
+        var save = try Save.init(std.testing.allocator, io, locating.request, destination);
+        save.deinit();
+    }
 }
 
 const TestLocate = struct {

@@ -1880,7 +1880,8 @@ pub const Runtime = struct {
         var input_owned = true;
         defer if (input_owned) input.deinit();
         if (action == .save) {
-            if (self.file_save == null) return .{ .immediate = .unavailable };
+            const save = self.file_save orelse return .{ .immediate = .unavailable };
+            save.validate_path_fn(location.relative) catch return .{ .immediate = .restricted };
             var total: usize = 0;
             for (self.pending_file_saves) |pending| if (pending != null) {
                 total += 1;
@@ -24786,7 +24787,10 @@ const FileSaveHarness = struct {
         self.releases += 1;
     }
     fn bind(self: *FileSaveHarness, control: *Runtime) void {
-        control.setFileSave(.{ .context = self, .begin_fn = request, .cancel_fn = cancel });
+        control.setFileSave(.{ .context = self, .validate_path_fn = validate, .begin_fn = request, .cancel_fn = cancel });
+    }
+    fn validate(path: []const u8) error{InvalidOutputPath}!void {
+        if (std.mem.startsWith(u8, path, "unsavable/")) return error.InvalidOutputPath;
     }
     fn request(context: *anyopaque, id: u64, _: u64, _: []const u8, completion: *const FileSavePort.Completion) !u64 {
         const self: *FileSaveHarness = @ptrCast(@alignCast(context));
@@ -24817,6 +24821,18 @@ const FileSaveHarness = struct {
         return error.TestTimeout;
     }
 };
+
+test "Save As refuses a name it cannot save before it asks where to" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try recordTestOutput(&control, @splat(3), "unsavable/a.docx");
+    var save: FileSaveHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    save.bind(&control);
+    const admission = control.beginFileAction(1, testOutput(@splat(3)), .save);
+    try std.testing.expectEqual(FileActionState.restricted, admission.immediate);
+    try std.testing.expectError(error.UnknownFile, control.borrowFileSaveSource(1));
+    try std.testing.expect(save.completion == null and !control.hasFileActions());
+}
 
 test "Save As pending dialog cancellation and failed choice release frozen targets without jobs" {
     var control = try testRuntime();

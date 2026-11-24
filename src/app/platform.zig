@@ -120,7 +120,7 @@ pub const Adapter = struct {
     }
 
     pub fn fileSave(self: *Adapter) control_ports.FileSave {
-        return .{ .context = self, .begin_fn = prepareFileSave, .cancel_fn = cancelFileSave };
+        return .{ .context = self, .validate_path_fn = output_file.validateTargetPath, .begin_fn = prepareFileSave, .cancel_fn = cancelFileSave };
     }
 
     const OwnedSave = struct {
