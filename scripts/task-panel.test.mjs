@@ -3413,6 +3413,45 @@ test("keyboard history paging works at the top without consuming nested scroll o
   assert.equal(loads, 1);
 });
 
+test("the keys and the wheel of a menu do not page the conversation it is in", async () => {
+  let loads = 0;
+  render(
+    createElement(
+      FileMenuProvider,
+      {
+        value: {
+          connected: true,
+          canReference: true,
+          perform: async () => null,
+        },
+      },
+      taskContentElement(
+        task({
+          currentRunId: "9",
+          runs: [linkedRun("p0-file-report.txt", [reportReference])],
+        }),
+        "1",
+        {
+          history: { available: true, loading: false, onLoad: () => loads++ },
+        },
+      ),
+    ),
+  );
+  await act(async () =>
+    fireEvent.contextMenu(
+      screen.getByRole("button", { name: "Preview p0-file-report.txt" }),
+    ),
+  );
+  const menu = await screen.findByRole("menu", { name: "File actions" });
+  fireEvent.keyDown(menu, { key: "PageUp" });
+  fireEvent.wheel(menu, { deltaY: -100 });
+  assert.equal(loads, 0);
+  fireEvent.keyDown(document.querySelector(".ai-conversation-viewport"), {
+    key: "PageUp",
+  });
+  assert.equal(loads, 1);
+});
+
 test("Tool summary expands its exact inline details", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const value = task({

@@ -1,9 +1,26 @@
-import type { HTMLAttributes, ReactNode, RefObject } from "react";
+import type {
+  HTMLAttributes,
+  ReactNode,
+  RefObject,
+  SyntheticEvent,
+} from "react";
 
 import { Button } from "../ui/button.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { Tooltip } from "../ui/tooltip.tsx";
 import { cn } from "../ui/utils.ts";
+
+/** React bubbles a menu of the content up to here, which is not inside it. */
+function inside<E extends SyntheticEvent<HTMLDivElement>>(
+  handler: ((event: E) => void) | undefined,
+) {
+  return (
+    handler &&
+    ((event: E) => {
+      if (event.currentTarget.contains(event.target as Node)) handler(event);
+    })
+  );
+}
 
 export function Conversation({
   className,
@@ -36,9 +53,9 @@ export function Conversation({
         ref={viewportRef}
         className="ai-conversation-viewport"
         onScroll={onViewportScroll}
-        onWheel={onViewportWheel}
-        onKeyDown={onViewportKeyDown}
-        onPointerDown={onViewportPointerDown}
+        onWheel={inside(onViewportWheel)}
+        onKeyDown={inside(onViewportKeyDown)}
+        onPointerDown={inside(onViewportPointerDown)}
         tabIndex={0}
       >
         <div className="ai-conversation-content">{children}</div>
