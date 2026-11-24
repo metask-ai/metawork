@@ -1627,6 +1627,9 @@ pub const Runtime = struct {
     fn queueApprovalHistoryWork(self: *Runtime, recipient: ApprovalJobRecipient, input: approval_job.HistoryInput, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
         const leases = if (recipient.taskId()) |task_id| leases: {
             const task = self.find(task_id) orelse return error.UnknownTask;
+            // Work that reaches the Session is refused once its close starts.
+            // This job only writes history, so the same rule is stated here.
+            if (recipient == .approval and sessionCloseRunning(task)) return error.TaskBusy;
             break :leases &task.runtime.worker_leases;
         } else &self.approval_cleanup_leases;
         const slot = try self.approvalJobSlot();
@@ -1894,6 +1897,13 @@ pub const Runtime = struct {
         return task.runtime.close_thread != null or task.runtime.close_requested;
     }
 
+    /// From the start of a Session close until its result is consumed. A close
+    /// starts only without a live lease and releases the Session only without
+    /// one, so the Task must gain none in between.
+    fn sessionCloseRunning(task: *const task_state.Task) bool {
+        return task.runtime.close_completion.load(.acquire) != .none;
+    }
+
     pub fn pendingSessionCloseTask(self: *const Runtime) ?u64 {
         for (self.tasks) |entry| {
             const task = entry orelse continue;
@@ -2152,7 +2162,8 @@ pub const Runtime = struct {
                     },
                 },
                 .baseline_commit, .mode_commit => {
-                    if (effects.history_blocked_fn(effects.context) or !self.approvalJobCapacityAvailable()) continue;
+                    if (effects.history_blocked_fn(effects.context) or !self.approvalJobCapacityAvailable() or
+                        sessionCloseRunning(task)) continue;
                     var candidate = self.captureApprovalCandidate(effects, task.durable.id) catch {
                         self.rejectApprovalChange(effects, task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
                         changed = true;

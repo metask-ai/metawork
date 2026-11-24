@@ -12515,6 +12515,147 @@ fn expectApprovalRecoveryWaitsForClose(close_running_task: bool) !void {
     try std.testing.expectEqual(attempt_before + 1, control.task_runtime.next_restore_attempt_id);
 }
 
+test "a closing Session admits no approval history job of its Task" {
+    try expectCloseAdmitsNoApprovalHistory(false);
+}
+
+test "a closing Session admits no readback of its Task's unknown approval write" {
+    try expectCloseAdmitsNoApprovalHistory(true);
+}
+
+/// Removing a Workspace closes the Sessions of its Tasks whatever their
+/// approval change is doing. A history job holds its Task's lease, and a closed
+/// Session is released only once no lease is live.
+fn expectCloseAdmitsNoApprovalHistory(readback: bool) !void {
+    const Hold = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
+        fn execute(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.entered.store(true, .release);
+            while (!self.released.load(.acquire)) std.Thread.yield() catch {};
+        }
+        fn cancel(_: *anyopaque) void {}
+        fn wait(self: *@This()) !void {
+            for (0..5000) |_| {
+                if (self.entered.load(.acquire)) return;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            return error.TestUnexpectedResult;
+        }
+    };
+    fake_core.reset();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "writer", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "closing", .default_dir);
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    const writer_root = try tmp.dir.realPathFileAlloc(std.testing.io, "writer", std.testing.allocator);
+    defer std.testing.allocator.free(writer_root);
+    const closing_root = try tmp.dir.realPathFileAlloc(std.testing.io, "closing", std.testing.allocator);
+    defer std.testing.allocator.free(closing_root);
+    var history: TaskPersistenceProbe = .{};
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    configuration.task_persistence = history.capability();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_tasks = 2,
+        .max_workspaces = 2,
+    }, configuration);
+    defer control.deinit();
+    var first: Hold = .{};
+    var later: Hold = .{};
+    var close: Hold = .{};
+    defer {
+        first.released.store(true, .release);
+        later.released.store(true, .release);
+        close.released.store(true, .release);
+    }
+    try installControlExecution(&control);
+    var input = productControlTaskInput();
+    input.trust = .explicitly_trusted;
+    input.approval_mode = .manual;
+    input.workspace_root = writer_root;
+    const writer_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
+    input.workspace_root = closing_root;
+    const closing_id = try control.createTask(input, try product_control.TestSupport.fixtureModelSelection(&control));
+    try waitInitialTaskCatalog(&control, writer_id);
+    try waitInitialTaskCatalog(&control, closing_id);
+    const writer = control.testTask(writer_id).?;
+    const closing = control.testTask(closing_id).?;
+    const workspace_id = try control.taskWorkspaceId(closing_id);
+
+    // The approval executor has one worker: each Hold keeps it while the test
+    // arranges what the next lifecycle turn observes.
+    try control.approval_executor.enqueue(.{ .identity = &first, .context = &first, .execute_fn = Hold.execute, .cancel_fn = Hold.cancel });
+    try first.wait();
+    if (readback) {
+        // The closing Task's own write ends unknown. Its readback is asked for
+        // while the Session is still closing.
+        history.result = .outcome_unknown;
+        history.store_on_outcome_unknown = true;
+        _ = try control.setApprovalMode(closing_id, .auto_review, closing.durable.binding_epoch, 1);
+        first.released.store(true, .release);
+        for (0..5000) |_| {
+            control.syncLifecycle();
+            if (closing.approval_change.?.phase == .outcome_unknown) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        } else return error.TestUnexpectedResult;
+        try control.approval_executor.enqueue(.{ .identity = &later, .context = &later, .execute_fn = Hold.execute, .cancel_fn = Hold.cancel });
+        try later.wait();
+        fake_core.lock();
+        fake_core.session_destroy_probe = .{ .context = &close, .observe_fn = Hold.execute };
+        fake_core.unlock();
+        try control.removeWorkspace(workspace_id);
+        try close.wait();
+        try std.testing.expectEqual(.unavailable, control.recoverTaskHistory(control.currentRevision()));
+        close.released.store(true, .release);
+    } else {
+        // The other Task owns the single history writer, so this one's write
+        // waits while its Workspace is removed.
+        _ = try control.setApprovalMode(writer_id, .auto_review, writer.durable.binding_epoch, 1);
+        control.syncLifecycle();
+        try std.testing.expect(control.task_runtime.approvalJobFor(writer_id));
+        _ = try control.setApprovalMode(closing_id, .auto_review, closing.durable.binding_epoch, 1);
+        control.syncLifecycle();
+        try std.testing.expectEqual(.mode_commit, closing.approval_change.?.phase);
+        try std.testing.expect(!control.task_runtime.approvalJobFor(closing_id));
+        try control.approval_executor.enqueue(.{ .identity = &later, .context = &later, .execute_fn = Hold.execute, .cancel_fn = Hold.cancel });
+        try control.removeWorkspace(workspace_id);
+        first.released.store(true, .release);
+        // The writer is free again and `later` keeps the next job queued.
+        try later.wait();
+    }
+    for (0..5000) |_| {
+        if (closing.runtime.close_completion.load(.acquire) == .closed) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    // One turn observes both the free writer and the finished close.
+    control.syncLifecycle();
+    try std.testing.expectEqual(.detached, std.meta.activeTag(closing.runtime.attachment));
+    try std.testing.expect(closing.runtime.close_thread == null);
+    later.released.store(true, .release);
+    if (readback) {
+        history.result = .committed;
+        try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+    }
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        if (closing.approval_change == null and control.task_runtime.workspaceRemovalState(workspace_id) == .ready) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(.completed, closing.approval_result.?.outcome);
+    try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(closing_id));
+}
+
 test "Session pressure never cancels busy work or automatically retries a failed close" {
     fake_core.reset();
     fake_core.setCheckpointGeneration(1);
