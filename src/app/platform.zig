@@ -188,12 +188,19 @@ pub const Adapter = struct {
     }
 
     pub fn fileEffects(self: *Adapter) control_ports.FileEffects {
-        return .{
-            .context = self,
-            // macOS Office support awaits opening and saving with a registered handler.
-            .office = builtin.os.tag == .windows,
-            .browser = output_browser_handoff.supported,
-            .prepare_fn = prepareFileEffect,
+        return .{ .context = self, .open_kind_fn = fileOpenKind, .prepare_fn = prepareFileEffect };
+    }
+
+    /// The list says which types may be opened; this adds what the platform
+    /// can hand them to.
+    fn fileOpenKind(context: *anyopaque, relative: []const u8) ?control_ports.FileOpenKind {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        return switch (output_file.openKind(relative) orelse return null) {
+            .browser => if (output_browser_handoff.supported) .browser else null,
+            .office, .app => if (self.platform_services) |services_value|
+                (if (services_value.open_external_url_fn != null) .default_app else null)
+            else
+                null,
         };
     }
 
@@ -243,9 +250,18 @@ pub const Adapter = struct {
             defer allocator.free(absolute);
             var buffer: [native_sdk.platform.max_external_url_bytes]u8 = undefined;
             const url = try directoryFileUrl(if (builtin.os.tag == .windows) .windows else .posix, absolute, &buffer);
-            if (output_file.htmlCandidate(self.relative)) return output_browser_handoff.openHtml(url);
-            const services_value = self.adapter.platform_services orelse return error.RuntimeUnavailable;
-            try services_value.openExternalUrl(url);
+            switch (fileOpenKind(self.adapter, self.relative) orelse return error.UnsupportedService) {
+                .browser => output_browser_handoff.openHtml(url) catch |err| return handoffFailure(err),
+                .default_app => {
+                    const services_value = self.adapter.platform_services orelse return error.RuntimeUnavailable;
+                    services_value.openExternalUrl(url) catch |err| return handoffFailure(err);
+                },
+            }
+        }
+
+        /// The file was fine and the system did not take it.
+        fn handoffFailure(err: anyerror) anyerror {
+            return if (err == error.UnsupportedService) err else error.FileOpenFailed;
         }
 
         fn release(context: *anyopaque) void {
@@ -263,7 +279,7 @@ pub const Adapter = struct {
         if (std.Thread.getCurrentId() != self.main_thread_id) return error.InvalidThread;
         if (!std.fs.path.isAbsolute(root)) return error.InvalidWorkspaceRoot;
         try output_file.validateTargetPath(relative);
-        if (kind == .open) try self.requireOpen(relative);
+        if (kind == .open and fileOpenKind(self, relative) == null) return error.UnsupportedService;
         const allocator = std.heap.c_allocator;
         const job = try allocator.create(FileEffect);
         errdefer allocator.destroy(job);
@@ -271,16 +287,6 @@ pub const Adapter = struct {
         errdefer allocator.free(root_copy);
         job.* = .{ .adapter = self, .kind = kind, .root = root_copy, .relative = try allocator.dupe(u8, relative) };
         return .{ .context = job, .inspect_fn = FileEffect.inspect, .perform_fn = FileEffect.perform, .release_fn = FileEffect.release };
-    }
-
-    fn requireOpen(self: *Adapter, relative: []const u8) !void {
-        if (output_file.officeCandidate(relative)) {
-            if (!self.fileEffects().office) return error.UnsupportedService;
-            const services_value = self.platform_services orelse return error.RuntimeUnavailable;
-            if (services_value.open_external_url_fn == null) return error.UnsupportedService;
-        } else if (output_file.htmlCandidate(relative)) {
-            if (!self.fileEffects().browser) return error.UnsupportedService;
-        } else return error.RestrictedOutput;
     }
 
     pub fn services(self: *const Adapter) ?native_sdk.platform.PlatformServices {
@@ -1169,6 +1175,71 @@ test "SDK consumption file location uses the Runtime reveal boundary and rejects
     try located.perform_fn(located.context);
     try tmp.dir.deleteFile(std.testing.io, "report.docx");
     try std.testing.expectError(error.FileNotFound, worker.inspect());
+    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
+}
+
+test "SDK consumption file open hands a listed type to the system once and nothing else to it" {
+    const Spy = struct {
+        var calls: usize = 0;
+        var fail: bool = false;
+        fn open(_: ?*anyopaque, url: []const u8) !void {
+            calls += 1;
+            try std.testing.expect(std.mem.startsWith(u8, url, "file://"));
+            if (fail) return error.InjectedOpenFailure;
+        }
+    };
+    Spy.calls = 0;
+    Spy.fail = false;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "a.pdf", "a.docx", "a.exe", "a.xml", "README" }) |name|
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "plain text" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var adapter = Adapter.init(io, std.Thread.getCurrentId());
+    adapter.native_runtime = &harness.runtime;
+    const port = adapter.fileEffects();
+
+    // Without the system's own hand-off nothing opens; with it, only the list.
+    try std.testing.expectEqual(@as(?control_ports.FileOpenKind, null), port.open_kind_fn(port.context, "a.pdf"));
+    try std.testing.expectError(error.UnsupportedService, port.prepare_fn(port.context, root, "a.pdf", .open));
+    adapter.platform_services = harness.runtime.options.platform.services;
+    adapter.platform_services.?.open_external_url_fn = null;
+    try std.testing.expectEqual(@as(?control_ports.FileOpenKind, null), port.open_kind_fn(port.context, "a.pdf"));
+    adapter.platform_services.?.open_external_url_fn = Spy.open;
+    try std.testing.expectEqual(@as(?control_ports.FileOpenKind, .default_app), port.open_kind_fn(port.context, "a.pdf"));
+    try std.testing.expectEqual(@as(?control_ports.FileOpenKind, .default_app), port.open_kind_fn(port.context, "a.docx"));
+    try std.testing.expectEqual(@as(?control_ports.FileOpenKind, if (output_browser_handoff.supported) .browser else null), port.open_kind_fn(port.context, "a.html"));
+    for ([_][]const u8{ "a.exe", "a.xml", "README" }) |name| {
+        try std.testing.expectEqual(@as(?control_ports.FileOpenKind, null), port.open_kind_fn(port.context, name));
+        try std.testing.expectError(error.UnsupportedService, port.prepare_fn(port.context, root, name, .open));
+    }
+
+    var effect = try port.prepare_fn(port.context, root, "a.pdf", .open);
+    defer effect.deinit();
+    var worker: TestFileEffect = .{ .effect = &effect };
+    try std.testing.expectError(error.RestrictedOutput, effect.perform_fn(effect.context));
+    try worker.inspect();
+    try std.testing.expectEqual(@as(usize, 0), Spy.calls);
+    try effect.perform_fn(effect.context);
+    try std.testing.expectEqual(@as(usize, 1), Spy.calls);
+    Spy.fail = true;
+    try std.testing.expectError(error.FileOpenFailed, effect.perform_fn(effect.context));
+    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
+    Spy.fail = false;
+    // The name now is another file: what was inspected is not what would open.
+    try tmp.dir.writeFile(io, .{ .sub_path = "other.pdf", .data = "other text" });
+    try tmp.dir.rename("other.pdf", tmp.dir, "a.pdf", io);
+    try std.testing.expectError(error.OutputChanged, effect.perform_fn(effect.context));
+    // A package that is not the document its name says stops on the worker.
+    var document = try port.prepare_fn(port.context, root, "a.docx", .open);
+    defer document.deinit();
+    var document_worker: TestFileEffect = .{ .effect = &document };
+    try std.testing.expectError(error.RestrictedOutput, document_worker.inspect());
+    try std.testing.expectError(error.RestrictedOutput, document.perform_fn(document.context));
     try std.testing.expectEqual(@as(usize, 2), Spy.calls);
 }
 

@@ -41,17 +41,52 @@ pub const Proof = struct {
     file: std.Io.File.Stat,
 };
 
+/// What opening a file by its name hands it to. The platform's own
+/// capabilities are asked separately: this says only whether the type is one
+/// that is looked at rather than run.
+pub const OpenKind = enum { browser, office, app };
+
+/// The one list of types a user may open in another application. The system
+/// decides what opens a file by its extension alone, and a list of types that
+/// run something can never be complete, so this names the types whose opening
+/// is reading, playing or editing them.
+///
+/// Left out on purpose: `xml` (an Office install hands it on by its content, and
+/// Word XML can hold macros), macro and legacy Office formats and `rtf` (no
+/// content check covers them), `wmv`/`wma`/`asf` (script commands and licence
+/// URLs), and every source type (many run, and what opens them differs by
+/// machine).
+const open_types = [_]struct { kind: OpenKind, extensions: []const []const u8 }{
+    .{ .kind = .app, .extensions = &.{ "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif", "avif", "svg" } },
+    .{ .kind = .app, .extensions = &.{ "mp4", "m4v", "mov", "webm", "mkv", "avi", "mpg", "mpeg" } },
+    .{ .kind = .app, .extensions = &.{ "mp3", "wav", "m4a", "aac", "flac", "ogg", "oga", "opus" } },
+    .{ .kind = .app, .extensions = &.{"pdf"} },
+    .{ .kind = .office, .extensions = &.{ "docx", "xlsx", "pptx" } },
+    .{ .kind = .app, .extensions = &.{ "txt", "md", "markdown", "log", "csv", "tsv", "json", "jsonl", "yaml", "yml", "toml", "srt", "vtt" } },
+    .{ .kind = .app, .extensions = &.{ "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz" } },
+    .{ .kind = .browser, .extensions = &.{ "html", "htm" } },
+};
+
+/// By the last extension only, as the system itself decides.
+pub fn openKind(path: []const u8) ?OpenKind {
+    const extension = std.fs.path.extension(path);
+    if (extension.len < 2) return null;
+    for (open_types) |types| for (types.extensions) |candidate| {
+        if (std.ascii.eqlIgnoreCase(extension[1..], candidate)) return types.kind;
+    };
+    return null;
+}
+
 const OfficeKind = enum {
     word,
     excel,
     powerpoint,
 
-    fn fromPath(path: []const u8) ?OfficeKind {
+    fn fromPath(path: []const u8) OfficeKind {
         const extension = std.fs.path.extension(path);
         if (std.ascii.eqlIgnoreCase(extension, ".docx")) return .word;
         if (std.ascii.eqlIgnoreCase(extension, ".xlsx")) return .excel;
-        if (std.ascii.eqlIgnoreCase(extension, ".pptx")) return .powerpoint;
-        return null;
+        return .powerpoint;
     }
 
     fn contentType(self: OfficeKind) []const u8 {
@@ -63,25 +98,19 @@ const OfficeKind = enum {
     }
 };
 
-pub fn officeCandidate(path: []const u8) bool {
-    return OfficeKind.fromPath(path) != null;
-}
-
-pub fn htmlCandidate(path: []const u8) bool {
-    const extension = std.fs.path.extension(path);
-    return std.ascii.eqlIgnoreCase(extension, ".html") or std.ascii.eqlIgnoreCase(extension, ".htm");
-}
-
 /// Proves which regular file a locator names without reading it, so it has no
 /// size to bound.
 pub fn locate(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool)) !Proof {
     return locateAnd(io, request, cancelled, null);
 }
 
+/// Locates a file of a listed type. Only Office documents are also read: the
+/// application that opens them runs what a mislabelled package holds. The rest
+/// are opened by their extension, and content that does not match only fails
+/// to open there.
 pub fn inspectOpen(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool)) !Proof {
-    const office = OfficeKind.fromPath(request.relative_path);
-    if (office == null and !htmlCandidate(request.relative_path)) return error.RestrictedOutput;
-    return locateAnd(io, request, cancelled, office);
+    const kind = openKind(request.relative_path) orelse return error.RestrictedOutput;
+    return locateAnd(io, request, cancelled, if (kind == .office) .fromPath(request.relative_path) else null);
 }
 
 fn locateAnd(io: std.Io, request: Request, cancelled: *const std.atomic.Value(bool), office: ?OfficeKind) !Proof {
@@ -728,6 +757,79 @@ const TestLocate = struct {
         return self.result;
     }
 };
+
+test "the open list names every type once and decides by the last extension alone" {
+    const listed = [_]struct { OpenKind, []const u8 }{
+        .{ .app, "png jpg jpeg gif webp bmp tif tiff heic heif avif svg" },
+        .{ .app, "mp4 m4v mov webm mkv avi mpg mpeg" },
+        .{ .app, "mp3 wav m4a aac flac ogg oga opus" },
+        .{ .app, "pdf" },
+        .{ .office, "docx xlsx pptx" },
+        .{ .app, "txt md markdown log csv tsv json jsonl yaml yml toml srt vtt" },
+        .{ .app, "zip 7z rar tar gz tgz bz2 xz" },
+        .{ .browser, "html htm" },
+    };
+    var count: usize = 0;
+    for (listed) |group| {
+        var names = std.mem.splitScalar(u8, group[1], ' ');
+        while (names.next()) |name| {
+            count += 1;
+            var buffer: [64]u8 = undefined;
+            const lower = try std.fmt.bufPrint(&buffer, "docs.exe/结果.exe.{s}", .{name});
+            try std.testing.expectEqual(@as(?OpenKind, group[0]), openKind(lower));
+            const dot = lower.len - name.len;
+            for (lower[dot..]) |*byte| byte.* = std.ascii.toUpper(byte.*);
+            try std.testing.expectEqual(@as(?OpenKind, group[0]), openKind(lower));
+            lower[dot] = name[0];
+            try std.testing.expectEqual(@as(?OpenKind, group[0]), openKind(lower));
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 55), count);
+    var total: usize = 0;
+    for (open_types) |types| total += types.extensions.len;
+    try std.testing.expectEqual(count, total);
+    for (open_types, 0..) |types, at| for (types.extensions, 0..) |extension, index| {
+        for (open_types[at..], at..) |other, other_at| for (other.extensions, 0..) |candidate, other_index| {
+            if (other_at == at and other_index == index) continue;
+            try std.testing.expect(!std.mem.eql(u8, extension, candidate));
+        };
+    };
+
+    var refused = std.mem.splitScalar(u8, "exe bat cmd com scr pif cpl msc msi msix appx reg lnk url scf inf hta wsf wsh vbs vbe js jse mjs ps1 psm1 sh bash py pyw rb pl php jar class dll sys application gadget library-ms settingcontent-ms " ++
+        "command tool terminal workflow scpt applescript app pkg dmg webloc inetloc fileloc action osax " ++
+        "xml xhtml mht mhtml svgz chm doc dot docm dotx dotm xls xlt xlsm xlsb xltx xltm xll ppt pps pptm ppsx potx ppam odt ods odp rtf " ++
+        "wmv wma asf m3u m3u8 pls ts tsx jsx java c h cpp cs go rs zig swift kt sql css scss ini cfg conf tex epub ico psd ics vcf eml msg iso img vhd torrent png~ docx# html5 htmx", ' ');
+    while (refused.next()) |name| {
+        var buffer: [64]u8 = undefined;
+        try std.testing.expectEqual(@as(?OpenKind, null), openKind(try std.fmt.bufPrint(&buffer, "结果.png.{s}", .{name})));
+    }
+    for ([_][]const u8{ "README", ".png", ".html", "docs.png/README", "docs/.docx", "a.", "a.png.", "", "png" }) |path|
+        try std.testing.expectEqual(@as(?OpenKind, null), openKind(path));
+}
+
+test "opening reads only Office documents and refuses what the list does not name" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    // A document name is a claim the package has to support; every other name
+    // is only a name, however large the file is.
+    for ([_][]const u8{ "a.docx", "a.xlsx", "a.pptx", "a.pdf", "a.csv", "a.html", "a.PNG", "a.exe", "a" }) |name|
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "plain text" });
+    const large = try tmp.dir.createFile(io, "large.mp4", .{});
+    try large.setLength(io, max_file_bytes + 1);
+    large.close(io);
+    var work: TestLocate = .{ .open = true, .request = .{ .workspace_root = root, .relative_path = "", .main_thread_id = std.Thread.getCurrentId() } };
+    for ([_][]const u8{ "a.pdf", "a.csv", "a.html", "a.PNG", "large.mp4" }) |name| {
+        work.request.relative_path = name;
+        _ = try work.execute();
+    }
+    for ([_][]const u8{ "a.docx", "a.xlsx", "a.pptx", "a.exe", "a" }) |name| {
+        work.request.relative_path = name;
+        try std.testing.expectError(error.RestrictedOutput, work.execute());
+    }
+}
 
 test "locating proves which file a name is without reading it or bounding its size" {
     const io = std.testing.io;

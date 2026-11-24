@@ -817,10 +817,9 @@ export async function runOutputBrowserHostProbe({
       60_000,
       "HTML delivery",
     );
-    assert.equal(published.task.browserOutputsOpen, true);
-    assert.equal(published.task.officeOutputsOpen, undefined);
     assert.equal(published.run.terminal.outcome, "completed");
     assert.equal(published.run.outputs[0].displayPath, relative);
+    assert.equal(published.run.outputs[0].open, "browser");
     const opened = await invoke("metawork.files.action", {
       generation: "1",
       operationId: "1",

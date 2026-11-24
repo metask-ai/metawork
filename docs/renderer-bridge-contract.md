@@ -128,9 +128,9 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 
 `output`、`activity`、`toolLog`、`fileReferences`、Tool 页与 `context` 只定义 Renderer 可消费的产品事实和 fail-closed 边界，不规定最终组件、布局、展开策略或更新节奏。当前 Agent 对话的 owner 链、Run exchange 槽位与 active→terminal 呈现收口由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；wire 字段存在、scripted Provider vertical 或静态 DOM 通过都不能替代真实 Provider cadence 与长任务阅读体验的独立验收。后续纯呈现调整仍可在不改变 revision 1 wire 语义的前提下进行。
 
-每个 Run 另精确发布必需的 `outputs` 数组，每项为 `{ id, displayPath, sizeBytes, redacted }`，对监测到本轮期间内容变化的成果追加 `updated: true`。单轮明确交付最多八项，更新可以引用会话中其他已登记成果。id 是非零、32 位小写十六进制的 opaque Task 成果身份，同一成果可由多个可见 Run 引用，同一 Run 内只发布一次；sizeBytes 是可为零的 canonical decimal `u64` string。displayPath 只包含用于展示及下述普通指令引用的相对文本，必须是容量不超过 512 UTF-8 bytes 的 Workspace 相对路径，不能包含路径逃逸、绝对路径或控制字符；redacted 为 true 时必须为空。Host 还须在投影时防御性检查已知 credential，不能因旧 redacted flag 不一致而泄露路径。协议不运输 locator authority、摘要或组件路径，Renderer 不从 Tool 文本构建成果。`capabilities.typedOutputs` 表示可信交付记录的呈现能力；记录不证明当前文件可用，文件操作须按自己的 Host 授权与文件校验收口。该字段与严格 decoder、scoped/history Run projection 和 fixture 在 revision 1 原位同步替换，不接纳缺失字段的旧 wire。
+每个 Run 另精确发布必需的 `outputs` 数组，每项为 `{ id, displayPath, sizeBytes, redacted }`，对监测到本轮期间内容变化的成果追加 `updated: true`，对当前可以打开的成果追加 `open: "browser" | "default_app"`。`open` 与 `metawork.files.action` 的 `open` 在 Host 用同一处判定：路径已隐藏、类型不在名单、平台没有对应能力、工作区身份不再精确或正在关闭时省略。单轮明确交付最多八项，更新可以引用会话中其他已登记成果。id 是非零、32 位小写十六进制的 opaque Task 成果身份，同一成果可由多个可见 Run 引用，同一 Run 内只发布一次；sizeBytes 是登记时的大小，可为零的 canonical decimal `u64` string。displayPath 只包含用于展示及下述普通指令引用的相对文本，必须是容量不超过 512 UTF-8 bytes 的 Workspace 相对路径，不能包含路径逃逸、绝对路径或控制字符；redacted 为 true 时必须为空。Host 还须在投影时防御性检查已知 credential，不能因旧 redacted flag 不一致而泄露路径。协议不运输 locator authority、摘要或组件路径，Renderer 不从 Tool 文本构建成果。`capabilities.typedOutputs` 表示可信交付记录的呈现能力；记录不证明当前文件可用，文件操作须按自己的 Host 授权与文件校验收口。该字段与严格 decoder、scoped/history Run projection 和 fixture 在 revision 1 原位同步替换，不接纳缺失字段的旧 wire。
 
-非空时 Task 投影追加 `conversationOutputs`。每项为 `{ id, displayPath, sizeBytes, redacted, runId }`，由首个可见登记的 Run 提供 action scope，覆盖未加载正文的历史轮次。
+非空时 Task 投影追加 `conversationOutputs`。每项为 `{ id, displayPath, sizeBytes, redacted, runId }` 加上同样可选的 `open`，由首个可见登记的 Run 提供 action scope，覆盖未加载正文的历史轮次。
 
 ## Global instructions commands
 
@@ -158,16 +158,16 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 | `reveal` | ✓ | ✓ | ✓ | 定位 | 再解析，请系统在文件管理器中选中该文件 |
 | `check_current` | ✓ | ✓ | ✓ | 定位 | 再解析 |
 | `save` | ✓ | ✓ | ✓ | 复制当前内容 | 再解析，作出一次性发布决定 |
-| `open` | — | ✓ | — | 定位，Office 另核 OOXML | 再解析，按名字复核是同一文件，交给浏览器或默认应用 |
+| `open` | ✓ | ✓ | ✓ | 定位，Office 另核 OOXML | 再解析，按名字复核是同一文件，交给浏览器或默认应用 |
 | `check` | — | ✓ | — | 整文件摘要，与交付时比对 | 再解析 |
 
 表中没有的组合是格式错误，直接拒绝且不消耗 operationId。**定位**指逐段 no-follow 打开、确认是普通文件、再按名字重新打开确认是同一文件：不读内容，也没有大小上限。
 
 `metawork.outputs.register` 是异步请求，精确输入 `{ generation, operationId, taskId, runId, changeId }`，与 `metawork.files.action` 共用 operationId 空间和在途名额。changeId 是所属 Run 的 File Change 身份，长度 1–128 bytes。Host 对可提交登记的记录追加 `outputRegistrationAdmitted: true`，其余记录省略该字段。登记成功只返回 `registered`，不运输成果字节或新的文件 authority；通过正常 Task 投影返回成果。
 
-两个请求的结果精确为 `{ generation, operationId, state }`，身份与请求一致。state 为 `ready | revealed | saved | registered | opened | save_failed | target_changed | cleanup_failed | busy | missing | restricted | changed | too_large | cancelled | timed_out | stale_security | unavailable | failed`。每种请求只有一个成功状态：`open` 为 `opened`，`reveal` 为 `revealed`，`check_current` 与 `check` 为 `ready`，`save` 为 `saved`，登记为 `registered`。`revealed` 与 `opened` 只表示系统接收了请求，`saved` 只证明选定目标已原子发布。`changed` 在 `check` 中表示与交付时不同，在其他请求中表示操作期间文件变化。save_failed、target_changed 与 cleanup_failed 分别说明保存失败、目标身份已变化及临时文件清理未完成，只出现在保存请求。后续每次操作都重新校验。
+两个请求的结果精确为 `{ generation, operationId, state }`，身份与请求一致。state 为 `ready | revealed | saved | registered | opened | open_unsupported | open_failed | save_failed | target_changed | cleanup_failed | busy | missing | restricted | changed | too_large | cancelled | timed_out | stale_security | unavailable | failed`。每种请求只有一个成功状态：`open` 为 `opened`，`reveal` 为 `revealed`，`check_current` 与 `check` 为 `ready`，`save` 为 `saved`，登记为 `registered`。`revealed` 与 `opened` 只表示系统接收了请求，`saved` 只证明选定目标已原子发布。`changed` 在 `check` 中表示与交付时不同，在其他请求中表示操作期间文件变化。save_failed、target_changed 与 cleanup_failed 分别说明保存失败、目标身份已变化及临时文件清理未完成，只出现在保存请求。后续每次操作都重新校验。
 
-有效 Workspace 下，Office 和浏览器打开能力分别由 Task 投影的 `officeOutputsOpen: true` 和 `browserOutputsOpen: true` 表示，未开放时省略相应字段。`open` 由 Host 根据已验证的成果类型选择交接目标。
+`open` 只接受 Host 名单内的类型，按最后一个扩展名判定、ASCII 大小写不敏感，Renderer 不持有名单。身份解析通过之后、排入 worker 之前判定：类型不在名单或平台没有对应能力时立即返回 `open_unsupported`。HTML 交给系统默认浏览器，其余交给系统默认应用；DOCX、XLSX、PPTX 另在 worker 核对 OOXML 主部件与扩展名一致，上限 256 MiB，其余类型不读内容。系统没有接受交接时返回 `open_failed`。
 
 Bridge 与 Product 分别有界限制在途请求；文件读取在独立 worker，不能占普通 File Preview worker。worker 完成后 Product 以同一身份再解析一次，结果与接纳时不同即不再继续；发布结果或执行 Application 的文件 effect 前，Bridge 还必须再次证明该请求的 connection/window 仍有效且未取消。取消、断连或安全代次变化之后不补做系统动作。Renderer 换 Task、身份失效、断连或组件卸载时丢弃旧响应并取消在途请求，不持久化检查状态。`metawork.files.cancelAction` 精确输入 `{ generation, operationId }`，同步结果精确为 `{ generation, operationId, cancelled }`；boolean 只表示该连接下仍存在的请求已接受取消，不证明 worker 已物理退出；保存发布决定一旦提交，取消返回 false，不能再把实际保存结果改写为 cancelled。原异步请求只在 worker 静止后完成并释放 owned effect；关闭应用须 join 后逐一结算 responder。文件工作期限覆盖排队、复制和等待发布决定；系统保存对话框的用户选择时间不计算为文件工作。save 的 Renderer transport 不使用普通短 command timeout 催促用户选位置。超时或 transport 失败不自动重放系统动作。
 

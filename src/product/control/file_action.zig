@@ -17,8 +17,8 @@ pub const Action = enum {
     pub fn accepts(self: Action, target: file_target.Target) bool {
         return switch (self) {
             // Only a delivery recorded the content there is to compare with.
-            .check, .open => target == .output,
-            .reveal, .check_current, .save => true,
+            .check => target == .output,
+            .open, .reveal, .check_current, .save => true,
         };
     }
 };
@@ -76,7 +76,7 @@ pub const Input = struct {
     }
 };
 
-pub const State = enum { ready, revealed, saved, registered, opened, save_failed, target_changed, cleanup_failed, busy, missing, restricted, changed, too_large, cancelled, timed_out, stale_security, unavailable, failed };
+pub const State = enum { ready, revealed, saved, registered, opened, open_unsupported, open_failed, save_failed, target_changed, cleanup_failed, busy, missing, restricted, changed, too_large, cancelled, timed_out, stale_security, unavailable, failed };
 pub const max_in_flight = 2;
 const timeout_ns = 30 * std.time.ns_per_s;
 pub const Notifier = struct { context: ?*anyopaque, wake_fn: *const fn (?*anyopaque) bool };
@@ -205,6 +205,7 @@ pub fn effectFailure(err: anyerror) State {
         error.FileNotFound, error.NotDir => .missing,
         error.OutputTooLarge => .too_large,
         error.OutputChanged => .changed,
+        error.FileOpenFailed => .open_failed,
         error.InvalidOutputPath, error.InvalidWorkspaceRoot, error.NotRegularOutput, error.RestrictedOutput, error.AccessDenied, error.SymLinkLoop => .restricted,
         else => .failed,
     };

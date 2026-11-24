@@ -1592,8 +1592,6 @@ export function TaskContent({
                   onAction={onFileAction}
                   onPrepareEdit={onPrepareOutputEdit}
                   onPreview={onPreviewWorkspaceFile}
-                  officeOpen={task.officeOutputsOpen}
-                  browserOpen={task.browserOutputsOpen}
                 />
               )}
               {fileChangesEnabled && run.fileChanges && (

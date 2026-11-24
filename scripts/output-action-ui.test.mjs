@@ -304,3 +304,36 @@ test("Continue editing discards a late check after switching Tasks or disabling 
     true,
   );
 });
+
+test("Opening an output is offered only where the Host opens it, by its own name", async () => {
+  const actions = [];
+  const onAction = async (_target, action) => {
+    actions.push(action);
+    return action === "open" ? "open_failed" : "ready";
+  };
+  const buttons = () =>
+    screen.getAllByRole("button").map((button) => button.textContent);
+  const names = ["Check file", "Show in folder", "Save as…"];
+  const rows = (value) =>
+    view({
+      onAction,
+      onPreview: () => {},
+      outputs: [{ ...output, ...value }],
+    });
+  // The extension says nothing: only the projection does.
+  const mounted = render(rows({ displayPath: "results/report.html" }));
+  assert.deepEqual(buttons(), names);
+  mounted.rerender(
+    rows({ displayPath: "results/report.html", open: "browser" }),
+  );
+  assert.deepEqual(buttons(), ["Open in browser", "View source", ...names]);
+  mounted.rerender(
+    rows({ displayPath: "results/report.pdf", open: "default_app" }),
+  );
+  assert.deepEqual(buttons(), ["Open in default app", ...names]);
+  fireEvent.click(screen.getByRole("button", { name: "Open in default app" }));
+  await screen.findByText(
+    "The system did not open this file. It may have no associated app.",
+  );
+  assert.deepEqual(actions, ["open"]);
+});

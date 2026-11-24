@@ -439,6 +439,7 @@ pub const NativeDialog = struct {
 };
 
 pub const FileEffect = enum { locate, reveal, open };
+pub const FileOpenKind = product_task.FileOpenKind;
 
 /// Effects on one currently authorized Workspace file. `inspect_fn` runs on the
 /// worker and proves which file the name is without publishing anything;
@@ -446,8 +447,9 @@ pub const FileEffect = enum { locate, reveal, open };
 /// target again, and only once.
 pub const FileEffects = struct {
     context: *anyopaque,
-    office: bool,
-    browser: bool,
+    /// Whether, and where, a file of this name may be opened. The one answer
+    /// the projection, the admission of `open` and its effect all use.
+    open_kind_fn: *const fn (*anyopaque, []const u8) ?FileOpenKind,
     prepare_fn: *const fn (*anyopaque, []const u8, []const u8, FileEffect) anyerror!OwnedFileEffect,
 };
 

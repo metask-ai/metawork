@@ -1358,7 +1358,11 @@ export const enUS = {
   "outputs.view": "View outputs",
   "outputs.open_browser": "Open in browser",
   "outputs.view_source": "View source",
-  "outputs.open": "Open",
+  "outputs.open": "Open in default app",
+  "outputs.state.open_unsupported":
+    "This type of file cannot be opened in the default app. Use “Open folder”.",
+  "outputs.state.open_failed":
+    "The system did not open this file. It may have no associated app.",
   "outputs.state.opened": "Sent to the default application",
   "outputs.updated": "File changed during this turn",
   "outputs.hidden_path": "File path hidden",

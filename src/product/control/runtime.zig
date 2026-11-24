@@ -1860,6 +1860,10 @@ pub const Runtime = struct {
         var scratch: [file_target.max_path_bytes]u8 = undefined;
         const location = self.resolveFileTarget(target, &scratch) catch |err|
             return .{ .immediate = fileActionAuthorityState(err) };
+        if (action == .open) {
+            const effects = self.file_effects orelse return .{ .immediate = .unavailable };
+            if (effects.open_kind_fn(effects.context, location.relative) == null) return .{ .immediate = .open_unsupported };
+        }
         var input = file_action.Input.init(self.allocator, .{ .file = .{ .target = target, .action = action } }, location, self.projection_security_epoch) catch
             return .{ .immediate = .failed };
         var input_owned = true;
@@ -7861,8 +7865,7 @@ pub const Runtime = struct {
             .authority_fn = taskProjectionAuthority,
             .text = text.task(),
             .output_path_validator = if (self.file_delivery_preparation) |preparation| preparation.validate_path_fn else null,
-            .office_outputs_open = if (self.file_effects) |effects| effects.office else false,
-            .browser_outputs_open = if (self.file_effects) |effects| effects.browser else false,
+            .file_open = if (self.file_effects) |effects| .{ .context = effects.context, .kind_fn = effects.open_kind_fn } else null,
             .catalog = .{
                 .context = text,
                 .write_fn = writeTaskCatalogProjection,
@@ -24003,6 +24006,8 @@ test "late credential discovery revokes Output locators in current and durable p
 test "delivered Output projection matches the strict Renderer fixture without exposing file authority" {
     var control = try testRuntime();
     defer control.deinit();
+    var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    harness.bind(&control);
     var expected = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, contract_fixture.delivered_output, .{});
     defer expected.deinit();
     const row = expected.value.object;
@@ -24020,7 +24025,7 @@ test "delivered Output projection matches the strict Renderer fixture without ex
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, output, .{});
     defer std.testing.allocator.free(encoded);
     try std.testing.expectEqualStrings(std.mem.trim(u8, contract_fixture.delivered_output, " \r\n\t"), encoded);
-    try std.testing.expectEqual(@as(usize, 4), output.object.count());
+    try std.testing.expectEqual(@as(usize, 5), output.object.count());
     try std.testing.expect(output.object.get("locator") == null);
     try std.testing.expect(output.object.get("sha256") == null);
     // Even an inconsistent stale flag must not expose a newly known credential.
@@ -24032,6 +24037,7 @@ test "delivered Output projection matches the strict Renderer fixture without ex
     defer redacted.deinit();
     const hidden = redacted.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("outputs").?.array.items[0];
     try std.testing.expect(hidden.object.get("redacted").?.bool);
+    try std.testing.expect(hidden.object.get("open") == null);
     try std.testing.expectEqualStrings("", hidden.object.get("displayPath").?.string);
 }
 
@@ -24197,6 +24203,12 @@ const FileActionHarness = struct {
         return .{ .context = self, .inspect_fn = locate, .perform_fn = perform, .release_fn = release };
     }
 
+    /// A list of its own: what it names has nothing to do with the real one.
+    pub fn openKind(_: *anyopaque, relative: []const u8) ?control_ports.FileOpenKind {
+        if (std.mem.endsWith(u8, relative, ".docx") or std.mem.endsWith(u8, relative, ".jpg")) return .default_app;
+        return if (std.mem.endsWith(u8, relative, ".html")) .browser else null;
+    }
+
     fn locate(context: *anyopaque, cancelled: *const std.atomic.Value(bool)) anyerror!void {
         const self: *FileActionHarness = @ptrCast(@alignCast(context));
         std.debug.assert(std.Thread.getCurrentId() != self.main_thread_id);
@@ -24244,7 +24256,7 @@ const FileActionHarness = struct {
 
     fn bind(self: *FileActionHarness, control: *Runtime) void {
         control.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepare });
-        control.setFileEffects(.{ .context = self, .office = true, .browser = true, .prepare_fn = prepareEffect });
+        control.setFileEffects(.{ .context = self, .open_kind_fn = openKind, .prepare_fn = prepareEffect });
     }
 
     fn waitEntered(self: *FileActionHarness) !void {
@@ -24422,8 +24434,7 @@ test "Output check deadline and shutdown cancel then join before releasing froze
 test "File actions accept each identity exactly as declared" {
     const targets = [_]FileTarget{ testReference(7, "file-3-1-1-1"), testOutput(@splat(3)), .{ .workspace = testWorkspacePath(3, 1, "image.jpg") } };
     for (targets) |target| for (std.enums.values(FileAction)) |action| {
-        const output_only = action == .check or action == .open;
-        try std.testing.expectEqual(!output_only or target == .output, action.accepts(target));
+        try std.testing.expectEqual(action != .check or target == .output, action.accepts(target));
     };
     var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
     var control = try testRuntime();
@@ -24460,12 +24471,12 @@ test "File actions locate any identity without reading it, and act once on the m
         try std.testing.expect(control.beginFileAction(id, target, .check_current) == .queued);
         try harness.drainAll(control);
         try std.testing.expectEqual(FileActionState.ready, harness.lastState());
+        id += 1;
+        try std.testing.expect(control.beginFileAction(id, target, .open) == .queued);
+        try harness.drainAll(control);
+        try std.testing.expectEqual(FileActionState.opened, harness.lastState());
+        try std.testing.expectEqual(index, harness.opens);
     }
-    id += 1;
-    try std.testing.expect(control.beginFileAction(id, testOutput(@splat(3)), .open) == .queued);
-    try harness.drainAll(control);
-    try std.testing.expectEqual(FileActionState.opened, harness.lastState());
-    try std.testing.expectEqual(@as(usize, 1), harness.opens);
     try std.testing.expectEqual(targets.len, harness.reveals);
     try std.testing.expectEqual(@as(usize, 0), harness.inspections.load(.acquire));
     try std.testing.expectEqual(id, harness.locates.load(.acquire));
@@ -24477,6 +24488,7 @@ test "File actions locate any identity without reading it, and act once on the m
         .{ .err = error.SymLinkLoop, .expected = .restricted },
         .{ .err = error.OutputChanged, .expected = .changed },
         .{ .err = error.RuntimeUnavailable, .expected = .unavailable },
+        .{ .err = error.FileOpenFailed, .expected = .open_failed },
         .{ .err = error.InputOutput, .expected = .failed },
     }) |failure| {
         harness.locate_error = failure.err;
@@ -24486,6 +24498,91 @@ test "File actions locate any identity without reading it, and act once on the m
         try std.testing.expectEqual(failure.expected, harness.lastState());
     }
     try std.testing.expectEqual(targets.len, harness.reveals);
+}
+
+test "File actions refuse to open an unlisted type before any worker exists, and the projection says the same" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const workspace_file = struct {
+        fn at(path: []const u8) FileTarget {
+            return .{ .workspace = .{ .task_id = 3, .workspace_id = 1, .workspace_epoch = 1, .path = path } };
+        }
+    };
+    try std.testing.expectEqual(FileActionState.unavailable, control.beginFileAction(1, workspace_file.at("image.jpg"), .open).immediate);
+    var harness: FileActionHarness = .{ .main_thread_id = std.Thread.getCurrentId() };
+    harness.bind(&control);
+    const Delivered = struct { path: []const u8, open: ?[]const u8 };
+    const delivered = comptime [_]Delivered{
+        .{ .path = "results/report.docx", .open = "default_app" },
+        .{ .path = "results/report.html", .open = "browser" },
+        .{ .path = "results/report.exe", .open = null },
+        .{ .path = "results/README", .open = null },
+    };
+    for (delivered, 1..) |entry, index| {
+        var buffer: [256]u8 = undefined;
+        var envelope = try testEnvelope(3, 7, try std.fmt.bufPrint(&buffer, "{{\"tool_result\":{{\"id\":\"deliver-{d}\",\"name\":\"DeliverFile\",\"input\":\"{{}}\",\"content\":\"delivered\",\"is_error\":false,\"elapsed_ms\":1}}}}", .{index}));
+        defer envelope.deinit();
+        envelope.delivered_file = try lifecycle.FileDeliveryReceipt.init(@splat(@intCast(index)), entry.path, 42, @splat(2));
+        try control.applyEvent(&envelope);
+    }
+    const task = control.testTaskSlots()[0].?;
+    const Projected = struct {
+        /// `open` of every delivery, as the Run and the conversation list it.
+        fn opens(runtime: *Runtime, list: enum { run, conversation }) ![delivered.len]?[]const u8 {
+            const storage = try std.testing.allocator.alloc(u8, 256 * 1024);
+            defer std.testing.allocator.free(storage);
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try runtime.writeAggregateFixture(storage), .{});
+            defer parsed.deinit();
+            const view = parsed.value.object.get("tasks").?.array.items[0].object;
+            try std.testing.expect(view.get("officeOutputsOpen") == null and view.get("browserOutputsOpen") == null);
+            const outputs = switch (list) {
+                .run => view.get("runs").?.array.items[0].object.get("outputs").?,
+                .conversation => view.get("conversationOutputs").?,
+            };
+            try std.testing.expectEqual(delivered.len, outputs.array.items.len);
+            var values: [delivered.len]?[]const u8 = undefined;
+            for (outputs.array.items, &values) |output, *value| value.* = if (output.object.get("open")) |open|
+                (if (std.mem.eql(u8, open.string, "browser")) "browser" else if (std.mem.eql(u8, open.string, "default_app")) "default_app" else return error.TestUnexpectedResult)
+            else
+                null;
+            return values;
+        }
+    };
+    inline for (.{ .run, .conversation }) |list| {
+        for (delivered, try Projected.opens(&control, list)) |entry, open| {
+            try std.testing.expectEqual(entry.open == null, open == null);
+            if (entry.open) |expected| try std.testing.expectEqualStrings(expected, open.?);
+        }
+    }
+    // Nothing is offered that the Task could not do: an identity that no longer
+    // matches, a hidden path, a Host that is stopping.
+    task.durable.workspace_epoch += 1;
+    inline for (.{ .run, .conversation }) |list| for (try Projected.opens(&control, list)) |open| try std.testing.expect(open == null);
+    task.durable.workspace_epoch -= 1;
+    const record = &task.durable.runs[0].?.outputs[0].?;
+    record.redacted = true;
+    try std.testing.expect((try Projected.opens(&control, .run))[0] == null);
+    try std.testing.expect((try Projected.opens(&control, .run))[1] != null);
+    record.redacted = false;
+
+    // What the projection does not offer is refused at once, on the same
+    // answer, and no worker is ever made for it.
+    for (delivered, 1..) |entry, index| {
+        if (entry.open != null) continue;
+        try std.testing.expectEqual(FileActionState.open_unsupported, control.beginFileAction(index, testOutput(@splat(@intCast(index))), .open).immediate);
+        try std.testing.expectEqual(FileActionState.open_unsupported, control.beginFileAction(index, workspace_file.at(entry.path), .open).immediate);
+    }
+    try std.testing.expectEqual(@as(usize, 0), harness.prepares);
+    try std.testing.expect(control.file_actions.executor == null);
+    // Who may reach a file is decided before what may be done with it.
+    try std.testing.expectEqual(FileActionState.missing, control.beginFileAction(9, testOutput(@splat(9)), .open).immediate);
+    for (delivered, 1..) |entry, index| {
+        if (entry.open == null) continue;
+        harness.relative = entry.path;
+        try std.testing.expect(control.beginFileAction(index, testOutput(@splat(@intCast(index))), .open) == .queued);
+        try harness.drainAll(&control);
+        try std.testing.expectEqual(FileActionState.opened, harness.lastState());
+    }
 }
 
 test "File actions drop their effect when anything admitted changed before the main loop" {
@@ -24510,6 +24607,8 @@ test "File actions drop their effect when anything admitted changed before the m
         .{ .target = reference, .action = .reveal },
         .{ .target = workspace, .action = .reveal },
         .{ .target = testOutput(@splat(3)), .action = .reveal },
+        .{ .target = reference, .action = .open },
+        .{ .target = workspace, .action = .open },
         .{ .target = testOutput(@splat(3)), .action = .open },
     }) |request| for (std.enums.values(Change)) |change| {
         harness.count = 0;

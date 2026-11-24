@@ -30,8 +30,6 @@ export function RunOutputs({
   onAction,
   onPrepareEdit,
   onPreview,
-  officeOpen = false,
-  browserOpen = false,
   layout = "outputs",
 }: {
   outputs: readonly (DeliveredOutputView & { runId?: string })[];
@@ -41,8 +39,6 @@ export function RunOutputs({
   onAction?: FileActionHandler;
   onPrepareEdit?: OutputEditHandler;
   onPreview?: OutputPreview;
-  officeOpen?: boolean;
-  browserOpen?: boolean;
   layout?: "outputs" | "file-actions" | "conversation";
 }) {
   const { t } = useI18n();
@@ -60,8 +56,6 @@ export function RunOutputs({
           onAction={onAction}
           onPrepareEdit={onPrepareEdit}
           onPreview={onPreview}
-          officeOpen={officeOpen}
-          browserOpen={browserOpen}
           actionsOnly={actionsOnly}
         />
       ))}
@@ -83,8 +77,6 @@ function OutputRow({
   onAction,
   onPrepareEdit,
   onPreview,
-  officeOpen,
-  browserOpen,
   actionsOnly,
 }: {
   output: DeliveredOutputView;
@@ -94,12 +86,9 @@ function OutputRow({
   onAction?: FileActionHandler;
   onPrepareEdit?: OutputEditHandler;
   onPreview?: OutputPreview;
-  officeOpen: boolean;
-  browserOpen: boolean;
   actionsOnly: boolean;
 }) {
   const { locale, t } = useI18n();
-  const html = /\.html?$/i.test(output.displayPath);
   const nameId = useId();
   const [pending, setPending] = useState<RowAction | null>(null);
   const [cancelling, setCancelling] = useState(false);
@@ -224,22 +213,23 @@ function OutputRow({
         )}
         {onAction && taskId && runId && (
           <div className="run-output-actions">
-            {!actionsOnly &&
-              ((officeOpen &&
-                /\.(?:docx|xlsx|pptx)$/i.test(output.displayPath)) ||
-                (browserOpen && html)) && (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  aria-describedby={nameId}
-                  disabled={disabled || pending !== null || output.redacted}
-                  onClick={() => void perform("open")}
-                >
-                  {t(html ? "outputs.open_browser" : "outputs.open")}
-                </Button>
-              )}
-            {!actionsOnly && onPreview && html && (
+            {!actionsOnly && output.open && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                aria-describedby={nameId}
+                disabled={disabled || pending !== null || output.redacted}
+                onClick={() => void perform("open")}
+              >
+                {t(
+                  output.open === "browser"
+                    ? "outputs.open_browser"
+                    : "outputs.open",
+                )}
+              </Button>
+            )}
+            {!actionsOnly && onPreview && output.open === "browser" && (
               <Button
                 type="button"
                 variant="ghost"

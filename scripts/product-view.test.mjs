@@ -321,6 +321,7 @@ test("delivered Output wire consumes only bounded trusted metadata and rejects p
   }));
   assert.throws(() => decodeWorkbenchSnapshot(over));
   const hidden = structuredClone(value);
+  delete hidden.taskPage.task.runs[0].outputs[0].open;
   Object.assign(hidden.taskPage.task.runs[0].outputs[0], {
     displayPath: "",
     redacted: true,
@@ -333,6 +334,47 @@ test("delivered Output wire consumes only bounded trusted metadata and rejects p
   const missing = structuredClone(value);
   delete missing.taskPage.task.runs[0].outputs;
   assert.throws(() => decodeWorkbenchSnapshot(missing));
+});
+
+test("an output says where the Host opens it, for a Run and for the conversation alike", () => {
+  const value = structuredClone(fixture);
+  const task = value.taskPage.task;
+  const runId = task.runs[0].id;
+  const set = (open) => {
+    const row = structuredClone(deliveredOutput);
+    delete row.open;
+    if (open !== undefined) row.open = open;
+    task.runs[0].outputs = [row];
+    task.conversationOutputs = [{ ...row, runId }];
+  };
+  for (const open of ["browser", "default_app", undefined]) {
+    set(open);
+    const decoded = decodeWorkbenchSnapshot(value).taskPage.task;
+    for (const output of [
+      decoded.runs[0].outputs[0],
+      decoded.conversationOutputs[0],
+    ]) {
+      assert.equal(output.open, open);
+      assert.equal(Object.hasOwn(output, "open"), open !== undefined);
+    }
+  }
+  for (const open of ["office", "", true, null]) {
+    set(open);
+    assert.throws(() => decodeWorkbenchSnapshot(value));
+    task.runs[0].outputs[0].open = "browser";
+    assert.throws(() => decodeWorkbenchSnapshot(value));
+  }
+  // A hidden path has nothing to open.
+  set("default_app");
+  for (const row of [task.runs[0].outputs[0], task.conversationOutputs[0]])
+    Object.assign(row, { displayPath: "", redacted: true });
+  assert.throws(() => decodeWorkbenchSnapshot(value));
+  for (const field of ["officeOutputsOpen", "browserOutputsOpen"]) {
+    set("browser");
+    const old = structuredClone(value);
+    old.taskPage.task[field] = true;
+    assert.throws(() => decodeWorkbenchSnapshot(old));
+  }
 });
 
 test("Product bounded Host search shares Native wire and rejects oversized or stale pages", () => {

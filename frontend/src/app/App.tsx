@@ -5711,8 +5711,6 @@ export default function App() {
                 <RunOutputs
                   layout="conversation"
                   outputs={panelTask.conversationOutputs}
-                  officeOpen={panelTask.officeOutputsOpen}
-                  browserOpen={panelTask.browserOutputsOpen}
                   taskId={panelTask.id}
                   disabled={bridgeUnavailable}
                   onPreview={

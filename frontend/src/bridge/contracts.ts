@@ -979,6 +979,8 @@ export const fileActionStates = [
   "saved",
   "registered",
   "opened",
+  "open_unsupported",
+  "open_failed",
   "save_failed",
   "target_changed",
   "cleanup_failed",
@@ -1000,8 +1002,12 @@ export type FileActionHandler = (
   action: FileAction,
   signal: AbortSignal,
 ) => Promise<FileActionState>;
+export const fileOpenKinds = ["browser", "default_app"] as const;
+export type FileOpenKind = (typeof fileOpenKinds)[number];
 export type DeliveredOutputView = {
   updated?: true;
+  // Where the Host opens this file; absent when it does not.
+  open?: FileOpenKind;
   id: string;
   displayPath: string;
   sizeBytes: string;
@@ -1384,8 +1390,6 @@ export const modelInputBlockers = [
 
 export type TaskView = {
   conversationOutputs?: (DeliveredOutputView & { runId: string })[];
-  officeOutputsOpen?: true;
-  browserOutputsOpen?: true;
   modelInputBlocker?: (typeof modelInputBlockers)[number];
   sessionCloseRetryAvailable?: true;
   signal: (typeof taskNavigationSignals)[number] | null;

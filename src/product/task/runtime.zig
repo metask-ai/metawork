@@ -1244,8 +1244,7 @@ pub const ProjectionEffects = struct {
     authority_fn: *const fn (*anyopaque, ProjectionAuthorityQuery) ProjectionAuthority,
     text: task_view.TextProjection,
     output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void = null,
-    office_outputs_open: bool = false,
-    browser_outputs_open: bool = false,
+    file_open: ?task_view.FileOpen = null,
     catalog: task_view.CatalogProjection,
     max_pending_ui_json_bytes: usize,
 
@@ -6907,8 +6906,7 @@ pub const Runtime = struct {
                 .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
                 .text = effects.text,
                 .output_path_validator = if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
-                .office_outputs_open = effects.office_outputs_open and external.workspace_identity_exact and !external.shutting_down,
-                .browser_outputs_open = effects.browser_outputs_open and external.workspace_identity_exact and !external.shutting_down,
+                .file_open = if (external.workspace_identity_exact and !external.shutting_down) effects.file_open else null,
                 .catalog = effects.catalog,
                 .pending_ui = .{
                     .context = &pending_ui_context,
@@ -7169,6 +7167,7 @@ pub const Runtime = struct {
                 task_view.editAdmitted(task, run, external.shutting_down),
                 effects.now_ms,
                 if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
+                if (external.workspace_identity_exact and !external.shutting_down) effects.file_open else null,
                 self.allocator,
             );
         }
@@ -7215,8 +7214,7 @@ pub const Runtime = struct {
             .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
             .text = effects.text,
             .output_path_validator = if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
-            .office_outputs_open = effects.office_outputs_open and external.workspace_identity_exact and !external.shutting_down,
-            .browser_outputs_open = effects.browser_outputs_open and external.workspace_identity_exact and !external.shutting_down,
+            .file_open = if (external.workspace_identity_exact and !external.shutting_down) effects.file_open else null,
             .catalog = effects.catalog,
             .pending_ui = .{ .context = &pending_ui_context, .write_fn = writePendingUiProjection },
             .run_start = start,
