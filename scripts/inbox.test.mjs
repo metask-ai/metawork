@@ -78,6 +78,7 @@ function view(patch = {}) {
   return decodeInboxView({
     binding: "1",
     state: "ready",
+    accountScope: null,
     unreadTotal: "3",
     syncedAtMs: at("2026-11-23T08:00:00Z"),
     conversations: [
@@ -146,6 +147,7 @@ function taskView(patch = {}) {
     assignees: ["Ann"],
     createdBy: null,
     updatedAtMs: null,
+    canLink: false,
     lastNote: null,
     notes: [],
     children: [],

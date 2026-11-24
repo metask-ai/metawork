@@ -235,6 +235,7 @@ export function decodeUpdateViewWire(
   };
 }
 export type InboxViewWire = {
+  accountScope: string | null;
   binding: string;
   state: "unavailable" | "checking" | "ready" | "reauthorize" | "unreachable";
   unreadTotal: string | null;
@@ -285,6 +286,7 @@ export function decodeInboxViewWire(
   path: string,
 ): InboxViewWire {
   const item = object(value, path, [
+    "accountScope",
     "binding",
     "state",
     "unreadTotal",
@@ -296,6 +298,10 @@ export function decodeInboxViewWire(
     "diagnostic",
   ]);
   return {
+    accountScope:
+      item.accountScope === null
+        ? null
+        : stringValue(item.accountScope, path + ".accountScope"),
     binding: u64WireInteger(item.binding, path + ".binding"),
     state: enumValue(item.state, path + ".state", [
       "unavailable",
@@ -556,6 +562,7 @@ export type InboxTaskDetailWire = {
     | "failed";
   task: {
     id: string;
+    canLink: boolean;
     name: string;
     progress: string | null;
     state: string | null;
@@ -646,6 +653,7 @@ export function decodeInboxTaskDetailWire(
         : ((value: unknown, path: string) => {
             const item = object(value, path, [
               "id",
+              "canLink",
               "name",
               "progress",
               "state",
@@ -660,6 +668,7 @@ export function decodeInboxTaskDetailWire(
             ]);
             return {
               id: stringValue(item.id, path + ".id"),
+              canLink: booleanValue(item.canLink, path + ".canLink"),
               name: stringValue(item.name, path + ".name"),
               progress:
                 item.progress === null

@@ -4,7 +4,10 @@ const inbox = @import("metawork_product_inbox");
 const sql = @import("metawork_storage_sql");
 const sqlite = @import("metawork_storage_sqlite");
 
-pub const migrations = [_]sql.Migration{.{ .version = 1, .name = "message_history", .sql = inbox.database_schema }};
+pub const migrations = [_]sql.Migration{
+    .{ .version = 1, .name = "message_history", .sql = inbox.database_schema },
+    .{ .version = 2, .name = "binding_owner", .sql = inbox.binding_owner_schema },
+};
 
 pub fn open(io: std.Io, allocator: std.mem.Allocator, directory: []const u8) !*sqlite.Database {
     const path = try std.fs.path.join(allocator, &.{ directory, inbox.database_name });
@@ -77,6 +80,29 @@ const Batch = struct {
 pub const Store = struct {
     db: sql.Database,
     scope: [32]u8,
+
+    pub fn knownOwner(self: *const Store) !?inbox.Id {
+        const Rows = struct {
+            owner: ?inbox.Id = null,
+            failed: bool = false,
+            fn append(rows: *@This(), row: sql.Row) !void {
+                rows.owner = try .init(row.value(0).text);
+            }
+        };
+        var rows: Rows = .{};
+        if (self.db.query("SELECT member_id FROM binding_owner WHERE binding_id=?", &.{.{ .blob = &self.scope }}, .{
+            .context = &rows,
+            .receive_fn = receiveRows(Rows),
+        }) != .ok or rows.failed) return error.CacheRead;
+        return rows.owner;
+    }
+
+    pub fn rememberOwner(self: *const Store, owner: inbox.Id) !void {
+        if (self.db.mutate(&.{.{ .statement = .{
+            .sql = "INSERT INTO binding_owner(binding_id,member_id) VALUES(?,?) ON CONFLICT(binding_id) DO UPDATE SET member_id=excluded.member_id WHERE member_id<>excluded.member_id",
+            .params = &.{ .{ .blob = &self.scope }, .{ .text = owner.slice() } },
+        } }}) != .committed) return error.CacheWrite;
+    }
 
     pub fn list(self: *const Store, a: std.mem.Allocator, cursor: ?inbox.ListCursor) !inbox.ListPage {
         const Rows = struct {
