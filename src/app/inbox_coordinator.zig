@@ -259,6 +259,7 @@ const Job = struct {
     unread: ?inbox.Unread = null,
     page: ?inbox.Messages = null,
     page_limit: u32 = 0,
+    consumed_unread: bool = false,
     detail: ?inbox.Detail = null,
     /// The names a send reached, when MetaTeam took it.
     sent: ?[]inbox.Name = null,
@@ -409,6 +410,14 @@ const Job = struct {
                 },
             };
             self.page_limit = limit;
+            // Cache writes restore the first observed "new" mark for display.
+            // Only the mark on this HTTP response is evidence of a new read.
+            for (self.page.?.items) |*message| {
+                if (message.is_new) {
+                    self.consumed_unread = true;
+                    break;
+                }
+            }
             return true;
         }
     }
@@ -932,6 +941,7 @@ pub const Coordinator = struct {
             job.join();
             self.conversation = null;
             const work = job.work.conversation;
+            if (job.consumed_unread) self.management.messages_marked_read_fn(self.management.context, work.reply.binding);
             const current = self.management.accepts_fn(self.management.context, work.reply.binding);
             // A completed read is already saved and may have consumed unread
             // messages even if the user selected another peer in the meantime.
@@ -1016,6 +1026,7 @@ pub const Coordinator = struct {
         self.send = null;
         defer job.destroy();
         const work = &job.work.send;
+        if (job.consumed_unread) self.management.messages_marked_read_fn(self.management.context, work.reply.binding);
         const state = inbox.sendState(job.send_status);
         // A new conversation joins the list and becomes the one being read;
         // when its recipient is known.
@@ -1549,6 +1560,7 @@ const TestManagement = struct {
             .set_active_fn = setActive,
             .next_poll_fn = nextPoll,
             .begin_poll_fn = beginPoll,
+            .messages_marked_read_fn = messagesMarkedRead,
             .complete_poll_fn = completePoll,
             .request_refresh_fn = requestRefresh,
             .request_earlier_fn = requestEarlier,
@@ -1587,6 +1599,9 @@ const TestManagement = struct {
     }
     fn completePoll(context: *anyopaque, now_ms: u64, wall_ms: u64, id: u64, completion: inbox.PollCompletion) void {
         _ = of(context).completePoll(now_ms, wall_ms, id, completion) catch unreachable;
+    }
+    fn messagesMarkedRead(context: *anyopaque, binding: u64) void {
+        of(context).messagesMarkedRead(binding);
     }
     fn requestRefresh(context: *anyopaque, now_ms: u64, binding: u64, explicit: bool) inbox.CommandOutcome {
         return of(context).requestRefresh(now_ms, binding, explicit);
@@ -1991,6 +2006,9 @@ test "inbox coordinator: only the opened peer is read, and their messages surviv
         f.settle();
         try testing.expect(std.mem.endsWith(u8, f.transport.url(1), "/messages?peer=ann&limit=50"));
         try testing.expect(std.mem.indexOf(u8, f.capture.last(), "\"isNew\":true") != null);
+        try testing.expectEqual(@as(u64, 1), f.view().unreadTotal.?.value);
+        try testing.expectEqual(@as(usize, 3), f.transport.count);
+        try testing.expect(std.mem.endsWith(u8, f.transport.url(2), "/open/v1/unread"));
     }
     var f: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
     try f.initTarget(.{ .file = path });
@@ -2760,6 +2778,15 @@ test "inbox coordinator: against a local MetaTeam over real HTTP, with the key r
     try testing.expect(coordinator.readConversation(responder, "read", .{ .binding = binding, .request_id = 9, .peer = "ann-id", .kind = .latest, .anchor = null }));
     settle(&coordinator);
     try testing.expect(std.mem.indexOf(u8, capture.last(), "\"isNew\":true") != null);
+    try testing.expectEqual(@as(u64, 1), management.runtime.view().unreadTotal.?.value);
+    for (management.runtime.view().conversations) |row| {
+        if (std.mem.eql(u8, row.peerId, "ann-id")) try testing.expectEqual(@as(u64, 0), row.unread.value);
+        if (std.mem.eql(u8, row.peerId, "bob-id")) try testing.expectEqual(@as(u64, 1), row.unread.value);
+    }
+    try testing.expect(coordinator.readConversation(responder, "read-bob", .{ .binding = binding, .request_id = 10, .peer = "bob-id", .kind = .latest, .anchor = null }));
+    settle(&coordinator);
+    try testing.expectEqual(@as(u64, 0), management.runtime.view().unreadTotal.?.value);
+    for (management.runtime.view().conversations) |row| try testing.expectEqual(@as(u64, 0), row.unread.value);
     const key = "0b6f7c2e-7d1a-4c55-9f0e-2a4b6c8d0e1f";
     try testing.expect(coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .to = .{ .peer = "ann-id" }, .text = "On it", .request_key = key }));
     settle(&coordinator);

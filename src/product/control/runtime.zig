@@ -10178,6 +10178,7 @@ pub const Runtime = struct {
             .set_active_fn = inboxSetActive,
             .next_poll_fn = inboxNextPoll,
             .begin_poll_fn = inboxBeginPoll,
+            .messages_marked_read_fn = inboxMessagesMarkedRead,
             .complete_poll_fn = inboxCompletePoll,
             .request_refresh_fn = inboxRequestRefresh,
             .request_earlier_fn = inboxRequestEarlier,
@@ -10236,6 +10237,9 @@ pub const Runtime = struct {
     fn inboxCompletePoll(context: *anyopaque, now_ms: u64, wall_ms: u64, id: u64, completion: inbox.PollCompletion) void {
         const self = inboxOwner(context);
         self.inboxSettle(self.inbox.completePoll(now_ms, wall_ms, id, completion));
+    }
+    fn inboxMessagesMarkedRead(context: *anyopaque, binding: u64) void {
+        inboxOwner(context).inbox.messagesMarkedRead(binding);
     }
     fn inboxRequestRefresh(context: *anyopaque, now_ms: u64, binding: u64, explicit: bool) inbox.CommandOutcome {
         const self = inboxOwner(context);

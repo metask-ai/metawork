@@ -273,6 +273,37 @@ test("the navigation badge shows the unread total only from a usable connection"
   const client = fakeClient();
   const { rerender } = render(element(client, view()));
   assert.ok(screen.getByRole("button", { name: "Messages, 3 unread" }));
+  const rows = view().conversations;
+  const oneLeft = rows.map((row) => ({
+    ...row,
+    unread: row.peerId === "bob" ? "1" : "0",
+  }));
+  rerender(element(client, view({ unreadTotal: "1", conversations: oneLeft })));
+  assert.equal(
+    document.querySelector(".primary-navigation-unread").textContent,
+    "1",
+  );
+  assert.equal(
+    screen
+      .getByRole("button", { name: "Ann" })
+      .querySelector(".inbox-unread-badge"),
+    null,
+  );
+  assert.equal(
+    document.querySelector(".inbox-list-row[data-unread=true] strong")
+      .textContent,
+    "Bob",
+  );
+  rerender(
+    element(
+      client,
+      view({
+        unreadTotal: "0",
+        conversations: rows.map((row) => ({ ...row, unread: "0" })),
+      }),
+    ),
+  );
+  assert.equal(document.querySelector(".inbox-unread-badge"), null);
   rerender(
     element(
       client,

@@ -1245,6 +1245,7 @@ pub const Runtime = struct {
     failures: u8 = 0,
     sequence: u64 = 0,
     poll_id: ?u64 = null,
+    poll_after_read: bool = false,
     list_id: ?u64 = null,
     list_requested: bool = false,
     /// Keep an opened peer addressable even when their unread count clears.
@@ -1290,6 +1291,7 @@ pub const Runtime = struct {
         self.last_result_ms = null;
         self.failures = 0;
         self.poll_id = null;
+        self.poll_after_read = false;
         self.list_id = null;
         self.list_requested = false;
         self.viewing = null;
@@ -1360,13 +1362,21 @@ pub const Runtime = struct {
     /// foreground, not refused and not already running.
     pub fn nextPoll(self: *const Runtime) ?u64 {
         if (!self.available or !self.bound or !self.active or self.state == .reauthorize or self.poll_id != null) return null;
+        if (self.poll_after_read and self.state == .ready) return 0;
         return self.next_poll_ms;
+    }
+
+    /// A remote messages response consumed unread items. Coalesce reads until
+    /// a poll starts after them; an older in-flight poll cannot cover them.
+    pub fn messagesMarkedRead(self: *Runtime, binding: u64) void {
+        if (self.accepts(binding)) self.poll_after_read = true;
     }
 
     pub fn beginPoll(self: *Runtime) ?u64 {
         if (!self.available or !self.bound or self.poll_id != null) return null;
         const id = self.nextId() orelse return null;
         self.poll_id = id;
+        self.poll_after_read = false;
         return id;
     }
 
@@ -1805,6 +1815,7 @@ pub const Management = struct {
     set_active_fn: *const fn (*anyopaque, u64, bool) void,
     next_poll_fn: *const fn (*anyopaque) ?u64,
     begin_poll_fn: *const fn (*anyopaque) ?u64,
+    messages_marked_read_fn: *const fn (*anyopaque, u64) void,
     complete_poll_fn: *const fn (*anyopaque, u64, u64, u64, PollCompletion) void,
     request_refresh_fn: *const fn (*anyopaque, u64, u64, bool) CommandOutcome,
     request_earlier_fn: *const fn (*anyopaque, u64) CommandOutcome,
@@ -2315,6 +2326,36 @@ test "an automatic refresh keeps the background rules; only an explicit retry pa
     try testing.expectEqual(CommandOutcome.rejected, runtime.requestRefresh(10_000_000, binding, false));
     try testing.expectEqual(CommandOutcome.accepted, runtime.requestRefresh(2000, binding, true));
     try testing.expectEqual(CommandOutcome.rejected, runtime.requestRefresh(2000, binding + 1, true));
+}
+
+test "reads during an unread poll schedule one follow-up within the foreground and retry rules" {
+    var runtime: Runtime = .init(testing.allocator);
+    defer runtime.deinit();
+    runtime.start(true);
+    _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
+    const binding = runtime.binding;
+    const unread: Unread = .{ .total = 0, .by_peer = &.{} };
+
+    const old_poll = runtime.beginPoll().?;
+    runtime.messagesMarkedRead(binding);
+    runtime.messagesMarkedRead(binding);
+    try testing.expect(runtime.nextPoll() == null);
+    _ = try runtime.completePoll(100, 1, old_poll, .{ .unread = &unread });
+    runtime.setActive(100, false);
+    try testing.expect(runtime.nextPoll() == null);
+    runtime.setActive(101, true);
+    try testing.expect(runtime.nextPoll().? <= 101);
+    _ = try runtime.completePoll(102, 2, runtime.beginPoll().?, .{ .unread = &unread });
+    runtime.messagesMarkedRead(binding + 1);
+    try testing.expectEqual(@as(?u64, 102 + Limits.poll_interval_ms), runtime.nextPoll());
+
+    const failed_poll = runtime.beginPoll().?;
+    runtime.messagesMarkedRead(binding);
+    _ = try runtime.completePoll(103, 3, failed_poll, .{ .failed = .{ .@"unreachable" = null } });
+    try testing.expectEqual(@as(?u64, 103 + Limits.retry_ms[0]), runtime.nextPoll());
+    _ = try runtime.completePoll(104, 4, runtime.beginPoll().?, .{ .failed = .reauthorize });
+    runtime.messagesMarkedRead(binding);
+    try testing.expect(runtime.nextPoll() == null);
 }
 
 test "one task or conversation read never changes the connection state" {
