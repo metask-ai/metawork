@@ -257,8 +257,12 @@ pub const Adapter = struct {
                 allocator.free(path);
             }
             const runtime = self.adapter.native_runtime orelse return error.RuntimeUnavailable;
-            runtime.writeClipboardData(.{ .mime_type = "text/plain", .bytes = path }) catch |err|
-                return if (err == error.UnsupportedService) err else error.ClipboardWriteFailed;
+            const services_value = &runtime.options.platform.services;
+            if (services_value.write_clipboard_data_fn == null and services_value.write_clipboard_fn == null)
+                return error.UnsupportedService;
+            // The system platforms answer a write the clipboard did not take
+            // with `UnsupportedService` too.
+            runtime.writeClipboardData(.{ .mime_type = "text/plain", .bytes = path }) catch return error.ClipboardWriteFailed;
         }
 
         /// The only effect that hands the file to another program by name, so
@@ -271,18 +275,16 @@ pub const Adapter = struct {
             defer allocator.free(absolute);
             var buffer: [native_sdk.platform.max_external_url_bytes]u8 = undefined;
             const url = try directoryFileUrl(if (builtin.os.tag == .windows) .windows else .posix, absolute, &buffer);
+            // Whether there is anything to hand it to is settled by the kind, so
+            // any error after that says the system did not take it: the system
+            // platforms report that as `UnsupportedService`.
             switch (fileOpenKind(self.adapter, self.relative) orelse return error.UnsupportedService) {
-                .browser => output_browser_handoff.openHtml(url) catch |err| return handoffFailure(err),
+                .browser => output_browser_handoff.openHtml(url) catch return error.FileOpenFailed,
                 .default_app => {
                     const services_value = self.adapter.platform_services orelse return error.RuntimeUnavailable;
-                    services_value.openExternalUrl(url) catch |err| return handoffFailure(err);
+                    services_value.openExternalUrl(url) catch return error.FileOpenFailed;
                 },
             }
-        }
-
-        /// The file was fine and the system did not take it.
-        fn handoffFailure(err: anyerror) anyerror {
-            return if (err == error.UnsupportedService) err else error.FileOpenFailed;
         }
 
         fn release(context: *anyopaque) void {
@@ -1063,8 +1065,9 @@ test "SDK consumption copying a path writes exactly that text to the clipboard a
         fn run(self: *@This()) void {
             self.result = self.effect.perform_fn(self.effect.context);
         }
+        // What both system platforms answer when the clipboard did not take it.
         fn refused(_: ?*anyopaque, _: native_sdk.platform.ClipboardData) anyerror!void {
-            return error.ClipboardFailed;
+            return error.UnsupportedService;
         }
     };
     var foreign: Foreign = .{ .effect = &effect };
@@ -1073,6 +1076,10 @@ test "SDK consumption copying a path writes exactly that text to the clipboard a
     try std.testing.expectError(error.InvalidThread, foreign.result);
     harness.runtime.options.platform.services.write_clipboard_data_fn = Foreign.refused;
     try std.testing.expectError(error.ClipboardWriteFailed, effect.perform_fn(effect.context));
+    // A platform with no clipboard at all has not refused anything.
+    harness.runtime.options.platform.services.write_clipboard_data_fn = null;
+    harness.runtime.options.platform.services.write_clipboard_fn = null;
+    try std.testing.expectError(error.UnsupportedService, effect.perform_fn(effect.context));
     adapter.native_runtime = null;
     try std.testing.expectError(error.RuntimeUnavailable, effect.perform_fn(effect.context));
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.clipboard_write_count);
@@ -1289,7 +1296,8 @@ test "SDK consumption file open hands a listed type to the system once and nothi
         fn open(_: ?*anyopaque, url: []const u8) !void {
             calls += 1;
             try std.testing.expect(std.mem.startsWith(u8, url, "file://"));
-            if (fail) return error.InjectedOpenFailure;
+            // What both system platforms answer when nothing took the file.
+            if (fail) return error.UnsupportedService;
         }
     };
     Spy.calls = 0;
