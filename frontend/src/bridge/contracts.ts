@@ -336,6 +336,8 @@ export type FilePreviewImage = {
   readonly src: string;
   readonly securityEpoch: string;
   valid: () => boolean;
+  /** Whether what it was checked under still holds, released or not. */
+  current: () => boolean;
   subscribe: (changed: () => void) => () => void;
   beginDecode: (signal: AbortSignal) => Promise<() => void>;
 };

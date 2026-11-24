@@ -597,6 +597,271 @@ test("file sizes read as file managers show them", () => {
     assert.equal(formatFileSize("en-US", bytes), text);
 });
 
+function imageResource() {
+  let current = true;
+  return {
+    expire: () => {
+      current = false;
+    },
+    image: {
+      id: "image",
+      mediaType: "image/jpeg",
+      width: 40,
+      height: 20,
+      securityEpoch: "1",
+      src: "data:image/jpeg;base64,AA==",
+      valid: () => true,
+      current: () => current,
+      subscribe: () => () => {},
+      beginDecode: async () => () => {},
+    },
+  };
+}
+
+// A browser's image and canvas, as far as encoding one needs them.
+function installImageEncoding(t, { decode, png = "png", write }) {
+  const images = dom.window.HTMLImageElement.prototype;
+  const canvas = dom.window.HTMLCanvasElement.prototype;
+  const drawn = [];
+  const originals = {
+    Image: globalThis.Image,
+    ClipboardItem: globalThis.ClipboardItem,
+    getContext: canvas.getContext,
+    toBlob: canvas.toBlob,
+  };
+  const writes = [];
+  Object.assign(globalThis, {
+    Image: dom.window.Image,
+    ClipboardItem: class {
+      static supports = (type) => type === "image/png";
+      constructor(items) {
+        this.items = items;
+      }
+    },
+  });
+  Object.defineProperty(dom.window.navigator, "clipboard", {
+    configurable: true,
+    value: {
+      write: (items) => {
+        writes.push(...items);
+        return (
+          write?.() ??
+          Promise.all(items.flatMap((item) => Object.values(item.items)))
+        );
+      },
+    },
+  });
+  images.decode = function () {
+    // The displayed one is in the document; the other is being copied.
+    return this.isConnected ? Promise.resolve() : decode();
+  };
+  Object.defineProperties(images, {
+    naturalWidth: { configurable: true, get: () => 400 },
+    naturalHeight: { configurable: true, get: () => 200 },
+  });
+  canvas.getContext = function () {
+    return {
+      drawImage: (image) =>
+        drawn.push({
+          canvas: this,
+          source: image.src,
+          width: this.width,
+          height: this.height,
+        }),
+    };
+  };
+  canvas.toBlob = function (done, type) {
+    assert.equal(type, "image/png");
+    done(png && new Blob([png], { type }));
+  };
+  t.after(() => {
+    delete dom.window.navigator.clipboard;
+    delete images.decode;
+    delete images.naturalWidth;
+    delete images.naturalHeight;
+    canvas.getContext = originals.getContext;
+    canvas.toBlob = originals.toBlob;
+    globalThis.Image = originals.Image;
+    if (originals.ClipboardItem === undefined) delete globalThis.ClipboardItem;
+    else globalThis.ClipboardItem = originals.ClipboardItem;
+  });
+  return { drawn, writes };
+}
+
+async function shownImage(handler, resource) {
+  const mounted = render(
+    view(
+      handler,
+      createElement(ReplyImage, {
+        target: reference,
+        displayPath: "generated-images/a.jpg",
+        enabled: true,
+        load: async () => ({
+          state: "ready",
+          content: "",
+          truncated: false,
+          redacted: false,
+          image: resource.image,
+          release: () => {},
+        }),
+        onOpen: () => {},
+      }),
+    ),
+  );
+  await waitFor(() =>
+    assert.ok(mounted.container.querySelector("img")?.getAttribute("src")),
+  );
+  return {
+    button: screen.getByRole("button", { name: /^Preview/ }),
+    decode: () =>
+      act(async () => fireEvent.load(mounted.container.querySelector("img"))),
+  };
+}
+
+test("copying an image is offered first, on an image alone, once it is shown", async (t) => {
+  installImageEncoding(t, { decode: async () => {} });
+  const { handler, calls } = handlerFixture();
+  const { button, decode } = await shownImage(handler, imageResource());
+  let menu = await openMenu(button);
+  assert.deepEqual(
+    menuItems(menu).map((item) => item.name),
+    ["Copy image", ...five],
+  );
+  assert.deepEqual(disabledItems(menu), ["Copy image"]);
+  await closeMenu(menu);
+  await decode();
+  menu = await openMenu(button);
+  assert.deepEqual(disabledItems(menu), []);
+  await closeMenu(menu);
+  assert.deepEqual(calls, []);
+  cleanup();
+
+  // Nothing to copy from what is not shown.
+  render(
+    view(
+      handler,
+      createElement(ReplyImage, {
+        target: reference,
+        displayPath: "a.png",
+        enabled: true,
+        load: async () => ({
+          state: "missing",
+          content: "",
+          truncated: false,
+          redacted: false,
+        }),
+        onOpen: () => {},
+      }),
+      card(),
+    ),
+  );
+  const failed = screen.getByRole("button", { name: /^Preview/ });
+  menu = await openMenu(failed);
+  assert.deepEqual(disabledItems(menu), ["Copy image"]);
+  await closeMenu(menu);
+  menu = await openMenu(screen.getByRole("group", { name: /report\.docx/ }));
+  assert.deepEqual(
+    menuItems(menu).map((item) => item.name),
+    five,
+  );
+  await closeMenu(menu);
+});
+
+test("an image is copied within the click, in its own size and as PNG alone", async (t) => {
+  let finishDecode;
+  const { drawn, writes } = installImageEncoding(t, {
+    decode: () =>
+      new Promise((resolve) => {
+        finishDecode = resolve;
+      }),
+  });
+  const { handler, calls } = handlerFixture();
+  const resource = imageResource();
+  const { button, decode } = await shownImage(handler, resource);
+  await decode();
+  const menu = await openMenu(button);
+  const item = within(menu).getByRole("menuitem", { name: "Copy image" });
+  act(() => {
+    fireEvent.click(item);
+    assert.equal(writes.length, 1);
+  });
+  assert.deepEqual(Object.keys(writes[0].items), ["image/png"]);
+  assert.equal(screen.getByRole("status").textContent, "Copying image…");
+  await act(async () => {});
+  await act(async () => finishDecode());
+  assert.equal(screen.getByRole("status").textContent, "Image copied");
+  const blob = await writes[0].items["image/png"];
+  assert.equal(blob.type, "image/png");
+  assert.equal(drawn.length, 1);
+  assert.deepEqual(
+    [drawn[0].source, drawn[0].width, drawn[0].height],
+    [resource.image.src, 400, 200],
+  );
+  // Its pixels are given back as soon as they are encoded.
+  assert.deepEqual([drawn[0].canvas.width, drawn[0].canvas.height], [0, 0]);
+  // Neither the Host nor its path took part.
+  assert.deepEqual(calls, []);
+});
+
+test("an image that cannot be copied says why and writes nothing", async (t) => {
+  const failed = "Could not copy. Try again.";
+  for (const { setup, meanwhile, message } of [
+    { setup: { decode: async () => Promise.reject(Error()) }, message: failed },
+    { setup: { decode: async () => {}, png: null }, message: failed },
+    {
+      setup: {
+        decode: async () => {},
+        write: () => Promise.reject(new Error("refused")),
+      },
+      message: failed,
+    },
+    {
+      setup: {},
+      meanwhile: (resource) => resource.expire(),
+      message: "Authorization changed. Check again.",
+    },
+    {
+      setup: {},
+      meanwhile: () =>
+        fireEvent.click(screen.getByRole("button", { name: "Cancel" })),
+      message: "Operation cancelled",
+    },
+  ]) {
+    await t.test(message, async (t) => {
+      let finishDecode;
+      const { writes } = installImageEncoding(t, {
+        decode: () =>
+          new Promise((resolve) => {
+            finishDecode = resolve;
+          }),
+        ...setup,
+      });
+      const { handler } = handlerFixture();
+      const resource = imageResource();
+      const { button, decode } = await shownImage(handler, resource);
+      await decode();
+      const menu = await openMenu(button);
+      const settled = [];
+      await act(async () => {
+        fireEvent.click(
+          within(menu).getByRole("menuitem", { name: "Copy image" }),
+        );
+        writes[0].items["image/png"].then(
+          () => settled.push("written"),
+          () => settled.push("refused"),
+        );
+      });
+      if (meanwhile) {
+        await act(async () => meanwhile(resource));
+        await act(async () => finishDecode());
+      }
+      assert.equal(screen.getByRole("status").textContent, message);
+      if (!setup.write) assert.deepEqual(settled, ["refused"]);
+      cleanup();
+    });
+  }
+});
+
 const described = {
   image: {
     state: "ready",

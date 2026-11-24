@@ -27,6 +27,11 @@ export type MenuFile = {
   available?: boolean;
   /** False when the Host said it does not open it. Nobody asked when absent. */
   openable?: boolean;
+  /**
+   * Copies the image it is shown as, from what the interface already holds.
+   * Null while there is none to copy, absent for anything but an image.
+   */
+  copyImage?: ((signal: AbortSignal) => Promise<FileMenuOutcome>) | null;
 };
 
 export type FileMenuAction =
@@ -54,6 +59,12 @@ type OpenFileMenu = (
 ) => void;
 const OpenFileMenuContext = createContext<OpenFileMenu | null>(null);
 
+type MenuAction = FileMenuAction | "copy_image";
+const copyImage = {
+  action: "copy_image",
+  icon: "copy",
+  label: "outputs.copy_image",
+} as const;
 const items = [
   { action: "open", icon: "external-link", label: "outputs.open" },
   { action: "reveal", icon: "folder-open", label: "outputs.reveal" },
@@ -110,7 +121,7 @@ export function FileMenuScope({
     anchor: ContextMenuAnchor;
   } | null>(null);
   const [open, setOpen] = useState(false);
-  const [pending, setPending] = useState<FileMenuAction | null>(null);
+  const [pending, setPending] = useState<MenuAction | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [notice, setNotice] = useState<FileMenuOutcome>(null);
 
@@ -152,27 +163,31 @@ export function FileMenuScope({
     setOpen(true);
   }, []);
 
-  async function perform(file: MenuFile, action: FileMenuAction) {
+  async function perform(file: MenuFile, action: MenuAction) {
     if (!handler || active.current) return;
     const controller = new AbortController();
     active.current = controller;
     setPending(action);
     setCancelling(false);
     setNotice(null);
-    const outcome = await handler
-      .perform(file, action, controller.signal)
-      .catch((): FileMenuOutcome => ({ message: "outputs.state.failed" }));
+    // An image is copied within the click: the clipboard asks for that.
+    const outcome = await (
+      action === "copy_image"
+        ? file.copyImage!(controller.signal)
+        : handler.perform(file, action, controller.signal)
+    ).catch((): FileMenuOutcome => ({ message: "outputs.state.failed" }));
     if (active.current !== controller) return;
     active.current = null;
     setPending(null);
     setNotice(outcome);
   }
 
-  function disabled(file: MenuFile, action: FileMenuAction): boolean {
+  function disabled(file: MenuFile, action: MenuAction): boolean {
     return (
       !handler?.connected ||
       pending !== null ||
       file.available === false ||
+      (action === "copy_image" && !file.copyImage) ||
       (action === "open" && file.openable === false) ||
       (action === "reference" && !handler.canReference)
     );
@@ -197,7 +212,9 @@ export function FileMenuScope({
                       ? "outputs.cancelling"
                       : pending === "save"
                         ? "outputs.saving"
-                        : "outputs.checking",
+                        : pending === "copy_image"
+                          ? "outputs.copying_image"
+                          : "outputs.checking",
                   )
                 : notice && t(notice.message)}
             </p>
@@ -254,7 +271,10 @@ export function FileMenuScope({
               }
             >
               {menu &&
-                items.map(({ action, icon, label }) => (
+                [
+                  ...(menu.file.copyImage === undefined ? [] : [copyImage]),
+                  ...items,
+                ].map(({ action, icon, label }) => (
                   <Menu.Item
                     key={action}
                     disabled={disabled(menu.file, action)}

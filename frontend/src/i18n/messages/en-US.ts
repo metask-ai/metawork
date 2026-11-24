@@ -1324,6 +1324,8 @@ export const enUS = {
   "outputs.state.cleanup_failed": "Temporary file cleanup was incomplete",
   "outputs.edit": "Reference in conversation",
   "outputs.copy_path": "Copy path",
+  "outputs.copy_image": "Copy image",
+  "outputs.copying_image": "Copying image…",
   "outputs.register": "Add to outputs",
   "outputs.state.registered": "Added to outputs",
   "outputs.edit_reference": "Workspace file {path}:",
@@ -1364,6 +1366,7 @@ export const enUS = {
   "outputs.state.open_failed":
     "The system did not open this file. It may have no associated app.",
   "outputs.state.path_copied": "Path copied",
+  "outputs.state.image_copied": "Image copied",
   "outputs.state.copy_failed": "Could not copy. Try again.",
   "outputs.state.opened": "Sent to the default application",
   "outputs.updated": "File changed during this turn",

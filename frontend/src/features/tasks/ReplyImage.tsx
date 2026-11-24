@@ -5,6 +5,7 @@ import {
   useFileMenuTrigger,
   type MenuFile,
 } from "../../components/FileMenu.tsx";
+import { previewImageCopy } from "../../components/preview-image-copy.ts";
 import { PreviewImageView } from "../../components/PreviewImageView.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { DescribedFileCard } from "./DescribedFileCard.tsx";
@@ -201,7 +202,6 @@ function ImageFigure({
   onRetry: () => void;
 }) {
   const { t } = useI18n();
-  const trigger = useFileMenuTrigger(menu);
   // A rotated photograph is only known to be one once it is decoded.
   const [decoded, setDecoded] = useState<{
     id: string;
@@ -209,6 +209,10 @@ function ImageFigure({
     height: number;
   } | null>(null);
   const image = preview?.image;
+  const trigger = useFileMenuTrigger({
+    ...menu,
+    copyImage: previewImageCopy(image, decoded?.id === image?.id),
+  });
   const state =
     image || preview?.state === "ready" ? undefined : preview?.state;
   const natural = image && decoded?.id === image.id ? decoded : size;

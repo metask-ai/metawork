@@ -406,6 +406,22 @@ test("window pixel quota admits two 4096-square resources, retains them and free
   replacement.release();
 });
 
+test("an image stays what was checked after its release and only until its security epoch ends", async () => {
+  const host = new Host();
+  const first = await host.load();
+  const second = await host.load();
+  first.release();
+  assert.equal(first.image.valid(), false);
+  assert.equal(first.image.current(), true);
+  host.loader.observeSecurityEpoch(String(BigInt(host.epoch) + 1n));
+  assert.equal(first.image.current(), false);
+  assert.equal(second.image.current(), false);
+  const later = new Host();
+  const third = await later.load();
+  later.loader.reset();
+  assert.equal(third.image.current(), false);
+});
+
 test("reset invalidates held resources and decode admission is serial and cancellable", async () => {
   const host = new Host();
   const first = await host.load(),

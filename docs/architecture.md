@@ -72,7 +72,7 @@ Renderer 是随 MetaWork 桌面应用一同构建、签名和发布的可信 UI 
 
 可信 UI 身份不使 Renderer 成为 Product authority、credential store 或原生系统 effect owner。Renderer 不访问任意文件或进程，不持有原生 identity/handle，不执行未登记的窗口、托盘、快捷键等平台 effect，也不根据 DOM、Toast、URL、显示文本或本地缓存发明 Product policy。Bridge 对 payload 的严格解码和 Host 对 identity、revision、membership、资源范围与时效的重新校验用于维护 owner、处理陈旧 UI 状态、实现错误隔离并拒绝格式错误，不以 Renderer 是恶意代码为前提。用户在 Custom Provider 表单中显式填写的 API Key 只允许停留到一次 create/replace command 提交完成，之后必须从表单状态清除；该窄例外不赋予 Renderer credential authority。
 
-Renderer 唯一可直接执行的标准 WebView 系统写入是 secure packaged origin 内、由用户手势触发的 Clipboard API 写入。它只承载已经进入 canonical Product projection 的 terminal final/partial response Markdown、由同一 Markdown 安全渲染得到的语义 HTML，或该 response 内可见代码块的纯文本；不得主动读取系统剪贴板、写入 provisional/commentary/Tool/状态、从页面 DOM 反取内容、截断后报告成功，或把这条登记扩展为任意 Web API 系统 effect。双格式写入必须由一个 `ClipboardItem` 原子提交；只有运行环境明确缺少多 MIME 能力时才可完整降级为 `writeText(Markdown)`，权限、容量、转换或系统拒绝必须显式失败。
+Renderer 唯一可直接执行的标准 WebView 系统写入是 secure packaged origin 内、由用户手势触发的 Clipboard API 写入。它只承载已经进入 canonical Product projection 的 terminal final/partial response Markdown、由同一 Markdown 安全渲染得到的语义 HTML，该 response 内可见代码块的纯文本，或用户在文件菜单里对一张已显示图片显式选择复制时，由该图片转成的 PNG；这张图片须是 Host 已做完整原件凭据检查并交付、当前安全代次仍有效的预览图，转码使用 WebView 对它的解码结果，不带原件元数据，写入前安全代次变化即放弃。不得主动读取系统剪贴板、写入 provisional/commentary/Tool/状态、从页面 DOM 反取内容、截断后报告成功，或把这条登记扩展为任意 Web API 系统 effect。双格式写入必须由一个 `ClipboardItem` 原子提交；只有运行环境明确缺少多 MIME 能力时才可完整降级为 `writeText(Markdown)`，权限、容量、转换或系统拒绝必须显式失败。
 
 Host 只有一种系统剪贴板写入：用户从文件菜单显式选择复制路径后，Application 在原生主线程经 Native SDK Runtime API 以 `text/plain` 写入该工作区文件的完整路径，系统原生格式，不带 Windows 的 `\\?\` 前缀。写入前 Product 以同一文件身份再解析一次，Bridge 再确认请求仍有效；Host 不读取系统剪贴板，路径不进入 Bridge 响应、Renderer、Snapshot 或日志，失败显式返回。
 
@@ -114,7 +114,7 @@ Native SDK Bridge API 是独立的正式 transport surface，不属于系统 eff
 | ----------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | Runtime API                         | Application                                                           | 正常系统 effect 与 SDK-owned runtime state                                                              |
 | WebView UI/input API                | Renderer、browser-side Bridge                                         | 只消费 `app.zon` 已开放的呈现与用户输入能力，不授予 Product authority 或通用系统 effect                 |
-| 标准 WebView Clipboard API          | Renderer                                                              | 只允许上述 secure origin、用户手势限定的 canonical response/code 写入；禁止 clipboard read 与未登记内容 |
+| 标准 WebView Clipboard API          | Renderer                                                              | 只允许上述 secure origin、用户手势限定的 canonical response/code 与已交付图片的 PNG 写入；禁止 clipboard read 与未登记内容 |
 | 标准 WebView paste 事件             | Renderer                                                              | 只允许普通 Composer 的显式图片粘贴输入，按文件附件合同消费本次 File；不开放主动 clipboard read          |
 | Bridge API / data-only DTO          | Bridge、Application                                                   | transport、source/window authority 与无执行权数据                                                       |
 | `PlatformServices` public primitive | Application 的主循环唤醒、附件图片解码、已登记一级 compatibility seam | 唤醒与附件仅按下述边界消费；其他调用只补 Runtime API 的明确缺口                                         |

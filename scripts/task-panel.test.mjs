@@ -9713,6 +9713,7 @@ function previewImageFixture(data) {
       return valid ? `data:image/png;base64,${data}` : "";
     },
     valid: () => valid,
+    current: () => true,
     subscribe: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
