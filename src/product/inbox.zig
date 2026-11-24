@@ -33,7 +33,7 @@ pub const Limits = struct {
     /// A list row shows one line; the preview never carries a whole message
     /// into the snapshot.
     pub const preview_codepoints = 160;
-    pub const poll_interval_ms: u64 = 60_000;
+    pub const poll_interval_ms: u64 = 10_000;
     /// Returning to the foreground asks again only when the last answer is at
     /// least this old, so focus flapping cannot become a request loop.
     pub const resume_after_ms: u64 = 15_000;
@@ -2215,7 +2215,7 @@ test "binding, polling and backoff follow the results" {
     const unread: Unread = .{ .total = 2, .by_peer = &by_peer };
     try testing.expect(try runtime.completePoll(1000, 5, id, .{ .unread = &unread }));
     try testing.expectEqual(State.ready, runtime.state);
-    try testing.expectEqual(@as(?u64, 61_000), runtime.nextPoll());
+    try testing.expectEqual(@as(?u64, 11_000), runtime.nextPoll());
     try testing.expectEqual(@as(u64, 2), runtime.view().unreadTotal.?.value);
     try testing.expectEqual(@as(usize, 1), runtime.view().conversations.len);
 
@@ -2254,7 +2254,7 @@ test "binding, polling and backoff follow the results" {
     try testing.expect(!try runtime.bind(500_000, null));
 }
 
-test "returning to the foreground asks again only after a quiet period" {
+test "returning to the foreground keeps the next unread poll deadline" {
     var runtime: Runtime = .init(testing.allocator);
     defer runtime.deinit();
     runtime.start(true);
@@ -2263,11 +2263,11 @@ test "returning to the foreground asks again only after a quiet period" {
     const unread: Unread = .{ .total = 0, .by_peer = &.{} };
     _ = try runtime.completePoll(1000, 1, id, .{ .unread = &unread });
     runtime.setActive(2000, false);
-    runtime.setActive(5000, true);
-    try testing.expectEqual(@as(?u64, 61_000), runtime.nextPoll());
-    runtime.setActive(6000, false);
+    runtime.setActive(10_998, true);
+    try testing.expectEqual(@as(?u64, 11_000), runtime.nextPoll());
+    runtime.setActive(10_999, false);
     runtime.setActive(16_000, true);
-    try testing.expectEqual(@as(?u64, 16_000), runtime.nextPoll());
+    try testing.expectEqual(@as(?u64, 11_000), runtime.nextPoll());
 }
 
 test "unread senders and cached conversations share one list without reading messages" {

@@ -372,7 +372,7 @@ test("the open inbox refreshes, and a conversation is read only when it is opene
   closed.unmount();
 
   render(element(client, view()));
-  assert.equal(timer.mock.calls[0].arguments[1], 15_000);
+  assert.equal(timer.mock.calls[0].arguments[1], 10_000);
   // The page's own refresh is automatic, so the Host keeps its rules.
   await waitFor(() =>
     assert.deepEqual(client.calls[0], ["refresh", "1", false]),

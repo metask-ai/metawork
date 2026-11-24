@@ -35,7 +35,7 @@ import { useI18n } from "../../i18n/context.ts";
 import { inboxDiagnosticText } from "./inbox-diagnostics.ts";
 
 /** While the inbox page is open and visible the Host is asked this often. */
-export const inboxRefreshMs = 15_000;
+export const inboxRefreshMs = 10_000;
 
 export type InboxClient = Pick<
   BridgeClient,
