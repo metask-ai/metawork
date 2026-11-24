@@ -2203,8 +2203,15 @@ export type HandoffSource = {
   referenced: string;
   canonical: string;
 };
-export type HandoffCreate = { source: HandoffSource; storeId: string; operationId: string };
-export type HandoffSessions = { storeId: string; sessions: { taskId: string; preferred: boolean }[] };
+export type HandoffCreate = {
+  source: HandoffSource;
+  storeId: string;
+  operationId: string;
+};
+export type HandoffSessions = {
+  storeId: string;
+  sessions: { taskId: string; preferred: boolean }[];
+};
 
 export type TaskCreateReason =
   | "handoff_changed"

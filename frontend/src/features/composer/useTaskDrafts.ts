@@ -241,6 +241,10 @@ export function useNewTaskDrafts(activeDraftId: string | null) {
   return {
     ...drafts,
     moveDraft,
+    discardDraft(id: string) {
+      drafts.clearDraft(id);
+      setDirectoryFor(id, { kind: "project_default" });
+    },
     directory: activeDraftId
       ? getDirectory(activeDraftId)
       : ({ kind: "project_default" } as NewTaskDirectory),

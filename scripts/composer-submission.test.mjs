@@ -3161,3 +3161,150 @@ test("opening a project preserves the unscoped draft when the project draft alre
   );
   assert.equal(fixture.textarea.value, "Keep the unscoped draft");
 });
+
+for (const path of ["fresh", "lost"]) {
+  test(
+    "Inbox handoff takes the verified task into the workbench: " + path,
+    async (ctx) => {
+      const fixture = await renderSubmissionApp(ctx, { newTask: true });
+      window.localStorage.clear();
+      ctx.after(() => window.localStorage.clear());
+      const { BridgeClient } = await vite.ssrLoadModule(
+        "/src/bridge/client.ts",
+      );
+      const account = "a".repeat(64);
+      const storeId = "c".repeat(32);
+      const message = {
+        id: "9",
+        direction: "in",
+        fromPeerId: "ann",
+        fromName: "Ann",
+        fromAgent: "Writer",
+        text: "First\r\n\nSecond",
+        isNew: false,
+        recipients: [],
+        truncated: false,
+        sentAtMs: "1700000000000",
+        taskIds: ["old"],
+      };
+      const remote = {
+        id: "new",
+        canLink: true,
+        name: "Review fixtures",
+        progress: "doing",
+        state: null,
+        path: null,
+        description: null,
+        assignees: ["Ann"],
+        createdBy: null,
+        updatedAtMs: null,
+        lastNote: null,
+        notes: [],
+        children: [],
+      };
+      const calls = [];
+      for (const [name, fn] of Object.entries({
+        listInboxPeople: async () => ({
+          state: "ready",
+          people: [{ id: "ann", name: "Ann", username: "ann" }],
+        }),
+        refreshInbox: async () => ({ outcome: "accepted" }),
+        readInboxConversation: async () => ({
+          state: "ready",
+          peerId: "ann",
+          messages: [message],
+          hasEarlier: false,
+        }),
+        readInboxTask: async () => ({
+          state: "ready",
+          requestId: "4",
+          task: remote,
+          file: null,
+          project: null,
+        }),
+        handoffSessions: async () => ({ storeId, sessions: [] }),
+        reconcileHandoff: async (draft) => {
+          calls.push(draft);
+          return fixture.task.id;
+        },
+      }))
+        ctx.mock.method(BridgeClient.prototype, name, fn);
+      Object.assign(fixture.snapshot.inbox, {
+        state: "ready",
+        binding: "1",
+        accountScope: account,
+        unreadTotal: "0",
+        conversationsLoaded: true,
+        conversations: [
+          {
+            peerId: "ann",
+            name: "Ann",
+            username: "ann",
+            unread: "0",
+            lastAtMs: null,
+            latest: {
+              id: "9",
+              direction: "in",
+              preview: "First",
+              sentAtMs: message.sentAtMs,
+            },
+          },
+        ],
+      });
+      await fixture.publish();
+      const user = userEvent.setup({ document });
+      await user.click(screen.getByRole("button", { name: /^Messages/ }));
+      await user.click(await screen.findByRole("button", { name: /^Ann/ }));
+      await user.click(
+        await screen.findByRole("button", { name: /Linked item.*#old/ }),
+      );
+      await user.click(
+        await screen.findByRole("button", { name: "Start a work session" }),
+      );
+      const area = document.querySelector(".composer-bar textarea");
+      assert.match(
+        area.value,
+        /> Ann · Agent Writer · .*#new\n> First\n> \n> Second/,
+      );
+      assert.equal(fixture.creations(), 0);
+      await selectManualSubmissionWorkspace(user);
+      fireEvent.keyDown(area, { key: "Enter", code: "Enter" });
+      await waitFor(() => assert.equal(fixture.creations(), 1));
+      const creation = fixture.createRequests[0][6];
+      assert.deepEqual(creation.source, {
+        account,
+        binding: "1",
+        referenced: "old",
+        canonical: "new",
+      });
+      assert.equal(creation.storeId, storeId);
+      assert.match(creation.operationId, /^[a-f0-9]{32}$/);
+      if (path === "fresh") {
+        await fixture.created();
+        await waitFor(() => assert.equal(fixture.inputs.length, 1));
+        assert.match(fixture.inputs[0][2].text, /> Second/);
+        await fixture.settle();
+      } else {
+        await fixture.loseCreationReply();
+        const check = await screen.findByRole("button", {
+          name: "Check creation result",
+        });
+        assert.equal(fixture.inputs.length, 0);
+        assert.equal(area.disabled || area.readOnly, true);
+        fixture.snapshot.tasks = [fixture.task];
+        await user.click(check);
+        await waitFor(() => assert.equal(calls.length, 1));
+        await fixture.publish();
+        assert.equal(calls[0].operationId, creation.operationId);
+        assert.equal(fixture.creations(), 1);
+        assert.equal(fixture.inputs.length, 0);
+        await waitFor(() =>
+          assert.match(
+            document.querySelector(".composer-bar textarea").value,
+            /> Second/,
+          ),
+        );
+      }
+    },
+  );
+}

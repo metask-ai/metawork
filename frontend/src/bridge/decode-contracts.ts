@@ -7633,12 +7633,19 @@ function decodeSessionBlocker(
 export function decodeHandoffSessions(value: unknown) {
   const item = object(value, "$", ["storeId", "sessions"]);
   const storeId = stringValue(item.storeId, "$.storeId");
-  if (!/^[a-f0-9]{32}$/.test(storeId)) fail("$.storeId", "invalid history identity");
+  if (!/^[a-f0-9]{32}$/.test(storeId))
+    fail("$.storeId", "invalid history identity");
   const sessions = arrayValue(item.sessions, "$.sessions", (value, path) => {
     const session = object(value, path, ["taskId", "preferred"]);
-    return { taskId: positiveWireId(session.taskId, path + ".taskId"), preferred: booleanValue(session.preferred, path + ".preferred") };
+    return {
+      taskId: positiveWireId(session.taskId, path + ".taskId"),
+      preferred: booleanValue(session.preferred, path + ".preferred"),
+    };
   });
-  if (new Set(sessions.map(s => s.taskId)).size !== sessions.length || sessions.filter(s => s.preferred).length > 1)
+  if (
+    new Set(sessions.map((s) => s.taskId)).size !== sessions.length ||
+    sessions.filter((s) => s.preferred).length > 1
+  )
     fail("$.sessions", "ambiguous session association");
   return { storeId, sessions };
 }
@@ -7647,10 +7654,13 @@ export function decodeHandoffReceipt(value: unknown) {
   return item.taskId === null ? null : positiveWireId(item.taskId, "$.taskId");
 }
 export function assertHandoffSaved(value: unknown) {
-  if (object(value, "$", ["saved"]).saved !== true) fail("$.saved", "expected durable association");
+  if (object(value, "$", ["saved"]).saved !== true)
+    fail("$.saved", "expected durable association");
 }
 export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
-  const existing = record(value, "$").existing === true && record(value, "$").accepted === true;
+  const existing =
+    record(value, "$").existing === true &&
+    record(value, "$").accepted === true;
   const item = object(value, "$", [
     "accepted",
     "taskId",

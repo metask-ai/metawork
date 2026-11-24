@@ -345,13 +345,18 @@ export type NewTaskDraftRecord = {
   directory: NewTaskDirectory;
   content: ComposerDraft;
 };
+function newDraftStorage(projectKey: string) {
+  return projectKey.startsWith("handoff.")
+    ? window.localStorage
+    : composerSessionStorage();
+}
 export function readNewTaskDraftRecord(projectKey: string): NewTaskDraftRecord {
   const empty = (): NewTaskDraftRecord => ({
     directory: { kind: "project_default" },
     content: emptyComposerDraft(),
   });
   try {
-    const encoded = composerSessionStorage()?.getItem(
+    const encoded = newDraftStorage(projectKey)?.getItem(
       `${newTaskPrefix}${projectKey}`,
     );
     if (!encoded || utf8ByteLength(encoded) > maxPersistedDraftBytes)
@@ -392,7 +397,7 @@ export function writeNewTaskDraftRecord(
   value: NewTaskDraftRecord,
 ): void {
   try {
-    const target = composerSessionStorage();
+    const target = newDraftStorage(projectKey);
     if (!target) return;
     const key = `${newTaskPrefix}${projectKey}`;
     if (

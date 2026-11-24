@@ -1,4 +1,5 @@
 import {
+  Fragment,
   type ReactNode,
   useCallback,
   useEffect,
@@ -32,6 +33,7 @@ import {
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { controlFocus } from "../../components/ui/utils.ts";
 import { useI18n } from "../../i18n/context.ts";
+import { HandoffControls } from "./InboxHandoff.tsx";
 import { inboxDiagnosticText } from "./inbox-diagnostics.ts";
 
 /** While the inbox page is open and visible the Host is asked this often. */
@@ -145,6 +147,7 @@ export type OpenedTask = {
   detail: InboxTaskDetail | null;
   trail: readonly string[];
   download: DownloadStatus;
+  message?: InboxMessage;
 };
 
 function mergeMessages(
@@ -272,7 +275,7 @@ export function useInbox(
     setTask(null);
     setComposers({});
     readEpoch.current++;
-  }, [binding]);
+  }, [binding, inbox.accountScope]);
 
   useEffect(() => {
     if (!open || disabled) return;
@@ -413,12 +416,19 @@ export function useInbox(
     void read(contact, "latest", null, cached);
   }
 
-  async function openTask(taskId: string, trail: readonly string[] = []) {
+  const detailSequence = useRef(0);
+  async function openTask(
+    taskId: string,
+    trail: readonly string[] = [],
+    message?: InboxMessage,
+  ) {
+    const sequence = ++detailSequence.current;
     setTask({
       taskId,
       status: "loading",
       detail: null,
       trail,
+      message,
       download: "idle",
     });
     let detail: InboxTaskDetail | null = null;
@@ -428,7 +438,8 @@ export function useInbox(
       detail = null;
     }
     setTask((current) => {
-      if (current?.taskId !== taskId) return current;
+      if (current?.taskId !== taskId || sequence !== detailSequence.current)
+        return current;
       if (detail?.state === "superseded") return current;
       if (detail?.state === "ready")
         return { ...current, status: "ready", detail };
@@ -550,12 +561,16 @@ export function useInbox(
     openTask,
     /** A sub-task or a project's file, opened from the item on screen. */
     openNested(taskId: string) {
-      void openTask(taskId, task ? [...task.trail, task.taskId] : []);
+      void openTask(
+        taskId,
+        task ? [...task.trail, task.taskId] : [],
+        task?.message,
+      );
     },
     back() {
       const previous = task?.trail.at(-1);
       if (task && previous !== undefined)
-        void openTask(previous, task.trail.slice(0, -1));
+        void openTask(previous, task.trail.slice(0, -1), task.message);
     },
     async downloadFile(fileId: string) {
       setTask((current) =>
@@ -1411,7 +1426,20 @@ function InboxTaskDialog({
               </Dialog.Description>
             )}
             {detail?.task && (
-              <TaskDetailBody task={detail.task} onOpen={onOpen} />
+              <>
+                <TaskDetailBody task={detail.task} onOpen={onOpen} />
+                {detail.task.canLink && task && (
+                  <HandoffControls
+                    referenced={task.taskId}
+                    canonical={detail.task.id}
+                    message={
+                      task.message?.taskIds.includes(task.taskId)
+                        ? task.message
+                        : undefined
+                    }
+                  />
+                )}
+              </>
             )}
             {detail?.file && task && (
               <FileDetailBody
@@ -1639,7 +1667,7 @@ function InboxConversationView({
   conversation: OpenedConversation;
   composer: Composer | null;
   onLoadEarlier: () => void;
-  onOpenTask: (taskId: string) => void;
+  onOpenTask: (taskId: string, message: InboxMessage) => void;
   onRetry: () => void;
   onDraft: (text: string) => void;
   onSend: () => void;
@@ -1747,11 +1775,13 @@ function InboxConversationView({
                   <div className="inbox-bubble">
                     {message.text && <p>{message.text}</p>}
                     {message.taskIds.map((id) => (
-                      <LinkedItem
-                        key={id}
-                        id={id}
-                        onOpen={() => onOpenTask(id)}
-                      />
+                      <Fragment key={id}>
+                        <LinkedItem
+                          id={id}
+                          onOpen={() => onOpenTask(id, message)}
+                        />
+                        <HandoffControls referenced={id} />
+                      </Fragment>
                     ))}
                   </div>
                   <ReadReceipts recipients={receipts} />
@@ -1887,7 +1917,9 @@ export function InboxMain({
           conversation={controller.conversation}
           composer={controller.composer}
           onLoadEarlier={controller.loadEarlierMessages}
-          onOpenTask={(taskId) => void controller.openTask(taskId)}
+          onOpenTask={(taskId, message) =>
+            void controller.openTask(taskId, [], message)
+          }
           onRetry={controller.retry}
           onDraft={controller.setDraft}
           onSend={() => void controller.send()}

@@ -33,8 +33,10 @@ export const enUS = {
     "Your model preference could not be saved. Confirmed task choices are unchanged.",
   "mutation.reason.schedule_persistence_unavailable":
     "Schedule storage is unavailable. Open Scheduled tasks to recover it before trying again.",
-  "mutation.reason.handoff_changed": "The task or account changed. Reopen task details.",
-  "mutation.reason.history_unavailable": "Session history could not be saved. Try again shortly.",
+  "mutation.reason.handoff_changed":
+    "The task or account changed. Reopen task details.",
+  "mutation.reason.history_unavailable":
+    "Session history could not be saved. Try again shortly.",
   "mutation.reason.schedule_persistence_failed":
     "Schedule storage could not be updated. Open Scheduled tasks to recover it before trying again.",
   "mutation.reason.schedule_persistence_outcome_unknown":
@@ -289,6 +291,37 @@ export const enUS = {
   "inbox.project_files": "Files",
   "inbox.project_no_files": "No files.",
   "inbox.project_files_more": "More files exist than are shown.",
+  "handoff.both_drafts":
+    "The session already has a draft. Finish that draft, then return to the message to retrieve this one.",
+  "handoff.unavailable": "Local session links are unavailable",
+  "handoff.loading": "Loading work sessions…",
+  "handoff.history": "View history",
+  "handoff.reauthorize": "Open session and check directory",
+  "handoff.continue": "Continue in workbench",
+  "handoff.choose": "Choose a session or draft",
+  "handoff.default": "Default",
+  "handoff.quote": "Bring this message",
+  "handoff.prefer": "Set as default",
+  "handoff.unlink": "Unlink",
+  "handoff.resume": "Resume draft",
+  "handoff.another": "Start another session",
+  "handoff.new": "Start a work session",
+  "handoff.link": "Link session",
+  "handoff.pick": "Choose an existing session",
+  "handoff.change_failed":
+    "Could not confirm the change. Reopen details to check.",
+  "handoff.workdir": "Choose a working directory to send.",
+  "handoff.pending":
+    "The creation result is unconfirmed. The directory and model are locked.",
+  "handoff.check": "Check creation result",
+  "handoff.store_failed": "The draft could not be saved. Check local storage.",
+  "handoff.quote_failed":
+    "The current draft cannot accept this quote. Your draft was preserved.",
+  "handoff.stale":
+    "The task or account has changed. Reopen the message details.",
+  "handoff.recovered":
+    "Work session found. Review the input in that session before sending.",
+  "handoff.not_created": "No session was created. You can edit and send again.",
   "inbox.task_loading": "Reading the task…",
   "inbox.task_failed": "This task can't be read right now.",
   "inbox.task_forbidden": "This device may not view this task.",

@@ -1236,14 +1236,42 @@ export class BridgeClient {
     );
   }
   async handoffSessions(binding: string, account: string, referenced: string) {
-    return decodeHandoffSessions(await this.invoke(commands.taskHandoff, { action: "list", binding, account, referenced }));
+    return decodeHandoffSessions(
+      await this.invoke(commands.taskHandoff, {
+        action: "list",
+        binding,
+        account,
+        referenced,
+      }),
+    );
   }
   async reconcileHandoff({ source, operationId, storeId }: HandoffCreate) {
     const { binding, account, referenced } = source;
-    return decodeHandoffReceipt(await this.invoke(commands.taskHandoff, { action: "reconcile", binding, account, referenced, operationId, storeId }));
+    return decodeHandoffReceipt(
+      await this.invoke(commands.taskHandoff, {
+        action: "reconcile",
+        binding,
+        account,
+        referenced,
+        operationId,
+        storeId,
+      }),
+    );
   }
-  async changeHandoff(source: HandoffSource, storeId: string, action: "link" | "prefer" | "unlink", taskId: string) {
-    assertHandoffSaved(await this.invoke(commands.taskHandoff, { ...source, storeId, action, taskId }));
+  async changeHandoff(
+    source: HandoffSource,
+    storeId: string,
+    action: "link" | "prefer" | "unlink",
+    taskId: string,
+  ) {
+    assertHandoffSaved(
+      await this.invoke(commands.taskHandoff, {
+        ...source,
+        storeId,
+        action,
+        taskId,
+      }),
+    );
   }
 
   async createTask(

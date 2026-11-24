@@ -649,3 +649,27 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.inbox-handoff,
+.inbox-handoff-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.inbox-handoff {
+  border-top: 1px solid var(--ui-border);
+  padding: 6px 10px;
+}
+.inbox-handoff-row {
+  width: 100%;
+}
+.inbox-handoff select {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--ui-content-primary);
+  background: var(--ui-surface-panel);
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
