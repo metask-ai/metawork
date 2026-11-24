@@ -43,6 +43,10 @@ import type {
   NotificationTextRegistration,
   InboxConversationPage,
   InboxTaskDetail,
+  InboxFileOpen,
+  InboxSendResult,
+  InboxSendTarget,
+  InboxPeople,
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
@@ -58,6 +62,9 @@ import {
   decodeInboxCommandResult,
   decodeInboxConversationPage,
   decodeInboxTaskDetail,
+  decodeInboxFileOpen,
+  decodeInboxSendResult,
+  decodeInboxPeople,
   decodeExecutionCommandResult,
   decodeCatalogRefreshResult,
   decodeWorkspaceRemovalResult,
@@ -375,6 +382,74 @@ export class BridgeClient {
       throw new RendererBridgeContractError(
         "invalid_response",
         "Inbox task identity mismatch",
+      );
+    return result;
+  }
+  /**
+   * Sends one message in an open conversation. `requestKey` identifies the
+   * message to MetaTeam: a retry of the same message passes the same key,
+   * so MetaTeam takes it at most once.
+   */
+  async sendInboxMessage(
+    binding: string,
+    to: InboxSendTarget,
+    text: string,
+    requestKey: string,
+  ): Promise<InboxSendResult> {
+    const { generation, requestId } = this.inboxRequest();
+    const result = decodeInboxSendResult(
+      await this.invoke(commands.inboxSend, {
+        generation,
+        binding,
+        requestId,
+        peerId: "peerId" in to ? to.peerId : null,
+        username: "username" in to ? to.username : null,
+        text,
+        requestKey,
+      }),
+    );
+    if (result.binding !== binding || result.requestId !== requestId)
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Inbox send identity mismatch",
+      );
+    return result;
+  }
+  /** The members a new conversation can start with; read on request only. */
+  async listInboxPeople(binding: string): Promise<InboxPeople> {
+    const { generation, requestId } = this.inboxRequest();
+    const result = decodeInboxPeople(
+      await this.invoke(commands.inboxListPeople, {
+        generation,
+        binding,
+        requestId,
+      }),
+    );
+    if (result.binding !== binding || result.requestId !== requestId)
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Inbox members identity mismatch",
+      );
+    return result;
+  }
+  /**
+   * Opens a shared file's download in the system browser. The Host reads a
+   * fresh download address and keeps it; only the outcome comes back.
+   */
+  async openInboxFile(binding: string, fileId: string): Promise<InboxFileOpen> {
+    const { generation, requestId } = this.inboxRequest();
+    const result = decodeInboxFileOpen(
+      await this.invoke(commands.inboxOpenFile, {
+        generation,
+        binding,
+        requestId,
+        fileId,
+      }),
+    );
+    if (result.binding !== binding || result.requestId !== requestId)
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Inbox file identity mismatch",
       );
     return result;
   }

@@ -25,6 +25,8 @@ pub const Host = struct {
     wake_fn: *const fn (?*anyopaque) anyerror!void,
     start_timer_fn: *const fn (?*anyopaque, u64, u64, bool) anyerror!void,
     cancel_timer_fn: *const fn (?*anyopaque, u64) anyerror!void,
+    /// Opens a web address in the system browser.
+    open_fn: *const fn (?*anyopaque, []const u8) anyerror!void,
     on_main_thread_fn: *const fn (?*anyopaque) bool,
 };
 
@@ -162,6 +164,7 @@ pub const max_bridge_id_bytes = 128;
 
 pub const ConversationRequest = inbox.ConversationRequest;
 pub const TaskRequest = inbox.TaskRequest;
+pub const FileOpenRequest = inbox.FileOpenRequest;
 
 const Reply = struct {
     responder: native_sdk.bridge.AsyncResponder,
@@ -182,11 +185,45 @@ const TaskWork = struct {
     task: inbox.Id,
 };
 
+const RequestKey = struct {
+    bytes: [64]u8 = undefined,
+    len: usize = 0,
+
+    fn init(value: []const u8) ?RequestKey {
+        if (!inbox.validRequestKey(value)) return null;
+        var key: RequestKey = .{ .len = value.len };
+        @memcpy(key.bytes[0..value.len], value);
+        return key;
+    }
+
+    fn slice(self: *const RequestKey) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+const SendWork = struct {
+    reply: Reply,
+    /// The JSON body, owned by the work.
+    body: []u8,
+    request_key: RequestKey,
+    /// A member picked by username for a new conversation: once sent, the
+    /// conversation it landed in is read back to put it in the list.
+    resolve: ?inbox.Name = null,
+};
+
+const PeopleWork = struct {
+    reply: Reply,
+};
+
 const Work = union(enum) {
     poll: u64,
     list: inbox.ListPreparation,
     conversation: ConversationWork,
     task: TaskWork,
+    /// Reads the file's detail for a fresh download address to open.
+    file: TaskWork,
+    send: SendWork,
+    people: PeopleWork,
 };
 
 const Job = struct {
@@ -212,7 +249,13 @@ const Job = struct {
     unread: ?inbox.Unread = null,
     page: ?inbox.Messages = null,
     page_limit: u32 = 0,
-    detail: ?inbox.Task = null,
+    detail: ?inbox.Detail = null,
+    /// The names a send reached, when MetaTeam took it.
+    sent: ?[]inbox.Name = null,
+    /// The answer to the send itself; `status` may belong to the read that
+    /// follows it.
+    send_status: ?u16 = null,
+    people: ?inbox.People = null,
 
     fn run(self: *Job) void {
         defer {
@@ -254,11 +297,50 @@ const Job = struct {
                 };
                 _ = try self.pageOf(query, inbox.Limits.conversation_page);
             },
-            .task => |work| {
-                const buffer = try self.allocator.alloc(u8, inbox.Limits.task_bytes);
+            .send => |work| {
+                const buffer = try self.allocator.alloc(u8, inbox.Limits.send_bytes);
+                defer self.allocator.free(buffer);
+                var diagnostic: ?inbox.Diagnostic = null;
+                const response: ?http.Response = self.transport.perform_fn(self.transport.context, .{ .base = self.base, .key = self.key, .isolation = self.isolation }, .{ .send = .{ .body = work.body, .request_key = work.request_key.slice() } }, buffer, &self.cancellation, &diagnostic) catch |err| switch (err) {
+                    // Only a success has its body read: it was taken.
+                    error.ResponseTooLarge => blk: {
+                        self.send_status = 200;
+                        self.sent = try self.allocator.alloc(inbox.Name, 0);
+                        break :blk null;
+                    },
+                    // No answer: whether it arrived is unknown, and only the
+                    // user's retry sends it again, under the same key.
+                    else => {
+                        self.failure = .{ .@"unreachable" = diagnostic };
+                        return;
+                    },
+                };
+                if (response) |answer| {
+                    self.send_status = answer.status;
+                    if (inbox.sendState(answer.status) != .sent) {
+                        std.log.warn("inbox request consumer=inbox request=send status={d}", .{answer.status});
+                        return;
+                    }
+                    self.sent = try inbox.parseSent(self.allocator, buffer[0..answer.body_len]);
+                }
+                // A new conversation: MetaTeam's newest message with that
+                // member tells which conversation it is.
+                if (work.resolve) |*username| _ = try self.pageOf(.{ .peer = username.slice() }, 1);
+            },
+            .people => {
+                const buffer = try self.allocator.alloc(u8, inbox.Limits.people_bytes);
+                defer self.allocator.free(buffer);
+                const body = (self.fetch(.people, buffer) catch return self.unusable(.people, 0)) orelse return;
+                self.people = inbox.parsePeople(self.allocator, body) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidResponse => return self.unusable(.people, body.len),
+                };
+            },
+            .task, .file => |work| {
+                const buffer = try self.allocator.alloc(u8, inbox.Limits.detail_bytes);
                 defer self.allocator.free(buffer);
                 const body = (self.fetch(.{ .task = work.task.slice() }, buffer) catch return self.unusable(.task, 0)) orelse return;
-                self.detail = inbox.parseTask(self.allocator, body) catch |err| switch (err) {
+                self.detail = inbox.parseDetail(self.allocator, body) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidResponse => return self.unusable(.task, body.len),
                 };
@@ -335,6 +417,9 @@ const Job = struct {
         if (self.unread) |*value| value.deinit(self.allocator);
         if (self.page) |*value| value.deinit();
         if (self.detail) |*value| value.deinit();
+        if (self.sent) |names| self.allocator.free(names);
+        if (self.people) |*value| value.deinit(self.allocator);
+        if (self.work == .send) self.allocator.free(self.work.send.body);
         std.crypto.secureZero(u8, self.key);
         self.allocator.free(self.key);
         self.allocator.free(self.base);
@@ -362,6 +447,18 @@ pub const Coordinator = struct {
     conversation_next: ?ConversationWork = null,
     task: ?*Job = null,
     task_next: ?TaskWork = null,
+    file: ?*Job = null,
+    file_next: ?TaskWork = null,
+    /// One message at a time. Never replaced, and never cancelled by a
+    /// changed connection: a send in flight may already have arrived.
+    send: ?*Job = null,
+    people: ?*Job = null,
+    people_next: ?PeopleWork = null,
+
+    /// Every request slot, for what applies to all of them alike.
+    const slots = .{ "poll", "list", "conversation", "task", "file", "people", "send" };
+    /// The requests whose result a changed connection makes worthless.
+    const read_slots = .{ "poll", "list", "conversation", "task", "file", "people" };
 
     fn now(self: *const Coordinator) u64 {
         return self.host.now_ns_fn(self.host.context) / std.time.ns_per_ms;
@@ -449,7 +546,7 @@ pub const Coordinator = struct {
         self.bound = null;
         self.retire_fn(self.retire_context, current.isolation);
         current.release(self.allocator);
-        inline for (.{ "poll", "list", "conversation", "task" }) |name| if (@field(self, name)) |job| job.cancellation.cancel();
+        inline for (read_slots) |name| if (@field(self, name)) |job| job.cancellation.cancel();
         if (self.conversation_next) |work| {
             self.conversation_next = null;
             respondConversationState(work.reply, work.peer.slice(), .stale_binding);
@@ -457,6 +554,14 @@ pub const Coordinator = struct {
         if (self.task_next) |work| {
             self.task_next = null;
             respondTaskState(work.reply, .stale_binding);
+        }
+        if (self.file_next) |work| {
+            self.file_next = null;
+            respondFileState(work.reply, .stale_binding);
+        }
+        if (self.people_next) |work| {
+            self.people_next = null;
+            respondPeopleState(work.reply, .stale_binding);
         }
     }
 
@@ -531,8 +636,18 @@ pub const Coordinator = struct {
         self.assertMain();
         if (self.conversation_next) |work| respondConversationState(work.reply, work.peer.slice(), .superseded);
         if (self.task_next) |work| respondTaskState(work.reply, .superseded);
+        if (self.file_next) |work| respondFileState(work.reply, .superseded);
+        if (self.people_next) |work| respondPeopleState(work.reply, .superseded);
         self.conversation_next = null;
         self.task_next = null;
+        self.file_next = null;
+        self.people_next = null;
+        if (self.people) |job| if (!job.replied) {
+            respondPeopleState(job.work.people.reply, .superseded);
+            job.replied = true;
+            job.superseded = true;
+            job.cancellation.cancel();
+        };
         if (self.conversation) |job| if (!job.replied) {
             respondConversationState(job.work.conversation.reply, job.work.conversation.peer.slice(), .superseded);
             job.replied = true;
@@ -545,6 +660,69 @@ pub const Coordinator = struct {
             job.superseded = true;
             job.cancellation.cancel();
         };
+        if (self.file) |job| if (!job.replied) {
+            respondFileState(job.work.file.reply, .superseded);
+            job.replied = true;
+            job.superseded = true;
+            job.cancellation.cancel();
+        };
+        // A send runs to its end; only its answer is no longer sent.
+        if (self.send) |job| if (!job.replied) {
+            respondSendState(job.work.send.reply, .superseded);
+            job.replied = true;
+        };
+    }
+
+    /// Sends one message to a conversation the list knows. Returns false
+    /// when the request cannot be answered at all; the caller then fails it
+    /// as a Bridge error.
+    pub fn sendMessage(self: *Coordinator, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: inbox.SendRequest) bool {
+        self.assertMain();
+        const target = reply(responder, bridge_id, request.binding, request.request_id) orelse return false;
+        // A picked member is addressed by their exact username.
+        const picked: ?inbox.Name = switch (request.to) {
+            .peer => |peer| blk: {
+                _ = inbox.Id.init(peer) catch return false;
+                break :blk null;
+            },
+            .username => |username| inbox.Name.init(username) catch return false,
+        };
+        if (!inbox.sendableText(request.text)) return false;
+        const request_key = RequestKey.init(request.request_key) orelse return false;
+        if (self.stopped or self.bound == null) {
+            respondSendState(target, .unavailable);
+            return true;
+        }
+        if (!self.management.accepts_fn(self.management.context, request.binding)) {
+            respondSendState(target, .stale_binding);
+            return true;
+        }
+        const address: inbox.Address = if (picked) |username| .{ .member = username } else self.management.peer_address_fn(self.management.context, request.binding, request.to.peer) orelse {
+            respondSendState(target, .unknown_peer);
+            return true;
+        };
+        if (self.send != null) {
+            respondSendState(target, .busy);
+            return true;
+        }
+        var body: std.Io.Writer.Allocating = .init(self.allocator);
+        inbox.writeSendBody(&body.writer, address, request.text) catch {
+            body.deinit();
+            respondSendState(target, .failed);
+            return true;
+        };
+        const owned = body.toOwnedSlice() catch {
+            body.deinit();
+            respondSendState(target, .failed);
+            return true;
+        };
+        self.send = self.startJob(.{ .send = .{ .reply = target, .body = owned, .request_key = request_key, .resolve = picked } }) catch {
+            self.allocator.free(owned);
+            respondSendState(target, .failed);
+            return true;
+        };
+        self.reconcileTimer();
+        return true;
     }
 
     pub fn loadEarlier(self: *Coordinator, binding: u64) inbox.CommandOutcome {
@@ -622,6 +800,35 @@ pub const Coordinator = struct {
         return true;
     }
 
+    /// Reads the file's detail again for a fresh download address and opens
+    /// it in the system browser. The address never reaches the Renderer.
+    pub fn openFile(self: *Coordinator, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: FileOpenRequest) bool {
+        self.assertMain();
+        const target = reply(responder, bridge_id, request.binding, request.request_id) orelse return false;
+        const file = inbox.Id.init(request.file) catch return false;
+        if (!inbox.validTaskId(file.slice())) return false;
+        const state: ?inbox.FileOpenState = if (self.stopped or self.bound == null)
+            .unavailable
+        else if (!self.management.accepts_fn(self.management.context, request.binding))
+            .stale_binding
+        else
+            null;
+        if (state) |value| {
+            respondFileState(target, value);
+            return true;
+        }
+        if (self.file_next) |previous| respondFileState(previous.reply, .superseded);
+        self.file_next = .{ .reply = target, .task = file };
+        if (self.file) |job| if (!job.replied) {
+            respondFileState(job.work.file.reply, .superseded);
+            job.replied = true;
+            job.superseded = true;
+            job.cancellation.cancel();
+        };
+        self.reconcile();
+        return true;
+    }
+
     pub fn drain(self: *Coordinator) void {
         self.assertMain();
         if (self.stopped) return;
@@ -631,6 +838,7 @@ pub const Coordinator = struct {
 
     fn settle(self: *Coordinator) void {
         const now_ms = self.now();
+        self.settleSend();
         if (self.poll) |job| if (job.finished.load(.acquire)) {
             job.join();
             self.poll = null;
@@ -683,6 +891,102 @@ pub const Coordinator = struct {
             }
             job.destroy();
         };
+        if (self.file) |job| if (job.finished.load(.acquire)) {
+            job.join();
+            self.file = null;
+            const work = job.work.file;
+            if (job.replied) {
+                // Already answered; nothing is sent twice.
+            } else if (job.superseded) {
+                respondFileState(work.reply, .superseded);
+            } else if (!self.management.accepts_fn(self.management.context, work.reply.binding)) {
+                respondFileState(work.reply, .stale_binding);
+            } else if (job.detail) |*detail| {
+                respondFileState(work.reply, self.openDownload(detail, job.key));
+            } else {
+                respondFileState(work.reply, requestState(inbox.FileOpenState, job.status));
+            }
+            job.destroy();
+        };
+        if (self.people) |job| if (job.finished.load(.acquire)) {
+            job.join();
+            self.people = null;
+            const work = job.work.people;
+            if (job.replied) {
+                // Already answered; nothing is sent twice.
+            } else if (job.superseded) {
+                respondPeopleState(work.reply, .superseded);
+            } else if (!self.management.accepts_fn(self.management.context, work.reply.binding)) {
+                respondPeopleState(work.reply, .stale_binding);
+            } else if (job.people) |*people| {
+                respondPeople(self.allocator, work.reply, people.items);
+            } else {
+                respondPeopleState(work.reply, requestState(inbox.PeopleState, job.status));
+            }
+            job.destroy();
+        };
+    }
+
+    /// What MetaTeam answered is a fact about the message, so it is
+    /// answered even when the connection changed meanwhile.
+    fn settleSend(self: *Coordinator) void {
+        const job = self.send orelse return;
+        if (!job.finished.load(.acquire)) return;
+        job.join();
+        self.send = null;
+        defer job.destroy();
+        const work = &job.work.send;
+        const state = inbox.sendState(job.send_status);
+        // A new conversation joins the list and becomes the one being read;
+        // when it cannot be told, the list asks for its newer end instead.
+        var landed: ?inbox.Peer = null;
+        if (state == .sent) if (work.resolve) |*username| if (self.management.accepts_fn(self.management.context, work.reply.binding)) {
+            if (job.page) |page| if (inbox.conversationOf(page.items, username.slice())) |peer| {
+                landed = peer;
+                self.management.complete_conversation_fn(self.management.context, work.reply.binding, peer.id.slice(), .latest, page.items);
+            };
+            if (landed == null) _ = self.management.request_refresh_fn(self.management.context, self.now(), work.reply.binding, false);
+        };
+        if (job.replied) return;
+        const conversation: ?inbox.ConversationRef = if (landed) |*peer| .{ .peerId = peer.id.slice(), .name = peer.name.slice() } else null;
+        respondSend(self.allocator, work.reply, state, job.sent orelse &.{}, conversation);
+    }
+
+    /// The members a new conversation can start with, read when the picker
+    /// opens; a newer request replaces one still waiting or running.
+    pub fn listPeople(self: *Coordinator, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: inbox.PeopleRequest) bool {
+        self.assertMain();
+        const target = reply(responder, bridge_id, request.binding, request.request_id) orelse return false;
+        const state: ?inbox.PeopleState = if (self.stopped or self.bound == null)
+            .unavailable
+        else if (!self.management.accepts_fn(self.management.context, request.binding))
+            .stale_binding
+        else
+            null;
+        if (state) |value| {
+            respondPeopleState(target, value);
+            return true;
+        }
+        if (self.people_next) |previous| respondPeopleState(previous.reply, .superseded);
+        self.people_next = .{ .reply = target };
+        if (self.people) |job| if (!job.replied) {
+            respondPeopleState(job.work.people.reply, .superseded);
+            job.replied = true;
+            job.superseded = true;
+            job.cancellation.cancel();
+        };
+        self.reconcile();
+        return true;
+    }
+
+    fn openDownload(self: *Coordinator, detail: *const inbox.Detail, key: []const u8) inbox.FileOpenState {
+        const url = switch (detail.kind) {
+            .file => |file| file.download_url orelse return .not_downloadable,
+            else => return .not_downloadable,
+        };
+        if (url.len > native_sdk.platform.max_external_url_bytes or !inbox.validDownloadUrl(url, key)) return .not_downloadable;
+        self.host.open_fn(self.host.context, url) catch return .failed;
+        return .opened;
     }
 
     fn completeList(self: *Coordinator, job: *Job, preparation: inbox.ListPreparation, now_ms: u64) void {
@@ -713,13 +1017,32 @@ pub const Coordinator = struct {
                     break :blk null;
                 };
             };
+            if (self.file == null) if (self.file_next) |work| {
+                self.file_next = null;
+                self.file = self.startJob(.{ .file = work }) catch blk: {
+                    respondFileState(work.reply, .failed);
+                    break :blk null;
+                };
+            };
+            if (self.people == null) if (self.people_next) |work| {
+                self.people_next = null;
+                self.people = self.startJob(.{ .people = work }) catch blk: {
+                    respondPeopleState(work.reply, .failed);
+                    break :blk null;
+                };
+            };
         }
         self.reconcileTimer();
     }
 
+    fn running(self: *const Coordinator) bool {
+        inline for (slots) |name| if (@field(self, name) != null) return true;
+        return false;
+    }
+
     fn reconcileTimer(self: *Coordinator) void {
         if (self.stopped) return;
-        const busy = self.poll != null or self.list != null or self.conversation != null or self.task != null;
+        const busy = self.running();
         const now_ms = self.now();
         var next: ?u64 = self.management.next_poll_fn(self.management.context);
         if (self.find_retry_at) |at| next = if (next) |value| @min(value, at) else at;
@@ -741,12 +1064,17 @@ pub const Coordinator = struct {
         if (self.stopped) return;
         self.stopped = true;
         self.host.cancel_timer_fn(self.host.context, timer_id) catch {};
-        inline for (.{ "poll", "list", "conversation", "task" }) |name| if (@field(self, name)) |job| job.cancellation.cancel();
-        inline for (.{ "poll", "list", "conversation", "task" }) |name| if (@field(self, name)) |job| {
+        inline for (slots) |name| if (@field(self, name)) |job| job.cancellation.cancel();
+        inline for (slots) |name| if (@field(self, name)) |job| {
             job.join();
             if (!job.replied) switch (job.work) {
                 .conversation => |work| respondConversationState(work.reply, work.peer.slice(), .unavailable),
                 .task => |work| respondTaskState(work.reply, .unavailable),
+                .file => |work| respondFileState(work.reply, .unavailable),
+                .people => |work| respondPeopleState(work.reply, .unavailable),
+                // What MetaTeam answered before the cancel stands; without
+                // an answer, whether it arrived is unknown.
+                .send => |work| respondSend(self.allocator, work.reply, inbox.sendState(job.send_status), job.sent orelse &.{}, null),
                 else => {},
             };
             job.destroy();
@@ -754,8 +1082,12 @@ pub const Coordinator = struct {
         };
         if (self.conversation_next) |work| respondConversationState(work.reply, work.peer.slice(), .unavailable);
         if (self.task_next) |work| respondTaskState(work.reply, .unavailable);
+        if (self.file_next) |work| respondFileState(work.reply, .unavailable);
+        if (self.people_next) |work| respondPeopleState(work.reply, .unavailable);
         self.conversation_next = null;
         self.task_next = null;
+        self.file_next = null;
+        self.people_next = null;
         if (self.bound) |*current| {
             self.retire_fn(self.retire_context, current.isolation);
             current.release(self.allocator);
@@ -782,38 +1114,160 @@ pub const Coordinator = struct {
         work.reply.responder.success(work.reply.bridge_id.slice(), json) catch {};
     }
 
-    /// The whole detail when it fits one Bridge result; otherwise the
-    /// description is cut, the one field that can be long.
-    fn respondTask(self: *Coordinator, work: TaskWork, detail: *const inbox.Task) void {
-        const output = self.allocator.alloc(u8, native_sdk.bridge.max_result_bytes - 256) catch
+    /// The whole detail when it fits one Bridge result; otherwise the long
+    /// parts are cut, see `shrinkDetail`.
+    fn respondTask(self: *Coordinator, work: TaskWork, detail: *const inbox.Detail) void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const output = arena.allocator().alloc(u8, native_sdk.bridge.max_result_bytes - 256) catch
             return respondTaskState(work.reply, .failed);
-        defer self.allocator.free(output);
-        var view: inbox.TaskView = .{
-            .id = if (detail.id) |*id| id.slice() else work.task.slice(),
-            .name = detail.name,
-            .progress = detail.progress,
-            .state = detail.state,
-            .path = detail.path,
-            .description = detail.description,
-            .assignees = detail.assignees,
-            .updatedAtMs = if (detail.updated_at_ms) |at| .{ .value = at } else null,
-        };
+        var result = detailView(arena.allocator(), work, detail) catch
+            return respondTaskState(work.reply, .failed);
         while (true) {
             var writer = std.Io.Writer.fixed(output);
-            if (std.json.Stringify.value(inbox.TaskDetail{
-                .binding = .{ .value = work.reply.binding },
-                .requestId = .{ .value = work.reply.request_id },
-                .state = .ready,
-                .task = view,
-            }, .{}, &writer)) |_| {
+            if (std.json.Stringify.value(result, .{}, &writer)) |_| {
                 work.reply.responder.success(work.reply.bridge_id.slice(), writer.buffered()) catch {};
                 return;
             } else |_| {}
-            const description = view.description orelse return respondTaskState(work.reply, .failed);
-            view.description = if (description.len == 0) null else inbox.utf8Prefix(description, description.len / 2);
+            if (!shrinkDetail(&result)) return respondTaskState(work.reply, .failed);
         }
     }
 };
+
+fn optionalU64(value: ?u64) ?inbox.U64 {
+    return if (value) |present| .{ .value = present } else null;
+}
+
+fn noteView(note: inbox.Note) inbox.NoteView {
+    return .{ .text = note.text, .atMs = optionalU64(note.at_ms), .by = note.by };
+}
+
+/// The Renderer view of one detail. The id MetaTeam returned wins over the
+/// one asked for: a renamed task answers under its current id.
+fn detailView(allocator: std.mem.Allocator, work: TaskWork, detail: *const inbox.Detail) !inbox.TaskDetail {
+    var result: inbox.TaskDetail = .{
+        .binding = .{ .value = work.reply.binding },
+        .requestId = .{ .value = work.reply.request_id },
+        .state = .ready,
+        .task = null,
+        .file = null,
+        .project = null,
+    };
+    switch (detail.kind) {
+        .task => |*task| {
+            const notes = try allocator.alloc(inbox.NoteView, task.notes.len);
+            for (task.notes, notes) |note, *view| view.* = noteView(note);
+            const children = try allocator.alloc(inbox.ChildView, task.children.len);
+            for (task.children, children) |*child, *view| view.* = .{ .id = child.id.slice(), .name = child.name, .progress = child.progress };
+            result.task = .{
+                .id = if (task.id) |*id| id.slice() else work.task.slice(),
+                .name = task.name,
+                .progress = task.progress,
+                .state = task.state,
+                .path = task.path,
+                .description = task.description,
+                .assignees = task.assignees,
+                .createdBy = task.created_by,
+                .updatedAtMs = optionalU64(task.updated_at_ms),
+                .lastNote = if (task.last_note) |note| noteView(note) else null,
+                .notes = notes,
+                .children = children,
+            };
+        },
+        .file => |*file| result.file = .{
+            .id = if (file.id) |*id| id.slice() else work.task.slice(),
+            .name = file.name,
+            .tag = file.tag,
+            .sizeBytes = optionalU64(file.size),
+            .mime = file.mime,
+            .description = file.description,
+            .by = file.by,
+            .updatedAtMs = optionalU64(file.updated_at_ms),
+            .path = file.path,
+            .content = file.content,
+            .contentTruncated = false,
+            .downloadable = file.download_url != null,
+        },
+        .project => |*project| {
+            const files = try allocator.alloc(inbox.ProjectFileView, project.files.len);
+            for (project.files, files) |*file, *view| view.* = .{
+                .id = file.id.slice(),
+                .name = file.name,
+                .tag = file.tag,
+                .sizeBytes = optionalU64(file.size),
+                .mime = file.mime,
+                .by = file.by,
+                .updatedAtMs = optionalU64(file.updated_at_ms),
+            };
+            const tags = try allocator.alloc(inbox.TagCountView, project.file_tags.len);
+            for (project.file_tags, tags) |tag, *view| view.* = .{ .tag = tag.tag, .count = .{ .value = tag.count } };
+            result.project = .{
+                .id = if (project.id) |*id| id.slice() else work.task.slice(),
+                .name = project.name,
+                .description = project.description,
+                .path = project.path,
+                .updatedAtMs = optionalU64(project.updated_at_ms),
+                .files = files,
+                .filesTruncated = false,
+                .fileTags = tags,
+            };
+        },
+    }
+    return result;
+}
+
+fn halved(text: []const u8) ?[]const u8 {
+    return if (text.len == 0) null else inbox.utf8Prefix(text, text.len / 2);
+}
+
+/// One step towards fitting a Bridge result, longest parts first: a file's
+/// content, then descriptions; a task's oldest notes, then its children;
+/// a project's last files. False when nothing is left to cut.
+fn shrinkDetail(result: *inbox.TaskDetail) bool {
+    if (result.file) |*file| {
+        if (file.content) |content| {
+            file.content = halved(content);
+            file.contentTruncated = true;
+            return true;
+        }
+        if (file.description) |description| {
+            file.description = halved(description);
+            return true;
+        }
+        return false;
+    }
+    if (result.task) |*task| {
+        if (task.description) |description| if (description.len > 4096) {
+            task.description = halved(description);
+            return true;
+        };
+        if (task.notes.len != 0) {
+            task.notes = task.notes[(task.notes.len + 1) / 2 ..];
+            return true;
+        }
+        if (task.children.len != 0) {
+            task.children = task.children[0 .. task.children.len / 2];
+            return true;
+        }
+        if (task.description) |description| {
+            task.description = halved(description);
+            return true;
+        }
+        return false;
+    }
+    if (result.project) |*project| {
+        if (project.files.len != 0) {
+            project.files = project.files[0 .. project.files.len / 2];
+            project.filesTruncated = true;
+            return true;
+        }
+        if (project.description) |description| {
+            project.description = halved(description);
+            return true;
+        }
+    }
+    return false;
+}
 
 fn requestState(comptime State: type, status: ?u16) State {
     return switch (inbox.requestFailure(status)) {
@@ -827,7 +1281,12 @@ fn messageViews(allocator: std.mem.Allocator, messages: []const inbox.Message) !
     const views = try allocator.alloc(inbox.MessageView, messages.len);
     for (messages, views) |*message, *view| {
         const recipients = try allocator.alloc(inbox.RecipientView, message.recipients.len);
-        for (message.recipients, recipients) |*peer, *recipient| recipient.* = .{ .peerId = peer.id.slice(), .name = peer.name.slice() };
+        for (message.recipients, recipients) |*entry, *recipient| recipient.* = .{
+            .peerId = entry.peer.id.slice(),
+            .name = entry.peer.name.slice(),
+            .read = entry.read,
+            .readAtMs = if (entry.read_at_ms) |at| .{ .value = at } else null,
+        };
         const tasks = try allocator.alloc([]const u8, message.task_ids.len);
         for (message.task_ids, tasks) |*id, *task| task.* = id.slice();
         view.* = .{
@@ -835,6 +1294,8 @@ fn messageViews(allocator: std.mem.Allocator, messages: []const inbox.Message) !
             .direction = message.direction,
             .fromPeerId = message.from.id.slice(),
             .fromName = message.from.name.slice(),
+            .fromAgent = if (message.from_agent) |*agent| agent.slice() else null,
+            .isNew = message.is_new,
             .recipients = recipients,
             .text = message.text,
             .truncated = false,
@@ -901,6 +1362,87 @@ fn respondTaskState(target: Reply, state: inbox.TaskState) void {
         .requestId = .{ .value = target.request_id },
         .state = state,
         .task = null,
+        .file = null,
+        .project = null,
+    }, .{}, &writer) catch {
+        target.responder.fail(target.bridge_id.slice(), .internal_error, "Inbox response encoding failed") catch {};
+        return;
+    };
+    target.responder.success(target.bridge_id.slice(), writer.buffered()) catch {};
+}
+
+fn respondSendState(target: Reply, state: inbox.SendState) void {
+    var buffer: [1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+    respondSend(fixed.allocator(), target, state, &.{}, null);
+}
+
+fn respondPeopleState(target: Reply, state: inbox.PeopleState) void {
+    var buffer: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    std.json.Stringify.value(inbox.PeopleList{
+        .binding = .{ .value = target.binding },
+        .requestId = .{ .value = target.request_id },
+        .state = state,
+        .people = &.{},
+    }, .{}, &writer) catch {
+        target.responder.fail(target.bridge_id.slice(), .internal_error, "Inbox response encoding failed") catch {};
+        return;
+    };
+    target.responder.success(target.bridge_id.slice(), writer.buffered()) catch {};
+}
+
+/// Every member when they fit one Bridge result; an organization too large
+/// for one keeps its first members.
+fn respondPeople(allocator: std.mem.Allocator, target: Reply, members: []const inbox.Member) void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const views = arena.allocator().alloc(inbox.MemberView, members.len) catch return respondPeopleState(target, .failed);
+    for (members, views) |*member, *view| view.* = .{ .username = member.username.slice(), .name = member.name.slice(), .online = member.online };
+    const output = arena.allocator().alloc(u8, native_sdk.bridge.max_result_bytes - 256) catch return respondPeopleState(target, .failed);
+    var count = views.len;
+    while (true) {
+        var writer = std.Io.Writer.fixed(output);
+        if (std.json.Stringify.value(inbox.PeopleList{
+            .binding = .{ .value = target.binding },
+            .requestId = .{ .value = target.request_id },
+            .state = .ready,
+            .people = views[0..count],
+        }, .{}, &writer)) |_| {
+            target.responder.success(target.bridge_id.slice(), writer.buffered()) catch {};
+            return;
+        } else |_| {}
+        if (count == 0) return respondPeopleState(target, .failed);
+        count /= 2;
+    }
+}
+
+fn respondSend(allocator: std.mem.Allocator, target: Reply, state: inbox.SendState, names: []const inbox.Name, conversation: ?inbox.ConversationRef) void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const sent = arena.allocator().alloc([]const u8, names.len) catch return target.responder.fail(target.bridge_id.slice(), .internal_error, "Inbox response encoding failed") catch {};
+    for (names, sent) |*name, *view| view.* = name.slice();
+    var writer: std.Io.Writer.Allocating = .init(arena.allocator());
+    std.json.Stringify.value(inbox.SendResult{
+        .binding = .{ .value = target.binding },
+        .requestId = .{ .value = target.request_id },
+        .state = state,
+        .sent = sent,
+        .conversation = conversation,
+    }, .{}, &writer.writer) catch {
+        target.responder.fail(target.bridge_id.slice(), .internal_error, "Inbox response encoding failed") catch {};
+        return;
+    };
+    target.responder.success(target.bridge_id.slice(), writer.written()) catch {};
+}
+
+fn respondFileState(target: Reply, state: inbox.FileOpenState) void {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    std.json.Stringify.value(inbox.FileOpen{
+        .binding = .{ .value = target.binding },
+        .requestId = .{ .value = target.request_id },
+        .state = state,
     }, .{}, &writer) catch {
         target.responder.fail(target.bridge_id.slice(), .internal_error, "Inbox response encoding failed") catch {};
         return;
@@ -935,6 +1477,7 @@ const TestManagement = struct {
             .complete_list_fn = completeList,
             .knows_peer_fn = knowsPeer,
             .accepts_fn = accepts,
+            .peer_address_fn = peerAddress,
             .complete_conversation_fn = completeConversation,
             .stop_fn = stop,
         };
@@ -984,6 +1527,9 @@ const TestManagement = struct {
     fn accepts(context: *anyopaque, binding: u64) bool {
         return of(context).accepts(binding);
     }
+    fn peerAddress(context: *anyopaque, binding: u64, peer: []const u8) ?inbox.Address {
+        return of(context).peerAddress(binding, peer);
+    }
     fn completeConversation(context: *anyopaque, binding: u64, peer: []const u8, kind: inbox.ConversationPageKind, messages: []const inbox.Message) void {
         _ = of(context).completeConversation(binding, peer, kind, messages) catch unreachable;
     }
@@ -996,9 +1542,18 @@ const TestHost = struct {
     main_thread: std.Thread.Id,
     now_ms: u64 = 1000,
     timer_ms: ?u64 = null,
+    opened: [256]u8 = undefined,
+    opened_len: usize = 0,
+    opens: usize = 0,
 
     fn host(self: *TestHost) Host {
-        return .{ .context = self, .now_ns_fn = now, .wake_fn = wake, .start_timer_fn = startTimer, .cancel_timer_fn = cancelTimer, .on_main_thread_fn = onMain };
+        return .{ .context = self, .now_ns_fn = now, .wake_fn = wake, .start_timer_fn = startTimer, .cancel_timer_fn = cancelTimer, .open_fn = open, .on_main_thread_fn = onMain };
+    }
+    fn open(context: ?*anyopaque, url: []const u8) anyerror!void {
+        const self = of(context);
+        self.opens += 1;
+        self.opened_len = @min(url.len, self.opened.len);
+        @memcpy(self.opened[0..self.opened_len], url[0..self.opened_len]);
     }
     fn of(context: ?*anyopaque) *TestHost {
         return @ptrCast(@alignCast(context.?));
@@ -1056,9 +1611,17 @@ const TestTransport = struct {
     block: std.atomic.Value(bool) = .init(false),
     /// Answers with `ResponseTooLarge` while the requested limit is above this.
     fits_limit: u32 = std.math.maxInt(u32),
-    unread: []const u8 = "{\"data\":{\"unread\":2,\"byPeer\":[{\"peer\":{\"id\":\"ann\",\"name\":\"Ann\"},\"unread\":2}]}}",
+    /// What a send is answered with; `null` drops it without an answer.
+    send_status: ?u16 = 200,
+    sends: usize = 0,
+    send_body: [256]u8 = undefined,
+    send_body_len: usize = 0,
+    send_key: [64]u8 = undefined,
+    send_key_len: usize = 0,
+    unread: []const u8 = "{\"data\":{\"unread\":2,\"byPeer\":[{\"peer\":{\"id\":\"ann\",\"username\":\"ann_u\",\"name\":\"Ann\"},\"unread\":2}]}}",
     messages: []const u8 = "{\"data\":{\"messages\":[{\"id\":7,\"time\":1795428968292,\"direction\":\"in\",\"from\":{\"id\":\"ann\",\"name\":\"Ann\"},\"text\":\"hello\",\"taskIds\":[13066]}]}}",
     task: []const u8 = "{\"data\":{\"id\":13066,\"name\":\"Inbox\",\"progress\":\"doing\"}}",
+    people: []const u8 = "{\"data\":{\"count\":4,\"people\":[{\"name\":\"Ann\",\"username\":\"ann_u\",\"online\":true,\"projects\":[\"metawork\"]},{\"name\":\"Bob\",\"username\":\"bob\",\"online\":false},{\"name\":\"Ann again\",\"username\":\"ann_u\"},{\"name\":\"No username\"}]}}",
 
     fn transport(self: *TestTransport) http.Transport {
         return .{ .context = self, .perform_fn = perform };
@@ -1075,6 +1638,18 @@ const TestTransport = struct {
             self.url_lens[self.count] = writer.buffered().len;
             self.count += 1;
         }
+        if (request == .send) {
+            self.sends += 1;
+            self.send_body_len = @min(request.send.body.len, self.send_body.len);
+            @memcpy(self.send_body[0..self.send_body_len], request.send.body[0..self.send_body_len]);
+            self.send_key_len = request.send.request_key.len;
+            @memcpy(self.send_key[0..self.send_key_len], request.send.request_key);
+            const status = self.send_status orelse return error.Network;
+            if (status != 200) return .{ .status = status };
+            const answer = "{\"data\":{\"sent\":[\"Ann\"]}}";
+            @memcpy(output[0..answer.len], answer);
+            return .{ .status = 200, .body_len = answer.len };
+        }
         if (self.status != 200) return .{ .status = self.status };
         if (request == .task and self.task_status != 200) return .{ .status = self.task_status };
         if (request == .messages and request.messages.peer != null and self.peer_status != 200) return .{ .status = self.peer_status };
@@ -1083,6 +1658,8 @@ const TestTransport = struct {
             .unread => self.unread,
             .messages => self.messages,
             .task => self.task,
+            .people => self.people,
+            .send => unreachable,
         };
         @memcpy(output[0..body.len], body);
         return .{ .status = 200, .body_len = body.len };
@@ -1142,10 +1719,9 @@ const Fixture = struct {
     fn settle(self: *Fixture) void {
         var rounds: usize = 0;
         while (rounds < 8) : (rounds += 1) {
-            inline for (.{ "poll", "list", "conversation", "task" }) |name| if (@field(self.coordinator, name)) |job| job.join();
+            inline for (Coordinator.slots) |name| if (@field(self.coordinator, name)) |job| job.join();
             self.coordinator.drain();
-            const busy = self.coordinator.poll != null or self.coordinator.list != null or self.coordinator.conversation != null or self.coordinator.task != null;
-            if (!busy) return;
+            if (!self.coordinator.running()) return;
         }
     }
     fn view(self: *Fixture) inbox.View {
@@ -1423,6 +1999,506 @@ test "inbox coordinator: a closed Bridge connection answers pending reads once" 
     try testing.expectEqual(@as(usize, 2), fixture.capture.responses.items.len);
     for (fixture.capture.responses.items) |response|
         try testing.expect(std.mem.indexOf(u8, response, "\"state\":\"superseded\"") != null);
+}
+
+test "inbox coordinator: linked files, projects and tasks answer by kind; a download opens in the browser and never reaches the Renderer" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    const responder = fixture.capture.responder();
+    const download = "http://192.0.2.10:8080/team/agent/v1/files/9830/dl?exp=1&sig=ab";
+    fixture.transport.task = "{\"data\":{\"id\":9830,\"name\":\"api.md\",\"tag\":\"API\",\"size\":12,\"mime\":\"text/markdown\",\"by\":\"Lin\",\"path\":\"space / api.md\",\"content\":\"# Title\",\"downloadUrl\":\"" ++ download ++ "\",\"webUrl\":\"http://192.0.2.10:8080/team/api/v1/files/9830/content\"}}";
+    try testing.expect(fixture.coordinator.readTask(responder, "t1", .{ .binding = binding, .request_id = 1, .task = "9830" }));
+    fixture.settle();
+    const file = fixture.capture.last();
+    try testing.expect(std.mem.indexOf(u8, file, "\"file\":{\"id\":\"9830\"") != null);
+    try testing.expect(std.mem.indexOf(u8, file, "\"content\":\"# Title\"") != null);
+    try testing.expect(std.mem.indexOf(u8, file, "\"downloadable\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, file, "\"task\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, file, "192.0.2.10") == null);
+    try testing.expect(std.mem.indexOf(u8, file, "sig=") == null);
+
+    // The download address is read again and handed to the browser only.
+    try testing.expect(fixture.coordinator.openFile(responder, "f1", .{ .binding = binding, .request_id = 2, .file = "9830" }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"opened\"") != null);
+    try testing.expectEqualStrings(download, fixture.host.opened[0..fixture.host.opened_len]);
+    try testing.expectEqualStrings("http://192.0.2.10:8080/team/open/v1/tasks/9830", fixture.transport.url(fixture.transport.count - 1));
+
+    // An address carrying the key, or an id that is not a file, is not opened.
+    fixture.transport.task = "{\"data\":{\"id\":9830,\"name\":\"api.md\",\"mime\":\"text/plain\",\"downloadUrl\":\"http://h.test/dl?k=" ++ sentinel_key ++ "\"}}";
+    try testing.expect(fixture.coordinator.openFile(responder, "f2", .{ .binding = binding, .request_id = 3, .file = "9830" }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"not_downloadable\"") != null);
+    fixture.transport.task = "{\"data\":{\"id\":13067,\"name\":\"Inbox\",\"type\":\"task\",\"progress\":\"doing\",\"state\":\"active\",\"lastNote\":null,\"notes\":[{\"text\":\"started\",\"at\":1,\"by\":\"Ann\"}],\"children\":[{\"id\":13070,\"name\":\"Reply\",\"progress\":\"todo\"}]}}";
+    try testing.expect(fixture.coordinator.openFile(responder, "f3", .{ .binding = binding, .request_id = 4, .file = "13066" }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"not_downloadable\"") != null);
+    try testing.expectEqual(@as(usize, 1), fixture.host.opens);
+
+    // A task answers under the id MetaTeam returned, with its notes and children.
+    try testing.expect(fixture.coordinator.readTask(responder, "t2", .{ .binding = binding, .request_id = 5, .task = "13066" }));
+    fixture.settle();
+    const task = fixture.capture.last();
+    try testing.expect(std.mem.indexOf(u8, task, "\"task\":{\"id\":\"13067\"") != null);
+    try testing.expect(std.mem.indexOf(u8, task, "\"notes\":[{\"text\":\"started\",\"atMs\":\"1\",\"by\":\"Ann\"}]") != null);
+    try testing.expect(std.mem.indexOf(u8, task, "\"children\":[{\"id\":\"13070\",\"name\":\"Reply\",\"progress\":\"todo\"}]") != null);
+
+    fixture.transport.task = "{\"data\":{\"id\":740,\"name\":\"metawork\",\"type\":\"project\",\"files\":[{\"id\":1,\"name\":\"a.md\",\"tag\":\"Docs\"}],\"fileTags\":{\"Docs\":1}}}";
+    try testing.expect(fixture.coordinator.readTask(responder, "t3", .{ .binding = binding, .request_id = 6, .task = "740" }));
+    fixture.settle();
+    const project = fixture.capture.last();
+    try testing.expect(std.mem.indexOf(u8, project, "\"project\":{\"id\":\"740\"") != null);
+    try testing.expect(std.mem.indexOf(u8, project, "\"fileTags\":[{\"tag\":\"Docs\",\"count\":\"1\"}]") != null);
+
+    // A refused file read is that request's outcome only.
+    fixture.transport.task_status = 403;
+    try testing.expect(fixture.coordinator.openFile(responder, "f4", .{ .binding = binding, .request_id = 7, .file = "9830" }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"forbidden\"") != null);
+    try testing.expectEqual(inbox.State.ready, fixture.view().state);
+    for (fixture.capture.responses.items) |response| try testing.expect(std.mem.indexOf(u8, response, sentinel_key) == null);
+}
+
+test "inbox coordinator: a detail larger than one Bridge result is cut, longest parts first" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    const responder = fixture.capture.responder();
+    const content = try testing.allocator.alloc(u8, native_sdk.bridge.max_result_bytes);
+    defer testing.allocator.free(content);
+    @memset(content, 'x');
+    const body = try std.fmt.allocPrint(testing.allocator, "{{\"data\":{{\"id\":1,\"name\":\"big.txt\",\"mime\":\"text/plain\",\"content\":\"{s}\"}}}}", .{content[0 .. inbox.Limits.detail_bytes - 128]});
+    defer testing.allocator.free(body);
+    fixture.transport.task = body;
+    try testing.expect(fixture.coordinator.readTask(responder, "t", .{ .binding = binding, .request_id = 1, .task = "1" }));
+    fixture.settle();
+    const answer = fixture.capture.last();
+    try testing.expect(answer.len < native_sdk.bridge.max_result_bytes);
+    try testing.expect(std.mem.indexOf(u8, answer, "\"state\":\"ready\"") != null);
+    try testing.expect(std.mem.indexOf(u8, answer, "\"contentTruncated\":true") != null);
+}
+
+test "inbox coordinator: a reply goes to the member's username once per user action, and a retry reuses its request key" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    const responder = fixture.capture.responder();
+    const key_a = "11111111-2222-4333-8444-555555555555";
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .to = .{ .peer = "ann" }, .text = "On it \"now\"", .request_key = key_a }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"requestId\":\"1\",\"state\":\"sent\",\"sent\":[\"Ann\"],\"conversation\":null}") != null);
+    try testing.expectEqualStrings("{\"to\":[\"ann_u\"],\"text\":\"On it \\\"now\\\"\"}", fixture.transport.send_body[0..fixture.transport.send_body_len]);
+    try testing.expectEqualStrings(key_a, fixture.transport.send_key[0..fixture.transport.send_key_len]);
+    try testing.expectEqualStrings("http://192.0.2.10:8080/team/agent/v1/notify", fixture.transport.url(fixture.transport.count - 1));
+
+    // The user's own conversation goes to `me`.
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 2, .to = .{ .peer = inbox.self_peer_id }, .text = "note", .request_key = "22222222-2222-4333-8444-555555555555" }));
+    fixture.settle();
+    try testing.expectEqualStrings("{\"to\":\"me\",\"text\":\"note\"}", fixture.transport.send_body[0..fixture.transport.send_body_len]);
+
+    // No answer, then the user's retry: one request each, the same key.
+    fixture.transport.send_status = null;
+    const sends = fixture.transport.sends;
+    const key_b = "33333333-2222-4333-8444-555555555555";
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s3", .{ .binding = binding, .request_id = 3, .to = .{ .peer = "ann" }, .text = "again", .request_key = key_b }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"failed\"") != null);
+    try testing.expectEqual(sends + 1, fixture.transport.sends);
+    fixture.transport.send_status = 200;
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s4", .{ .binding = binding, .request_id = 4, .to = .{ .peer = "ann" }, .text = "again", .request_key = key_b }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"sent\"") != null);
+    try testing.expectEqual(sends + 2, fixture.transport.sends);
+    try testing.expectEqualStrings(key_b, fixture.transport.send_key[0..fixture.transport.send_key_len]);
+
+    // A refusal is that message's outcome only.
+    for ([_]struct { u16, []const u8 }{ .{ 400, "rejected" }, .{ 403, "forbidden" }, .{ 401, "forbidden" }, .{ 404, "not_found" }, .{ 503, "failed" } }) |case| {
+        fixture.transport.send_status = case[0];
+        try testing.expect(fixture.coordinator.sendMessage(responder, "s5", .{ .binding = binding, .request_id = 5, .to = .{ .peer = "ann" }, .text = "x", .request_key = "44444444-2222-4333-8444-555555555555" }));
+        fixture.settle();
+        var expected: [64]u8 = undefined;
+        try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), try std.fmt.bufPrint(&expected, "\"state\":\"{s}\"", .{case[1]})) != null);
+        try testing.expectEqual(inbox.State.ready, fixture.view().state);
+        try testing.expect(fixture.management.runtime.nextPoll() != null);
+    }
+    fixture.transport.send_status = 200;
+
+    // Nothing is sent without an address, text or a usable request key.
+    const before = fixture.transport.sends;
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s6", .{ .binding = binding, .request_id = 6, .to = .{ .peer = "nobody" }, .text = "x", .request_key = key_a }));
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"unknown_peer\"") != null);
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s7", .{ .binding = binding + 1, .request_id = 7, .to = .{ .peer = "ann" }, .text = "x", .request_key = key_a }));
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"stale_binding\"") != null);
+    try testing.expect(!fixture.coordinator.sendMessage(responder, "s8", .{ .binding = binding, .request_id = 8, .to = .{ .peer = "ann" }, .text = " \n ", .request_key = key_a }));
+    try testing.expect(!fixture.coordinator.sendMessage(responder, "s9", .{ .binding = binding, .request_id = 9, .to = .{ .peer = "ann" }, .text = "x", .request_key = "bad\r\nkey-value" }));
+    fixture.settle();
+    try testing.expectEqual(before, fixture.transport.sends);
+    for (fixture.capture.responses.items) |response| {
+        try testing.expect(std.mem.indexOf(u8, response, sentinel_key) == null);
+        try testing.expect(std.mem.indexOf(u8, response, "192.0.2.10") == null);
+    }
+}
+
+test "inbox coordinator: members are listed on request, and a message to one starts a conversation in the list" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    const responder = fixture.capture.responder();
+    try testing.expect(fixture.coordinator.listPeople(responder, "p1", .{ .binding = binding, .request_id = 1 }));
+    fixture.settle();
+    const people = fixture.capture.last();
+    try testing.expect(std.mem.indexOf(u8, people, "\"people\":[{\"username\":\"ann_u\",\"name\":\"Ann\",\"online\":true},{\"username\":\"bob\",\"name\":\"Bob\",\"online\":false}]") != null);
+    try testing.expectEqualStrings("http://192.0.2.10:8080/team/agent/v1/people", fixture.transport.url(fixture.transport.count - 1));
+    try testing.expect(fixture.coordinator.listPeople(responder, "p2", .{ .binding = binding + 1, .request_id = 2 }));
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"stale_binding\"") != null);
+
+    // Bob has no conversation yet. Once sent, MetaTeam's newest message with
+    // him says which conversation it is, and the list has it.
+    fixture.transport.messages = "{\"data\":{\"messages\":[{\"id\":40,\"time\":1795428968292,\"direction\":\"out\",\"from\":{\"id\":\"u-me\",\"username\":\"me_u\",\"name\":\"Me\"},\"recipients\":[{\"id\":\"bob-id\",\"username\":\"Bob\",\"name\":\"Bob\",\"readAt\":null}],\"text\":\"Hello Bob\",\"taskIds\":[]}]}}";
+    try testing.expect(!fixture.management.runtime.knowsPeer(binding, "bob-id"));
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 3, .to = .{ .username = "bob" }, .text = "Hello Bob", .request_key = "11111111-2222-4333-8444-555555555555" }));
+    fixture.settle();
+    try testing.expectEqualStrings("{\"to\":[\"bob\"],\"text\":\"Hello Bob\"}", fixture.transport.send_body[0..fixture.transport.send_body_len]);
+    try testing.expectEqualStrings("http://192.0.2.10:8080/team/open/v1/messages?peer=bob&limit=1", fixture.transport.url(fixture.transport.count - 1));
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"sent\",\"sent\":[\"Ann\"],\"conversation\":{\"peerId\":\"bob-id\",\"name\":\"Bob\"}") != null);
+    try testing.expect(fixture.management.runtime.knowsPeer(binding, "bob-id"));
+    try testing.expectEqualStrings("Bob", fixture.management.runtime.peerAddress(binding, "bob-id").?.member.slice());
+    var listed = false;
+    for (fixture.view().conversations) |row| {
+        if (std.mem.eql(u8, row.peerId, "bob-id")) listed = std.mem.eql(u8, row.latest.?.preview, "Hello Bob");
+    }
+    try testing.expect(listed);
+
+    // When the conversation cannot be told, the list asks for its newer end.
+    fixture.transport.messages = "{\"data\":{\"messages\":[]}}";
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 4, .to = .{ .username = "cy" }, .text = "Hi", .request_key = "22222222-2222-4333-8444-555555555555" }));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"sent\",\"sent\":[\"Ann\"],\"conversation\":null") != null);
+    var refreshed = false;
+    for (0..fixture.transport.count) |index| {
+        if (std.mem.endsWith(u8, fixture.transport.url(index), "messages?afterId=40&limit=200") or
+            std.mem.endsWith(u8, fixture.transport.url(index), "messages?limit=200")) refreshed = true;
+    }
+    try testing.expect(refreshed);
+    // A username that could not be an address is refused before anything is sent.
+    try testing.expect(!fixture.coordinator.sendMessage(responder, "s3", .{ .binding = binding, .request_id = 5, .to = .{ .username = "" }, .text = "Hi", .request_key = "33333333-2222-4333-8444-555555555555" }));
+    for (fixture.capture.responses.items) |response| try testing.expect(std.mem.indexOf(u8, response, sentinel_key) == null);
+}
+
+test "inbox coordinator: closing answers a send once, with what MetaTeam said or failed without an answer" {
+    for ([_]struct { ?u16, []const u8 }{ .{ 200, "sent" }, .{ 400, "rejected" }, .{ null, "failed" } }) |case| {
+        var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+        fixture.init();
+        defer fixture.deinit();
+        fixture.coordinator.start(true);
+        fixture.settle();
+        const binding = fixture.view().binding.value;
+        const responder = fixture.capture.responder();
+        fixture.transport.send_status = case[0];
+        try testing.expect(fixture.coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .to = .{ .peer = "ann" }, .text = "x", .request_key = "11111111-2222-4333-8444-555555555555" }));
+        // Answered by MetaTeam, not yet delivered when the app closes.
+        fixture.coordinator.send.?.join();
+        const before = fixture.capture.responses.items.len;
+        fixture.coordinator.shutdown();
+        try testing.expect(fixture.coordinator.send == null);
+        try testing.expectEqual(before + 1, fixture.capture.responses.items.len);
+        var expected: [64]u8 = undefined;
+        try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), try std.fmt.bufPrint(&expected, "\"requestId\":\"1\",\"state\":\"{s}\"", .{case[1]})) != null);
+    }
+}
+
+test "inbox coordinator: one message at a time, and a changed connection never cancels one in flight" {
+    var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    fixture.init();
+    defer fixture.deinit();
+    fixture.coordinator.start(true);
+    fixture.settle();
+    const binding = fixture.view().binding.value;
+    const responder = fixture.capture.responder();
+    fixture.transport.block.store(true, .release);
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .to = .{ .peer = "ann" }, .text = "first", .request_key = "11111111-2222-4333-8444-555555555555" }));
+    const job = fixture.coordinator.send.?;
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 2, .to = .{ .peer = "ann" }, .text = "second", .request_key = "22222222-2222-4333-8444-555555555555" }));
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"busy\"") != null);
+    // The connection is replaced while the message is on its way.
+    fixture.source.fingerprint = @splat('b');
+    fixture.source.generation = 2;
+    fixture.coordinator.drain();
+    try testing.expect(fixture.view().binding.value != binding);
+    try testing.expectEqual(@as(u32, 0), job.cancellation.state.load(.acquire));
+    fixture.transport.block.store(false, .release);
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"requestId\":\"1\",\"state\":\"sent\"") != null);
+    try testing.expectEqual(@as(usize, 1), fixture.transport.sends);
+
+    // A closed Bridge connection answers it at once; the send still finishes.
+    const now = fixture.view().binding.value;
+    fixture.settle();
+    fixture.transport.block.store(true, .release);
+    try testing.expect(fixture.coordinator.sendMessage(responder, "s3", .{ .binding = now, .request_id = 3, .to = .{ .peer = "ann" }, .text = "third", .request_key = "33333333-2222-4333-8444-555555555555" }));
+    fixture.coordinator.cancelReads();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"requestId\":\"3\",\"state\":\"superseded\"") != null);
+    const answers = fixture.capture.responses.items.len;
+    fixture.transport.block.store(false, .release);
+    fixture.settle();
+    try testing.expectEqual(answers, fixture.capture.responses.items.len);
+    try testing.expectEqual(@as(usize, 2), fixture.transport.sends);
+}
+
+/// A local stand-in for MetaTeam over real HTTP: the open API, members and
+/// notify with MetaTeam's request-key deduplication. The first new message
+/// is taken and its answer lost, as when a connection drops.
+const FakeMetaTeam = struct {
+    listener: *std.Io.net.Server,
+    stop: std.atomic.Value(bool) = .init(false),
+    failure: ?anyerror = null,
+    refused: usize = 0,
+    posts: usize = 0,
+    delivered: usize = 0,
+    replayed: usize = 0,
+    lose_first_answer: bool = true,
+    keys: [8][64]u8 = undefined,
+    key_lens: [8]usize = @splat(0),
+    key_count: usize = 0,
+
+    const unread_body = "{\"data\":{\"unread\":1,\"byPeer\":[{\"peer\":{\"id\":\"ann-id\",\"username\":\"ann_u\",\"name\":\"Ann\"},\"unread\":1,\"lastAt\":1795428968292}]}}";
+    const messages_body = "{\"data\":{\"messages\":[" ++
+        "{\"id\":\"m1\",\"at\":1795428000000,\"time\":\"2026-11-23T08:00:00.000Z\",\"direction\":\"self\",\"from\":{\"id\":\"me-id\",\"username\":\"me_u\",\"name\":\"Me\"},\"text\":\"note to self\",\"taskIds\":[]}," ++
+        "{\"id\":\"m2\",\"at\":1795428968292,\"time\":\"2026-11-23T08:16:08.292Z\",\"direction\":\"in\",\"from\":{\"id\":\"ann-id\",\"username\":\"ann_u\",\"name\":\"Ann\"},\"text\":\"see the file\",\"taskIds\":[9830],\"new\":true,\"readAt\":1795428968300}" ++
+        "]}}";
+    const file_body = "{\"data\":{\"id\":9830,\"name\":\"api.md\",\"tag\":\"API\",\"size\":7,\"mime\":\"text/markdown\",\"by\":\"Lin\",\"content\":\"# Title\",\"downloadUrl\":\"http://127.0.0.1:1/agent/v1/files/9830/dl?exp=1&sig=ab\",\"webUrl\":\"http://127.0.0.1:1/api/v1/files/9830/content\"}}";
+    const people_body = "{\"data\":{\"count\":2,\"people\":[{\"name\":\"Ann\",\"username\":\"ann_u\",\"online\":true},{\"name\":\"Bob\",\"username\":\"bob\"}]}}";
+    const sent_body = "{\"data\":{\"sent\":[\"Ann\"]}}";
+
+    fn run(self: *FakeMetaTeam) void {
+        while (!self.stop.load(.acquire)) self.serve() catch |err| {
+            if (!self.stop.load(.acquire)) self.failure = err;
+        };
+    }
+
+    fn serve(self: *FakeMetaTeam) !void {
+        var connection = try self.listener.accept(testing.io);
+        defer connection.close(testing.io);
+        if (self.stop.load(.acquire)) return;
+        var reads: [8192]u8 = undefined;
+        var writes: [8192]u8 = undefined;
+        var reader = connection.reader(testing.io, &reads);
+        var writer = connection.writer(testing.io, &writes);
+        var server: std.http.Server = .init(&reader.interface, &writer.interface);
+        var request = try server.receiveHead();
+        var authorized = false;
+        var request_key: []const u8 = "";
+        var headers = request.iterateHeaders();
+        while (headers.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) authorized = std.mem.eql(u8, header.value, "Bearer " ++ sentinel_key);
+            if (std.ascii.eqlIgnoreCase(header.name, "X-Request-Id")) request_key = header.value;
+        }
+        const target = request.head.target;
+        if (!authorized) {
+            self.refused += 1;
+            return request.respond("{\"error\":{\"code\":\"401\",\"message\":\"no\"}}", .{ .status = .unauthorized, .keep_alive = false });
+        }
+        var key_copy: [64]u8 = undefined;
+        const key = key_copy[0..@min(request_key.len, key_copy.len)];
+        @memcpy(key, request_key[0..key.len]);
+        if (request.head.method == .POST and std.mem.eql(u8, target, "/team/agent/v1/notify")) {
+            var body: [512]u8 = undefined;
+            const length: usize = @min(@as(usize, @intCast(request.head.content_length orelse 0)), body.len);
+            var body_buffer: [64]u8 = undefined;
+            try request.readerExpectNone(&body_buffer).readSliceAll(body[0..length]);
+            self.posts += 1;
+            for (self.keys[0..self.key_count], self.key_lens[0..self.key_count]) |*seen, seen_len| {
+                if (std.mem.eql(u8, seen[0..seen_len], key)) {
+                    self.replayed += 1;
+                    return request.respond(sent_body, .{ .keep_alive = false });
+                }
+            }
+            @memcpy(self.keys[self.key_count][0..key.len], key);
+            self.key_lens[self.key_count] = key.len;
+            self.key_count += 1;
+            self.delivered += 1;
+            if (self.lose_first_answer) {
+                self.lose_first_answer = false;
+                return; // Taken, but the answer never arrives.
+            }
+            return request.respond(sent_body, .{ .keep_alive = false });
+        }
+        const body: []const u8 = if (std.mem.eql(u8, target, "/team/open/v1/unread"))
+            unread_body
+        else if (std.mem.startsWith(u8, target, "/team/open/v1/messages"))
+            messages_body
+        else if (std.mem.eql(u8, target, "/team/open/v1/tasks/9830"))
+            file_body
+        else if (std.mem.eql(u8, target, "/team/agent/v1/people"))
+            people_body
+        else
+            return request.respond("{\"error\":{\"code\":\"404\",\"message\":\"no\"}}", .{ .status = .not_found, .keep_alive = false });
+        try request.respond(body, .{ .keep_alive = false });
+    }
+
+    fn shutdown(self: *FakeMetaTeam, port: u16) void {
+        self.stop.store(true, .release);
+        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+        var stream = address.connect(testing.io, .{ .mode = .stream }) catch return;
+        stream.close(testing.io);
+    }
+};
+
+test "inbox coordinator: against a local MetaTeam over real HTTP, with the key read from the credential store" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(testing.io, .{ .kernel_backlog = 8 });
+    defer listener.deinit(testing.io);
+    const port = listener.socket.address.getPort();
+    var service: FakeMetaTeam = .{ .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, FakeMetaTeam.run, .{&service});
+    defer {
+        service.shutdown(port);
+        thread.join();
+    }
+
+    // The production path: a sensitive endpoint in the credential store,
+    // resolved by the MCP source into a base and a key.
+    const harness = try native_sdk.TestHarness().create(testing.allocator, .{});
+    defer harness.destroy(testing.allocator);
+    var store: mcp_platform.CredentialStore = .{ .io = testing.io, .runtime = &harness.runtime, .main_thread_id = std.Thread.getCurrentId() };
+    const locator = "mcp/endpoint-1";
+    var origin_buffer: [64]u8 = undefined;
+    const origin = try std.fmt.bufPrint(&origin_buffer, "http://127.0.0.1:{d}", .{port});
+    var url_buffer: [160]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buffer, "{s}/team/agent/v1/mcp/k/{s}", .{ origin, sentinel_key });
+    const effects = store.effects();
+    try testing.expect(effects.create_fn(effects.context, locator, url));
+    var server: mcp_configuration.ServerWire = .{
+        .id = "server-1",
+        .namespace = "metateam",
+        .display_name = "MetaTeam",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 30_000,
+        .transport = .{ .kind = "streamable_http", .sensitive_endpoint = .{ .origin = origin, .identity = locator, .credential_refs = &.{locator} } },
+        .auth = .{ .kind = "none", .oauth = null },
+        .connection_approval = null,
+        .tools = &.{},
+    };
+    const fingerprint = mcp_configuration.connectionFingerprint(server);
+    server.connection_approval = .{ .fingerprint = &fingerprint };
+    var servers = [_]mcp_configuration.ServerWire{server};
+    var storage: [16 * 1024]u8 = undefined;
+    const bytes = try mcp_configuration.encode(&storage, .{ .schema_version = mcp_configuration.schema_version, .generation = 1, .oauth_operation = null, .servers = &servers }, mcp_startup.configuration_limits);
+    const Port = struct {
+        bytes: []const u8,
+        fn inspect(_: *anyopaque) ?mcp_configuration.ManagementInspection {
+            return .{ .health = .ready, .desired_generation = 1, .runtime_alignment = .current, .server_count = 1 };
+        }
+        fn write(context: *anyopaque, _: u64, output: []u8) anyerror![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            @memcpy(output[0..self.bytes.len], self.bytes);
+            return output[0..self.bytes.len];
+        }
+    };
+    var port_state: Port = .{ .bytes = bytes };
+    var management_port: control_ports.McpManagementPort = undefined;
+    management_port.context = &port_state;
+    management_port.inspect_fn = Port.inspect;
+    management_port.write_desired_fn = Port.write;
+    var mcp: McpSource = .{ .port = management_port, .credential_store = &store };
+
+    var engine: @import("metawork_http_transport").Engine = undefined;
+    engine.init(testing.allocator, threaded.io());
+    defer engine.deinit();
+    var adapter: http.Adapter = .{ .http = &engine };
+    var management: TestManagement = .{ .runtime = .init(testing.allocator) };
+    defer management.runtime.deinit();
+    var host: TestHost = .{ .main_thread = std.Thread.getCurrentId() };
+    var capture: Capture = .{};
+    defer capture.deinit();
+    var coordinator: Coordinator = .{
+        .allocator = testing.allocator,
+        .io = testing.io,
+        .management = management.management(),
+        .transport = adapter.transport(),
+        .retire_fn = http.Adapter.retire,
+        .retire_context = &adapter,
+        .source = mcp.source(),
+        .host = host.host(),
+    };
+    defer coordinator.shutdown();
+    const settle = struct {
+        fn run(value: *Coordinator) void {
+            for (0..16) |_| {
+                inline for (Coordinator.slots) |name| if (@field(value, name)) |job| job.join();
+                value.drain();
+                if (!value.running()) return;
+            }
+        }
+    }.run;
+
+    coordinator.start(true);
+    settle(&coordinator);
+    try testing.expectEqual(inbox.State.ready, management.runtime.view().state);
+    const binding = management.runtime.view().binding.value;
+    try testing.expectEqual(inbox.CommandOutcome.accepted, coordinator.refresh(binding, false));
+    settle(&coordinator);
+    // A message to oneself is the `me` conversation, beside Ann's.
+    var rows: [2][]const u8 = undefined;
+    for (management.runtime.view().conversations, 0..) |row, index| rows[index] = row.peerId;
+    try testing.expectEqual(@as(usize, 2), management.runtime.view().conversations.len);
+    try testing.expectEqualStrings("ann-id", rows[0]);
+    try testing.expectEqualStrings(inbox.self_peer_id, rows[1]);
+
+    const responder = capture.responder();
+    const key = "0b6f7c2e-7d1a-4c55-9f0e-2a4b6c8d0e1f";
+    try testing.expect(coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .to = .{ .peer = "ann-id" }, .text = "On it", .request_key = key }));
+    settle(&coordinator);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "\"state\":\"failed\"") != null);
+    // The user's retry: the same request key, so MetaTeam takes it once.
+    try testing.expect(coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 2, .to = .{ .peer = "ann-id" }, .text = "On it", .request_key = key }));
+    settle(&coordinator);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "\"state\":\"sent\",\"sent\":[\"Ann\"]") != null);
+    try testing.expectEqual(@as(usize, 2), service.posts);
+    try testing.expectEqual(@as(usize, 1), service.delivered);
+    try testing.expectEqual(@as(usize, 1), service.replayed);
+
+    try testing.expect(coordinator.listPeople(responder, "p1", .{ .binding = binding, .request_id = 3 }));
+    settle(&coordinator);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "{\"username\":\"bob\",\"name\":\"Bob\",\"online\":null}") != null);
+    try testing.expect(coordinator.readTask(responder, "t1", .{ .binding = binding, .request_id = 4, .task = "9830" }));
+    settle(&coordinator);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "\"content\":\"# Title\"") != null);
+    try testing.expect(coordinator.openFile(responder, "f1", .{ .binding = binding, .request_id = 5, .file = "9830" }));
+    settle(&coordinator);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "\"state\":\"opened\"") != null);
+    try testing.expectEqualStrings("http://127.0.0.1:1/agent/v1/files/9830/dl?exp=1&sig=ab", host.opened[0..host.opened_len]);
+
+    try testing.expectEqual(@as(?anyerror, null), service.failure);
+    try testing.expectEqual(@as(usize, 0), service.refused);
+    // The key reached MetaTeam only as a header: never a Renderer answer,
+    // the snapshot, a download address or the address of a request.
+    var snapshot: [16 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&snapshot);
+    try std.json.Stringify.value(management.runtime.view(), .{}, &writer);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), sentinel_key) == null);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "127.0.0.1") == null);
+    for (capture.responses.items) |response| {
+        try testing.expect(std.mem.indexOf(u8, response, sentinel_key) == null);
+        try testing.expect(std.mem.indexOf(u8, response, "127.0.0.1") == null);
+        try testing.expect(std.mem.indexOf(u8, response, "sig=") == null);
+    }
 }
 
 test "inbox coordinator: the MCP source resolves a sensitive MetaTeam endpoint through the credential store" {

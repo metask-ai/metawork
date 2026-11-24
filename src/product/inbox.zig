@@ -14,7 +14,12 @@ pub const Limits = struct {
     /// for again with a smaller `limit`.
     pub const unread_bytes = 256 * 1024;
     pub const messages_bytes = 4 * 1024 * 1024;
-    pub const task_bytes = 256 * 1024;
+    /// A shared text file brings up to 200 KB of content, escaped.
+    pub const detail_bytes = 1024 * 1024;
+    /// A send answers with the names it reached.
+    pub const send_bytes = 64 * 1024;
+    /// Every member with their projects and current work.
+    pub const people_bytes = 1024 * 1024;
     pub const json_depth = 16;
     /// The conversation list is built from the most recent messages and grows
     /// backwards on request; a page is a transfer unit, never a visibility cap.
@@ -161,19 +166,71 @@ pub const MessagesQuery = struct {
     limit: ?u32 = null,
 };
 
+/// A message to send: the JSON body and the request identity MetaTeam
+/// deduplicates by. Borrowed for the call.
+pub const Send = struct {
+    body: []const u8,
+    request_key: []const u8,
+};
+
 pub const Request = union(enum) {
     unread,
     messages: MessagesQuery,
     task: []const u8,
+    /// `POST /agent/v1/notify`. Never resent by this client on its own:
+    /// only the user's retry sends it again, under the same request key.
+    send: Send,
+    /// `GET /agent/v1/people`: the organization's current members.
+    people,
 
     pub fn maxBytes(self: Request) usize {
         return switch (self) {
             .unread => Limits.unread_bytes,
             .messages => Limits.messages_bytes,
-            .task => Limits.task_bytes,
+            .task => Limits.detail_bytes,
+            .send => Limits.send_bytes,
+            .people => Limits.people_bytes,
         };
     }
 };
+
+/// Who a message goes to. MetaTeam addresses members by username only; a
+/// member id is not accepted.
+pub const Address = union(enum) {
+    self,
+    member: Name,
+};
+
+/// `{"to":["<username>"]|"me","text":"..."}`.
+pub fn writeSendBody(writer: *std.Io.Writer, address: Address, text: []const u8) std.Io.Writer.Error!void {
+    var json: std.json.Stringify = .{ .writer = writer };
+    try json.beginObject();
+    try json.objectField("to");
+    switch (address) {
+        .self => try json.write(self_peer_id),
+        .member => |username| {
+            try json.beginArray();
+            try json.write(username.slice());
+            try json.endArray();
+        },
+    }
+    try json.objectField("text");
+    try json.write(text);
+    try json.endObject();
+}
+
+/// A request key becomes the `X-Request-Id` header: a UUID or any other
+/// short run of letters, digits and dashes.
+pub fn validRequestKey(key: []const u8) bool {
+    if (key.len < 8 or key.len > 64) return false;
+    for (key) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-') return false;
+    return true;
+}
+
+/// A message is sent only with something in it.
+pub fn sendableText(text: []const u8) bool {
+    return std.mem.trim(u8, text, " \t\r\n").len != 0 and std.unicode.utf8ValidateSlice(text);
+}
 
 /// The full request URL: the base of the bound connection plus the open API
 /// path and query. Never carries the key; it travels as a Bearer header.
@@ -181,6 +238,8 @@ pub fn writeUrl(writer: *std.Io.Writer, base: []const u8, request: Request) std.
     try writer.writeAll(base);
     switch (request) {
         .unread => try writer.writeAll("/open/v1/unread"),
+        .send => try writer.writeAll("/agent/v1/notify"),
+        .people => try writer.writeAll("/agent/v1/people"),
         .task => |id| {
             try writer.writeAll("/open/v1/tasks/");
             try writeComponent(writer, id);
@@ -222,6 +281,100 @@ pub fn requestFailure(status: ?u16) RequestFailure {
     };
 }
 
+/// What one send's answer means. MetaTeam keeps the answer to a request key
+/// and replays it for the same key, except a server error: so only `failed`
+/// (no answer, or a server error) can turn out differently when the same
+/// request is sent again. A refusal is the request's own outcome and never
+/// the connection's.
+pub fn sendState(status: ?u16) SendState {
+    const value = status orelse return .failed;
+    return switch (value) {
+        200...299 => .sent,
+        401, 403 => .forbidden,
+        404, 410 => .not_found,
+        400, 402, 405...409, 411...499 => .rejected,
+        else => .failed,
+    };
+}
+
+/// The names a send reached, when MetaTeam reports them; an answer without
+/// them is still a sent message.
+pub fn parseSent(allocator: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}![]Name {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const data = parseData(arena.allocator(), bytes, Limits.send_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidResponse => return allocator.alloc(Name, 0),
+    };
+    const list = if (data == .object) field(data.object, "sent") else null;
+    const items: []const std.json.Value = if (list) |value| if (value == .array) value.array.items else &.{} else &.{};
+    var names: std.ArrayList(Name) = .empty;
+    errdefer names.deinit(allocator);
+    for (items) |item| if (item == .string and item.string.len != 0) try names.append(allocator, .truncated(item.string));
+    return names.toOwnedSlice(allocator);
+}
+
+pub const Member = struct {
+    username: Name,
+    name: Name,
+    online: ?bool,
+};
+
+pub const People = struct {
+    items: []Member,
+
+    pub fn deinit(self: *People, allocator: std.mem.Allocator) void {
+        allocator.free(self.items);
+        self.* = undefined;
+    }
+};
+
+/// The members a message can be addressed to. A member without a usable
+/// username cannot be: they are left out. A username listed twice is one
+/// member.
+pub fn parsePeople(allocator: std.mem.Allocator, bytes: []const u8) ParseError!People {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const data = try parseData(arena.allocator(), bytes, Limits.people_bytes);
+    if (data != .object) return error.InvalidResponse;
+    const list = data.object.get("people") orelse return error.InvalidResponse;
+    if (list != .array) return error.InvalidResponse;
+    var members: std.ArrayList(Member) = .empty;
+    errdefer members.deinit(allocator);
+    for (list.array.items) |entry| {
+        if (entry != .object) continue;
+        const username = Name.init(nonEmptyString(field(entry.object, "username")) orelse continue) catch continue;
+        const name = nonEmptyString(field(entry.object, "name")) orelse username.slice();
+        const online: ?bool = if (field(entry.object, "online")) |value| if (value == .bool) value.bool else null else null;
+        for (members.items) |*seen| {
+            if (seen.username.eql(username.slice())) break;
+        } else try members.append(allocator, .{ .username = username, .name = .truncated(name), .online = online });
+    }
+    return .{ .items = try members.toOwnedSlice(allocator) };
+}
+
+/// The conversation a message to `username` landed in, from MetaTeam's
+/// newest message with them: the member with that username, `me` for a
+/// message to oneself, or the only recipient. Null when it cannot be told.
+pub fn conversationOf(messages: []const Message, username: []const u8) ?Peer {
+    var index = messages.len;
+    while (index > 0) {
+        index -= 1;
+        const message = &messages[index];
+        for (message.conversations) |peer| if (peer.username) |name| {
+            if (std.ascii.eqlIgnoreCase(name.slice(), username)) return peer;
+        };
+        switch (message.direction) {
+            .self => return message.conversations[0],
+            // Only a recipient MetaTeam named no username for can be the
+            // one picked; a different username is someone else.
+            .out => if (message.conversations.len == 1 and message.conversations[0].username == null) return message.conversations[0],
+            .in => {},
+        }
+    }
+    return null;
+}
+
 /// A task id becomes one path segment. Every byte is percent-encoded except
 /// the unreserved ones, so only the dot segments could still move the path.
 pub fn validTaskId(id: []const u8) bool {
@@ -245,16 +398,35 @@ pub fn statusFailure(status: u16) ?Failure {
 // service, and unknown fields are ignored. A missing or mistyped required
 // field makes the whole response unusable.
 
-pub const Direction = enum { in, out };
+/// `self` is a message the user sent to themself: from one of their own
+/// agents to another, or a group message that also went to them.
+pub const Direction = enum { in, out, self };
+
+/// The conversation of what the user sent to themself. MetaTeam's own name
+/// for it as a `peer`; never a member id.
+pub const self_peer_id = "me";
 
 pub const Peer = struct {
     id: Id,
     name: Name,
+    /// The only name MetaTeam addresses a message to exactly; absent when
+    /// the service did not report it or it does not fit.
+    username: ?Name = null,
 };
 
 pub const PeerUnread = struct {
     peer: Peer,
     unread: u64,
+    /// When their latest unread message arrived.
+    last_at_ms: ?u64 = null,
+};
+
+/// One recipient of a message the user sent, and whether they read it.
+pub const Recipient = struct {
+    peer: Peer,
+    read: bool,
+    /// Null when unread, or read at a time this client cannot parse.
+    read_at_ms: ?u64,
 };
 
 pub const Unread = struct {
@@ -272,16 +444,27 @@ pub const Message = struct {
     sent_at_ms: u64,
     direction: Direction,
     from: Peer,
-    recipients: []const Peer,
+    recipients: []const Recipient,
     text: []const u8,
     task_ids: []const Id,
-
+    /// A received message the user had not read before this answer.
+    is_new: bool = false,
+    /// The agent that sent it, as MetaTeam names it ("client@host").
+    from_agent: ?Name = null,
     /// The conversations this message belongs to, seen from this user: what
-    /// came in belongs to its sender, what went out to every recipient.
+    /// came in belongs to its sender, what went out to every recipient, and
+    /// what went to the user themself to `me` and every other recipient.
+    conversations: []const Peer,
+
     pub fn peers(self: *const Message) []const Peer {
-        return if (self.direction == .in) @as(*const [1]Peer, &self.from) else self.recipients;
+        return self.conversations;
     }
 };
+
+/// The `me` conversation, named after the user as MetaTeam reports them.
+pub fn selfPeer(from: Peer) Peer {
+    return .{ .id = Id.init(self_peer_id) catch unreachable, .name = from.name };
+}
 
 pub const Messages = struct {
     arena: std.heap.ArenaAllocator,
@@ -293,8 +476,19 @@ pub const Messages = struct {
     }
 };
 
-pub const Task = struct {
-    arena: std.heap.ArenaAllocator,
+pub const Note = struct {
+    text: []const u8,
+    at_ms: ?u64,
+    by: ?[]const u8,
+};
+
+pub const Child = struct {
+    id: Id,
+    name: []const u8,
+    progress: ?[]const u8,
+};
+
+pub const TaskFacts = struct {
     id: ?Id,
     name: []const u8,
     progress: ?[]const u8,
@@ -302,9 +496,67 @@ pub const Task = struct {
     path: ?[]const u8,
     description: ?[]const u8,
     assignees: []const []const u8,
+    created_by: ?[]const u8,
     updated_at_ms: ?u64,
+    last_note: ?Note,
+    /// MetaTeam's latest notes, oldest first.
+    notes: []const Note,
+    children: []const Child,
+};
 
-    pub fn deinit(self: *Task) void {
+pub const FileFacts = struct {
+    id: ?Id,
+    name: []const u8,
+    tag: ?[]const u8,
+    size: ?u64,
+    mime: ?[]const u8,
+    description: ?[]const u8,
+    by: ?[]const u8,
+    updated_at_ms: ?u64,
+    path: ?[]const u8,
+    /// Only for a small text file.
+    content: ?[]const u8,
+    /// A short-lived signed address. Application opens it in the system
+    /// browser; it never reaches the Renderer.
+    download_url: ?[]const u8,
+};
+
+pub const ProjectFile = struct {
+    id: Id,
+    name: []const u8,
+    tag: ?[]const u8,
+    size: ?u64,
+    mime: ?[]const u8,
+    by: ?[]const u8,
+    updated_at_ms: ?u64,
+};
+
+pub const TagCount = struct {
+    tag: []const u8,
+    count: u64,
+};
+
+pub const ProjectFacts = struct {
+    id: ?Id,
+    name: []const u8,
+    description: ?[]const u8,
+    path: ?[]const u8,
+    updated_at_ms: ?u64,
+    files: []const ProjectFile,
+    file_tags: []const TagCount,
+};
+
+/// What `/open/v1/tasks/{id}` answered: a message's linked id may name a
+/// task, a shared file or a project.
+pub const Detail = struct {
+    arena: std.heap.ArenaAllocator,
+    kind: union(enum) {
+        task: TaskFacts,
+        file: FileFacts,
+        project: ProjectFacts,
+    },
+
+    pub fn deinit(self: *Detail) void {
         self.arena.deinit();
         self.* = undefined;
     }
@@ -407,12 +659,28 @@ fn peerValue(value: std.json.Value) error{InvalidResponse}!Peer {
     if (value != .object) return error.InvalidResponse;
     const id = try idValue(value.object.get("id") orelse return error.InvalidResponse);
     // The development client showed `name`, then `username`.
-    const name = nonEmptyString(field(value.object, "name")) orelse
-        nonEmptyString(field(value.object, "username")) orelse id.slice();
-    return .{ .id = id, .name = .truncated(name) };
+    const username = nonEmptyString(field(value.object, "username"));
+    const name = nonEmptyString(field(value.object, "name")) orelse username orelse id.slice();
+    // A username is an address: kept exactly or not at all.
+    return .{ .id = id, .name = .truncated(name), .username = if (username) |text| Name.init(text) catch null else null };
 }
 
+/// An optional instant: absent, null or unreadable is no time at all.
+fn optionalTime(object: std.json.ObjectMap, names: []const []const u8) ?u64 {
+    for (names) |name| if (field(object, name)) |value| return timeValue(value) catch null;
+    return null;
+}
+
+/// The latest instant JavaScript can represent; a later one would break the
+/// Renderer's dates.
+pub const max_time_ms: u64 = 8_640_000_000_000_000;
+
 fn timeValue(value: std.json.Value) error{InvalidResponse}!u64 {
+    const at = try timeOf(value);
+    return if (at > max_time_ms) error.InvalidResponse else at;
+}
+
+fn timeOf(value: std.json.Value) error{InvalidResponse}!u64 {
     return switch (value) {
         // MetaTeam reports instants as Unix milliseconds elsewhere.
         .number_string => |text| if (integerText(text))
@@ -442,14 +710,16 @@ pub fn parseUnread(allocator: std.mem.Allocator, bytes: []const u8) ParseError!U
         if (item != .object) return error.InvalidResponse;
         const peer = try peerValue(item.object.get("peer") orelse return error.InvalidResponse);
         const unread = try countValue(item.object.get("unread") orelse return error.InvalidResponse);
+        const last_at = optionalTime(item.object, &.{ "lastAt", "lastTime" });
         // Ids are compared as text, so `7` and `"7"` are one member: one row,
         // its counts added, rather than two rows with the same key.
         for (by_peer.items) |*existing| {
             if (existing.peer.id.eql(peer.id.slice())) {
                 existing.unread +|= unread;
+                if (last_at) |at| existing.last_at_ms = @max(at, existing.last_at_ms orelse 0);
                 break;
             }
-        } else by_peer.appendAssumeCapacity(.{ .peer = peer, .unread = unread });
+        } else by_peer.appendAssumeCapacity(.{ .peer = peer, .unread = unread, .last_at_ms = last_at });
     }
     return .{ .total = total, .by_peer = try by_peer.toOwnedSlice(allocator) };
 }
@@ -482,13 +752,23 @@ pub fn parseMessages(allocator: std.mem.Allocator, bytes: []const u8) ParseError
         // Repeated recipients, task ids or messages are kept once: each is a
         // key on the Renderer side.
         const peer_list = try arena.alloc(Peer, recipients.len);
+        const recipient_list = try arena.alloc(Recipient, recipients.len);
         var peers: usize = 0;
         for (recipients) |entry| {
             const peer = try peerValue(entry);
-            for (peer_list[0..peers]) |*seen| {
-                if (seen.id.eql(peer.id.slice())) break;
+            // `readAt` null is unread; any other value says it was read.
+            const read_at = entry.object.get("readAt");
+            const read = read_at != null and read_at.? != .null;
+            const at = if (read) timeValue(read_at.?) catch null else null;
+            for (recipient_list[0..peers]) |*seen| {
+                if (seen.peer.id.eql(peer.id.slice())) {
+                    // The same member twice: read if either says so.
+                    if (read and !seen.read) seen.* = .{ .peer = seen.peer, .read = true, .read_at_ms = at };
+                    break;
+                }
             } else {
                 peer_list[peers] = peer;
+                recipient_list[peers] = .{ .peer = peer, .read = read, .read_at_ms = at };
                 peers += 1;
             }
         }
@@ -503,14 +783,41 @@ pub fn parseMessages(allocator: std.mem.Allocator, bytes: []const u8) ParseError
                 task_count += 1;
             }
         }
+        const from = try peerValue(object.get("from") orelse return error.InvalidResponse);
+        const kind = std.meta.stringToEnum(Direction, direction) orelse return error.InvalidResponse;
+        const conversations: []const Peer = switch (kind) {
+            .in => (try arena.dupe(Peer, &.{from})),
+            .out => peer_list[0..peers],
+            .self => self: {
+                // A group message that also went to the user is theirs and
+                // every other recipient's.
+                const mine = try arena.alloc(Peer, peers + 1);
+                mine[0] = selfPeer(from);
+                var count_self: usize = 1;
+                for (peer_list[0..peers]) |peer| {
+                    if (peer.id.eql(from.id.slice()) or peer.id.eql(self_peer_id)) continue;
+                    mine[count_self] = peer;
+                    count_self += 1;
+                }
+                break :self mine[0..count_self];
+            },
+        };
         message.* = .{
             .id = try idValue(object.get("id") orelse return error.InvalidResponse),
             .sent_at_ms = try timeValue(object.get("time") orelse return error.InvalidResponse),
-            .direction = std.meta.stringToEnum(Direction, direction) orelse return error.InvalidResponse,
-            .from = try peerValue(object.get("from") orelse return error.InvalidResponse),
-            .recipients = peer_list[0..peers],
+            .direction = kind,
+            .from = from,
+            .recipients = recipient_list[0..peers],
             .text = text.string,
             .task_ids = task_list[0..task_count],
+            // Only a literal `true` is new; anything else was seen before.
+            .is_new = if (field(object, "new")) |value| value == .bool and value.bool else false,
+            // Present means an agent sent it; its value only names which.
+            .from_agent = if (field(object, "fromAgent")) |value| switch (value) {
+                .string => |agent| Name.truncated(if (agent.len == 0) "agent" else agent),
+                else => Name.truncated("agent"),
+            } else null,
+            .conversations = conversations,
         };
         // An outgoing message without recipients belongs to no conversation.
         if (message.direction == .out and peers == 0) return error.InvalidResponse;
@@ -522,17 +829,64 @@ pub fn parseMessages(allocator: std.mem.Allocator, bytes: []const u8) ParseError
     return result;
 }
 
-pub fn parseTask(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Task {
+/// The name, which every kind needs, is the only required field. Optional
+/// fields and list entries that are missing or mistyped are left out: they
+/// never make the rest unusable.
+pub fn parseDetail(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Detail {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();
-    var data = try parseData(a, bytes, Limits.task_bytes);
+    var data = try parseData(a, bytes, Limits.detail_bytes);
     if (data != .object) return error.InvalidResponse;
     if (field(data.object, "task")) |inner| {
         if (inner == .object) data = inner;
     }
     const object = data.object;
     const name = nonEmptyString(field(object, "name")) orelse return error.InvalidResponse;
+    const id = if (field(object, "id")) |value| idValue(value) catch null else null;
+    const updated = optionalTime(object, &.{"updatedAt"});
+    const path = nonEmptyString(field(object, "path"));
+    const description = nonEmptyString(field(object, "description")) orelse nonEmptyString(field(object, "desc"));
+    // A declared type decides. Without one, MetaTeam tells them apart by
+    // their fields: a file has a tag or a MIME type, a task a progress, a
+    // project its files.
+    const Kind = enum { task, file, project };
+    const declared: ?Kind = if (nonEmptyString(field(object, "type"))) |kind| std.meta.stringToEnum(Kind, kind) else null;
+    const resolved: Kind = declared orelse if (field(object, "tag") != null or field(object, "mime") != null)
+        .file
+    else if (field(object, "progress") != null)
+        .task
+    else if (field(object, "files") != null or field(object, "fileTags") != null)
+        .project
+    else
+        .task;
+    if (resolved == .file) return .{ .arena = arena, .kind = .{ .file = .{
+        .id = id,
+        .name = name,
+        .tag = nonEmptyString(field(object, "tag")),
+        .size = if (field(object, "size")) |value| countValue(value) catch null else null,
+        .mime = nonEmptyString(field(object, "mime")),
+        .description = description,
+        .by = nonEmptyString(field(object, "by")),
+        .updated_at_ms = updated,
+        .path = path,
+        .content = if (field(object, "content")) |value| if (value == .string) value.string else null else null,
+        .download_url = nonEmptyString(field(object, "downloadUrl")),
+    } } };
+    if (resolved == .project) {
+        // Allocated before the arena's state is copied into the result.
+        const files = try projectFiles(a, field(object, "files"));
+        const file_tags = try tagCounts(a, field(object, "fileTags"));
+        return .{ .arena = arena, .kind = .{ .project = .{
+            .id = id,
+            .name = name,
+            .description = description,
+            .path = path,
+            .updated_at_ms = updated,
+            .files = files,
+            .file_tags = file_tags,
+        } } };
+    }
     var assignees: std.ArrayList([]const u8) = .empty;
     if (field(object, "assignees")) |value| {
         if (value == .array) for (value.array.items) |entry| {
@@ -544,23 +898,111 @@ pub fn parseTask(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Tas
             try assignees.append(a, text);
         };
     }
-    const id = if (field(object, "id")) |value| idValue(value) catch null else null;
-    const updated = if (field(object, "updatedAt")) |value| timeValue(value) catch null else null;
-    const progress = nonEmptyString(field(object, "progress"));
-    const state = nonEmptyString(field(object, "state"));
-    const path = nonEmptyString(field(object, "path"));
-    const description = nonEmptyString(field(object, "description")) orelse nonEmptyString(field(object, "desc"));
-    return .{
-        .arena = arena,
+    var notes: std.ArrayList(Note) = .empty;
+    if (field(object, "notes")) |value| if (value == .array) for (value.array.items) |entry| {
+        if (noteValue(entry)) |note| try notes.append(a, note);
+    };
+    var children: std.ArrayList(Child) = .empty;
+    if (field(object, "children")) |value| if (value == .array) for (value.array.items) |entry| {
+        if (entry != .object) continue;
+        const child_id = idValue(entry.object.get("id") orelse continue) catch continue;
+        const child_name = nonEmptyString(field(entry.object, "name")) orelse continue;
+        // Each child is a key on the Renderer side: kept once.
+        for (children.items) |*seen| {
+            if (seen.id.eql(child_id.slice())) break;
+        } else try children.append(a, .{ .id = child_id, .name = child_name, .progress = nonEmptyString(field(entry.object, "progress")) });
+    };
+    return .{ .arena = arena, .kind = .{ .task = .{
         .id = id,
         .name = name,
-        .progress = progress,
-        .state = state,
+        .progress = nonEmptyString(field(object, "progress")),
+        .state = nonEmptyString(field(object, "state")),
         .path = path,
         .description = description,
         .assignees = assignees.items,
+        .created_by = nonEmptyString(field(object, "createdBy")),
         .updated_at_ms = updated,
+        .last_note = if (field(object, "lastNote")) |value| noteValue(value) else null,
+        .notes = notes.items,
+        .children = children.items,
+    } } };
+}
+
+fn noteValue(value: std.json.Value) ?Note {
+    if (value != .object) return null;
+    const text = nonEmptyString(field(value.object, "text")) orelse return null;
+    return .{ .text = text, .at_ms = optionalTime(value.object, &.{ "at", "time" }), .by = nonEmptyString(field(value.object, "by")) };
+}
+
+fn projectFiles(arena: std.mem.Allocator, value: ?std.json.Value) ParseError![]const ProjectFile {
+    const list = value orelse return &.{};
+    if (list != .array) return &.{};
+    var files: std.ArrayList(ProjectFile) = .empty;
+    for (list.array.items) |entry| {
+        if (entry != .object) continue;
+        const object = entry.object;
+        const id = idValue(object.get("id") orelse continue) catch continue;
+        const name = nonEmptyString(field(object, "name")) orelse continue;
+        for (files.items) |*seen| {
+            if (seen.id.eql(id.slice())) break;
+        } else try files.append(arena, .{
+            .id = id,
+            .name = name,
+            .tag = nonEmptyString(field(object, "tag")),
+            .size = if (field(object, "size")) |size| countValue(size) catch null else null,
+            .mime = nonEmptyString(field(object, "mime")),
+            .by = nonEmptyString(field(object, "by")),
+            .updated_at_ms = optionalTime(object, &.{"updatedAt"}),
+        });
+    }
+    return files.items;
+}
+
+/// Counts by category, as an object of counts or a list of `{tag, count}`.
+/// A category named twice is one, its counts added.
+fn tagCounts(arena: std.mem.Allocator, value: ?std.json.Value) ParseError![]const TagCount {
+    const present = value orelse return &.{};
+    var tags: std.ArrayList(TagCount) = .empty;
+    switch (present) {
+        .object => |object| {
+            var entries = object.iterator();
+            while (entries.next()) |entry| {
+                if (entry.key_ptr.len == 0) continue;
+                const count = countValue(entry.value_ptr.*) catch continue;
+                try addTag(arena, &tags, entry.key_ptr.*, count);
+            }
+        },
+        .array => |array| for (array.items) |entry| {
+            if (entry != .object) continue;
+            const tag = nonEmptyString(field(entry.object, "tag")) orelse nonEmptyString(field(entry.object, "name")) orelse continue;
+            const count = countValue(entry.object.get("count") orelse continue) catch continue;
+            try addTag(arena, &tags, tag, count);
+        },
+        else => {},
+    }
+    return tags.items;
+}
+
+fn addTag(arena: std.mem.Allocator, tags: *std.ArrayList(TagCount), tag: []const u8, count: u64) !void {
+    for (tags.items) |*seen| if (std.mem.eql(u8, seen.tag, tag)) {
+        seen.count +|= count;
+        return;
     };
+    try tags.append(arena, .{ .tag = tag, .count = count });
+}
+
+/// Whether a file's download address may be handed to the system browser:
+/// an absolute web address without credentials, and never one that carries
+/// the device key.
+pub fn validDownloadUrl(url: []const u8, key: []const u8) bool {
+    if (url.len == 0) return false;
+    for (url) |byte| if (byte <= 0x20 or byte >= 0x7f or byte == '\\') return false;
+    if (key.len != 0 and std.mem.indexOf(u8, url, key) != null) return false;
+    const uri = std.Uri.parse(url) catch return false;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http") and !std.ascii.eqlIgnoreCase(uri.scheme, "https")) return false;
+    const host = uri.host orelse return false;
+    if (host.isEmpty()) return false;
+    return uri.user == null and uri.password == null and uri.fragment == null;
 }
 
 /// `YYYY-MM-DD[T ]HH:MM:SS[.fraction][Z|±HH:MM|±HHMM]`. A missing zone is UTC.
@@ -755,6 +1197,8 @@ pub const ConversationView = struct {
     name: []const u8,
     unread: U64,
     latest: ?LatestView,
+    /// When their latest unread message arrived, from the unread facts.
+    lastAtMs: ?U64,
 };
 
 /// Borrowed, key-free and URL-free projection; serialize from the main thread.
@@ -1063,11 +1507,20 @@ pub const Runtime = struct {
     }
 
     fn replaceWindow(self: *Runtime, messages: []const Message, full: bool) std.mem.Allocator.Error!void {
+        const previous = try self.allocator.dupe(Summary, self.summaries.items);
+        defer self.allocator.free(previous);
         const kept: ?Summary = if (self.viewing) |*peer| if (self.summaryIndex(peer.slice())) |index| self.summaries.items[index] else null else null;
         self.summaries.clearRetainingCapacity();
         for (messages) |*message| try self.absorb(message, true);
         if (kept) |summary| if (self.summaryIndex(summary.peer.id.slice()) == null)
             try self.summaries.append(self.allocator, summary);
+        // A rebuilt window keeps the usernames it knew: replies use them.
+        for (self.summaries.items) |*summary| if (summary.peer.username == null) {
+            for (previous) |*old| if (old.peer.id.eql(summary.peer.id.slice())) {
+                summary.peer.username = old.peer.username;
+                break;
+            };
+        };
         self.newest = if (messages.len != 0) messages[messages.len - 1].id else null;
         self.oldest = if (messages.len != 0) messages[0].id else null;
         self.has_earlier = full;
@@ -1083,7 +1536,11 @@ pub const Runtime = struct {
             if (self.summaryIndex(peer.id.slice())) |index| {
                 const current = &self.summaries.items[index];
                 if (newer or message.sent_at_ms > current.latest.sent_at_ms) {
-                    current.* = .{ .peer = peer, .latest = latest };
+                    // A message that does not report the username keeps the
+                    // one known: replies are addressed by it.
+                    var known = peer;
+                    if (known.username == null) known.username = current.peer.username;
+                    current.* = .{ .peer = known, .latest = latest };
                 }
             } else try self.summaries.append(self.allocator, .{ .peer = peer, .latest = latest });
         }
@@ -1095,10 +1552,10 @@ pub const Runtime = struct {
         return null;
     }
 
-    fn unreadOf(self: *const Runtime, peer: []const u8) u64 {
+    fn unreadOf(self: *const Runtime, peer: []const u8) ?*const PeerUnread {
         for (self.by_peer.items) |*entry|
-            if (entry.peer.id.eql(peer)) return entry.unread;
-        return 0;
+            if (entry.peer.id.eql(peer)) return entry;
+        return null;
     }
 
     /// Whether a Renderer request about this conversation may run now.
@@ -1112,6 +1569,17 @@ pub const Runtime = struct {
 
     pub fn accepts(self: *const Runtime, binding: u64) bool {
         return self.available and self.bound and binding == self.binding;
+    }
+
+    /// Where a reply in this conversation goes: `me`, or the member's exact
+    /// username as MetaTeam reported it. Null when the list does not know
+    /// the conversation or MetaTeam gave no username.
+    pub fn peerAddress(self: *const Runtime, binding: u64, peer: []const u8) ?Address {
+        if (!self.accepts(binding)) return null;
+        if (std.mem.eql(u8, peer, self_peer_id)) return .self;
+        if (self.summaryIndex(peer)) |index| if (self.summaries.items[index].peer.username) |username| return .{ .member = username };
+        if (self.unreadOf(peer)) |entry| if (entry.peer.username) |username| return .{ .member = username };
+        return null;
     }
 
     /// A conversation page the user read keeps the list's summary current
@@ -1133,15 +1601,25 @@ pub const Runtime = struct {
         if (!self.bound) return;
         for (self.by_peer.items) |*entry| {
             if (entry.unread == 0 or self.summaryIndex(entry.peer.id.slice()) != null) continue;
-            try self.rows.append(self.allocator, .{ .peerId = entry.peer.id.slice(), .name = entry.peer.name.slice(), .unread = .{ .value = entry.unread }, .latest = null });
+            try self.rows.append(self.allocator, .{
+                .peerId = entry.peer.id.slice(),
+                .name = entry.peer.name.slice(),
+                .unread = .{ .value = entry.unread },
+                .latest = null,
+                .lastAtMs = if (entry.last_at_ms) |at| .{ .value = at } else null,
+            });
         }
         const pending = self.rows.items.len;
-        for (self.summaries.items) |*summary| try self.rows.append(self.allocator, .{
-            .peerId = summary.peer.id.slice(),
-            .name = summary.peer.name.slice(),
-            .unread = .{ .value = self.unreadOf(summary.peer.id.slice()) },
-            .latest = .{ .id = summary.latest.id.slice(), .direction = summary.latest.direction, .preview = summary.latest.preview.slice(), .sentAtMs = .{ .value = summary.latest.sent_at_ms } },
-        });
+        for (self.summaries.items) |*summary| {
+            const unread = self.unreadOf(summary.peer.id.slice());
+            try self.rows.append(self.allocator, .{
+                .peerId = summary.peer.id.slice(),
+                .name = summary.peer.name.slice(),
+                .unread = .{ .value = if (unread) |entry| entry.unread else 0 },
+                .latest = .{ .id = summary.latest.id.slice(), .direction = summary.latest.direction, .preview = summary.latest.preview.slice(), .sentAtMs = .{ .value = summary.latest.sent_at_ms } },
+                .lastAtMs = if (unread) |entry| if (entry.last_at_ms) |at| U64{ .value = at } else null else null,
+            });
+        }
         std.mem.sort(ConversationView, self.rows.items[0..pending], {}, struct {
             fn less(_: void, a: ConversationView, b: ConversationView) bool {
                 return a.unread.value > b.unread.value;
@@ -1179,6 +1657,8 @@ pub const Runtime = struct {
 pub const RecipientView = struct {
     peerId: []const u8,
     name: []const u8,
+    read: bool,
+    readAtMs: ?U64,
 };
 
 pub const MessageView = struct {
@@ -1186,6 +1666,10 @@ pub const MessageView = struct {
     direction: Direction,
     fromPeerId: []const u8,
     fromName: []const u8,
+    /// The agent that sent it ("client@host"), when an agent did.
+    fromAgent: ?[]const u8,
+    /// Received and not read before this answer.
+    isNew: bool,
     recipients: []const RecipientView,
     text: []const u8,
     /// The text was cut to fit one Bridge result; only for a single message
@@ -1210,6 +1694,18 @@ pub const ConversationPage = struct {
     complete: bool,
 };
 
+pub const NoteView = struct {
+    text: []const u8,
+    atMs: ?U64,
+    by: ?[]const u8,
+};
+
+pub const ChildView = struct {
+    id: []const u8,
+    name: []const u8,
+    progress: ?[]const u8,
+};
+
 pub const TaskView = struct {
     id: []const u8,
     name: []const u8,
@@ -1218,16 +1714,150 @@ pub const TaskView = struct {
     path: ?[]const u8,
     description: ?[]const u8,
     assignees: []const []const u8,
+    createdBy: ?[]const u8,
     updatedAtMs: ?U64,
+    lastNote: ?NoteView,
+    /// Oldest first. Older ones are left out when the detail does not fit.
+    notes: []const NoteView,
+    children: []const ChildView,
+};
+
+/// A shared file. Its download address stays in Application; `downloadable`
+/// only says whether there is one to open.
+pub const FileView = struct {
+    id: []const u8,
+    name: []const u8,
+    tag: ?[]const u8,
+    sizeBytes: ?U64,
+    mime: ?[]const u8,
+    description: ?[]const u8,
+    by: ?[]const u8,
+    updatedAtMs: ?U64,
+    path: ?[]const u8,
+    content: ?[]const u8,
+    /// The content was cut to fit one Bridge result.
+    contentTruncated: bool,
+    downloadable: bool,
+};
+
+pub const ProjectFileView = struct {
+    id: []const u8,
+    name: []const u8,
+    tag: ?[]const u8,
+    sizeBytes: ?U64,
+    mime: ?[]const u8,
+    by: ?[]const u8,
+    updatedAtMs: ?U64,
+};
+
+pub const TagCountView = struct {
+    tag: []const u8,
+    count: U64,
+};
+
+pub const ProjectView = struct {
+    id: []const u8,
+    name: []const u8,
+    description: ?[]const u8,
+    path: ?[]const u8,
+    updatedAtMs: ?U64,
+    files: []const ProjectFileView,
+    /// More files exist than fit one Bridge result.
+    filesTruncated: bool,
+    fileTags: []const TagCountView,
 };
 
 pub const TaskState = enum { ready, stale_binding, superseded, unavailable, forbidden, not_found, failed };
 
+/// One linked id's detail: when `ready`, exactly one of `task`, `file` and
+/// `project` is present.
 pub const TaskDetail = struct {
     binding: U64,
     requestId: U64,
     state: TaskState,
     task: ?TaskView,
+    file: ?FileView,
+    project: ?ProjectView,
+};
+
+pub const FileOpenRequest = struct {
+    binding: u64,
+    request_id: u64,
+    file: []const u8,
+};
+
+/// `not_downloadable`: the id is not a file, or MetaTeam gave no usable
+/// download address. `failed` includes the system refusing to open it.
+pub const FileOpenState = enum { opened, stale_binding, superseded, unavailable, forbidden, not_found, not_downloadable, failed };
+
+pub const FileOpen = struct {
+    binding: U64,
+    requestId: U64,
+    state: FileOpenState,
+};
+
+/// Where a message goes: a conversation the list knows, or a member picked
+/// by username for a new one.
+pub const SendTarget = union(enum) {
+    /// A member's id or `me`.
+    peer: []const u8,
+    username: []const u8,
+};
+
+/// A Renderer request to send one message. Borrowed for the call.
+pub const SendRequest = struct {
+    binding: u64,
+    request_id: u64,
+    to: SendTarget,
+    text: []const u8,
+    /// The `X-Request-Id`; the Renderer sends it again only for a retry.
+    request_key: []const u8,
+};
+
+/// - `sent`: MetaTeam took the message.
+/// - `failed`: no answer, or a server error; the same request may be sent
+///   again under the same key.
+/// - `forbidden`, `not_found`, `rejected`: MetaTeam refused it; it keeps
+///   that answer for the same key.
+/// - `busy`: another message is still being sent; nothing was sent.
+/// - `unknown_peer`: the conversation has no address to send to.
+/// - `superseded`: the Bridge connection ended before the answer.
+pub const SendState = enum { sent, stale_binding, unknown_peer, busy, superseded, unavailable, forbidden, not_found, rejected, failed };
+
+pub const ConversationRef = struct {
+    peerId: []const u8,
+    name: []const u8,
+};
+
+pub const SendResult = struct {
+    binding: U64,
+    requestId: U64,
+    state: SendState,
+    /// The names MetaTeam reports it reached.
+    sent: []const []const u8,
+    /// For a message to a member picked by username: the conversation it
+    /// landed in, now in the list, when it could be told.
+    conversation: ?ConversationRef,
+};
+
+pub const MemberView = struct {
+    username: []const u8,
+    name: []const u8,
+    online: ?bool,
+};
+
+pub const PeopleState = enum { ready, stale_binding, superseded, unavailable, forbidden, not_found, failed };
+
+pub const PeopleRequest = struct {
+    binding: u64,
+    request_id: u64,
+};
+
+pub const PeopleList = struct {
+    binding: U64,
+    requestId: U64,
+    state: PeopleState,
+    people: []const MemberView,
 };
 
 /// Application receives only these lifecycle capabilities, never the Control
@@ -1248,6 +1878,7 @@ pub const Management = struct {
     complete_list_fn: *const fn (*anyopaque, u64, u64, ListKind, ListCompletion) void,
     knows_peer_fn: *const fn (*anyopaque, u64, []const u8) bool,
     accepts_fn: *const fn (*anyopaque, u64) bool,
+    peer_address_fn: *const fn (*anyopaque, u64, []const u8) ?Address,
     complete_conversation_fn: *const fn (*anyopaque, u64, []const u8, ConversationPageKind, []const Message) void,
     stop_fn: *const fn (*anyopaque) void,
 };
@@ -1358,17 +1989,234 @@ test "unusable responses are rejected as a whole" {
 }
 
 test "task details read only the fields shown" {
-    var task = try parseTask(testing.allocator,
+    var detail = try parseDetail(testing.allocator,
         \\{"data":{"id":13066,"name":"Inbox","progress":"doing","path":"metawork / Inbox","assignees":[{"name":"Ann"},"Bob",3],"desc":"Read only","updatedAt":1795428968292,"other":[1]}}
     );
-    defer task.deinit();
+    defer detail.deinit();
+    const task = detail.kind.task;
     try testing.expectEqualStrings("13066", task.id.?.slice());
     try testing.expectEqualStrings("Inbox", task.name);
     try testing.expectEqualStrings("doing", task.progress.?);
     try testing.expectEqual(@as(usize, 2), task.assignees.len);
     try testing.expectEqualStrings("Read only", task.description.?);
     try testing.expectEqual(@as(?u64, 1795428968292), task.updated_at_ms);
-    try testing.expectError(error.InvalidResponse, parseTask(testing.allocator, "{\"data\":{\"id\":1}}"));
+    try testing.expect(task.last_note == null and task.notes.len == 0 and task.children.len == 0);
+    try testing.expectError(error.InvalidResponse, parseDetail(testing.allocator, "{\"data\":{\"id\":1}}"));
+}
+
+test "a linked id is a task, a shared file or a project, told apart by its fields" {
+    var task = try parseDetail(testing.allocator,
+        \\{"data":{"id":9801,"name":"API","type":"task","progress":"doing","state":"closed","createdBy":"Lin",
+        \\ "lastNote":{"text":"deployed","at":1795242000000,"by":"Lin"},
+        \\ "notes":[{"text":"found it","at":"2026-11-21T03:00:00Z","by":"Lin"},{"at":1},"bad",{"text":"deployed","at":1795242000000}],
+        \\ "children":[{"id":9802,"name":"Docs","progress":"todo"},{"id":"9802","name":"Docs again"},{"name":"no id"},{"id":9803,"name":"Tests"}]}}
+    );
+    defer task.deinit();
+    const facts = task.kind.task;
+    try testing.expectEqualStrings("closed", facts.state.?);
+    try testing.expectEqualStrings("Lin", facts.created_by.?);
+    try testing.expectEqualStrings("deployed", facts.last_note.?.text);
+    try testing.expectEqual(@as(?u64, 1795242000000), facts.last_note.?.at_ms);
+    // Unusable entries are left out; the rest keep MetaTeam's order.
+    try testing.expectEqual(@as(usize, 2), facts.notes.len);
+    try testing.expectEqualStrings("found it", facts.notes[0].text);
+    try testing.expectEqual(@as(usize, 2), facts.children.len);
+    try testing.expectEqualStrings("9802", facts.children[0].id.slice());
+    try testing.expectEqualStrings("todo", facts.children[0].progress.?);
+    try testing.expectEqualStrings("9803", facts.children[1].id.slice());
+
+    var file = try parseDetail(testing.allocator,
+        \\{"data":{"id":9830,"name":"metawork-api.md","tag":"API","size":12034,"mime":"text/markdown","desc":"","by":"Lin",
+        \\ "updatedAt":1795245000000,"projectId":1131,"path":"space / metawork-api.md","content":"# Title","downloadUrl":"https://h.test/dl?exp=1&sig=2","webUrl":"https://h.test/web"}}
+    );
+    defer file.deinit();
+    const shared = file.kind.file;
+    try testing.expectEqualStrings("API", shared.tag.?);
+    try testing.expectEqual(@as(?u64, 12034), shared.size);
+    try testing.expectEqualStrings("# Title", shared.content.?);
+    try testing.expectEqualStrings("https://h.test/dl?exp=1&sig=2", shared.download_url.?);
+    try testing.expect(shared.description == null);
+
+    var project = try parseDetail(testing.allocator,
+        \\{"data":{"id":740,"name":"metawork","type":"project","desc":"Desktop",
+        \\ "files":[{"id":1,"name":"a.md","tag":"Docs","size":10},{"id":"1","name":"dup"},{"name":"no id"},{"id":2,"name":"b.png","mime":"image/png"}],
+        \\ "fileTags":{"Docs":1,"Images":"x","":3}}}
+    );
+    defer project.deinit();
+    const space = project.kind.project;
+    try testing.expectEqualStrings("Desktop", space.description.?);
+    try testing.expectEqual(@as(usize, 2), space.files.len);
+    try testing.expectEqualStrings("b.png", space.files[1].name);
+    try testing.expectEqual(@as(usize, 1), space.file_tags.len);
+    try testing.expectEqual(@as(u64, 1), space.file_tags[0].count);
+
+    var listed = try parseDetail(testing.allocator,
+        \\{"data":{"id":740,"name":"metawork","fileTags":[{"tag":"Docs","count":2},{"name":"Docs","count":1},{"tag":"Other"}]}}
+    );
+    defer listed.deinit();
+    try testing.expectEqual(@as(usize, 1), listed.kind.project.file_tags.len);
+    try testing.expectEqual(@as(u64, 3), listed.kind.project.file_tags[0].count);
+}
+
+test "a message goes to a username or to me, and its answer is typed" {
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeSendBody(&writer, .{ .member = try .init("ann") }, "hi \"there\"\n");
+    try testing.expectEqualStrings("{\"to\":[\"ann\"],\"text\":\"hi \\\"there\\\"\\n\"}", writer.buffered());
+    writer = .fixed(&buffer);
+    try writeSendBody(&writer, .self, "note");
+    try testing.expectEqualStrings("{\"to\":\"me\",\"text\":\"note\"}", writer.buffered());
+
+    try testing.expect(validRequestKey("0b6f7c2e-7d1a-4c55-9f0e-2a4b6c8d0e1f"));
+    for ([_][]const u8{ "", "short", "has space-1234", "a\r\nX-Evil:-1", "x" ** 65 }) |key| try testing.expect(!validRequestKey(key));
+    try testing.expect(sendableText(" ok "));
+    try testing.expect(!sendableText(" \r\n\t"));
+
+    try testing.expectEqual(SendState.sent, sendState(200));
+    try testing.expectEqual(SendState.forbidden, sendState(401));
+    try testing.expectEqual(SendState.forbidden, sendState(403));
+    try testing.expectEqual(SendState.not_found, sendState(404));
+    try testing.expectEqual(SendState.rejected, sendState(400));
+    try testing.expectEqual(SendState.rejected, sendState(422));
+    try testing.expectEqual(SendState.failed, sendState(500));
+    try testing.expectEqual(SendState.failed, sendState(null));
+
+    const names = try parseSent(testing.allocator, "{\"data\":{\"sent\":[\"Ann\",\"\",3,\"Bob\"]}}");
+    defer testing.allocator.free(names);
+    try testing.expectEqual(@as(usize, 2), names.len);
+    try testing.expectEqualStrings("Bob", names[1].slice());
+    const none = try parseSent(testing.allocator, "not json");
+    defer testing.allocator.free(none);
+    try testing.expectEqual(@as(usize, 0), none.len);
+
+    // A reply's address comes from what the list knows about the member.
+    var runtime: Runtime = .init(testing.allocator);
+    defer runtime.deinit();
+    runtime.start(true);
+    _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
+    var unread = try parseUnread(testing.allocator,
+        \\{"data":{"unread":2,"byPeer":[{"peer":{"id":"u-1","username":"ann","name":"Ann"},"unread":1},{"peer":{"id":"u-2","name":"Bob"},"unread":1}]}}
+    );
+    defer unread.deinit(testing.allocator);
+    _ = try runtime.completePoll(0, 1, runtime.beginPoll().?, .{ .unread = &unread });
+    const binding = runtime.binding;
+    try testing.expectEqualStrings("ann", runtime.peerAddress(binding, "u-1").?.member.slice());
+    try testing.expect(runtime.peerAddress(binding, "u-2") == null);
+    try testing.expect(runtime.peerAddress(binding, self_peer_id).? == .self);
+    try testing.expect(runtime.peerAddress(binding, "nobody") == null);
+    try testing.expect(runtime.peerAddress(binding + 1, "u-1") == null);
+}
+
+test "members are addressable by username, once each; a sent message's conversation is told from MetaTeam's newest message" {
+    var people = try parsePeople(testing.allocator,
+        \\{"data":{"count":4,"people":[{"name":"Ann","username":"ann","role":"dev","online":true,"projects":["a"]},
+        \\ {"username":"bob"},{"name":"Ann twice","username":"ann"},{"name":"No username"},"bad",{"name":"Cy","username":"cy","online":"yes"}]}}
+    );
+    defer people.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), people.items.len);
+    try testing.expectEqualStrings("Ann", people.items[0].name.slice());
+    try testing.expectEqual(@as(?bool, true), people.items[0].online);
+    try testing.expectEqualStrings("bob", people.items[1].name.slice());
+    try testing.expect(people.items[2].online == null);
+    try testing.expectError(error.InvalidResponse, parsePeople(testing.allocator, "{\"data\":{\"count\":0}}"));
+
+    var messages = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[
+        \\ {"id":1,"time":1,"direction":"out","from":{"id":"me"},"recipients":[{"id":"u-b","username":"Bob","name":"Bob"}],"text":"hi"},
+        \\ {"id":2,"time":2,"direction":"self","from":{"id":"u-me","username":"zj"},"text":"note"}
+        \\]}}
+    );
+    defer messages.deinit();
+    try testing.expectEqualStrings("u-b", conversationOf(messages.items[0..1], "bob").?.id.slice());
+    try testing.expectEqualStrings(self_peer_id, conversationOf(messages.items, "zj").?.id.slice());
+    try testing.expect(conversationOf(&.{}, "bob") == null);
+
+    // A sole recipient is the picked member only when MetaTeam named no
+    // username for them; a different username is someone else.
+    var others = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[
+        \\ {"id":3,"time":3,"direction":"out","from":{"id":"me"},"recipients":[{"id":"u-c","username":"cy"}],"text":"hi"},
+        \\ {"id":4,"time":4,"direction":"out","from":{"id":"me"},"recipients":[{"id":"u-d","name":"Dee"}],"text":"hi"}
+        \\]}}
+    );
+    defer others.deinit();
+    try testing.expect(conversationOf(others.items[0..1], "bob") == null);
+    try testing.expectEqualStrings("u-d", conversationOf(others.items[1..2], "bob").?.id.slice());
+}
+
+test "a newer message without a username keeps the one known for replies" {
+    var runtime: Runtime = .init(testing.allocator);
+    defer runtime.deinit();
+    runtime.start(true);
+    _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
+    const binding = runtime.binding;
+    var first = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[{"id":1,"time":1,"direction":"in","from":{"id":"u-a","username":"ann","name":"Ann"},"text":"hi"}]}}
+    );
+    defer first.deinit();
+    _ = try runtime.completeConversation(binding, "u-a", .latest, first.items);
+    var second = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[{"id":2,"time":2,"direction":"in","from":{"id":"u-a","name":"Ann"},"text":"again"}]}}
+    );
+    defer second.deinit();
+    _ = runtime.requestRefresh(0, binding, false);
+    const list = runtime.beginList().?;
+    _ = try runtime.completeList(0, list.id, list.kind, .{ .page = .{ .messages = second.items, .limit = Limits.list_page } });
+    try testing.expectEqualStrings("again", runtime.view().conversations[0].latest.?.preview);
+    try testing.expectEqualStrings("ann", runtime.peerAddress(binding, "u-a").?.member.slice());
+    _ = try runtime.completeConversation(binding, "u-a", .after, second.items);
+    try testing.expectEqualStrings("ann", runtime.peerAddress(binding, "u-a").?.member.slice());
+}
+
+test "an instant JavaScript cannot represent drops an optional time and refuses a message time" {
+    var unread = try parseUnread(testing.allocator,
+        \\{"data":{"unread":1,"byPeer":[{"peer":{"id":"a"},"unread":1,"lastAt":8640000000000001}]}}
+    );
+    defer unread.deinit(testing.allocator);
+    try testing.expect(unread.by_peer[0].last_at_ms == null);
+    var messages = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[{"id":1,"time":8640000000000000,"direction":"out","from":{"id":"me"},"recipients":[{"id":"a","readAt":99999999999999999}],"text":"x"}]}}
+    );
+    defer messages.deinit();
+    try testing.expect(messages.items[0].recipients[0].read);
+    try testing.expect(messages.items[0].recipients[0].read_at_ms == null);
+    try testing.expectError(error.InvalidResponse, parseMessages(testing.allocator,
+        \\{"data":{"messages":[{"id":1,"time":8640000000000001,"direction":"in","from":{"id":"a"},"text":"x"}]}}
+    ));
+    var detail = try parseDetail(testing.allocator, "{\"data\":{\"name\":\"t\",\"progress\":\"doing\",\"updatedAt\":18446744073709551615,\"lastNote\":{\"text\":\"n\",\"at\":9000000000000000}}}");
+    defer detail.deinit();
+    try testing.expect(detail.kind.task.updated_at_ms == null);
+    try testing.expect(detail.kind.task.last_note.?.at_ms == null);
+}
+
+test "a declared type decides what a linked id is" {
+    for ([_]struct { []const u8, std.meta.Tag(@FieldType(Detail, "kind")) }{
+        .{ "{\"data\":{\"name\":\"n\",\"type\":\"task\",\"tag\":\"x\",\"mime\":\"text/plain\",\"progress\":\"doing\"}}", .task },
+        .{ "{\"data\":{\"name\":\"n\",\"type\":\"file\"}}", .file },
+        .{ "{\"data\":{\"name\":\"n\",\"type\":\"project\",\"progress\":\"doing\"}}", .project },
+        .{ "{\"data\":{\"name\":\"n\",\"type\":\"other\",\"mime\":\"text/plain\"}}", .file },
+        .{ "{\"data\":{\"name\":\"n\",\"progress\":\"doing\",\"files\":[]}}", .task },
+    }) |case| {
+        var detail = try parseDetail(testing.allocator, case[0]);
+        defer detail.deinit();
+        try testing.expectEqual(case[1], std.meta.activeTag(detail.kind));
+    }
+}
+
+test "only a credential-free web address without the key is handed to the browser" {
+    try testing.expect(validDownloadUrl("http://192.0.2.10:8080/agent/v1/files/9/dl?exp=1&sig=ab", "mtk-key"));
+    try testing.expect(validDownloadUrl("https://cdn.example.test/f?sig=1", "mtk-key"));
+    for ([_][]const u8{
+        "",
+        "ftp://h.test/f",
+        "file:///C:/x",
+        "javascript:alert(1)",
+        "https://user:pw@h.test/f",
+        "https://h.test/f#frag",
+        "https://h.test/f?k=mtk-key",
+        "https://h.test/f g",
+        "/relative/f",
+    }) |url| try testing.expect(!validDownloadUrl(url, "mtk-key"));
 }
 
 test "ISO instants become Unix milliseconds" {
@@ -1388,16 +2236,30 @@ test "the preview is the first line, cut on a character boundary" {
     try testing.expect(std.unicode.utf8ValidateSlice(cut.slice()));
 }
 
-fn testMessage(id: []const u8, at: u64, direction: Direction, peer: []const u8, text: []const u8) Message {
-    const person: Peer = .{ .id = Id.init(peer) catch unreachable, .name = .truncated(peer) };
+fn testPeers(comptime id: []const u8) []const Peer {
+    return &struct {
+        const value = [1]Peer{.{ .id = Id.init(id) catch unreachable, .name = .truncated(id) }};
+    }.value;
+}
+
+fn testRecipients(comptime id: []const u8) []const Recipient {
+    return &struct {
+        const value = [1]Recipient{.{ .peer = testPeers(id)[0], .read = false, .read_at_ms = null }};
+    }.value;
+}
+
+fn testMessage(id: []const u8, at: u64, direction: Direction, comptime peer: []const u8, text: []const u8) Message {
+    const person = testPeers(peer);
+    const user: Peer = .{ .id = Id.init("u-self") catch unreachable, .name = .truncated("Me") };
     return .{
         .id = Id.init(id) catch unreachable,
         .sent_at_ms = at,
         .direction = direction,
-        .from = if (direction == .in) person else .{ .id = Id.init("me") catch unreachable, .name = .truncated("me") },
-        .recipients = &.{},
+        .from = if (direction == .in) person[0] else user,
+        .recipients = if (direction == .in) &.{} else testRecipients(peer),
         .text = text,
         .task_ids = &.{},
+        .conversations = person,
     };
 }
 
@@ -1498,10 +2360,7 @@ test "the conversation list grows from pages and closes gaps by starting over" {
         testMessage("2", 20, .in, "ann", "first"),
         testMessage("3", 30, .out, "ann", "reply"),
     };
-    var reply = page[2];
-    const ann = [_]Peer{page[1].from};
-    reply.recipients = &ann;
-    const window = [_]Message{ page[0], page[1], reply };
+    const window = [_]Message{ page[0], page[1], page[2] };
     try testing.expect(try runtime.completeList(0, first.id, .initial, .{ .page = .{ .messages = &window, .limit = Limits.list_page } }));
     var view = runtime.view();
     try testing.expect(view.conversationsLoaded and !view.hasEarlier);
@@ -1650,4 +2509,86 @@ test "a member listed twice is one row" {
     try testing.expectEqual(@as(usize, 1), messages.items.len);
     try testing.expectEqual(@as(usize, 1), messages.items[0].recipients.len);
     try testing.expectEqual(@as(usize, 1), messages.items[0].task_ids.len);
+}
+
+test "new marks, sending agents, read receipts and unread times are read when present" {
+    var messages = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[
+        \\ {"id":1,"time":"2026-11-21T03:06:40.000Z","at":1795240000000,"direction":"out","from":{"id":"me-1","username":"wenlin","name":"Lin"},"text":"group","taskIds":[],
+        \\  "recipients":[{"id":"a","username":"ann","name":"Ann","readAt":1795240100000},{"id":"b","name":"Bob","readAt":null},{"id":"c","name":"Cy","readAt":"yesterday"},{"id":"a","readAt":null}]},
+        \\ {"id":2,"time":2,"direction":"in","from":{"id":"a","username":"ann","name":"Ann"},"text":"by agent","new":true,"readAt":5,"fromAgent":"claude-code@box"},
+        \\ {"id":3,"time":3,"direction":"in","from":{"id":"a","name":"Ann"},"text":"seen","new":"yes","fromAgent":null}
+        \\]}}
+    );
+    defer messages.deinit();
+    const group = messages.items[0];
+    try testing.expectEqual(@as(usize, 3), group.recipients.len);
+    try testing.expect(group.recipients[0].read);
+    try testing.expectEqual(@as(?u64, 1795240100000), group.recipients[0].read_at_ms);
+    try testing.expect(!group.recipients[1].read);
+    // Read at a time this client cannot parse is still read.
+    try testing.expect(group.recipients[2].read and group.recipients[2].read_at_ms == null);
+    try testing.expectEqualStrings("wenlin", group.from.username.?.slice());
+    try testing.expect(group.recipients[1].peer.username == null);
+    try testing.expect(!group.is_new);
+    try testing.expect(messages.items[1].is_new);
+    try testing.expectEqualStrings("claude-code@box", messages.items[1].from_agent.?.slice());
+    try testing.expect(!messages.items[2].is_new);
+    try testing.expect(messages.items[2].from_agent == null);
+
+    var unread = try parseUnread(testing.allocator,
+        \\{"data":{"unread":3,"byPeer":[{"peer":{"id":"a","username":"ann","name":"Ann"},"unread":2,"lastAt":1795241730816,"lastTime":"2026-11-21T03:35:30.816Z"},
+        \\ {"peer":{"id":"b"},"unread":1,"lastTime":"2026-11-21T01:10:48.681Z"},{"peer":{"id":"c"},"unread":1,"lastAt":"soon"},{"peer":{"id":"a"},"unread":1,"lastAt":1}]}}
+    );
+    defer unread.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u64, 1795241730816), unread.by_peer[0].last_at_ms);
+    try testing.expectEqual(@as(u64, 3), unread.by_peer[0].unread);
+    try testing.expectEqual(parseIsoMilliseconds("2026-11-21T01:10:48.681Z"), unread.by_peer[1].last_at_ms);
+    try testing.expect(unread.by_peer[2].last_at_ms == null);
+
+    var runtime: Runtime = .init(testing.allocator);
+    defer runtime.deinit();
+    runtime.start(true);
+    _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
+    _ = try runtime.completePoll(0, 1, runtime.beginPoll().?, .{ .unread = &unread });
+    const rows = runtime.view().conversations;
+    try testing.expectEqual(@as(usize, 3), rows.len);
+    for (rows) |row| if (std.mem.eql(u8, row.peerId, "a")) {
+        try testing.expect(row.latest == null);
+        try testing.expectEqual(@as(u64, 1795241730816), row.lastAtMs.?.value);
+    };
+}
+
+test "messages to oneself belong to the me conversation and never break the page" {
+    var messages = try parseMessages(testing.allocator,
+        \\{"data":{"messages":[
+        \\ {"id":1,"time":1,"direction":"self","from":{"id":"u-me","username":"zj","name":"Zhu"},"text":"note to self","taskIds":[]},
+        \\ {"id":2,"time":2,"direction":"self","from":{"id":"u-me","name":"Zhu"},"recipients":[{"id":"u-me","name":"Zhu","readAt":null},{"id":"ann","name":"Ann","readAt":null}],"text":"group with me"},
+        \\ {"id":3,"time":3,"direction":"in","from":{"id":"ann","name":"Ann"},"text":"hi"}
+        \\]}}
+    );
+    defer messages.deinit();
+    try testing.expectEqual(@as(usize, 3), messages.items.len);
+    try testing.expectEqual(Direction.self, messages.items[0].direction);
+    try testing.expectEqual(@as(usize, 1), messages.items[0].peers().len);
+    try testing.expectEqualStrings(self_peer_id, messages.items[0].peers()[0].id.slice());
+    // A group message that also went to the user: `me` and every other
+    // recipient, never the user's own member id.
+    try testing.expectEqual(@as(usize, 2), messages.items[1].peers().len);
+    try testing.expectEqualStrings(self_peer_id, messages.items[1].peers()[0].id.slice());
+    try testing.expectEqualStrings("ann", messages.items[1].peers()[1].id.slice());
+
+    var runtime: Runtime = .init(testing.allocator);
+    defer runtime.deinit();
+    runtime.start(true);
+    _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
+    _ = runtime.requestRefresh(0, runtime.binding, false);
+    const first = runtime.beginList().?;
+    _ = try runtime.completeList(0, first.id, .initial, .{ .page = .{ .messages = messages.items, .limit = Limits.list_page } });
+    const view = runtime.view();
+    try testing.expectEqual(@as(usize, 2), view.conversations.len);
+    try testing.expectEqualStrings("ann", view.conversations[0].peerId);
+    try testing.expectEqualStrings(self_peer_id, view.conversations[1].peerId);
+    try testing.expectEqual(Direction.self, view.conversations[1].latest.?.direction);
+    try testing.expect(runtime.knowsPeer(runtime.binding, self_peer_id));
 }

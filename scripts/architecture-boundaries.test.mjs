@@ -551,6 +551,29 @@ test("the MetaTeam inbox reads only through Application and keeps the device key
     read("src/app/inbox_http_transport.zig"),
     /\.name = "Authorization", \.value = authorization/,
   );
+  // Inbox log lines format closed facts only: a request kind, a status
+  // code, a byte count. A key, an address, a request key or message text
+  // cannot reach a log even by mistake.
+  let logs = 0;
+  for (const file of [
+    "src/product/inbox.zig",
+    "src/app/inbox_coordinator.zig",
+    "src/app/inbox_http_transport.zig",
+  ]) {
+    for (const call of read(file).matchAll(
+      /std\.log\.\w+\("[^"]*",\s*\.\{([^}]*)\}\)/g,
+    )) {
+      logs += 1;
+      for (const argument of call[1].split(",").map((part) => part.trim()))
+        if (argument !== "")
+          assert.match(
+            argument,
+            /^(@tagName\(\w+\)|\w+\.status|body_len)$/,
+            `${file}: ${call[0]}`,
+          );
+    }
+  }
+  assert.ok(logs >= 3);
   // The Renderer never reaches the service itself.
   assert.doesNotMatch(
     read("frontend/src/features/inbox/MessageInbox.tsx"),

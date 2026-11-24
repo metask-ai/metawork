@@ -20,6 +20,9 @@ pub const inbox_refresh = "metawork.inbox.refresh";
 pub const inbox_load_earlier = "metawork.inbox.loadEarlier";
 pub const inbox_read_conversation = "metawork.inbox.readConversation";
 pub const inbox_read_task = "metawork.inbox.readTask";
+pub const inbox_open_file = "metawork.inbox.openFile";
+pub const inbox_send = "metawork.inbox.send";
+pub const inbox_list_people = "metawork.inbox.listPeople";
 pub const add_project = "metawork.workspaces.addProject";
 pub const choose_workspace = "metawork.workspaces.choose";
 pub const open_workspace = "metawork.workspaces.open";
@@ -149,6 +152,9 @@ pub const product = [_][]const u8{
     inbox_load_earlier,
     inbox_read_conversation,
     inbox_read_task,
+    inbox_open_file,
+    inbox_send,
+    inbox_list_people,
     choose_workspace,
     add_project,
     open_workspace,

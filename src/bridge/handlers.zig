@@ -288,6 +288,33 @@ pub const InboxTaskRead = struct {
     requestId: []const u8,
     taskId: []const u8,
 };
+
+/// One message: to a conversation the Renderer has open (`peerId`, the Host
+/// decides the address), or to a member picked by `username` for a new
+/// conversation. Exactly one is present. `requestKey` is the request
+/// identity MetaTeam deduplicates by, sent again only by the user's retry.
+pub const InboxSend = struct {
+    generation: []const u8,
+    binding: []const u8,
+    requestId: []const u8,
+    peerId: ?[]const u8,
+    username: ?[]const u8,
+    text: []const u8,
+    requestKey: []const u8,
+};
+
+pub const InboxPeopleRead = struct {
+    generation: []const u8,
+    binding: []const u8,
+    requestId: []const u8,
+};
+
+pub const InboxFileOpen = struct {
+    generation: []const u8,
+    binding: []const u8,
+    requestId: []const u8,
+    fileId: []const u8,
+};
 /// `text` is the whole file the editor wants saved; the payload limit makes
 /// room for its JSON escaping, and the Host checks the decoded bytes.
 pub const GlobalInstructionsSave = struct {

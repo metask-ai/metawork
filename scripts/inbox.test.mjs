@@ -91,6 +91,7 @@ function view(patch = {}) {
           preview: "Can you review?",
           sentAtMs: at("2026-11-23T08:00:00Z"),
         },
+        lastAtMs: at("2026-11-23T08:00:00Z"),
       },
       {
         peerId: "bob",
@@ -102,6 +103,7 @@ function view(patch = {}) {
           preview: "Done",
           sentAtMs: at("2026-11-22T08:00:00Z"),
         },
+        lastAtMs: null,
       },
     ],
     conversationsLoaded: true,
@@ -118,7 +120,12 @@ function message(id, direction, text, taskIds = []) {
     direction,
     fromPeerId: direction === "in" ? "ann" : "me",
     fromName: direction === "in" ? "Ann" : "Me",
-    recipients: direction === "in" ? [] : [{ peerId: "ann", name: "Ann" }],
+    fromAgent: null,
+    isNew: false,
+    recipients:
+      direction === "in"
+        ? []
+        : [{ peerId: "ann", name: "Ann", read: false, readAtMs: null }],
     text,
     truncated: false,
     sentAtMs: at("2026-11-23T07:00:00Z"),
@@ -126,10 +133,69 @@ function message(id, direction, text, taskIds = []) {
   };
 }
 
-function fakeClient({ pages = {}, task, taskState } = {}) {
+function taskView(patch = {}) {
+  return {
+    id: "13066",
+    name: "Inbox",
+    progress: "doing",
+    state: null,
+    path: "metawork / Inbox",
+    description: "Read only",
+    assignees: ["Ann"],
+    createdBy: null,
+    updatedAtMs: null,
+    lastNote: null,
+    notes: [],
+    children: [],
+    ...patch,
+  };
+}
+
+function fakeClient({
+  pages = {},
+  task,
+  taskState,
+  details = {},
+  fileState = "opened",
+  sendStates = [],
+  sendGate = null,
+  people = [],
+  conversation = null,
+} = {}) {
   const calls = [];
   return {
     calls,
+    async sendInboxMessage(binding, to, text, requestKey) {
+      calls.push([
+        "send",
+        binding,
+        to.peerId ?? `@${to.username}`,
+        text,
+        requestKey,
+      ]);
+      if (sendGate) await sendGate;
+      const state = sendStates.shift() ?? "sent";
+      return {
+        binding,
+        requestId: String(calls.length),
+        state,
+        sent: state === "sent" ? ["Ann"] : [],
+        conversation: state === "sent" ? conversation : null,
+      };
+    },
+    async listInboxPeople(binding) {
+      calls.push(["people", binding]);
+      return {
+        binding,
+        requestId: String(calls.length),
+        state: "ready",
+        people,
+      };
+    },
+    async openInboxFile(binding, fileId) {
+      calls.push(["file", binding, fileId]);
+      return { binding, requestId: String(calls.length), state: fileState };
+    },
     async refreshInbox(binding, explicit) {
       calls.push(["refresh", binding, explicit]);
       return { outcome: "accepted" };
@@ -155,11 +221,15 @@ function fakeClient({ pages = {}, task, taskState } = {}) {
     },
     async readInboxTask(binding, taskId) {
       calls.push(["task", binding, taskId]);
+      const detail = details[taskId] ?? (task ? { task } : null);
       return {
         binding,
         requestId: String(calls.length),
-        state: task ? "ready" : (taskState ?? "failed"),
-        task: task ?? null,
+        state: detail ? "ready" : (taskState ?? "failed"),
+        task: null,
+        file: null,
+        project: null,
+        ...detail,
       };
     },
   };
@@ -293,16 +363,7 @@ test("the open inbox refreshes, and a conversation is read only when it is opene
       },
       "ann:before:10": { messages: [message("4", "in", "Earlier note")] },
     },
-    task: {
-      id: "13066",
-      name: "Inbox",
-      progress: "doing",
-      state: null,
-      path: "metawork / Inbox",
-      description: "Read only",
-      assignees: ["Ann"],
-      updatedAtMs: null,
-    },
+    task: taskView(),
   });
   const closed = render(element(client, view(), { open: false }));
   assert.equal(client.calls.length, 0);
@@ -334,9 +395,9 @@ test("the open inbox refreshes, and a conversation is read only when it is opene
     ),
   );
 
-  await user.click(screen.getByRole("button", { name: /Task #13066/ }));
+  await user.click(screen.getByRole("button", { name: /#13066/ }));
   await waitFor(() => assert.ok(screen.getByText("Read only")));
-  assert.ok(screen.getByText("doing"));
+  assert.ok(screen.getByText("In progress"));
   assert.ok(screen.getByText("metawork / Inbox"));
   assert.deepEqual(
     client.calls.find(([kind]) => kind === "task"),
@@ -405,6 +466,460 @@ test("the conversation list asks for earlier conversations at its end", async ()
   assert.ok(screen.getByText("Loading conversations…"));
 });
 
+test("what the user sent to themself is the Me conversation", async () => {
+  const user = userEvent.setup({ document });
+  const note = {
+    ...message("20", "self", "Remember the demo"),
+    fromPeerId: "u-me",
+    recipients: [],
+  };
+  const client = fakeClient({
+    pages: { "me:latest:null": { messages: [note] } },
+  });
+  render(
+    element(
+      client,
+      view({
+        conversations: [
+          {
+            peerId: "me",
+            name: "Zhu",
+            unread: "0",
+            latest: {
+              id: "20",
+              direction: "self",
+              preview: "Remember the demo",
+              sentAtMs: at("2026-11-23T09:00:00Z"),
+            },
+            lastAtMs: null,
+          },
+        ],
+      }),
+    ),
+  );
+  assert.ok(screen.getByText("You: Remember the demo"));
+  await user.click(screen.getByRole("button", { name: "Me" }));
+  await waitFor(() => assert.ok(screen.getByRole("heading", { name: "Me" })));
+  assert.deepEqual(
+    client.calls.find(([kind]) => kind === "read"),
+    ["read", "1", "me", "latest", null],
+  );
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".inbox-message").dataset.direction,
+      "outgoing",
+    ),
+  );
+});
+
+test("messages show new marks, sending agents and read receipts; unread rows show their time", async () => {
+  const user = userEvent.setup({ document });
+  const group = {
+    ...message("30", "out", "Shipped"),
+    recipients: [
+      {
+        peerId: "ann",
+        name: "Ann",
+        read: true,
+        readAtMs: at("2026-11-23T07:30:00Z"),
+      },
+      { peerId: "bob", name: "Bob", read: false, readAtMs: null },
+    ],
+  };
+  const client = fakeClient({
+    pages: {
+      "ann:latest:null": {
+        messages: [
+          { ...message("31", "in", "From my agent"), isNew: true },
+          {
+            ...message("32", "in", "Automated"),
+            fromAgent: "claude-code@box",
+          },
+          message("33", "out", "Thanks"),
+          group,
+        ],
+      },
+    },
+  });
+  const base = view();
+  render(
+    element(
+      client,
+      view({
+        conversations: [
+          ...base.conversations,
+          {
+            peerId: "cy",
+            name: "Cy",
+            unread: "1",
+            latest: null,
+            lastAtMs: at("2026-11-20T10:00:00Z"),
+          },
+        ],
+      }),
+    ),
+  );
+  const cy = screen.getByRole("button", { name: "Cy, 1 unread" });
+  assert.equal(
+    cy.querySelector("time").getAttribute("datetime"),
+    "2026-11-20T10:00:00.000Z",
+  );
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await waitFor(() => assert.ok(screen.getByText("Shipped")));
+  assert.equal(document.querySelectorAll(".inbox-new-badge").length, 1);
+  assert.ok(screen.getByText("Sent by claude-code@box"));
+  // One recipient: one status. A group: every recipient by name.
+  assert.equal(
+    document.querySelector(".inbox-message-receipt").textContent,
+    "Unread",
+  );
+  const receipts = screen.getByRole("list", { name: "Read status" });
+  assert.deepEqual(
+    [...receipts.querySelectorAll("li")].map((item) => item.textContent),
+    ["Ann: Read", "Bob: Unread"],
+  );
+});
+
+test("a linked file, project or task shows its own details, opens nested items and downloads through the Host", async () => {
+  const user = userEvent.setup({ document });
+  const file = {
+    id: "9830",
+    name: "metawork-api.md",
+    tag: "API",
+    sizeBytes: "12034",
+    mime: "text/markdown",
+    description: null,
+    by: "Lin",
+    updatedAtMs: at("2026-11-21T03:00:00Z"),
+    path: "space / metawork-api.md",
+    content: "# MetaTeam messages",
+    contentTruncated: false,
+    downloadable: true,
+  };
+  const client = fakeClient({
+    pages: {
+      "ann:latest:null": {
+        messages: [message("12", "in", "See these", ["740", "9749"])],
+      },
+    },
+    details: {
+      740: {
+        project: {
+          id: "740",
+          name: "metawork",
+          description: "Desktop app",
+          path: null,
+          updatedAtMs: null,
+          files: [
+            {
+              id: "9830",
+              name: "metawork-api.md",
+              tag: "API",
+              sizeBytes: "12034",
+              mime: "text/markdown",
+              by: "Lin",
+              updatedAtMs: null,
+            },
+          ],
+          filesTruncated: false,
+          fileTags: [{ tag: "API", count: "1" }],
+        },
+      },
+      9830: { file },
+      9749: {
+        task: taskView({
+          id: "9749",
+          name: "Open API",
+          state: "closed",
+          createdBy: "Lin",
+          lastNote: { text: "Deployed", atMs: null, by: "Lin" },
+          notes: [
+            { text: "Found it", atMs: null, by: "Lin" },
+            { text: "Deployed", atMs: null, by: "Lin" },
+          ],
+          children: [{ id: "9801", name: "Write docs", progress: "todo" }],
+        }),
+      },
+      9801: { task: taskView({ id: "9801", name: "Write docs" }) },
+    },
+  });
+  render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await waitFor(() => assert.ok(screen.getByText("See these")));
+
+  await user.click(screen.getByRole("button", { name: /#740/ }));
+  await waitFor(() => assert.ok(screen.getByText("Desktop app")));
+  assert.ok(screen.getByText("API · 1"));
+  await user.click(screen.getByRole("button", { name: /metawork-api\.md/ }));
+  await waitFor(() => assert.ok(screen.getByText("# MetaTeam messages")));
+  assert.ok(screen.getByText("13 KB"));
+  assert.ok(screen.getByText("text/markdown"));
+  assert.ok(screen.getByText("space / metawork-api.md"));
+  await user.click(screen.getByRole("button", { name: "Download" }));
+  await waitFor(() => assert.ok(screen.getByText("Opened in your browser.")));
+  assert.deepEqual(client.calls.at(-1), ["file", "1", "9830"]);
+  // Back to the project the file was opened from.
+  await user.click(screen.getByRole("button", { name: "Back" }));
+  await waitFor(() => assert.ok(screen.getByText("Desktop app")));
+  await user.keyboard("{Escape}");
+
+  await user.click(screen.getByRole("button", { name: /#9749/ }));
+  await waitFor(() => assert.ok(screen.getByText("Found it")));
+  assert.ok(screen.getByText("Closed"));
+  assert.ok(screen.getByText("Latest note"));
+  await user.click(screen.getByRole("button", { name: /Write docs/ }));
+  await waitFor(() =>
+    assert.ok(screen.getByRole("heading", { name: "Write docs" })),
+  );
+  assert.deepEqual(client.calls.at(-1), ["task", "1", "9801"]);
+});
+
+test("a reply is sent once, shown from the newer messages, and retried under the same request key", async () => {
+  const user = userEvent.setup({ document });
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const client = fakeClient({
+    sendGate: gate,
+    sendStates: ["failed", "sent"],
+    pages: {
+      "ann:latest:null": { messages: [message("12", "in", "Can you review?")] },
+      "ann:after:12": { messages: [message("13", "out", "Looking now")] },
+    },
+  });
+  render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await waitFor(() =>
+    assert.equal(document.querySelectorAll(".inbox-bubble").length, 1),
+  );
+  const box = screen.getByRole("textbox", { name: "Message Ann" });
+  const sendButton = screen.getByRole("button", { name: "Send" });
+  assert.equal(sendButton.disabled, true);
+  // Shift+Enter is a new line; Enter sends.
+  await user.type(box, "Looking{Shift>}{Enter}{/Shift}now");
+  assert.equal(box.value, "Looking\nnow");
+  await user.clear(box);
+  await user.type(box, "Looking now{Enter}");
+  await waitFor(() =>
+    assert.ok(screen.getByRole("button", { name: "Sending…" })),
+  );
+  // The task composer's shell: one box, the round send button in it.
+  const shell = box.closest(".ai-composer");
+  assert.equal(shell.dataset.state, "running");
+  assert.ok(shell.querySelector("button.composer-send"));
+  assert.equal(box.placeholder, "Write a message…");
+  // While it is on its way nothing else is submitted.
+  assert.equal(box.readOnly, true);
+  await user.type(box, "{Enter}");
+  assert.equal(client.calls.filter(([kind]) => kind === "send").length, 1);
+  release();
+  await waitFor(() =>
+    assert.ok(screen.getByText(/Retrying won't send it twice/)),
+  );
+  const first = client.calls.find(([kind]) => kind === "send");
+  assert.deepEqual(first.slice(0, 4), ["send", "1", "ann", "Looking now"]);
+  assert.match(
+    first[4],
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
+  assert.equal(box.value, "Looking now");
+
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => assert.ok(screen.getByText("Looking now")));
+  const sends = client.calls.filter(([kind]) => kind === "send");
+  assert.equal(sends.length, 2);
+  assert.equal(sends[1][4], first[4]);
+  // Sent: the box empties and the newer messages are read.
+  assert.equal(box.value, "");
+  assert.ok(
+    client.calls.some(
+      (call) => call[0] === "read" && call[3] === "after" && call[4] === "12",
+    ),
+  );
+  assert.equal(document.querySelector(".inbox-composer-failure"), null);
+});
+
+test("a refused reply is not retried as is; a changed message gets a new request key", async () => {
+  const user = userEvent.setup({ document });
+  const client = fakeClient({
+    sendStates: ["rejected", "sent"],
+    pages: {
+      "ann:latest:null": { messages: [message("12", "in", "Can you review?")] },
+    },
+  });
+  render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await waitFor(() =>
+    assert.equal(document.querySelectorAll(".inbox-bubble").length, 1),
+  );
+  const box = screen.getByRole("textbox", { name: "Message Ann" });
+  await user.type(box, "Hi");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() =>
+    assert.ok(
+      screen.getByText(
+        "MetaTeam refused this message. Change it to send again.",
+      ),
+    ),
+  );
+  assert.equal(screen.queryByRole("button", { name: "Retry" }), null);
+  await user.type(box, "!");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => assert.equal(box.value, ""));
+  const sends = client.calls.filter(([kind]) => kind === "send");
+  assert.equal(sends.length, 2);
+  assert.equal(sends[1][3], "Hi!");
+  assert.notEqual(sends[1][4], sends[0][4]);
+});
+
+test("a new message picks a member read on opening, and the conversation it starts opens", async () => {
+  const user = userEvent.setup({ document });
+  const client = fakeClient({
+    sendStates: ["failed", "sent"],
+    people: [
+      { username: "ann", name: "Ann", online: true },
+      { username: "bob", name: "Bob Li", online: false },
+      { username: "cy", name: "Cy", online: null },
+    ],
+    conversation: { peerId: "bob-id", name: "Bob Li" },
+    pages: {
+      "bob-id:latest:null": { messages: [message("40", "out", "Hello Bob")] },
+    },
+  });
+  render(element(client, view()));
+  assert.equal(client.calls.filter(([kind]) => kind === "people").length, 0);
+  await user.click(screen.getByRole("button", { name: "New message" }));
+  await waitFor(() => assert.ok(screen.getByRole("button", { name: /Ann/ })));
+  assert.equal(client.calls.filter(([kind]) => kind === "people").length, 1);
+
+  await user.type(
+    screen.getByRole("searchbox", { name: "Search members" }),
+    "LI",
+  );
+  assert.equal(screen.queryByRole("button", { name: /Ann/ }), null);
+  const send = screen.getByRole("button", { name: "Send" });
+  assert.equal(send.disabled, true);
+  await user.click(screen.getByRole("button", { name: /Bob Li/ }));
+  await user.type(
+    screen.getByRole("textbox", { name: "Message" }),
+    "Hello Bob",
+  );
+  await user.click(send);
+  await waitFor(() =>
+    assert.ok(screen.getByText(/Retrying won't send it twice/)),
+  );
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() =>
+    assert.ok(screen.getByRole("heading", { name: "Bob Li" })),
+  );
+  const sends = client.calls.filter(([kind]) => kind === "send");
+  assert.equal(sends.length, 2);
+  assert.deepEqual(sends[0].slice(0, 4), ["send", "1", "@bob", "Hello Bob"]);
+  assert.equal(sends[1][4], sends[0][4]);
+  // The dialog closed and the new conversation is open and read.
+  assert.equal(screen.queryByRole("dialog"), null);
+  await waitFor(() => assert.ok(screen.getByText("Hello Bob")));
+  assert.deepEqual(
+    client.calls.find(([kind]) => kind === "read"),
+    ["read", "1", "bob-id", "latest", null],
+  );
+  // The members are not asked for again until the picker opens again.
+  assert.equal(client.calls.filter(([kind]) => kind === "people").length, 1);
+});
+
+test("leaving a conversation while it sends keeps its reply box, and the answer lands only in that attempt", async () => {
+  const user = userEvent.setup({ document });
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const client = fakeClient({
+    sendGate: gate,
+    sendStates: ["failed", "sent"],
+    pages: {
+      "ann:latest:null": { messages: [message("12", "in", "Can you review?")] },
+      "bob:latest:null": { messages: [message("9", "out", "Done")] },
+    },
+  });
+  render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await waitFor(() =>
+    assert.equal(document.querySelectorAll(".inbox-bubble").length, 1),
+  );
+  await user.type(screen.getByRole("textbox", { name: "Message Ann" }), "A");
+  await user.keyboard("{Enter}");
+  await waitFor(() =>
+    assert.ok(screen.getByRole("button", { name: "Sending…" })),
+  );
+
+  // Bob's box is his own; one message is on its way, so his waits.
+  await user.click(screen.getByRole("button", { name: "Bob" }));
+  const bobBox = await screen.findByRole("textbox", { name: "Message Bob" });
+  assert.equal(bobBox.value, "");
+  await user.type(bobBox, "B{Enter}");
+  await waitFor(() =>
+    assert.ok(screen.getByText("Another message is still being sent.")),
+  );
+  assert.equal(client.calls.filter(([kind]) => kind === "send").length, 1);
+
+  // Back with Ann: still her message, still on its way.
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  const annBox = await screen.findByRole("textbox", { name: "Message Ann" });
+  assert.equal(annBox.value, "A");
+  assert.equal(annBox.readOnly, true);
+  release();
+  await waitFor(() =>
+    assert.ok(screen.getByText(/Retrying won't send it twice/)),
+  );
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => assert.equal(annBox.value, ""));
+  const sends = client.calls.filter(([kind]) => kind === "send");
+  assert.equal(sends.length, 2);
+  assert.deepEqual(sends[1].slice(2, 5), ["ann", "A", sends[0][4]]);
+  // Bob's draft was never touched by Ann's answers.
+  await user.click(screen.getByRole("button", { name: "Bob" }));
+  assert.equal(
+    (await screen.findByRole("textbox", { name: "Message Bob" })).value,
+    "B",
+  );
+});
+
+test("a new message belongs to its connection: another one closes the picker and its late answer opens nothing", async () => {
+  const user = userEvent.setup({ document });
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const client = fakeClient({
+    sendGate: gate,
+    people: [{ username: "bob", name: "Bob Li", online: null }],
+    conversation: { peerId: "bob-id", name: "Bob Li" },
+  });
+  const { rerender } = render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "New message" }));
+  await user.click(await screen.findByRole("button", { name: /Bob Li/ }));
+  await user.type(screen.getByRole("textbox", { name: "Message" }), "Hi");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  rerender(element(client, view({ binding: "2" })));
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+  release();
+  await waitFor(() =>
+    assert.equal(client.calls.filter(([kind]) => kind === "send").length, 1),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(screen.getByText("Select a conversation"));
+  assert.equal(client.calls.filter(([kind]) => kind === "read").length, 0);
+});
+
+test("a new message to oneself opens the Me conversation", async () => {
+  const user = userEvent.setup({ document });
+  const client = fakeClient({
+    people: [{ username: "zj", name: "Zhu", online: true }],
+    conversation: { peerId: "me", name: "Zhu" },
+  });
+  render(element(client, view()));
+  await user.click(screen.getByRole("button", { name: "New message" }));
+  await user.click(await screen.findByRole("button", { name: /Zhu/ }));
+  await user.type(screen.getByRole("textbox", { name: "Message" }), "note");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => assert.ok(screen.getByRole("heading", { name: "Me" })));
+});
+
 test("a refused task or a missing conversation is shown where it was asked for", async () => {
   const user = userEvent.setup({ document });
   const client = fakeClient({
@@ -421,7 +936,7 @@ test("a refused task or a missing conversation is shown where it was asked for",
   await waitFor(() =>
     assert.equal(document.querySelectorAll(".inbox-bubble").length, 1),
   );
-  await user.click(screen.getByRole("button", { name: /Task #13066/ }));
+  await user.click(screen.getByRole("button", { name: /#13066/ }));
   await waitFor(() =>
     assert.ok(screen.getByText("This device may not view this task.")),
   );

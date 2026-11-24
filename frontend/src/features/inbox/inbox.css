@@ -32,15 +32,43 @@
   height: 100%;
 }
 
-.inbox-list h2 {
+.inbox-list-header {
   display: flex;
   min-height: 72px;
   flex: none;
   align-items: center;
-  padding: 12px 18px;
+  gap: 8px;
+  padding: 12px 12px 12px 18px;
   border-bottom: 1px solid var(--ui-border);
+}
+
+.inbox-list h2 {
+  min-width: 0;
+  flex: 1;
   font-size: var(--text-title-lg);
   font-weight: 680;
+}
+
+.inbox-new-message {
+  width: min(32rem, calc(100vw - 2rem));
+}
+
+.inbox-new-message-form {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.inbox-people {
+  display: grid;
+  max-height: 240px;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.inbox-people .inbox-detail-link[aria-pressed="true"] {
+  border-color: var(--ui-control-focus-border);
+  background: var(--ui-action-hover-surface);
 }
 
 .inbox-list-scroll {
@@ -344,6 +372,105 @@
   color: var(--ui-content-muted);
 }
 
+.inbox-task-facts dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.inbox-detail-dialog {
+  width: min(40rem, calc(100vw - 2rem));
+}
+
+.inbox-detail-body {
+  display: grid;
+  min-width: 0;
+  gap: 16px;
+}
+
+.inbox-detail-section {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ui-border);
+  font-size: var(--text-control);
+}
+
+.inbox-detail-section h3 {
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  font-weight: 600;
+}
+
+.inbox-note-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.inbox-note-meta,
+.inbox-detail-link-meta {
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+}
+
+.inbox-notes {
+  display: grid;
+  gap: 10px;
+}
+
+.inbox-detail-links {
+  display: grid;
+  gap: 4px;
+}
+
+.inbox-detail-link {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  text-align: start;
+}
+
+.inbox-detail-link > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inbox-detail-link:hover {
+  border-color: var(--ui-control-focus-border);
+  background: var(--ui-action-hover-surface);
+}
+
+.inbox-file-preview {
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-surface-canvas);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-label);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.inbox-file-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.inbox-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
 .inbox-list-note {
   padding: 16px 18px;
   color: var(--ui-content-muted);
@@ -381,13 +508,131 @@
   overflow-wrap: anywhere;
 }
 
+/* The message box reuses the task composer's shell (`ai-composer`), its
+   toolbar and its round send button from the shared stylesheet; only the
+   placement around them is the inbox's own. */
+.inbox-composer {
+  display: grid;
+  flex: none;
+  gap: 6px;
+  padding: 8px clamp(16px, 3vw, 32px) 16px;
+}
+
+.inbox-composer > * {
+  width: min(100%, var(--content-measure));
+  margin-inline: auto;
+}
+
+.inbox-new-message .inbox-composer {
+  padding: 0;
+}
+
+/* The shared toolbar spreads its controls apart; with the send button its
+   only control, the button still belongs in the right corner. Scoped to
+   the inbox and independent of stylesheet order. */
+.inbox-composer .inbox-composer-toolbar {
+  justify-content: flex-end;
+}
+
+.inbox-composer .inbox-composer-toolbar > .composer-send {
+  margin-inline-start: auto;
+}
+
+.inbox-composer .ai-composer textarea[readonly] {
+  color: var(--ui-content-muted);
+}
+
+/* Why the last attempt failed: one small line, never a block of its own. */
+.inbox-composer-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  margin: 0;
+  padding-inline: 4px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  line-height: 1.5;
+}
+
+.inbox-composer-note > span {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.inbox-composer-retry {
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ui-action-primary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.inbox-composer-retry:disabled {
+  color: var(--ui-content-muted);
+  cursor: default;
+}
+
+.inbox-search-input {
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 10px;
+  background: var(--ui-surface-canvas);
+  color: var(--ui-content-primary);
+  font-size: var(--text-body);
+}
+
 .inbox-transcript-earlier {
   display: flex;
   justify-content: center;
   padding-top: 12px;
 }
 
-.inbox-message-recipients,
+.inbox-message-meta {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.inbox-message-meta > small {
+  overflow-wrap: anywhere;
+}
+
+.inbox-new-badge {
+  height: 18px;
+  padding-inline: 6px;
+  font-size: var(--text-micro);
+}
+
+.inbox-message-receipt,
+.inbox-message-receipts {
+  margin: 4px 2px 0;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+}
+
+.inbox-message[data-direction="outgoing"] .inbox-message-receipt,
+.inbox-message[data-direction="outgoing"] .inbox-message-receipts {
+  text-align: end;
+}
+
+.inbox-message-receipts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px 10px;
+}
+
+.inbox-message-receipt[data-read="false"],
+.inbox-message-receipts > li[data-read="false"] {
+  color: var(--ui-content-primary);
+}
+
 .inbox-message-note {
   color: var(--ui-content-muted);
   font-size: var(--text-label);

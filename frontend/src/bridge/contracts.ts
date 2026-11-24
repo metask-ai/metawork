@@ -5,6 +5,9 @@ import {
   type InboxViewWire,
   type InboxConversationPageWire,
   type InboxTaskDetailWire,
+  type InboxFileOpenWire,
+  type InboxSendResultWire,
+  type InboxPeopleWire,
 } from "./generated-wire.ts";
 export type UpdateView = UpdateViewWire;
 /** The MetaTeam inbox: connection state, unread facts and conversations. */
@@ -13,6 +16,15 @@ export type InboxConversation = InboxView["conversations"][number];
 export type InboxConversationPage = InboxConversationPageWire;
 export type InboxMessage = InboxConversationPage["messages"][number];
 export type InboxTaskDetail = InboxTaskDetailWire;
+export type InboxTaskView = NonNullable<InboxTaskDetail["task"]>;
+export type InboxFileView = NonNullable<InboxTaskDetail["file"]>;
+export type InboxProjectView = NonNullable<InboxTaskDetail["project"]>;
+export type InboxFileOpen = InboxFileOpenWire;
+export type InboxSendResult = InboxSendResultWire;
+export type InboxPeople = InboxPeopleWire;
+export type InboxMember = InboxPeople["people"][number];
+/** A message goes to an open conversation or to a member picked by username. */
+export type InboxSendTarget = { peerId: string } | { username: string };
 export type InboxCommandOutcome = "accepted" | "rejected" | "unavailable";
 /**
  * The system-notification strings the Host holds on our behalf. It raises the

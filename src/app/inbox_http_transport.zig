@@ -57,11 +57,16 @@ pub const Adapter = struct {
         var url_buffer: [max_url_bytes]u8 = undefined;
         var url = std.Io.Writer.fixed(&url_buffer);
         inbox.writeUrl(&url, target.base, request) catch return error.InvalidResponse;
-        const seconds: i64 = if (request == .messages) 15 else 10;
-        return self.performAt(target, url.buffered(), output, cancellation, .fromSeconds(seconds), diagnostic);
+        const seconds: i64 = switch (request) {
+            .messages, .send => 15,
+            else => 10,
+        };
+        const send: ?inbox.Send = if (request == .send) request.send else null;
+        if (send) |message| if (!inbox.validRequestKey(message.request_key)) return error.InvalidResponse;
+        return self.performAt(target, url.buffered(), send, output, cancellation, .fromSeconds(seconds), diagnostic);
     }
 
-    fn performAt(self: *Adapter, target: Target, url: []const u8, output: []u8, cancellation: *const Cancellation, timeout: std.Io.Duration, diagnostic: *?inbox.Diagnostic) Error!Response {
+    fn performAt(self: *Adapter, target: Target, url: []const u8, send: ?inbox.Send, output: []u8, cancellation: *const Cancellation, timeout: std.Io.Duration, diagnostic: *?inbox.Diagnostic) Error!Response {
         if (target.key.len == 0 or target.key.len > max_authorization_bytes - "Bearer ".len) return error.InvalidResponse;
         var authorization: [max_authorization_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &authorization);
@@ -73,7 +78,7 @@ pub const Adapter = struct {
             .isolation = target.isolation,
             .budget = .{ .deadline = .fromNow(self.http.io, .{ .raw = timeout, .clock = .boot }) },
             .cancellation = .atomic(&cancellation.state),
-        }, fetch, .{ url, header, output });
+        }, fetch, .{ url, header, send, output });
         // Typed facts only: the engine reports no endpoint, address or header.
         diagnostic.* = if (result.diagnostic) |evidence| .{
             .phase = evidence.phase,
@@ -86,20 +91,41 @@ pub const Adapter = struct {
         };
     }
 
-    fn fetch(operation: *http.Operation, url: []const u8, authorization: []const u8, output: []u8) http.Error!Response {
+    /// A read is a GET. A send is a POST with its request key; the engine
+    /// never replays a POST, and nothing here sends it a second time.
+    fn fetch(operation: *http.Operation, url: []const u8, authorization: []const u8, send: ?inbox.Send, output: []u8) http.Error!Response {
         const uri = std.Uri.parse(url) catch return operation.fail(error.InvalidRequest);
-        var request = try operation.open(.GET, uri, .{ .headers = &.{
+        var request = if (send) |message| try operation.open(.POST, uri, .{
+            .standard_headers = .{ .content_type = .{ .override = "application/json" } },
+            .headers = &.{
+                .{ .name = "Accept", .value = "application/json" },
+                .{ .name = "Accept-Encoding", .value = "identity" },
+                .{ .name = "X-Request-Id", .value = message.request_key },
+                .{ .name = "Authorization", .value = authorization },
+            },
+        }) else try operation.open(.GET, uri, .{ .headers = &.{
             .{ .name = "Accept", .value = "application/json" },
             .{ .name = "Accept-Encoding", .value = "identity" },
             .{ .name = "Cache-Control", .value = "no-cache" },
             .{ .name = "Authorization", .value = authorization },
         } });
         defer request.deinit();
-        try request.send(null);
+        try request.send(if (send) |message| message.body else null);
         var response = try request.receiveHead();
         const status: u16 = @intFromEnum(response.head.status);
         // A refusal or a server error is the whole fact; its body is not read.
         if (status < 200 or status > 299) return .{ .status = status };
+        // A send is decided by its status: MetaTeam took the message, and a
+        // retry under the same key would replay this same answer. Its body
+        // only names the recipients, so an unreadable one is left empty.
+        if (send != null) {
+            if (response.head.content_encoding != .identity) return .{ .status = status };
+            const body = request.readAll(&response, output) catch |err| switch (err) {
+                error.ResponseTooLarge => return err,
+                else => return .{ .status = status },
+            };
+            return .{ .status = status, .body_len = body.len };
+        }
         if (response.head.content_encoding != .identity) return operation.fail(error.InvalidResponse);
         const body = try request.readAll(&response, output);
         return .{ .status = status, .body_len = body.len };
@@ -192,6 +218,179 @@ test "inbox HTTP sends the key only as a Bearer header and counts under its own 
         try std.testing.expectEqual(@as(u64, 1), stats.consumers.get(.inbox).requests);
         try std.testing.expectEqual(@as(u64, 0), stats.consumers.get(.mcp).requests);
     }
+}
+
+test "inbox HTTP sends a message once, as JSON with its request key, and never sends it again by itself" {
+    const Server = struct {
+        listener: *std.Io.net.Server,
+        answer: bool,
+        failure: ?anyerror = null,
+        method: ?std.http.Method = null,
+        target: [128]u8 = undefined,
+        target_len: usize = 0,
+        request_id: [80]u8 = undefined,
+        request_id_len: usize = 0,
+        content_type: [64]u8 = undefined,
+        content_type_len: usize = 0,
+        body: [256]u8 = undefined,
+        body_len: usize = 0,
+        /// What the next connection began with: a second attempt would be
+        /// an HTTP request, the test's own sentinel is "STOP".
+        next: [4]u8 = undefined,
+
+        fn run(self: *@This()) void {
+            self.serve() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn copy(into: []u8, value: []const u8) usize {
+            const length = @min(into.len, value.len);
+            @memcpy(into[0..length], value[0..length]);
+            return length;
+        }
+        fn serve(self: *@This()) !void {
+            {
+                var connection = try self.listener.accept(std.testing.io);
+                defer connection.close(std.testing.io);
+                var reads: [4096]u8 = undefined;
+                var writes: [4096]u8 = undefined;
+                var reader = connection.reader(std.testing.io, &reads);
+                var writer = connection.writer(std.testing.io, &writes);
+                var server: std.http.Server = .init(&reader.interface, &writer.interface);
+                var request = try server.receiveHead();
+                self.method = request.head.method;
+                self.target_len = copy(&self.target, request.head.target);
+                if (request.head.content_type) |value| self.content_type_len = copy(&self.content_type, value);
+                var headers = request.iterateHeaders();
+                while (headers.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "X-Request-Id")) {
+                    self.request_id_len = copy(&self.request_id, header.value);
+                };
+                const length: usize = @intCast(request.head.content_length orelse 0);
+                self.body_len = @min(length, self.body.len);
+                var body_buffer: [64]u8 = undefined;
+                try request.readerExpectNone(&body_buffer).readSliceAll(self.body[0..self.body_len]);
+                // Without an answer the outcome is unknown to the client.
+                if (self.answer) try request.respond("{\"data\":{\"sent\":[\"Ann\"]}}", .{ .keep_alive = false });
+            }
+            var connection = try self.listener.accept(std.testing.io);
+            defer connection.close(std.testing.io);
+            var reads: [64]u8 = undefined;
+            var reader = connection.reader(std.testing.io, &reads);
+            try reader.interface.readSliceAll(&self.next);
+        }
+    };
+    const key = "mtk-SENTINEL-key";
+    const request_key = "0b6f7c2e-7d1a-4c55-9f0e-2a4b6c8d0e1f";
+    for ([_]bool{ true, false }) |answer| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+        defer threaded.deinit();
+        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+        var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 4 });
+        defer listener.deinit(std.testing.io);
+        var server: Server = .{ .listener = &listener, .answer = answer };
+        const thread = try std.Thread.spawn(.{}, Server.run, .{&server});
+        const port = listener.socket.address.getPort();
+        const base = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/team", .{port});
+        defer std.testing.allocator.free(base);
+        var engine: http.Engine = undefined;
+        engine.init(std.testing.allocator, threaded.io());
+        defer engine.deinit();
+        var adapter: Adapter = .{ .http = &engine };
+        var cancellation: Cancellation = .{ .io = threaded.io() };
+        var buffer: [256]u8 = undefined;
+        var diagnostic: ?inbox.Diagnostic = null;
+        const body = "{\"to\":[\"ann\"],\"text\":\"hi\"}";
+        const result = adapter.transport().perform_fn(&adapter, .{ .base = base, .key = key, .isolation = .of(.inbox, "server") }, .{ .send = .{ .body = body, .request_key = request_key } }, &buffer, &cancellation, &diagnostic);
+        // The test's own sentinel connection: the server reads it next only
+        // if the client opened no second connection for the same message.
+        {
+            const sentinel_address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+            var stream = try sentinel_address.connect(std.testing.io, .{ .mode = .stream });
+            defer stream.close(std.testing.io);
+            var writes: [16]u8 = undefined;
+            var writer = stream.writer(std.testing.io, &writes);
+            try writer.interface.writeAll("STOP");
+            try writer.interface.flush();
+        }
+        thread.join();
+        try std.testing.expectEqual(@as(?anyerror, null), server.failure);
+        try std.testing.expectEqual(std.http.Method.POST, server.method.?);
+        try std.testing.expectEqualStrings("/team/agent/v1/notify", server.target[0..server.target_len]);
+        try std.testing.expectEqualStrings(request_key, server.request_id[0..server.request_id_len]);
+        try std.testing.expectEqualStrings("application/json", server.content_type[0..server.content_type_len]);
+        try std.testing.expectEqualStrings(body, server.body[0..server.body_len]);
+        try std.testing.expectEqualStrings("STOP", &server.next);
+        if (answer) {
+            const response = try result;
+            try std.testing.expectEqual(@as(u16, 200), response.status);
+            try std.testing.expectEqualStrings("{\"data\":{\"sent\":[\"Ann\"]}}", buffer[0..response.body_len]);
+        } else {
+            try std.testing.expect(std.meta.isError(result));
+        }
+        try std.testing.expectEqual(@as(u64, 1), engine.stats().consumers.get(.inbox).requests);
+    }
+    // A request key that could break the header is never sent.
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, threaded.io());
+    defer engine.deinit();
+    var adapter: Adapter = .{ .http = &engine };
+    var cancellation: Cancellation = .{ .io = threaded.io() };
+    var buffer: [16]u8 = undefined;
+    var diagnostic: ?inbox.Diagnostic = null;
+    try std.testing.expectError(error.InvalidResponse, adapter.transport().perform_fn(&adapter, .{ .base = "http://127.0.0.1:9", .key = key, .isolation = .of(.inbox, "server") }, .{ .send = .{ .body = "{}", .request_key = "a\r\nX-Evil: 1" } }, &buffer, &cancellation, &diagnostic));
+    try std.testing.expectEqual(@as(u64, 0), engine.stats().consumers.get(.inbox).requests);
+}
+
+test "inbox HTTP takes a send's success from its status even when the body cannot be read" {
+    const Server = struct {
+        listener: *std.Io.net.Server,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.serve() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn serve(self: *@This()) !void {
+            var connection = try self.listener.accept(std.testing.io);
+            defer connection.close(std.testing.io);
+            var reads: [4096]u8 = undefined;
+            var writes: [4096]u8 = undefined;
+            var reader = connection.reader(std.testing.io, &reads);
+            var writer = connection.writer(std.testing.io, &writes);
+            var server: std.http.Server = .init(&reader.interface, &writer.interface);
+            var request = try server.receiveHead();
+            var body: [64]u8 = undefined;
+            var body_buffer: [64]u8 = undefined;
+            const length: usize = @intCast(request.head.content_length orelse 0);
+            try request.readerExpectNone(&body_buffer).readSliceAll(body[0..length]);
+            try request.respond("not gzip at all", .{ .keep_alive = false, .extra_headers = &.{.{ .name = "Content-Encoding", .value = "gzip" }} });
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 1 });
+    defer listener.deinit(std.testing.io);
+    var server: Server = .{ .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Server.run, .{&server});
+    const base = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}", .{listener.socket.address.getPort()});
+    defer std.testing.allocator.free(base);
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, threaded.io());
+    defer engine.deinit();
+    var adapter: Adapter = .{ .http = &engine };
+    var cancellation: Cancellation = .{ .io = threaded.io() };
+    var buffer: [64]u8 = undefined;
+    var diagnostic: ?inbox.Diagnostic = null;
+    const result = adapter.transport().perform_fn(&adapter, .{ .base = base, .key = "k", .isolation = .of(.inbox, "server") }, .{ .send = .{ .body = "{\"to\":\"me\",\"text\":\"x\"}", .request_key = "0b6f7c2e-7d1a-4c55-9f0e-2a4b6c8d0e1f" } }, &buffer, &cancellation, &diagnostic);
+    thread.join();
+    try std.testing.expectEqual(@as(?anyerror, null), server.failure);
+    const response = try result;
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqual(@as(usize, 0), response.body_len);
 }
 
 test "inbox HTTP reports where an unreachable service stopped" {
