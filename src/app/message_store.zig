@@ -78,6 +78,44 @@ pub const Store = struct {
     db: sql.Database,
     scope: [32]u8,
 
+    pub fn list(self: *const Store, a: std.mem.Allocator, cursor: ?inbox.ListCursor) !inbox.ListPage {
+        const Rows = struct {
+            a: std.mem.Allocator,
+            items: std.ArrayList(inbox.Summary) = .empty,
+            failed: bool = false,
+
+            fn append(r: *@This(), row: sql.Row) !void {
+                try r.items.append(r.a, .{
+                    .peer = .{ .id = try .init(row.value(0).text), .name = .truncated(row.value(1).blob), .username = try optionalName(row.value(2)) },
+                    .latest = .{ .id = try .init(row.value(3).text), .sent_at_ms = @intCast(row.value(4).integer), .direction = std.meta.stringToEnum(inbox.Direction, row.value(5).text) orelse return error.InvalidDirection, .preview = inbox.preview(row.value(6).blob) },
+                });
+            }
+        };
+        var rows = Rows{ .a = a };
+        const time: sql.Value = if (cursor) |c| .{ .integer = @intCast(c.time) } else .null_value;
+        const result = self.db.query(
+            \\SELECT c.peer_id, CAST(c.display_name AS BLOB), CAST(c.username AS BLOB), m.message_id, m.sent_at_ms, m.direction,
+            \\       substr(CAST(ltrim(m.body, char(32,9,13,10)) AS BLOB),1,?5)
+            \\FROM conversations c JOIN messages m ON (m.binding_id,m.message_id)=(c.binding_id,c.latest_id)
+            \\WHERE c.binding_id=?1 AND (?2 IS NULL OR c.latest_at_ms<?2 OR (c.latest_at_ms=?2 AND c.peer_id>?3))
+            \\ORDER BY c.latest_at_ms DESC,c.peer_id LIMIT ?4
+        , &.{
+            .{ .blob = &self.scope },
+            time,
+            .{ .text = if (cursor) |*c| c.peer.slice() else "" },
+            .{ .integer = inbox.Limits.list_page + 1 },
+            .{ .integer = inbox.Preview.max },
+        }, .{
+            .context = &rows,
+            .receive_fn = receiveRows(Rows),
+        });
+        if (result != .ok or rows.failed) return error.CacheRead;
+        return .{
+            .summaries = rows.items.items[0..@min(rows.items.items.len, inbox.Limits.list_page)],
+            .has_earlier = rows.items.items.len > inbox.Limits.list_page,
+        };
+    }
+
     pub fn latest(self: *const Store, allocator: std.mem.Allocator, peer: []const u8) !?struct { page: inbox.Messages, has_earlier: bool } {
         var page = inbox.Messages{ .arena = .init(allocator), .items = &.{} };
         errdefer page.deinit();

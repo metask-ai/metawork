@@ -197,6 +197,8 @@ export function useInbox(
   const sending = useRef(false);
   const conversationRef = useRef(conversation);
   conversationRef.current = conversation;
+  const shown = useRef(open && !disabled);
+  shown.current = open && !disabled;
   const bindingRef = useRef(binding);
   bindingRef.current = binding;
   const updateComposer = (
@@ -215,29 +217,50 @@ export function useInbox(
       anchor: string | null,
     ) => Promise<void>
   >(async () => {});
-  const followed = useRef<string | null>(null);
+  const readEpoch = useRef(0);
 
   // A different MetaTeam connection is a different inbox.
   useEffect(() => {
     setSelectedId(null);
+    conversationRef.current = null;
     setConversation(null);
     setTask(null);
     setComposers({});
-    followed.current = null;
+    readEpoch.current++;
   }, [binding]);
 
   useEffect(() => {
     if (!open || disabled) return;
     // An automatic refresh: the Host skips it in the background, while
     // refused and before a failure's retry delay.
-    const tick = () => {
+    let active = true;
+    const tick = async () => {
       if (document.visibilityState !== "visible") return;
-      void client.refreshInbox(binding, false).catch(() => undefined);
+      const result = await client
+        .refreshInbox(binding, false)
+        .catch(() => null);
+      const current = conversationRef.current;
+      if (
+        !active ||
+        document.visibilityState !== "visible" ||
+        result?.outcome !== "accepted" ||
+        !current ||
+        current.loading ||
+        (current.failure && current.failure !== "failed")
+      )
+        return;
+      const last = current.messages.at(-1);
+      await readRef.current(
+        current.peerId,
+        last ? "after" : "latest",
+        last?.id ?? null,
+      );
     };
     tick();
     const timer = window.setInterval(tick, inboxRefreshMs);
     document.addEventListener("visibilitychange", tick);
     return () => {
+      active = false;
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", tick);
     };
@@ -249,6 +272,7 @@ export function useInbox(
       page: "latest" | "before" | "after",
       anchor: string | null,
     ) => {
+      const epoch = ++readEpoch.current;
       setConversation((current) =>
         current?.peerId === peerId
           ? { ...current, loading: true }
@@ -274,6 +298,7 @@ export function useInbox(
       } catch {
         result = null;
       }
+      if (epoch !== readEpoch.current || binding !== bindingRef.current) return;
       const answer = result;
       setConversation((current) => {
         if (current?.peerId !== peerId) return current;
@@ -282,7 +307,7 @@ export function useInbox(
         switch (answer.state) {
           case "superseded":
           case "stale_binding":
-            return current;
+            return { ...current, loading: false };
           case "ready":
             if (page === "latest")
               return {
@@ -314,6 +339,7 @@ export function useInbox(
       });
       // Newer messages that did not all fit: read the latest page instead of
       // guessing what lies in between.
+      if (!shown.current || document.visibilityState !== "visible") return;
       if (answer?.state === "ready" && page === "after" && !answer.complete)
         await readRef.current(peerId, "latest", null);
     },
@@ -321,26 +347,9 @@ export function useInbox(
   );
   readRef.current = read;
 
-  // Follow new messages of the open conversation while it is shown.
-  const summary = inbox.conversations.find(
-    (item) => item.peerId === conversation?.peerId,
-  );
-  const latestId = summary?.latest?.id ?? null;
-  useEffect(() => {
-    if (!open || !conversation || conversation.loading) return;
-    if (conversation.failure || latestId === null) return;
-    const last = conversation.messages.at(-1);
-    if (!last || conversation.messages.some((item) => item.id === latestId))
-      return;
-    if (followed.current === latestId) return;
-    followed.current = latestId;
-    void read(conversation.peerId, "after", last.id);
-  }, [open, conversation, latestId, read]);
-
   function select(peerId: string, name: string) {
     setSelectedId(peerId);
     setTask(null);
-    followed.current = null;
     setConversation({
       peerId,
       name,
@@ -498,7 +507,14 @@ export function useInbox(
     /** The user's own retry: past any retry delay or refusal. */
     retry() {
       void client.refreshInbox(binding, true).catch(() => undefined);
-      if (conversation?.failure) void read(conversation.peerId, "latest", null);
+      if (conversation?.failure) {
+        const last = conversation.messages.at(-1);
+        void read(
+          conversation.peerId,
+          last ? "after" : "latest",
+          last?.id ?? null,
+        );
+      }
     },
     openTask,
     /** A sub-task or a project's file, opened from the item on screen. */

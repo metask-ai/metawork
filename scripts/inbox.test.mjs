@@ -350,7 +350,8 @@ test("each connection state says what is wrong and what can be done", async () =
   assert.ok(screen.getByRole("button", { name: "Ann, 2 unread" }));
 });
 
-test("the open inbox refreshes, and a conversation is read only when it is opened", async () => {
+test("the open inbox refreshes, and a conversation is read only when it is opened", async (t) => {
+  const timer = t.mock.method(window, "setInterval");
   const user = userEvent.setup({ document });
   const client = fakeClient({
     pages: {
@@ -367,9 +368,11 @@ test("the open inbox refreshes, and a conversation is read only when it is opene
   });
   const closed = render(element(client, view(), { open: false }));
   assert.equal(client.calls.length, 0);
+  assert.equal(timer.mock.callCount(), 0);
   closed.unmount();
 
   render(element(client, view()));
+  assert.equal(timer.mock.calls[0].arguments[1], 15_000);
   // The page's own refresh is automatic, so the Host keeps its rules.
   await waitFor(() =>
     assert.deepEqual(client.calls[0], ["refresh", "1", false]),
@@ -405,7 +408,8 @@ test("the open inbox refreshes, and a conversation is read only when it is opene
   );
 });
 
-test("an open conversation follows its newer messages and a new connection starts over", async () => {
+test("the timer follows only the open conversation even with zero unread, and a new connection starts over", async (t) => {
+  const timer = t.mock.method(window, "setInterval");
   const user = userEvent.setup({ document });
   const client = fakeClient({
     pages: {
@@ -413,28 +417,16 @@ test("an open conversation follows its newer messages and a new connection start
       "ann:after:12": { messages: [message("15", "in", "Any update?")] },
     },
   });
-  const { rerender } = render(element(client, view()));
+  const initial = view();
+  initial.conversations[0] = { ...initial.conversations[0], latest: null };
+  const { rerender } = render(element(client, initial));
   await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
   await waitFor(() =>
     assert.equal(document.querySelectorAll(".inbox-bubble").length, 1),
   );
 
-  const newer = view();
-  const updated = view({
-    conversations: [
-      {
-        ...newer.conversations[0],
-        unread: "3",
-        latest: {
-          ...newer.conversations[0].latest,
-          id: "15",
-          preview: "Any update?",
-        },
-      },
-      newer.conversations[1],
-    ],
-  });
-  rerender(element(client, updated));
+  rerender(element(client, { ...initial, unreadTotal: "0" }));
+  await timer.mock.calls[0].arguments[0]();
   await waitFor(() =>
     assert.equal(document.querySelectorAll(".inbox-bubble").length, 2),
   );
@@ -686,7 +678,9 @@ test("a reply is sent once, shown from the newer messages, and retried under the
       "ann:after:12": { messages: [message("13", "out", "Looking now")] },
     },
   });
-  render(element(client, view()));
+  const initial = view();
+  initial.conversations[0] = { ...initial.conversations[0], latest: null };
+  render(element(client, initial));
   await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
   await waitFor(() =>
     assert.equal(document.querySelectorAll(".inbox-bubble").length, 1),

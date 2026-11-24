@@ -24,8 +24,7 @@ pub const Limits = struct {
     /// Every member with their projects and current work.
     pub const people_bytes = 1024 * 1024;
     pub const json_depth = 16;
-    /// The conversation list is built from the most recent messages and grows
-    /// backwards on request; a page is a transfer unit, never a visibility cap.
+    /// Local conversation summaries per page, ordered by their latest activity.
     pub const list_page: u32 = 200;
     /// One screen of a conversation plus scrollback; earlier pages on request.
     pub const conversation_page: u32 = 50;
@@ -173,7 +172,7 @@ fn percentDecode(value: []const u8, output: []u8) ?[]const u8 {
 // Requests.
 
 pub const MessagesQuery = struct {
-    peer: ?[]const u8 = null,
+    peer: []const u8,
     after: ?[]const u8 = null,
     before: ?[]const u8 = null,
     limit: ?u32 = null,
@@ -258,16 +257,15 @@ pub fn writeUrl(writer: *std.Io.Writer, base: []const u8, request: Request) std.
             try writeComponent(writer, id);
         },
         .messages => |query| {
-            try writer.writeAll("/open/v1/messages");
-            var separator: u8 = '?';
-            inline for (.{ .{ "peer", "peer" }, .{ "afterId", "after" }, .{ "beforeId", "before" } }) |param| {
+            try writer.writeAll("/open/v1/messages?peer=");
+            try writeComponent(writer, query.peer);
+            inline for (.{ .{ "afterId", "after" }, .{ "beforeId", "before" } }) |param| {
                 if (@field(query, param[1])) |value| {
-                    try writer.print("{c}{s}=", .{ separator, param[0] });
+                    try writer.print("&{s}=", .{param[0]});
                     try writeComponent(writer, value);
-                    separator = '&';
                 }
             }
-            if (query.limit) |limit| try writer.print("{c}limit={d}", .{ separator, limit });
+            if (query.limit) |limit| try writer.print("&limit={d}", .{limit});
         },
     }
 }
@@ -1141,23 +1139,15 @@ pub const BindingKey = struct {
     fingerprint: [64]u8,
 };
 
-pub const ListKind = enum { initial, newer, earlier };
-
 pub const ListPreparation = struct {
     id: u64,
     binding: u64,
-    kind: ListKind,
-    /// `afterId` for `newer`, `beforeId` for `earlier`.
-    anchor: ?Id,
+    /// Continue the local list after this (time, peer) pair.
+    anchor: ?ListCursor,
 };
 
-pub const ListPage = struct {
-    /// The page itself, oldest first.
-    messages: []const Message,
-    /// The `limit` that page was finally asked with.
-    limit: u32,
-};
-
+pub const ListCursor = struct { time: u64, peer: Id };
+pub const ListPage = struct { summaries: []const Summary, has_earlier: bool };
 pub const ListCompletion = union(enum) { page: ListPage, failed: Failure };
 pub const PollCompletion = union(enum) { unread: *const Unread, failed: Failure };
 pub const CommandOutcome = enum { accepted, rejected, unavailable };
@@ -1247,8 +1237,7 @@ pub const Runtime = struct {
     rows: std.ArrayList(ConversationView) = .empty,
     list_loaded: bool = false,
     has_earlier: bool = false,
-    newest: ?Id = null,
-    oldest: ?Id = null,
+    list_cursor: ?ListCursor = null,
     synced_at_ms: ?u64 = null,
     diagnostic: ?Diagnostic = null,
     next_poll_ms: ?u64 = null,
@@ -1257,10 +1246,8 @@ pub const Runtime = struct {
     sequence: u64 = 0,
     poll_id: ?u64 = null,
     list_id: ?u64 = null,
-    pending_newer: bool = false,
-    pending_earlier: bool = false,
-    /// The member whose conversation was read last. A rebuilt window keeps
-    /// their row, so a page being read never loses its place in the list.
+    list_requested: bool = false,
+    /// Keep an opened peer addressable even when their unread count clears.
     viewing: ?Id = null,
 
     pub fn init(allocator: std.mem.Allocator) Runtime {
@@ -1296,8 +1283,7 @@ pub const Runtime = struct {
         self.summaries.clearRetainingCapacity();
         self.list_loaded = false;
         self.has_earlier = false;
-        self.newest = null;
-        self.oldest = null;
+        self.list_cursor = null;
         self.synced_at_ms = null;
         self.diagnostic = null;
         self.next_poll_ms = null;
@@ -1305,8 +1291,7 @@ pub const Runtime = struct {
         self.failures = 0;
         self.poll_id = null;
         self.list_id = null;
-        self.pending_newer = false;
-        self.pending_earlier = false;
+        self.list_requested = false;
         self.viewing = null;
     }
 
@@ -1415,8 +1400,7 @@ pub const Runtime = struct {
                 self.state = .reauthorize;
                 self.diagnostic = null;
                 self.next_poll_ms = null;
-                self.pending_newer = false;
-                self.pending_earlier = false;
+                self.list_requested = false;
             },
             .@"unreachable" => |diagnostic| {
                 self.state = .@"unreachable";
@@ -1430,8 +1414,8 @@ pub const Runtime = struct {
 
     /// The Renderer refreshes while the inbox page is open. An automatic
     /// refresh keeps every background rule: nothing in the background, nothing
-    /// while refused, nothing before a failure's retry delay; it asks for the
-    /// newer end of the list. Only the user's own retry passes those rules,
+    /// while refused, nothing before a failure's retry delay; it loads the
+    /// first local page once. Only the user's own retry passes those rules,
     /// and the caller then also reads the unread facts at once.
     pub fn requestRefresh(self: *Runtime, now_ms: u64, binding: u64, explicit: bool) CommandOutcome {
         if (!self.available) return .unavailable;
@@ -1440,7 +1424,7 @@ pub const Runtime = struct {
             if (!self.active or self.state == .reauthorize) return .rejected;
             if (self.state == .@"unreachable") if (self.next_poll_ms) |at| if (now_ms < at) return .rejected;
         }
-        self.pending_newer = true;
+        if (!self.list_loaded and self.list_id == null) self.list_requested = true;
         return .accepted;
     }
 
@@ -1448,73 +1432,35 @@ pub const Runtime = struct {
         if (!self.available) return .unavailable;
         if (!self.bound or binding != self.binding) return .rejected;
         if (self.list_loaded and !self.has_earlier) return .rejected;
-        self.pending_earlier = true;
+        self.list_requested = true;
         return .accepted;
     }
 
-    pub fn listBusy(self: *const Runtime) bool {
-        return self.list_id != null;
-    }
-
     pub fn listPending(self: *const Runtime) bool {
-        return self.bound and self.list_id == null and self.state != .reauthorize and
-            (self.pending_newer or (self.pending_earlier and (!self.list_loaded or self.has_earlier)));
+        return self.bound and self.list_id == null and self.state != .reauthorize and self.list_requested and (!self.list_loaded or self.has_earlier);
     }
 
-    /// The next list page to fetch, if one was asked for. The first page
-    /// always comes first; a newer page wins over an earlier one.
+    /// Page only through summaries of locally opened conversations.
     pub fn beginList(self: *Runtime) ?ListPreparation {
         if (!self.available or !self.listPending()) return null;
-        // An empty window has no newest message to continue from: it starts
-        // over, which is the same request a first page makes.
-        const kind: ListKind = if (!self.list_loaded or (self.pending_newer and self.newest == null))
-            .initial
-        else if (self.pending_newer) .newer else .earlier;
-        const anchor: ?Id = switch (kind) {
-            .initial => null,
-            .newer => self.newest,
-            .earlier => self.oldest,
-        };
-        if (kind == .earlier and anchor == null) {
-            self.pending_earlier = false;
-            return null;
-        }
         const id = self.nextId() orelse return null;
-        switch (kind) {
-            .initial => {
-                self.pending_newer = false;
-            },
-            .newer => self.pending_newer = false,
-            .earlier => self.pending_earlier = false,
-        }
+        self.list_requested = false;
         self.list_id = id;
-        return .{ .id = id, .binding = self.binding, .kind = kind, .anchor = anchor };
+        return .{ .id = id, .binding = self.binding, .anchor = self.list_cursor };
     }
 
-    pub fn completeList(self: *Runtime, now_ms: u64, id: u64, kind: ListKind, completion: ListCompletion) std.mem.Allocator.Error!bool {
+    pub fn completeList(self: *Runtime, now_ms: u64, id: u64, completion: ListCompletion) std.mem.Allocator.Error!bool {
         if (!self.available or self.list_id != id) return false;
         self.list_id = null;
         switch (completion) {
-            .failed => |failure| {
-                self.fail(now_ms, failure);
-            },
+            .failed => |failure| self.fail(now_ms, failure),
             .page => |page| {
-                const full = page.messages.len >= page.limit;
-                switch (kind) {
-                    .initial => try self.replaceWindow(page.messages, full),
-                    .newer => if (full) {
-                        // The gap between the old window and this page may
-                        // hide someone's latest message: start over from here.
-                        try self.replaceWindow(page.messages, true);
-                    } else {
-                        for (page.messages) |*message| try self.absorb(message, true);
-                        if (page.messages.len != 0) self.newest = page.messages[page.messages.len - 1].id;
-                    },
-                    .earlier => {
-                        for (page.messages) |*message| try self.absorb(message, false);
-                        if (page.messages.len != 0) self.oldest = page.messages[0].id;
-                        self.has_earlier = full;
-                    },
+                for (page.summaries) |summary| try self.keepSummary(summary, false);
+                self.list_loaded = true;
+                self.has_earlier = page.has_earlier;
+                if (page.summaries.len != 0) {
+                    const last = page.summaries[page.summaries.len - 1];
+                    self.list_cursor = .{ .time = last.latest.sent_at_ms, .peer = last.peer.id };
                 }
             },
         }
@@ -1522,44 +1468,18 @@ pub const Runtime = struct {
         return true;
     }
 
-    fn replaceWindow(self: *Runtime, messages: []const Message, full: bool) std.mem.Allocator.Error!void {
-        const previous = try self.allocator.dupe(Summary, self.summaries.items);
-        defer self.allocator.free(previous);
-        const kept: ?Summary = if (self.viewing) |*peer| if (self.summaryIndex(peer.slice())) |index| self.summaries.items[index] else null else null;
-        self.summaries.clearRetainingCapacity();
-        for (messages) |*message| try self.absorb(message, true);
-        if (kept) |summary| if (self.summaryIndex(summary.peer.id.slice()) == null)
-            try self.summaries.append(self.allocator, summary);
-        // A rebuilt window keeps the usernames it knew: replies use them.
-        for (self.summaries.items) |*summary| if (summary.peer.username == null) {
-            for (previous) |*old| if (old.peer.id.eql(summary.peer.id.slice())) {
-                summary.peer.username = old.peer.username;
-                break;
-            };
-        };
-        self.newest = if (messages.len != 0) messages[messages.len - 1].id else null;
-        self.oldest = if (messages.len != 0) messages[0].id else null;
-        self.has_earlier = full;
-        self.list_loaded = true;
-    }
-
-    /// Records `message` as the latest of each of its conversations. A newer
-    /// message replaces the summary; an older one only fills a conversation
-    /// the list does not have yet.
-    fn absorb(self: *Runtime, message: *const Message, newer: bool) std.mem.Allocator.Error!void {
-        const latest: Latest = .{ .id = message.id, .direction = message.direction, .preview = preview(message.text), .sent_at_ms = message.sent_at_ms };
-        for (message.peers()) |peer| {
-            if (self.summaryIndex(peer.id.slice())) |index| {
-                const current = &self.summaries.items[index];
-                if (newer or message.sent_at_ms > current.latest.sent_at_ms) {
-                    // A message that does not report the username keeps the
-                    // one known: replies are addressed by it.
-                    var known = peer;
-                    if (known.username == null) known.username = current.peer.username;
-                    current.* = .{ .peer = known, .latest = latest };
-                }
-            } else try self.summaries.append(self.allocator, .{ .peer = peer, .latest = latest });
+    fn keepSummary(self: *Runtime, received: Summary, from_read: bool) !void {
+        var summary = received;
+        if (summary.peer.username == null) {
+            if (self.unreadOf(summary.peer.id.slice())) |entry| summary.peer.username = entry.peer.username;
         }
+        if (self.summaryIndex(summary.peer.id.slice())) |idx| {
+            const old = &self.summaries.items[idx];
+            if (summary.latest.sent_at_ms < old.latest.sent_at_ms or (!from_read and summary.latest.sent_at_ms == old.latest.sent_at_ms)) return;
+            const username = summary.peer.username orelse old.peer.username;
+            old.* = summary;
+            old.peer.username = username;
+        } else try self.summaries.append(self.allocator, summary);
     }
 
     fn summaryIndex(self: *const Runtime, peer: []const u8) ?usize {
@@ -1601,17 +1521,18 @@ pub const Runtime = struct {
     /// A conversation page the user read keeps the list's summary current
     /// and marks whose page is open. A failed read changes nothing here: its
     /// outcome belongs to that request alone.
-    pub fn completeConversation(self: *Runtime, binding: u64, peer: []const u8, kind: ConversationPageKind, messages: []const Message) std.mem.Allocator.Error!bool {
+    pub fn completeConversation(self: *Runtime, binding: u64, peer: []const u8, kind: ConversationPageKind, messages: []const Message, known_username: ?Name) std.mem.Allocator.Error!bool {
         if (!self.accepts(binding)) return false;
         self.viewing = Id.init(peer) catch null;
-        if (kind != .before and messages.len != 0) try self.absorb(&messages[messages.len - 1], false);
+        if (kind != .before and messages.len != 0) {
+            if (openedSummary(peer, &messages[messages.len - 1], known_username)) |summary| try self.keepSummary(summary, true);
+        }
         try self.rebuild();
         return true;
     }
 
-    /// Rows are rebuilt after every change so `view` only borrows. Unread
-    /// conversations the list has no message for yet come first; the rest
-    /// follow by their latest message, newest first.
+    /// The most recent activity may come from an unread notification or
+    /// from a locally saved message.
     fn rebuild(self: *Runtime) std.mem.Allocator.Error!void {
         self.rows.clearRetainingCapacity();
         if (!self.bound) return;
@@ -1625,7 +1546,6 @@ pub const Runtime = struct {
                 .lastAtMs = if (entry.last_at_ms) |at| .{ .value = at } else null,
             });
         }
-        const pending = self.rows.items.len;
         for (self.summaries.items) |*summary| {
             const unread = self.unreadOf(summary.peer.id.slice());
             try self.rows.append(self.allocator, .{
@@ -1636,15 +1556,13 @@ pub const Runtime = struct {
                 .lastAtMs = if (unread) |entry| if (entry.last_at_ms) |at| U64{ .value = at } else null else null,
             });
         }
-        std.mem.sort(ConversationView, self.rows.items[0..pending], {}, struct {
-            fn less(_: void, a: ConversationView, b: ConversationView) bool {
-                return a.unread.value > b.unread.value;
+        std.mem.sort(ConversationView, self.rows.items, {}, struct {
+            fn time(row: ConversationView) u64 {
+                return @max(if (row.lastAtMs) |v| v.value else 0, if (row.latest) |v| v.sentAtMs.value else 0);
             }
-        }.less);
-        std.mem.sort(ConversationView, self.rows.items[pending..], {}, struct {
             fn less(_: void, a: ConversationView, b: ConversationView) bool {
-                const left = a.latest.?.sentAtMs.value;
-                const right = b.latest.?.sentAtMs.value;
+                const left = time(a);
+                const right = time(b);
                 if (left != right) return left > right;
                 return std.mem.order(u8, a.peerId, b.peerId) == .lt;
             }
@@ -1891,11 +1809,11 @@ pub const Management = struct {
     request_refresh_fn: *const fn (*anyopaque, u64, u64, bool) CommandOutcome,
     request_earlier_fn: *const fn (*anyopaque, u64) CommandOutcome,
     begin_list_fn: *const fn (*anyopaque) ?ListPreparation,
-    complete_list_fn: *const fn (*anyopaque, u64, u64, ListKind, ListCompletion) void,
+    complete_list_fn: *const fn (*anyopaque, u64, u64, ListCompletion) void,
     knows_peer_fn: *const fn (*anyopaque, u64, []const u8) bool,
     accepts_fn: *const fn (*anyopaque, u64) bool,
     peer_address_fn: *const fn (*anyopaque, u64, []const u8) ?Address,
-    complete_conversation_fn: *const fn (*anyopaque, u64, []const u8, ConversationPageKind, []const Message) void,
+    complete_conversation_fn: *const fn (*anyopaque, u64, []const u8, ConversationPageKind, []const Message, ?Name) void,
     stop_fn: *const fn (*anyopaque) void,
 };
 
@@ -1946,8 +1864,8 @@ test "request URLs keep the key out and encode every value" {
     try writeUrl(&writer, "http://h.test", .{ .messages = .{ .peer = "a b&c", .before = "9", .limit = 50 } });
     try testing.expectEqualStrings("http://h.test/open/v1/messages?peer=a%20b%26c&beforeId=9&limit=50", writer.buffered());
     writer = .fixed(&buffer);
-    try writeUrl(&writer, "http://h.test", .{ .messages = .{ .limit = 200 } });
-    try testing.expectEqualStrings("http://h.test/open/v1/messages?limit=200", writer.buffered());
+    try writeUrl(&writer, "http://h.test", .{ .messages = .{ .peer = "me", .after = "10", .limit = 50 } });
+    try testing.expectEqualStrings("http://h.test/open/v1/messages?peer=me&afterId=10&limit=50", writer.buffered());
     writer = .fixed(&buffer);
     try writeUrl(&writer, "http://h.test", .{ .task = "13066" });
     try testing.expectEqualStrings("http://h.test/open/v1/tasks/13066", writer.buffered());
@@ -2170,17 +2088,15 @@ test "a newer message without a username keeps the one known for replies" {
         \\{"data":{"messages":[{"id":1,"time":1,"direction":"in","from":{"id":"u-a","username":"ann","name":"Ann"},"text":"hi"}]}}
     );
     defer first.deinit();
-    _ = try runtime.completeConversation(binding, "u-a", .latest, first.items);
+    _ = try runtime.completeConversation(binding, "u-a", .latest, first.items, null);
     var second = try parseMessages(testing.allocator,
         \\{"data":{"messages":[{"id":2,"time":2,"direction":"in","from":{"id":"u-a","name":"Ann"},"text":"again"}]}}
     );
     defer second.deinit();
-    _ = runtime.requestRefresh(0, binding, false);
-    const list = runtime.beginList().?;
-    _ = try runtime.completeList(0, list.id, list.kind, .{ .page = .{ .messages = second.items, .limit = Limits.list_page } });
+    _ = try runtime.completeConversation(binding, "u-a", .after, second.items, null);
     try testing.expectEqualStrings("again", runtime.view().conversations[0].latest.?.preview);
     try testing.expectEqualStrings("ann", runtime.peerAddress(binding, "u-a").?.member.slice());
-    _ = try runtime.completeConversation(binding, "u-a", .after, second.items);
+    _ = try runtime.completeConversation(binding, "u-a", .after, second.items, null);
     try testing.expectEqualStrings("ann", runtime.peerAddress(binding, "u-a").?.member.slice());
 }
 
@@ -2354,82 +2270,26 @@ test "returning to the foreground asks again only after a quiet period" {
     try testing.expectEqual(@as(?u64, 16_000), runtime.nextPoll());
 }
 
-test "the conversation list grows from pages and closes gaps by starting over" {
+test "unread senders and cached conversations share one list without reading messages" {
     var runtime: Runtime = .init(testing.allocator);
     defer runtime.deinit();
     runtime.start(true);
     _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
-    const binding = runtime.binding;
-    var by_peer = [_]PeerUnread{
-        .{ .peer = .{ .id = try .init("ann"), .name = .truncated("Ann") }, .unread = 1 },
-        .{ .peer = .{ .id = try .init("old"), .name = .truncated("Old") }, .unread = 4 },
-    };
-    const unread: Unread = .{ .total = 5, .by_peer = &by_peer };
-    _ = try runtime.completePoll(0, 1, runtime.beginPoll().?, .{ .unread = &unread });
-    try testing.expectEqual(CommandOutcome.accepted, runtime.requestRefresh(0, binding, false));
-
+    var peers = [_]PeerUnread{.{ .peer = .{ .id = try .init("bob"), .name = .truncated("Bob") }, .unread = 1 }};
+    const unread: Unread = .{ .total = 1, .by_peer = &peers };
+    _ = try runtime.completePoll(0, 0, runtime.beginPoll().?, .{ .unread = &unread });
+    _ = runtime.requestRefresh(0, runtime.binding, false);
     const first = runtime.beginList().?;
-    try testing.expectEqual(ListKind.initial, first.kind);
-    try testing.expect(runtime.view().loadingConversations);
-    const page = [_]Message{
-        testMessage("1", 10, .in, "bob", "hello bob"),
-        testMessage("2", 20, .in, "ann", "first"),
-        testMessage("3", 30, .out, "ann", "reply"),
-    };
-    const window = [_]Message{ page[0], page[1], page[2] };
-    try testing.expect(try runtime.completeList(0, first.id, .initial, .{ .page = .{ .messages = &window, .limit = Limits.list_page } }));
-    var view = runtime.view();
-    try testing.expect(view.conversationsLoaded and !view.hasEarlier);
-    // An unread member outside the window still has a row, without a message.
-    try testing.expectEqual(@as(usize, 3), view.conversations.len);
-    try testing.expectEqualStrings("old", view.conversations[0].peerId);
-    try testing.expect(view.conversations[0].latest == null);
-    try testing.expectEqualStrings("ann", view.conversations[1].peerId);
-    try testing.expectEqualStrings("reply", view.conversations[1].latest.?.preview);
-    try testing.expectEqual(Direction.out, view.conversations[1].latest.?.direction);
-    try testing.expectEqual(@as(u64, 1), view.conversations[1].unread.value);
-    try testing.expectEqualStrings("bob", view.conversations[2].peerId);
-    try testing.expectEqual(CommandOutcome.rejected, runtime.requestEarlier(binding));
-
-    // A full newer page may hide a gap, so the window starts over from it.
-    _ = runtime.requestRefresh(0, binding, false);
-    const newer = runtime.beginList().?;
-    try testing.expectEqual(ListKind.newer, newer.kind);
-    try testing.expectEqualStrings("3", newer.anchor.?.slice());
-    var full: [Limits.list_page]Message = undefined;
-    for (&full, 0..) |*message, i| message.* = testMessage("9", 100 + i, .in, "cy", "busy");
-    _ = try runtime.completeList(0, newer.id, .newer, .{ .page = .{ .messages = &full, .limit = Limits.list_page } });
-    view = runtime.view();
-    try testing.expect(view.hasEarlier);
-    try testing.expectEqual(@as(usize, 3), view.conversations.len); // two unread without summary + cy
-    try testing.expectEqualStrings("cy", view.conversations[2].peerId);
-
-    // Earlier pages only add conversations the window does not have.
-    try testing.expectEqual(CommandOutcome.accepted, runtime.requestEarlier(binding));
+    const ann = Summary{ .peer = .{ .id = try .init("ann"), .name = .truncated("Ann") }, .latest = .{ .id = try .init("4"), .direction = .in, .preview = .truncated("hello"), .sent_at_ms = 2 } };
+    _ = try runtime.completeList(0, first.id, .{ .page = .{ .summaries = &.{ann}, .has_earlier = true } });
+    try testing.expectEqual(@as(usize, 2), runtime.view().conversations.len);
+    _ = runtime.requestRefresh(0, runtime.binding, false);
+    try testing.expect(runtime.beginList() == null);
+    _ = runtime.requestEarlier(runtime.binding);
     const earlier = runtime.beginList().?;
-    try testing.expectEqual(ListKind.earlier, earlier.kind);
-    const older = [_]Message{ testMessage("1", 10, .in, "bob", "hello bob"), testMessage("8", 99, .in, "cy", "older cy") };
-    _ = try runtime.completeList(0, earlier.id, .earlier, .{ .page = .{ .messages = &older, .limit = Limits.list_page } });
-    view = runtime.view();
-    try testing.expect(!view.hasEarlier);
-    for (view.conversations) |row| if (std.mem.eql(u8, row.peerId, "cy")) try testing.expectEqualStrings("busy", row.latest.?.preview);
-}
-
-test "an empty first page is asked for again instead of continuing from nothing" {
-    var runtime: Runtime = .init(testing.allocator);
-    defer runtime.deinit();
-    runtime.start(true);
-    _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
-    const binding = runtime.binding;
-    _ = runtime.requestRefresh(0, binding, false);
-    const first = runtime.beginList().?;
-    _ = try runtime.completeList(0, first.id, .initial, .{ .page = .{ .messages = &.{}, .limit = Limits.list_page } });
-    try testing.expect(runtime.view().conversationsLoaded);
-    try testing.expect(runtime.newest == null);
-    _ = runtime.requestRefresh(0, binding, false);
-    const again = runtime.beginList().?;
-    try testing.expectEqual(ListKind.initial, again.kind);
-    try testing.expect(again.anchor == null);
+    try testing.expect(earlier.anchor.?.peer.eql("ann"));
+    _ = try runtime.completeList(0, earlier.id, .{ .page = .{ .summaries = &.{}, .has_earlier = false } });
+    try testing.expectEqual(CommandOutcome.rejected, runtime.requestEarlier(runtime.binding));
 }
 
 test "an automatic refresh keeps the background rules; only an explicit retry passes them" {
@@ -2443,13 +2303,13 @@ test "an automatic refresh keeps the background rules; only an explicit retry pa
     try testing.expect(!runtime.listPending());
     runtime.setActive(0, true);
     try testing.expectEqual(CommandOutcome.accepted, runtime.requestRefresh(0, binding, false));
-    runtime.pending_newer = false;
+    runtime.list_requested = false;
     // Inside a failure's retry delay, and while refused, it waits.
     var id = runtime.beginPoll().?;
     _ = try runtime.completePoll(1000, 1, id, .{ .failed = .{ .@"unreachable" = null } });
     try testing.expectEqual(CommandOutcome.rejected, runtime.requestRefresh(1000 + Limits.retry_ms[0] - 1, binding, false));
     try testing.expectEqual(CommandOutcome.accepted, runtime.requestRefresh(1000 + Limits.retry_ms[0], binding, false));
-    runtime.pending_newer = false;
+    runtime.list_requested = false;
     id = runtime.beginPoll().?;
     _ = try runtime.completePoll(2000, 2, id, .{ .failed = .reauthorize });
     try testing.expectEqual(CommandOutcome.rejected, runtime.requestRefresh(10_000_000, binding, false));
@@ -2467,10 +2327,10 @@ test "one task or conversation read never changes the connection state" {
     _ = try runtime.completePoll(0, 1, runtime.beginPoll().?, .{ .unread = &unread });
     try testing.expect(!runtime.knowsPeer(binding, "ann"));
     const page = [_]Message{testMessage("5", 50, .in, "ann", "newest")};
-    try testing.expect(try runtime.completeConversation(binding, "ann", .latest, &page));
+    try testing.expect(try runtime.completeConversation(binding, "ann", .latest, &page, null));
     try testing.expect(runtime.knowsPeer(binding, "ann"));
     try testing.expect(!runtime.knowsPeer(binding + 1, "ann"));
-    try testing.expect(!try runtime.completeConversation(binding + 1, "ann", .latest, &page));
+    try testing.expect(!try runtime.completeConversation(binding + 1, "ann", .latest, &page, null));
     // A refused or missing task is that request's outcome alone.
     try testing.expectEqual(RequestFailure.forbidden, requestFailure(403));
     try testing.expectEqual(RequestFailure.forbidden, requestFailure(401));
@@ -2482,30 +2342,6 @@ test "one task or conversation read never changes the connection state" {
     try testing.expect(!validTaskId(".."));
     try testing.expect(!validTaskId("."));
     try testing.expect(validTaskId("13066"));
-}
-
-test "a rebuilt window keeps the conversation being read" {
-    var runtime: Runtime = .init(testing.allocator);
-    defer runtime.deinit();
-    runtime.start(true);
-    _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
-    const binding = runtime.binding;
-    _ = runtime.requestRefresh(0, binding, false);
-    const first = runtime.beginList().?;
-    const window = [_]Message{testMessage("2", 20, .in, "ann", "first")};
-    _ = try runtime.completeList(0, first.id, .initial, .{ .page = .{ .messages = &window, .limit = Limits.list_page } });
-    _ = try runtime.completeConversation(binding, "ann", .latest, &window);
-    _ = runtime.requestRefresh(0, binding, false);
-    const newer = runtime.beginList().?;
-    var full: [Limits.list_page]Message = undefined;
-    for (&full, 0..) |*message, i| message.* = testMessage("9", 100 + i, .in, "cy", "busy");
-    _ = try runtime.completeList(0, newer.id, .newer, .{ .page = .{ .messages = &full, .limit = Limits.list_page } });
-    try testing.expect(runtime.knowsPeer(binding, "ann"));
-    var found = false;
-    for (runtime.view().conversations) |row| {
-        if (std.mem.eql(u8, row.peerId, "ann")) found = true;
-    }
-    try testing.expect(found);
 }
 
 test "a member listed twice is one row" {
@@ -2598,9 +2434,8 @@ test "messages to oneself belong to the me conversation and never break the page
     defer runtime.deinit();
     runtime.start(true);
     _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
-    _ = runtime.requestRefresh(0, runtime.binding, false);
-    const first = runtime.beginList().?;
-    _ = try runtime.completeList(0, first.id, .initial, .{ .page = .{ .messages = messages.items, .limit = Limits.list_page } });
+    _ = try runtime.completeConversation(runtime.binding, self_peer_id, .latest, messages.items[0..2], null);
+    _ = try runtime.completeConversation(runtime.binding, "ann", .latest, messages.items, null);
     const view = runtime.view();
     try testing.expectEqual(@as(usize, 2), view.conversations.len);
     try testing.expectEqualStrings("ann", view.conversations[0].peerId);

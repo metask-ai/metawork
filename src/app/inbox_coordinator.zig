@@ -239,6 +239,8 @@ const Job = struct {
     isolation: @import("metawork_http_transport").Isolation,
     cache: ?cache_store.Store,
     page_mutex: *std.Io.Mutex,
+    list_arena: std.heap.ArenaAllocator,
+    local_list: ?inbox.ListPage = null,
     cached_has_earlier: ?bool = null,
     work: Work,
     cancellation: http.Cancellation,
@@ -288,14 +290,8 @@ const Job = struct {
                 };
             },
             .list => |preparation| {
-                // Product never prepares a continuation without its anchor;
-                // without one this is a first page, never a crash.
-                const query: inbox.MessagesQuery = if (preparation.anchor) |*anchor| switch (preparation.kind) {
-                    .initial => .{},
-                    .newer => .{ .after = anchor.slice() },
-                    .earlier => .{ .before = anchor.slice() },
-                } else .{};
-                _ = try self.pageOf(query, inbox.Limits.list_page);
+                const cache = self.cache orelse return error.CacheUnavailable;
+                self.local_list = try cache.list(self.list_arena.allocator(), preparation.anchor);
             },
             .conversation => |work| {
                 const cache = self.cache orelse return error.CacheUnavailable;
@@ -461,6 +457,7 @@ const Job = struct {
     fn destroy(self: *Job) void {
         std.debug.assert(self.thread == null);
         if (self.unread) |*value| value.deinit(self.allocator);
+        self.list_arena.deinit();
         if (self.page) |*value| value.deinit();
         if (self.detail) |*value| value.deinit();
         if (self.sent) |names| self.allocator.free(names);
@@ -648,6 +645,7 @@ pub const Coordinator = struct {
             .key = key,
             .cache = if (self.database) |db| .{ .db = db, .scope = bound.isolation.digest } else null,
             .page_mutex = &self.page_mutex,
+            .list_arena = .init(self.allocator),
             .isolation = bound.isolation,
             .work = work,
             .cancellation = .{ .io = self.io },
@@ -671,13 +669,13 @@ pub const Coordinator = struct {
         if (self.list != null or self.bound == null) return;
         const preparation = self.management.begin_list_fn(self.management.context) orelse return;
         self.list = self.startJob(.{ .list = preparation }) catch {
-            self.management.complete_list_fn(self.management.context, self.now(), preparation.id, preparation.kind, .{ .failed = .{ .@"unreachable" = null } });
+            self.management.complete_list_fn(self.management.context, self.now(), preparation.id, .{ .failed = .{ .@"unreachable" = null } });
             return;
         };
     }
 
-    /// While the inbox page is open the Renderer asks for the newer end of
-    /// the list; Product decides whether an automatic ask runs at all. The
+    /// Refresh loads local summaries on first entry; Product gates each
+    /// automatic request before the open peer can be polled. The
     /// user's explicit retry also reads the unread facts at once, past any
     /// retry delay or refusal.
     pub fn refresh(self: *Coordinator, binding: u64, explicit: bool) inbox.CommandOutcome {
@@ -934,15 +932,20 @@ pub const Coordinator = struct {
             job.join();
             self.conversation = null;
             const work = job.work.conversation;
+            const current = self.management.accepts_fn(self.management.context, work.reply.binding);
+            // A completed read is already saved and may have consumed unread
+            // messages even if the user selected another peer in the meantime.
+            if (current) if (job.page) |page| {
+                self.management.complete_conversation_fn(self.management.context, work.reply.binding, work.peer.slice(), work.kind, page.items, work.username);
+            };
             if (job.replied) {
                 // Already answered; nothing is sent twice.
             } else if (job.superseded) {
                 respondConversationState(work.reply, work.peer.slice(), .superseded);
-            } else if (!self.management.accepts_fn(self.management.context, work.reply.binding)) {
+            } else if (!current) {
                 // The connection changed while the request ran.
                 respondConversationState(work.reply, work.peer.slice(), .stale_binding);
             } else if (job.page) |page| {
-                self.management.complete_conversation_fn(self.management.context, work.reply.binding, work.peer.slice(), work.kind, page.items);
                 self.respondConversation(work, page.items, job.cached_has_earlier orelse (page.items.len >= job.page_limit));
             } else {
                 // This request's own outcome; the connection state is the
@@ -1015,14 +1018,13 @@ pub const Coordinator = struct {
         const work = &job.work.send;
         const state = inbox.sendState(job.send_status);
         // A new conversation joins the list and becomes the one being read;
-        // when it cannot be told, the list asks for its newer end instead.
+        // when its recipient is known.
         var landed: ?inbox.Peer = null;
         if (state == .sent) if (work.resolve) |*username| if (self.management.accepts_fn(self.management.context, work.reply.binding)) {
             if (job.page) |page| if (inbox.conversationOf(page.items, username.slice())) |peer| {
                 landed = peer;
-                self.management.complete_conversation_fn(self.management.context, work.reply.binding, peer.id.slice(), .latest, page.items);
+                self.management.complete_conversation_fn(self.management.context, work.reply.binding, peer.id.slice(), .latest, page.items, username.*);
             };
-            if (landed == null) _ = self.management.request_refresh_fn(self.management.context, self.now(), work.reply.binding, false);
         };
         if (job.replied) return;
         const conversation: ?inbox.ConversationRef = if (landed) |*peer| .{ .peerId = peer.id.slice(), .name = peer.name.slice() } else null;
@@ -1067,11 +1069,11 @@ pub const Coordinator = struct {
     }
 
     fn completeList(self: *Coordinator, job: *Job, preparation: inbox.ListPreparation, now_ms: u64) void {
-        const page = job.page orelse {
-            self.management.complete_list_fn(self.management.context, now_ms, preparation.id, preparation.kind, .{ .failed = job.failure orelse .{ .@"unreachable" = null } });
+        const page = job.local_list orelse {
+            self.management.complete_list_fn(self.management.context, now_ms, preparation.id, .{ .failed = job.failure orelse .{ .@"unreachable" = null } });
             return;
         };
-        self.management.complete_list_fn(self.management.context, now_ms, preparation.id, preparation.kind, .{ .page = .{ .messages = page.items, .limit = job.page_limit } });
+        self.management.complete_list_fn(self.management.context, now_ms, preparation.id, .{ .page = page });
     }
 
     fn reconcile(self: *Coordinator) void {
@@ -1595,8 +1597,8 @@ const TestManagement = struct {
     fn beginList(context: *anyopaque) ?inbox.ListPreparation {
         return of(context).beginList();
     }
-    fn completeList(context: *anyopaque, now_ms: u64, id: u64, kind: inbox.ListKind, completion: inbox.ListCompletion) void {
-        _ = of(context).completeList(now_ms, id, kind, completion) catch unreachable;
+    fn completeList(context: *anyopaque, now_ms: u64, id: u64, completion: inbox.ListCompletion) void {
+        _ = of(context).completeList(now_ms, id, completion) catch unreachable;
     }
     fn knowsPeer(context: *anyopaque, binding: u64, peer: []const u8) bool {
         return of(context).knowsPeer(binding, peer);
@@ -1607,8 +1609,8 @@ const TestManagement = struct {
     fn peerAddress(context: *anyopaque, binding: u64, peer: []const u8) ?inbox.Address {
         return of(context).peerAddress(binding, peer);
     }
-    fn completeConversation(context: *anyopaque, binding: u64, peer: []const u8, kind: inbox.ConversationPageKind, messages: []const inbox.Message) void {
-        _ = of(context).completeConversation(binding, peer, kind, messages) catch unreachable;
+    fn completeConversation(context: *anyopaque, binding: u64, peer: []const u8, kind: inbox.ConversationPageKind, messages: []const inbox.Message, username: ?inbox.Name) void {
+        _ = of(context).completeConversation(binding, peer, kind, messages, username) catch unreachable;
     }
     fn stop(context: *anyopaque) void {
         of(context).stop();
@@ -1729,7 +1731,7 @@ const TestTransport = struct {
         }
         if (self.status != 200) return .{ .status = self.status };
         if (request == .task and self.task_status != 200) return .{ .status = self.task_status };
-        if (request == .messages and request.messages.peer != null and self.peer_status != 200) return .{ .status = self.peer_status };
+        if (request == .messages and self.peer_status != 200) return .{ .status = self.peer_status };
         if (request == .messages) if (request.messages.limit) |limit| if (limit > self.fits_limit) return error.ResponseTooLarge;
         const body = switch (request) {
             .unread => self.unread,
@@ -1900,27 +1902,20 @@ test "inbox coordinator: a refused key stops background polling until the user r
     try testing.expectEqual(inbox.State.checking, fixture.view().state);
 }
 
-test "inbox coordinator: list pages shrink until they fit, and conversations and tasks answer by request" {
+test "inbox coordinator: the local list reads no bodies; only the opened peer is fetched and oversized pages shrink" {
     var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
     fixture.init();
     defer fixture.deinit();
     fixture.coordinator.start(true);
     fixture.settle();
     const binding = fixture.view().binding.value;
-    fixture.transport.fits_limit = 50;
+    fixture.transport.fits_limit = 25;
     try testing.expectEqual(inbox.CommandOutcome.accepted, fixture.coordinator.refresh(binding, false));
     fixture.settle();
     try testing.expect(fixture.view().conversationsLoaded);
     try testing.expectEqualStrings("ann", fixture.view().conversations[0].peerId);
-    try testing.expectEqualStrings("hello", fixture.view().conversations[0].latest.?.preview);
-    var limits: [3]bool = @splat(false);
-    for (0..fixture.transport.count) |index| {
-        const value = fixture.transport.url(index);
-        if (std.mem.endsWith(u8, value, "messages?limit=200")) limits[0] = true;
-        if (std.mem.endsWith(u8, value, "messages?limit=100")) limits[1] = true;
-        if (std.mem.endsWith(u8, value, "messages?limit=50")) limits[2] = true;
-    }
-    try testing.expectEqual([3]bool{ true, true, true }, limits);
+    try testing.expect(fixture.view().conversations[0].latest == null);
+    try testing.expectEqual(@as(usize, 1), fixture.transport.count);
 
     const responder = fixture.capture.responder();
     try testing.expect(fixture.coordinator.readConversation(responder, "r1", .{ .binding = binding, .request_id = 1, .peer = "nobody", .kind = .latest, .anchor = null }));
@@ -1949,6 +1944,8 @@ test "inbox coordinator: list pages shrink until they fit, and conversations and
         if (std.mem.endsWith(u8, fixture.transport.url(index), "messages?peer=ann&limit=50")) saw_peer_request = true;
     }
     try testing.expect(saw_peer_request);
+    try testing.expectEqualStrings("hello", fixture.view().conversations[0].latest.?.preview);
+    try testing.expect(std.mem.endsWith(u8, fixture.transport.url(fixture.transport.count - 1), "messages?peer=ann&limit=25"));
 
     try testing.expect(fixture.coordinator.readTask(responder, "t1", .{ .binding = binding, .request_id = 9, .task = "13066" }));
     fixture.settle();
@@ -1959,6 +1956,105 @@ test "inbox coordinator: list pages shrink until they fit, and conversations and
         try testing.expect(std.mem.indexOf(u8, response, "192.0.2.10") == null);
     }
     try testing.expect(fixture.transport.keys_ok);
+}
+
+test "inbox coordinator: only the opened peer is read, and their messages survive reopening the database" {
+    var temp = testing.tmpDir(.{});
+    defer temp.cleanup();
+    const dir = try temp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(dir);
+    const path = try std.fs.path.join(testing.allocator, &.{ dir, inbox.database_name });
+    defer testing.allocator.free(path);
+    const both =
+        \\{"data":{"unread":2,"byPeer":[{"peer":{"id":"ann","username":"ann_u","name":"Ann"},"unread":1},{"peer":{"id":"bob","name":"Bob"},"unread":1}]}}
+    ;
+    const bob =
+        \\{"data":{"unread":1,"byPeer":[{"peer":{"id":"bob","name":"Bob"},"unread":1}]}}
+    ;
+    {
+        var f: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+        try f.initTarget(.{ .file = path });
+        defer f.deinit();
+        f.transport.unread = both;
+        f.transport.messages =
+            \\{"data":{"messages":[{"id":"7","time":7,"direction":"in","from":{"id":"ann","name":"Ann"},"text":"first","new":true}]}}
+        ;
+        f.coordinator.start(true);
+        f.settle();
+        const binding = f.view().binding.value;
+        _ = f.coordinator.refresh(binding, false);
+        f.settle();
+        try testing.expectEqual(@as(usize, 1), f.transport.count);
+        try testing.expectEqual(@as(usize, 2), f.view().conversations.len);
+        f.transport.unread = bob; // Next unread response, after Ann's messages are fetched.
+        try testing.expect(f.coordinator.readConversation(f.capture.responder(), "r", .{ .binding = binding, .request_id = 1, .peer = "ann", .kind = .latest, .anchor = null }));
+        f.settle();
+        try testing.expect(std.mem.endsWith(u8, f.transport.url(1), "/messages?peer=ann&limit=50"));
+        try testing.expect(std.mem.indexOf(u8, f.capture.last(), "\"isNew\":true") != null);
+    }
+    var f: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    try f.initTarget(.{ .file = path });
+    defer f.deinit();
+    f.transport.unread = bob;
+    f.coordinator.start(true);
+    f.settle();
+    const binding = f.view().binding.value;
+    _ = f.coordinator.refresh(binding, false);
+    f.settle();
+    try testing.expectEqual(@as(usize, 2), f.view().conversations.len);
+    try testing.expectEqualStrings("ann_u", f.management.runtime.peerAddress(binding, "ann").?.member.slice());
+    try testing.expect(f.coordinator.readConversation(f.capture.responder(), "r", .{ .binding = binding, .request_id = 1, .peer = "ann", .kind = .latest, .anchor = null }));
+    f.settle();
+    try testing.expectEqual(@as(usize, 1), f.transport.count);
+    try testing.expect(std.mem.indexOf(u8, f.capture.last(), "\"text\":\"first\"") != null);
+    try testing.expect(std.mem.indexOf(u8, f.capture.last(), "\"isNew\":true") != null);
+    // Reading a previously saved message remotely can still display its
+    // original mark. The remote response no longer consumes any unread items.
+    f.transport.messages =
+        \\{"data":{"messages":[{"id":"7","time":7,"direction":"in","from":{"id":"ann","name":"Ann"},"text":"first","new":false}]}}
+    ;
+    try testing.expect(f.coordinator.readConversation(f.capture.responder(), "earlier", .{ .binding = binding, .request_id = 4, .peer = "ann", .kind = .before, .anchor = "8" }));
+    f.settle();
+    try testing.expect(std.mem.indexOf(u8, f.capture.last(), "\"isNew\":true") != null);
+    try testing.expectEqual(@as(usize, 2), f.transport.count);
+    try testing.expect(std.mem.endsWith(u8, f.transport.url(1), "/messages?peer=ann&beforeId=8&limit=50"));
+    f.source.generation = 2;
+    f.source.fingerprint = @splat('b');
+    f.coordinator.drain();
+    f.settle();
+    _ = f.coordinator.refresh(f.view().binding.value, false);
+    f.settle();
+    try testing.expect(!f.management.runtime.knowsPeer(f.view().binding.value, "ann"));
+}
+
+test "a completed read is kept in the list when another peer supersedes its reply" {
+    var f: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    f.init();
+    defer f.deinit();
+    f.transport.unread =
+        \\{"data":{"unread":2,"byPeer":[{"peer":{"id":"ann","name":"Ann"},"unread":1},{"peer":{"id":"bob","name":"Bob"},"unread":1}]}}
+    ;
+    f.coordinator.start(true);
+    f.settle();
+    const binding = f.view().binding.value;
+    _ = f.coordinator.refresh(binding, false);
+    f.settle();
+    try testing.expect(f.coordinator.readConversation(f.capture.responder(), "a", .{ .binding = binding, .request_id = 1, .peer = "ann", .kind = .latest, .anchor = null }));
+    f.coordinator.conversation.?.join();
+    f.transport.messages =
+        \\{"data":{"messages":[]}}
+    ;
+    try testing.expect(f.coordinator.readConversation(f.capture.responder(), "b", .{ .binding = binding, .request_id = 2, .peer = "bob", .kind = .latest, .anchor = null }));
+    f.settle();
+    f.transport.unread =
+        \\{"data":{"unread":0,"byPeer":[]}}
+    ;
+    f.host.now_ms += inbox.Limits.poll_interval_ms;
+    f.coordinator.onTimer();
+    f.settle();
+    try testing.expectEqual(@as(usize, 1), f.view().conversations.len);
+    try testing.expectEqualStrings("ann", f.view().conversations[0].peerId);
+    try testing.expectEqualStrings("hello", f.view().conversations[0].latest.?.preview);
 }
 
 test "inbox response protection recognizes a JSON-escaped device key" {
@@ -2089,7 +2185,7 @@ test "inbox coordinator: the newest matching MCP connection is MetaTeam; others 
     try testing.expect(result == .none);
 }
 
-test "inbox coordinator: an empty first page and a refresh after it start over" {
+test "inbox coordinator: an empty local list and repeated refreshes do not read any conversation" {
     var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
     fixture.init();
     defer fixture.deinit();
@@ -2102,13 +2198,8 @@ test "inbox coordinator: an empty first page and a refresh after it start over" 
     try testing.expect(fixture.view().conversationsLoaded);
     try testing.expectEqual(inbox.CommandOutcome.accepted, fixture.coordinator.refresh(binding, false));
     fixture.settle();
-    var first_pages: usize = 0;
-    for (0..fixture.transport.count) |index| {
-        const value = fixture.transport.url(index);
-        if (std.mem.endsWith(u8, value, "messages?limit=200")) first_pages += 1;
-        try testing.expect(std.mem.indexOf(u8, value, "afterId") == null);
-    }
-    try testing.expectEqual(@as(usize, 2), first_pages);
+    try testing.expectEqual(@as(usize, 1), fixture.transport.count);
+    try testing.expect(std.mem.endsWith(u8, fixture.transport.url(0), "/unread"));
 }
 
 test "inbox coordinator: a refused task or conversation answers that request only" {
@@ -2371,7 +2462,7 @@ test "inbox coordinator: members are listed on request, and a message to one sta
     }
     try testing.expect(listed);
 
-    // When the conversation cannot be told, the list asks for its newer end.
+    // An unresolved recipient never triggers a cross-peer read.
     fixture.transport.messages = "{\"data\":{\"messages\":[]}}";
     try testing.expect(fixture.coordinator.sendMessage(responder, "s2", .{ .binding = binding, .request_id = 4, .to = .{ .username = "cy" }, .text = "Hi", .request_key = "22222222-2222-4333-8444-555555555555" }));
     fixture.settle();
@@ -2381,7 +2472,7 @@ test "inbox coordinator: members are listed on request, and a message to one sta
         if (std.mem.endsWith(u8, fixture.transport.url(index), "messages?afterId=40&limit=200") or
             std.mem.endsWith(u8, fixture.transport.url(index), "messages?limit=200")) refreshed = true;
     }
-    try testing.expect(refreshed);
+    try testing.expect(!refreshed);
     // A username that could not be an address is refused before anything is sent.
     try testing.expect(!fixture.coordinator.sendMessage(responder, "s3", .{ .binding = binding, .request_id = 5, .to = .{ .username = "" }, .text = "Hi", .request_key = "33333333-2222-4333-8444-555555555555" }));
     for (fixture.capture.responses.items) |response| try testing.expect(std.mem.indexOf(u8, response, sentinel_key) == null);
@@ -2463,11 +2554,19 @@ const FakeMetaTeam = struct {
     key_lens: [8]usize = @splat(0),
     key_count: usize = 0,
 
-    const unread_body = "{\"data\":{\"unread\":1,\"byPeer\":[{\"peer\":{\"id\":\"ann-id\",\"username\":\"ann_u\",\"name\":\"Ann\"},\"unread\":1,\"lastAt\":1795428968292}]}}";
-    const messages_body = "{\"data\":{\"messages\":[" ++
-        "{\"id\":\"m1\",\"at\":1795428000000,\"time\":\"2026-11-23T08:00:00.000Z\",\"direction\":\"self\",\"from\":{\"id\":\"me-id\",\"username\":\"me_u\",\"name\":\"Me\"},\"text\":\"note to self\",\"taskIds\":[]}," ++
-        "{\"id\":\"m2\",\"at\":1795428968292,\"time\":\"2026-11-23T08:16:08.292Z\",\"direction\":\"in\",\"from\":{\"id\":\"ann-id\",\"username\":\"ann_u\",\"name\":\"Ann\"},\"text\":\"see the file\",\"taskIds\":[9830],\"new\":true,\"readAt\":1795428968300}" ++
-        "]}}";
+    ann_read: bool = false,
+    bob_read: bool = false,
+    const ann_unread = "{\"peer\":{\"id\":\"ann-id\",\"username\":\"ann_u\",\"name\":\"Ann\"},\"unread\":1,\"lastAt\":1795428968292}";
+    const bob_unread = "{\"peer\":{\"id\":\"bob-id\",\"username\":\"bob\",\"name\":\"Bob\"},\"unread\":1}";
+    fn unreadBody(self: *const FakeMetaTeam) []const u8 {
+        if (self.ann_read and self.bob_read) return "{\"data\":{\"unread\":0,\"byPeer\":[]}}";
+        if (self.ann_read) return "{\"data\":{\"unread\":1,\"byPeer\":[" ++ bob_unread ++ "]}}";
+        if (self.bob_read) return "{\"data\":{\"unread\":1,\"byPeer\":[" ++ ann_unread ++ "]}}";
+        return "{\"data\":{\"unread\":2,\"byPeer\":[" ++ ann_unread ++ "," ++ bob_unread ++ "]}}";
+    }
+    const ann_message =
+        \\{"data":{"messages":[{"id":"m2","time":"2026-11-23T08:16:08.292Z","direction":"in","from":{"id":"ann-id","username":"ann_u","name":"Ann"},"text":"see the file","taskIds":[9830],"new":true}]}}
+    ;
     const file_body = "{\"data\":{\"id\":9830,\"name\":\"api.md\",\"tag\":\"API\",\"size\":7,\"mime\":\"text/markdown\",\"by\":\"Lin\",\"content\":\"# Title\",\"downloadUrl\":\"http://127.0.0.1:1/agent/v1/files/9830/dl?exp=1&sig=ab\",\"webUrl\":\"http://127.0.0.1:1/api/v1/files/9830/content\"}}";
     const people_body = "{\"data\":{\"count\":2,\"people\":[{\"name\":\"Ann\",\"username\":\"ann_u\",\"online\":true},{\"name\":\"Bob\",\"username\":\"bob\"}]}}";
     const sent_body = "{\"data\":{\"sent\":[\"Ann\"]}}";
@@ -2526,10 +2625,16 @@ const FakeMetaTeam = struct {
             return request.respond(sent_body, .{ .keep_alive = false });
         }
         const body: []const u8 = if (std.mem.eql(u8, target, "/team/open/v1/unread"))
-            unread_body
-        else if (std.mem.startsWith(u8, target, "/team/open/v1/messages"))
-            messages_body
-        else if (std.mem.eql(u8, target, "/team/open/v1/tasks/9830"))
+            self.unreadBody()
+        else if (std.mem.eql(u8, target, "/team/open/v1/messages?peer=ann-id&limit=50")) read: {
+            self.ann_read = true;
+            break :read ann_message;
+        } else if (std.mem.eql(u8, target, "/team/open/v1/messages?peer=bob-id&limit=50")) read: {
+            self.bob_read = true;
+            break :read
+            \\{"data":{"messages":[{"id":"m3","time":1795428968292,"direction":"in","from":{"id":"bob-id","username":"bob","name":"Bob"},"text":"hello","new":true}]}}
+            ;
+        } else if (std.mem.eql(u8, target, "/team/open/v1/tasks/9830"))
             file_body
         else if (std.mem.eql(u8, target, "/team/agent/v1/people"))
             people_body
@@ -2646,14 +2751,15 @@ test "inbox coordinator: against a local MetaTeam over real HTTP, with the key r
     const binding = management.runtime.view().binding.value;
     try testing.expectEqual(inbox.CommandOutcome.accepted, coordinator.refresh(binding, false));
     settle(&coordinator);
-    // A message to oneself is the `me` conversation, beside Ann's.
-    var rows: [2][]const u8 = undefined;
-    for (management.runtime.view().conversations, 0..) |row, index| rows[index] = row.peerId;
+    try testing.expectEqual(@as(u64, 2), management.runtime.view().unreadTotal.?.value);
     try testing.expectEqual(@as(usize, 2), management.runtime.view().conversations.len);
-    try testing.expectEqualStrings("ann-id", rows[0]);
-    try testing.expectEqualStrings(inbox.self_peer_id, rows[1]);
+    try testing.expectEqualStrings("ann-id", management.runtime.view().conversations[0].peerId);
+    try testing.expect(management.runtime.view().conversations[0].latest == null);
 
     const responder = capture.responder();
+    try testing.expect(coordinator.readConversation(responder, "read", .{ .binding = binding, .request_id = 9, .peer = "ann-id", .kind = .latest, .anchor = null }));
+    settle(&coordinator);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "\"isNew\":true") != null);
     const key = "0b6f7c2e-7d1a-4c55-9f0e-2a4b6c8d0e1f";
     try testing.expect(coordinator.sendMessage(responder, "s1", .{ .binding = binding, .request_id = 1, .to = .{ .peer = "ann-id" }, .text = "On it", .request_key = key }));
     settle(&coordinator);
