@@ -21,6 +21,24 @@ export function formatInteger(locale: string, value: bigint | number): string {
   );
 }
 
+const sizeUnits = ["B", "KB", "MB", "GB", "TB"];
+
+/** A file size in powers of 1024 with one decimal, as file managers show it. */
+export function formatFileSize(locale: string, bytes: string): string {
+  let value = Number(bytes);
+  let unit = 0;
+  // The next unit starts where one decimal would already read as 1024.0.
+  while (value >= 1023.95 && unit < sizeUnits.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const digits = unit === 0 ? 0 : 1;
+  return `${new Intl.NumberFormat(locale, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(value)} ${sizeUnits[unit]}`;
+}
+
 export function taskCountMessageId(
   locale: Locale,
   count: number,

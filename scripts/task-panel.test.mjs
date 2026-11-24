@@ -91,11 +91,11 @@ const { useFilePreviewTabs } = await vite.ssrLoadModule(
 const { TaskContent, createTaskReadingMemory } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
-const { GeneratedImagePreview } = await vite.ssrLoadModule(
-  "/src/features/tasks/GeneratedImagePreview.tsx",
+const { ReplyImage } = await vite.ssrLoadModule(
+  "/src/features/tasks/ReplyImage.tsx",
 );
-const { GeneratedVideoPreview } = await vite.ssrLoadModule(
-  "/src/features/tasks/GeneratedVideoPreview.tsx",
+const { ReplyVideo } = await vite.ssrLoadModule(
+  "/src/features/tasks/ReplyVideo.tsx",
 );
 const { FileChangesView } = await vite.ssrLoadModule(
   "/src/features/task-panel/FileChangesView.tsx",
@@ -203,6 +203,7 @@ function run(overrides = {}) {
     usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
     additionalInputs: [],
     tools: [],
+    outputs: [],
     ...overrides,
   };
 }
@@ -9747,10 +9748,14 @@ test("generated MP4 renders a bare player on approach and releases it offscreen"
     const referenceId = "file-17-1-1-1";
     const view = render(
       localizedView(
-        createElement(GeneratedVideoPreview, {
-          taskId: "17",
-          runId: "23",
-          referenceId,
+        createElement(ReplyVideo, {
+          target: {
+            kind: "reference",
+            taskId: "17",
+            runId: "23",
+            fileReferenceId: referenceId,
+          },
+          displayPath: "generated-videos/clip.mp4",
           load: async (...args) => {
             loads.push(args);
             return {
@@ -9799,7 +9804,7 @@ test("generated MP4 renders a bare player on approach and releases it offscreen"
   }
 });
 
-test("the assistant previews a generated video and exposes explicit file actions in Execution details", async () => {
+test("a reply shows each of its files once, before what supplements it, and repeats none in Execution details", async () => {
   const reference = {
     id: "video-ref",
     title: "",
@@ -9847,11 +9852,10 @@ test("the assistant previews a generated video and exposes explicit file actions
   const html = renderTaskContent(task({ runs: [completed] }), "en-US", props);
   const content = document.createElement("div");
   content.innerHTML = html;
-  const player = content.querySelector(".generated-video-preview");
+  const player = content.querySelector(".reply-video");
   assert.ok(player?.closest('[data-reading-id="9:video:video-ref"]'));
-  assert.equal(player.closest(".run-outputs"), null);
   const response = content.querySelector('[data-output-disposition="final"]');
-  const picture = content.querySelector(".generated-image-preview");
+  const picture = content.querySelector(".reply-image");
   const footers = content.querySelectorAll(
     '.message-info-bar[data-role="assistant"]',
   );
@@ -9863,8 +9867,13 @@ test("the assistant previews a generated video and exposes explicit file actions
   assert.ok(
     player.compareDocumentPosition(picture) & Node.DOCUMENT_POSITION_FOLLOWING,
   );
+  const files = content.querySelector(".run-files");
+  assert.ok(files?.closest('[data-reading-id="9:files"]'));
   assert.ok(
-    picture.compareDocumentPosition(footers[0]) &
+    picture.compareDocumentPosition(files) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.ok(
+    files.compareDocumentPosition(footers[0]) &
       Node.DOCUMENT_POSITION_FOLLOWING,
   );
   assert.ok(
@@ -9875,7 +9884,9 @@ test("the assistant previews a generated video and exposes explicit file actions
     content.querySelector(`[data-output-id="${duplicate.id}"]`),
     null,
   );
-  assert.ok(content.querySelector(`[data-output-id="${other.id}"]`));
+  assert.ok(
+    content.querySelector(`.run-files li[data-output-id="${other.id}"]`),
+  );
   const beforeDelivery = renderTaskContent(
     task({
       runs: [
@@ -9889,72 +9900,65 @@ test("the assistant previews a generated video and exposes explicit file actions
     "en-US",
     props,
   );
-  assert.match(beforeDelivery, /generated-video-preview/);
-  assert.doesNotMatch(beforeDelivery, /class="run-outputs"/);
+  assert.match(beforeDelivery, /class="reply-video /);
+  assert.doesNotMatch(beforeDelivery, /class="run-files"/);
   assert.doesNotMatch(beforeDelivery, /returned no final response/);
 
-  const actions = [];
+  const asked = [];
   const view = render(
     taskContentElement(task({ runs: [completed] }), "1", {
       ...props,
       loadFilePreview: async () => ({ state: "missing" }),
-      onFileAction: async (target, action, signal) => {
-        assert.equal(signal.aborted, false);
-        actions.push([target, action]);
-        return action === "save" ? "saved" : "revealed";
+      describeFile: async (target) => {
+        asked.push(target);
+        return {
+          state: "ready",
+          file: { kind: "file", sizeBytes: "7", previewable: false },
+        };
       },
     }),
   );
-  assert.equal(
-    view.container.querySelector(`[data-output-id="${duplicate.id}"]`),
-    null,
-  );
+  await waitFor(() => assert.equal(asked.length, 1));
+  assert.deepEqual(asked, [
+    {
+      kind: "output",
+      taskId: task().id,
+      runId: completed.id,
+      outputId: other.id,
+    },
+  ]);
   const user = userEvent.setup({ document: dom.window.document });
   await user.click(screen.getByRole("button", { name: /^Execution details/ }));
-  const delivery = view.container.querySelector(
-    `[data-output-id="${duplicate.id}"]`,
+  const executionDetails = view.container.querySelector(".run-process-body");
+  assert.ok(executionDetails);
+  assert.equal(executionDetails.querySelector("[data-output-id]"), null);
+  // A tool names the file it wrote; nothing there acts on it.
+  assert.match(executionDetails.textContent, /clip\.mp4/);
+  assert.doesNotMatch(executionDetails.textContent, /Open folder|Save as/);
+  assert.equal(
+    executionDetails.querySelector('[aria-keyshortcuts="Shift+F10"]'),
+    null,
   );
-  assert.ok(delivery?.closest(".run-process-body"));
-  assert.equal(delivery.closest(".run-outputs"), null);
-  assert.deepEqual(
-    [...delivery.querySelectorAll("button")].map(
-      (button) => button.textContent,
-    ),
-    ["Show in folder", "Save as…"],
+  assert.equal(
+    view.container.querySelectorAll(`[data-output-id="${other.id}"]`).length,
+    1,
   );
-  await user.click(
-    within(delivery).getByRole("button", { name: "Show in folder" }),
-  );
-  await user.click(within(delivery).getByRole("button", { name: "Save as…" }));
-  const target = {
-    kind: "output",
-    taskId: task().id,
-    runId: completed.id,
-    outputId: duplicate.id,
-  };
-  assert.deepEqual(actions, [
-    [target, "reveal"],
-    [target, "save"],
-  ]);
 });
+
+function imageTarget(fileReferenceId) {
+  return { kind: "reference", taskId: "17", runId: "23", fileReferenceId };
+}
 
 test("generated image loads only its reference and opens the existing preview", async () => {
   const calls = [];
   const opened = [];
   let released = 0;
   const image = previewImageFixture(generatedPng);
-  const reference = {
-    id: "host-image-1",
-    title: "",
-    displayPath: "generated-images/ocean.jpg",
-    generatedImage: true,
-  };
   const view = render(
     localizedView(
-      createElement(GeneratedImagePreview, {
-        taskId: "17",
-        runId: "23",
-        reference,
+      createElement(ReplyImage, {
+        target: imageTarget("host-image-1"),
+        displayPath: "generated-images/ocean.jpg",
         enabled: true,
         load: async (...identity) => {
           calls.push(identity);
@@ -9980,14 +9984,7 @@ test("generated image loads only its reference and opens the existing preview", 
   );
   assert.deepEqual(
     calls.map(([target]) => target),
-    [
-      {
-        kind: "reference",
-        taskId: "17",
-        runId: "23",
-        fileReferenceId: "host-image-1",
-      },
-    ],
+    [imageTarget("host-image-1")],
   );
   assert.equal(calls[0][1].priority, "prefetch");
   assert.match(view.container.textContent, /Loading preview/);
@@ -10014,7 +10011,7 @@ test("generated image loads only its reference and opens the existing preview", 
   await act(async () => image.dispose());
   assert.equal(view.container.querySelector("img"), null);
   assert.equal(released, 1);
-  const retry = view.container.querySelector(".generated-image-retry");
+  const retry = view.container.querySelector(".reply-image-retry");
   assert.ok(retry);
   await act(async () => fireEvent.click(retry));
   await waitFor(() => assert.equal(calls.length, 2));
@@ -10024,28 +10021,25 @@ test("generated image loads only its reference and opens the existing preview", 
 test("generated image ignores late completion after reference replacement and unmount", async () => {
   const pending = [];
   const props = {
-    taskId: "17",
-    runId: "23",
     enabled: true,
     load: () => new Promise((resolve) => pending.push(resolve)),
     onOpen() {},
   };
-  const reference = {
-    id: "old",
-    title: "",
-    displayPath: "old.jpg",
-    generatedImage: true,
-  };
   const view = render(
     localizedView(
-      createElement(GeneratedImagePreview, { ...props, reference }),
+      createElement(ReplyImage, {
+        ...props,
+        target: imageTarget("old"),
+        displayPath: "old.jpg",
+      }),
     ),
   );
   view.rerender(
     localizedView(
-      createElement(GeneratedImagePreview, {
+      createElement(ReplyImage, {
         ...props,
-        reference: { ...reference, id: "new", displayPath: "new.jpg" },
+        target: imageTarget("new"),
+        displayPath: "new.jpg",
       }),
     ),
   );
@@ -10520,7 +10514,7 @@ test("Assistant image stays mounted before a pending interjection through later 
   const options = { synchronized: true, loadFilePreview };
   const view = render(taskContentElement(value, "1", options));
   await waitFor(() => assert.equal(loads, 1));
-  const figure = view.container.querySelector(".generated-image-preview");
+  const figure = view.container.querySelector(".reply-image");
   const user = view.container.querySelector('[data-operation-id="make-blue"]');
   assert.equal(figure.closest(".ai-message").dataset.role, "assistant");
   assert.ok(
@@ -10541,10 +10535,7 @@ test("Assistant image stays mounted before a pending interjection through later 
       options,
     ),
   );
-  assert.equal(
-    view.container.querySelector(".generated-image-preview"),
-    figure,
-  );
+  assert.equal(view.container.querySelector(".reply-image"), figure);
   assert.ok(
     figure.compareDocumentPosition(user) & Node.DOCUMENT_POSITION_FOLLOWING,
   );
@@ -10570,10 +10561,7 @@ test("Assistant image stays mounted before a pending interjection through later 
       options,
     ),
   );
-  assert.equal(
-    view.container.querySelector(".generated-image-preview"),
-    figure,
-  );
+  assert.equal(view.container.querySelector(".reply-image"), figure);
   assert.equal(loads, 1);
 });
 

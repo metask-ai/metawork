@@ -1,0 +1,273 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
+import { useI18n, type MessageId } from "../i18n/context.ts";
+import { Button } from "./ui/button.tsx";
+import {
+  createContextMenuAnchor,
+  type ContextMenuAnchor,
+} from "./ui/context-menu-anchor.ts";
+import { Icon } from "./ui/Icon.tsx";
+import { Menu } from "./ui/menu.tsx";
+
+/** The file a menu was opened on. Only the handler knows what `target` names. */
+export type MenuFile = {
+  target: unknown;
+  /** What the interface already shows for it. */
+  displayPath: string;
+  /** False when nothing can be done with it: it is missing or out of reach. */
+  available?: boolean;
+  /** False when the Host said it does not open it. Nobody asked when absent. */
+  openable?: boolean;
+};
+
+export type FileMenuAction =
+  "open" | "reveal" | "reference" | "copy_path" | "save";
+
+/** What there is to say about a finished action; null when it speaks for itself. */
+export type FileMenuOutcome = { message: MessageId; brief?: boolean } | null;
+
+export type FileMenuHandler = {
+  connected: boolean;
+  canReference: boolean;
+  perform: (
+    file: MenuFile,
+    action: FileMenuAction,
+    signal: AbortSignal,
+  ) => Promise<FileMenuOutcome>;
+};
+
+const FileMenuHandlerContext = createContext<FileMenuHandler | null>(null);
+export const FileMenuProvider = FileMenuHandlerContext.Provider;
+
+type OpenFileMenu = (
+  file: MenuFile,
+  event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>,
+) => void;
+const OpenFileMenuContext = createContext<OpenFileMenu | null>(null);
+
+const items = [
+  { action: "open", icon: "external-link", label: "outputs.open" },
+  { action: "reveal", icon: "folder-open", label: "outputs.reveal" },
+  { action: "reference", icon: "edit", label: "outputs.edit" },
+  { action: "copy_path", icon: "copy", label: "outputs.copy_path" },
+  { action: "save", icon: "download", label: "outputs.save" },
+] as const;
+
+/**
+ * Everything an element needs to open the menu of its file: the secondary
+ * button, the menu key and Shift+F10. Nothing without a scope or a file.
+ */
+export function useFileMenuTrigger(file: MenuFile | null) {
+  const openMenu = useContext(OpenFileMenuContext);
+  if (!openMenu || !file) return {};
+  return {
+    "aria-keyshortcuts": "Shift+F10",
+    onContextMenu: (event: MouseEvent<HTMLElement>) => openMenu(file, event),
+    onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
+      if (
+        event.key === "ContextMenu" ||
+        (event.shiftKey && event.key === "F10")
+      )
+        openMenu(file, event);
+    },
+  };
+}
+
+/**
+ * One region whose files share a menu and the line that reports on it. Opening
+ * the menu asks nothing of the Host: what is greyed out follows from what the
+ * interface already knows.
+ */
+export function FileMenuScope({
+  className,
+  resetKey = "",
+  children,
+}: {
+  className?: string;
+  /** A result belongs to what was asked; a change of this drops both. */
+  resetKey?: string;
+  children: ReactNode;
+}) {
+  const { t } = useI18n();
+  const handler = useContext(FileMenuHandlerContext);
+  const connected = handler?.connected ?? false;
+  const root = useRef<HTMLDivElement>(null);
+  const popup = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLElement | null>(null);
+  const keyboardOpen = useRef(false);
+  const active = useRef<AbortController | null>(null);
+  const [menu, setMenu] = useState<{
+    file: MenuFile;
+    anchor: ContextMenuAnchor;
+  } | null>(null);
+  const [open, setOpen] = useState(false);
+  const [pending, setPending] = useState<FileMenuAction | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [notice, setNotice] = useState<FileMenuOutcome>(null);
+
+  useEffect(
+    () => () => {
+      active.current?.abort();
+      active.current = null;
+      setPending(null);
+      setNotice(null);
+      setOpen(false);
+    },
+    [resetKey, connected],
+  );
+  useEffect(() => {
+    if (!notice?.brief) return;
+    const timer = setTimeout(() => setNotice(null), 1200);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  const openMenu = useCallback<OpenFileMenu>((file, event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const element = event.currentTarget;
+    // Focus returns to what held it, which may be inside the element: a
+    // playing video keeps the focus of its own controls.
+    trigger.current =
+      document.activeElement instanceof HTMLElement &&
+      element.contains(document.activeElement)
+        ? document.activeElement
+        : element;
+    keyboardOpen.current = !("clientX" in event);
+    setMenu({
+      file,
+      anchor:
+        "clientX" in event
+          ? createContextMenuAnchor(element, event.clientX, event.clientY)
+          : element,
+    });
+    setOpen(true);
+  }, []);
+
+  async function perform(file: MenuFile, action: FileMenuAction) {
+    if (!handler || active.current) return;
+    const controller = new AbortController();
+    active.current = controller;
+    setPending(action);
+    setCancelling(false);
+    setNotice(null);
+    const outcome = await handler
+      .perform(file, action, controller.signal)
+      .catch((): FileMenuOutcome => ({ message: "outputs.state.failed" }));
+    if (active.current !== controller) return;
+    active.current = null;
+    setPending(null);
+    setNotice(outcome);
+  }
+
+  function disabled(file: MenuFile, action: FileMenuAction): boolean {
+    return (
+      !handler?.connected ||
+      pending !== null ||
+      file.available === false ||
+      (action === "open" && file.openable === false) ||
+      (action === "reference" && !handler.canReference)
+    );
+  }
+
+  return (
+    <OpenFileMenuContext.Provider value={handler ? openMenu : null}>
+      <div
+        ref={root}
+        className={
+          className ? `file-menu-scope ${className}` : "file-menu-scope"
+        }
+        tabIndex={-1}
+      >
+        {children}
+        {(pending || notice) && (
+          <div className="file-menu-status">
+            <p role="status" aria-live="polite">
+              {pending
+                ? t(
+                    cancelling
+                      ? "outputs.cancelling"
+                      : pending === "save"
+                        ? "outputs.saving"
+                        : "outputs.checking",
+                  )
+                : notice && t(notice.message)}
+            </p>
+            {pending && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={cancelling}
+                onClick={() => {
+                  active.current?.abort();
+                  setCancelling(true);
+                }}
+              >
+                {t("outputs.cancel")}
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+      <Menu.Root
+        open={open}
+        onOpenChange={setOpen}
+        onOpenChangeComplete={(opened) => {
+          if (opened && keyboardOpen.current)
+            // Let the menu register its items before focusing one.
+            window.requestAnimationFrame(() => {
+              if (popup.current?.hasAttribute("data-open"))
+                popup.current
+                  .querySelector<HTMLElement>(
+                    '[role="menuitem"]:not([aria-disabled="true"]):not([data-disabled])',
+                  )
+                  ?.focus();
+            });
+        }}
+      >
+        <Menu.Portal>
+          <Menu.Positioner
+            anchor={menu?.anchor}
+            positionMethod="fixed"
+            sticky
+            side="bottom"
+            align="start"
+            sideOffset={menu && !("contextElement" in menu.anchor) ? 2 : 0}
+            alignOffset={0}
+            arrowPadding={0}
+            collisionPadding={8}
+          >
+            <Menu.Popup
+              ref={popup}
+              className="file-menu"
+              aria-label={t("file_menu.label")}
+              finalFocus={() =>
+                trigger.current?.isConnected ? trigger.current : root.current
+              }
+            >
+              {menu &&
+                items.map(({ action, icon, label }) => (
+                  <Menu.Item
+                    key={action}
+                    disabled={disabled(menu.file, action)}
+                    onClick={() => void perform(menu.file, action)}
+                  >
+                    <Icon name={icon} />
+                    {t(label)}
+                  </Menu.Item>
+                ))}
+            </Menu.Popup>
+          </Menu.Positioner>
+        </Menu.Portal>
+      </Menu.Root>
+    </OpenFileMenuContext.Provider>
+  );
+}

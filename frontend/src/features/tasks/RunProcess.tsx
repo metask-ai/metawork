@@ -402,7 +402,6 @@ export function RunProcess({
   toolSource,
   reviewingPermission,
   approvalHistory = null,
-  deliveryActions = null,
   fileChanges = null,
   elapsedMs = null,
   snapshotReceivedAt = null,
@@ -418,7 +417,6 @@ export function RunProcess({
   toolSource: RunToolSource;
   reviewingPermission: boolean;
   approvalHistory?: ReactNode;
-  deliveryActions?: ReactNode;
   fileChanges?: RunFileChanges | null;
   elapsedMs?: string | null;
   snapshotReceivedAt?: number | null;
@@ -446,8 +444,7 @@ export function RunProcess({
     presentation.active,
     toolSource.cache,
   );
-  if (!presentation.processVisible && !approvalHistory && !deliveryActions)
-    return null;
+  if (!presentation.processVisible && !approvalHistory) return null;
 
   const activity = presentation.activity;
   const unsynchronized = presentation.active && !synchronized;
@@ -474,8 +471,7 @@ export function RunProcess({
         ? activityDetail(activity, locale, t)
         : null;
   const collapsible =
-    presentation.processCanCollapse ||
-    Boolean(approvalHistory || deliveryActions);
+    presentation.processCanCollapse || Boolean(approvalHistory);
   const showBody = expanded && collapsible;
 
   return (
@@ -561,7 +557,6 @@ export function RunProcess({
             </button>
           )}
           {approvalHistory}
-          {deliveryActions}
         </div>
       )}
     </section>

@@ -241,6 +241,7 @@ function projectedRun(id, overrides = {}) {
     terminal: { outcome: "completed" },
     activity: null,
     tools: [],
+    outputs: [],
     additionalInputs: [],
     input: { kind: "text", text: `root ${id}`, redacted: false },
     output: output({ response: "done", responseKind: "final" }),

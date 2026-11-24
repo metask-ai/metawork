@@ -1,8 +1,7 @@
-import {
-  GeneratedImagePreview,
-  type FilePreviewLoader,
-} from "./GeneratedImagePreview.tsx";
-import { GeneratedVideoPreview } from "./GeneratedVideoPreview.tsx";
+import { ReplyImage } from "./ReplyImage.tsx";
+import { ReplyVideo } from "./ReplyVideo.tsx";
+import { RunFiles } from "./RunFiles.tsx";
+import type { FileDescriber, FilePreviewLoader } from "./reply-files.ts";
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { SkillMessageBody, UserInputMessage } from "./UserInputMessage.tsx";
 import { AdditionalInput } from "./AdditionalInput.tsx";
@@ -38,7 +37,6 @@ import {
 import type {
   FileReferenceView,
   MediaTarget,
-  FileActionHandler,
   PendingUi,
   RunInputView,
   RunManifest,
@@ -66,7 +64,6 @@ import { formatInteger } from "../../i18n/formatters.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunToolsCache, type RunToolsLoader } from "./run-tools.ts";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
-import { RunOutputs, type OutputEditHandler } from "./RunOutputs.tsx";
 import {
   deriveTaskReadingPlan,
   type LocalReadingInput,
@@ -514,9 +511,7 @@ export function TaskContent({
   responseDisabled,
   fileChangesEnabled,
   outputsEnabled,
-  onFileAction,
   onShowOutputs,
-  onPrepareOutputEdit,
   webLink,
   onPrepareRetry,
   onRetryInput,
@@ -531,6 +526,7 @@ export function TaskContent({
   workspaceRoot = null,
   onPreviewWorkspaceFile,
   loadFilePreview,
+  describeFile,
   loadAttachmentThumbnail,
   onOpenSentAttachment,
   onReviewFileChanges,
@@ -569,9 +565,7 @@ export function TaskContent({
   responseDisabled: boolean;
   fileChangesEnabled: boolean;
   outputsEnabled: boolean;
-  onFileAction?: FileActionHandler;
   onShowOutputs?: (opener: HTMLButtonElement) => void;
-  onPrepareOutputEdit?: OutputEditHandler;
   webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView, taskId: string, runId: string) => void;
   onRetryInput?: (taskId: string, operationId: string) => void;
@@ -590,6 +584,7 @@ export function TaskContent({
   /** Current Account recharge eligibility; never inherited from Run history. */
   recharge?: { available: boolean; busy: boolean; onOpen: () => void };
   loadFilePreview?: FilePreviewLoader;
+  describeFile?: FileDescriber;
   loadAttachmentThumbnail?: AttachmentThumbnailLoader<MediaTarget>;
   /** Opens the image a message was sent with in the media viewer. */
   onOpenSentAttachment?: (
@@ -1398,10 +1393,11 @@ export function TaskContent({
             for (const entry of readingFlow.slice(responseIndex + 1)) {
               if (
                 entry.kind === "image" ||
+                (entry.kind === "files" && outputsEnabled) ||
                 (entry.kind === "video" && videoPreviewLoader)
               )
                 responseInfoAt = entry.identity;
-              else if (entry.kind !== "video") break;
+              else if (entry.kind !== "video" && entry.kind !== "files") break;
             }
           }
           const responseInfo = responseInfoAt && (
@@ -1494,34 +1490,6 @@ export function TaskContent({
                 ))}
               </details>
             ) : null;
-          const deliveredVideos = [];
-          const otherOutputs = [];
-          for (const output of outputsEnabled ? run.outputs : []) {
-            if (
-              !output.redacted &&
-              readingFlow.some(
-                (entry) =>
-                  entry.kind === "video" &&
-                  entry.reference.displayPath === output.displayPath,
-              )
-            ) {
-              deliveredVideos.push(output);
-            } else {
-              otherOutputs.push(output);
-            }
-          }
-          const deliveryActions = outputsEnabled &&
-            onFileAction &&
-            deliveredVideos.length > 0 && (
-              <RunOutputs
-                outputs={deliveredVideos}
-                taskId={task.id}
-                runId={run.id}
-                disabled={responseDisabled || !synchronized}
-                onAction={onFileAction}
-                layout="file-actions"
-              />
-            );
           const supplement = (
             <>
               {renderRunSupplement?.({
@@ -1583,17 +1551,6 @@ export function TaskContent({
                     record={record}
                   />
                 ))}
-              {outputsEnabled && (
-                <RunOutputs
-                  outputs={otherOutputs}
-                  taskId={task.id}
-                  runId={run.id}
-                  disabled={responseDisabled || !synchronized}
-                  onAction={onFileAction}
-                  onPrepareEdit={onPrepareOutputEdit}
-                  onPreview={onPreviewWorkspaceFile}
-                />
-              )}
               {fileChangesEnabled && run.fileChanges && (
                 <RunFileChangesSummary
                   fileChanges={run.fileChanges}
@@ -1630,7 +1587,6 @@ export function TaskContent({
                     cache: toolsCache,
                   }}
                   approvalHistory={approvalHistory}
-                  deliveryActions={deliveryActions}
                   reviewingPermission={false}
                   fileChanges={fileChangesEnabled ? run.fileChanges : null}
                   elapsedMs={run.elapsedMs}
@@ -1794,12 +1750,17 @@ export function TaskContent({
                       key={entry.identity}
                       data-reading-id={entry.identity}
                     >
-                      <GeneratedImagePreview
-                        taskId={task.id}
-                        runId={run.id}
-                        reference={entry.reference}
+                      <ReplyImage
+                        target={{
+                          kind: "reference",
+                          taskId: task.id,
+                          runId: run.id,
+                          fileReferenceId: entry.reference.id,
+                        }}
+                        displayPath={entry.reference.displayPath}
                         enabled={Boolean(synchronized && !responseDisabled)}
                         load={loadFilePreview}
+                        describe={describeFile}
                         onOpen={(opener) =>
                           onPreviewFile(
                             task.id,
@@ -1818,11 +1779,39 @@ export function TaskContent({
                         key={entry.identity}
                         data-reading-id={entry.identity}
                       >
-                        <GeneratedVideoPreview
+                        <ReplyVideo
+                          target={{
+                            kind: "reference",
+                            taskId: task.id,
+                            runId: run.id,
+                            fileReferenceId: entry.reference.id,
+                          }}
+                          displayPath={entry.reference.displayPath}
+                          load={videoPreviewLoader}
+                          describe={describeFile}
+                        />
+                        {entry.identity === responseInfoAt && responseInfo}
+                      </Message>
+                    )
+                  ) : entry.kind === "files" ? (
+                    outputsEnabled && (
+                      <Message
+                        role="assistant"
+                        key={entry.identity}
+                        data-reading-id={entry.identity}
+                      >
+                        <RunFiles
                           taskId={task.id}
                           runId={run.id}
-                          referenceId={entry.reference.id}
-                          load={videoPreviewLoader}
+                          outputs={entry.outputs}
+                          enabled={Boolean(synchronized && !responseDisabled)}
+                          describe={describeFile}
+                          load={loadFilePreview}
+                          onOpen={
+                            onPreviewWorkspaceFile &&
+                            ((path, opener) =>
+                              onPreviewWorkspaceFile(task.id, path, opener))
+                          }
                         />
                         {entry.identity === responseInfoAt && responseInfo}
                       </Message>

@@ -351,21 +351,80 @@ export async function runOutputDeliveryVertical({
     );
     evidence.escapingDeliveryRejected = true;
     const callsBeforeChecks = provider.requests.length;
-    async function click(action, expected) {
-      const before = await webview.evaluate(`window.__outputActions.length`);
-      const buttons = labels(`outputs.${action}`);
-      const expectedLabel = labels(`outputs.state.${expected}`);
+    async function clickLabel(labels, selector = "button") {
       await poll(
         () =>
           webview.evaluate(`(() => {
-        const row = document.querySelector('[data-output-id="${output.id}"]');
-        const button = [...(row?.querySelectorAll('button') ?? [])].find(item => ${JSON.stringify(buttons)}.includes(item.textContent.trim()));
-        if (!button || button.disabled) return false;
+        const button = [...document.querySelectorAll(${JSON.stringify(selector)})].findLast(item => !item.disabled && ${JSON.stringify(labels)}.some(label => item.textContent.trim().includes(label)));
+        if (!button) return false;
         button.click(); return true;
       })()`),
         15_000,
-        `Output ${action} button`,
+        `Output button ${labels[0]}`,
       );
+    }
+    // Its row in the outputs list of the right panel.
+    const listed = (id) => `.run-output[data-output-id="${id}"]`;
+    // Its card in the reply.
+    const card = (id) => `.run-files [data-output-id="${id}"] .file-card`;
+    const statusOf = (id, list) =>
+      list
+        ? `document.querySelector(${JSON.stringify(listed(id))})?.querySelector('.run-output-status')`
+        : `[...document.querySelectorAll(${JSON.stringify(card(id))})].at(-1)?.closest('.file-menu-scope')?.querySelector('.file-menu-status p')`;
+    async function showMenu(id) {
+      await poll(
+        () =>
+          webview.evaluate(`(() => {
+        const card = [...document.querySelectorAll(${JSON.stringify(card(id))})].at(-1);
+        card?.scrollIntoView({ block: 'center' });
+        if (!card || card.dataset.pending) return false;
+        const box = card.getBoundingClientRect();
+        card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: box.left + 8, clientY: box.top + 8 }));
+        return true;
+      })()`),
+        20_000,
+        "Delivered file card",
+      );
+      const items = await poll(
+        () =>
+          webview.evaluate(`(() => {
+        const items = [...document.querySelectorAll('.file-menu [role="menuitem"]')];
+        return items.length > 0 ? items.map(item => item.textContent.trim()) : null;
+      })()`),
+        5000,
+        "Delivered file menu",
+      );
+      assert.equal(items.length, 5);
+      for (const [index, key] of [
+        "open",
+        "reveal",
+        "edit",
+        "copy_path",
+        "save",
+      ].entries())
+        assert.ok(
+          labels(`outputs.${key}`).includes(items[index]),
+          items[index],
+        );
+    }
+    // `check` is in the outputs list; everything else is in the file's menu.
+    // A file that was opened or shown in its folder answers for itself.
+    async function click(action, expected, record = output) {
+      const before = await webview.evaluate(`window.__outputActions.length`);
+      const list = action === "check";
+      if (list) {
+        await clickLabel(labels("outputs.view"));
+        await clickLabel(
+          labels("outputs.check"),
+          `${listed(record.id)} button`,
+        );
+      } else {
+        await showMenu(record.id);
+        await clickLabel(
+          labels(`outputs.${action}`),
+          '.file-menu [role="menuitem"]:not([aria-disabled="true"])',
+        );
+      }
       const request = await poll(
         () => webview.evaluate(`window.__outputActions[${before}] ?? null`),
         5000,
@@ -374,17 +433,19 @@ export async function runOutputDeliveryVertical({
       assert.deepEqual(request.target, {
         kind: "output",
         taskId,
-        runId: delivered.id,
-        outputId: output.id,
+        runId: record.runId ?? delivered.id,
+        outputId: record.id,
       });
+      const expectedLabel = expected && labels(`outputs.state.${expected}`);
       await poll(
         () =>
-          webview.evaluate(`(() => {
-        const row = document.querySelector('[data-output-id="${output.id}"]');
-        return ${JSON.stringify(expectedLabel)}.includes(row?.querySelector('.run-output-status')?.textContent.trim());
-      })()`),
+          webview.evaluate(
+            expectedLabel
+              ? `${JSON.stringify(expectedLabel)}.includes(${statusOf(record.id, list)}?.textContent.trim())`
+              : `!${statusOf(record.id, list)}`,
+          ),
         35_000,
-        `Output visible ${expected} status`,
+        `Output visible ${expected ?? "silent"} status`,
       );
       evidence.states.push({ action, state: expected });
       return request;
@@ -423,7 +484,7 @@ export async function runOutputDeliveryVertical({
       const revealed = await nativeOutputProbe({
         mode: "reveal",
         source,
-        trigger: () => click("reveal", "revealed"),
+        trigger: () => click("reveal", null),
       });
       assert.equal(saved.dialogObserved, true);
       assert.equal(cancelled.dialogObserved, true);
@@ -531,18 +592,6 @@ export async function runOutputDeliveryVertical({
     assert.equal(change?.outputRegistrationAdmitted, true);
     const review = labels("file_changes.review");
     const register = labels("outputs.register");
-    async function clickLabel(labels, selector = "button") {
-      await poll(
-        () =>
-          webview.evaluate(`(() => {
-        const button = [...document.querySelectorAll(${JSON.stringify(selector)})].findLast(item => !item.disabled && ${JSON.stringify(labels)}.some(label => item.textContent.trim().includes(label)));
-        if (!button) return false;
-        button.click(); return true;
-      })()`),
-        15_000,
-        `Output button ${labels[0]}`,
-      );
-    }
     await clickLabel(review);
     await clickLabel(register, "#task-panel-tabpanel button");
     const htmlOutput = await poll(
@@ -631,30 +680,22 @@ export async function runOutputDeliveryVertical({
         ],
       );
       const [word, sheet, slides, mismatch, invalid] = cases.map(
-        ({ relative }) =>
-          officeRun.outputs.find((record) => record.displayPath === relative),
+        ({ relative }) => ({
+          ...officeRun.outputs.find(
+            (record) => record.displayPath === relative,
+          ),
+          runId: officeRun.id,
+        }),
       );
       evidence.officeStage = "rejecting_mismatch";
-      const officeRow = (record) => `[data-output-id="${record.id}"]`;
-      const expectOpen = async (record, state) => {
-        await clickLabel(labels("outputs.open"), `${officeRow(record)} button`);
-        await poll(
-          () =>
-            webview.evaluate(`(() => {
-          const rows = [...document.querySelectorAll(${JSON.stringify(officeRow(record))})];
-          return rows.some(row => ${JSON.stringify(labels(`outputs.state.${state}`))}.includes(row.querySelector('.run-output-status')?.textContent.trim()));
-        })()`),
-          20_000,
-          `Office action returned ${state}`,
-        );
-      };
+      const expectOpen = (record, state) => click("open", state, record);
       await expectOpen(mismatch, "restricted");
       await expectOpen(invalid, "restricted");
       evidence.officeStage = "opening_original";
       evidence.office = await nativeOutputProbe({
         mode: "office",
         source: original,
-        trigger: () => expectOpen(word, "opened"),
+        trigger: () => expectOpen(word, null),
       });
       assert.equal(evidence.office.openedOriginal, true);
       assert.equal(evidence.office.savedOriginal, true);
@@ -666,13 +707,13 @@ export async function runOutputDeliveryVertical({
         const result = await nativeOutputProbe({
           mode: "office-view",
           source,
-          trigger: () => expectOpen(record, "opened"),
+          trigger: () => expectOpen(record, null),
         });
         assert.equal(result.openedOriginal, true);
       }
       evidence.office.openedWorkbookAndSlides = true;
       evidence.officeStage = "working_from_saved_original";
-      await clickLabel(labels("outputs.edit"), `${officeRow(word)} button`);
+      await click("edit", "edit_prepared", word);
       await poll(
         () =>
           webview.evaluate(

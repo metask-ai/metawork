@@ -86,12 +86,12 @@ test("Output actions show checked states and always submit identity intent anew"
   fireEvent.click(screen.getByRole("button", { name: "Check file" }));
   assert.deepEqual(calls[0].slice(0, 2), [target, "check"]);
   assert.equal(
-    screen.getByRole("button", { name: "Show in folder" }).disabled,
+    screen.getByRole("button", { name: "Open folder" }).disabled,
     true,
   );
   resolve("changed");
   await screen.findByText("Changed since delivery");
-  fireEvent.click(screen.getByRole("button", { name: "Show in folder" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
   assert.equal(calls[1][1], "reveal");
   resolve("revealed");
   await screen.findByText("Requested location in file manager");
@@ -110,7 +110,7 @@ test("Output cancellation aborts the Host request and ignores its late success",
       },
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Show in folder" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   assert.equal(signal.aborted, true);
   resolve("revealed");
@@ -132,7 +132,7 @@ test("Task replacement and disconnection invalidate in-flight results; hidden pa
     });
   };
   const mounted = render(view({ onAction }));
-  fireEvent.click(screen.getByRole("button", { name: "Show in folder" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
   mounted.rerender(view({ taskId: "4", onAction }));
   assert.equal(signal.aborted, true);
   resolve("revealed");
@@ -153,7 +153,7 @@ test("Task replacement and disconnection invalidate in-flight results; hidden pa
     true,
   );
   assert.equal(
-    screen.getByRole("button", { name: "Show in folder" }).disabled,
+    screen.getByRole("button", { name: "Open folder" }).disabled,
     true,
   );
   assert.equal(screen.queryByText("年度报告.docx"), null);
@@ -206,7 +206,7 @@ test("Save transport failure after cancel does not claim the destination was unt
   assert.equal(screen.queryByText("Operation cancelled"), null);
 });
 
-test("Continue editing waits for the scoped Host check before preparing a draft and never submits", async () => {
+test("Referencing a file in the conversation waits for the scoped Host check before preparing a draft and never submits", async () => {
   let complete;
   const checks = [];
   const prepared = [];
@@ -218,45 +218,49 @@ test("Continue editing waits for the scoped Host check before preparing a draft 
           complete = resolve;
         });
       },
-      onPrepareEdit: (...args) => {
+      onReference: (...args) => {
         prepared.push(args);
         return "edit_prepared";
       },
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reference in conversation" }),
+  );
   assert.deepEqual(checks[0].slice(0, 2), [target, "check_current"]);
   assert.deepEqual(prepared, []);
   complete("ready");
-  await screen.findByText(
-    "File reference added. Enter your requested changes.",
-  );
-  assert.deepEqual(prepared, [["3", "7", output.id]]);
+  await screen.findByText("File reference added to the input.");
+  assert.deepEqual(prepared, [[target, output.displayPath]]);
   assert.equal(checks.length, 1);
 });
-test("Continue editing preserves a conflicting draft and cannot prepare a changed source", async () => {
+test("Referencing a file in the conversation preserves a conflicting draft and cannot prepare a changed source", async () => {
   let result = "changed";
   let preparations = 0;
   render(
     view({
       onAction: async () => result,
-      onPrepareEdit: () => {
+      onReference: () => {
         preparations++;
         return "edit_draft_busy";
       },
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reference in conversation" }),
+  );
   await screen.findByText("The file changed during the operation. Try again.");
   assert.equal(preparations, 0);
   result = "ready";
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reference in conversation" }),
+  );
   await screen.findByText(
     "Skill draft preserved. Finish the current input first.",
   );
   assert.equal(preparations, 1);
 });
-test("Continue editing discards a late check after switching Tasks or disabling the source", async () => {
+test("Referencing a file in the conversation discards a late check after switching Tasks or disabling the source", async () => {
   let complete;
   let signal;
   let preparations = 0;
@@ -266,32 +270,38 @@ test("Continue editing discards a late check after switching Tasks or disabling 
       complete = resolve;
     });
   };
-  const onPrepareEdit = () => {
+  const onReference = () => {
     preparations++;
     return "edit_prepared";
   };
-  const mounted = render(view({ onAction, onPrepareEdit }));
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
-  mounted.rerender(view({ taskId: "4", onAction, onPrepareEdit }));
+  const mounted = render(view({ onAction, onReference }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reference in conversation" }),
+  );
+  mounted.rerender(view({ taskId: "4", onAction, onReference }));
   assert.equal(signal.aborted, true);
   complete("ready");
   await waitFor(() => assert.equal(screen.queryByRole("status"), null));
   assert.equal(preparations, 0);
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reference in conversation" }),
+  );
   mounted.rerender(
-    view({ taskId: "4", disabled: true, onAction, onPrepareEdit }),
+    view({ taskId: "4", disabled: true, onAction, onReference }),
   );
   assert.equal(signal.aborted, true);
   complete("ready");
   await waitFor(() => assert.equal(screen.queryByRole("status"), null));
   assert.equal(preparations, 0);
-  mounted.rerender(view({ taskId: "4", onAction, onPrepareEdit }));
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  mounted.rerender(view({ taskId: "4", onAction, onReference }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reference in conversation" }),
+  );
   mounted.rerender(
     view({
       taskId: "4",
       onAction,
-      onPrepareEdit,
+      onReference,
       outputs: [{ ...output, redacted: true, displayPath: "" }],
     }),
   );
@@ -300,9 +310,24 @@ test("Continue editing discards a late check after switching Tasks or disabling 
   await waitFor(() => assert.equal(screen.queryByRole("status"), null));
   assert.equal(preparations, 0);
   assert.equal(
-    screen.getByRole("button", { name: "Continue editing" }).disabled,
+    screen.getByRole("button", { name: "Reference in conversation" }).disabled,
     true,
   );
+});
+
+test("Referencing a file is offered only while the conversation can take it", () => {
+  const mounted = render(view({ onAction: async () => "ready" }));
+  assert.equal(
+    screen.queryByRole("button", { name: "Reference in conversation" }),
+    null,
+  );
+  mounted.rerender(
+    view({
+      onAction: async () => "ready",
+      onReference: () => "edit_prepared",
+    }),
+  );
+  assert.ok(screen.getByRole("button", { name: "Reference in conversation" }));
 });
 
 test("Opening an output is offered only where the Host opens it, by its own name", async () => {
@@ -313,7 +338,7 @@ test("Opening an output is offered only where the Host opens it, by its own name
   };
   const buttons = () =>
     screen.getAllByRole("button").map((button) => button.textContent);
-  const names = ["Check file", "Show in folder", "Save as…"];
+  const names = ["Check file", "Open folder", "Save as…"];
   const rows = (value) =>
     view({
       onAction,

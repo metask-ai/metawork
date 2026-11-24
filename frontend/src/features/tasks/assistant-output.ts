@@ -1,5 +1,6 @@
 import type {
   AdditionalInputView,
+  DeliveredOutputView,
   RunOutput,
   WaitingInputView,
   FileReferenceView,
@@ -29,6 +30,7 @@ export type RunReadingEntry =
   | { kind: "submission"; identity: string; input: WaitingInputView }
   | { kind: "image"; identity: string; reference: FileReferenceView }
   | { kind: "video"; identity: string; reference: FileReferenceView }
+  | { kind: "files"; identity: string; outputs: DeliveredOutputView[] }
   | { kind: "local"; identity: string; operationId: string }
   | { kind: "supplement"; identity: string };
 
@@ -177,10 +179,15 @@ export function deriveTaskReadingPlan(
               : last,
           0,
         );
-    entries.splice(boundary, 0, {
-      kind: "supplement",
-      identity: `${run.id}:supplement`,
-    });
+    const outputs = undisplayedOutputs(run.outputs, entries);
+    entries.splice(
+      boundary,
+      0,
+      ...(outputs.length > 0
+        ? [{ kind: "files" as const, identity: `${run.id}:files`, outputs }]
+        : []),
+      { kind: "supplement", identity: `${run.id}:supplement` },
+    );
     return {
       run,
       presentation,
@@ -192,6 +199,27 @@ export function deriveTaskReadingPlan(
     };
   });
   return { task, before, runs, after };
+}
+
+/**
+ * The outputs of a reply that its own reading flow does not already show. What
+ * is shown is an image or a video of this reply at the same path; a link in
+ * the text is a mention, not the file. A hidden path matches nothing.
+ */
+export function undisplayedOutputs(
+  outputs: readonly DeliveredOutputView[],
+  entries: readonly RunReadingEntry[],
+): DeliveredOutputView[] {
+  const displayed = new Set(
+    entries.flatMap((entry) =>
+      entry.kind === "image" || entry.kind === "video"
+        ? [entry.reference.displayPath]
+        : [],
+    ),
+  );
+  return outputs.filter(
+    (output) => output.redacted || !displayed.has(output.displayPath),
+  );
 }
 
 /** Order belongs to received facts; output slots remain canonical, including empty ones. */

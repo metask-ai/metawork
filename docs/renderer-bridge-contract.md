@@ -176,7 +176,7 @@ Bridge 与 Product 分别有界限制在途请求；文件读取在独立 worker
 
 save 由 Application 消费 Native SDK Runtime 保存对话框选择目标，路径只在 Host 有界持有。保存的是文件的当前内容：worker 复制一次稳定读取的字节，核对读取期间源文件未变、临时文件未被替换，不要求与交付时相同。复制完成后，Product 再解析当前身份，Bridge 再检查请求；通过后形成一次性发布决定，worker 才原子替换目标。决定前取消、失效或超时使 worker 丢弃暂存；决定后等待实际发布结果，不再撤销已授权的动作。断连仍阻止旧内容用于新连接，但不能把已经提交的保存改写成未发生。保存不创建历史成果副本。
 
-“继续修改”使用 check_current：通过同一身份校验后，Renderer 在同一 Task 的普通可编辑草稿中引用相对显示文本；该文本不是 Host locator authority，不调用文件读取/编辑 command、不伪造 Attachment token，也不自动发送。用户手动发送后仍沿原 Task 输入、权限和 Skill/Shell 路径执行。准备草稿须复核当前 UI audience、Task、成果呈现及输入准入，保留现有文字和附件；Skill 或未完成的斜杠输入发生冲突时保留原草稿，超限不得截断。换 Task、断连或源呈现失效后的旧检查结果不能修改其他草稿。
+“在对话中引用”使用 check_current：通过同一身份校验后，Renderer 在同一 Task 的普通可编辑草稿中引用相对显示文本；该文本不是 Host locator authority，不调用文件读取/编辑 command、不伪造 Attachment token，也不自动发送。用户手动发送后仍沿原 Task 输入、权限和 Skill/Shell 路径执行。准备草稿须复核当前 UI audience、Task、成果呈现及输入准入，保留现有文字和附件；Skill 或未完成的斜杠输入发生冲突时保留原草稿，超限不得截断。换 Task、断连或源呈现失效后的旧检查结果不能修改其他草稿。
 
 ## Skill directory discovery
 
