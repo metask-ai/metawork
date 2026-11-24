@@ -1417,34 +1417,15 @@ export default function App() {
   );
   const loadFilePreview = useCallback(
     (
-      taskId: string,
-      runId: string,
-      referenceId: string,
+      target: import("../bridge/contracts.ts").FileTarget,
       options?: import("../bridge/contracts.ts").FilePreviewLoadOptions,
-    ) => client.previewFile(taskId, runId, referenceId, options),
+    ) => client.previewFile(target, options),
     [client],
   );
   const filePreviewTabs = useFilePreviewTabs(
     route === "workbench" ? workbench.activeTaskId : null,
     previewTabIds,
     loadFilePreview,
-    useCallback(
-      (
-        taskId: string,
-        workspaceId: string,
-        workspaceEpoch: string,
-        path: string,
-        options?: import("../bridge/contracts.ts").FilePreviewLoadOptions,
-      ) =>
-        client.previewWorkspaceFile(
-          taskId,
-          workspaceId,
-          workspaceEpoch,
-          path,
-          options,
-        ),
-      [client],
-    ),
   );
   const workspaceFilesAvailable = Boolean(
     panelTask &&
@@ -5211,17 +5192,20 @@ export default function App() {
   const activePanelView = taskPanel.activeTab
     ? taskPanelViews.stateFor(taskPanel.activeTab.tabId)
     : null;
+  const previewTarget = activePreview?.target;
   const previewMatchesTarget =
     panelTarget.kind !== "empty" &&
-    activePreview !== undefined &&
-    panelTarget.taskId === activePreview.taskId &&
+    previewTarget !== undefined &&
+    panelTarget.taskId === previewTarget.taskId &&
     ((panelTarget.kind === "preview" &&
-      panelTarget.runId === activePreview.runId &&
-      panelTarget.referenceId === activePreview.reference.id) ||
+      previewTarget.kind === "reference" &&
+      panelTarget.runId === previewTarget.runId &&
+      panelTarget.referenceId === previewTarget.fileReferenceId) ||
       (panelTarget.kind === "workspace" &&
-        panelTarget.workspaceId === activePreview.workspaceId &&
-        panelTarget.workspaceEpoch === activePreview.workspaceEpoch &&
-        panelTarget.path === activePreview.reference.displayPath));
+        previewTarget.kind === "workspace" &&
+        panelTarget.workspaceId === previewTarget.workspaceId &&
+        panelTarget.workspaceEpoch === previewTarget.workspaceEpoch &&
+        panelTarget.path === previewTarget.path));
   const reviewMatchesTarget =
     panelTarget.kind === "review" &&
     fileChanges.kind !== "closed" &&

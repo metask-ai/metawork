@@ -5014,7 +5014,9 @@ pub const Runtime = struct {
         reference_id: []const u8,
     ) ?FileReference {
         const task = self.findConst(task_id) orelse return null;
+        if (task.deletion != .idle) return null;
         const run = task_state.findRun(task.durable.runs, run_id) orelse return null;
+        if (!task_policy.runProjected(task, run)) return null;
         for (run.tools) |*tool_entry| {
             const tool = &(tool_entry.* orelse continue);
             const references = tool.file_refs orelse continue;

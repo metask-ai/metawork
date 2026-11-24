@@ -13,6 +13,7 @@ const account_projection = @import("product_control_account_projection");
 const execution_state = @import("product_control_execution_state");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
+const file_target = @import("product_control_file_target");
 const media_source = @import("product_control_media_source");
 const output_check = @import("output_check.zig");
 const permission_job = @import("permission_job.zig");
@@ -1081,9 +1082,12 @@ fn absoluteReferenceRelativePath(
     const relative = absolute[root.len + 1 ..];
     if (relative.len == 0 or relative.len > storage.len) return null;
     @memcpy(storage[0..relative.len], relative);
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, storage[0..relative.len], '\\', '/');
     return storage[0..relative.len];
 }
 
+pub const FileTarget = file_target.Target;
+pub const max_file_target_path_bytes = file_target.max_path_bytes;
 pub const OutputFileTarget = output_check.Target;
 pub const NativeDialog = control_ports.NativeDialog;
 pub const McpApproval = control_ports.McpApproval;
@@ -1113,6 +1117,16 @@ fn outputCheckAuthorityState(err: anyerror) OutputCheckState {
 }
 
 pub const FilePreviewState = file_preview.State;
+
+fn filePreviewAuthorityState(err: file_target.Error) FilePreviewState {
+    return switch (err) {
+        error.ShuttingDown, error.StaleSecurityEpoch => .failed,
+        error.UnknownFile => .missing,
+        error.RestrictedFile => .restricted,
+        error.UnsupportedFile => .unsupported,
+    };
+}
+
 pub const ToolPage = task_runtime.ToolPage;
 pub const ToolPageState = task_runtime.ToolPageState;
 /// Source text one Tool page formats on the main thread. A page always
@@ -1753,6 +1767,72 @@ pub const Runtime = struct {
         return control;
     }
 
+    /// The one place a Workspace file's identity becomes a location: bounded
+    /// identity and authority work on the main thread, no file effect. The
+    /// result borrows Product state and `scratch`. A caller that waits keeps
+    /// its own copy and resolves the same target again before any effect.
+    fn resolveFileTarget(self: *const Runtime, target: FileTarget, scratch: *[file_target.max_path_bytes]u8) file_target.Error!file_target.Location {
+        try self.requireFileAuthority();
+        const location = switch (target) {
+            .reference => |value| try self.referenceLocation(value, scratch),
+            .workspace => |value| try self.workspaceLocation(value, false),
+        };
+        try self.requireFileLocation(location);
+        return location;
+    }
+
+    /// The directory listing's half of the same rule. The root itself is a
+    /// valid directory, and never a valid file.
+    fn resolveDirectory(self: *const Runtime, target: FileTarget.Workspace) file_target.Error!file_target.Location {
+        try self.requireFileAuthority();
+        const location = try self.workspaceLocation(target, true);
+        try self.requireFileLocation(location);
+        return location;
+    }
+
+    fn requireFileAuthority(self: *const Runtime) file_target.Error!void {
+        if (self.shutting_down) return error.ShuttingDown;
+        if (self.projection_security_epoch == 0) return error.StaleSecurityEpoch;
+    }
+
+    fn requireFileLocation(self: *const Runtime, location: file_target.Location) file_target.Error!void {
+        if (!self.workspace.filePreviewAuthorized(location.workspace_id, location.workspace_epoch, location.root) or
+            self.containsKnownCredential(location.relative) or self.containsKnownCredential(location.root))
+            return error.RestrictedFile;
+    }
+
+    fn referenceLocation(self: *const Runtime, target: FileTarget.Reference, scratch: *[file_target.max_path_bytes]u8) file_target.Error!file_target.Location {
+        const reference = self.task_runtime.fileReference(target.task_id, target.run_id, target.id) orelse return error.UnknownFile;
+        if (reference.generated_video and reference.locator_kind != .workspace_path) return error.UnsupportedFile;
+        const relative = switch (reference.locator_kind) {
+            .workspace_path => reference.locator,
+            .absolute_path => absoluteReferenceRelativePath(reference.workspace_root, reference.locator, scratch) orelse return error.RestrictedFile,
+            .uri => return error.UnsupportedFile,
+        };
+        if (relative.len == 0 or relative.len > scratch.len) return error.RestrictedFile;
+        return .{
+            .workspace_id = reference.workspace_id,
+            .workspace_epoch = reference.workspace_epoch,
+            .root = reference.workspace_root,
+            .relative = relative,
+            .generated_video = reference.generated_video,
+        };
+    }
+
+    fn workspaceLocation(self: *const Runtime, target: FileTarget.Workspace, allow_root: bool) file_target.Error!file_target.Location {
+        if (target.task_id == 0) return error.RestrictedFile;
+        const binding = self.workspace.binding(target.workspace_id) orelse return error.UnknownFile;
+        if (binding.epoch != target.workspace_epoch or
+            !self.task_runtime.workspaceFileTaskMatches(target.task_id, target.workspace_id) or
+            !file_preview.validWorkspacePath(target.path, allow_root)) return error.RestrictedFile;
+        return .{
+            .workspace_id = target.workspace_id,
+            .workspace_epoch = binding.epoch,
+            .root = binding.canonical_root,
+            .relative = target.path,
+        };
+    }
+
     fn workspaceStorage(self: *Runtime) product_workspace.Storage {
         return .{
             .context = self,
@@ -2115,49 +2195,26 @@ pub const Runtime = struct {
     /// Performs only bounded identity/authority work on the main thread and
     /// submits immutable Host-only input to the preview lane. File I/O never
     /// occurs in this call.
-    pub fn beginFilePreview(
-        self: *Runtime,
-        completion_id: u64,
-        task_id: u64,
-        run_id: u64,
-        reference_id: []const u8,
-    ) FilePreviewAdmission {
-        if (self.shutting_down or self.preview_executor_shutdown)
-            return .{ .immediate = .failed };
-        const reference = self.task_runtime.fileReference(
-            task_id,
-            run_id,
-            reference_id,
-        ) orelse return .{ .immediate = .missing };
-        if (!self.filePreviewWorkspaceAuthorized(reference))
-            return .{ .immediate = .restricted };
-        if (reference.locator_kind == .uri or (reference.generated_video and reference.locator_kind != .workspace_path))
-            return .{ .immediate = .unsupported };
+    pub fn beginFilePreview(self: *Runtime, completion_id: u64, target: FileTarget) FilePreviewAdmission {
+        var scratch: [file_target.max_path_bytes]u8 = undefined;
+        const location = self.resolveFileTarget(target, &scratch) catch |err|
+            return .{ .immediate = filePreviewAuthorityState(err) };
+        return self.queueFilePreview(completion_id, .{ .file = target }, location);
+    }
 
-        var relative_storage: [4096]u8 = undefined;
-        const relative = switch (reference.locator_kind) {
-            .workspace_path => reference.locator,
-            .absolute_path => absoluteReferenceRelativePath(
-                reference.workspace_root,
-                reference.locator,
-                &relative_storage,
-            ) orelse return .{ .immediate = .restricted },
-            .uri => unreachable,
-        };
-        if (relative.len == 0 or relative.len > relative_storage.len)
-            return .{ .immediate = .restricted };
+    pub fn beginDirectory(self: *Runtime, completion_id: u64, target: FileTarget.Workspace) FilePreviewAdmission {
+        const location = self.resolveDirectory(target) catch |err|
+            return .{ .immediate = filePreviewAuthorityState(err) };
+        return self.queueFilePreview(completion_id, .{ .directory = target }, location);
+    }
 
+    fn queueFilePreview(self: *Runtime, completion_id: u64, subject: file_preview.Subject, location: file_target.Location) FilePreviewAdmission {
+        if (self.preview_executor_shutdown) return .{ .immediate = .failed };
         self.preview_lane.begin(.{
+            .subject = subject,
+            .location = location,
             .completion_id = completion_id,
-            .generated_video = reference.generated_video,
-            .task_id = task_id,
-            .run_id = run_id,
-            .workspace_id = reference.workspace_id,
-            .workspace_epoch = reference.workspace_epoch,
-            .reference_id = reference.id,
-            .workspace_root = reference.workspace_root,
-            .relative_path = relative,
-            .max_bytes = if (reference.generated_video) lifecycle.max_generated_video_bytes else self.limits.max_file_preview_bytes,
+            .max_bytes = if (location.generated_video) lifecycle.max_generated_video_bytes else self.limits.max_file_preview_bytes,
             .max_lines = self.limits.max_file_preview_lines,
             .max_line_bytes = self.limits.max_file_preview_line_bytes,
         }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
@@ -2168,10 +2225,10 @@ pub const Runtime = struct {
     /// again at every chunk. A batch that was borrowed for a Task in the
     /// meantime stops resolving, so the grant is released instead of reading a
     /// file that now belongs to Task ownership.
-    fn attachmentOriginalAuthority(self: *Runtime, raw: file_preview.Completion) FilePreviewState {
+    fn attachmentOriginalAuthority(self: *Runtime, attachment_id: u64, location: file_target.Location) FilePreviewState {
         var relative: [product_attachment.max_original_relative_bytes]u8 = undefined;
         const resolution = media_source.resolve(
-            .{ .draft_attachment = raw.attachment_id },
+            .{ .draft_attachment = attachment_id },
             .viewer,
             .{ .staging = &self.attachments },
             &relative,
@@ -2181,8 +2238,8 @@ pub const Runtime = struct {
             .derived => unreachable,
             .unavailable => |availability| return mediaUnavailableState(availability),
         };
-        if (!std.mem.eql(u8, stored.directory, raw.workspace_root) or
-            !std.mem.eql(u8, stored.relative, raw.relative_path)) return .missing;
+        if (!std.mem.eql(u8, stored.directory, location.root) or
+            !std.mem.eql(u8, stored.relative, location.relative)) return .missing;
         return .ready;
     }
 
@@ -2193,8 +2250,8 @@ pub const Runtime = struct {
     /// the projection security epoch, which the existing delivery and chunk
     /// checks already refuse on. A file that is gone fails the read as
     /// `missing` without this having to predict it.
-    fn taskAttachmentOriginalAuthority(self: *Runtime, raw: file_preview.Completion) FilePreviewState {
-        return if (self.task_runtime.mediaReadable(raw.task_id)) .ready else .missing;
+    fn taskAttachmentOriginalAuthority(self: *Runtime, task_id: u64) FilePreviewState {
+        return if (self.task_runtime.mediaReadable(task_id)) .ready else .missing;
     }
 
     /// Derived pixels for one chip, answered on the main thread: no decode, no
@@ -2240,7 +2297,7 @@ pub const Runtime = struct {
     /// The viewer tier for a registered image: the original, read inside the
     /// existing bounded lane and charged to the existing original-image budget.
     pub fn beginMediaPreview(self: *Runtime, completion_id: u64, target: MediaTarget) FilePreviewAdmission {
-        if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
+        if (self.shutting_down) return .{ .immediate = .failed };
         var relative: [product_attachment.max_original_relative_bytes]u8 = undefined;
         const resolution = media_source.resolve(
             target,
@@ -2253,26 +2310,11 @@ pub const Runtime = struct {
             .derived => unreachable,
             .unavailable => |availability| return .{ .immediate = mediaUnavailableState(availability) },
         };
-        self.preview_lane.begin(.{
-            .source = if (target == .draft_attachment) .attachment else .task_attachment,
-            .completion_id = completion_id,
-            .attachment_id = if (target == .draft_attachment) target.draft_attachment else 0,
-            .task_id = switch (target) {
-                .draft_attachment => 0,
-                .run_attachment => |value| value.task_id,
-                .submission_attachment => |value| value.task_id,
-            },
-            .run_id = 0,
-            .workspace_id = 0,
-            .workspace_epoch = 0,
-            .reference_id = "",
-            .workspace_root = stored.directory,
-            .relative_path = stored.relative,
-            .max_bytes = self.limits.max_file_preview_bytes,
-            .max_lines = self.limits.max_file_preview_lines,
-            .max_line_bytes = self.limits.max_file_preview_line_bytes,
-        }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
-        return .queued;
+        return self.queueFilePreview(completion_id, switch (target) {
+            .draft_attachment => |attachment_id| .{ .draft_attachment = attachment_id },
+            .run_attachment => |value| .{ .task_attachment = value.task_id },
+            .submission_attachment => |value| .{ .task_attachment = value.task_id },
+        }, .{ .workspace_id = 0, .workspace_epoch = 0, .root = stored.directory, .relative = stored.relative });
     }
 
     /// The record a Task-owned target names, asked of the Task that owns it.
@@ -2303,38 +2345,12 @@ pub const Runtime = struct {
         };
     }
 
-    pub fn beginWorkspaceFile(self: *Runtime, completion_id: u64, task_id: u64, workspace_id: u64, workspace_epoch: u64, path: []const u8, directory: bool) FilePreviewAdmission {
-        if (self.shutting_down or self.preview_executor_shutdown) return .{ .immediate = .failed };
-        if (task_id == 0) return .{ .immediate = .restricted };
-        const binding = self.workspace.binding(workspace_id) orelse return .{ .immediate = .missing };
-        if (binding.epoch != workspace_epoch or !self.workspaceFileAuthorized(task_id, workspace_id, binding.epoch, binding.canonical_root) or !file_preview.validWorkspacePath(path, directory) or self.workspacePathHasCredential(path)) return .{ .immediate = .restricted };
-        self.preview_lane.begin(.{
-            .source = if (directory) .directory else .workspace,
-            .completion_id = completion_id,
-            .task_id = task_id,
-            .run_id = 0,
-            .workspace_id = workspace_id,
-            .workspace_epoch = binding.epoch,
-            .reference_id = "",
-            .workspace_root = binding.canonical_root,
-            .relative_path = path,
-            .max_bytes = self.limits.max_file_preview_bytes,
-            .max_lines = self.limits.max_file_preview_lines,
-            .max_line_bytes = self.limits.max_file_preview_line_bytes,
-        }) catch |err| return .{ .immediate = if (err == error.Capacity) .busy else .failed };
-        return .queued;
-    }
-
     fn mediaUnavailableState(availability: media_source.Availability) FilePreviewState {
         return switch (availability) {
             .missing => .missing,
             .restricted => .restricted,
             .unsupported => .unsupported,
         };
-    }
-
-    fn workspaceFileAuthorized(self: *const Runtime, task_id: u64, workspace_id: u64, epoch: u64, root: []const u8) bool {
-        return self.task_runtime.workspaceFileTaskMatches(task_id, workspace_id) and self.workspace.filePreviewAuthorized(workspace_id, epoch, root);
     }
 
     fn workspacePathHasCredential(self: *const Runtime, path: []const u8) bool {
@@ -2346,20 +2362,14 @@ pub const Runtime = struct {
     }
 
     fn filePreviewAuthority(self: *Runtime, raw: file_preview.Completion) FilePreviewState {
-        if (raw.source == .attachment) return self.attachmentOriginalAuthority(raw);
-        if (raw.source == .task_attachment) return self.taskAttachmentOriginalAuthority(raw);
-        if (raw.source != .reference) return if (self.workspaceFileAuthorized(raw.task_id, raw.workspace_id, raw.workspace_epoch, raw.workspace_root) and !self.workspacePathHasCredential(raw.relative_path)) .ready else .restricted;
-        const reference = self.task_runtime.fileReference(raw.task_id, raw.run_id, raw.reference_id) orelse return .missing;
-        if (reference.workspace_id != raw.workspace_id or reference.workspace_epoch != raw.workspace_epoch or
-            !std.mem.eql(u8, reference.workspace_root, raw.workspace_root) or !self.filePreviewWorkspaceAuthorized(reference)) return .restricted;
-        var relative_storage: [4096]u8 = undefined;
-        const relative = switch (reference.locator_kind) {
-            .workspace_path => reference.locator,
-            .absolute_path => absoluteReferenceRelativePath(reference.workspace_root, reference.locator, &relative_storage) orelse return .restricted,
-            .uri => return .restricted,
-        };
-        if (reference.generated_video != raw.generated_video or !std.mem.eql(u8, relative, raw.relative_path)) return .restricted;
-        return .ready;
+        var scratch: [file_target.max_path_bytes]u8 = undefined;
+        const location = switch (raw.subject) {
+            .draft_attachment => |attachment_id| return self.attachmentOriginalAuthority(attachment_id, raw.location),
+            .task_attachment => |task_id| return self.taskAttachmentOriginalAuthority(task_id),
+            .file => |target| self.resolveFileTarget(target, &scratch),
+            .directory => |target| self.resolveDirectory(target),
+        } catch |err| return filePreviewAuthorityState(err);
+        return if (location.eql(raw.location)) .ready else .restricted;
     }
 
     /// Complete raw reads on the main loop; image buffers stay in their Product
@@ -2371,13 +2381,13 @@ pub const Runtime = struct {
             var state = self.filePreviewAuthority(raw);
             if (state == .ready) state = raw.state;
             if (self.shutting_down or self.preview_executor_shutdown or self.preview_lane.wasCancelled(taken)) state = .failed;
-            if (raw.source == .directory) {
+            if (raw.subject == .directory) {
                 var safe_entries: [file_preview.max_directory_entries]DirectoryEntry = undefined;
                 var count: usize = 0;
                 var redacted = false;
                 if (state == .ready) for (raw.entries) |entry| {
                     var path_buffer: [4096]u8 = undefined;
-                    const path = std.fmt.bufPrint(&path_buffer, "{s}{s}{s}", .{ raw.relative_path, if (raw.relative_path.len == 0) @as([]const u8, "") else "/", entry.name }) catch {
+                    const path = std.fmt.bufPrint(&path_buffer, "{s}{s}{s}", .{ raw.location.relative, if (raw.location.relative.len == 0) @as([]const u8, "") else "/", entry.name }) catch {
                         redacted = true;
                         continue;
                     };
@@ -2392,7 +2402,7 @@ pub const Runtime = struct {
                 self.preview_lane.release(taken);
                 continue;
             }
-            if (state == .ready and (raw.image_info != null or raw.generated_video)) {
+            if (state == .ready and (raw.image_info != null or raw.location.generated_video)) {
                 if (self.projection_security_epoch == 0) state = .failed else {
                     const overlap = self.filePreviewCredentialOverlap() catch {
                         self.preview_lane.release(taken);
@@ -2716,17 +2726,6 @@ pub const Runtime = struct {
                 },
             }
         }
-    }
-
-    fn filePreviewWorkspaceAuthorized(
-        self: *const Runtime,
-        reference: task_runtime.FileReference,
-    ) bool {
-        return self.workspace.filePreviewAuthorized(
-            reference.workspace_id,
-            reference.workspace_epoch,
-            reference.workspace_root,
-        );
     }
 
     const PreviewProjection = struct {
@@ -12838,35 +12837,110 @@ test "hidden Workspace record with Task history cannot be reused" {
 test "File Preview Workspace authority requires exact identity epoch and root" {
     var control = try testRuntime();
     defer control.deinit();
-    const exact: task_runtime.FileReference = .{
-        .workspace_id = 1,
-        .workspace_epoch = 1,
-        .workspace_root = "/tmp/metawork-test",
-        .id = "ref-1",
-        .title = "fixture",
-        .display_path = "fixture.txt",
-        .kind = "file",
-        .locator_kind = .workspace_path,
-        .locator = "fixture.txt",
-        .range = null,
-    };
-    try std.testing.expect(control.filePreviewWorkspaceAuthorized(exact));
+    const exact: file_target.Location = .{ .workspace_id = 1, .workspace_epoch = 1, .root = "/tmp/metawork-test", .relative = "fixture.txt" };
+    try control.requireFileLocation(exact);
 
-    var stale_id = exact;
-    stale_id.workspace_id = 2;
-    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(stale_id));
-    var stale_epoch = exact;
-    stale_epoch.workspace_epoch = 2;
-    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(stale_epoch));
-    var stale_root = exact;
-    stale_root.workspace_root = "/tmp/other";
-    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(stale_root));
+    inline for (.{
+        .{ "workspace_id", @as(u64, 2) },
+        .{ "workspace_epoch", @as(u64, 2) },
+        .{ "root", @as([]const u8, "/tmp/other") },
+        .{ "relative", @as([]const u8, "SECRET-KEY/fixture.txt") },
+    }) |change| {
+        var other = exact;
+        @field(other, change[0]) = change[1];
+        try std.testing.expectError(error.RestrictedFile, control.requireFileLocation(other));
+    }
     product_workspace.testing.setAuthorization(
         &control.workspace,
         1,
         .removing,
     );
-    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(exact));
+    try std.testing.expectError(error.RestrictedFile, control.requireFileLocation(exact));
+}
+
+test "File Preview resolves a reference and a Workspace path by one rule" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
+    defer control.deinit();
+    const task = control.testTaskSlots()[0].?;
+    const run = &task.durable.runs[0].?;
+    const reference = found: for (run.tools) |*entry| {
+        const tool = &(entry.* orelse continue);
+        const refs = tool.file_refs orelse continue;
+        for (refs) |*slot| if (slot.*) |*value| break :found value;
+    } else return error.TestUnexpectedResult;
+
+    var scratch: [file_target.max_path_bytes]u8 = undefined;
+    const by_reference = testReference(7, reference.id);
+    const by_path: FileTarget = .{ .workspace = testWorkspacePath(3, 1, "image.jpg") };
+    const expected: file_target.Location = .{ .workspace_id = 2, .workspace_epoch = 1, .root = root, .relative = "image.jpg" };
+    for ([_]FileTarget{ by_reference, by_path }) |target|
+        try std.testing.expect(expected.eql(try control.resolveFileTarget(target, &scratch)));
+
+    // An absolute locator inside the root is the same file; outside it, or a
+    // URI, is no Workspace file at all.
+    const separator = std.fs.path.sep_str;
+    const inside = try std.mem.concat(std.testing.allocator, u8, &.{ root, separator, "docs", separator, "a.md" });
+    defer std.testing.allocator.free(inside);
+    const outside = try std.mem.concat(std.testing.allocator, u8, &.{ root, "-other", separator, "a.md" });
+    defer std.testing.allocator.free(outside);
+    reference.locator_kind = .absolute_path;
+    try control.replaceTracked(&reference.locator, inside, 4096);
+    try std.testing.expectEqualStrings("docs/a.md", (try control.resolveFileTarget(by_reference, &scratch)).relative);
+    try control.replaceTracked(&reference.locator, outside, 4096);
+    try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_reference, &scratch));
+    reference.locator_kind = .uri;
+    try std.testing.expectError(error.UnsupportedFile, control.resolveFileTarget(by_reference, &scratch));
+    reference.locator_kind = .workspace_path;
+    try control.replaceTracked(&reference.locator, "SECRET-KEY/image.jpg", 4096);
+    try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_reference, &scratch));
+    try control.replaceTracked(&reference.locator, "image.jpg", 4096);
+
+    for ([_]FileTarget{
+        .{ .reference = .{ .task_id = 4, .run_id = 7, .id = reference.id } },
+        testReference(8, reference.id),
+        testReference(7, "file-3-1-1-9"),
+        .{ .workspace = .{ .task_id = 3, .workspace_id = 9, .workspace_epoch = 1, .path = "image.jpg" } },
+    }) |target| try std.testing.expectError(error.UnknownFile, control.resolveFileTarget(target, &scratch));
+    for ([_]FileTarget.Workspace{
+        testWorkspacePath(0, 1, "image.jpg"),
+        testWorkspacePath(4, 1, "image.jpg"),
+        testWorkspacePath(3, 2, "image.jpg"),
+        testWorkspacePath(3, 1, "../image.jpg"),
+        testWorkspacePath(3, 1, ""),
+        testWorkspacePath(3, 1, "SECRET-KEY.jpg"),
+        // Another of this Task's identities never lends its Workspace.
+        .{ .task_id = 3, .workspace_id = 1, .workspace_epoch = 1, .path = "image.jpg" },
+    }) |target| try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(.{ .workspace = target }, &scratch));
+    // Only a directory may be the root.
+    _ = try control.resolveDirectory(testWorkspacePath(3, 1, ""));
+
+    // Every fact that held at admission is asked again at completion, so each
+    // one has to turn the answer by itself.
+    const targets = [_]FileTarget{ by_reference, by_path };
+    task.deletion = .deleting;
+    try std.testing.expectError(error.UnknownFile, control.resolveFileTarget(by_reference, &scratch));
+    try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(by_path, &scratch));
+    task.deletion = .idle;
+    run.superseded_by_run_id = 99;
+    try std.testing.expectError(error.UnknownFile, control.resolveFileTarget(by_reference, &scratch));
+    run.superseded_by_run_id = null;
+    product_workspace.testing.setAuthorization(&control.workspace, 2, .removing);
+    for (targets) |target| try std.testing.expectError(error.RestrictedFile, control.resolveFileTarget(target, &scratch));
+    product_workspace.testing.setAuthorization(&control.workspace, 2, .available);
+    const epoch = control.projection_security_epoch;
+    control.projection_security_epoch = 0;
+    for (targets) |target| try std.testing.expectError(error.StaleSecurityEpoch, control.resolveFileTarget(target, &scratch));
+    control.projection_security_epoch = epoch;
+    control.shutting_down = true;
+    for (targets) |target| try std.testing.expectError(error.ShuttingDown, control.resolveFileTarget(target, &scratch));
+    control.shutting_down = false;
+    for (targets) |target| try std.testing.expect(expected.eql(try control.resolveFileTarget(target, &scratch)));
 }
 
 test "Workspace projection derives aggregate Task signals and removal preserves history" {
@@ -20247,6 +20321,14 @@ fn testImagePreviewRuntime(control: *Runtime, root: []const u8) !void {
     try control.applyEvent(&event);
 }
 
+fn testReference(run_id: u64, id: []const u8) FileTarget {
+    return .{ .reference = .{ .task_id = 3, .run_id = run_id, .id = id } };
+}
+
+fn testWorkspacePath(task_id: u64, workspace_epoch: u64, path: []const u8) FileTarget.Workspace {
+    return .{ .task_id = task_id, .workspace_id = 2, .workspace_epoch = workspace_epoch, .path = path };
+}
+
 const PreviewTestCapture = struct {
     calls: usize = 0,
     state: FilePreviewState = .failed,
@@ -20298,9 +20380,9 @@ test "file preview opens the trusted generated MP4 reference and rejects malform
             for (refs) |ref| if (ref) |value| if (value.generated_video) break :found value.id;
         };
     } else return error.MissingGeneratedVideo;
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .missing }, control.beginFilePreview(1, 3, 8, id));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .missing }, control.beginFilePreview(1, testReference(8, id)));
 
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(2, 3, 7, id));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(2, testReference(7, id)));
     var capture: PreviewTestCapture = .{};
     try capture.wait(control);
     try std.testing.expectEqual(FilePreviewState.ready, capture.state);
@@ -20314,15 +20396,40 @@ test "file preview opens the trusted generated MP4 reference and rejects malform
     bytes[4] = 'b';
     try tmp.dir.writeFile(io, .{ .sub_path = path, .data = bytes });
     capture = .{};
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(3, 3, 7, id));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(3, testReference(7, id)));
     try capture.wait(control);
     try std.testing.expectEqual(FilePreviewState.unsupported, capture.state);
     try std.testing.expect(capture.image == null);
     try tmp.dir.deleteFile(io, path);
     capture = .{};
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(4, 3, 7, id));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(4, testReference(7, id)));
     try capture.wait(control);
     try std.testing.expectEqual(FilePreviewState.missing, capture.state);
+    try std.testing.expect(!control.hasFilePreviews());
+}
+
+test "file preview delivers nothing when the same target resolves to another file at completion" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = "readable text" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "other.jpg", .data = "another file" });
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testImagePreviewRuntime(control, root);
+    defer control.deinit();
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
+    const reference = found: for (run.tools) |*entry| {
+        const tool = &(entry.* orelse continue);
+        const refs = tool.file_refs orelse continue;
+        for (refs) |*slot| if (slot.*) |*value| break :found value;
+    } else return error.TestUnexpectedResult;
+    var capture: PreviewTestCapture = .{};
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(1, testReference(7, reference.id)));
+    try control.replaceTracked(&reference.locator, "other.jpg", 4096);
+    try capture.wait(control);
+    try std.testing.expectEqual(FilePreviewState.restricted, capture.state);
     try std.testing.expect(!control.hasFilePreviews());
 }
 
@@ -20337,11 +20444,11 @@ test "file preview workspace directory authority redacts names and rejects stale
     defer std.testing.allocator.destroy(control);
     try testImagePreviewRuntime(control, root);
     defer control.deinit();
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 3, 2, 2, "", true));
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 99, 2, 1, "", true));
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 3, 2, 1, "../outside", true));
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 0, 2, 1, "visible.txt", false));
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginWorkspaceFile(90, 0, 2, 1, "", true));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginDirectory(90, testWorkspacePath(3, 2, "")));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginDirectory(90, testWorkspacePath(99, 1, "")));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginDirectory(90, testWorkspacePath(3, 1, "../outside")));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginFilePreview(90, .{ .workspace = testWorkspacePath(0, 1, "visible.txt") }));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .restricted }, control.beginDirectory(90, testWorkspacePath(0, 1, "")));
     const Capture = struct {
         calls: usize = 0,
         state: FilePreviewState = .failed,
@@ -20360,7 +20467,7 @@ test "file preview workspace directory authority redacts names and rejects stale
         }
     };
     var capture = Capture{};
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginWorkspaceFile(91, 3, 2, 1, "", true));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginDirectory(91, testWorkspacePath(3, 1, "")));
     for (0..5000) |_| {
         control.drainFilePreviewCompletions(capture.sink());
         if (capture.calls != 0) break;
@@ -20371,7 +20478,7 @@ test "file preview workspace directory authority redacts names and rejects stale
     try std.testing.expectEqual(@as(usize, 1), capture.count);
     try std.testing.expect(capture.redacted);
     capture = .{};
-    _ = control.beginWorkspaceFile(92, 3, 2, 1, "", true);
+    _ = control.beginDirectory(92, testWorkspacePath(3, 1, ""));
     control.testTaskSlots()[0].?.durable.workspace_id = 1;
     for (0..5000) |_| {
         control.drainFilePreviewCompletions(capture.sink());
@@ -20400,7 +20507,7 @@ test "file preview scans all original bytes including a credential across the sc
     try testImagePreviewRuntime(control, root);
     defer control.deinit();
     var capture: PreviewTestCapture = .{};
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(71, 3, 7, "file-3-1-1-1"));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(71, testReference(7, "file-3-1-1-1")));
     for (0..5000) |_| {
         control.drainFilePreviewCompletions(capture.sink());
         if (capture.calls != 0) break;
@@ -20428,7 +20535,7 @@ test "file preview immutable original transfer is sequential and revoked by secu
     try testImagePreviewRuntime(control, root);
     defer control.deinit();
     var capture: PreviewTestCapture = .{};
-    _ = control.beginFilePreview(72, 3, 7, "file-3-1-1-1");
+    _ = control.beginFilePreview(72, testReference(7, "file-3-1-1-1"));
     for (0..5000) |_| {
         control.drainFilePreviewCompletions(capture.sink());
         if (capture.calls != 0) break;
@@ -21226,7 +21333,7 @@ test "Tool slots grow while a snapshot read and a file preview are in flight" {
     defer std.testing.allocator.free(output);
     var read = try control.writeSnapshot(output, .{ .task_id = 3 });
     var capture: PreviewTestCapture = .{};
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(81, 3, 7, "file-3-1-1-1"));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginFilePreview(81, testReference(7, "file-3-1-1-1")));
     // Records arrive until the slots move to a larger array.
     for (1..capacity + 2) |index| try applyLongRunTool(control, 3, 7, index, "grown", false);
     try std.testing.expect(run.tools.len > capacity);

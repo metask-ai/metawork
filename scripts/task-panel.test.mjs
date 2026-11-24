@@ -6362,9 +6362,9 @@ test("file preview resources load independently and reject closed or switched Ta
     createTaskPanelPreviewTab("3", "9", reference),
   );
   const requests = [];
-  const load = (taskId, runId, referenceId) =>
+  const load = (target) =>
     new Promise((resolve, reject) =>
-      requests.push({ taskId, runId, referenceId, resolve, reject }),
+      requests.push({ target, resolve, reject }),
     );
   let previewTabs;
   function Harness({ activeTaskId }) {
@@ -6381,8 +6381,13 @@ test("file preview resources load independently and reject closed or switched Ta
     previewTabs.open("3", "9", references[1]);
   });
   assert.deepEqual(
-    requests.map(({ referenceId }) => referenceId),
-    ["a", "b"],
+    requests.map(({ target }) => target),
+    ["a", "b"].map((fileReferenceId) => ({
+      kind: "reference",
+      taskId: "3",
+      runId: "9",
+      fileReferenceId,
+    })),
   );
   await act(async () => {
     requests[1].resolve({
@@ -7221,14 +7226,9 @@ async function renderAppFixture(
       if (snapshotFailure) throw new Error("fixture synchronization failure");
       return productStateFixture(snapshot, scope);
     },
-    previewFile: (...ids) =>
+    previewFile: (target, options) =>
       new Promise((resolve, reject) =>
-        previews.push({
-          ids: ids.slice(0, 3),
-          options: ids[3],
-          resolve,
-          reject,
-        }),
+        previews.push({ target, options, resolve, reject }),
       ),
     fileChangeDiff: (...ids) =>
       new Promise((resolve, reject) => diffs.push({ ids, resolve, reject })),
@@ -7342,9 +7342,22 @@ test("App compact errors stay local and their diagnostics survive dismissing the
   await screen.findByText("safe-compact-diagnostic");
 });
 
+function referenceTarget(fileReferenceId) {
+  return { kind: "reference", taskId: "3", runId: "7", fileReferenceId };
+}
+
+function workspaceTarget(path) {
+  return {
+    kind: "workspace",
+    taskId: "3",
+    workspaceId: "1",
+    workspaceEpoch: "1",
+    path,
+  };
+}
+
 test("App opens unreferenced workspace files in preview tabs and revokes them with workspace authority", async (ctx) => {
-  const listings = [],
-    reads = [];
+  const listings = [];
   const fixture = await renderAppFixture(
     ctx,
     1440,
@@ -7362,10 +7375,9 @@ test("App opens unreferenced workspace files in preview tabs and revokes them wi
           redacted: false,
         };
       },
-      previewWorkspaceFile: (...args) =>
-        new Promise((resolve) => reads.push({ args, resolve })),
     },
   );
+  const reads = fixture.previews;
   await selectRecentTask(/First task/);
   fireEvent.click(screen.getByRole("button", { name: "Open side panel" }));
   assert.equal(listings.length, 0);
@@ -7376,12 +7388,10 @@ test("App opens unreferenced workspace files in preview tabs and revokes them wi
   const file = await screen.findByRole("treeitem", { name: "unreferenced.md" });
   assert.equal(listings.length, 2);
   fireEvent.click(file);
-  assert.deepEqual(reads[0].args.slice(0, 4), [
-    "3",
-    "1",
-    "1",
-    "docs/unreferenced.md",
-  ]);
+  assert.deepEqual(
+    reads.map((request) => request.target),
+    [workspaceTarget("docs/unreferenced.md")],
+  );
   await act(async () =>
     reads[0].resolve({
       state: "ready",
@@ -7391,7 +7401,6 @@ test("App opens unreferenced workspace files in preview tabs and revokes them wi
     }),
   );
   assert.ok(screen.getByRole("heading", { name: "Workspace preview" }));
-  assert.equal(fixture.previews.length, 0);
   fireEvent.click(file);
   assert.equal(reads.length, 1);
   assert.equal(
@@ -7410,16 +7419,8 @@ test("App opens unreferenced workspace files in preview tabs and revokes them wi
 });
 
 test("App opens conversation Markdown file links through Workspace authority", async (ctx) => {
-  const reads = [];
-  const fixture = await renderAppFixture(
-    ctx,
-    1440,
-    {},
-    {
-      previewWorkspaceFile: (...args) =>
-        new Promise((resolve) => reads.push({ args, resolve })),
-    },
-  );
+  const fixture = await renderAppFixture(ctx, 1440);
+  const reads = fixture.previews;
   Object.assign(fixture.snapshot.tasks[0], {
     currentRunPhase: null,
     activeOperation: null,
@@ -7447,24 +7448,14 @@ test("App opens conversation Markdown file links through Workspace authority", a
   fireEvent.click(
     await screen.findByRole("button", { name: "Preview p0-file-manifest.csv" }),
   );
-  assert.deepEqual(reads[0].args.slice(0, 4), [
-    "3",
-    "1",
-    "1",
-    "p0-file-manifest.csv",
-  ]);
+  assert.deepEqual(reads[0].target, workspaceTarget("p0-file-manifest.csv"));
   assert.ok(screen.getByRole("tab", { name: "p0-file-manifest.csv" }));
   fireEvent.click(
     screen.getByRole("button", { name: "Preview notes/qa preview.txt" }),
   );
-  assert.deepEqual(reads[1].args.slice(0, 4), [
-    "3",
-    "1",
-    "1",
-    "notes/qa preview.txt",
-  ]);
+  assert.deepEqual(reads[1].target, workspaceTarget("notes/qa preview.txt"));
   assert.ok(screen.getByRole("tab", { name: "qa preview.txt" }));
-  assert.equal(fixture.previews.length, 0);
+  assert.equal(reads.length, 2);
   assert.equal(
     screen.getByRole("link", { name: "hosts" }).getAttribute("aria-disabled"),
     "true",
@@ -8039,7 +8030,7 @@ test("permanent panel toggle hides and restores the active Task Panel session", 
   assert.equal(previews.length, 0);
   assert.equal(diffs.length, 0);
   fireEvent.click(filePreviewOpener("a.txt"));
-  assert.deepEqual(previews[0].ids, ["3", "7", "ref-a"]);
+  assert.deepEqual(previews[0].target, referenceTarget("ref-a"));
   fireEvent.click(toggle);
   await act(async () =>
     previews[0].resolve({
@@ -8254,7 +8245,7 @@ test("App keeps preview and Review resources independent and rejects stale respo
     redacted: false,
   });
   openPreview();
-  assert.deepEqual(previews[0].ids, ["3", "7", "ref-a"]);
+  assert.deepEqual(previews[0].target, referenceTarget("ref-a"));
   fireEvent.click(
     within(document.querySelector("#task-panel")).getByRole("button", {
       name: "Hide side panel",
@@ -8419,11 +8410,8 @@ test("conversation file links preview directly without expanding tools and retur
   fireEvent.click(first);
   fireEvent.click(second);
   assert.deepEqual(
-    previews.map((request) => request.ids),
-    [
-      ["3", "7", "ref-a"],
-      ["3", "7", "ref-b"],
-    ],
+    previews.map((request) => request.target),
+    [referenceTarget("ref-a"), referenceTarget("ref-b")],
   );
   const ready = (content) => ({
     state: "ready",
@@ -8557,11 +8545,8 @@ test("App previews exact operation references, rejects superseded reads, and ref
   fireEvent.click(openers[0]);
   fireEvent.click(openers[1]);
   assert.deepEqual(
-    previews.map((request) => request.ids),
-    [
-      ["3", "7", "ref-a"],
-      ["3", "7", "ref-b"],
-    ],
+    previews.map((request) => request.target),
+    [referenceTarget("ref-a"), referenceTarget("ref-b")],
   );
   const ready = (content) => ({
     state: "ready",
@@ -8576,7 +8561,7 @@ test("App previews exact operation references, rejects superseded reads, and ref
   const panel = within(document.querySelector("#task-panel"));
   assert.equal(panel.queryByRole("combobox"), null);
   fireEvent.click(panel.getByRole("button", { name: "Refresh" }));
-  assert.deepEqual(previews[2].ids, ["3", "7", "ref-b"]);
+  assert.deepEqual(previews[2].target, referenceTarget("ref-b"));
   assert.equal(screen.queryByText("selected reference"), null);
   await act(async () => previews[2].resolve(ready("refreshed reference")));
   assert.ok(screen.getByText("refreshed reference"));
@@ -8594,7 +8579,7 @@ test("App previews exact operation references, rejects superseded reads, and ref
     "false",
   );
   fireEvent.click(openers[1]);
-  assert.deepEqual(previews[3].ids, ["3", "7", "ref-b"]);
+  assert.deepEqual(previews[3].target, referenceTarget("ref-b"));
   assert.equal(screen.queryByText("refreshed reference"), null);
   await act(async () => previews[3].resolve(ready("explicit reread")));
   assert.ok(screen.getByText("explicit reread"));
@@ -9789,7 +9774,12 @@ test("generated MP4 renders a bare player on approach and releases it offscreen"
     assert.equal(loads.length, 0);
     assert.equal(view.container.querySelector("button"), null);
     await act(async () => visible(true));
-    assert.deepEqual(loads[0].slice(0, 3), ["17", "23", referenceId]);
+    assert.deepEqual(loads[0][0], {
+      kind: "reference",
+      taskId: "17",
+      runId: "23",
+      fileReferenceId: referenceId,
+    });
     const video = view.container.querySelector("video");
     assert.ok(video.controls && !video.autoplay && video.hidden);
     fireEvent.loadedData(video);
@@ -9798,7 +9788,7 @@ test("generated MP4 renders a bare player on approach and releases it offscreen"
     assert.equal(view.container.querySelector("video"), null);
     assert.equal(released, 1);
     assert.equal(paused, 1);
-    assert.equal(loads[0][3].signal.aborted, true);
+    assert.equal(loads[0][1].signal.aborted, true);
     await act(async () => visible(true));
     assert.equal(loads.length, 2);
   } finally {
@@ -9983,10 +9973,17 @@ test("generated image loads only its reference and opens the existing preview", 
     assert.equal(view.container.querySelectorAll("img").length, 1),
   );
   assert.deepEqual(
-    calls.map((args) => args.slice(0, 3)),
-    [["17", "23", "host-image-1"]],
+    calls.map(([target]) => target),
+    [
+      {
+        kind: "reference",
+        taskId: "17",
+        runId: "23",
+        fileReferenceId: "host-image-1",
+      },
+    ],
   );
-  assert.equal(calls[0][3].priority, "prefetch");
+  assert.equal(calls[0][1].priority, "prefetch");
   assert.match(view.container.textContent, /Loading preview/);
   let finishDecode;
   view.container.querySelector("img").decode = () =>

@@ -3,6 +3,7 @@ import type {
   FilePreview,
   FileReferenceView,
   FilePreviewLoadOptions,
+  FileTarget,
 } from "../../bridge/contracts.ts";
 import {
   createTaskPanelPreviewTab,
@@ -10,10 +11,7 @@ import {
 } from "./task-panel-state.ts";
 type FilePreviewIdentity = {
   tabId: string;
-  taskId: string;
-  runId: string | null;
-  workspaceId: string | null;
-  workspaceEpoch: string | null;
+  target: FileTarget;
   reference: FileReferenceView;
   requestGeneration: number;
 };
@@ -30,22 +28,13 @@ export type FilePreviewTabState =
       preview: FilePreview;
     });
 type FilePreviewLoader = (
-  taskId: string,
-  runId: string,
-  referenceId: string,
+  target: FileTarget,
   options?: FilePreviewLoadOptions,
 ) => Promise<FilePreview>;
 export function useFilePreviewTabs(
   activeTaskId: string | null,
   validTabIds: ReadonlySet<string>,
   load: FilePreviewLoader,
-  loadWorkspace: (
-    taskId: string,
-    workspaceId: string,
-    workspaceEpoch: string,
-    path: string,
-    options?: FilePreviewLoadOptions,
-  ) => Promise<FilePreview>,
 ) {
   const [resources, setResourceState] = useState<
     Record<string, FilePreviewTabState>
@@ -72,78 +61,45 @@ export function useFilePreviewTabs(
     generations.current.set(tabId, (generations.current.get(tabId) ?? 0) + 1);
   }
   function request(
-    taskId: string,
-    runId: string | null,
+    tabId: string,
+    target: FileTarget,
     reference: FileReferenceView,
-    workspaceId: string | null = null,
-    workspaceEpoch: string | null = null,
   ) {
-    const tab =
-      workspaceId !== null
-        ? createTaskPanelWorkspaceTab(
-            taskId,
-            workspaceId,
-            workspaceEpoch!,
-            reference.displayPath,
-          )
-        : createTaskPanelPreviewTab(taskId, runId!, reference);
-    invalidate(tab.tabId);
+    const { taskId } = target;
+    invalidate(tabId);
     const controller = new AbortController();
-    controllers.current.set(tab.tabId, controller);
-    const requestGeneration = (generations.current.get(tab.tabId) ?? 0) + 1;
-    generations.current.set(tab.tabId, requestGeneration);
+    controllers.current.set(tabId, controller);
+    const requestGeneration = (generations.current.get(tabId) ?? 0) + 1;
+    generations.current.set(tabId, requestGeneration);
     const identity: FilePreviewIdentity = {
-      tabId: tab.tabId,
-      taskId,
-      runId,
-      workspaceId,
-      workspaceEpoch,
+      tabId,
+      target,
       reference,
       requestGeneration,
     };
     setResources((current) => ({
       ...current,
-      [tab.tabId]: { kind: "loading", ...identity },
+      [tabId]: { kind: "loading", ...identity },
     }));
-    const options: FilePreviewLoadOptions = {
-      signal: controller.signal,
-      priority: "interactive",
-    };
-    void (
-      workspaceId !== null
-        ? loadWorkspace(
-            taskId,
-            workspaceId,
-            workspaceEpoch!,
-            reference.displayPath,
-            options,
-          )
-        : load(taskId, runId!, reference.id, options)
-    )
+    void load(target, { signal: controller.signal, priority: "interactive" })
       .then((preview) => {
         if (
           controller.signal.aborted ||
-          generations.current.get(tab.tabId) !== requestGeneration ||
+          generations.current.get(tabId) !== requestGeneration ||
           activeTaskIdRef.current !== taskId
         ) {
           preview.release?.();
           return;
         }
         setResources((current) => {
-          const resource = current[tab.tabId];
-          if (
-            !resource ||
-            resource.requestGeneration !== requestGeneration ||
-            resource.taskId !== taskId ||
-            resource.runId !== runId ||
-            resource.reference.id !== reference.id
-          ) {
+          const resource = current[tabId];
+          if (!resource || resource.requestGeneration !== requestGeneration) {
             preview.release?.();
             return current;
           }
           return {
             ...current,
-            [tab.tabId]:
+            [tabId]:
               preview.state === "ready"
                 ? { ...resource, kind: "ready", preview }
                 : { ...resource, kind: "failed", preview },
@@ -153,17 +109,17 @@ export function useFilePreviewTabs(
       .catch(() => {
         if (
           controller.signal.aborted ||
-          generations.current.get(tab.tabId) !== requestGeneration ||
+          generations.current.get(tabId) !== requestGeneration ||
           activeTaskIdRef.current !== taskId
         )
           return;
         setResources((current) => {
-          const resource = current[tab.tabId];
+          const resource = current[tabId];
           if (!resource || resource.requestGeneration !== requestGeneration)
             return current;
           return {
             ...current,
-            [tab.tabId]: {
+            [tabId]: {
               ...resource,
               kind: "failed",
               preview: {
@@ -176,6 +132,17 @@ export function useFilePreviewTabs(
           };
         });
       });
+  }
+  function refresh(
+    taskId: string,
+    runId: string,
+    reference: FileReferenceView,
+  ) {
+    request(
+      createTaskPanelPreviewTab(taskId, runId, reference).tabId,
+      { kind: "reference", taskId, runId, fileReferenceId: reference.id },
+      reference,
+    );
   }
   function open(taskId: string, runId: string, reference: FileReferenceView) {
     const tab = createTaskPanelPreviewTab(taskId, runId, reference);
@@ -191,7 +158,7 @@ export function useFilePreviewTabs(
         }));
       return;
     }
-    request(taskId, runId, reference);
+    refresh(taskId, runId, reference);
   }
   function close(tabId: string) {
     invalidate(tabId);
@@ -208,20 +175,14 @@ export function useFilePreviewTabs(
     workspaceEpoch: string,
     path: string,
   ) {
-    const tab = createTaskPanelWorkspaceTab(
+    const { tabId } = createTaskPanelWorkspaceTab(
       taskId,
       workspaceId,
       workspaceEpoch,
       path,
     );
-    if (!resourcesRef.current[tab.tabId])
-      request(
-        taskId,
-        null,
-        { id: path, title: tab.title, displayPath: path },
-        workspaceId,
-        workspaceEpoch,
-      );
+    if (!resourcesRef.current[tabId])
+      refreshWorkspace(taskId, workspaceId, workspaceEpoch, path);
   }
   function refreshWorkspace(
     taskId: string,
@@ -236,11 +197,9 @@ export function useFilePreviewTabs(
       path,
     );
     request(
-      taskId,
-      null,
+      tab.tabId,
+      { kind: "workspace", taskId, workspaceId, workspaceEpoch, path },
       { id: path, title: tab.title, displayPath: path },
-      workspaceId,
-      workspaceEpoch,
     );
   }
   function clear() {
@@ -270,7 +229,7 @@ export function useFilePreviewTabs(
     open,
     openWorkspace,
     refreshWorkspace,
-    refresh: request,
+    refresh,
     close,
     clear,
   };

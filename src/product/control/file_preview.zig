@@ -1,5 +1,6 @@
 const std = @import("std");
 const image_container = @import("image_container");
+const file_target = @import("product_control_file_target");
 
 pub const max_in_flight: usize = 8;
 pub const worker_count: usize = 2;
@@ -11,24 +12,57 @@ pub const max_image_side: u32 = 8192;
 pub const media_chunk_bytes: usize = 262143;
 pub const max_media_slots: usize = max_image_slots + 1;
 pub const ImageInfo = image_container.Info;
-/// Where the bytes come from. `attachment` and `task_attachment` are both
-/// Product-owned store reads: no Workspace is involved, so their authority is
-/// the attachment's own identity, not a Workspace id/epoch/root. They differ in
+/// What a read is of. A Workspace file carries the identity the Renderer
+/// addressed it with, which the owner resolves again before it delivers
+/// anything. `draft_attachment` and `task_attachment` are both Product-owned
+/// store reads: no Workspace is involved, so their authority is the
+/// attachment's own identity, not a Workspace id/epoch/root. They differ in
 /// which identity that is -- a staged draft, or a message a Task accepted.
-pub const Source = enum { reference, workspace, directory, attachment, task_attachment };
+pub const Subject = union(enum) {
+    file: file_target.Target,
+    directory: file_target.Target.Workspace,
+    draft_attachment: u64,
+    task_attachment: u64,
 
-/// Whether this source reads the Product-owned attachment store rather than a
-/// Workspace, which decides both path handling and that the bytes must still
-/// be the image staging classified.
-pub fn storeOwned(source: Source) bool {
-    return source == .attachment or source == .task_attachment;
-}
+    /// Whether this reads the Product-owned attachment store rather than a
+    /// Workspace, which decides both path handling and that the bytes must
+    /// still be the image staging classified.
+    fn storeOwned(self: Subject) bool {
+        return self == .draft_attachment or self == .task_attachment;
+    }
+
+    /// A recorded reference opens its locator as it was recorded. Every other
+    /// subject is a Workspace-relative path and is walked one component at a
+    /// time.
+    fn walked(self: Subject, location: file_target.Location) bool {
+        return switch (self) {
+            .file => |target| target != .reference or location.generated_video,
+            .directory, .draft_attachment, .task_attachment => true,
+        };
+    }
+
+    fn clone(self: Subject, allocator: std.mem.Allocator) std.mem.Allocator.Error!Subject {
+        return switch (self) {
+            .file => |target| .{ .file = try target.clone(allocator) },
+            .directory => |value| .{ .directory = try value.clone(allocator) },
+            .draft_attachment, .task_attachment => self,
+        };
+    }
+
+    fn free(self: Subject, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .file => |target| target.free(allocator),
+            .directory => |value| value.free(allocator),
+            .draft_attachment, .task_attachment => {},
+        }
+    }
+};
 pub const max_directory_entries = 512;
 pub const DirectoryEntry = struct { name: []const u8, kind: enum { file, directory } };
 
 pub fn validWorkspacePath(path: []const u8, allow_root: bool) bool {
     if (path.len == 0) return allow_root;
-    if (path.len > 4096 or !std.unicode.utf8ValidateSlice(path)) return false;
+    if (path.len > file_target.max_path_bytes or !std.unicode.utf8ValidateSlice(path)) return false;
     var parts = std.mem.splitScalar(u8, path, '/');
     var depth: usize = 0;
     while (parts.next()) |part| {
@@ -78,35 +112,20 @@ pub const State = enum {
 };
 
 pub const Input = struct {
-    source: Source = .reference,
-    generated_video: bool = false,
+    subject: Subject,
+    /// Frozen at admission. A store-owned subject has no Workspace id or epoch.
+    location: file_target.Location,
     completion_id: u64,
-    attachment_id: u64 = 0,
-    task_id: u64,
-    run_id: u64,
-    workspace_id: u64,
-    workspace_epoch: u64,
-    reference_id: []const u8,
-    workspace_root: []const u8,
-    relative_path: []const u8,
     max_bytes: usize,
     max_lines: usize,
     max_line_bytes: usize,
 };
 
 pub const Completion = struct {
-    source: Source = .reference,
-    generated_video: bool = false,
+    subject: Subject,
+    location: file_target.Location,
     entries: []const DirectoryEntry = &.{},
     completion_id: u64,
-    attachment_id: u64 = 0,
-    task_id: u64,
-    run_id: u64,
-    workspace_id: u64,
-    workspace_epoch: u64,
-    reference_id: []const u8,
-    workspace_root: []const u8,
-    relative_path: []const u8,
     state: State,
     content: []const u8,
     image_info: ?ImageInfo = null,
@@ -152,20 +171,12 @@ fn isImage(bytes: []const u8) bool {
 }
 
 const Job = struct {
-    source: Source,
-    generated_video: bool,
+    subject: Subject,
+    location: file_target.Location,
     entries: [max_directory_entries]DirectoryEntry = undefined,
     entry_count: usize = 0,
     lane: *Lane,
     completion_id: u64,
-    attachment_id: u64,
-    task_id: u64,
-    run_id: u64,
-    workspace_id: u64,
-    workspace_epoch: u64,
-    reference_id: []u8,
-    workspace_root: []u8,
-    relative_path: []u8,
     max_bytes: usize,
     max_lines: usize,
     max_line_bytes: usize,
@@ -221,7 +232,8 @@ const Job = struct {
             self.state = .failed;
             return .completed;
         }
-        var root = std.Io.Dir.openDirAbsolute(self.lane.io, self.workspace_root, .{
+        const generated_video = self.location.generated_video;
+        var root = std.Io.Dir.openDirAbsolute(self.lane.io, self.location.root, .{
             .access_sub_paths = true,
             .follow_symlinks = false,
         }) catch {
@@ -229,19 +241,19 @@ const Job = struct {
             return .completed;
         };
         defer root.close(self.lane.io);
-        if (self.source == .directory) return self.readDirectory(root);
-        const relative = self.source == .workspace or storeOwned(self.source) or self.generated_video;
-        if (relative and !validWorkspacePath(self.relative_path, false)) {
+        if (self.subject == .directory) return self.readDirectory(root);
+        const walked = self.subject.walked(self.location);
+        if (walked and !validWorkspacePath(self.location.relative, false)) {
             self.state = .restricted;
             return .completed;
         }
         var parent: ?std.Io.Dir = null;
         defer if (parent) |*dir| dir.close(self.lane.io);
-        var file_path: []const u8 = self.relative_path;
-        if (relative) {
+        var file_path: []const u8 = self.location.relative;
+        if (walked) {
             const split = std.mem.lastIndexOfScalar(u8, file_path, '/');
             parent = openWorkspaceDirectory(self.lane.io, root, if (split) |index| file_path[0..index] else "") catch |err| {
-                self.state = if (self.generated_video and (err == error.FileNotFound or err == error.NotDir)) .missing else .restricted;
+                self.state = if (generated_video and (err == error.FileNotFound or err == error.NotDir)) .missing else .restricted;
                 return .completed;
             };
             if (split) |index| file_path = file_path[index + 1 ..];
@@ -274,7 +286,7 @@ const Job = struct {
             self.state = .failed;
             return .completed;
         };
-        if (self.generated_video) {
+        if (generated_video) {
             if (header_read < 16 or before.size > self.max_bytes or !std.mem.eql(u8, header[4..8], "ftyp")) {
                 self.state = .unsupported;
                 return .completed;
@@ -293,7 +305,7 @@ const Job = struct {
         // An attachment original was classified as an image when it was staged.
         // If it no longer looks like one it has changed underneath us, and this
         // source must never fall through to the text body path.
-        if (storeOwned(self.source) and !image) {
+        if (self.subject.storeOwned() and !image) {
             self.state = .unsupported;
             return .completed;
         }
@@ -301,7 +313,7 @@ const Job = struct {
             self.state = .image_limit;
             return .completed;
         }
-        const wanted: usize = @intCast(if (image or self.generated_video) before.size else @min(before.size, self.max_bytes));
+        const wanted: usize = @intCast(if (image or generated_video) before.size else @min(before.size, self.max_bytes));
         if (image) {
             if (!self.lane.reserveImage(wanted)) {
                 self.state = .busy;
@@ -349,7 +361,7 @@ const Job = struct {
         };
         if (read != wanted or metadataChanged(before, after)) return .changed;
 
-        if (self.generated_video) {
+        if (generated_video) {
             if (!std.mem.eql(u8, bytes[4..8], "ftyp")) return .changed;
             self.state = .ready;
             return .completed;
@@ -389,7 +401,7 @@ const Job = struct {
     }
 
     fn readDirectory(self: *Job, root: std.Io.Dir) ReadOutcome {
-        var directory = openWorkspaceDirectory(self.lane.io, root, self.relative_path) catch |err| {
+        var directory = openWorkspaceDirectory(self.lane.io, root, self.location.relative) catch |err| {
             self.state = if (err == error.FileNotFound or err == error.NotDir) .missing else .restricted;
             return .completed;
         };
@@ -446,12 +458,8 @@ const Job = struct {
 
     fn deinit(self: *Job) void {
         self.clearContent();
-        std.crypto.secureZero(u8, self.relative_path);
-        std.crypto.secureZero(u8, self.workspace_root);
-        std.crypto.secureZero(u8, self.reference_id);
-        self.lane.allocator.free(self.relative_path);
-        self.lane.allocator.free(self.workspace_root);
-        self.lane.allocator.free(self.reference_id);
+        self.location.free(self.lane.allocator);
+        self.subject.free(self.lane.allocator);
         self.lane.allocator.destroy(self);
     }
 };
@@ -510,26 +518,16 @@ pub const Lane = struct {
 
         const job = try self.allocator.create(Job);
         errdefer self.allocator.destroy(job);
-        const reference_id = try self.allocator.dupe(u8, input.reference_id);
-        errdefer self.allocator.free(reference_id);
-        const workspace_root = try self.allocator.dupe(u8, input.workspace_root);
-        errdefer self.allocator.free(workspace_root);
-        const relative_path = try self.allocator.dupe(u8, input.relative_path);
-        errdefer self.allocator.free(relative_path);
+        const subject = try input.subject.clone(self.allocator);
+        errdefer subject.free(self.allocator);
+        const location = try input.location.clone(self.allocator);
+        errdefer location.free(self.allocator);
         job.* = .{
-            .source = input.source,
-            .generated_video = input.generated_video,
+            .subject = subject,
+            .location = location,
             .lane = self,
             .completion_id = input.completion_id,
-            .attachment_id = input.attachment_id,
             .created_at = .now(self.io, .awake),
-            .task_id = input.task_id,
-            .run_id = input.run_id,
-            .workspace_id = input.workspace_id,
-            .workspace_epoch = input.workspace_epoch,
-            .reference_id = reference_id,
-            .workspace_root = workspace_root,
-            .relative_path = relative_path,
             .max_bytes = input.max_bytes,
             .max_lines = input.max_lines,
             .max_line_bytes = input.max_line_bytes,
@@ -589,18 +587,10 @@ pub const Lane = struct {
         return .{
             .job = job,
             .completion = .{
-                .source = job.source,
-                .generated_video = job.generated_video,
+                .subject = job.subject,
+                .location = job.location,
                 .entries = job.entries[0..job.entry_count],
                 .completion_id = job.completion_id,
-                .attachment_id = job.attachment_id,
-                .task_id = job.task_id,
-                .run_id = job.run_id,
-                .workspace_id = job.workspace_id,
-                .workspace_epoch = job.workspace_epoch,
-                .reference_id = job.reference_id,
-                .workspace_root = job.workspace_root,
-                .relative_path = job.relative_path,
                 .state = job.state,
                 .content = job.content,
                 .image_info = job.image_info,
@@ -760,6 +750,19 @@ test "file preview workspace paths reject traversal absolute paths controls and 
     try std.testing.expect(validWorkspacePath("docs/中文.md", false));
 }
 
+const test_reference: Subject = .{ .file = .{ .reference = .{ .task_id = 1, .run_id = 1, .id = "ref" } } };
+
+fn testInput(subject: Subject, root: []const u8, relative: []const u8) Input {
+    return .{
+        .subject = subject,
+        .location = .{ .workspace_id = 1, .workspace_epoch = 1, .root = root, .relative = relative },
+        .completion_id = 1,
+        .max_bytes = 1024,
+        .max_lines = 100,
+        .max_line_bytes = 1024,
+    };
+}
+
 test "file preview workspace directory reads children on demand and opens unreferenced files" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -781,24 +784,19 @@ test "file preview workspace directory reads children on demand and opens unrefe
         lane.stopAdmission();
         lane.deinit();
     }
-    var input: Input = .{ .source = .directory, .completion_id = 1, .task_id = 1, .run_id = 0, .workspace_id = 1, .workspace_epoch = 1, .reference_id = "", .workspace_root = root, .relative_path = "", .max_bytes = 1024, .max_lines = 20, .max_line_bytes = 1024 };
-    try lane.begin(input);
+    try lane.begin(testInput(.{ .directory = .{ .task_id = 1, .workspace_id = 1, .workspace_epoch = 1, .path = "" } }, root, ""));
     const listing = lane.take().?;
     try std.testing.expectEqual(State.ready, listing.completion.state);
     try std.testing.expectEqual(@as(usize, 1), listing.completion.entries.len);
     try std.testing.expectEqualStrings("docs", listing.completion.entries[0].name);
     try std.testing.expectEqual(.directory, listing.completion.entries[0].kind);
     lane.release(listing);
-    input.source = .workspace;
-    input.relative_path = "docs/unreferenced.txt";
-    try lane.begin(input);
+    try lane.begin(testInput(.{ .file = .{ .workspace = .{ .task_id = 1, .workspace_id = 1, .workspace_epoch = 1, .path = "docs/unreferenced.txt" } } }, root, "docs/unreferenced.txt"));
     const file = lane.take().?;
     try std.testing.expectEqual(State.ready, file.completion.state);
     try std.testing.expectEqualStrings("workspace content", file.completion.content);
     lane.release(file);
-    input.source = .directory;
-    input.relative_path = "../outside";
-    try lane.begin(input);
+    try lane.begin(testInput(.{ .directory = .{ .task_id = 1, .workspace_id = 1, .workspace_epoch = 1, .path = "../outside" } }, root, "../outside"));
     const denied = lane.take().?;
     try std.testing.expectEqual(State.restricted, denied.completion.state);
     lane.release(denied);
@@ -854,19 +852,12 @@ test "file preview lane classifies bounded text empty and unsafe files" {
         .{ @as(u64, 1), "text.txt", @as(usize, 5) },
         .{ @as(u64, 2), "unsafe.txt", @as(usize, 64) },
         .{ @as(u64, 3), "empty.txt", @as(usize, 64) },
-    }) |entry| try lane.begin(.{
-        .completion_id = entry[0],
-        .task_id = 11,
-        .run_id = 12,
-        .workspace_id = 13,
-        .workspace_epoch = 14,
-        .reference_id = "ref",
-        .workspace_root = root_storage[0..root_len],
-        .relative_path = entry[1],
-        .max_bytes = entry[2],
-        .max_lines = 100,
-        .max_line_bytes = 100,
-    });
+    }) |entry| {
+        var input = testInput(test_reference, root_storage[0..root_len], entry[1]);
+        input.completion_id = entry[0];
+        input.max_bytes = entry[2];
+        try lane.begin(input);
+    }
 
     try std.testing.expectEqual(@as(usize, 3), wake.count.load(.acquire));
     var seen: [3]bool = @splat(false);
@@ -932,7 +923,10 @@ test "file preview image source is bounded and malformed containers are not read
         lane.deinit();
     }
     for ([_][]const u8{ "small.jpg", "large.png", "animated.webp" }, 0..) |path, index| {
-        try lane.begin(.{ .completion_id = index + 1, .task_id = 1, .run_id = 1, .workspace_id = 1, .workspace_epoch = 1, .reference_id = "ref", .workspace_root = root, .relative_path = path, .max_bytes = 2, .max_lines = 10, .max_line_bytes = 10 });
+        var input = testInput(test_reference, root, path);
+        input.completion_id = index + 1;
+        input.max_bytes = 2;
+        try lane.begin(input);
         const taken = lane.take().?;
         defer lane.release(taken);
         if (index == 0) {
@@ -972,7 +966,9 @@ test "two retained image buffers do not take text capacity and busy retains no b
     }
     var held: [2]Taken = undefined;
     for (0..4) |index| {
-        try lane.begin(.{ .completion_id = index + 1, .task_id = 1, .run_id = 1, .workspace_id = 1, .workspace_epoch = 1, .reference_id = "ref", .workspace_root = root, .relative_path = if (index == 3) "text.txt" else "image.jpg", .max_bytes = 64, .max_lines = 10, .max_line_bytes = 64 });
+        var input = testInput(test_reference, root, if (index == 3) "text.txt" else "image.jpg");
+        input.completion_id = index + 1;
+        try lane.begin(input);
         const taken = lane.take().?;
         if (index < 2) {
             try std.testing.expectEqual(State.ready, taken.completion.state);
@@ -1009,7 +1005,9 @@ test "cancelled queued reads publish once without opening or reserving an image"
         lane.stopAdmission();
         lane.deinit();
     }
-    try lane.begin(.{ .completion_id = 17, .task_id = 1, .run_id = 1, .workspace_id = 1, .workspace_epoch = 1, .reference_id = "ref", .workspace_root = "not-a-real-root", .relative_path = "not-opened.jpg", .max_bytes = 64, .max_lines = 10, .max_line_bytes = 64 });
+    var input = testInput(test_reference, "not-a-real-root", "not-opened.jpg");
+    input.completion_id = 17;
+    try lane.begin(input);
     try std.testing.expect(lane.cancelRequest(17));
     const job = context.job.?;
     job.execute_fn(job.context);

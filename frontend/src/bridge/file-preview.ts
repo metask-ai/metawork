@@ -10,6 +10,7 @@ import type {
   FilePreview,
   FilePreviewLoadOptions,
   FilePreviewResponse,
+  FileTarget,
   MediaTarget,
   FilePreviewVideo,
   WorkspaceDirectory,
@@ -133,12 +134,10 @@ export class FilePreviewLoader {
     });
   }
   load(
-    taskId: string,
-    runId: string,
-    fileReferenceId: string,
+    target: FileTarget,
     options: FilePreviewLoadOptions = {},
   ): Promise<FilePreview> {
-    return this.loadTarget(taskId, { runId, fileReferenceId }, options);
+    return this.loadTarget(commands.previewFile, target, options);
   }
   /// The viewer tier for a registered image: the original, under the same
   /// grant, chunk transfer, capacity and security rules as any other preview.
@@ -146,7 +145,7 @@ export class FilePreviewLoader {
     target: MediaTarget,
     options: FilePreviewLoadOptions = {},
   ): Promise<FilePreview> {
-    return this.loadTarget(null, { media: target }, options);
+    return this.loadTarget(commands.mediaPreview, target, options);
   }
   /// The thumbnail tier: one request, one response, no Host grant to release.
   /// The derived pixels register in the same image pool, so the security epoch
@@ -224,19 +223,6 @@ export class FilePreviewLoader {
       options.signal?.removeEventListener("abort", abort);
     }
   }
-  loadWorkspace(
-    taskId: string,
-    workspaceId: string,
-    workspaceEpoch: string,
-    path: string,
-    options: FilePreviewLoadOptions = {},
-  ): Promise<FilePreview> {
-    return this.loadTarget(
-      taskId,
-      { workspaceId, workspaceEpoch, path },
-      options,
-    );
-  }
   async listDirectory(
     taskId: string,
     workspaceId: string,
@@ -300,11 +286,8 @@ export class FilePreviewLoader {
     }
   }
   private async loadTarget(
-    taskId: string | null,
-    target:
-      | { runId: string; fileReferenceId: string }
-      | { workspaceId: string; workspaceEpoch: string; path: string }
-      | { media: MediaTarget },
+    command: typeof commands.previewFile | typeof commands.mediaPreview,
+    target: FileTarget | MediaTarget,
     options: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
     const controller = new AbortController();
@@ -354,16 +337,7 @@ export class FilePreviewLoader {
         signal.addEventListener("abort", cancelHost, { once: true });
         try {
           const response = decodeFilePreview(
-            await this.invoke(
-              "media" in target
-                ? commands.mediaPreview
-                : "runId" in target
-                  ? commands.previewFile
-                  : commands.previewWorkspaceFile,
-              "media" in target
-                ? { ...key, target: target.media }
-                : { ...key, taskId, ...target },
-            ),
+            await this.invoke(command, { ...key, target }),
           );
           releasePreparation();
           check(signal);

@@ -67,7 +67,6 @@ export const commands = {
   readRunTools: "metawork.tasks.tools",
   previewFile: "metawork.files.preview",
   listDirectory: "metawork.files.listDirectory",
-  previewWorkspaceFile: "metawork.files.previewWorkspace",
   readPreviewImage: "metawork.files.preview.readImageChunk",
   readPreviewVideo: "metawork.files.preview.readVideoChunk",
   releasePreview: "metawork.files.preview.release",

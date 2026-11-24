@@ -36,6 +36,7 @@ import type {
   WorkspaceChoice,
   AttachmentThumbnailResult,
   FilePreview,
+  FileTarget,
   FilePreviewLoadOptions,
   MediaTarget,
   FileChangeDiffResult,
@@ -597,12 +598,10 @@ export class BridgeClient {
     return page;
   }
   previewFile(
-    taskId: string,
-    runId: string,
-    fileReferenceId: string,
+    target: FileTarget,
     options?: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
-    return this.previews.load(taskId, runId, fileReferenceId, options);
+    return this.previews.load(target, options);
   }
   /// The viewer tier for a registered image, draft or sent.
   previewAttachment(
@@ -639,21 +638,6 @@ export class BridgeClient {
     options?: FilePreviewLoadOptions,
   ) {
     return this.previews.listDirectory(
-      taskId,
-      workspaceId,
-      workspaceEpoch,
-      path,
-      options,
-    );
-  }
-  previewWorkspaceFile(
-    taskId: string,
-    workspaceId: string,
-    workspaceEpoch: string,
-    path: string,
-    options?: FilePreviewLoadOptions,
-  ) {
-    return this.previews.loadWorkspace(
       taskId,
       workspaceId,
       workspaceEpoch,

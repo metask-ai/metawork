@@ -22,7 +22,7 @@ const attachment_grant = @import("attachment_grant.zig");
 const notification_text = @import("notification_text.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 27;
+const async_product_handler_count = 26;
 const output_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
@@ -585,7 +585,6 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[8] = .{ .name = commands.release_preview, .context = self, .invoke_fn = releasePreview };
         self.registered_async_handlers[9] = .{ .name = commands.output_action, .context = self, .invoke_fn = outputAction };
         self.registered_async_handlers[10] = .{ .name = commands.list_directory, .context = self, .invoke_fn = listDirectory };
-        self.registered_async_handlers[11] = .{ .name = commands.preview_workspace_file, .context = self, .invoke_fn = previewWorkspaceFile };
         self.registered_async_handlers[12] = .{ .name = commands.choose_workspace, .context = self, .invoke_fn = chooseWorkspace };
         self.registered_async_handlers[13] = .{ .name = commands.choose_automatic_workspace_root, .context = self, .invoke_fn = chooseAutomaticWorkspaceRoot };
         self.registered_async_handlers[14] = .{ .name = commands.choose_skill_import, .context = self, .invoke_fn = chooseSkillImport };
@@ -600,7 +599,7 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[23] = .{ .name = commands.inbox_read_task, .context = self, .invoke_fn = readInboxTask };
         self.registered_async_handlers[24] = .{ .name = commands.inbox_open_file, .context = self, .invoke_fn = openInboxFile };
         self.registered_async_handlers[25] = .{ .name = commands.inbox_send, .context = self, .invoke_fn = sendInboxMessage };
-        self.registered_async_handlers[26] = .{ .name = commands.inbox_list_people, .context = self, .invoke_fn = listInboxPeople };
+        self.registered_async_handlers[11] = .{ .name = commands.inbox_list_people, .context = self, .invoke_fn = listInboxPeople };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -1626,10 +1625,8 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayload(handlers.FilePreviewRequest, invocation.request.payload);
         defer parsed.deinit();
         const key = try self.requirePreviewKey(invocation, parsed.value.generation, parsed.value.previewId);
-        if (key.preview_id <= self.preview_high_water or parsed.value.fileReferenceId.len == 0 or parsed.value.fileReferenceId.len > 128) return error.InvalidBridgePayload;
+        if (key.preview_id <= self.preview_high_water) return error.InvalidBridgePayload;
         self.preview_high_water = key.preview_id;
-        const task_id = try handlers.parseWireId(parsed.value.taskId);
-        const run_id = try handlers.parseWireId(parsed.value.runId);
         const control = try self.requireProductControl();
         const id = self.reserveFilePreview(responder, invocation.request.id) orelse {
             respondFilePreview(responder, invocation.request.id, .busy, "", false, false, null);
@@ -1641,30 +1638,24 @@ pub const Dispatcher = struct {
             slot.window_id = invocation.source.window_id;
             break;
         };
-        switch (control.beginFilePreview(id, task_id, run_id, parsed.value.fileReferenceId)) {
+        switch (control.beginFilePreview(id, parsed.value.target.value)) {
             .queued => self.updatePreviewTimer(),
             .immediate => |state| self.completeFilePreview(.{ .completion_id = id, .state = state, .content = "", .truncated = false, .redacted = false }),
         }
     }
     fn listDirectory(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        self.beginWorkspaceFile(invocation, responder, true) catch {
+        self.beginListDirectory(invocation, responder) catch {
             respondDirectory(responder, invocation.request.id, .failed, &.{}, false, false);
         };
     }
-    fn previewWorkspaceFile(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        self.beginWorkspaceFile(invocation, responder, false) catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, null);
-        };
-    }
-    fn beginWorkspaceFile(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder, directory: bool) !void {
+    fn beginListDirectory(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        var parsed = try handlers.parsePayload(handlers.WorkspaceFileRequest, invocation.request.payload);
+        var parsed = try handlers.parsePayload(handlers.ListDirectoryRequest, invocation.request.payload);
         defer parsed.deinit();
         const key = try self.requirePreviewKey(invocation, parsed.value.generation, parsed.value.previewId);
-        if (key.preview_id <= self.preview_high_water or parsed.value.path.len > 4096) return error.InvalidBridgePayload;
+        if (key.preview_id <= self.preview_high_water or parsed.value.path.len > product_control.max_file_target_path_bytes) return error.InvalidBridgePayload;
         self.preview_high_water = key.preview_id;
         const task_id = try handlers.parseWireId(parsed.value.taskId);
         if (task_id == 0) return error.InvalidBridgePayload;
@@ -1672,17 +1663,17 @@ pub const Dispatcher = struct {
         const workspace_epoch = try handlers.parseWireId(parsed.value.workspaceEpoch);
         const control = try self.requireProductControl();
         const id = self.reserveFilePreview(responder, invocation.request.id) orelse {
-            if (directory) respondDirectory(responder, invocation.request.id, .busy, &.{}, false, false) else respondFilePreview(responder, invocation.request.id, .busy, "", false, false, null);
+            respondDirectory(responder, invocation.request.id, .busy, &.{}, false, false);
             return;
         };
         for (&self.preview_in_flight) |*slot| if (slot.active and slot.completion_id == id) {
             slot.generation = key.generation;
             slot.preview_id = key.preview_id;
             slot.window_id = invocation.source.window_id;
-            slot.directory = directory;
+            slot.directory = true;
             break;
         };
-        switch (control.beginWorkspaceFile(id, task_id, workspace_id, workspace_epoch, parsed.value.path, directory)) {
+        switch (control.beginDirectory(id, .{ .task_id = task_id, .workspace_id = workspace_id, .workspace_epoch = workspace_epoch, .path = parsed.value.path })) {
             .queued => self.updatePreviewTimer(),
             .immediate => |state| self.completeFilePreview(.{ .completion_id = id, .state = state, .content = "", .truncated = false, .redacted = false }),
         }
@@ -7325,10 +7316,10 @@ test "file preview native grants bind authority and cancellation and expire with
     var released: Capture = .{ .control = control, .released_check = true };
     defer released.deinit();
     try released.invoke(native, commands.release_preview, "{\"generation\":\"1\",\"previewId\":\"1\"}");
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"1\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"state\":\"error\"") != null);
     try std.testing.expect(!control.hasFilePreviews());
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"2\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     try opened.wait(&boundary, 2);
     var descriptor = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, opened.response.?, .{});
     defer descriptor.deinit();
@@ -7353,33 +7344,33 @@ test "file preview native grants bind authority and cancellation and expire with
     try std.testing.expectEqualStrings("{\"state\":\"stale_security\"}", stale);
     try released.invoke(native, commands.release_preview, "{\"generation\":\"1\",\"previewId\":\"2\"}");
     try std.testing.expect(!control.hasFilePreviews());
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"3\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"3\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     try released.invoke(native, commands.release_preview, "{\"generation\":\"1\",\"previewId\":\"3\"}");
     try opened.wait(&boundary, 3);
     try std.testing.expectEqual(@as(usize, 3), released.calls);
     try std.testing.expect(!control.hasFilePreviews());
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"4\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"4\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     try opened.wait(&boundary, 4);
     product_control.TestSupport.expirePreview(control, boundary.preview_grants[0].?.media.id);
     try std.testing.expect(boundary.onTimer(preview_timer_id));
     try std.testing.expect(!control.hasFilePreviews());
     for (boundary.preview_grants) |entry| try std.testing.expect(entry == null);
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"5\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"5\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     try opened.wait(&boundary, 5);
     try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"image\"") != null);
     boundary.breakConnection();
     try std.testing.expect(!control.hasFilePreviews());
     _ = try boundary.delivery.connect(3, boundary.transport());
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"6\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"6\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     try opened.wait(&boundary, 6);
     try opened.invoke(native, commands.list_directory, "{\"generation\":\"2\",\"previewId\":\"7\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"\"}");
     try opened.wait(&boundary, 7);
     try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"entries\":[{\"name\":\"image.jpg\",\"kind\":\"file\"}]") != null);
-    try opened.invoke(native, commands.preview_workspace_file, "{\"generation\":\"2\",\"previewId\":\"8\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"image.jpg\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"8\",\"target\":{\"kind\":\"workspace\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"image.jpg\"}}");
     try opened.wait(&boundary, 8);
     try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"image\"") != null);
     try released.invoke(native, commands.release_preview, "{\"generation\":\"2\",\"previewId\":\"8\"}");
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"9\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"9\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     control.beginShutdown();
     boundary.stopIngress();
     control.shutdownFilePreviewExecutor();

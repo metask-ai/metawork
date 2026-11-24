@@ -4,13 +4,12 @@ import type {
   FilePreview,
   FileReferenceView,
   FilePreviewLoadOptions,
+  FileTarget,
 } from "../../bridge/contracts.ts";
 import { useI18n } from "../../i18n/context.ts";
 
 export type FilePreviewLoader = (
-  taskId: string,
-  runId: string,
-  referenceId: string,
+  target: FileTarget,
   options?: FilePreviewLoadOptions,
 ) => Promise<FilePreview>;
 
@@ -53,10 +52,10 @@ export function GeneratedImagePreview({
       started = true;
       controller = new AbortController();
       const requestVersion = ++version;
-      void load!(taskId, runId, reference.id, {
-        signal: controller.signal,
-        priority: "prefetch",
-      }).then(
+      void load!(
+        { kind: "reference", taskId, runId, fileReferenceId: reference.id },
+        { signal: controller.signal, priority: "prefetch" },
+      ).then(
         (value) => {
           if (current && requestVersion === version) {
             owned = value;

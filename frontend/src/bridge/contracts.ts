@@ -385,6 +385,23 @@ export type FilePreviewResponse = Omit<
     securityEpoch: string;
   };
 };
+/// One Workspace file, in the shape its kind declares: a file a Run already
+/// refers to, or a path in the Task's Workspace. The Host alone decides which
+/// file that is; no kind carries an absolute path.
+export type FileTarget =
+  | {
+      kind: "reference";
+      taskId: string;
+      runId: string;
+      fileReferenceId: string;
+    }
+  | {
+      kind: "workspace";
+      taskId: string;
+      workspaceId: string;
+      workspaceEpoch: string;
+      path: string;
+    };
 /// A registered media target, in the shape its kind declares. A draft is owned
 /// by the staged grant that issued its token; a sent image is owned by the
 /// message it was accepted with, which is addressed by the Task, the message

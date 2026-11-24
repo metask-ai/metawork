@@ -199,21 +199,32 @@ response result 精确为 `{ generation, requestId, state, securityEpoch, revisi
 
 inbox 的 command 都要求绑定窗口与主线程；格式错误、多余字段、连接代不符、零 `requestId`、非法 `page`、锚点与 `page` 不配、id 为点段、`peerId` 与 `username` 不是恰好一个、空文本或非法 `requestKey` 时返回 handler failure，不透露消息。Bridge 连接断开或重连时，Host 立即以 `superseded` 回答所有未决的请求，之后到达的结果不再发送。
 
+## File target
+
+工作区文件在 Bridge 上只有一种身份 `FileTarget`，按 `kind` 精确取下列两种形状之一：
+
+```json
+{ "kind": "reference", "taskId": "17", "runId": "23", "fileReferenceId": "file-17-1-1-1" }
+{ "kind": "workspace", "taskId": "17", "workspaceId": "2", "workspaceEpoch": "3", "path": "docs/说明.md" }
+```
+
+每种形状的字段均不可省略、为 null 或增加替代字段，未知 `kind` 直接拒绝；各 id 与 epoch 是非零 canonical decimal `u64` string，`fileReferenceId` 是 1–128 bytes 的 opaque identity。`reference` 是该 Run 的文件引用，Host 只在精确 Task + Run 内解析，不做全局 reference id 扫描。`workspace` 是该 Task 所属工作区内的一个文件，`path` 只接受 UTF-8、最多 4096 bytes、最多 64 段的 `/` 分隔工作区相对路径，不接受空路径、空段、`.`、`..`、反斜杠、冒号、控制字符或绝对路径。Renderer 永不提交物理根路径、绝对路径、URI、shell command、range、Tool name 或 AgentCore handle。
+
+两种形状由 Product Control 在一处解析成工作区 id、epoch、根与相对路径，解析在主线程进行且不读文件。任务不存在或正在删除、Run 不存在或已被取代、引用不存在时为 `missing`；工作区未授权或根不一致、epoch 不符、Task 不属于该工作区、路径规则不符、引用的绝对路径不在根内、路径或根含已知凭据时为 `restricted`；URI 引用为 `unsupported`。worker 完成后以同一身份再解析一次，结果与接纳时不同即 `restricted`，之后才交付任何内容。
+
 ## File preview command
 
 `metawork.files.preview` 是 revision 1 command catalog 中的异步 command，原地 hard cut 使用 Native SDK async registry；它不出现在同步 handler registry。request 精确为：
 
 ```json
 {
-  "taskId": "17",
-  "runId": "23",
-  "fileReferenceId": "task:17:run:23:file:1",
   "generation": "1",
-  "previewId": "1"
+  "previewId": "1",
+  "target": { "kind": "reference", "taskId": "17", "runId": "23", "fileReferenceId": "file-17-1-1-1" }
 }
 ```
 
-五个字段均不可省略或增加替代字段；Task/Run、connection generation 和递增 previewId 必须是 canonical decimal `u64`，reference id 必须是 1–128 bytes 的 opaque identity。Renderer 永不提交文件系统路径、URI、shell command、range、Tool name 或 AgentCore handle。Host 只在精确 Task + Run 内解析 reference，不做全局 reference id 扫描。
+三个字段均不可省略或增加替代字段；connection generation 和递增 previewId 必须是 canonical decimal `u64`，target 是一个 [File target](#file-target)。
 
 response result 精确为：
 
@@ -228,7 +239,7 @@ response result 精确为：
 
 `loading` 只属于 Renderer 临时状态，不进入 wire。仅 `ready` 可以携带正文与 true 的 `truncated/redacted`；其他状态必须返回空 `content` 和两个 false。`unsupported` 可以附带 `reason: "image_limit" | "animated_image"`。`changing` 表示同一次有界读取的 before/after metadata 连续两次不稳定，不是 FileChange observation。Host 结果编码必须容纳 256 KiB 正文在 JSON escaping 后仍落在 Native SDK 1 MiB async response 上限内；容量不足独立返回 `busy`，解析、authority 或 shutdown failure 以一次 terminal result 收口，不悬挂 responder。
 
-Product Control 使用独立 2-worker、最多 8 个 in-flight 的 File Preview lane 执行 no-follow、root-contained、regular-file-only 的有界读取；worker 不持有 Product Control/Bridge/Renderer。图片类型及实际大小识别后才在 lane 锁内预留原图额度，文本不占图片槽，锁内不执行文件 IO。主线程交付前重新校验 Task、Run、reference locator、Workspace id/epoch/root/authorization，并有界分步扫描当前及历史 Task execution credential（含分步边界及全部尾部字节）。文本仅在 callback 期间借用；图片由 Product 保留不可变原图，释放时 secure-zero。正文不进入 Snapshot、Task persistence、日志或磁盘缓存。
+Product Control 使用独立 2-worker、最多 8 个 in-flight 的 File Preview lane 执行 no-follow、root-contained、regular-file-only 的有界读取；worker 不持有 Product Control/Bridge/Renderer。图片类型及实际大小识别后才在 lane 锁内预留原图额度，文本不占图片槽，锁内不执行文件 IO。主线程交付前重新解析同一 target，并有界分步扫描当前及历史 Task execution credential（含分步边界及全部尾部字节）。文本仅在 callback 期间借用；图片由 Product 保留不可变原图，释放时 secure-zero。正文不进入 Snapshot、Task persistence、日志或磁盘缓存。
 
 同一 `metawork.files.preview` 接纳静态 PNG、JPEG 和静态 WebP；不解码、不缩小、不转码。图片成功响应保留 `state: "ready"`、空 `content` 与两个 false flag，额外且精确提供 `image: { token, mediaType, sizeBytes, chunkBytes, width, height, securityEpoch }`。token 是 24 随机字节的小写十六进制串，三个 byte/epoch 字段使用 canonical decimal u64 string，尺寸使用正整数。mediaType 只允许 `image/png | image/jpeg | image/webp`；chunkBytes 固定 `"262143"`。文本响应不含 image；非 ready 响应不得携带图片。容器结构校验允许有效主图或 RIFF 容器之后的尾部数据，但完整原件仍受大小及凭据检查；APNG/动画 WebP 拒绝。
 
@@ -248,17 +259,17 @@ Tool `fileRefs[]` 中的可信 Host 生视频引用精确增加 `generatedVideo:
 
 ## Workspace file browsing commands
 
-`metawork.files.listDirectory` 与 `metawork.files.previewWorkspace` 是异步 command，精确接收 `{ generation, previewId, taskId, workspaceId, workspaceEpoch, path }`。前五项是 canonical decimal u64 string。两种请求均需要非零 Task identity，并校验该 Task 的 Workspace 归属和授权。`previewId` 与原 File Preview command 共享连接内单调递增空间；`path` 只接受 UTF-8、最多 4096 bytes、最多 64 段的 `/` 分隔工作区相对路径，不接受空段、`.`、`..`、反斜杠、冒号、控制字符或绝对路径。仅列根目录可使用空 `path`。这些 command 不接受 Run/reference identity、物理根路径或 URI；不改变原引用预览 command 的 request。
+`metawork.files.listDirectory` 是异步 command，精确接收 `{ generation, previewId, taskId, workspaceId, workspaceEpoch, path }`。前五项是 canonical decimal u64 string，Task identity 非零。`previewId` 与 File preview command 共享连接内单调递增空间；`path` 的规则与 `workspace` 文件身份相同，只有列目录可以用空 `path` 表示根目录。它不接受 Run/reference identity、物理根路径或 URI。
 
-Host 校验当前工作区 epoch 与授权。带 Task identity 时还校验其所属工作区。校验通过后向同一 File Preview lane 提交 owned 输入。目录与工作区路径逐段拒绝 symlink/reparse 跳转；目录只列一层普通文件与目录，不返回链接或其他特殊文件。worker 在最多观察 4096 个条目、保留 512 项或累计 64 KiB 文件名时停止，达到边界以 `truncated` 说明，不能声称列出全部文件。
+Host 以 [File target](#file-target) 的同一套工作区规则解析目录，通过后向同一 File Preview lane 提交 owned 输入。目录与工作区路径逐段拒绝 symlink/reparse 跳转；目录只列一层普通文件与目录，不返回链接或其他特殊文件。worker 在最多观察 4096 个条目、保留 512 项或累计 64 KiB 文件名时停止，达到边界以 `truncated` 说明，不能声称列出全部文件。
 
-目录精确返回 `{ state: "ready" | "busy" | "missing" | "restricted" | "error", entries: [{ name, kind: "file" | "directory" }], truncated, redacted }`。`name` 是单个合法路径段；Renderer 不从展示文字扩大读取权限。仅 ready 可包含 entries 和 true flags。已知凭据命中的名称整体省略并标记 redacted；结果交付前重新验证相同的 Workspace 授权及适用的 Task 归属，失效时整份结果清空。工作区文件预览返回与原引用预览相同的文本/图片结果，复用其分块、release、连接绑定、安全检查、超时及资源额度；每次刷新独立重新授权。
+目录精确返回 `{ state: "ready" | "busy" | "missing" | "restricted" | "error", entries: [{ name, kind: "file" | "directory" }], truncated, redacted }`。`name` 是单个合法路径段；Renderer 不从展示文字扩大读取权限。仅 ready 可包含 entries 和 true flags。已知凭据命中的名称整体省略并标记 redacted；结果交付前以同一身份重新解析，失效时整份结果清空。每次刷新独立重新授权。
 
 Renderer 的目录缓存与请求绑定 Task、Workspace id/epoch、连接和安全代次；关闭 Task、工作区失效或换代后旧结果不可显示。隐藏视图可保留同一有效 Task 的目录数据，不自动轮询。每个 Task 会话最多缓存 64 个目录，超限明确提示用户刷新；刷新清空缓存及展开状态。目录与打开文件的请求共享准备并发和取消链路，不新增持久读取授权。
 
 ## Attachment media commands
 
-可预览媒体按来源注册，每一类身份自带授权依据；wire 上既有 File preview command 的五字段 request 一字不改，新来源使用自己的 command 并精确接收一个 typed target。在册的 target 有三种，分别对应草稿、已进入 Run 的消息和仍在等待的提交：
+可预览媒体按来源注册，每一类身份自带授权依据；工作区文件使用 File preview command，附件这类不在工作区内的来源使用自己的 command 并精确接收一个 typed target。在册的 target 有三种，分别对应草稿、已进入 Run 的消息和仍在等待的提交：
 
 ```json
 {

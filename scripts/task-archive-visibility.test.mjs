@@ -2589,14 +2589,10 @@ test("opening archived history with revoked directory never requests its files",
       return { state: "error", entries: [], truncated: false, redacted: false };
     },
   );
-  ctx.mock.method(
-    BridgeClient.prototype,
-    "previewWorkspaceFile",
-    async (...args) => {
-      requests.push(args);
-      return { state: "missing" };
-    },
-  );
+  ctx.mock.method(BridgeClient.prototype, "previewFile", async (...args) => {
+    requests.push(args);
+    return { state: "missing" };
+  });
   await fixture.openArchives();
   await fixture.user.click(
     screen.getByRole("button", { name: "Earlier archive", exact: true }),

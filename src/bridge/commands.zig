@@ -69,7 +69,6 @@ pub const output_action_cancel = "metawork.outputs.cancel";
 pub const read_run_tools = "metawork.tasks.tools";
 pub const preview_file = "metawork.files.preview";
 pub const list_directory = "metawork.files.listDirectory";
-pub const preview_workspace_file = "metawork.files.previewWorkspace";
 pub const read_preview_image = "metawork.files.preview.readImageChunk";
 pub const read_preview_video = "metawork.files.preview.readVideoChunk";
 pub const release_preview = "metawork.files.preview.release";
@@ -201,7 +200,6 @@ pub const product = [_][]const u8{
     read_run_tools,
     preview_file,
     list_directory,
-    preview_workspace_file,
     read_preview_image,
     read_preview_video,
     release_preview,

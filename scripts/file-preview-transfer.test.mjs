@@ -35,7 +35,7 @@ test("generated MP4 shares file preview admission and revokes its source on secu
     }),
   );
   const calls = [];
-  const fileReferenceId = "file-3-1-1-1";
+  const target = referenceTarget("7", "file-3-1-1-1");
   const loader = new FilePreviewLoader(
     async (command, payload) => {
       calls.push({ command, payload });
@@ -58,7 +58,7 @@ test("generated MP4 shares file preview admission and revokes its source on secu
     },
     () => "1",
   );
-  const result = await loader.load("3", "7", fileReferenceId);
+  const result = await loader.load(target);
   assert.equal(result.state, "ready");
   assert.deepEqual(
     calls.map((call) => call.command),
@@ -67,15 +67,13 @@ test("generated MP4 shares file preview admission and revokes its source on secu
   assert.deepEqual(calls[0].payload, {
     generation: "1",
     previewId: "1",
-    taskId: "3",
-    runId: "7",
-    fileReferenceId,
+    target,
   });
   const src = result.video.src;
   const media = await fetch(src);
   assert.equal(media.headers.get("content-type"), "video/mp4");
   assert.deepEqual(Buffer.from(await media.arrayBuffer()), bytes);
-  const second = await loader.load("3", "8", "file-3-2-1-1");
+  const second = await loader.load(referenceTarget("8", "file-3-2-1-1"));
   assert.equal(second.state, "ready");
   assert.equal(result.video.valid(), true);
   const secondSrc = second.video.src;
@@ -85,6 +83,10 @@ test("generated MP4 shares file preview admission and revokes its source on secu
   await assert.rejects(fetch(src));
   await assert.rejects(fetch(secondSrc));
 });
+
+function referenceTarget(runId, fileReferenceId) {
+  return { kind: "reference", taskId: "3", runId, fileReferenceId };
+}
 
 function deferred() {
   let resolve;
@@ -112,7 +114,7 @@ class Host {
     if (command === commands.previewFile || command === commands.mediaPreview) {
       if (this.cancelled.has(payload.previewId))
         return { ...empty, state: "error" };
-      if (payload.fileReferenceId === "text")
+      if (payload.target.fileReferenceId === "text")
         return { ...empty, state: "ready", content: "text is available" };
       if (this.busy > 0) {
         this.busy--;
@@ -159,7 +161,15 @@ class Host {
     };
   }
   load(reference = "image", options) {
-    return this.loader.load("17", "23", reference, options);
+    return this.loader.load(
+      {
+        kind: "reference",
+        taskId: "17",
+        runId: "23",
+        fileReferenceId: reference,
+      },
+      options,
+    );
   }
 }
 
@@ -221,20 +231,18 @@ test("workspace preview and directory reads share request IDs and preserve their
     () => "7",
   );
   await loader.listDirectory("17", "2", "3", "docs");
-  const preview = await loader.loadWorkspace(
-    "17",
-    "2",
-    "3",
-    "docs/unreferenced.md",
-  );
+  const target = {
+    kind: "workspace",
+    taskId: "17",
+    workspaceId: "2",
+    workspaceEpoch: "3",
+    path: "docs/unreferenced.md",
+  };
+  const preview = await loader.load(target);
   assert.equal(preview.content, "workspace file");
   assert.deepEqual(
     calls.map((call) => call.command),
-    [
-      commands.listDirectory,
-      commands.previewWorkspaceFile,
-      commands.releasePreview,
-    ],
+    [commands.listDirectory, commands.previewFile, commands.releasePreview],
   );
   assert.deepEqual(calls[0].payload, {
     generation: "7",
@@ -247,10 +255,7 @@ test("workspace preview and directory reads share request IDs and preserve their
   assert.deepEqual(calls[1].payload, {
     generation: "7",
     previewId: "2",
-    taskId: "17",
-    workspaceId: "2",
-    workspaceEpoch: "3",
-    path: "docs/unreferenced.md",
+    target,
   });
 });
 

@@ -48,10 +48,10 @@ function VideoPlayer({ taskId, runId, referenceId, load }: Props) {
   useEffect(() => {
     const controller = new AbortController();
     let unsubscribe: (() => void) | undefined;
-    void load(taskId, runId, referenceId, {
-      signal: controller.signal,
-      priority: "prefetch",
-    }).then(
+    void load(
+      { kind: "reference", taskId, runId, fileReferenceId: referenceId },
+      { signal: controller.signal, priority: "prefetch" },
+    ).then(
       (result) => {
         if (controller.signal.aborted || !result.video?.valid()) {
           result.release?.();
