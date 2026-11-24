@@ -7,12 +7,15 @@ const skill_enablement = @import("metawork_product_skill").enablement;
 const skill_management = @import("metawork_product_skill").management;
 const product_task = @import("metawork_product_task");
 const history_store = @import("history_store.zig");
+const sqlite = @import("metawork_storage_sqlite");
+const message_store = @import("message_store.zig");
 const app_paths = @import("paths.zig");
 
 pub const Stores = struct {
     allocator: std.mem.Allocator = undefined,
     automatic_workspace_configuration: ?product_control.AutomaticWorkspaceRootConfigurationFileStore = null,
     mcp_configuration: ?mcp_configuration.FileStore = null,
+    inbox: ?*sqlite.Database = null,
     task: ?history_store.Store = null,
     task_restore_failed: bool = true,
     task_restored_history: ?product_task.history.RecoveredState = null,
@@ -50,6 +53,7 @@ pub const Stores = struct {
         if (self.mcp_configuration) |*store| store.quarantine_move = mcp_platform.quarantineMove();
 
         self.task = history_store.Store.init(io, allocator, paths.workbenchDir()) catch null;
+        self.inbox = message_store.open(io, allocator, paths.dataDir()) catch null;
         self.task_restore_failed = self.task == null;
         self.task_restored_history = if (self.task) |*store|
             store.load(allocator) catch failed: {
@@ -125,6 +129,7 @@ pub const Stores = struct {
         if (self.file_change) |*store| store.deinit();
         if (self.attachments) |*store| store.deinit();
         if (self.checkpoint) |*store| store.deinit();
+        if (self.inbox) |db| db.destroy() catch unreachable;
         if (self.task) |*store| store.deinit();
         if (self.mcp_configuration) |*store| store.deinit();
         if (self.automatic_workspace_configuration) |*store| store.deinit();

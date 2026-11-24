@@ -10178,12 +10178,14 @@ pub const Runtime = struct {
             .set_active_fn = inboxSetActive,
             .next_poll_fn = inboxNextPoll,
             .begin_poll_fn = inboxBeginPoll,
+            .messages_marked_read_fn = inboxMessagesMarkedRead,
             .complete_poll_fn = inboxCompletePoll,
             .request_refresh_fn = inboxRequestRefresh,
             .request_earlier_fn = inboxRequestEarlier,
             .begin_list_fn = inboxBeginList,
             .complete_list_fn = inboxCompleteList,
             .knows_peer_fn = inboxKnowsPeer,
+            .set_owner_fn = inboxSetOwner,
             .accepts_fn = inboxAccepts,
             .peer_address_fn = inboxPeerAddress,
             .complete_conversation_fn = inboxCompleteConversation,
@@ -10237,6 +10239,9 @@ pub const Runtime = struct {
         const self = inboxOwner(context);
         self.inboxSettle(self.inbox.completePoll(now_ms, wall_ms, id, completion));
     }
+    fn inboxMessagesMarkedRead(context: *anyopaque, binding: u64) void {
+        inboxOwner(context).inbox.messagesMarkedRead(binding);
+    }
     fn inboxRequestRefresh(context: *anyopaque, now_ms: u64, binding: u64, explicit: bool) inbox.CommandOutcome {
         const self = inboxOwner(context);
         return if (self.shutting_down) .unavailable else self.inbox.requestRefresh(now_ms, binding, explicit);
@@ -10252,13 +10257,17 @@ pub const Runtime = struct {
         self.updateChanged();
         return preparation;
     }
-    fn inboxCompleteList(context: *anyopaque, now_ms: u64, id: u64, kind: inbox.ListKind, completion: inbox.ListCompletion) void {
+    fn inboxCompleteList(context: *anyopaque, now_ms: u64, id: u64, completion: inbox.ListCompletion) void {
         const self = inboxOwner(context);
-        self.inboxSettle(self.inbox.completeList(now_ms, id, kind, completion));
+        self.inboxSettle(self.inbox.completeList(now_ms, id, completion));
     }
     fn inboxKnowsPeer(context: *anyopaque, binding: u64, peer: []const u8) bool {
         const self = inboxOwner(context);
         return !self.shutting_down and self.inbox.knowsPeer(binding, peer);
+    }
+    fn inboxSetOwner(context: *anyopaque, binding: u64, id: inbox.Id) void {
+        const self = inboxOwner(context);
+        self.inboxSettle(self.inbox.setOwner(binding, id));
     }
     fn inboxAccepts(context: *anyopaque, binding: u64) bool {
         const self = inboxOwner(context);
@@ -10268,9 +10277,9 @@ pub const Runtime = struct {
         const self = inboxOwner(context);
         return if (self.shutting_down) null else self.inbox.peerAddress(binding, peer);
     }
-    fn inboxCompleteConversation(context: *anyopaque, binding: u64, peer: []const u8, kind: inbox.ConversationPageKind, messages: []const inbox.Message) void {
+    fn inboxCompleteConversation(context: *anyopaque, binding: u64, peer: []const u8, kind: inbox.ConversationPageKind, messages: []const inbox.Message, username: ?inbox.Name) void {
         const self = inboxOwner(context);
-        self.inboxSettle(self.inbox.completeConversation(binding, peer, kind, messages));
+        self.inboxSettle(self.inbox.completeConversation(binding, peer, kind, messages, username));
     }
     fn inboxStop(context: *anyopaque) void {
         const self = inboxOwner(context);
