@@ -194,6 +194,8 @@ pub const Request = union(enum) {
     send: Send,
     /// `GET /agent/v1/people`: the organization's current members.
     people,
+    /// Authenticated, read-only REST brief. Only data.me is consumed.
+    identity,
 
     pub fn maxBytes(self: Request) usize {
         return switch (self) {
@@ -201,7 +203,7 @@ pub const Request = union(enum) {
             .messages => Limits.messages_bytes,
             .task => Limits.detail_bytes,
             .send => Limits.send_bytes,
-            .people => Limits.people_bytes,
+            .people, .identity => Limits.people_bytes,
         };
     }
 };
@@ -252,6 +254,7 @@ pub fn writeUrl(writer: *std.Io.Writer, base: []const u8, request: Request) std.
         .unread => try writer.writeAll("/open/v1/unread"),
         .send => try writer.writeAll("/agent/v1/notify"),
         .people => try writer.writeAll("/agent/v1/people"),
+        .identity => try writer.writeAll("/agent/v1/brief"),
         .task => |id| {
             try writer.writeAll("/open/v1/tasks/");
             try writeComponent(writer, id);
@@ -332,6 +335,7 @@ pub const Member = struct {
 };
 
 pub const People = struct {
+    owner_id: Id,
     items: []Member,
 
     pub fn deinit(self: *People, allocator: std.mem.Allocator) void {
@@ -340,10 +344,25 @@ pub const People = struct {
     }
 };
 
+pub const MemberIdentity = struct { id: Id, username: Name };
+
+pub fn parseIdentity(allocator: std.mem.Allocator, bytes: []const u8) ParseError!MemberIdentity {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const data = try parseData(arena.allocator(), bytes, Limits.people_bytes);
+    if (data != .object) return error.InvalidResponse;
+    const me = data.object.get("me") orelse return error.InvalidResponse;
+    if (me != .object) return error.InvalidResponse;
+    return .{
+        .id = try idValue(me.object.get("id") orelse return error.InvalidResponse),
+        .username = try Name.init(nonEmptyString(field(me.object, "username")) orelse return error.InvalidResponse),
+    };
+}
+
 /// The members a message can be addressed to. A member without a usable
 /// username cannot be: they are left out. A username listed twice is one
 /// member.
-pub fn parsePeople(allocator: std.mem.Allocator, bytes: []const u8) ParseError!People {
+pub fn parsePeople(allocator: std.mem.Allocator, bytes: []const u8, owner: MemberIdentity) ParseError!People {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const data = try parseData(arena.allocator(), bytes, Limits.people_bytes);
@@ -355,13 +374,14 @@ pub fn parsePeople(allocator: std.mem.Allocator, bytes: []const u8) ParseError!P
     for (list.array.items) |entry| {
         if (entry != .object) continue;
         const username = Name.init(nonEmptyString(field(entry.object, "username")) orelse continue) catch continue;
+        if (username.eql(owner.username.slice())) continue;
         const name = nonEmptyString(field(entry.object, "name")) orelse username.slice();
         const online: ?bool = if (field(entry.object, "online")) |value| if (value == .bool) value.bool else null else null;
         for (members.items) |*seen| {
             if (seen.username.eql(username.slice())) break;
         } else try members.append(allocator, .{ .username = username, .name = .truncated(name), .online = online });
     }
-    return .{ .items = try members.toOwnedSlice(allocator) };
+    return .{ .owner_id = owner.id, .items = try members.toOwnedSlice(allocator) };
 }
 
 /// Resolve a page fetched for this username to its canonical conversation.
@@ -1233,6 +1253,7 @@ pub const Runtime = struct {
     state: State = .unavailable,
     active: bool = false,
     unread_total: ?u64 = null,
+    owner_id: ?Id = null,
     by_peer: std.ArrayList(PeerUnread) = .empty,
     summaries: std.ArrayList(Summary) = .empty,
     rows: std.ArrayList(ConversationView) = .empty,
@@ -1281,6 +1302,7 @@ pub const Runtime = struct {
 
     fn clearData(self: *Runtime) void {
         self.unread_total = null;
+        self.owner_id = null;
         self.by_peer.clearRetainingCapacity();
         self.summaries.clearRetainingCapacity();
         self.list_loaded = false;
@@ -1392,6 +1414,7 @@ pub const Runtime = struct {
             .unread => |unread| {
                 try self.by_peer.resize(self.allocator, unread.by_peer.len);
                 @memcpy(self.by_peer.items, unread.by_peer);
+                _ = self.normalizeSelfUnread();
                 self.unread_total = unread.total;
                 self.state = .ready;
                 self.diagnostic = null;
@@ -1516,6 +1539,33 @@ pub const Runtime = struct {
 
     pub fn accepts(self: *const Runtime, binding: u64) bool {
         return self.available and self.bound and binding == self.binding;
+    }
+
+    /// Unread facts can arrive before the directory identifies this device.
+    pub fn setOwner(self: *Runtime, binding: u64, id: Id) !bool {
+        if (!self.accepts(binding)) return false;
+        self.owner_id = id;
+        if (!self.normalizeSelfUnread()) return false;
+        try self.rebuild();
+        return true;
+    }
+
+    fn normalizeSelfUnread(self: *Runtime) bool {
+        const owner = self.owner_id orelse return false;
+        if (owner.eql(self_peer_id)) return false;
+        for (self.by_peer.items, 0..) |*entry, i| {
+            if (!entry.peer.id.eql(owner.slice())) continue;
+            for (self.by_peer.items) |*other| {
+                if (!other.peer.id.eql(self_peer_id)) continue;
+                other.unread +|= entry.unread;
+                if (entry.last_at_ms) |at| other.last_at_ms = @max(other.last_at_ms orelse 0, at);
+                _ = self.by_peer.swapRemove(i);
+                return true;
+            }
+            entry.peer = selfPeer(entry.peer);
+            return true;
+        }
+        return false;
     }
 
     /// Where a reply in this conversation goes: `me`, or the member's exact
@@ -1825,6 +1875,7 @@ pub const Management = struct {
     begin_list_fn: *const fn (*anyopaque) ?ListPreparation,
     complete_list_fn: *const fn (*anyopaque, u64, u64, ListCompletion) void,
     knows_peer_fn: *const fn (*anyopaque, u64, []const u8) bool,
+    set_owner_fn: *const fn (*anyopaque, u64, Id) void,
     accepts_fn: *const fn (*anyopaque, u64) bool,
     peer_address_fn: *const fn (*anyopaque, u64, []const u8) ?Address,
     complete_conversation_fn: *const fn (*anyopaque, u64, []const u8, ConversationPageKind, []const Message, ?Name) void,
@@ -2056,17 +2107,21 @@ test "a message goes to a username or to me, and its answer is typed" {
 }
 
 test "members are addressable by username, once each; a sent message's conversation is told from MetaTeam's newest message" {
+    const owner = try parseIdentity(testing.allocator, "{\"data\":{\"me\":{\"id\":42,\"name\":\"Ann\",\"username\":\"my_account\"}}}");
+    try testing.expectEqualStrings("42", owner.id.slice());
+    try testing.expectError(error.InvalidResponse, parseIdentity(testing.allocator, "{\"data\":{\"me\":{\"name\":\"Ann\"}}}"));
     var people = try parsePeople(testing.allocator,
-        \\{"data":{"count":4,"people":[{"name":"Ann","username":"ann","role":"dev","online":true,"projects":["a"]},
+        \\{"data":{"people":[{"name":"Ann","username":"my_account"},{"name":"Ann","username":"ann","role":"dev","online":true,"projects":["a"]},
         \\ {"username":"bob"},{"name":"Ann twice","username":"ann"},{"name":"No username"},"bad",{"name":"Cy","username":"cy","online":"yes"}]}}
-    );
+    , owner);
     defer people.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 3), people.items.len);
     try testing.expectEqualStrings("Ann", people.items[0].name.slice());
     try testing.expectEqual(@as(?bool, true), people.items[0].online);
     try testing.expectEqualStrings("bob", people.items[1].name.slice());
     try testing.expect(people.items[2].online == null);
-    try testing.expectError(error.InvalidResponse, parsePeople(testing.allocator, "{\"data\":{\"count\":0}}"));
+    try testing.expectEqualStrings("ann", people.items[0].username.slice());
+    try testing.expectError(error.InvalidResponse, parsePeople(testing.allocator, "{\"data\":{\"count\":0}}", owner));
 
     var messages = try parseMessages(testing.allocator,
         \\{"data":{"messages":[
@@ -2387,6 +2442,33 @@ test "one task or conversation read never changes the connection state" {
     try testing.expect(!validTaskId(".."));
     try testing.expect(!validTaskId("."));
     try testing.expect(validTaskId("13066"));
+}
+
+test "unread messages from the bound account belong to Me, including when identity arrives after a poll" {
+    var runtime = Runtime.init(testing.allocator);
+    defer runtime.deinit();
+    runtime.start(true);
+    _ = try runtime.bind(0, .{ .server_id = "s1", .fingerprint = fingerprint_a });
+    const first_binding = runtime.binding;
+    const owner = try Id.init("owner-id");
+    var unread = try parseUnread(testing.allocator,
+        \\{"data":{"unread":4,"byPeer":[{"peer":{"id":"owner-id","name":"Ann"},"unread":1,"lastAt":20},{"peer":{"id":"me","name":"Ann"},"unread":2,"lastAt":10},{"peer":{"id":"other","name":"Ann"},"unread":1}]}}
+    );
+    defer unread.deinit(testing.allocator);
+    _ = try runtime.completePoll(0, 1, runtime.beginPoll().?, .{ .unread = &unread });
+    try testing.expect(try runtime.setOwner(first_binding, owner));
+    try testing.expectEqual(@as(usize, 2), runtime.view().conversations.len);
+    try testing.expectEqual(@as(u64, 3), runtime.unreadOf("me").?.unread);
+    try testing.expectEqual(@as(?u64, 20), runtime.unreadOf("me").?.last_at_ms);
+    try testing.expectEqual(@as(u64, 1), runtime.unreadOf("other").?.unread);
+    try testing.expect(runtime.unreadOf("owner-id") == null);
+
+    _ = try runtime.completePoll(Limits.poll_interval_ms, 2, runtime.beginPoll().?, .{ .unread = &unread });
+    try testing.expectEqual(@as(u64, 3), runtime.unreadOf("me").?.unread);
+    _ = try runtime.bind(50_000, .{ .server_id = "s2", .fingerprint = fingerprint_b });
+    try testing.expect(!try runtime.setOwner(first_binding, owner));
+    _ = try runtime.completePoll(50_000, 3, runtime.beginPoll().?, .{ .unread = &unread });
+    try testing.expect(runtime.unreadOf("owner-id") != null);
 }
 
 test "a member listed twice is one row" {

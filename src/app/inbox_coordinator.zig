@@ -387,8 +387,13 @@ const Job = struct {
             .people => {
                 const buffer = try self.allocator.alloc(u8, inbox.Limits.people_bytes);
                 defer self.allocator.free(buffer);
+                const brief = (self.fetch(.identity, buffer) catch return self.unusable(.identity, 0)) orelse return;
+                const owner = inbox.parseIdentity(self.allocator, brief) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidResponse => return self.unusable(.identity, brief.len),
+                };
                 const body = (self.fetch(.people, buffer) catch return self.unusable(.people, 0)) orelse return;
-                self.people = inbox.parsePeople(self.allocator, body) catch |err| switch (err) {
+                self.people = inbox.parsePeople(self.allocator, body, owner) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidResponse => return self.unusable(.people, body.len),
                 };
@@ -464,7 +469,7 @@ const Job = struct {
             return null;
         }
         const body = buffer[0..response.body_len];
-        if (request == .unread or request == .messages or request == .people) {
+        if (request == .unread or request == .messages or request == .people or request == .identity) {
             if (responseContainsKey(self.allocator, body, self.key)) {
                 self.unusable(std.meta.activeTag(request), body.len);
                 return null;
@@ -1035,6 +1040,7 @@ pub const Coordinator = struct {
             } else if (!self.management.accepts_fn(self.management.context, work.reply.binding)) {
                 respondPeopleState(work.reply, .stale_binding);
             } else if (job.people) |*people| {
+                self.management.set_owner_fn(self.management.context, work.reply.binding, people.owner_id);
                 if (self.bound.?.directory) |*previous| previous.deinit(self.allocator);
                 self.bound.?.directory = people.*;
                 job.people = null;
@@ -1595,6 +1601,7 @@ const TestManagement = struct {
             .begin_list_fn = beginList,
             .complete_list_fn = completeList,
             .knows_peer_fn = knowsPeer,
+            .set_owner_fn = setOwner,
             .accepts_fn = accepts,
             .peer_address_fn = peerAddress,
             .complete_conversation_fn = completeConversation,
@@ -1645,6 +1652,9 @@ const TestManagement = struct {
     }
     fn knowsPeer(context: *anyopaque, binding: u64, peer: []const u8) bool {
         return of(context).knowsPeer(binding, peer);
+    }
+    fn setOwner(context: *anyopaque, binding: u64, id: inbox.Id) void {
+        _ = of(context).setOwner(binding, id) catch unreachable;
     }
     fn accepts(context: *anyopaque, binding: u64) bool {
         return of(context).accepts(binding);
@@ -1725,6 +1735,7 @@ const TestTransport = struct {
     url_lens: [32]usize = @splat(0),
     count: usize = 0,
     keys_ok: bool = true,
+    identity: []const u8 = "{\"data\":{\"me\":{\"id\":\"u-me\",\"username\":\"my_account\"}}}",
     status: u16 = 200,
     /// Answers for one task or one member's conversation only.
     task_status: u16 = 200,
@@ -1781,6 +1792,7 @@ const TestTransport = struct {
             .messages => self.messages,
             .task => self.task,
             .people => self.people,
+            .identity => self.identity,
             .send => unreachable,
         };
         @memcpy(output[0..body.len], body);
@@ -2677,7 +2689,7 @@ const FakeMetaTeam = struct {
         \\{"data":{"messages":[{"id":"m2","time":"2026-11-23T08:16:08.292Z","direction":"in","from":{"id":"ann-id","username":"ann_u","name":"Ann"},"text":"see the file","taskIds":[9830],"new":true}]}}
     ;
     const file_body = "{\"data\":{\"id\":9830,\"name\":\"api.md\",\"tag\":\"API\",\"size\":7,\"mime\":\"text/markdown\",\"by\":\"Lin\",\"content\":\"# Title\",\"downloadUrl\":\"http://127.0.0.1:1/agent/v1/files/9830/dl?exp=1&sig=ab\",\"webUrl\":\"http://127.0.0.1:1/api/v1/files/9830/content\"}}";
-    const people_body = "{\"data\":{\"count\":2,\"people\":[{\"name\":\"Ann\",\"username\":\"ann_u\",\"online\":true},{\"name\":\"Bob\",\"username\":\"bob\"}]}}";
+    const people_body = "{\"data\":{\"count\":3,\"people\":[{\"name\":\"Ann\",\"username\":\"ann_u\",\"online\":true},{\"name\":\"Bob\",\"username\":\"my_account\"},{\"name\":\"Bob\",\"username\":\"bob\"}]}}";
     const sent_body = "{\"data\":{\"sent\":[\"Ann\"]}}";
 
     fn run(self: *FakeMetaTeam) void {
@@ -2745,6 +2757,8 @@ const FakeMetaTeam = struct {
             ;
         } else if (std.mem.eql(u8, target, "/team/open/v1/tasks/9830"))
             file_body
+        else if (std.mem.eql(u8, target, "/team/agent/v1/brief"))
+            "{\"data\":{\"me\":{\"id\":\"u-me\",\"username\":\"my_account\"},\"unread\":[{\"text\":\"brief-only text\"}]}}"
         else if (std.mem.eql(u8, target, "/team/agent/v1/people"))
             people_body
         else
@@ -2893,6 +2907,8 @@ test "inbox coordinator: against a local MetaTeam over real HTTP, with the key r
     try testing.expect(coordinator.listPeople(responder, "p1", .{ .binding = binding, .request_id = 3 }));
     settle(&coordinator);
     try testing.expect(std.mem.indexOf(u8, capture.last(), "{\"username\":\"bob\",\"name\":\"Bob\",\"online\":null}") != null);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "my_account") == null);
+    try testing.expect(std.mem.indexOf(u8, capture.last(), "brief-only text") == null);
     try testing.expect(coordinator.readTask(responder, "t1", .{ .binding = binding, .request_id = 4, .task = "9830" }));
     settle(&coordinator);
     try testing.expect(std.mem.indexOf(u8, capture.last(), "\"content\":\"# Title\"") != null);

@@ -1029,9 +1029,11 @@ test("switching connections drops the selected member and ignores a late send an
   );
 });
 
-test("the existing Me history sends to its own recipient", async () => {
+test("a namesake remains searchable and the existing Me history has its own recipient", async () => {
   const user = userEvent.setup({ document });
-  const client = fakeClient();
+  const client = fakeClient({
+    people: [{ username: "colleague", name: "Zhu", online: true }],
+  });
   const inbox = view();
   inbox.conversations = [
     {
@@ -1043,6 +1045,10 @@ test("the existing Me history sends to its own recipient", async () => {
     },
   ];
   render(element(client, inbox));
+  await user.type(screen.getByRole("searchbox"), "colleague");
+  assert.ok(await screen.findByRole("button", { name: "Zhu" }));
+  assert.equal(screen.queryByRole("button", { name: "Me" }), null);
+  await user.clear(screen.getByRole("searchbox"));
   await user.click(screen.getByRole("button", { name: "Me" }));
   await user.type(screen.getByRole("textbox", { name: "Message Me" }), "note");
   await user.click(screen.getByRole("button", { name: "Send" }));
