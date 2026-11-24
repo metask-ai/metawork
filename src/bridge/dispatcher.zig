@@ -1051,10 +1051,12 @@ pub const Dispatcher = struct {
         const request_id = try handlers.parseWireId(parsed.value.requestId);
         if (request_id == 0) return error.InvalidBridgePayload;
         const host = self.inbox_host orelse return error.InvalidBridgePayload;
+        if ((parsed.value.peerId == null) == (parsed.value.username == null)) return error.InvalidBridgePayload;
         const request: inbox.ConversationRequest = .{
             .binding = try handlers.parseWireId(parsed.value.binding),
             .request_id = request_id,
-            .peer = parsed.value.peerId,
+            .peer = parsed.value.peerId orelse parsed.value.username.?,
+            .by_username = parsed.value.username != null,
             .kind = std.meta.stringToEnum(inbox.ConversationPageKind, parsed.value.page) orelse return error.InvalidBridgePayload,
             .anchor = parsed.value.anchorId,
         };
@@ -8964,6 +8966,9 @@ test "Dispatcher validates authority before domain calls and preserves committed
         for ([_]struct { []const u8, bool }{
             .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"page\":\"before\",\"anchorId\":\"12\"}", true },
             .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"page\":\"refresh\",\"anchorId\":null}", true },
+            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"username\":\"ann\",\"page\":\"latest\",\"anchorId\":null}", true },
+            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"username\":\"ann\",\"page\":\"refresh\",\"anchorId\":null}", false },
+            .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"page\":\"refresh\",\"anchorId\":null}", false },
             .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"0\",\"peerId\":\"ann\",\"page\":\"latest\",\"anchorId\":null}", false },
             .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"page\":\"sideways\",\"anchorId\":null}", false },
             .{ "{\"generation\":\"GEN\",\"binding\":\"4\",\"requestId\":\"9\",\"peerId\":\"ann\",\"page\":\"latest\"}", false },

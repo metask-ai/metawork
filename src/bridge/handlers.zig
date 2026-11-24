@@ -277,7 +277,8 @@ pub const InboxConversationRead = struct {
     generation: []const u8,
     binding: []const u8,
     requestId: []const u8,
-    peerId: []const u8,
+    peerId: ?[]const u8 = null,
+    username: ?[]const u8 = null,
     page: []const u8,
     anchorId: ?[]const u8,
 };

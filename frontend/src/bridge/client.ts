@@ -338,7 +338,7 @@ export class BridgeClient {
    */
   async readInboxConversation(
     binding: string,
-    peerId: string,
+    target: string | { username: string },
     page: "latest" | "refresh" | "before" | "after",
     anchorId: string | null,
   ): Promise<InboxConversationPage> {
@@ -348,7 +348,7 @@ export class BridgeClient {
         generation,
         binding,
         requestId,
-        peerId,
+        ...(typeof target === "string" ? { peerId: target } : target),
         page,
         anchorId,
       }),
@@ -356,7 +356,11 @@ export class BridgeClient {
     if (
       result.binding !== binding ||
       result.requestId !== requestId ||
-      result.peerId !== peerId
+      ((typeof target === "string" ||
+        result.state !== "ready" ||
+        !result.messages.length) &&
+        result.peerId !==
+          (typeof target === "string" ? target : target.username))
     )
       throw new RendererBridgeContractError(
         "invalid_response",

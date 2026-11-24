@@ -241,6 +241,7 @@ export type InboxViewWire = {
   syncedAtMs: string | null;
   conversations: readonly {
     peerId: string;
+    username: string | null;
     name: string;
     unread: string;
     latest: {
@@ -318,6 +319,7 @@ export function decodeInboxViewWire(
         ((value: unknown, path: string) => {
           const item = object(value, path, [
             "peerId",
+            "username",
             "name",
             "unread",
             "latest",
@@ -325,6 +327,10 @@ export function decodeInboxViewWire(
           ]);
           return {
             peerId: stringValue(item.peerId, path + ".peerId"),
+            username:
+              item.username === null
+                ? null
+                : stringValue(item.username, path + ".username"),
             name: stringValue(item.name, path + ".name"),
             unread: u64WireInteger(item.unread, path + ".unread"),
             latest:

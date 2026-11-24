@@ -83,6 +83,7 @@ function view(patch = {}) {
     conversations: [
       {
         peerId: "ann",
+        username: "ann_u",
         name: "Ann",
         unread: "2",
         latest: {
@@ -95,6 +96,7 @@ function view(patch = {}) {
       },
       {
         peerId: "bob",
+        username: "bob_u",
         name: "Bob",
         unread: "0",
         latest: {
@@ -204,7 +206,9 @@ function fakeClient({
       calls.push(["earlier", binding]);
       return { outcome: "accepted" };
     },
-    async readInboxConversation(binding, peerId, page, anchorId) {
+    async readInboxConversation(binding, target, page, anchorId) {
+      const peerId =
+        typeof target === "string" ? target : "@" + target.username;
       calls.push(["read", binding, peerId, page, anchorId]);
       const answer = pages[`${peerId}:${page}:${anchorId}`] ??
         (page === "refresh" ? pages[`${peerId}:latest:null`] : undefined) ?? {
@@ -547,6 +551,7 @@ test("what the user sent to themself is the Me conversation", async () => {
         conversations: [
           {
             peerId: "me",
+            username: "zj",
             name: "Zhu",
             unread: "0",
             latest: {
@@ -614,6 +619,7 @@ test("messages show new marks, sending agents and read receipts; unread rows sho
           ...base.conversations,
           {
             peerId: "cy",
+            username: null,
             name: "Cy",
             unread: "1",
             latest: null,

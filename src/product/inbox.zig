@@ -364,9 +364,8 @@ pub fn parsePeople(allocator: std.mem.Allocator, bytes: []const u8) ParseError!P
     return .{ .items = try members.toOwnedSlice(allocator) };
 }
 
-/// The conversation a message to `username` landed in, from MetaTeam's
-/// newest message with them: the member with that username, `me` for a
-/// message to oneself, or the only recipient. Null when it cannot be told.
+/// Resolve a page fetched for this username to its canonical conversation.
+/// Without a username on the message, infer only an unambiguous participant.
 pub fn conversationOf(messages: []const Message, username: []const u8) ?Peer {
     var index = messages.len;
     while (index > 0) {
@@ -376,11 +375,11 @@ pub fn conversationOf(messages: []const Message, username: []const u8) ?Peer {
             if (std.ascii.eqlIgnoreCase(name.slice(), username)) return peer;
         };
         switch (message.direction) {
-            .self => return message.conversations[0],
+            .self => if (message.conversations.len == 1 and message.from.username == null) return message.conversations[0],
             // Only a recipient MetaTeam named no username for can be the
             // one picked; a different username is someone else.
             .out => if (message.conversations.len == 1 and message.conversations[0].username == null) return message.conversations[0],
-            .in => {},
+            .in => if (message.from.username == null) return message.from,
         }
     }
     return null;
@@ -474,7 +473,7 @@ pub const Message = struct {
 
 /// The `me` conversation, named after the user as MetaTeam reports them.
 pub fn selfPeer(from: Peer) Peer {
-    return .{ .id = Id.init(self_peer_id) catch unreachable, .name = from.name };
+    return .{ .id = Id.init(self_peer_id) catch unreachable, .name = from.name, .username = from.username };
 }
 
 pub fn conversationPeers(a: std.mem.Allocator, kind: Direction, from: Peer, recipients: []const Recipient) ![]const Peer {
@@ -1158,6 +1157,7 @@ pub const ConversationRequest = struct {
     binding: u64,
     request_id: u64,
     peer: []const u8,
+    by_username: bool = false,
     kind: ConversationPageKind,
     anchor: ?[]const u8,
 };
@@ -1200,6 +1200,7 @@ pub const LatestView = struct {
 
 pub const ConversationView = struct {
     peerId: []const u8,
+    username: ?[]const u8,
     name: []const u8,
     unread: U64,
     latest: ?LatestView,
@@ -1551,6 +1552,7 @@ pub const Runtime = struct {
             try self.rows.append(self.allocator, .{
                 .peerId = entry.peer.id.slice(),
                 .name = entry.peer.name.slice(),
+                .username = if (entry.peer.username) |*name| name.slice() else null,
                 .unread = .{ .value = entry.unread },
                 .latest = null,
                 .lastAtMs = if (entry.last_at_ms) |at| .{ .value = at } else null,
@@ -1561,6 +1563,7 @@ pub const Runtime = struct {
             try self.rows.append(self.allocator, .{
                 .peerId = summary.peer.id.slice(),
                 .name = summary.peer.name.slice(),
+                .username = if (summary.peer.username) |*name| name.slice() else if (unread) |entry| if (entry.peer.username) |*name| name.slice() else null else null,
                 .unread = .{ .value = if (unread) |entry| entry.unread else 0 },
                 .latest = .{ .id = summary.latest.id.slice(), .direction = summary.latest.direction, .preview = summary.latest.preview.slice(), .sentAtMs = .{ .value = summary.latest.sent_at_ms } },
                 .lastAtMs = if (unread) |entry| if (entry.last_at_ms) |at| U64{ .value = at } else null else null,
@@ -2074,6 +2077,7 @@ test "members are addressable by username, once each; a sent message's conversat
     defer messages.deinit();
     try testing.expectEqualStrings("u-b", conversationOf(messages.items[0..1], "bob").?.id.slice());
     try testing.expectEqualStrings(self_peer_id, conversationOf(messages.items, "zj").?.id.slice());
+    try testing.expect(conversationOf(messages.items[1..], "somebody_else") == null);
     try testing.expect(conversationOf(&.{}, "bob") == null);
 
     // A sole recipient is the picked member only when MetaTeam named no

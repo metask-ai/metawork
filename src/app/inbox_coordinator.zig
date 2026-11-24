@@ -147,7 +147,16 @@ const Bound = struct {
     key: []u8,
     isolation: @import("metawork_http_transport").Isolation,
 
+    directory: ?inbox.People = null,
+
+    fn hasMember(self: *const Bound, username: []const u8) bool {
+        const directory = self.directory orelse return false;
+        for (directory.items) |*member| if (member.username.eql(username)) return true;
+        return false;
+    }
+
     fn release(self: *Bound, allocator: std.mem.Allocator) void {
+        if (self.directory) |*people| people.deinit(allocator);
         allocator.free(self.server_id);
         allocator.free(self.base);
         std.crypto.secureZero(u8, self.key);
@@ -179,7 +188,8 @@ const Reply = struct {
 
 const ConversationWork = struct {
     reply: Reply,
-    peer: inbox.Id,
+    peer: inbox.Name,
+    by_username: bool = false,
     kind: inbox.ConversationPageKind,
     anchor: ?inbox.Id,
     username: ?inbox.Name = null,
@@ -259,6 +269,7 @@ const Job = struct {
     unread: ?inbox.Unread = null,
     page: ?inbox.Messages = null,
     page_limit: u32 = 0,
+    resolved_peer: ?inbox.Id = null,
     consumed_unread: bool = false,
     detail: ?inbox.Detail = null,
     /// The names a send reached, when MetaTeam took it.
@@ -300,7 +311,7 @@ const Job = struct {
                 // worker. Commit pages in the order in which we fetch them.
                 self.page_mutex.lockUncancelable(self.cancellation.io);
                 defer self.page_mutex.unlock(self.cancellation.io);
-                if (work.kind == .latest) {
+                if (!work.by_username and work.kind == .latest) {
                     if (try cache.latest(self.allocator, work.peer.slice())) |saved| {
                         self.page = saved.page;
                         self.cached_has_earlier = saved.has_earlier;
@@ -313,7 +324,17 @@ const Job = struct {
                     .after => .{ .peer = work.peer.slice(), .after = work.anchor.?.slice() },
                 };
                 if (try self.pageOf(query, inbox.Limits.conversation_page)) {
-                    cache.save(self.allocator, work.peer.slice(), work.username, work.kind, work.anchor, &self.page.?, self.page_limit) catch |err| {
+                    if (work.by_username) {
+                        if (self.page.?.items.len == 0) return;
+                        const member = inbox.conversationOf(self.page.?.items, work.peer.slice()) orelse {
+                            self.page.?.deinit();
+                            self.page = null;
+                            return error.WrongPeer;
+                        };
+                        self.resolved_peer = member.id;
+                    }
+                    const peer = if (self.resolved_peer) |*id| id.slice() else work.peer.slice();
+                    cache.save(self.allocator, peer, work.username, work.kind, work.anchor, &self.page.?, self.page_limit) catch |err| {
                         self.page.?.deinit();
                         self.page = null;
                         return err;
@@ -825,14 +846,16 @@ pub const Coordinator = struct {
     pub fn readConversation(self: *Coordinator, responder: native_sdk.bridge.AsyncResponder, bridge_id: []const u8, request: ConversationRequest) bool {
         self.assertMain();
         const target = reply(responder, bridge_id, request.binding, request.request_id) orelse return false;
-        const peer = inbox.Id.init(request.peer) catch return false;
+        const peer = inbox.Name.init(request.peer) catch return false;
+        if (request.by_username and request.kind != .latest) return false;
+        if (!request.by_username and request.peer.len > inbox.Limits.id_bytes) return false;
         const anchor: ?inbox.Id = if (request.anchor) |value| inbox.Id.init(value) catch return false else null;
         if ((request.kind == .before or request.kind == .after) != (anchor != null)) return false;
         const state: ?inbox.ConversationState = if (self.stopped or self.bound == null)
             .unavailable
         else if (!self.management.accepts_fn(self.management.context, request.binding))
             .stale_binding
-        else if (!self.management.knows_peer_fn(self.management.context, request.binding, request.peer))
+        else if (if (request.by_username) !self.bound.?.hasMember(request.peer) else !self.management.knows_peer_fn(self.management.context, request.binding, request.peer))
             .unknown_peer
         else
             null;
@@ -840,8 +863,8 @@ pub const Coordinator = struct {
             respondConversationState(target, request.peer, value);
             return true;
         }
-        const address = self.management.peer_address_fn(self.management.context, request.binding, request.peer);
-        const work: ConversationWork = .{ .reply = target, .peer = peer, .kind = request.kind, .anchor = anchor, .username = if (address) |v| switch (v) {
+        const address: ?inbox.Address = if (request.by_username) .{ .member = peer } else self.management.peer_address_fn(self.management.context, request.binding, request.peer);
+        const work: ConversationWork = .{ .reply = target, .peer = peer, .by_username = request.by_username, .kind = request.kind, .anchor = anchor, .username = if (address) |v| switch (v) {
             .member => |name| name,
             .self => null,
         } else null };
@@ -941,12 +964,15 @@ pub const Coordinator = struct {
             job.join();
             self.conversation = null;
             const work = job.work.conversation;
+            var resolved = work;
+            if (job.resolved_peer) |*peer| resolved.peer = .truncated(peer.slice());
             if (job.consumed_unread) self.management.messages_marked_read_fn(self.management.context, work.reply.binding);
             const current = self.management.accepts_fn(self.management.context, work.reply.binding);
             // A completed read is already saved and may have consumed unread
             // messages even if the user selected another peer in the meantime.
             if (current) if (job.page) |page| {
-                self.management.complete_conversation_fn(self.management.context, work.reply.binding, work.peer.slice(), work.kind, page.items, work.username);
+                if (!work.by_username or job.resolved_peer != null)
+                    self.management.complete_conversation_fn(self.management.context, work.reply.binding, resolved.peer.slice(), work.kind, page.items, work.username);
             };
             if (job.replied) {
                 // Already answered; nothing is sent twice.
@@ -956,7 +982,7 @@ pub const Coordinator = struct {
                 // The connection changed while the request ran.
                 respondConversationState(work.reply, work.peer.slice(), .stale_binding);
             } else if (job.page) |page| {
-                self.respondConversation(work, page.items, job.cached_has_earlier orelse (page.items.len >= job.page_limit));
+                self.respondConversation(resolved, page.items, job.cached_has_earlier orelse (page.items.len >= job.page_limit));
             } else {
                 // This request's own outcome; the connection state is the
                 // unread and list requests' to decide.
@@ -1009,7 +1035,10 @@ pub const Coordinator = struct {
             } else if (!self.management.accepts_fn(self.management.context, work.reply.binding)) {
                 respondPeopleState(work.reply, .stale_binding);
             } else if (job.people) |*people| {
-                respondPeople(self.allocator, work.reply, people.items);
+                if (self.bound.?.directory) |*previous| previous.deinit(self.allocator);
+                self.bound.?.directory = people.*;
+                job.people = null;
+                respondPeople(self.allocator, work.reply, self.bound.?.directory.?.items);
             } else {
                 respondPeopleState(work.reply, requestState(inbox.PeopleState, job.status));
             }
@@ -2453,6 +2482,36 @@ test "inbox coordinator: a reply goes to the member's username once per user act
     }
 }
 
+test "inbox directory opens existing remote history before a first local send, then reopens it by id" {
+    var f: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
+    f.init();
+    defer f.deinit();
+    f.transport.unread = "{\"data\":{\"unread\":0,\"byPeer\":[]}}";
+    f.transport.messages =
+        \\{"data":{"messages":[{"id":"5","time":123,"direction":"in","from":{"id":"u2","username":"bob","name":"Bob"},"text":"earlier"}]}}
+    ;
+    f.coordinator.start(true);
+    f.settle();
+    const binding = f.view().binding.value;
+    const responder = f.capture.responder();
+    try testing.expect(f.coordinator.listPeople(responder, "people", .{ .binding = binding, .request_id = 1 }));
+    f.settle();
+    try testing.expectEqual(@as(usize, 0), f.view().conversations.len);
+    const before = f.transport.count;
+    try testing.expect(f.coordinator.readConversation(responder, "member", .{ .binding = binding, .request_id = 2, .peer = "bob", .by_username = true, .kind = .latest, .anchor = null }));
+    f.settle();
+    try testing.expectEqual(before + 1, f.transport.count);
+    try testing.expect(std.mem.indexOf(u8, f.transport.url(before), "messages?peer=bob&") != null);
+    try testing.expect(std.mem.indexOf(u8, f.capture.last(), "\"peerId\":\"u2\",\"messages\":[{") != null);
+    try testing.expectEqualStrings("bob", f.view().conversations[0].username.?);
+    try testing.expectEqualStrings("u2", f.view().conversations[0].peerId);
+    try testing.expect(f.coordinator.readConversation(responder, "reopen", .{ .binding = binding, .request_id = 3, .peer = "u2", .kind = .latest, .anchor = null }));
+    f.settle();
+    try testing.expectEqual(before + 1, f.transport.count);
+    try testing.expect(std.mem.indexOf(u8, f.capture.last(), "\"text\":\"earlier\"") != null);
+    try testing.expectEqual(@as(usize, 0), f.transport.sends);
+}
+
 test "inbox coordinator: members are listed on request, and a message to one starts a conversation in the list" {
     var fixture: Fixture = .{ .host = .{ .main_thread = std.Thread.getCurrentId() } };
     fixture.init();
@@ -2468,6 +2527,23 @@ test "inbox coordinator: members are listed on request, and a message to one sta
     try testing.expectEqualStrings("http://192.0.2.10:8080/team/agent/v1/people", fixture.transport.url(fixture.transport.count - 1));
     try testing.expect(fixture.coordinator.listPeople(responder, "p2", .{ .binding = binding + 1, .request_id = 2 }));
     try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"state\":\"stale_binding\"") != null);
+
+    // Listing/searching members reads no bodies. Only an explicit, known
+    // username may open a timeline before there is a canonical peer id.
+    const before = fixture.transport.count;
+    const first: ConversationRequest = .{ .binding = binding, .request_id = 8, .peer = "bob", .by_username = true, .kind = .latest, .anchor = null };
+    var unknown = first;
+    unknown.peer = "outsider";
+    try testing.expect(fixture.coordinator.readConversation(responder, "unknown", unknown));
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"unknown_peer\"") != null);
+    try testing.expectEqual(before, fixture.transport.count);
+    fixture.transport.messages = "{\"data\":{\"messages\":[]}}";
+    try testing.expect(fixture.coordinator.readConversation(responder, "empty", first));
+    fixture.settle();
+    try testing.expectEqual(before + 1, fixture.transport.count);
+    try testing.expect(std.mem.indexOf(u8, fixture.transport.url(before), "messages?peer=bob&") != null);
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"messages\":[]") != null);
+    try testing.expect(!fixture.management.runtime.knowsPeer(binding, "bob"));
 
     // Bob has no conversation yet. Once sent, MetaTeam's newest message with
     // him says which conversation it is, and the list has it.
@@ -2485,6 +2561,16 @@ test "inbox coordinator: members are listed on request, and a message to one sta
         if (std.mem.eql(u8, row.peerId, "bob-id")) listed = std.mem.eql(u8, row.latest.?.preview, "Hello Bob");
     }
     try testing.expect(listed);
+
+    try testing.expect(fixture.coordinator.readConversation(responder, "history", first));
+    fixture.settle();
+    try testing.expect(std.mem.indexOf(u8, fixture.capture.last(), "\"peerId\":\"bob-id\",\"messages\":[{") != null);
+    const rows = fixture.view().conversations;
+    for (rows) |row| {
+        try testing.expect(!std.mem.eql(u8, row.peerId, "bob"));
+        if (std.mem.eql(u8, row.peerId, "bob-id"))
+            try testing.expectEqualStrings("Bob", row.username.?);
+    }
 
     // An unresolved recipient never triggers a cross-peer read.
     fixture.transport.messages = "{\"data\":{\"messages\":[]}}";
