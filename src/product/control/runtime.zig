@@ -1519,7 +1519,6 @@ pub const Runtime = struct {
     assembling_snapshot: if (builtin.is_test) bool else void = if (builtin.is_test) false else {},
     projection_history_epoch: u64 = 1,
     account_credentials: ?account_contract.AccessTokenProjection = null,
-    /// The credential generation already scrubbed for execution renewal.
     default_approval_mode: ApprovalMode = .auto_review,
     account_projection: account_projection.Projection,
     execution_generations: execution_state.Generations = .{},

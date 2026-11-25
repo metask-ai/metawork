@@ -4691,7 +4691,8 @@ pub const Runtime = struct {
 
     /// Account authority is checked by Product Control. This owner owns the
     /// Session/Host atomic handoff; any current login renews the installed
-    /// credential in place. `value` and `generation` come from one lease.
+    /// credential in place. `value` is the token of `generation`, lent for the
+    /// call.
     pub fn renewMetaskCredential(self: *Runtime, task_id: u64, generation: u64, value: []const u8, origin: CredentialOrigin) !CredentialRenewal {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.restore_job != null) return .unrelated;

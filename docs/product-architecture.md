@@ -379,13 +379,15 @@ Product Task identity、Agent Session route identity、execution generation、Wo
 
 Credential redaction 是 owner 释放协议，而不是 snapshot 时的偶然过滤：
 
-1. Task 创建、恢复/rebind 安装或凭据续期取得新 credential 前，先清洗所有可能包含它的既有产品文本，包括 Schedule durable candidate；
+1. Task 创建、恢复/rebind 安装取得新 credential 前，先清洗所有可能包含它的既有产品文本，包括 Schedule durable candidate；
 2. 实际 credential 替换或释放前，清洗 Workspace、Task、Run、Tool、UI 与 Schedule 的相关 durable candidate；不依赖全局默认 execution；
 3. 释放 quiescent Task-owned ExecutionConfig 前，再用即将释放的 credential 清洗该 Task 的全部产品历史；
-4. durable commit 成功后才能转移或 secure-zero 对应 credential ownership；
+4. durable commit 成功后才能转移或 secure-zero 对应的 Task credential ownership；
 5. 新构建的投影块在交付前继续扫描所有 live credential，作为提交前的第二道防线；仅在内容版本和安全代次均未改变时，才允许复用已经检查过的编码块。
 
-Schedule 脱敏只在已加载计划内容命中待接纳或释放的 credential 时建立持久化前置条件；未命中时不得读取健康度或执行 I/O，也不得阻塞无关 Task。Schedule 脱敏由实际 credential 安装、续期及释放边界触发，覆盖新 credential 可能命中的既有计划文本及即将释放 credential 的历史；清洗失败或提交结果不确定时保留必要 owned credential 与恢复证据，禁止该次未完成保护的安装或释放。Models 纯偏好提交与该过程无关。
+Account 的 access token 单列：它在装入之前不可能出现在任何产品文本里，每次提交和离开检查之前都按正在检查的 token 清洗内存中的产品文本，没有落盘前置条件；续期只把已经在检查的 token 借给已接纳的执行，之后每次 Schedule 写入照常按全部在用 credential 清洗并检查。
+
+Schedule 的落盘前置条件只对 Task 取得和释放的 credential 成立：已加载计划内容命中它时才建立；未命中时不得读取健康度或执行 I/O，也不得阻塞无关 Task。它由实际 credential 安装及释放边界触发，覆盖新 credential 可能命中的既有计划文本及即将释放 credential 的历史；清洗失败或提交结果不确定时保留必要 owned credential 与恢复证据，禁止该次未完成保护的安装或释放。Models 纯偏好提交与该过程无关。
 
 Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 codepoint 边界；多个 credential 前缀重叠时采用最长匹配，不能因替换 secret 产生非法 UTF-8 产品事实。除 Custom Provider create/replace 与 MCP captureSecret command 的调用期手动凭据外，credential 不进入 Bridge 或 Renderer；credential、locator、Authorization header 和可重建 secret 的 metadata 永远不进入 projection、result、event、日志、产品历史或 checkpoint record。
 

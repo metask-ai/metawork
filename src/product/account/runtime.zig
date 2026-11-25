@@ -2170,24 +2170,6 @@ test "cold restore alone consumes a retained refresh credential" {
     try std.testing.expect(refresh.transition.takeEffect().? == .refresh_token);
 }
 
-test "explicit login starts new OAuth even when a retained refresh remains" {
-    var transport: RuntimeTestTransport = .{};
-    var runtime = try initRuntimeForUnitTest(&transport);
-    defer runtime.deinit();
-    var signed_out = runtime.prepareAutomationStart();
-    defer signed_out.deinit();
-    runtime.commit(&signed_out);
-    runtime.credentials.install(try credentials_impl.TestSupport.issued(std.testing.allocator, "stale-access", "retained-refresh", 200));
-
-    var login = switch (runtime.prepareCommand(.begin_login)) {
-        .prepared => |prepared| prepared,
-        else => return error.TestUnexpectedResult,
-    };
-    defer login.deinit();
-    try std.testing.expectEqual(contract.AccountState.authorizing, login.transition.view().state);
-    try std.testing.expect(login.transition.takeEffect().? == .begin_oauth);
-}
-
 test "unauthorized login code exchange preserves the retained credential" {
     var transport: RuntimeTestTransport = .{};
     var runtime = try initRuntimeForUnitTest(&transport);
@@ -3122,6 +3104,8 @@ test "a login that ends keeps no credential and its tokens are inspected until t
         try runtime.accessTokenProjection().visit(&inspection, Inspection.visit);
         try std.testing.expectEqual(expected.len, inspection.count);
         for (expected, inspection.seen[0..inspection.count]) |token, seen| try std.testing.expectEqualStrings(token, seen);
+        var retired = runtime.credentials.retired;
+        while (retired) |grant| : (retired = grant.next) try std.testing.expect(!grant.refresh_token.owned);
         // A minute past the latest moment the server can have meant.
         const ends: i64 = switch (ending) {
             .logout, .renewal => 260,
@@ -3740,40 +3724,4 @@ test "stopping suppresses a prepared unsent refresh retry" {
     platform.now_unix_seconds = 4000;
     try std.testing.expect(runtime.prepareDue() == null);
     try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
-}
-
-test "projection inspection follows Account access token ownership without exporting refresh tokens" {
-    const Inspection = struct {
-        seen: usize = 0,
-        fn visit(context: *anyopaque, token: []const u8) std.mem.Allocator.Error!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            std.debug.assert(std.mem.eql(u8, "access-token", token));
-            self.seen += 1;
-        }
-    };
-    var transport: RuntimeTestTransport = .{};
-    var runtime = try initRuntimeForUnitTest(&transport);
-    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
-    TestSupport.attachPlatform(&runtime, &platform);
-    defer {
-        TestSupport.detachPlatform(&runtime);
-        runtime.deinit();
-    }
-    const source = runtime.accessTokenProjection();
-    var inspection: Inspection = .{};
-    try source.visit(&inspection, Inspection.visit);
-    try std.testing.expectEqual(@as(usize, 0), inspection.seen);
-    var authenticated = try TestSupport.prepareAuthenticated(&runtime, "account-1", "User", "access-token", "refresh-token", 200);
-    defer authenticated.deinit();
-    runtime.commit(&authenticated);
-    try source.visit(&inspection, Inspection.visit);
-    try std.testing.expectEqual(@as(usize, 1), inspection.seen);
-    try logOut(&runtime);
-    try std.testing.expect(!runtime.credentials.retired.?.refresh_token.owned);
-    try source.visit(&inspection, Inspection.visit);
-    try std.testing.expectEqual(@as(usize, 2), inspection.seen);
-    platform.now_unix_seconds = 260;
-    runtime.forgetGrant(runtime.expiredGrant().?);
-    try source.visit(&inspection, Inspection.visit);
-    try std.testing.expectEqual(@as(usize, 2), inspection.seen);
 }

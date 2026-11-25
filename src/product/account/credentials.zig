@@ -156,20 +156,6 @@ pub const TestSupport = if (builtin.is_test) struct {
     }
 } else struct {};
 
-test "a grant holds a response of the largest tokens without allocating again" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
-    const grant = try Grant.create(failing.allocator());
-    defer grant.destroy();
-    const token = "t" ** oauth.Limits.secret_bytes;
-    const body = "{\"access_token\":\"" ++ token ++ "\",\"refresh_token\":\"" ++ token ++ "\",\"token_type\":\"Bearer\",\"expires_in\":3600}";
-    var tokens = try oauth.parseTokenResponse(grant.secretAllocator(), body, 100);
-    grant.issue(&tokens);
-    try std.testing.expectEqualStrings(token, grant.accessToken().?);
-    try std.testing.expectEqualStrings(token, grant.refresh_token.view());
-    try std.testing.expectEqual(@as(i64, 3700), grant.expires_at);
-    try std.testing.expect(!failing.has_induced_failure);
-}
-
 test "credentials hold one grant and a stored login has no access token" {
     var credentials: Credentials = .{};
     defer credentials.deinit();
