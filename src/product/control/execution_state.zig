@@ -2,7 +2,10 @@
 const std = @import("std");
 
 pub const AdmissionReason = enum { none, shutting_down, workspace_unavailable };
-pub const NewTaskAdmissionView = struct { available: bool, reason: AdmissionReason };
+/// Whether Metask's connection holds a new Task on Metask back. A missing
+/// sign-in does not: Account and the catalog already say that.
+pub const MetaskAdmission = enum { none, recovering, @"unreachable" };
+pub const NewTaskAdmissionView = struct { available: bool, reason: AdmissionReason, metask: MetaskAdmission };
 
 pub const Generations = struct {
     last: u64 = 0,

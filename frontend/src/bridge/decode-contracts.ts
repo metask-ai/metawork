@@ -367,6 +367,7 @@ const newTaskAdmissionReasons = [
   "shutting_down",
   "workspace_unavailable",
 ] as const;
+const newTaskMetaskAdmissions = ["none", "recovering", "unreachable"] as const;
 const customProviderProtocols = [
   "openai_responses",
   "anthropic_messages",
@@ -1952,7 +1953,7 @@ function decodeNewTaskAdmission(
   value: unknown,
   path: string,
 ): NewTaskAdmissionView {
-  const item = object(value, path, ["available", "reason"]);
+  const item = object(value, path, ["available", "reason", "metask"]);
   const available = booleanValue(item.available, `${path}.available`);
   const reason = enumValue(
     item.reason,
@@ -1961,7 +1962,12 @@ function decodeNewTaskAdmission(
   );
   if (available !== (reason === "none"))
     fail(path, "available admission must have no blocking reason");
-  return { available, reason };
+  const metask = enumValue(
+    item.metask,
+    `${path}.metask`,
+    newTaskMetaskAdmissions,
+  );
+  return { available, reason, metask };
 }
 function decodePresentationAnchor(value: unknown, path: string) {
   const item = object(value, path, ["afterOutputCount", "presentationOrder"]);

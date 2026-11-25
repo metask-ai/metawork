@@ -14,7 +14,8 @@ const account_api = @import("metawork_account");
 const product_identity = @import("metawork_product_identity");
 const mcp_platform = @import("metawork_mcp_platform");
 const mcp_oauth = @import("metawork_mcp_oauth");
-const account_coordinator = @import("app/account_coordinator.zig");
+const account_coordinator = @import("account_coordinator");
+const account_contract = @import("metawork_account_contract");
 const account_platform_binding = @import("app/account_platform_binding.zig");
 const models_coordinator = @import("models_coordinator");
 const models_automation_vault = @import("app/models_automation_vault.zig");
@@ -364,8 +365,8 @@ const App = struct {
         control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
         control_storage.setImageRunPreparation(models_management.imageRunPreparation());
         control_storage.setVideoRunPreparation(models_management.videoRunPreparation());
-        control_storage.setMetaskAuthorizationCheck(models_management.metaskAuthorizationCheck());
-        models_management.setCredentialRenewal(control_storage.metaskCredentialRenewal());
+        control_storage.setAccountAuthorization(account.authorizationQuery());
+        account.setCredentialRenewal(control_storage.metaskCredentialRenewal());
         control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery, .validate_path_fn = output_file.validatePath });
         control_storage.setFileEffects(self.platform.fileEffects());
         control_storage.setFileSave(self.platform.fileSave());
@@ -1169,7 +1170,7 @@ pub fn run(init: std.process.Init) !void {
         app.main_thread_id,
     );
     var models_coordinator_state = models_coordinator.Coordinator.init(
-        &account_runtime,
+        account_coordinator_state.credentialSource(),
         account_http.modelsTransport(),
         control.modelsManagement(),
         app.main_thread_id,
@@ -1191,9 +1192,9 @@ pub fn run(init: std.process.Init) !void {
     models_coordinator_state.setCompletionTransport(
         app.completion_transport.transport(),
     );
-    account_coordinator_state.setCommitObserver(.{
+    account_coordinator_state.setFollower(.{
         .context = &models_coordinator_state,
-        .notify_fn = notifyModelsAuthorizationChanged,
+        .follow_fn = followAuthorization,
     });
     app.account_coordinator = &account_coordinator_state;
     app.models_coordinator = &models_coordinator_state;
@@ -1236,9 +1237,9 @@ pub fn run(init: std.process.Init) !void {
     }, init);
 }
 
-fn notifyModelsAuthorizationChanged(context: *anyopaque) void {
+fn followAuthorization(context: *anyopaque, authorization: account_contract.Authorization) void {
     const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
-    coordinator.authorizationChanged();
+    coordinator.follow(authorization);
 }
 
 fn refreshModelsCatalog(context: *anyopaque) models_contract.CommandResult {

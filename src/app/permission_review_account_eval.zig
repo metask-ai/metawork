@@ -10,7 +10,7 @@ const catalog_api = @import("product_models_metask");
 const models_contract = @import("metawork_product_models_contract");
 const protocol_adapter = @import("product_agent_protocol_adapter");
 const evaluation = @import("permission_review_evaluation");
-const Coordinator = @import("account_coordinator.zig").Coordinator;
+const Coordinator = @import("account_coordinator").Coordinator;
 const Platform = @import("account_platform_binding.zig").Adapter;
 const Http = @import("metask_http_transport.zig").Adapter;
 const CompletionHttp = @import("completion_http_transport.zig").Backend;
@@ -127,7 +127,7 @@ const Host = struct {
     }
 
     fn beginEvaluation(self: *Host) !void {
-        self.lease = (try self.account_runtime.authorizationLease()) orelse return error.AuthorizationUnavailable;
+        self.lease = (try self.account_runtime.credential()) orelse return error.AuthorizationUnavailable;
         errdefer {
             self.lease.?.deinit();
             self.lease = null;

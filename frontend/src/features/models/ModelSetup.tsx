@@ -26,6 +26,8 @@ const reasonMessages: Record<ModelSetupReason, MessageId> = {
   checking: "account.checking.title",
   authorizing: "model_setup.authorizing",
   loading: "model_setup.loading",
+  recovering: "model_setup.recovering",
+  unreachable: "model_setup.unreachable",
   sign_in: "model_setup.sign_in",
   no_models: "model_setup.no_models",
   catalog_failed: "model_setup.catalog_failed",

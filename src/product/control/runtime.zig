@@ -1522,7 +1522,8 @@ pub const Runtime = struct {
     projection_history_epoch: u64 = 1,
     account_credentials: ?account_contract.AccessTokenProjection = null,
     account_credential_generation: u64 = 0,
-    learned_renewal: ?control_ports.MetaskAuthorization = null,
+    /// The credential generation already scrubbed for execution renewal.
+    learned_renewal: u64 = 0,
     default_approval_mode: ApprovalMode = .auto_review,
     account_projection: account_projection.Projection,
     execution_generations: execution_state.Generations = .{},
@@ -1532,7 +1533,7 @@ pub const Runtime = struct {
     completion_factory: CompletionFactory,
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
     video_run_preparation: ?control_ports.VideoRunPreparation = null,
-    metask_authorization_check: ?control_ports.MetaskAuthorizationCheck = null,
+    account_authorization: ?account_contract.AuthorizationQuery = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     file_actions: file_action.Lane = .{},
     file_effects: ?control_ports.FileEffects = null,
@@ -3121,7 +3122,6 @@ pub const Runtime = struct {
     ) void {
         commit.assertValid();
         self.commitAccountFactNoFail(commit.fact);
-        self.publishAdmissionChangesNoFail();
     }
 
     /// Reconcile independent Schedule sources after Models or Account facts change.
@@ -3137,7 +3137,22 @@ pub const Runtime = struct {
     }
 
     pub fn newTaskAdmissionView(self: *Runtime) NewTaskAdmissionView {
-        return .{ .available = self.canCreateTask(), .reason = if (self.shutting_down) .shutting_down else if (!self.skill.identitySourceTrusted()) .workspace_unavailable else .none };
+        return .{
+            .available = self.canCreateTask(),
+            .reason = if (self.shutting_down) .shutting_down else if (!self.skill.identitySourceTrusted()) .workspace_unavailable else .none,
+            .metask = self.newTaskMetask(self.metaskUse()),
+        };
+    }
+
+    fn newTaskMetask(self: *Runtime, use: ?account_contract.Authorization.Use) execution_state.MetaskAdmission {
+        return switch (use orelse return .none) {
+            .ready => .none,
+            .wait => if (self.account_projection.view().error_code == .none) .recovering else .@"unreachable",
+            .stop => |reason| switch (reason) {
+                .sign_in => .none,
+                .no_connection => .@"unreachable",
+            },
+        };
     }
 
     pub fn modelsView(self: *Runtime) models_contract.ModelsView {
@@ -7682,7 +7697,7 @@ pub const Runtime = struct {
 
     fn writeNewTaskAdmission(self: *Runtime, writer: *std.Io.Writer) Error!void {
         const value = self.newTaskAdmissionView();
-        writer.print("{{\"available\":{},\"reason\":\"{s}\"}}", .{ value.available, @tagName(value.reason) }) catch return error.SnapshotTooLarge;
+        writer.print("{{\"available\":{},\"reason\":\"{s}\",\"metask\":\"{s}\"}}", .{ value.available, @tagName(value.reason), @tagName(value.metask) }) catch return error.SnapshotTooLarge;
     }
 
     const WorkspaceViewContext = struct {
@@ -7958,10 +7973,12 @@ pub const Runtime = struct {
             query.workspace_root,
             query.task_id,
         );
-        const binding = self.taskBindingPlan(query.task_id);
+        // One Account sample answers both, so a projection cannot disagree.
+        const metask_use = self.metaskUse();
+        const binding = self.taskBindingPlan(query.task_id, metask_use);
         const model_rebind_required = binding == .rebind;
         const releasing_route_id = if (model_rebind_required) self.task_runtime.recoveryReleaseRoute(query.task_id) else null;
-        const metask_input = self.taskMetaskInput(query.task_id);
+        const metask_input = self.taskMetaskInput(query.task_id, metask_use);
         return .{
             .shutting_down = self.shutting_down,
             .task_persistence_ready = self.task_persistence_health.operational(),
@@ -8006,9 +8023,9 @@ pub const Runtime = struct {
     }
 
     /// Reads no credential, so a projection answers as an admission would.
-    fn taskBindingPlan(self: *Runtime, task_id: u64) task_runtime.Runtime.BindingPlan {
+    fn taskBindingPlan(self: *Runtime, task_id: u64, use: ?account_contract.Authorization.Use) task_runtime.Runtime.BindingPlan {
         const facts = self.task_runtime.modelFacts(task_id) orelse return .{ .blocked = .unknown_task };
-        const credential_generation = if (usesMetask(facts)) self.admittedMetaskGeneration() orelse
+        const credential_generation = if (usesMetask(facts)) self.admittedMetaskGeneration(use) orelse
             return self.task_runtime.bindingPlan(task_id, .{ .authorized = false }) else 0;
         const target = if (facts.intent) |intent| self.custom_providers.currentTarget(intent.target) else null;
         return self.task_runtime.bindingPlan(task_id, .{
@@ -8062,7 +8079,7 @@ pub const Runtime = struct {
     };
 
     fn prepareTaskBinding(self: *Runtime, task_id: u64) Error!PreparedBinding {
-        const plan = self.taskBindingPlan(task_id);
+        const plan = self.taskBindingPlan(task_id, self.metaskUse());
         const renew = switch (plan) {
             .blocked => |reason| return switch (reason) {
                 .unknown_task => error.UnknownTask,
@@ -8201,7 +8218,11 @@ pub const Runtime = struct {
     fn validateNewTaskModelAdmission(self: *Runtime, selection: NewTaskModelSelectionInput) Error!void {
         if (!self.canCreateTask()) return error.ExecutionUnavailable;
         if (!self.newTaskModelSelectionAuthorized(selection)) return error.ModelSelectionChanged;
-        try self.checkMetaskAuthorization(selection.target.source_id);
+        if (!std.mem.eql(u8, selection.target.source_id, models_contract.metask_source_id)) return;
+        // One Account sample answers as the projection that offered it did.
+        const use = self.metaskUse();
+        if (self.newTaskMetask(use) != .none or self.admittedMetaskGeneration(use) == null)
+            return error.ExecutionUnavailable;
     }
 
     fn scheduleExecutionBinding(self: *Runtime) product_schedule.ExecutionBinding {
@@ -10095,44 +10116,44 @@ pub const Runtime = struct {
         return .{
             .context = self,
             .commit_fn = controlCommitAccountChange,
+            .settle_fn = controlSettleAccountChange,
         };
     }
 
-    pub fn setMetaskAuthorizationCheck(self: *Runtime, check: control_ports.MetaskAuthorizationCheck) void {
-        self.metask_authorization_check = check;
+    pub fn setAccountAuthorization(self: *Runtime, query: account_contract.AuthorizationQuery) void {
+        self.account_authorization = query;
     }
 
     pub fn metaskCredentialRenewal(self: *Runtime) control_ports.MetaskCredentialRenewal {
         return .{ .context = self, .renew_fn = renewMetaskExecutionCredentials, .needs_fn = needsDeferredMetaskCredential };
     }
 
-    fn currentRenewalAuthority(self: *Runtime, authority: control_ports.MetaskAuthorization) bool {
-        if (self.shutting_down or authority.generation == 0) return false;
-        const check = self.metask_authorization_check orelse return false;
-        const current = check.current() orelse return false;
-        return current.generation == authority.generation;
+    fn currentCredentialGeneration(self: *Runtime, generation: u64) bool {
+        if (self.shutting_down or generation == 0) return false;
+        const query = self.account_authorization orelse return false;
+        return switch (query.status().use()) {
+            .ready => |current| current == generation,
+            .wait, .stop => false,
+        };
     }
 
-    fn needsDeferredMetaskCredential(context: *anyopaque, authority: control_ports.MetaskAuthorization) bool {
+    fn needsDeferredMetaskCredential(context: *anyopaque, generation: u64) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        return self.currentRenewalAuthority(authority) and self.task_runtime.needsDeferredMetaskCredential();
+        return self.currentCredentialGeneration(generation) and self.task_runtime.needsDeferredMetaskCredential();
     }
 
-    fn renewMetaskExecutionCredentials(context: *anyopaque, authority: control_ports.MetaskAuthorization, credential: ?[]const u8) void {
+    fn renewMetaskExecutionCredentials(context: *anyopaque, generation: u64, credential: ?[]const u8) void {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        if (!self.currentRenewalAuthority(authority)) return;
-        if (credential) |value| {
-            const previous = self.learned_renewal;
-            if (previous == null or previous.?.generation != authority.generation) {
-                self.prepareTaskCredential(value) catch {
-                    self.task_runtime.deferMetaskCredentialRenewals();
-                    self.bumpRevision();
-                    return;
-                };
-                self.learned_renewal = authority;
-            }
-        }
-        const changed = self.task_runtime.renewMetaskExecutions(authority.generation, credential, self.taskRuntimeOperationEffects());
+        if (!self.currentCredentialGeneration(generation)) return;
+        if (credential) |value| if (self.learned_renewal != generation) {
+            self.prepareTaskCredential(value) catch {
+                self.task_runtime.deferMetaskCredentialRenewals();
+                self.bumpRevision();
+                return;
+            };
+            self.learned_renewal = generation;
+        };
+        const changed = self.task_runtime.renewMetaskExecutions(generation, credential, self.taskRuntimeOperationEffects());
         self.retireQuiescentCredentials();
         if (changed) self.bumpRevision();
     }
@@ -10151,19 +10172,25 @@ pub const Runtime = struct {
 
     fn checkMetaskAuthorization(self: *Runtime, provider_id: []const u8) Error!void {
         if (!std.mem.eql(u8, provider_id, models_contract.metask_source_id)) return;
-        _ = self.admittedMetaskGeneration() orelse return error.ExecutionUnavailable;
+        _ = self.admittedMetaskGeneration(self.metaskUse()) orelse return error.ExecutionUnavailable;
     }
 
-    /// The Account generation a Metask use may run on now. Isolated Product
-    /// tests have no Account composition and read zero; desktop admission
-    /// fails closed if that capability is absent.
-    fn admittedMetaskGeneration(self: *Runtime) ?u64 {
+    /// What a Metask use may do now. Null only in isolated Product tests,
+    /// which compose no Account; without that capability the desktop stops.
+    fn metaskUse(self: *Runtime) ?account_contract.Authorization.Use {
+        const query = self.account_authorization orelse
+            return if (builtin.is_test) null else .{ .stop = .sign_in };
+        return query.status().use();
+    }
+
+    /// The Account generation a Metask use may run on now; zero when no
+    /// Account governs it.
+    fn admittedMetaskGeneration(self: *Runtime, use: ?account_contract.Authorization.Use) ?u64 {
         if (self.shutting_down) return null;
-        const check = self.metask_authorization_check orelse return if (builtin.is_test) 0 else null;
-        const current = check.current() orelse return null;
-        if (current.generation == 0 or
-            !self.custom_providers.acceptsMetaskAuthorization(current.generation)) return null;
-        return current.generation;
+        return switch (use orelse return 0) {
+            .ready => |generation| if (self.custom_providers.acceptsMetaskAuthorization(generation)) generation else null,
+            .wait, .stop => null,
+        };
     }
 
     /// A Task is not bound to a login: any current login admits it.
@@ -10173,35 +10200,32 @@ pub const Runtime = struct {
     }
 
     fn taskMetaskInputBlocker(self: *Runtime, task_id: u64) ?task_runtime.SendInputReason {
-        return self.taskMetaskInput(task_id).blocker;
+        return self.taskMetaskInput(task_id, self.metaskUse()).blocker;
     }
 
     const MetaskInput = struct {
         blocker: ?task_runtime.SendInputReason = null,
-        /// Account's renewal epoch while the blocker is a recovery.
+        /// The renewal epoch a message waits out while Account connects.
         recovery_epoch: ?u64 = null,
     };
 
-    /// One Account status read yields both the blocker and its recovery
-    /// epoch, so a projection and an admission never see two facts.
-    fn taskMetaskInput(self: *Runtime, task_id: u64) MetaskInput {
+    fn taskMetaskInput(self: *Runtime, task_id: u64, use: ?account_contract.Authorization.Use) MetaskInput {
         const facts = self.task_runtime.modelFacts(task_id) orelse return .{};
         if (!usesMetask(facts)) return .{};
-        const check = self.metask_authorization_check orelse
-            return .{ .blocker = if (builtin.is_test) null else .metask_authorization_required };
-        const current = switch (check.status()) {
-            .unavailable => return .{ .blocker = .metask_authorization_required },
-            .recovering => |epoch| return .{ .blocker = .metask_authorization_recovering, .recovery_epoch = epoch },
-            .available => |authorization| authorization,
+        return switch (use orelse return .{}) {
+            .wait => |epoch| .{ .blocker = .metask_authorization_recovering, .recovery_epoch = epoch },
+            .stop => |reason| .{ .blocker = switch (reason) {
+                .sign_in => .metask_authorization_required,
+                .no_connection => .metask_connection_unavailable,
+            } },
+            .ready => |generation| .{ .blocker = switch (self.custom_providers.metaskInputCatalogState(generation)) {
+                .ready => null,
+                .loading => .models_catalog_loading,
+                .failed => .models_catalog_failed,
+                .needs_authentication => .metask_authorization_required,
+                else => .binding_unavailable,
+            } },
         };
-        if (current.generation == 0) return .{ .blocker = .metask_authorization_required };
-        return .{ .blocker = switch (self.custom_providers.metaskInputCatalogState(current.generation)) {
-            .ready => null,
-            .loading => .models_catalog_loading,
-            .failed => .models_catalog_failed,
-            .needs_authentication => .metask_authorization_required,
-            else => .binding_unavailable,
-        } };
     }
 
     pub fn setImageRunPreparation(self: *Runtime, preparation: ?control_ports.ImageRunPreparation) void {
@@ -10947,6 +10971,9 @@ fn controlCommitAccountChange(
     commit: control_ports.AccountCommit,
 ) void {
     controlOwner(context).commitAccountChangeNoFail(commit);
+}
+fn controlSettleAccountChange(context: *anyopaque) void {
+    controlOwner(context).publishAdmissionChangesNoFail();
 }
 fn controlStartCustomProviders(context: *anyopaque, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
     try controlOwner(context).startCustomProviders(directory, vault);
@@ -16478,8 +16505,8 @@ test "Task model installed intent does not borrow a catalog refresh as new execu
 
 test "Task model projection reads its binding plan without resolving a credential" {
     const Account = struct {
-        fn status(_: *anyopaque) control_ports.MetaskAuthorizationStatus {
-            return .{ .available = .{ .generation = 17 } };
+        fn status(_: *anyopaque) account_contract.Authorization {
+            return .{ .available = .{ .account_id = "account-1", .generation = 17 } };
         }
     };
     var control = try testRuntime();
@@ -16488,8 +16515,8 @@ test "Task model projection reads its binding plan without resolving a credentia
     _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
     var account: u8 = 0;
-    control.setMetaskAuthorizationCheck(.{ .context = &account, .status_fn = Account.status });
-    try std.testing.expectEqualDeep(task_runtime.Runtime.BindingPlan.renew, control.taskBindingPlan(3));
+    control.setAccountAuthorization(.{ .context = &account, .status_fn = Account.status });
+    try std.testing.expectEqualDeep(task_runtime.Runtime.BindingPlan.renew, control.taskBindingPlan(3, control.metaskUse()));
     var failing = std.testing.FailingAllocator.init(control.allocator, .{ .fail_index = 0 });
     const original = control.custom_providers.metask_catalog.allocator;
     control.custom_providers.metask_catalog.allocator = failing.allocator();

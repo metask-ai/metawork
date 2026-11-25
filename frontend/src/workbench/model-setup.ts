@@ -32,6 +32,8 @@ export type ModelSetupReason =
   | "checking"
   | "authorizing"
   | "loading"
+  | "recovering"
+  | "unreachable"
   | "sign_in"
   | "no_models"
   | "catalog_failed"
@@ -47,6 +49,16 @@ export type ModelSetupNotice = {
   reason: ModelSetupReason;
   action: ModelSetupAction | null;
 };
+
+/** Why Metask's connection holds this model back; other sources ignore it. */
+export function metaskAdmission(
+  admission: NewTaskAdmissionView,
+  model: ModelRef | null | undefined,
+): "recovering" | "unreachable" | null {
+  return model?.sourceId === "metask" && admission.metask !== "none"
+    ? admission.metask
+    : null;
+}
 
 // Presentation only. Task admission and source-qualified selection stay with
 // their existing owners; discovering another source never selects it.
@@ -69,7 +81,10 @@ export function modelSetupNotice({
   customProvidersAvailable: boolean;
   schedulesAvailable: boolean;
 }): ModelSetupNotice | null {
-  if (valid) return null;
+  if (valid) {
+    const reason = metaskAdmission(admission, selected);
+    return reason && { reason, action: null };
+  }
   if (models.persistenceHealth !== "ready")
     return { reason: "persistence", action: "models" };
   if (admission.reason === "shutting_down")

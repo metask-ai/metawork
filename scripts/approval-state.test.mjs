@@ -29,7 +29,11 @@ const account = {
   safeDiagnostic: "",
   catalogGeneration: "0",
 };
-const newTaskAdmission = { available: false, reason: "workspace_unavailable" };
+const newTaskAdmission = {
+  available: false,
+  reason: "workspace_unavailable",
+  metask: "none",
+};
 
 function pending(identity) {
   return {

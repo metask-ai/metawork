@@ -38,7 +38,11 @@ function snapshot(revision, tasks = []) {
       safeDiagnostic: "",
       catalogGeneration: "0",
     },
-    newTaskAdmission: { available: false, reason: "workspace_unavailable" },
+    newTaskAdmission: {
+      available: false,
+      reason: "workspace_unavailable",
+      metask: "none",
+    },
     capabilities: {
       taskHistoryPersistence: false,
       conversationRecovery: false,

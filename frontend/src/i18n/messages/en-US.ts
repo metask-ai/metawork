@@ -171,6 +171,10 @@ export const enUS = {
     "Complete sign-in in your browser. Your draft will be kept.",
   "model_setup.cancel_login": "Cancel sign-in",
   "model_setup.loading": "Loading models…",
+  "model_setup.recovering":
+    "Connecting to Metask. You can send once it's connected; your text is kept.",
+  "model_setup.unreachable":
+    "Can't reach Metask right now. MetaWork keeps retrying; your text is kept.",
   "model_setup.preparing": "Preparing the model…",
   "model_setup.choose": "Choose an available model before sending.",
   "model_setup.catalog_failed":
@@ -2035,7 +2039,7 @@ export const enUS = {
   "mutation.reason.metask_authorization_required":
     "Sign in to Metask to use this model.",
   "mutation.reason.metask_authorization_recovering":
-    "Reconnecting to Metask. Messages run once the connection is back.",
+    "Connecting to Metask. This message runs once connected, or is marked not run if this attempt fails.",
   "mutation.reason.metask_connection_unavailable":
     "Can't reach Metask right now. The message was not run.",
   "mutation.reason.session_poisoned":

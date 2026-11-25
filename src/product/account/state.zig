@@ -211,6 +211,11 @@ pub const Account = struct {
         };
     }
 
+    /// Borrows the committed identity; `currentIdentity` returns a copy.
+    pub fn accountId(self: *const Account) []const u8 {
+        return self.state.account_id.view();
+    }
+
     pub fn currentIdentity(self: *const Account) ?AccountIdentity {
         if (self.state.account_id.len == 0) return null;
         return .{

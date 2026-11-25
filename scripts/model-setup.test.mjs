@@ -912,10 +912,32 @@ test("generic workspace admission does not masquerade as a model failure", () =>
   state.newTaskAdmission = {
     available: false,
     reason: "workspace_unavailable",
+    metask: "none",
   };
   assert.deepEqual(classify(state), { reason: "required", action: "start" });
   state.newTaskAdmission.reason = "shutting_down";
   assert.deepEqual(classify(state), { reason: "preparing", action: null });
+});
+
+test("a Metask connection holds back only Metask models, without a false action", () => {
+  const state = structuredClone(fixture);
+  const metask = { sourceId: "metask", modelId: "model" };
+  for (const reason of ["recovering", "unreachable"]) {
+    state.newTaskAdmission.metask = reason;
+    assert.deepEqual(classify(state, { selected: metask, valid: true }), {
+      reason,
+      action: null,
+    });
+    assert.equal(
+      classify(state, {
+        selected: { sourceId: "custom-1", modelId: "model" },
+        valid: true,
+      }),
+      null,
+    );
+  }
+  state.newTaskAdmission.metask = "none";
+  assert.equal(classify(state, { selected: metask, valid: true }), null);
 });
 
 test("schedule persistence recovery opens its existing page without starting model setup", async (ctx) => {

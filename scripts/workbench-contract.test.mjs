@@ -1139,7 +1139,11 @@ test("durable Metask intent remains decodable when the current catalog is unavai
     safeDiagnostic: "",
     summary: emptyAccountSummary,
   };
-  catalogUnavailable.newTaskAdmission = { available: true, reason: "none" };
+  catalogUnavailable.newTaskAdmission = {
+    available: true,
+    reason: "none",
+    metask: "none",
+  };
 
   assert.deepEqual(
     decodeWorkbenchSnapshot(catalogUnavailable).models,
@@ -1162,7 +1166,11 @@ test("Models recovery-required health crosses the strict snapshot decoder", () =
   recoveryRequired.models.availability = "unavailable";
   recoveryRequired.models.persistenceHealth = "recovery_required";
   recoveryRequired.models.errorCode = "persistence_unavailable";
-  recoveryRequired.newTaskAdmission = { available: true, reason: "none" };
+  recoveryRequired.newTaskAdmission = {
+    available: true,
+    reason: "none",
+    metask: "none",
+  };
 
   assert.deepEqual(decodeWorkbenchSnapshot(recoveryRequired), recoveryRequired);
 });
@@ -2521,17 +2529,27 @@ test("new Task admission rejects retired execution fields and inconsistent gener
     assert.throws(() => decodeWorkbenchSnapshot(snapshot), /expected keys/);
   }
   for (const gate of [
-    { available: true, reason: "workspace_unavailable" },
-    { available: false, reason: "none" },
-    { available: false, reason: "invalid_candidate" },
+    { available: true, reason: "workspace_unavailable", metask: "none" },
+    { available: false, reason: "none", metask: "none" },
+    { available: false, reason: "invalid_candidate", metask: "none" },
+    { available: true, reason: "none", metask: "expired" },
+    { available: true, reason: "none" },
   ]) {
     const snapshot = clone(fixture);
     snapshot.newTaskAdmission = gate;
     assert.throws(() => decodeWorkbenchSnapshot(snapshot));
   }
   const snapshot = clone(fixture);
-  snapshot.newTaskAdmission = { available: false, reason: "shutting_down" };
+  snapshot.newTaskAdmission = {
+    available: false,
+    reason: "shutting_down",
+    metask: "none",
+  };
   assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
+  for (const metask of ["recovering", "unreachable"]) {
+    snapshot.newTaskAdmission = { available: true, reason: "none", metask };
+    assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
+  }
 });
 
 test("Custom Provider readiness survives an isolated failed retest", () => {
@@ -2582,7 +2600,11 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
       },
     ],
   };
-  snapshot.newTaskAdmission = { available: true, reason: "none" };
+  snapshot.newTaskAdmission = {
+    available: true,
+    reason: "none",
+    metask: "none",
+  };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(snapshot));
 
   const neverVerified = clone(snapshot);
@@ -2978,6 +3000,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   readyAccountWithoutInstalledExecution.newTaskAdmission = {
     available: true,
     reason: "none",
+    metask: "none",
   };
   assert.doesNotThrow(() =>
     decodeWorkbenchSnapshot(readyAccountWithoutInstalledExecution),

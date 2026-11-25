@@ -178,6 +178,61 @@ pub const OwnedAuthorizationLease = struct {
     }
 };
 
+/// The one Metask authorization fact. Main-thread only: its slices borrow
+/// committed Account state for the call that receives them.
+pub const Authorization = union(enum) {
+    /// A stored login is being confirmed. The epoch counts finished renewal
+    /// attempts, so a waiter waits for exactly one of them.
+    checking: u64,
+    signed_out,
+    authorizing,
+    available: struct { account_id: []const u8, generation: u64 },
+    /// The access token expired and Account will renew it.
+    recovering: struct { account_id: []const u8, epoch: u64 },
+    /// A verified identity whose token no wall clock can judge.
+    stalled: struct { account_id: []const u8 },
+
+    /// What a consumer may do with it. Every consumer reads only this.
+    pub const Use = union(enum) {
+        /// Use the credential of this generation.
+        ready: u64,
+        /// Wait until this epoch moves on.
+        wait: u64,
+        stop: enum { sign_in, no_connection },
+    };
+
+    pub fn use(self: Authorization) Use {
+        return switch (self) {
+            .available => |value| .{ .ready = value.generation },
+            .checking => |epoch| .{ .wait = epoch },
+            .recovering => |value| .{ .wait = value.epoch },
+            .stalled => .{ .stop = .no_connection },
+            .signed_out, .authorizing => .{ .stop = .sign_in },
+        };
+    }
+};
+
+/// Secret-free view of Account authorization for admission and projection.
+pub const AuthorizationQuery = struct {
+    context: *anyopaque,
+    status_fn: *const fn (*anyopaque) Authorization,
+
+    pub fn status(self: AuthorizationQuery) Authorization {
+        return self.status_fn(self.context);
+    }
+};
+
+/// The current credential: account, access token and generation taken
+/// together. Null when none may be used now; the receiver zeroes it.
+pub const CredentialSource = struct {
+    context: *anyopaque,
+    take_fn: *const fn (*anyopaque) std.mem.Allocator.Error!?OwnedAuthorizationLease,
+
+    pub fn take(self: CredentialSource) std.mem.Allocator.Error!?OwnedAuthorizationLease {
+        return self.take_fn(self.context);
+    }
+};
+
 /// Stable Account error identity. Model catalog errors are defined by Models.
 pub const ErrorCode = enum {
     none,

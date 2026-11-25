@@ -29,17 +29,6 @@ const refresh_retry_interval_ns: u64 = refresh_retry_interval_seconds * std.time
 /// with the same id and an active attempt rejects a second refresh.
 const refresh_overdue_grace_seconds: i64 = 5;
 
-/// The one Metask authorization fact consumers read. An authenticated
-/// identity is never `unavailable`: once its token has expired it is
-/// `recovering` until a refresh lands or the session signs out.
-pub const AuthorizationStatus = union(enum) {
-    unavailable,
-    /// Current authorization generation; the access token is unexpired.
-    available: u64,
-    /// Renewal epoch: the count of refresh attempts that have finished.
-    recovering: u64,
-};
-
 const SummaryJob = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -790,7 +779,7 @@ pub const Runtime = struct {
         if (self.stopping) return .{ .result = .rejected(.invalid_state), .changed = false };
         if (self.summary_job != null)
             return .{ .result = .rejected(.operation_in_progress), .changed = false };
-        var lease = (self.authorizationLease() catch
+        var lease = (self.credential() catch
             return .{ .result = .rejected(.local_resource_exhausted), .changed = false }) orelse
             return .{ .result = .rejected(.invalid_state), .changed = false };
         defer lease.deinit();
@@ -823,7 +812,7 @@ pub const Runtime = struct {
             self.cancelSummaryJob();
             return self.summary.fail(attempt_id, .generation_mismatch);
         }
-        var lease = (self.authorizationLease() catch {
+        var lease = (self.credential() catch {
             self.cancelSummaryJob();
             return self.summary.clearAuthorization();
         }) orelse {
@@ -847,7 +836,8 @@ pub const Runtime = struct {
         if (!job.finished.load(.acquire)) return false;
         job.join();
         const changed = if (job.completion) |*completion|
-            self.acceptsAuthorizationGeneration(completion.authorization_generation) and
+            completion.authorization_generation == self.authorization_generation and
+                self.availableAuthorizationIdentity() != null and
                 self.summary.complete(completion)
         else
             self.summary.fail(job.attempt_id, .account_operation_failed);
@@ -879,7 +869,9 @@ pub const Runtime = struct {
         if (self.credentials.tokens) |*tokens| try visitor(visitor_context, tokens.access_token.view());
     }
 
-    pub fn authorizationLease(
+    /// The current credential, taken whole: account, access token and
+    /// generation. Null when nothing may use one now.
+    pub fn credential(
         self: *Runtime,
     ) std.mem.Allocator.Error!?contract.OwnedAuthorizationLease {
         self.assertMainThread();
@@ -894,23 +886,30 @@ pub const Runtime = struct {
         };
     }
 
-    /// Secret-free admission proof; checks the Account-owned hard-expiry clock.
-    pub fn authorizationGeneration(self: *Runtime) ?u64 {
-        self.assertMainThread();
-        _ = self.availableAuthorizationIdentity() orelse return null;
-        return self.authorization_generation;
-    }
-
     /// Admission and every Task blocker read this one fact. Observing it
     /// also re-arms a refresh whose timer is overdue: late, voided by a
     /// rejected fire, or started without ever firing.
-    pub fn authorizationStatus(self: *Runtime) AuthorizationStatus {
+    pub fn authorization(self: *Runtime) contract.Authorization {
         self.assertMainThread();
-        if (self.account.view().state != .authenticated or !self.credentials.available())
-            return .unavailable;
+        switch (self.account.view().state) {
+            .checking => return .{ .checking = self.renewal_epoch },
+            .signed_out => return .signed_out,
+            .authorizing => return .authorizing,
+            .authenticated => {},
+        }
+        // A logout drops the credential one turn before it commits.
+        if (!self.credentials.available()) return .signed_out;
         self.armOverdueRefresh();
-        if (self.authorizationGeneration()) |generation| return .{ .available = generation };
-        return .{ .recovering = self.renewal_epoch };
+        const account_id = self.account.accountId();
+        if (self.availableAuthorizationIdentity() != null)
+            return .{ .available = .{ .account_id = account_id, .generation = self.authorization_generation } };
+        const clock_reads = if (self.platform) |platform|
+            platform.wall_clock.nowUnixSeconds() != null
+        else
+            false;
+        if (!clock_reads and !self.account.refreshInFlight())
+            return .{ .stalled = .{ .account_id = account_id } };
+        return .{ .recovering = .{ .account_id = account_id, .epoch = self.renewal_epoch } };
     }
 
     fn armOverdueRefresh(self: *Runtime) void {
@@ -926,12 +925,6 @@ pub const Runtime = struct {
         if (now < overdue_at) return;
         // A failed arm leaves the due time unset; the next query tries again.
         self.armRefreshTimer(platform, now, 0) catch {};
-    }
-
-    pub fn acceptsAuthorizationGeneration(self: *Runtime, generation: u64) bool {
-        self.assertMainThread();
-        return generation != 0 and generation == self.authorization_generation and
-            self.availableAuthorizationIdentity() != null;
     }
 
     pub fn preparedFact(
@@ -1876,14 +1869,19 @@ pub const TestSupport = if (builtin.is_test) struct {
         return preparedFromState(runtime.account.prepareCompletion(&completion));
     }
 
-    pub fn commitBeginLoginWithoutDispatch(runtime: *Runtime) u64 {
+    pub fn prepareBeginLoginWithoutEffect(runtime: *Runtime) Prepared {
         var begin = switch (runtime.prepareCommand(.begin_login)) {
             .prepared => |prepared| prepared,
             else => @panic("test Account cannot begin login"),
         };
-        defer begin.deinit();
         _ = begin.transition.takeEffect() orelse
             @panic("test login has no OAuth effect");
+        return begin;
+    }
+
+    pub fn commitBeginLoginWithoutDispatch(runtime: *Runtime) u64 {
+        var begin = prepareBeginLoginWithoutEffect(runtime);
+        defer begin.deinit();
         runtime.commit(&begin);
         return runtime.account.activeAttempt() orelse
             @panic("test login has no active attempt");
@@ -1932,6 +1930,11 @@ pub const TestSupport = if (builtin.is_test) struct {
         if (runtime.account.activeAttempt() == attempt_id and runtime.account.activeRequestUsesCredential() and runtime.request_binding == null)
             runtime.captureRequestBinding(attempt_id);
         runtime.publishFailure(attempt_id, error_code);
+    }
+
+    /// A refresh that ended before any HTTP, as the Runtime publishes it.
+    pub fn publishUnsentRefreshFailure(runtime: *Runtime, error_code: contract.ErrorCode) void {
+        runtime.publishUnsentRefreshFailure(runtime.account.activeAttempt().?, error_code);
     }
 
     pub fn publishLoginExchange(
@@ -2078,20 +2081,20 @@ test "authorization lease requires authenticated matching unexpired credentials"
     defer authenticated.deinit();
     runtime.commit(&authenticated);
 
-    var lease = (try runtime.authorizationLease()).?;
+    var lease = (try runtime.credential()).?;
     defer lease.deinit();
     const generation = lease.authorization_generation;
-    try std.testing.expect(runtime.acceptsAuthorizationGeneration(generation));
+    try std.testing.expectEqual(generation, runtime.authorization().use().ready);
 
     // Run preparation must call the lease capability at admission. Neither
     // cached authenticated state nor a matching generation proves the clock
     // still permits a new consumer, and no notification is needed to expire it.
     platform.now_unix_seconds = null;
-    try std.testing.expect((try runtime.authorizationLease()) == null);
-    try std.testing.expect(!runtime.acceptsAuthorizationGeneration(generation));
+    try std.testing.expect((try runtime.credential()) == null);
+    try std.testing.expect(runtime.authorization() == .stalled);
     platform.now_unix_seconds = 101;
-    try std.testing.expect((try runtime.authorizationLease()) == null);
-    try std.testing.expect(!runtime.acceptsAuthorizationGeneration(generation));
+    try std.testing.expect((try runtime.credential()) == null);
+    try std.testing.expect(runtime.authorization() == .recovering);
     try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
     try std.testing.expectEqual(generation, runtime.authorization_generation);
     // Already handed-off owned credentials retain their independent lifetime.
@@ -2152,13 +2155,11 @@ test "incomplete profile identity still issues an authorization lease" {
     defer authenticated.deinit();
     runtime.commit(&authenticated);
 
-    var lease = (try runtime.authorizationLease()).?;
+    var lease = (try runtime.credential()).?;
     defer lease.deinit();
     try std.testing.expectEqualStrings("account-1", lease.principal_ref);
     try std.testing.expectEqualStrings("access-token", lease.access_token);
-    try std.testing.expect(runtime.acceptsAuthorizationGeneration(
-        lease.authorization_generation,
-    ));
+    try std.testing.expectEqual(lease.authorization_generation, runtime.authorization().use().ready);
 }
 
 test "recharge page opens only for an authenticated Account" {
@@ -2325,7 +2326,7 @@ test "unauthorized login code exchange preserves the retained credential" {
     );
     defer authenticated.deinit();
     runtime.commit(&authenticated);
-    var previous_lease = (try runtime.authorizationLease()).?;
+    var previous_lease = (try runtime.credential()).?;
     const previous_generation = previous_lease.authorization_generation;
     previous_lease.deinit();
 
@@ -2354,7 +2355,7 @@ test "unauthorized login code exchange preserves the retained credential" {
     );
     runtime.commit(&failed);
     try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
-    var retained_lease = (try runtime.authorizationLease()).?;
+    var retained_lease = (try runtime.credential()).?;
     defer retained_lease.deinit();
     try std.testing.expectEqual(previous_generation, retained_lease.authorization_generation);
 }
@@ -2426,7 +2427,7 @@ test "unauthorized login identity validation deletes the newly committed credent
     try std.testing.expectEqual(@as(?usize, null), platform.refresh_token_len);
     runtime.commit(&signed_out);
     try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
-    try std.testing.expect((try runtime.authorizationLease()) == null);
+    try std.testing.expect((try runtime.credential()) == null);
 }
 
 test "authorization lease rejects authorizing and mismatched principals" {
@@ -2449,7 +2450,7 @@ test "authorization lease rejects authorizing and mismatched principals" {
     defer authenticated.deinit();
     runtime.commit(&authenticated);
     _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
-    try std.testing.expect((try runtime.authorizationLease()) == null);
+    try std.testing.expect((try runtime.credential()) == null);
 
     var mismatched_transport: RuntimeTestTransport = .{};
     var mismatched = try initRuntimeForUnitTest(&mismatched_transport);
@@ -2470,7 +2471,7 @@ test "authorization lease rejects authorizing and mismatched principals" {
     );
     defer mismatched_authenticated.deinit();
     mismatched.commit(&mismatched_authenticated);
-    try std.testing.expect((try mismatched.authorizationLease()) == null);
+    try std.testing.expect((try mismatched.credential()) == null);
 }
 
 test "healthy refresh window preserves authorization generation" {
@@ -2492,7 +2493,7 @@ test "healthy refresh window preserves authorization generation" {
     );
     defer authenticated.deinit();
     runtime.commit(&authenticated);
-    var before = (try runtime.authorizationLease()).?;
+    var before = (try runtime.credential()).?;
     const generation = before.authorization_generation;
     before.deinit();
 
@@ -2500,10 +2501,9 @@ test "healthy refresh window preserves authorization generation" {
     defer refreshing.deinit();
     runtime.commit(&refreshing);
 
-    var during = (try runtime.authorizationLease()).?;
+    var during = (try runtime.credential()).?;
     defer during.deinit();
     try std.testing.expectEqual(generation, during.authorization_generation);
-    try std.testing.expect(runtime.acceptsAuthorizationGeneration(generation));
 }
 
 test "unauthorized refresh deletes the retained credential before signing out" {
@@ -2544,7 +2544,7 @@ test "unauthorized refresh deletes the retained credential before signing out" {
     runtime.commit(&signed_out);
     try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
     try std.testing.expectEqual(contract.ErrorCode.metask_unauthorized, runtime.view().error_code);
-    try std.testing.expect((try runtime.authorizationLease()) == null);
+    try std.testing.expect((try runtime.credential()) == null);
 }
 
 test "retry refresh schedules fresh credentials and refreshes inside skew" {
@@ -2751,7 +2751,7 @@ test "unknown transport result blocks timer retry cancelled reauthentication and
         try std.testing.expect(runtime.prepareCommand(.retry_refresh) == .rejected);
         for ([_]i64{ 150, 200, 4000 }) |now| {
             platform.now_unix_seconds = now;
-            try std.testing.expect(runtime.authorizationStatus() == .unavailable);
+            try std.testing.expect(runtime.authorization() == .signed_out);
         }
         try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
         _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
@@ -2823,7 +2823,7 @@ test "a refresh answered without a rotation signs out exactly as restore would" 
         try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, runtime.view().error_code);
         try std.testing.expectEqualStrings(case.cause, runtime.view().safe_diagnostic);
         try std.testing.expect(!runtime.credentials.available());
-        try std.testing.expect(runtime.authorizationStatus() == .unavailable);
+        try std.testing.expect(runtime.authorization() == .signed_out);
         try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
         try std.testing.expectEqualStrings("refresh-token", platform.refresh_token[0..platform.refresh_token_len.?]);
         try std.testing.expectEqual(case.blocks, platform.refresh_marker != null);
@@ -2853,7 +2853,8 @@ test "a refresh answered without a rotation signs out exactly as restore would" 
     }
 }
 
-test "the authorization status is unavailable exactly when no identity is verified" {
+test "every Account state answers one authorization" {
+    const Use = contract.Authorization.Use;
     var transport: RotationTestTransport = .{};
     var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &transport, .notify_fn = runtimeTestWake });
     var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
@@ -2862,21 +2863,21 @@ test "the authorization status is unavailable exactly when no identity is verifi
         TestSupport.detachPlatform(&runtime);
         runtime.deinit();
     }
-    // checking: a restore is underway but no identity is verified yet.
+    // Confirming a stored login: not started, restored, refreshing.
+    try std.testing.expectEqual(Use{ .wait = 0 }, runtime.authorization().use());
     var start = runtime.prepareStart(platform.ports());
     defer start.deinit();
     runtime.commit(&start);
-    try std.testing.expectEqual(contract.AccountState.checking, runtime.view().state);
-    try std.testing.expect(runtime.authorizationStatus() == .unavailable);
+    try std.testing.expectEqual(Use{ .wait = 0 }, runtime.authorization().use());
     var restore = runtime.prepareRestoredRefresh();
     defer restore.deinit();
     try std.testing.expect(runtime.admitEffect(&restore));
     runtime.commit(&restore);
-    try std.testing.expect(runtime.authorizationStatus() == .unavailable);
     TestSupport.clearEffectQueue(&runtime);
+    try std.testing.expectEqual(@as(u64, 0), runtime.authorization().checking);
 
-    var signed_out_transport: RuntimeTestTransport = .{};
-    var verified = try initRuntimeForUnitTest(&signed_out_transport);
+    var verified_transport: RuntimeTestTransport = .{};
+    var verified = try initRuntimeForUnitTest(&verified_transport);
     var verified_platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
     TestSupport.attachPlatform(&verified, &verified_platform);
     defer {
@@ -2887,16 +2888,41 @@ test "the authorization status is unavailable exactly when no identity is verifi
     defer authenticated.deinit();
     verified.commit(&authenticated);
     const generation = verified.authorization_generation;
-    try std.testing.expectEqual(AuthorizationStatus{ .available = generation }, verified.authorizationStatus());
+    try std.testing.expectEqualStrings("account-1", verified.authorization().available.account_id);
+    try std.testing.expectEqual(Use{ .ready = generation }, verified.authorization().use());
+    // The identity is borrowed from committed state, not from a copy.
+    try std.testing.expectEqual(verified.account.accountId().ptr, verified.authorization().available.account_id.ptr);
+    // Without a wall clock nothing says whether the token still holds, so
+    // nothing waits for it.
+    verified_platform.now_unix_seconds = null;
+    try std.testing.expect(verified.authorization() == .stalled);
+    try std.testing.expectEqual(Use{ .stop = .no_connection }, verified.authorization().use());
+    // An expired token recovers; an attempt underway always has an outcome.
     verified_platform.now_unix_seconds = 200;
-    try std.testing.expectEqual(AuthorizationStatus{ .recovering = 0 }, verified.authorizationStatus());
-    // Nothing had armed a refresh, so observing the expiry arms one.
-    try std.testing.expectEqual(@as(usize, 1), verified_platform.timer_start_count);
-
-    // A login from the verified session publishes `authorizing`.
+    try std.testing.expectEqual(Use{ .wait = 0 }, verified.authorization().use());
+    try std.testing.expectEqualStrings("account-1", verified.authorization().recovering.account_id);
+    var refresh = TestSupport.prepareTokenRefreshWithoutEffect(&verified);
+    defer refresh.deinit();
+    verified.commit(&refresh);
+    verified_platform.now_unix_seconds = null;
+    try std.testing.expect(verified.authorization() == .recovering);
     verified_platform.now_unix_seconds = 100;
-    const login = TestSupport.commitBeginLoginWithoutDispatch(&verified);
-    try std.testing.expect(verified.authorizationStatus() == .unavailable);
+    try std.testing.expectEqual(Use{ .ready = generation }, verified.authorization().use());
+    TestSupport.publishUnsentRefreshFailure(&verified, .account_operation_failed);
+    var unsent = switch (verified.prepareNextCompletion().?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer unsent.deinit();
+    verified.commit(&unsent);
+    verified_platform.now_unix_seconds = 200;
+    try std.testing.expectEqual(Use{ .wait = 1 }, verified.authorization().use());
+
+    // A login from the verified session needs the person to finish it.
+    verified_platform.now_unix_seconds = 100;
+    _ = TestSupport.commitBeginLoginWithoutDispatch(&verified);
+    try std.testing.expect(verified.authorization() == .authorizing);
+    try std.testing.expectEqual(Use{ .stop = .sign_in }, verified.authorization().use());
     var cancel = switch (verified.prepareCommand(.cancel_operation)) {
         .prepared => |prepared| prepared,
         else => return error.TestUnexpectedResult,
@@ -2904,22 +2930,43 @@ test "the authorization status is unavailable exactly when no identity is verifi
     defer cancel.deinit();
     _ = cancel.transition.takeEffect();
     verified.commit(&cancel);
-    _ = login;
-    try std.testing.expectEqual(AuthorizationStatus{ .available = generation }, verified.authorizationStatus());
+    try std.testing.expectEqual(Use{ .ready = generation }, verified.authorization().use());
 
-    // Logging out keeps `authenticated` until the credential is deleted.
+    // Logging out keeps `authenticated` until the deletion is committed, but
+    // its credential is already gone.
     var logout = switch (verified.prepareCommand(.logout)) {
         .prepared => |prepared| prepared,
         else => return error.TestUnexpectedResult,
     };
     defer logout.deinit();
-    _ = logout.transition.takeEffect();
+    try std.testing.expect(verified.admitEffect(&logout));
     verified.commit(&logout);
-    try std.testing.expectEqual(AuthorizationStatus{ .available = generation }, verified.authorizationStatus());
-    verified_platform.now_unix_seconds = 260;
-    try std.testing.expectEqual(AuthorizationStatus{ .recovering = 0 }, verified.authorizationStatus());
-    // No refresh is armed while another attempt owns the session.
-    try std.testing.expectEqual(@as(usize, 1), verified_platform.timer_start_count);
+    try std.testing.expectEqual(Use{ .ready = generation }, verified.authorization().use());
+    _ = verified.dispatchCommitted(&logout);
+    try std.testing.expectEqual(contract.AccountState.authenticated, verified.view().state);
+    try std.testing.expectEqual(Use{ .stop = .sign_in }, verified.authorization().use());
+    var logged_out = switch (verified.prepareNextCompletion().?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer logged_out.deinit();
+    verified.commit(&logged_out);
+    try std.testing.expect(verified.authorization() == .signed_out);
+
+    for ([_]enum { automation, unavailable, shutdown }{ .automation, .unavailable, .shutdown }) |ending| {
+        var other_transport: RuntimeTestTransport = .{};
+        var other = try initRuntimeForUnitTest(&other_transport);
+        defer other.deinit();
+        var prepared = switch (ending) {
+            .automation => other.prepareAutomationStart(),
+            .unavailable => other.prepareStartUnavailable(),
+            .shutdown => other.prepareShutdown(),
+        };
+        defer prepared.deinit();
+        _ = prepared.transition.takeEffect();
+        other.commit(&prepared);
+        try std.testing.expect(other.authorization() == .signed_out);
+    }
 }
 
 test "an overdue refresh timer is re-armed by the authorization query" {
@@ -2942,28 +2989,28 @@ test "an overdue refresh timer is re-armed by the authorization query" {
 
     // Not yet overdue: the armed timer still has its grace period.
     platform.now_unix_seconds = 144;
-    try std.testing.expectEqual(AuthorizationStatus{ .available = generation }, runtime.authorizationStatus());
+    try std.testing.expectEqual(contract.Authorization.Use{ .ready = generation }, runtime.authorization().use());
     try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
 
     // The timer never fired: the query arms it again to fire at once.
     platform.now_unix_seconds = 145;
-    try std.testing.expectEqual(AuthorizationStatus{ .available = generation }, runtime.authorizationStatus());
+    try std.testing.expectEqual(contract.Authorization.Use{ .ready = generation }, runtime.authorization().use());
     try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
     try std.testing.expectEqual(refresh_timer_id, platform.last_timer_id.?);
     try std.testing.expectEqual(@as(u64, 1), platform.last_timer_interval_ns);
-    for (0..3) |_| _ = runtime.authorizationStatus();
+    for (0..3) |_| _ = runtime.authorization();
     try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
 
     // The re-armed timer started but stays silent too; it is armed again
     // once its own grace has passed, and again after the token expired.
     platform.now_unix_seconds = 149;
-    _ = runtime.authorizationStatus();
+    _ = runtime.authorization();
     try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
     platform.now_unix_seconds = 150;
-    _ = runtime.authorizationStatus();
+    _ = runtime.authorization();
     try std.testing.expectEqual(@as(usize, 3), platform.timer_start_count);
     platform.now_unix_seconds = 230;
-    try std.testing.expectEqual(AuthorizationStatus{ .recovering = 0 }, runtime.authorizationStatus());
+    try std.testing.expectEqual(contract.Authorization.Use{ .wait = 0 }, runtime.authorization().use());
     try std.testing.expectEqual(@as(usize, 4), platform.timer_start_count);
 
     var refresh = switch (runtime.prepareTimer(refresh_timer_id).?) {
@@ -2975,7 +3022,7 @@ test "an overdue refresh timer is re-armed by the authorization query" {
     runtime.commit(&refresh);
     try std.testing.expect(runtime.dispatchCommitted(&refresh) == null);
     // An attempt in flight is recovery in motion; nothing more is armed.
-    try std.testing.expectEqual(AuthorizationStatus{ .recovering = 0 }, runtime.authorizationStatus());
+    try std.testing.expectEqual(contract.Authorization.Use{ .wait = 0 }, runtime.authorization().use());
     try std.testing.expectEqual(@as(usize, 4), platform.timer_start_count);
     runtime.effects.network_attempt.join();
     var rotated = switch (runtime.prepareNextCompletion().?) {
@@ -2985,7 +3032,7 @@ test "an overdue refresh timer is re-armed by the authorization query" {
     defer rotated.deinit();
     runtime.commit(&rotated);
     try std.testing.expect(runtime.dispatchCommitted(&rotated) == null);
-    try std.testing.expectEqual(AuthorizationStatus{ .available = runtime.authorization_generation }, runtime.authorizationStatus());
+    try std.testing.expectEqual(contract.Authorization.Use{ .ready = runtime.authorization_generation }, runtime.authorization().use());
     try std.testing.expect(runtime.authorization_generation != generation);
     try std.testing.expectEqual(@as(u64, 1), runtime.renewal_epoch);
     try std.testing.expectEqual(@as(usize, 1), transport.calls);
@@ -3012,7 +3059,7 @@ test "a refresh timer voided during a login is re-armed after the login ends" {
         platform.now_unix_seconds = 140;
         // The one timer fires into the login and is rejected: it is spent.
         try std.testing.expect(runtime.prepareTimer(refresh_timer_id).? == .rejected);
-        try std.testing.expect(runtime.authorizationStatus() == .unavailable);
+        try std.testing.expect(runtime.authorization() == .authorizing);
         try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
 
         switch (ending) {
@@ -3044,7 +3091,7 @@ test "a refresh timer voided during a login is re-armed after the login ends" {
         // Nothing re-armed the refresh when the login ended ...
         try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
         // ... so the first query does, before the token can expire unseen.
-        try std.testing.expect(runtime.authorizationStatus() == .available);
+        try std.testing.expect(runtime.authorization() == .available);
         try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
         try std.testing.expectEqual(@as(u64, 1), platform.last_timer_interval_ns);
         var refresh = switch (runtime.prepareTimer(refresh_timer_id).?) {
@@ -3210,7 +3257,7 @@ test "committed replacement remains available after marker cleanup failure" {
     runtime.commit(&completed);
     try std.testing.expect(!runtime.refresh_blocked);
     try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
-    var lease = (try runtime.authorizationLease()).?;
+    var lease = (try runtime.credential()).?;
     defer lease.deinit();
     try std.testing.expectEqualStrings("new-access", lease.access_token);
     var restored = try credential_store.restore(std.testing.allocator, platform.ports().credentials);
@@ -3312,9 +3359,9 @@ test "unsent refresh retries through its timer and recovers after access expiry"
     for ([_]i64{ 170, 200 }) |now| {
         platform.now_unix_seconds = now;
         if (now == 200) {
-            try std.testing.expect((try runtime.authorizationLease()) == null);
+            try std.testing.expect((try runtime.credential()) == null);
             // Two attempts finished; the armed retry is due, not overdue.
-            try std.testing.expectEqual(AuthorizationStatus{ .recovering = 2 }, runtime.authorizationStatus());
+            try std.testing.expectEqual(contract.Authorization.Use{ .wait = 2 }, runtime.authorization().use());
             try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
         }
         var retry = switch (runtime.prepareTimer(platform.last_timer_id.?).?) {
@@ -3340,7 +3387,7 @@ test "unsent refresh retries through its timer and recovers after access expiry"
     try std.testing.expect(platform.refresh_marker == null);
     try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
     try std.testing.expectEqual(contract.ErrorCode.none, runtime.view().error_code);
-    var lease = (try runtime.authorizationLease()).?;
+    var lease = (try runtime.credential()).?;
     defer lease.deinit();
     try std.testing.expectEqualStrings("new-access", lease.access_token);
     try std.testing.expectEqual(@as(usize, 0), platform.authorization_open_count);

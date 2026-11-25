@@ -179,6 +179,7 @@ export const initialWorkbenchState: WorkbenchState = {
     newTaskAdmission: {
       available: false,
       reason: "workspace_unavailable",
+      metask: "none",
     },
     skillCatalog: {
       availability: "uninitialized",

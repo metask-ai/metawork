@@ -279,6 +279,7 @@ import {
 } from "./task-model-selection.ts";
 import { AttachmentRemovalCoordinator } from "./attachment-removal.ts";
 import {
+  metaskAdmission,
   modelSetupNotice,
   supportsCustomProviders,
   type ModelSetupAction,
@@ -1995,7 +1996,11 @@ export default function App() {
   const canCreateTask =
     snapshot.newTaskAdmission.available &&
     newTaskWorkspaceReady &&
-    newTaskModelState.valid;
+    newTaskModelState.valid &&
+    !metaskAdmission(
+      snapshot.newTaskAdmission,
+      newTaskModelState.intent?.targetModelRef,
+    );
   const handoffBlocksSubmission =
     newTaskDraftActive &&
     handoffId !== null &&
@@ -2060,7 +2065,10 @@ export default function App() {
           account: snapshot.account,
           models: snapshot.models,
           admission: snapshot.newTaskAdmission,
-          selected: newTaskRequestedModel ?? snapshot.models.defaultSelection,
+          selected:
+            newTaskModelState.intent?.targetModelRef ??
+            newTaskRequestedModel ??
+            snapshot.models.defaultSelection,
           valid: newTaskModelState.valid,
           hasReadyModels,
           customProvidersAvailable,

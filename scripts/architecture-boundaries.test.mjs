@@ -2117,17 +2117,19 @@ test("Account authorization and Models provider state remain separate owners", (
   assert.match(accountCommit, /self\.commitAccountFactNoFail\(commit\.fact\)/);
   assert.doesNotMatch(accountCommit, /model|Model|source|Source|credential/);
 
-  const accountCommitAt = accountCoordinator.indexOf(
+  const commitSteps = [
     "self.runtime.commit(&prepared);",
-  );
-  const productCommitAt = accountCoordinator.indexOf(
     "self.control.commitNoFail",
-  );
-  assert.ok(accountCommitAt >= 0 && productCommitAt > accountCommitAt);
-  const observerAt = accountCoordinator.indexOf("observer.notify();");
-  assert.ok(observerAt > productCommitAt);
-  assert.match(accountRuntime, /pub fn authorizationLease/);
-  assert.match(modelsCoordinator, /self\.account\.authorizationLease\(\)/);
+    "self.deliverCredential();",
+    "follower.follow(self.runtime.authorization());",
+    "self.control.settleNoFail();",
+  ].map((step) => accountCoordinator.indexOf(step));
+  assert.ok(commitSteps[0] >= 0);
+  for (let step = 1; step < commitSteps.length; step++)
+    assert.ok(commitSteps[step] > commitSteps[step - 1]);
+  assert.match(accountRuntime, /pub fn credential\(/);
+  assert.match(modelsCoordinator, /self\.credentials\.take\(\)/);
+  assert.doesNotMatch(modelsCoordinator, /@import\("metawork_account"\)/);
   assert.match(
     modelsCoordinator,
     /self\.management\.setMetaskAuthorizationUnavailable\(\)/,
