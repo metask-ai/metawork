@@ -4771,25 +4771,13 @@ pub const Runtime = struct {
         return false;
     }
 
-    pub fn deferMetaskCredentialRenewals(self: *Runtime) void {
-        for (self.tasks) |entry| if (entry) |task| {
-            if (self.renewsMetaskCredential(task.durable.id))
-                task.runtime.credential_renewal_deferred = true;
-        };
-    }
-
-    pub fn renewMetaskExecutions(self: *Runtime, generation: u64, credential: ?[]const u8, effects: OperationEffects) bool {
+    pub fn renewMetaskExecutions(self: *Runtime, generation: u64, credential: []const u8, effects: OperationEffects) bool {
         var changed = false;
         for (self.tasks) |entry| if (entry) |task| {
             const id = task.durable.id;
             changed = self.renewMetaskMedia(id, generation, credential) or changed;
             if (!self.renewsMetaskCredential(id)) continue;
-            const value = credential orelse {
-                self.failCredentialRenewal(id, generation, true, false);
-                changed = true;
-                continue;
-            };
-            const outcome = self.renewMetaskCredential(id, generation, value, .delivery) catch |err| {
+            const outcome = self.renewMetaskCredential(id, generation, credential, .delivery) catch |err| {
                 self.failMetaskCredentialUpdate(id, generation, err, effects);
                 changed = true;
                 continue;
@@ -4818,7 +4806,7 @@ pub const Runtime = struct {
         access.requestTermination(task.runtime.active_run_id, .{ .credential_update_failure = if (contract) .dependency_contract else if (resource) .resource_limit else .rejected }) catch {};
     }
 
-    fn renewMetaskMedia(self: *Runtime, task_id: u64, generation: u64, value: ?[]const u8) bool {
+    fn renewMetaskMedia(self: *Runtime, task_id: u64, generation: u64, value: []const u8) bool {
         const task = self.find(task_id) orelse return false;
         var changed = false;
         for (task.durable.runs) |*entry| if (entry.*) |*run| {
@@ -4830,13 +4818,11 @@ pub const Runtime = struct {
         return changed;
     }
 
-    fn renewMediaCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, authorization: *task_state.MediaCredentials, generation: u64, value: ?[]const u8) bool {
+    fn renewMediaCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, authorization: *task_state.MediaCredentials, generation: u64, value: []const u8) bool {
         if (authorization.generation == generation) return false;
         const source = authorization.source orelse return false;
         authorization.generation = generation;
-        if (value) |key| {
-            installMediaCredential(allocator, run, authorization, key) catch source.invalidate();
-        } else source.invalidate();
+        installMediaCredential(allocator, run, authorization, value) catch source.invalidate();
         return true;
     }
 

@@ -142,6 +142,11 @@ pub const Coordinator = struct {
             if (!self.commitPrepared(prepared).accepted) break;
             committed = true;
         }
+        // Product rewrites what only masking hid before the token leaves.
+        while (self.runtime.expiredGrant()) |grant| {
+            if (self.credential_renewal) |renewal| renewal.retire(grant.accessToken().?);
+            self.runtime.forgetGrant(grant);
+        }
         return committed;
     }
 
@@ -183,15 +188,8 @@ pub const Coordinator = struct {
     }
 
     fn renew(self: *Coordinator, renewal: control_ports.MetaskCredentialRenewal, generation: u64) void {
-        var credential = (self.runtime.credential() catch {
-            self.delivered_generation = generation;
-            renewal.renew(generation, null);
-            return;
-        }) orelse return;
-        defer credential.deinit();
-        std.debug.assert(credential.authorization_generation == generation);
         self.delivered_generation = generation;
-        renewal.renew(generation, credential.access_token);
+        renewal.renew(generation, self.runtime.accessToken().?);
     }
 
     fn readyGeneration(self: *Coordinator) ?u64 {
@@ -219,14 +217,15 @@ pub const Coordinator = struct {
 
         // Account commits its own state first; every later step is no-fail and
         // cannot re-enter or roll back that transaction. Product learns the
-        // fact and its credential before anyone uses it, running executions
-        // take the credential before the catalog follows, and scheduled work
+        // fact and inspects the tokens before anyone uses the new one, running
+        // executions take it before the catalog follows, and scheduled work
         // rearms only once all of them agree.
         self.runtime.commit(&prepared);
         self.control.commitNoFail(.{
             .fact = fact,
             .attempt_id = attempt_id,
             .attempt_terminal = attempt_terminal,
+            .token_changed = prepared.token_changed,
         });
         self.deliverCredential();
         if (self.follower) |follower| follower.follow(self.runtime.authorization());
@@ -353,7 +352,7 @@ const RecordingSink = struct {
 };
 
 const CommitSteps = struct {
-    const Step = enum { commit, renew, renew_failed, follow, settle };
+    const Step = enum { commit, renew, follow, settle, retire };
     items: [16]Step = undefined,
     count: usize = 0,
 
@@ -368,13 +367,19 @@ const CommitSteps = struct {
     }
 
     fn renewal(self: *CommitSteps) control_ports.MetaskCredentialRenewal {
-        return .{ .context = self, .renew_fn = renew, .needs_fn = needs, .waits_fn = waits };
+        return .{ .context = self, .renew_fn = renew, .needs_fn = needs, .waits_fn = waits, .retire_fn = retire };
     }
 
-    fn renew(context: *anyopaque, generation: u64, credential: ?[]const u8) void {
+    fn renew(context: *anyopaque, generation: u64, credential: []const u8) void {
         const self: *CommitSteps = @ptrCast(@alignCast(context));
-        std.debug.assert(generation != 0);
-        self.add(if (credential == null) .renew_failed else .renew);
+        std.debug.assert(generation != 0 and credential.len != 0);
+        self.add(.renew);
+    }
+
+    fn retire(context: *anyopaque, credential: []const u8) void {
+        const self: *CommitSteps = @ptrCast(@alignCast(context));
+        std.debug.assert(std.mem.eql(u8, credential, "access-token"));
+        self.add(.retire);
     }
 
     fn needs(_: *anyopaque, _: u64) bool {
@@ -1156,17 +1161,18 @@ test "Account commit installs, renews, follows and settles in that order" {
     _ = coordinator.commandSink().submit(.cancel_operation);
     try std.testing.expect(std.mem.indexOfScalar(CommitSteps.Step, steps.take(), .renew) == null);
 
-    // Without memory for the copy, running executions end; none may go on
-    // with a credential Account already replaced.
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    runtime.credentials.current.?.generation += 1;
-    const allocator = runtime.allocator;
-    runtime.allocator = failing.allocator();
-    defer runtime.allocator = allocator;
-    coordinator.deliverCredential();
-    try std.testing.expectEqualSlices(CommitSteps.Step, &.{.renew_failed}, steps.take());
-    coordinator.deliverCredential();
+    // A token that ended is retired once nothing can accept it, which no wall
+    // clock decides, and is not inspected any more after that.
+    _ = coordinator.commandSink().submit(.logout);
+    _ = steps.take();
+    platform.boot_seconds = 259;
+    platform.now_unix_seconds = 100_000;
+    try std.testing.expect(!coordinator.tick());
     try std.testing.expectEqual(@as(usize, 0), steps.take().len);
+    platform.boot_seconds = 260;
+    try std.testing.expect(!coordinator.tick());
+    try std.testing.expectEqualSlices(CommitSteps.Step, &.{.retire}, steps.take());
+    try std.testing.expect(runtime.credentials.retired == null);
 }
 
 const ClosingRefreshTransport = struct {

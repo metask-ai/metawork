@@ -1431,7 +1431,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     try std.testing.expect(std.mem.startsWith(u8, control.testTask(task_id).?.runtime.executionConst().?.provider_id, "custom_provider:"));
     const projection_epoch = control.projectionSecurityEpoch();
     const first_id = try @import("lifecycle_fixture").runPreparedTask(&control, task_id, .{ .text = "Generate the fixture image." });
-    if (!logout_after_admission and !rotate_after_admission) try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
+    try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
     const task = control.testTask(task_id).?;
     try std.testing.expect(task.durable.runs[0].?.image_execution != null);
     // The Core cannot send the image request before manual once approval.
@@ -1447,7 +1447,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     }
     const cancelled = std.mem.eql(u8, mode, "hold");
     try image_product.finish(&control, task_id, first_id, if (cancelled) &effects else null);
-    if (!logout_after_admission and !rotate_after_admission) try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
+    try std.testing.expectEqual(projection_epoch, control.projectionSecurityEpoch());
     try std.testing.expect(task.durable.checkpoint != null);
     if (!cancelled) try expectProductGeneratedImagePreview(&control, task_id, first_id);
     try std.testing.expectEqual(@as(usize, 1), effects.image_calls.load(.acquire));

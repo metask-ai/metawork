@@ -29,6 +29,9 @@ pub const Grant = struct {
     expires_at: i64 = 0,
     /// When the access token is over and when it is renewed, once dated.
     times: ?struct { expires: Moment, renews: Moment } = null,
+    /// Boot seconds until which something may still accept the access token.
+    masked_until: i64 = 0,
+    next: ?*Grant = null,
     /// Counts the access tokens installed in this process.
     generation: u64 = 0,
     /// False once a logout could not delete the stored refresh token: its
@@ -85,21 +88,28 @@ pub const Grant = struct {
 /// sent with their own copies, so nothing borrows it beyond a main-thread call.
 pub const Credentials = struct {
     current: ?*Grant = null,
+    /// Access tokens that were replaced or ended and may still be accepted.
+    /// Their refresh tokens are gone.
+    retired: ?*Grant = null,
     generation: u64 = 0,
 
     pub fn install(self: *Credentials, grant: *Grant) void {
-        self.drop();
+        self.end();
         if (grant.accessToken() != null) {
-            self.advance();
+            self.generation +%= 1;
+            if (self.generation == 0) self.generation = 1;
             grant.generation = self.generation;
         }
         self.current = grant;
     }
 
     pub fn end(self: *Credentials) void {
-        if (self.current == null) return;
-        self.drop();
-        self.advance();
+        const grant = self.current orelse return;
+        self.current = null;
+        if (grant.accessToken() == null) return grant.destroy();
+        grant.refresh_token.deinit();
+        grant.next = self.retired;
+        self.retired = grant;
     }
 
     /// An access token is held; a stored login may have none yet.
@@ -115,18 +125,23 @@ pub const Credentials = struct {
         return &(self.current orelse return null).refresh_token;
     }
 
+    /// A retired token nothing accepts any more.
+    pub fn expired(self: *const Credentials, boot_now: i64) ?*Grant {
+        var next = self.retired;
+        while (next) |grant| : (next = grant.next) if (grant.masked_until <= boot_now) return grant;
+        return null;
+    }
+
+    pub fn forget(self: *Credentials, grant: *Grant) void {
+        var link = &self.retired;
+        while (link.* != grant) link = &link.*.?.next;
+        link.* = grant.next;
+        grant.destroy();
+    }
+
     pub fn deinit(self: *Credentials) void {
-        self.drop();
-    }
-
-    fn drop(self: *Credentials) void {
-        if (self.current) |grant| grant.destroy();
-        self.current = null;
-    }
-
-    fn advance(self: *Credentials) void {
-        self.generation +%= 1;
-        if (self.generation == 0) self.generation = 1;
+        self.end();
+        while (self.retired) |grant| self.forget(grant);
     }
 };
 
@@ -166,6 +181,18 @@ test "credentials hold one grant and a stored login has no access token" {
     try std.testing.expectEqualStrings("access-1", credentials.accessToken().?);
     try std.testing.expectEqualStrings("refresh-1", credentials.refreshToken().?.view());
     try std.testing.expectEqual(@as(u64, 1), credentials.current.?.generation);
+    credentials.install(try TestSupport.issued(std.testing.allocator, "access-2", "refresh-2", 20));
     credentials.end();
     try std.testing.expect(!credentials.available() and credentials.current == null);
+    // Both access tokens may still be accepted; neither refresh token is left.
+    const replaced = credentials.retired.?.next.?;
+    try std.testing.expectEqualStrings("access-1", replaced.accessToken().?);
+    try std.testing.expect(!replaced.refresh_token.owned);
+    replaced.masked_until = 10;
+    credentials.retired.?.masked_until = 20;
+    try std.testing.expect(credentials.expired(9) == null);
+    try std.testing.expectEqual(replaced, credentials.expired(10).?);
+    credentials.forget(replaced);
+    try std.testing.expect(credentials.expired(10) == null);
+    try std.testing.expectEqualStrings("access-2", credentials.expired(20).?.accessToken().?);
 }

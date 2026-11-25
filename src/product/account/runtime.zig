@@ -26,6 +26,9 @@ const renewal_lead_seconds: i64 = 90;
 /// Keeps a token with a very short lifetime from renewing back to back.
 const renewal_min_age_seconds: i64 = 30;
 const renewal_retry_seconds: i64 = 30;
+/// A token is inspected for this long beyond the latest moment it can end: the
+/// boot clock reads whole seconds, and the gateway has a clock of its own.
+const masked_margin_seconds: i64 = 60;
 /// A stored login is confirmed again and again, ever less often, until it is
 /// confirmed or disproved, or someone signs in instead.
 const confirm_delays_seconds = [_]i64{ 30, 60, 120, 300 };
@@ -475,6 +478,8 @@ pub const Prepared = struct {
     grant: ?*credentials_impl.Grant = null,
     /// The stored refresh token may be there still, but nothing sends it.
     ends_renewal: bool = false,
+    /// Set by the commit: it installed or ended an access token.
+    token_changed: bool = false,
     refresh_after_commit: bool = false,
     /// What the commit makes of the next renewal.
     renewal: enum { keep, token, retry } = .keep,
@@ -858,19 +863,33 @@ pub const Runtime = struct {
 
     pub fn accessTokenProjection(self: *Runtime) contract.AccessTokenProjection {
         self.assertMainThread();
-        return .{ .context = self, .generation_fn = projectionGeneration, .visit_fn = visitProjectionToken };
+        return .{ .context = self, .visit_fn = visitProjectionTokens };
     }
 
-    fn projectionGeneration(context: *anyopaque) u64 {
-        const self: *Runtime = @ptrCast(@alignCast(context));
-        self.assertMainThread();
-        return self.credentials.generation;
-    }
-
-    fn visitProjectionToken(context: *anyopaque, visitor_context: *anyopaque, visitor: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+    fn visitProjectionTokens(context: *anyopaque, visitor_context: *anyopaque, visitor: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
         const self: *Runtime = @ptrCast(@alignCast(context));
         self.assertMainThread();
         if (self.credentials.accessToken()) |token| try visitor(visitor_context, token);
+        var next = self.credentials.retired;
+        while (next) |grant| : (next = grant.next) try visitor(visitor_context, grant.accessToken().?);
+    }
+
+    /// Lent for the call, to what is already authorized to use it.
+    pub fn accessToken(self: *const Runtime) ?[]const u8 {
+        self.assertMainThread();
+        return self.credentials.accessToken();
+    }
+
+    /// What was replaced or ended and whose token nothing accepts any more.
+    pub fn expiredGrant(self: *const Runtime) ?*credentials_impl.Grant {
+        self.assertMainThread();
+        const platform = self.platform orelse return null;
+        return self.credentials.expired(platform.boot_clock.nowSeconds());
+    }
+
+    pub fn forgetGrant(self: *Runtime, grant: *credentials_impl.Grant) void {
+        self.assertMainThread();
+        self.credentials.forget(grant);
     }
 
     /// The current credential, taken whole: account, access token and
@@ -1003,8 +1022,10 @@ pub const Runtime = struct {
             self.effects.transport.retire(self.account.accountId());
         prepared.transition.commit(&self.account);
         // The only place the credential changes.
+        prepared.token_changed = ended and self.credentials.available();
         if (prepared.grant) |grant| {
             prepared.grant = null;
+            prepared.token_changed = grant.accessToken() != null;
             self.credentials.install(grant);
             self.request.marked = false;
         } else if (ended) self.credentials.end();
@@ -1361,6 +1382,7 @@ pub const Runtime = struct {
         const boot_expires_at = self.request.boot +| (grant.expires_at -| self.request.wall);
         const wall_now = platform.wall_clock.nowUnixSeconds() orelse self.request.wall;
         const boot_now = platform.boot_clock.nowSeconds();
+        grant.masked_until = boot_now +| (grant.expires_at -| self.request.wall) +| masked_margin_seconds;
         grant.times = .{
             .expires = .{ .wall = grant.expires_at, .boot = boot_expires_at },
             .renews = .{
@@ -3052,8 +3074,17 @@ test "a logout is one commit and one it could not finish ends with the next logi
     }
 }
 
-test "a login that ends keeps no credential however it ended" {
+test "a login that ends keeps no credential and its tokens are inspected until they end" {
     const Ending = enum { logout, renewal, login_identity, confirmation };
+    const Inspection = struct {
+        seen: [2][]const u8 = undefined,
+        count: usize = 0,
+        fn visit(context: *anyopaque, token: []const u8) std.mem.Allocator.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.seen[self.count] = token;
+            self.count += 1;
+        }
+    };
     for (std.enums.values(Ending)) |ending| {
         var transport: ConfirmTransport = .{ .refresh = if (ending == .renewal) .lost else .answered, .identity = .malformed };
         var runtime = transport.runtimeFor();
@@ -3082,6 +3113,29 @@ test "a login that ends keeps no credential however it ended" {
         }
         try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
         try std.testing.expect(runtime.credentials.current == null);
+        const expected: []const []const u8 = switch (ending) {
+            .logout, .renewal => &.{"access-token"},
+            .login_identity => &.{ "new-access", "access-token" },
+            .confirmation => &.{"new-access"},
+        };
+        var inspection: Inspection = .{};
+        try runtime.accessTokenProjection().visit(&inspection, Inspection.visit);
+        try std.testing.expectEqual(expected.len, inspection.count);
+        for (expected, inspection.seen[0..inspection.count]) |token, seen| try std.testing.expectEqualStrings(token, seen);
+        // A minute past the latest moment the server can have meant.
+        const ends: i64 = switch (ending) {
+            .logout, .renewal => 260,
+            .login_identity, .confirmation => 3760,
+        };
+        platform.boot_seconds = ends - 1;
+        platform.now_unix_seconds = 100_000;
+        while (runtime.expiredGrant()) |grant| runtime.forgetGrant(grant);
+        try std.testing.expect(runtime.credentials.retired != null);
+        platform.boot_seconds = ends;
+        const last = runtime.expiredGrant().?;
+        try std.testing.expectEqualStrings(expected[0], last.accessToken().?);
+        runtime.forgetGrant(last);
+        try std.testing.expect(runtime.credentials.retired == null);
     }
 }
 
@@ -3712,11 +3766,14 @@ test "projection inspection follows Account access token ownership without expor
     var authenticated = try TestSupport.prepareAuthenticated(&runtime, "account-1", "User", "access-token", "refresh-token", 200);
     defer authenticated.deinit();
     runtime.commit(&authenticated);
-    const generation = source.generation();
     try source.visit(&inspection, Inspection.visit);
     try std.testing.expectEqual(@as(usize, 1), inspection.seen);
     try logOut(&runtime);
-    try std.testing.expect(source.generation() != generation);
+    try std.testing.expect(!runtime.credentials.retired.?.refresh_token.owned);
     try source.visit(&inspection, Inspection.visit);
-    try std.testing.expectEqual(@as(usize, 1), inspection.seen);
+    try std.testing.expectEqual(@as(usize, 2), inspection.seen);
+    platform.now_unix_seconds = 260;
+    runtime.forgetGrant(runtime.expiredGrant().?);
+    try source.visit(&inspection, Inspection.visit);
+    try std.testing.expectEqual(@as(usize, 2), inspection.seen);
 }

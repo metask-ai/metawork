@@ -2115,15 +2115,26 @@ test("Account authorization and Models provider state remain separate owners", (
   const nextMethod = control.indexOf("\n    }", commitStart + 1);
   const accountCommit = control.slice(commitStart, nextMethod);
   assert.match(accountCommit, /self\.commitAccountFactNoFail\(commit\.fact\)/);
-  assert.doesNotMatch(accountCommit, /model|Model|source|Source|credential/);
+  assert.doesNotMatch(accountCommit, /model|Model|source|Source/);
+  // Product learns that a token changed and inspects it through its visitor;
+  // the commit itself carries no bytes of one.
+  const accountCommitFields = ports.match(
+    /pub const AccountCommit = struct \{([\s\S]*?)\n    pub fn /,
+  )?.[1];
+  assert.match(accountCommitFields, /token_changed: bool/);
+  assert.doesNotMatch(accountCommitFields, /\[\](?:const )?u8/);
 
+  const commitPrepared = accountCoordinator.slice(
+    accountCoordinator.indexOf("fn commitPrepared("),
+    accountCoordinator.indexOf("pub fn beginShutdown("),
+  );
   const commitSteps = [
     "self.runtime.commit(&prepared);",
     "self.control.commitNoFail",
     "self.deliverCredential();",
     "follower.follow(self.runtime.authorization());",
     "self.control.settleNoFail();",
-  ].map((step) => accountCoordinator.indexOf(step));
+  ].map((step) => commitPrepared.indexOf(step));
   assert.ok(commitSteps[0] >= 0);
   for (let step = 1; step < commitSteps.length; step++)
     assert.ok(commitSteps[step] > commitSteps[step - 1]);
