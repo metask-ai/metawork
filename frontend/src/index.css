@@ -8225,7 +8225,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   align-items: center;
   gap: 7px;
   border: 1px solid var(--ui-border);
-  border-left: 2px solid var(--ui-action-primary);
   border-radius: 8px;
   background: var(--ui-surface-panel-2);
 }
