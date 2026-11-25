@@ -512,11 +512,11 @@ pub const Runtime = struct {
             self.metask_error = .local_resource_exhausted;
             return self.metask_error;
         };
-        // Source authority is independent of catalog order and consumer choices.
-        const current = self.registry.metaskSource();
-        const keeps_authority = if (current) |source|
-            std.mem.eql(u8, source.principal_ref, attempt.principal_ref.view()) and
-                self.metask_catalog.sameCredential(session)
+        // The account is the source's whole authority: neither its token, the
+        // catalog's order nor a consumer's choice is part of it.
+        const principal_ref = attempt.principal_ref.view();
+        const keeps_authority = if (self.registry.metaskSource()) |source|
+            std.mem.eql(u8, source.principal_ref, principal_ref)
         else
             false;
         if (!keeps_authority) {
@@ -526,12 +526,7 @@ pub const Runtime = struct {
                 return self.metask_error;
             };
             defer candidate.deinit();
-            const generation = self.freshGeneration(if (current) |source| source.source_generation else 0) catch {
-                self.metask_catalog_state = .failed;
-                self.metask_error = .local_resource_exhausted;
-                return self.metask_error;
-            };
-            candidate.configureMetaskSource(attempt.principal_ref.view(), generation) catch {
+            candidate.configureMetaskSource(principal_ref, registry_impl.metaskSourceGeneration(principal_ref)) catch {
                 self.metask_catalog_state = .failed;
                 self.metask_error = .local_resource_exhausted;
                 return self.metask_error;
@@ -578,6 +573,29 @@ pub const Runtime = struct {
     pub fn setMetaskAuthorizationUnavailable(self: *Runtime) void {
         self.assertMainThread();
         self.clearMetaskRuntime(.needs_authentication, .authorization_unavailable);
+    }
+
+    pub const MetaskAdoption = struct { stored: u64, derived: u64 };
+
+    /// The generation an older version drew for the stored account, while it
+    /// is still the one in use.
+    pub fn pendingMetaskAdoption(self: *const Runtime) ?MetaskAdoption {
+        self.assertMainThread();
+        if (!self.store_healthy) return null;
+        const source = self.registry.metaskSource() orelse return null;
+        const derived = registry_impl.metaskSourceGeneration(source.principal_ref);
+        return if (source.source_generation == derived) null else .{ .stored = source.source_generation, .derived = derived };
+    }
+
+    /// Memory moves first, because the bindings that named the stored value
+    /// already moved. A failed write leaves that value for the next start.
+    pub fn adoptMetaskGeneration(self: *Runtime, adoption: MetaskAdoption) void {
+        self.assertMainThread();
+        self.registry.metask_source_generation = adoption.derived;
+        const encoded = registry_impl.encodeAlloc(self.allocator, &self.registry) catch return;
+        defer self.allocator.free(encoded);
+        const store = if (self.store) |*value| value else return;
+        if (commitCanonical(self.allocator, store, encoded) == .unresolved) self.store_healthy = false;
     }
 
     /// Best-effort memory of a confirmed interactive consumer choice. This
@@ -2239,7 +2257,7 @@ test "Models owns Metask catalog authority without changing global default" {
         ),
     );
     const second = runtime.view();
-    try std.testing.expect(first_source_generation != second.providers[0].source_generation);
+    try std.testing.expectEqual(first_source_generation, second.providers[0].source_generation);
     try std.testing.expect(first_catalog_generation != second.providers[0].catalog_generation);
 
     try std.testing.expect(runtime.rememberPreference(.{
@@ -2264,6 +2282,8 @@ test "Models owns Metask catalog authority without changing global default" {
         second.providers[0].source_generation,
         second_candidate.input().source_generation,
     );
+    // The token and its Account generation travel together.
+    try std.testing.expectEqual(@as(u64, 6), second_candidate.input().credential_generation);
     try std.testing.expectEqual(
         contract.Protocol.anthropic_messages,
         second_candidate.input().target.protocol,
@@ -2755,7 +2775,7 @@ test "successful empty Metask catalog preserves intent but removes all resolvabl
     try std.testing.expectEqual(contract.ModelsError.no_models, view.providers[0].error_code);
     try std.testing.expectEqual(@as(usize, 0), view.providers[0].models.len);
     try std.testing.expect(view.providers[0].catalog_generation != 4);
-    try std.testing.expect(view.providers[0].source_generation != 0 and view.providers[0].source_generation != 1);
+    try std.testing.expectEqual(@as(u64, 1), view.providers[0].source_generation);
     try std.testing.expectEqual(@as(u64, 3), view.selection_revision);
     try std.testing.expectEqualStrings("model-1", view.default_selection.?.model_id);
     try std.testing.expectEqualStrings("model-1", view.default_selection.?.model_id);
@@ -3020,10 +3040,10 @@ test "image model policy prefers the default and then the first declared generat
     try std.testing.expectEqualStrings(contract.metask_default_image_model, preferred.input().selection.model_id);
 }
 
-test "Metask credential authority advances even when the selected catalog model is unavailable" {
+test "Metask source survives a credential change when the selected model leaves the catalog" {
     const Refresh = struct {
-        fn run(runtime: *Runtime, token: []const u8, body: []const u8) !void {
-            const attempt = switch (runtime.prepareMetaskCatalogRefresh("principal", 17)) {
+        fn run(runtime: *Runtime, token: []const u8, generation: u64, body: []const u8) !void {
+            const attempt = switch (runtime.prepareMetaskCatalogRefresh("principal", generation)) {
                 .ready => |value| value,
                 .rejected => return error.TestUnexpectedResult,
             };
@@ -3059,13 +3079,13 @@ test "Metask credential authority advances even when the selected catalog model 
             runtime.stop();
             runtime.deinit();
         }
-        try Refresh.run(&runtime, "synthetic-authority-a", initial);
+        try Refresh.run(&runtime, "synthetic-authority-a", 17, initial);
         try std.testing.expect(runtime.rememberPreference(.{ .source_id = "metask", .model_id = "selected" }).accepted);
         const source_a = runtime.view().providers[0].source_generation;
         const selection = runtime.view().selection_revision;
-        try Refresh.run(&runtime, "synthetic-authority-b", updated);
+        try Refresh.run(&runtime, "synthetic-authority-b", 18, updated);
         const source_b = runtime.view().providers[0].source_generation;
-        try std.testing.expect(source_b != 0 and source_b != source_a);
+        try std.testing.expect(source_b != 0 and source_b == source_a);
         try std.testing.expectEqual(selection, runtime.view().selection_revision);
         try std.testing.expectEqualStrings("selected", runtime.view().default_selection.?.model_id);
         try std.testing.expectEqualStrings("selected", runtime.view().default_selection.?.model_id);
@@ -3075,16 +3095,71 @@ test "Metask credential authority advances even when the selected catalog model 
             defer other.deinit();
             try std.testing.expectEqualStrings("synthetic-authority-b", other.input().api_key);
             try std.testing.expectEqual(source_b, other.input().source_generation);
+            try std.testing.expectEqual(@as(u64, 18), other.input().credential_generation);
         }
-        // No new persistent shape or implicit selection is needed. An unchanged
-        // credential does not rotate authority on another catalog-only refresh.
+        // No new persistent shape or implicit selection is needed.
         const encoded = try registry_impl.encodeAlloc(std.testing.allocator, &runtime.registry);
         defer std.testing.allocator.free(encoded);
         var decoded = try registry_impl.decode(std.testing.allocator, encoded);
         defer decoded.deinit();
         try std.testing.expectEqual(source_b, decoded.metaskSource().?.source_generation);
         try std.testing.expectEqualStrings("selected", decoded.defaultSelection().?.model_id);
-        try Refresh.run(&runtime, "synthetic-authority-b", updated);
+        try Refresh.run(&runtime, "synthetic-authority-b", 18, updated);
         try std.testing.expectEqual(source_b, runtime.view().providers[0].source_generation);
     }
+}
+
+test "Metask source follows its account through a switch, a return, a restart and an adoption" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var vault = TestVault{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(home, vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    const models = [_]contract.ModelView{.{ .id = "model-1", .display_name = "Model One" }};
+    const Account = struct { principal: []const u8, token: []const u8 };
+    var seen: [4]u64 = undefined;
+    for ([_]Account{
+        .{ .principal = "account-a", .token = "a-1" },
+        .{ .principal = "account-a", .token = "a-2" },
+        .{ .principal = "account-b", .token = "b-1" },
+        .{ .principal = "account-a", .token = "a-3" },
+    }, &seen) |account, *generation| {
+        try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogWithCredential(&runtime, account.principal, account.token, &models));
+        generation.* = runtime.view().providers[0].source_generation;
+    }
+    try std.testing.expect(seen[0] == seen[1] and seen[0] == seen[3] and seen[0] != seen[2]);
+    runtime.stop();
+    try runtime.start(home, vault.port());
+    try std.testing.expectEqual(seen[0], runtime.view().providers[0].source_generation);
+    try std.testing.expect(runtime.pendingMetaskAdoption() == null);
+
+    // An older version left the same account under a value it drew itself.
+    runtime.registry.metask_source_generation = 1234;
+    try std.testing.expect(runtime.rememberPreference(.{ .source_id = "metask", .model_id = "model-1" }).accepted);
+    for ([_]bool{ false, true }) |writes| {
+        runtime.stop();
+        try runtime.start(home, vault.port());
+        const adoption = runtime.pendingMetaskAdoption().?;
+        try std.testing.expectEqual(@as(u64, 1234), adoption.stored);
+        try std.testing.expectEqual(seen[0], adoption.derived);
+        // Until it is adopted the stored value is as stable as the derived one.
+        try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogWithCredential(&runtime, "account-a", "a-4", &models));
+        try std.testing.expectEqual(@as(u64, 1234), runtime.view().providers[0].source_generation);
+        const store = runtime.store;
+        if (!writes) runtime.store = null;
+        runtime.adoptMetaskGeneration(adoption);
+        runtime.store = store;
+        try std.testing.expectEqual(seen[0], runtime.view().providers[0].source_generation);
+        try std.testing.expect(runtime.pendingMetaskAdoption() == null);
+    }
+    runtime.stop();
+    try runtime.start(home, vault.port());
+    try std.testing.expect(runtime.pendingMetaskAdoption() == null);
+    try std.testing.expectEqual(seen[0], runtime.view().providers[0].source_generation);
 }

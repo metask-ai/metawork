@@ -672,11 +672,11 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
             try expectSwitchedAccount(&wake_loop, &control, &account_runtime, tmp.dir, workspace, old_id, previous_source_generation);
             return;
         }
-        // Userinfo bound the new login to the same principal: models.json is
-        // rewritten for the new credential, but its principal stays unchanged.
+        // Userinfo bound the new login to the same principal, so the source
+        // and what models.json says of it stay as they were.
         const relogged = control.modelsView().providers[0];
         try std.testing.expectEqualStrings("credential-lifecycle", relogged.principal_ref);
-        try std.testing.expect(relogged.source_generation != previous_source_generation);
+        try std.testing.expectEqual(previous_source_generation, relogged.source_generation);
         try expectPersistedMetaskSource(tmp.dir, "credential-lifecycle", relogged.source_generation);
         // The idle Session receives the new login in place, without a new
         // binding or execution generation.
@@ -1091,7 +1091,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         }
         try std.testing.expectEqual(@as(usize, 1), network.refresh_calls.load(.acquire));
         try std.testing.expectEqual(@as(usize, 2), network.catalog_calls.load(.acquire));
-        try std.testing.expectEqual(scenario != .continuation_unchanged, old_source != control.modelsView().providers[0].source_generation);
+        try std.testing.expectEqual(old_source, control.modelsView().providers[0].source_generation);
         try std.testing.expectEqual(default_revision, control.modelsView().selection_revision);
         if (scenario == .catalog_drift or rebuilds) {
             try std.testing.expectEqualStrings(model_id, control.modelsView().default_selection.?.model_id);

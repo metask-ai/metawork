@@ -3140,7 +3140,18 @@ pub const Runtime = struct {
     ) models_aggregate.StartError!void {
         try self.custom_providers.start(absolute_directory, vault);
 
+        self.adoptMetaskSourceNoFail();
         self.finishModelsCommitNoFail();
+    }
+
+    /// Settles an older version's Metask generation before Schedule sees any
+    /// Models fact. Schedule moves first: an interrupted adoption still finds
+    /// the older value in Models and repeats, and until then that value stays
+    /// in use on both sides.
+    fn adoptMetaskSourceNoFail(self: *Runtime) void {
+        const adoption = self.custom_providers.pendingMetaskAdoption() orelse return;
+        if (self.schedule.rebindSourceNoFail(models_contract.metask_source_id, adoption.stored, adoption.derived, self.scheduleRedaction()))
+            self.custom_providers.adoptMetaskGeneration(adoption);
     }
 
     pub fn startCustomProvidersUnavailable(self: *Runtime) void {
@@ -3168,6 +3179,7 @@ pub const Runtime = struct {
         const result = self.custom_providers.resetStore();
         if (!result.accepted) return result;
 
+        self.adoptMetaskSourceNoFail();
         self.finishModelsCommitNoFail();
         return result;
     }
@@ -14650,6 +14662,112 @@ test "Scheduled Task ignores Product binding generation drift for stable source 
     try std.testing.expectEqual(@as(u64, 2_000), item.next_run_at_unix_seconds.?);
     try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
     try std.testing.expectEqual(@as(usize, 1), persistence.commits);
+}
+
+/// One Scheduled Task on a Metask model, beside a real Models store.
+const MetaskScheduleFixture = struct {
+    control: Runtime = undefined,
+    models_tmp: std.testing.TmpDir,
+    automatic_tmp: std.testing.TmpDir,
+    automatic_root: product_workspace.AutomaticRoot = undefined,
+    vault: TestCustomProviderVault = .{},
+    clock: TestScheduleClock = .{ .now = 1_000 },
+    persistence: TestSchedulePersistence = .{},
+
+    fn init(self: *@This()) !void {
+        self.* = .{ .models_tmp = std.testing.tmpDir(.{}), .automatic_tmp = std.testing.tmpDir(.{}) };
+        self.control = try testRuntime();
+        var storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        self.automatic_root = try product_workspace.AutomaticRoot.open(std.testing.io, std.testing.allocator, storage[0..try self.automatic_tmp.dir.realPath(std.testing.io, &storage)]);
+        product_schedule.testing.configure(&self.control.schedule, self.clock.timer(), self.persistence.capability(), .ready);
+        product_workspace.testing.installAutomaticRoot(&self.control.workspace, &self.automatic_root);
+        self.control.setScheduleBackgroundAvailableNoFail(true);
+        try self.restartModels();
+    }
+
+    fn deinit(self: *@This()) void {
+        self.control.stopCustomProviders();
+        self.control.deinit();
+        self.automatic_root.deinit();
+        self.automatic_tmp.cleanup();
+        self.models_tmp.cleanup();
+    }
+
+    fn restartModels(self: *@This()) !void {
+        var storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        self.control.stopCustomProviders();
+        try self.control.startCustomProviders(storage[0..try self.models_tmp.dir.realPath(std.testing.io, &storage)], self.vault.port());
+    }
+
+    fn loadCatalog(self: *@This(), credential: []const u8) !void {
+        const models = [_]models_contract.ModelView{.{ .id = "fixture-model", .display_name = "Fixture model" }};
+        try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogWithCredential(&self.control.custom_providers, "account-1", credential, &models));
+        self.control.finishModelsCommitNoFail();
+    }
+
+    fn schedule(self: *@This()) !u64 {
+        return self.control.createScheduledTask(.{
+            .title = "Review current work",
+            .model_selection = try TestSupport.fixtureModelSelection(&self.control),
+            .permission_profile = .approval_required,
+            .input = "Review current work",
+            .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+        });
+    }
+
+    /// The task still runs on its own binding, which names `generation`.
+    fn expectRunnable(self: *@This(), id: u64, generation: u64) !void {
+        const item = product_schedule.testing.item(&self.control.schedule, id).?;
+        try std.testing.expect(item.enabled and item.health == .ready);
+        try std.testing.expectEqual(generation, item.binding.source_generation);
+        try std.testing.expectEqual(generation, self.control.modelsView().providers[0].source_generation);
+        try std.testing.expect(self.control.scheduledModelBinding(item.binding) == .ready);
+    }
+};
+
+test "Scheduled Task keeps its Metask model across renewals, logins and restarts" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const id = try fixture.schedule();
+    const generation = fixture.control.modelsView().providers[0].source_generation;
+    const commits = fixture.persistence.commits;
+    for ([_][]const u8{ "token-a", "token-b" }) |token| try fixture.loadCatalog(token);
+    try fixture.restartModels();
+    try fixture.loadCatalog("token-c");
+    try fixture.expectRunnable(id, generation);
+    try std.testing.expectEqual(@as(?u64, 2_000), fixture.clock.armed_at);
+    try std.testing.expectEqual(commits, fixture.persistence.commits);
+}
+
+test "Scheduled Task follows its account's generation out of an older version's store" {
+    for ([_]enum { adopted, schedule_write_fails, interrupted }{ .adopted, .schedule_write_fails, .interrupted }) |case| {
+        var fixture: MetaskScheduleFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        try fixture.loadCatalog("token-a");
+        const id = try fixture.schedule();
+        const derived = fixture.control.modelsView().providers[0].source_generation;
+        // The same account under a value an older version drew. Interrupted
+        // adoption already wrote Schedule, but not Models.
+        fixture.control.custom_providers.registry.metask_source_generation = 1234;
+        try std.testing.expect(fixture.control.custom_providers.rememberPreference(.{ .source_id = "metask", .model_id = "fixture-model" }).accepted);
+        if (case != .interrupted) fixture.control.schedule.store.find(id).?.binding.source_generation = 1234;
+        if (case == .schedule_write_fails) fixture.persistence.result = .failed;
+        const commits = fixture.persistence.commits;
+        try fixture.restartModels();
+        try fixture.loadCatalog("token-b");
+        try fixture.expectRunnable(id, if (case == .schedule_write_fails) 1234 else derived);
+        try std.testing.expectEqual(commits + @as(usize, if (case == .interrupted) 0 else 1), fixture.persistence.commits);
+        if (case != .schedule_write_fails) continue;
+        // Neither side moved, so the next start can.
+        fixture.persistence.result = .committed;
+        product_schedule.testing.setPersistenceHealth(&fixture.control.schedule, .ready);
+        try fixture.restartModels();
+        try fixture.loadCatalog("token-c");
+        try fixture.expectRunnable(id, derived);
+    }
 }
 
 test "Skill catalog snapshot reports redaction without exposing credential bytes" {

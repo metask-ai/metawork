@@ -764,6 +764,20 @@ pub const Store = struct {
         return item;
     }
 
+    /// Moves every definition of one source generation to another. Only the
+    /// identity's value moves; the definition, its epoch and health do not.
+    pub fn rebindSource(self: *Store, source_id: []const u8, previous: u64, next: u64) bool {
+        var changed = false;
+        for (self.items) |*entry| {
+            const item = &(entry.* orelse continue);
+            if (item.binding.source_generation != previous or
+                !std.mem.eql(u8, item.binding.source_id, source_id)) continue;
+            item.binding.source_generation = next;
+            changed = true;
+        }
+        return changed;
+    }
+
     fn cloneBinding(self: *Store, binding: Binding) Error!OwnedBinding {
         const source_id = try self.copy(binding.model_ref.source_id);
         errdefer self.free(source_id);

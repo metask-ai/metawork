@@ -82,7 +82,7 @@ Account commits verified identity/credential generation
 → later explicit target admission independently resolves current authority
 ```
 
-authorization lease 由 Account 构造，Application 负责在主线程交付或单个 catalog job 的相应生命周期内持有并清零。刷新时先向已接纳消费者交付所需 owned copy，再替换目录 job。Models 只接收 attempt、principal、authorization generation 与 owned catalog completion；Models module 不导入 Account，也不持久化 OAuth token。成功 completion 把 access token 的 owned copy 作为当前 Metask source 的 transient execution credential，下一次 authorization generation 变化会重新加载目录并替换该 copy。credential 改变必须建立新的 source generation，不能因 principal、模型或 protocol 相同而复用旧 authority；已选模型失格或合法空目录也不阻止来源版本更新，保留的模型意图仍不可执行，其他合格模型按新 authority 解析。纯 credential 轮换不改变用户的模型 selection revision。Application 另向 Product Control 提供主线程、无 secret 的当次授权校验 capability，返回 Account-owned authorization generation；每次 Metask 新执行接纳及恢复候选发布前重新查询，匹配 Models 已接纳目录的 authorization generation，不能由 cached authenticated view、目录仍存在或 Task model intent revision 相同推断授权有效；catalog worker 不拥有 committed state，陈旧 completion 只能销毁。Models 的失败不调用 Account abort、不改变登录状态，也不补写 Account error。
+authorization lease 由 Account 构造，Application 负责在主线程交付或单个 catalog job 的相应生命周期内持有并清零。刷新时先向已接纳消费者交付所需 owned copy，再替换目录 job。Models 只接收 attempt、principal、authorization generation 与 owned catalog completion；Models module 不导入 Account，也不持久化 OAuth token。成功 completion 把 access token 的 owned copy 作为当前 Metask source 的 transient execution credential，下一次 authorization generation 变化会重新加载目录并替换该 copy。Metask 的 source generation 由 principal 派生：同一账号在续期、重启和再次登录后不变，换账号随之改变，换回得到同一个值。credential 的新旧由随 candidate 交付的 Account authorization generation 表示，不由 source generation 表示。已选模型失格或合法空目录时仍接收新 credential，保留的模型意图仍不可执行，其他合格模型按新 credential 解析。纯 credential 轮换不改变用户的模型 selection revision。Application 另向 Product Control 提供主线程、无 secret 的当次授权校验 capability，返回 Account-owned authorization generation；每次 Metask 新执行接纳及恢复候选发布前重新查询，匹配 Models 已接纳目录的 authorization generation，不能由 cached authenticated view、目录仍存在或 Task model intent revision 相同推断授权有效；catalog worker 不拥有 committed state，陈旧 completion 只能销毁。Models 的失败不调用 Account abort、不改变登录状态，也不补写 Account error。
 
 authorization loss 时 Application cancel/join Metask catalog job并销毁 lease；Models 清除可解析目录及 transient credential并发布 needs_authentication，保留无 secret 起始偏好。只关闭 Metask 新解析与执行资格，custom 来源及既有 owned binding 不被全局暂停；再次登录后既有 Task 按下文规则采用当前授权。
 
@@ -127,7 +127,7 @@ Canonical snapshot 保持 owner 边界：Account 发布身份与授权事实，M
 
 Models 每次 resolve 只产生精确 `ModelRef + source_generation + protocol` 的调用方 owned candidate。Product Control 在 Task 创建、恢复/rebind 安装、凭据续期及释放边界执行产品文本与 Schedule durable scrub；完成必要持久提交后才安装、转移或 secure-zero 对应 credential。失败保留所需 owner 与诊断，不建立 default desired/active mismatch。
 
-`models.json` 是 Models aggregate 的唯一 canonical store；当前 schema 3 保存 Metask 无 secret 来源 authority（principal 与 source generation）、source-qualified 起始偏好及其 revision、Metask 起始偏好的可选 `default_selection.display_name`、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone。它不保存 Provider-local 模型选择、OAuth token、API credential、credential locator 或 Product binding generation；Custom Provider credential 只进入系统安全存储。Metask source id 固定为 `metask`。确认交互选择时，Models 从当时的有效 Metask 目录保存非空显示名。Metask 偏好缺少显示名时，新任务要求用户明确重选。读取偏好和目录刷新均不改写已保存偏好。生图不形成用户选择、独立 revision 或持久化 intent。
+`models.json` 是 Models aggregate 的唯一 canonical store；当前 schema 3 保存 Metask 无 secret 来源 authority（principal 与 source generation）、source-qualified 起始偏好及其 revision、Metask 起始偏好的可选 `default_selection.display_name`、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone。旧版写入的随机 Metask source generation 在启动时改写为派生值：先改 Schedule 中等于它的绑定，未写成则两边都保持原值；再写本文件，未写成则文件留着原值；下次启动重做。它不保存 Provider-local 模型选择、OAuth token、API credential、credential locator 或 Product binding generation；Custom Provider credential 只进入系统安全存储。Metask source id 固定为 `metask`。确认交互选择时，Models 从当时的有效 Metask 目录保存非空显示名。Metask 偏好缺少显示名时，新任务要求用户明确重选。读取偏好和目录刷新均不改写已保存偏好。生图不形成用户选择、独立 revision 或持久化 intent。
 
 Models 退役格式硬切前只提取可验证的 Custom Provider id 和已有待删除 id，合并去重后持久写入当前空 registry 的 credential deletion 队列；canonical 提交确认后才删除系统凭据，删除失败保留 tombstone 并跨重启重试。该过程不恢复旧 Provider、模型、偏好或执行 authority；无法完整保全清理义务时保留原文件并报告恢复失败。
 
@@ -234,7 +234,7 @@ Schedule 的可执行定义保存 `ModelRef + source_generation + protocol`。Pr
 
 Schedule persistence recovery 由 Schedule owner 决策；旧格式自动 hard cut 时先保留 exact quarantine，再安装空当前 store。当前格式的显式恢复校验全局 snapshot revision，先stage并sync当前内存候选，再保留旧canonical并安装；中断证据不丢失，再次恢复收口精确pending artifacts。只有提交确认后重新开放mutation与timer；quarantine不进入decoder或自动迁移。
 
-Schedule store 保持 canonical `schema_version = 1`，严格保存 `ModelRef + source_generation + protocol`，删除 global selection revision。被替代旧格式先 exact quarantine 再原子安装空当前 store，无转换、双读或重放；失败保持真实错误。当前格式的提交、未知结果与显式恢复仍由 Schedule owner 处理，不用起始偏好作为恢复依据。
+Schedule store 保持 canonical `schema_version = 1`，严格保存 `ModelRef + source_generation + protocol`，删除 global selection revision。被替代旧格式先 exact quarantine 再原子安装空当前 store，无转换、双读或重放；失败保持真实错误。当前格式的提交、未知结果与显式恢复仍由 Schedule owner 处理，不用起始偏好作为恢复依据。Metask 来源代次的启动改写只替换绑定中的代次，不改 epoch、启用状态与健康；已经 needs_attention 的定义不自动恢复。
 
 ### 2.4 Skill authority 与本地资产
 
