@@ -125,7 +125,7 @@ test "handoff headers migrate without inventing links and persist with the local
         const current = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer current.destroy() catch unreachable;
         try expectSame(a, current.capability(), state);
-        var repo = schema.repository.Repository.init(std.testing.allocator, current.capability(), history.limits);
+        var repo = schema.repository.Repository.init(std.testing.allocator, current.capability(), history.limits, digest_key);
         defer repo.deinit();
         first_store = repo.instance() orelse return error.MissingStoreIdentity;
         try repo.seed(state, .{});
@@ -139,13 +139,13 @@ test "handoff headers migrate without inventing links and persist with the local
     const reopened = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
     defer reopened.destroy() catch unreachable;
     try expectSame(a, reopened.capability(), state);
-    var repo = schema.repository.Repository.init(a, reopened.capability(), history.limits);
+    var repo = schema.repository.Repository.init(a, reopened.capability(), history.limits, digest_key);
     defer repo.deinit();
     try std.testing.expectEqual(first_store, repo.instance().?);
 
     const second = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = try std.mem.concat(a, u8, &.{ path, ".rebuilt" }) }, schema.migrations);
     defer second.destroy() catch unreachable;
-    var fresh = schema.repository.Repository.init(a, second.capability(), history.limits);
+    var fresh = schema.repository.Repository.init(a, second.capability(), history.limits, digest_key);
     defer fresh.deinit();
     try std.testing.expect(!std.mem.eql(u8, &first_store, &fresh.instance().?));
 }
