@@ -21172,8 +21172,15 @@ test "a sent image attachment serves both media tiers from the identity its mess
         );
     }
 
+    // The same submission resolves once this Run is the one that took it.
+    const accepted_message: MediaTarget = .{ .submission_attachment = .{ .task_id = 3, .operation_id = "op-1", .index = 0 } };
+    run.submission = .{ .operation_id_len = "op-1".len };
+    defer run.submission = null;
+    @memcpy(run.submission.?.operation_id[0.."op-1".len], "op-1");
+    try std.testing.expectEqualStrings(staged_jpeg, control.mediaThumbnail(accepted_message, &thumbnail_scratch).ready.bytes);
+
     // The viewer tier reads the retained original on the existing lane.
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginMediaPreview(91, sent));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginMediaPreview(91, accepted_message));
     var capture: PreviewTestCapture = .{};
     try capture.wait(control);
     try std.testing.expectEqual(FilePreviewState.ready, capture.state);

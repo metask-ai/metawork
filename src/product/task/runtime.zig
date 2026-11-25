@@ -4972,8 +4972,8 @@ pub const Runtime = struct {
         unreachable;
     }
 
-    /// Which message owns an accepted attachment: a Run input, or a message
-    /// that is still waiting for its turn.
+    /// Which message owns an accepted attachment: the submission it was
+    /// accepted with, before and after a Run takes it, or the Run itself.
     pub const AttachmentMessage = union(enum) { run: u64, submission: []const u8 };
 
     /// What addressing an accepted image needs: the identity persisted with its
@@ -5005,19 +5005,8 @@ pub const Runtime = struct {
         index: usize,
     ) ?AcceptedAttachment {
         if (!self.mediaReadable(task_id)) return null;
-        const task = self.findConst(task_id).?;
-        const input = switch (message) {
-            .run => |run_id| (task_state.findRun(task.durable.runs, run_id) orelse return null).input,
-            .submission => |operation_id| blk: {
-                if (operation_id.len == 0) return null;
-                for (task.input_submissions.items) |*record| {
-                    if (std.mem.eql(u8, operation_id, record.submission.operationId()))
-                        break :blk record.input;
-                }
-                return null;
-            },
-        };
-        if (input != .multimodal) return null;
+        const input = messageInput(self.findConst(task_id).?, message) orelse return null;
+        if (input.* != .multimodal) return null;
         const attachments = input.multimodal.attachments;
         if (index >= attachments.len) return null;
         const record = attachments[index];
@@ -11384,6 +11373,25 @@ fn inputBlocksAutomaticAllow(run: *const task_state.RunRecord) bool {
     return observation.blocksAutomaticAllow();
 }
 
+/// What this message is now. Once a Run took it, that Run's record is the
+/// message, as in every other projection of it, and the submission record
+/// never answers in its place.
+fn messageInput(task: *const task_state.Task, message: Runtime.AttachmentMessage) ?*const task_state.RunInputRecord {
+    const run = switch (message) {
+        .run => |run_id| task_state.findRunConst(task.durable.runs, run_id) orelse return null,
+        .submission => |operation_id| taken: {
+            for (task.durable.runs) |*entry| if (entry.*) |*run| if (run.submission) |*submission| {
+                if (std.mem.eql(u8, operation_id, submission.operationId())) break :taken run;
+            };
+            for (task.input_submissions.items) |*record| {
+                if (std.mem.eql(u8, operation_id, record.submission.operationId())) return &record.input;
+            }
+            return null;
+        },
+    };
+    return if (task_policy.runProjected(task, run)) &run.input else null;
+}
+
 fn hasWaitingInputs(task: *const task_state.Task) bool {
     for (task.input_submissions.items) |record| if (record.state == .waiting) return true;
     return false;
@@ -13142,6 +13150,48 @@ test "Task first root resolves only later unanchored messages without moving old
     try std.testing.expect(task.input_submissions.items[0].submission.anchor_run_id == null);
     try std.testing.expectEqual(@as(?u64, 9), task.input_submissions.items[1].submission.anchor_run_id);
     try std.testing.expectEqual(@as(u32, 0), task.input_submissions.items[1].submission.after_output_count);
+}
+
+test "an accepted attachment answers for its message from waiting through its Run" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
+    var projection: InputTestProjection = .{ .allocator = std.testing.allocator };
+    defer projection.clear(&runtime);
+    const task = runtime.find(1).?;
+    const media: task_state.AttachmentMedia = .{ .original_name = @splat('a'), .thumbnail_name = @splat('b'), .thumbnail_size_bytes = 3, .thumbnail_width = 8, .thumbnail_height = 4 };
+    _ = try runtime.receiveInput(1, "op-1", .{ .multimodal = .{
+        .text = "look",
+        .attachments = &.{.{ .kind = .image, .format = .png, .display_name = "shot.png", .bytes = "png", .media = media }},
+    } }, projection.effects());
+    const message: Runtime.AttachmentMessage = .{ .submission = "op-1" };
+    try std.testing.expectEqual(media, runtime.acceptedAttachment(1, message, 0).?.media);
+    try std.testing.expect(runtime.acceptedAttachment(1, .{ .submission = "op-2" }, 0) == null);
+
+    // While acceptance still owns its input, the prepared Run already is the
+    // message: its record decides, and the submission does not stand in for it.
+    var records = [_]task_state.AttachmentRecord{.{ .kind = .image, .format = .png, .display_name = @constCast("shot.png"), .size_bytes = 3, .redacted = true, .media = media }};
+    var runs = [_]?task_state.RunRecord{ reviewHistoryTestRun(7, "earlier"), reviewHistoryTestRun(9, "") };
+    const run = &runs[1].?;
+    run.input = .{ .multimodal = .{ .text = null, .attachments = &records } };
+    run.submission = task.input_submissions.items[0].submission;
+    task.durable.runs = &runs;
+    defer task.durable.runs = &.{};
+    try std.testing.expect(runtime.acceptedAttachment(1, message, 0) == null);
+    records[0].redacted = false;
+    runtime.finishWaitingInput(1, 0, 9, null, projection.effects().release);
+    try std.testing.expectEqual(@as(usize, 0), task.input_submissions.items.len);
+    try std.testing.expectEqual(media, runtime.acceptedAttachment(1, message, 0).?.media);
+
+    // A turn an edited message replaced is shown nowhere, and a Task that
+    // accepted a delete stops answering.
+    run.superseded_by_run_id = 7;
+    try std.testing.expect(runtime.acceptedAttachment(1, message, 0) == null);
+    run.superseded_by_run_id = null;
+    task.deletion = .deleting;
+    try std.testing.expect(runtime.acceptedAttachment(1, message, 0) == null);
+    task.deletion = .idle;
 }
 
 test "Task known Session close failure ends the message instead of waiting forever" {
