@@ -140,6 +140,7 @@ const Entry = struct {
     /// persisted identity names.
     thumbnail_file: ?store.File = null,
     reference: []u8 = &.{},
+    workspace_path: ?[]u8 = null,
     retry_group: u64 = 0,
     retry_task_id: u64 = 0,
 };
@@ -482,9 +483,13 @@ pub const Runtime = struct {
             if (retrying) try self.classify(entry);
             try self.file_store.?.move(&entry.file, task_id);
             self.retainThumbnail(entry);
-            const path = try self.file_store.?.pathAlloc(self.allocator, entry.file);
-            defer self.allocator.free(path);
-            const escaped_path = try std.json.Stringify.valueAlloc(self.allocator, path, .{});
+            const escaped_path = if (entry.workspace_path) |path|
+                try std.json.Stringify.valueAlloc(self.allocator, path, .{})
+            else escaped: {
+                const path = try self.file_store.?.pathAlloc(self.allocator, entry.file);
+                defer self.allocator.free(path);
+                break :escaped try std.json.Stringify.valueAlloc(self.allocator, path, .{});
+            };
             defer self.allocator.free(escaped_path);
             const escaped_name = try std.json.Stringify.valueAlloc(self.allocator, entry.display_name, .{});
             defer self.allocator.free(escaped_name);
@@ -510,6 +515,16 @@ pub const Runtime = struct {
         self.slots[index] = null;
         return true;
     }
+    pub fn bindWorkspacePath(self: *Runtime, id: u64, path: []const u8) Error!void {
+        const entry = &self.slots[self.findIndex(id) orelse return error.UnknownAttachment].?;
+        if (entry.state != .ready or entry.workspace_path != null) return error.AttachmentBusy;
+        entry.workspace_path = try self.allocator.dupe(u8, path);
+    }
+
+    pub fn hasEntry(self: *const Runtime, id: u64) bool {
+        return self.findIndex(id) != null;
+    }
+
     pub fn descriptorFor(self: *const Runtime, id: u64) ?Descriptor {
         const entry = self.slots[self.findIndex(id) orelse return null].?;
         if (entry.state != .ready and entry.state != .borrowed) return null;
@@ -766,6 +781,7 @@ pub const Runtime = struct {
         return true;
     }
     fn freeEntryMemory(self: *Runtime, entry: *Entry) void {
+        if (entry.workspace_path) |path| self.allocator.free(path);
         for ([_][]u8{ entry.display_name, entry.preview, entry.thumbnail, entry.reference }) |bytes| {
             std.crypto.secureZero(u8, bytes);
             self.allocator.free(bytes);

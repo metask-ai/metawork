@@ -585,7 +585,10 @@ pub const FileTarget = struct {
     value: product_control.FileTarget,
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !FileTarget {
-        const object = switch (try std.json.innerParse(std.json.Value, allocator, source, options)) {
+        return fromValue(try std.json.innerParse(std.json.Value, allocator, source, options));
+    }
+    fn fromValue(value: std.json.Value) !FileTarget {
+        const object = switch (value) {
             .object => |fields| fields,
             else => return error.UnexpectedToken,
         };
@@ -639,7 +642,9 @@ pub const MediaTarget = union(product_control.MediaKind) {
     message_attachment: product_control.MessageAttachment,
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-        const value = try std.json.innerParse(std.json.Value, allocator, source, options);
+        return fromValue(try std.json.innerParse(std.json.Value, allocator, source, options));
+    }
+    fn fromValue(value: std.json.Value) !MediaTarget {
         const object = switch (value) {
             .object => |fields| fields,
             else => return error.UnexpectedToken,
@@ -741,10 +746,30 @@ pub const AttachmentAddBegin = struct {
     generation: []const u8,
     batchId: []const u8,
     remainingFiles: JsonU32 = .{ .value = product_control.max_attachment_batch_files },
-    source: struct {
-        kind: enum { picker, native_paths, file_bytes },
-        paths: ?[]const []const u8 = null,
-        files: ?[]const struct { name: []const u8, sizeBytes: []const u8 } = null,
+    source: union(enum) {
+        picker,
+        native_paths: []const []const u8,
+        file_bytes: []const struct { name: []const u8, sizeBytes: []const u8 },
+        workspace_file: product_control.FileTarget,
+        message_file: product_control.MessageAttachment,
+
+        pub fn jsonParse(allocator: std.mem.Allocator, reader: anytype, options: std.json.ParseOptions) !@This() {
+            const value = try std.json.innerParse(std.json.Value, allocator, reader, options);
+            if (value != .object) return error.UnexpectedToken;
+            const fields = value.object;
+            const kind = std.meta.stringToEnum(std.meta.Tag(@This()), try targetText(fields, "kind")) orelse return error.UnexpectedToken;
+            if (fields.count() != (if (kind == .picker) @as(usize, 1) else @as(usize, 2))) return error.UnexpectedToken;
+            return switch (kind) {
+                .picker => .picker,
+                .native_paths => .{ .native_paths = try std.json.innerParseFromValue(@FieldType(@This(), "native_paths"), allocator, fields.get("paths") orelse return error.UnexpectedToken, options) },
+                .file_bytes => .{ .file_bytes = try std.json.innerParseFromValue(@FieldType(@This(), "file_bytes"), allocator, fields.get("files") orelse return error.UnexpectedToken, options) },
+                .workspace_file => .{ .workspace_file = (try FileTarget.fromValue(fields.get("target") orelse return error.UnexpectedToken)).value },
+                .message_file => switch (try MediaTarget.fromValue(fields.get("attachment") orelse return error.UnexpectedToken)) {
+                    .message_attachment => |message| .{ .message_file = message },
+                    else => error.UnexpectedToken,
+                },
+            };
+        }
     },
 };
 pub const AttachmentReceiveAppend = struct {
@@ -1801,6 +1826,18 @@ test "Skill import payloads accept only typed target and exact preparation confi
         "{\"previewId\":\"7\",\"preparationRevision\":\"2\",\"confirmation\":\"update\",\"sourcePath\":\"/tmp/source\"}",
         "{\"previewId\":\"7\",\"preparationRevision\":2,\"confirmation\":\"update\"}",
     }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(SkillInstall, payload));
+}
+
+test "attachment reference sources reject draft tokens, extra fields and raw paths" {
+    for ([_][]const u8{
+        "{\"kind\":\"message_file\",\"attachment\":{\"kind\":\"draftAttachment\",\"token\":\"private\"}}",
+        "{\"kind\":\"workspace_file\",\"target\":{\"kind\":\"workspace\",\"taskId\":\"1\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"report.txt\"},\"files\":null}",
+        "{\"kind\":\"workspace_file\",\"paths\":[\"report.txt\"]}",
+    }) |source| {
+        var buffer: [400]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&buffer, "{{\"generation\":\"1\",\"batchId\":\"1\",\"source\":{s}}}", .{source});
+        try std.testing.expectError(error.InvalidBridgePayload, parsePayload(AttachmentAddBegin, payload));
+    }
 }
 
 test "attachment remainingFiles is optional and accepts only JSON u32 integer literals" {

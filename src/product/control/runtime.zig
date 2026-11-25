@@ -1536,6 +1536,7 @@ pub const Runtime = struct {
     metask_authorization_check: ?control_ports.MetaskAuthorizationCheck = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     file_actions: file_action.Lane = .{},
+    reference_inputs: [product_attachment.record_capacity]?ReferenceInput = @splat(null),
     file_effects: ?control_ports.FileEffects = null,
     file_save: ?control_ports.FileSave = null,
     pending_file_saves: [file_action.max_in_flight]?struct { id: u64, input: file_action.Input } = @splat(null),
@@ -2243,6 +2244,96 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         return self.attachment_lane.beginPreparedPaths(&self.attachments, completion_id, id, path_count, paths);
     }
+    const ReferenceInput = struct {
+        completion_id: u64,
+        attachment_id: ?u64 = null,
+        task_id: u64,
+        epoch: u64,
+        source: union(enum) {
+            workspace: file_action.Input,
+            message: struct { target: MessageAttachment, original: [32]u8 },
+        },
+
+        fn deinit(input: *ReferenceInput, allocator: std.mem.Allocator) void {
+            switch (input.source) {
+                .workspace => |*file| file.deinit(),
+                .message => |m| if (m.target.message == .submission) allocator.free(m.target.message.submission),
+            }
+        }
+        fn current(input: *const ReferenceInput, control: *const Runtime) bool {
+            if (input.epoch == 0 or input.epoch != control.projection_security_epoch) return false;
+            switch (input.source) {
+                .workspace => |*file| control.revalidateFileAction(file) catch return false,
+                .message => |m| {
+                    const record = control.task_runtime.messageFile(m.target.task_id, m.target.message, m.target.index) orelse return false;
+                    const name = record.retainedOriginal() orelse return false;
+                    if (control.containsKnownCredential(record.display_name) or !std.mem.eql(u8, &name, &m.original)) return false;
+                },
+            }
+            return true;
+        }
+    };
+
+    pub const ReferenceTarget = union(enum) { file: FileTarget, message: MessageAttachment };
+
+    pub fn beginAttachmentReference(self: *Runtime, completion: u64, id: u64, target: ReferenceTarget) !void {
+        try self.requireFileAuthority();
+        for (&self.reference_inputs) |*slot| if (slot.*) |*entry| {
+            if (entry.attachment_id) |value| if (!self.attachments.hasEntry(value)) {
+                entry.deinit(self.allocator);
+                slot.* = null;
+            };
+        };
+        const slot = for (&self.reference_inputs) |*entry| {
+            if (entry.* == null) break entry;
+        } else return error.Capacity;
+        var scratch: [file_target.max_path_bytes]u8 = undefined;
+        var source: attachment_staging.ReferenceSource = undefined;
+        var input: ReferenceInput = .{ .completion_id = completion, .task_id = undefined, .epoch = self.projection_security_epoch, .source = undefined };
+        switch (target) {
+            .file => |file| {
+                const location = try self.resolveFileTarget(file, &scratch);
+                input.task_id = switch (file) {
+                    inline else => |v| v.task_id,
+                };
+                input.source = .{ .workspace = try file_action.Input.init(self.allocator, .{ .file = .{ .target = file, .action = .check_current } }, location, input.epoch) };
+                source = .{ .root = location.root, .relative = location.relative, .display_name = std.fs.path.basename(location.relative), .open_fn = openReferenceSource };
+            },
+            .message => |msg| {
+                const record = self.task_runtime.messageFile(msg.task_id, msg.message, msg.index) orelse return error.UnknownAttachment;
+                if (self.containsKnownCredential(record.display_name)) return error.RestrictedFile;
+                const store = self.attachments.file_store orelse return error.UnknownAttachment;
+                const original = record.retainedOriginal() orelse return error.UnknownAttachment;
+                const extension = if (record.format) |fmt| try product_attachment.store.Extension.fromSuffix(product_attachment.originalExtension(@enumFromInt(@intFromEnum(fmt)))) else product_attachment.store.Extension.fromName(record.display_name);
+                const relative = try product_attachment.store.relativePath(.{ .name = original, .task_id = msg.task_id, .size = @intCast(record.size_bytes), .extension = extension }, &scratch);
+                input.task_id = msg.task_id;
+                input.source = .{ .message = .{ .target = msg, .original = original } };
+                if (msg.message == .submission) input.source.message.target.message = .{ .submission = try self.allocator.dupe(u8, msg.message.submission) };
+                source = .{ .root = store.directory, .relative = relative, .display_name = record.display_name, .expected_size = record.size_bytes, .open_fn = openReferenceSource };
+            },
+        }
+        errdefer input.deinit(self.allocator);
+        try self.attachment_lane.beginReference(&self.attachments, completion, id, source);
+        slot.* = input;
+    }
+
+    fn openReferenceSource(io: std.Io, root_path: []const u8, relative: []const u8) !product_attachment.store.Source {
+        if (!file_preview.validWorkspacePath(relative, false)) return error.RestrictedFile;
+        var root = try std.Io.Dir.openDirAbsolute(io, root_path, .{ .follow_symlinks = false });
+        defer root.close(io);
+        const separator = std.mem.lastIndexOfScalar(u8, relative, '/');
+        var parent = try file_preview.openWorkspaceDirectory(io, root, if (separator) |pos| relative[0..pos] else "");
+        defer parent.close(io);
+        const name = std.fs.path.basename(relative);
+        if ((try parent.statFile(io, name, .{ .follow_symlinks = false })).kind != .file) return error.UnsupportedType;
+        var file = try parent.openFile(io, name, .{ .follow_symlinks = false, .resolve_beneath = true });
+        errdefer file.close(io);
+        if (@import("builtin").os.tag == .windows) file.flags.nonblocking = true;
+        const stat = try file.stat(io);
+        if (stat.kind != .file or stat.size == 0) return error.UnsupportedType;
+        return .{ .handle = file, .before = stat };
+    }
+
     pub fn beginPreparedAttachmentBytes(self: *Runtime, completion_id: u64, id: u64, files: []const product_attachment.ReceiveFile) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         defer self.pruneInputRetries();
@@ -2261,7 +2352,36 @@ pub const Runtime = struct {
     }
     pub fn drainAttachmentStagingCompletions(self: *Runtime, sink: AttachmentStagingSink) void {
         defer self.pruneInputRetries();
-        self.attachment_lane.drainCompletions(&self.attachments, sink);
+        const Forward = struct {
+            control: *Runtime,
+            sink: AttachmentStagingSink,
+            fn complete(context: *anyopaque, id: u64, result: attachment_staging.Result) void {
+                const f: *@This() = @ptrCast(@alignCast(context));
+                var answer = result;
+                for (&f.control.reference_inputs) |*slot| if (slot.*) |*entry| {
+                    if (entry.completion_id != id or entry.attachment_id != null) continue;
+                    if (result == .ready) {
+                        const resource = result.ready[0].id;
+                        var valid = entry.current(f.control);
+                        if (valid and entry.source == .workspace) f.control.attachments.bindWorkspacePath(resource, entry.source.workspace.location.relative) catch {
+                            valid = false;
+                        };
+                        if (valid) {
+                            entry.attachment_id = resource;
+                            break;
+                        }
+                        const released = f.control.releaseAttachmentChecked(resource) catch false;
+                        answer = .{ .rejected = if (released) .stale_transfer else .cleanup_failed };
+                    }
+                    entry.deinit(f.control.allocator);
+                    slot.* = null;
+                    break;
+                };
+                f.sink.complete_fn(f.sink.context, id, answer);
+            }
+        };
+        var forward: Forward = .{ .control = self, .sink = sink };
+        self.attachment_lane.drainCompletions(&self.attachments, .{ .context = &forward, .complete_fn = Forward.complete });
     }
 
     /// Performs only bounded identity/authority work on the main thread and
@@ -2307,7 +2427,15 @@ pub const Runtime = struct {
     /// again at every chunk. A batch that was borrowed for a Task in the
     /// meantime stops resolving, so the grant is released instead of reading a
     /// file that now belongs to Task ownership.
+    fn attachmentReferenceCurrent(self: *const Runtime, attachment_id: u64) bool {
+        for (self.reference_inputs) |slot| if (slot) |entry| {
+            if (entry.attachment_id == attachment_id) return entry.current(self);
+        };
+        return true;
+    }
+
     fn attachmentOriginalAuthority(self: *Runtime, attachment_id: u64, location: file_target.Location) FilePreviewState {
+        if (!self.attachmentReferenceCurrent(attachment_id)) return .restricted;
         var relative: [product_attachment.max_original_relative_bytes]u8 = undefined;
         const resolution = media_source.resolve(
             .{ .draft_attachment = attachment_id },
@@ -2344,6 +2472,7 @@ pub const Runtime = struct {
     /// exactly as long as it borrows a draft's own bytes.
     pub fn mediaThumbnail(self: *Runtime, target: MediaTarget, scratch: []u8) MediaThumbnailResult {
         std.debug.assert(scratch.len >= max_attachment_thumbnail_bytes);
+        if (target == .draft_attachment and !self.attachmentReferenceCurrent(target.draft_attachment)) return .{ .unavailable = .restricted };
         if (self.shutting_down or self.projection_security_epoch == 0) return .{ .unavailable = .failed };
         var relative: [product_attachment.max_original_relative_bytes]u8 = undefined;
         const resolution = media_source.resolve(
@@ -2379,6 +2508,7 @@ pub const Runtime = struct {
     /// The viewer tier for a registered image: the original, read inside the
     /// existing bounded lane and charged to the existing original-image budget.
     pub fn beginMediaPreview(self: *Runtime, completion_id: u64, target: MediaTarget) FilePreviewAdmission {
+        if (target == .draft_attachment and !self.attachmentReferenceCurrent(target.draft_attachment)) return .{ .immediate = .restricted };
         if (self.shutting_down) return .{ .immediate = .failed };
         var relative: [product_attachment.max_original_relative_bytes]u8 = undefined;
         const resolution = media_source.resolve(
@@ -5249,6 +5379,14 @@ pub const Runtime = struct {
                 if (multimodal.attachment_ids.len == 0 or
                     multimodal.attachment_ids.len > self.limits.max_attachments_per_draft)
                     return error.TooManyFiles;
+                var referenced = [_]bool{false} ** lifecycle.multimodal_input_limits.max_parts;
+                for (self.reference_inputs) |slot| if (slot) |entry| {
+                    const id = entry.attachment_id orelse continue;
+                    if (std.mem.indexOfScalar(u64, multimodal.attachment_ids, id)) |index| {
+                        if (entry.task_id != task_id or !entry.current(self)) return error.UnknownAttachment;
+                        referenced[index] = true;
+                    }
+                };
                 staged.borrow = if (retrying)
                     try self.attachments.borrowRetry(multimodal.attachment_ids, &staged.parts, &staged.indices, task_id)
                 else
@@ -5296,6 +5434,7 @@ pub const Runtime = struct {
                             .size_bytes = descriptor.size_bytes,
                         },
                     };
+                    staged.items[index].referenced = referenced[index];
                 }
                 break :input .{ .multimodal = .{
                     .text = multimodal.text,
@@ -7772,6 +7911,7 @@ pub const Runtime = struct {
         }
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
+        for (&self.reference_inputs) |*slot| if (slot.*) |*entry| entry.deinit(self.allocator);
         self.attachments.deinit();
         for (0..self.workspace.slotCount()) |index| {
             const workspace = self.workspace.factsAt(index) orelse continue;
@@ -20694,6 +20834,10 @@ test "file preview redaction protects credentials that cross a truncation bounda
 fn testImagePreviewRuntime(control: *Runtime, root: []const u8) !void {
     try initTestRuntimeWithLimits(control, testLimits(), .{});
     errdefer control.deinit();
+    try bindTestImageWorkspace(control, root);
+}
+
+fn bindTestImageWorkspace(control: *Runtime, root: []const u8) !void {
     product_workspace.testing.installOwned(&control.workspace, 1, .{
         .id = 2,
         .canonical_root = try control.copyBounded(root, control.limits.max_workspace_bytes),
@@ -21104,6 +21248,114 @@ test "attachment file preview reads the staged original and loses authority with
         Runtime.FilePreviewAdmission{ .immediate = .missing },
         control.beginMediaPreview(82, .{ .draft_attachment = staged[0].id }),
     );
+}
+
+fn stageTestConversationReference(control: *Runtime, target: Runtime.ReferenceTarget) !u64 {
+    try control.beginAttachmentReference(37, try control.prepareAttachmentAdd(), target);
+    const Capture = struct {
+        id: u64 = 0,
+        done: bool = false,
+        fn complete(context: *anyopaque, _: u64, result: attachment_staging.Result) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.done = true;
+            if (result == .ready) self.id = result.ready[0].id;
+        }
+    };
+    var capture: Capture = .{};
+    for (0..5000) |_| {
+        control.drainAttachmentStagingCompletions(.{ .context = &capture, .complete_fn = Capture.complete });
+        if (capture.done) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(capture.done);
+    return capture.id;
+}
+
+test "conversation attachment reference selects the exact retained upload and binds it to the original task" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, root);
+    defer store.deinit();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testAttachmentMediaRuntime(control, &store);
+    defer control.deinit();
+
+    var records: [2]task_test_state.AttachmentRecord = undefined;
+    const cwd = std.Io.Dir.cwd();
+    const earlier = try cwd.readFileAlloc(std.testing.io, "tests/fixtures/office/checked-summary.xlsx", std.testing.allocator, .limited(128 * 1024));
+    defer std.testing.allocator.free(earlier);
+    const later = try cwd.readFileAlloc(std.testing.io, "tests/fixtures/office/model-bad-styles.xlsx", std.testing.allocator, .limited(128 * 1024));
+    defer std.testing.allocator.free(later);
+    try std.testing.expect(!std.mem.eql(u8, earlier, later));
+    for ([_][]const u8{ earlier, later }, &records) |bytes, *record| {
+        var output: [1]product_attachment.Descriptor = undefined;
+        const staged = try control.stageAttachments(&.{.{ .display_name = "quote.xlsx", .bytes = bytes }}, &output);
+        const command: TaskRunInput = .{ .multimodal = .{ .text = "inspect", .attachment_ids = &.{staged[0].id} } };
+        var input: Runtime.StagedTaskInput = .{};
+        const accepted = try control.borrowTaskInput(3, command, &input, false);
+        const file = accepted.multimodal.attachments[0];
+        record.* = .{ .kind = .file, .format = null, .display_name = @constCast("quote.xlsx"), .size_bytes = bytes.len, .original_name = file.original_name.? };
+        input.borrow.?.consume();
+    }
+    const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
+    const previous = run.input;
+    defer run.input = previous;
+    run.input = .{ .multimodal = .{ .text = null, .attachments = &records } };
+
+    const target: Runtime.ReferenceTarget = .{ .message = .{ .task_id = 3, .message = .{ .run = 7 }, .index = 0 } };
+    const staged_id = try stageTestConversationReference(control, target);
+    try std.testing.expect(staged_id != 0);
+    const command: TaskRunInput = .{ .multimodal = .{ .text = "inspect", .attachment_ids = &.{staged_id} } };
+    var staged: Runtime.StagedTaskInput = .{};
+    try std.testing.expectError(error.UnknownAttachment, control.borrowTaskInput(4, command, &staged, false));
+    records[0].redacted = true;
+    try std.testing.expectError(error.UnknownAttachment, control.borrowTaskInput(3, command, &staged, false));
+    records[0].redacted = false;
+    const sent = try control.borrowTaskInput(3, command, &staged, false);
+    defer staged.borrow.?.rollback();
+    const file = sent.multimodal.attachments[0];
+    try std.testing.expect(file.referenced);
+    try std.testing.expectEqualStrings("quote.xlsx", file.display_name);
+    const kept: product_attachment.store.File = .{ .name = file.original_name.?, .task_id = 3, .size = earlier.len, .extension = .fromName(file.display_name) };
+    const owned_path = try store.pathAlloc(std.testing.allocator, kept);
+    defer std.testing.allocator.free(owned_path);
+    const quoted_path = try std.json.Stringify.valueAlloc(std.testing.allocator, owned_path, .{});
+    defer std.testing.allocator.free(quoted_path);
+    try std.testing.expect(std.mem.indexOf(u8, file.bytes, quoted_path) != null);
+    const contents = try store.readAlloc(std.testing.allocator, kept);
+    defer std.testing.allocator.free(contents);
+    try std.testing.expectEqualSlices(u8, earlier, contents);
+}
+
+test "workspace attachment reference sends visual input and the workspace original path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, root);
+    defer store.deinit();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testAttachmentMediaRuntime(control, &store);
+    defer control.deinit();
+    try bindTestImageWorkspace(control, root);
+    const target: Runtime.ReferenceTarget = .{ .file = testReference(7, "file-3-1-1-1") };
+    try std.testing.expectEqual(@as(u64, 0), try stageTestConversationReference(control, target));
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = staged_jpeg });
+    const id = try stageTestConversationReference(control, target);
+    try std.testing.expect(id != 0);
+    const command: TaskRunInput = .{ .multimodal = .{ .text = "Revise this picture", .attachment_ids = &.{id} } };
+    var staged: Runtime.StagedTaskInput = .{};
+    const input = (try control.borrowTaskInput(3, command, &staged, false)).multimodal;
+    defer staged.borrow.?.rollback();
+    try std.testing.expectEqualStrings("Revise this picture", input.text);
+    const image = input.attachments[0];
+    try std.testing.expectEqual(.image, image.kind);
+    try std.testing.expectEqualSlices(u8, staged_jpeg, image.bytes);
+    try std.testing.expect(std.mem.indexOf(u8, image.reference, "file_path=\"image.jpg\"") != null);
 }
 
 test "a sent image attachment serves both media tiers from the identity its message persisted" {

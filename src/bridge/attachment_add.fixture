@@ -85,5 +85,37 @@
         "path": "docs/brief.md"
       }
     }
+  },
+  "workspaceFile": {
+    "generation": "2",
+    "batchId": "25",
+    "remainingFiles": 1,
+    "source": {
+      "kind": "workspace_file",
+      "target": {
+        "kind": "workspace",
+        "taskId": "99",
+        "workspaceId": "1",
+        "workspaceEpoch": "1",
+        "path": "reports/sales.xlsx"
+      }
+    }
+  },
+  "messageFile": {
+    "generation": "2",
+    "batchId": "26",
+    "remainingFiles": 1,
+    "source": {
+      "kind": "message_file",
+      "attachment": {
+        "kind": "messageAttachment",
+        "taskId": "99",
+        "message": {
+          "kind": "run",
+          "runId": "1"
+        },
+        "index": 0
+      }
+    }
   }
 }

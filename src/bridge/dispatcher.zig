@@ -2359,15 +2359,7 @@ pub const Dispatcher = struct {
         const value = parsed.value;
         const key = try self.requireAddKey(invocation, value.generation, value.batchId);
         const source = value.source;
-        var shape = try handlers.parsePayloadWithLimit(std.json.Value, invocation.request.payload, native_sdk.platform.max_drop_paths_bytes * 2);
-        defer shape.deinit();
-        const source_shape = shape.value.object.get("source").?.object;
-        if (source_shape.count() != (if (source.kind == .picker) @as(usize, 1) else @as(usize, 2))) return error.InvalidBridgePayload;
-        switch (source.kind) {
-            .picker => if (source.paths != null or source.files != null) return error.InvalidBridgePayload,
-            .native_paths => if (self.platform.attachment_input != .native_paths or source.paths == null or source.files != null) return error.InvalidBridgePayload,
-            .file_bytes => if (source.files == null or source.paths != null) return error.InvalidBridgePayload,
-        }
+        if (source == .native_paths and self.platform.attachment_input != .native_paths) return error.InvalidBridgePayload;
         if (key.batch_id <= self.receive_high_water) {
             respondAddError(responder, invocation.request.id, error.StaleTransfer);
             return;
@@ -2378,13 +2370,13 @@ pub const Dispatcher = struct {
             return;
         }
         const max_files = @min(attachment_grant.max_batch_files, value.remainingFiles.value);
-        if (max_files == 0 or (source.kind == .native_paths and source.paths.?.len > max_files)) {
+        if (max_files == 0 or (source == .native_paths and source.native_paths.len > max_files)) {
             respondAddError(responder, invocation.request.id, error.TooManyFiles);
             return;
         }
         const workbench = try self.requireProductControl();
-        if (source.kind == .file_bytes) {
-            const files = source.files.?;
+        if (source == .file_bytes) {
+            const files = source.file_bytes;
             if (files.len == 0 or files.len > max_files) {
                 respondAddError(responder, invocation.request.id, error.TooManyFiles);
                 return;
@@ -2414,7 +2406,7 @@ pub const Dispatcher = struct {
             return;
         }
         var path_storage: [native_sdk.platform.max_drop_paths_bytes]u8 = undefined;
-        const paths = if (source.kind == .native_paths) addPaths(source.paths.?, &path_storage) catch |err| {
+        const paths = if (source == .native_paths) addPaths(source.native_paths, &path_storage) catch |err| {
             if (err != error.TooManyFiles) return err;
             respondAddError(responder, invocation.request.id, err);
             return;
@@ -2432,8 +2424,13 @@ pub const Dispatcher = struct {
         for (&self.attachment_in_flight) |*slot| if (slot.active and slot.completion_id == completion) {
             slot.max_files = max_files;
         };
-        if (source.kind == .native_paths) {
-            self.attachmentDialogResult(completion, .{ .files = .{ .paths = paths, .count = source.paths.?.len } });
+        if (source == .workspace_file or source == .message_file) {
+            workbench.beginAttachmentReference(completion, product_id, if (source == .workspace_file) .{ .file = source.workspace_file } else .{ .message = source.message_file }) catch |err| {
+                _ = workbench.cancelAttachmentPreparation(product_id);
+                self.completeAttachmentStaging(completion, .{ .rejected = addRejection(err) });
+            };
+        } else if (source == .native_paths) {
+            self.attachmentDialogResult(completion, .{ .files = .{ .paths = paths, .count = source.native_paths.len } });
         } else if (self.automation.active()) {
             const selected_paths = self.automation.attachmentPaths() orelse {
                 self.attachmentDialogResult(completion, .failed);
@@ -10099,6 +10096,17 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try capture.expect("\"status\":\"cancelled\"");
     try std.testing.expect(try workbench.attachments.releaseChecked(stock[0].id));
     workbench.attachments.limits.max_staged_bytes = old_bytes;
+    for ([_][]const u8{ "workspaceFile", "messageFile" }) |fixture_name| {
+        const payload = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), add_wire.value.object.get(fixture_name).?, .{});
+        try capture.invoke(native, source, commands.begin_attachment_add, payload);
+        try capture.expect("\"reason\":\"read_failed\"");
+        const batch = add_wire.value.object.get(fixture_name).?.object.get("batchId").?.string;
+        const cancel = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), .{ .generation = "2", .batchId = batch }, .{});
+        try capture.invoke(native, source, commands.cancel_attachment_add, cancel);
+        try capture.expect("\"status\":\"cleaned\"");
+        try std.testing.expect(workbench.attachments.preparing == null);
+        try std.testing.expect(dispatcher.receive_active == null);
+    }
     const Cancel = struct {
         fn expect(c: anytype, n: native_sdk.bridge.Dispatcher, source_value: native_sdk.bridge.Source, unified: bool, batch: u64, failed: bool) !void {
             var key_buffer: [80]u8 = undefined;

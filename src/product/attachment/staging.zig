@@ -20,7 +20,16 @@ pub fn reject(err: anyerror) Rejection {
         else => .read_failed,
     };
 }
+/// A Product-authorized file. Its opener operates beneath the supplied root.
+pub const ReferenceSource = struct {
+    root: []const u8,
+    relative: []const u8,
+    display_name: []const u8,
+    expected_size: ?u64 = null,
+    open_fn: *const fn (std.Io, []const u8, []const u8) anyerror!attachment.store.Source,
+};
 pub const Input = struct {
+    reference: ?ReferenceSource = null,
     completion_id: u64,
     path_count: usize,
     paths: []const u8,
@@ -48,6 +57,10 @@ const Job = struct {
     cancelled: std.atomic.Value(bool) = .init(false),
     rejection: ?Rejection = null,
     paths: []u8 = &.{},
+    reference_root: []u8 = &.{},
+    reference_name: []u8 = &.{},
+    expected_size: ?u64 = null,
+    open_reference: ?@FieldType(ReferenceSource, "open_fn") = null,
     metadata: []attachment.ReceiveFile = &.{},
     sources: []attachment.store.Source = &.{},
     source_count: usize = 0,
@@ -85,12 +98,17 @@ const Job = struct {
                     try self.check();
                     const path = split.next() orelse return error.InvalidInput;
                     if (path.len == 0) return error.ReadFailed;
-                    if (!std.fs.path.isAbsolute(path)) return error.ReadFailed;
-                    const source = try self.file_store.openSource(path);
+                    const source = if (self.open_reference) |open|
+                        try open(self.file_store.io, self.reference_root, path)
+                    else if (std.fs.path.isAbsolute(path))
+                        try self.file_store.openSource(path)
+                    else
+                        return error.ReadFailed;
                     self.sources[index] = source;
                     self.source_count += 1;
+                    if (self.expected_size) |size| if (source.before.size != size) return error.FileChanged;
                     meta.* = .{
-                        .display_name = std.fs.path.basename(path),
+                        .display_name = if (self.open_reference != null) self.reference_name else std.fs.path.basename(path),
                         .size_bytes = std.math.cast(usize, source.before.size) orelse return error.FileTooLarge,
                     };
                 }
@@ -124,7 +142,7 @@ const Job = struct {
     }
     fn deinit(self: *Job) void {
         self.closeSources();
-        for ([_][]u8{ self.paths, self.chunk }) |bytes| {
+        for ([_][]u8{ self.paths, self.chunk, self.reference_root, self.reference_name }) |bytes| {
             std.crypto.secureZero(u8, bytes);
             self.lane.allocator.free(bytes);
         }
@@ -181,6 +199,14 @@ pub const Lane = struct {
         try self.begin(.{ .completion_id = completion_id, .path_count = path_count, .paths = paths, .limits = runtime.limits, .file_store = runtime.file_store orelse return error.StagingCapacity });
         self.operation = .{ .completion_id = completion_id, .product_id = id };
     }
+    pub fn beginReference(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64, reference: ReferenceSource) Error!void {
+        errdefer _ = runtime.cancelPreparing(id);
+        if (self.operation != null) return error.InputBusy;
+        if (runtime.preparing != id) return error.StaleTransfer;
+        try self.begin(.{ .completion_id = completion_id, .path_count = 1, .paths = reference.relative, .reference = reference, .limits = runtime.limits, .file_store = runtime.file_store orelse return error.StagingCapacity });
+        self.operation = .{ .completion_id = completion_id, .product_id = id };
+    }
+
     pub fn beginPreparedBytes(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64, files: []const attachment.ReceiveFile) Error!void {
         if (self.operation != null) return error.InputBusy;
         if (runtime.preparing != id) return error.StaleTransfer;
@@ -335,6 +361,12 @@ pub const Lane = struct {
         if (input.path_count == 0 or input.paths.len == 0) return error.InvalidInput;
         const job = try self.allocate(input.completion_id, input.file_store);
         errdefer self.release(.{ .job = job, .completion = undefined });
+        if (input.reference) |ref| {
+            job.reference_root = try self.allocator.dupe(u8, ref.root);
+            job.reference_name = try self.allocator.dupe(u8, ref.display_name);
+            job.open_reference = ref.open_fn;
+            job.expected_size = ref.expected_size;
+        }
         job.paths = try self.allocator.dupe(u8, input.paths);
         job.metadata = try self.allocator.alloc(attachment.ReceiveFile, input.path_count);
         job.sources = try self.allocator.alloc(attachment.store.Source, input.path_count);
