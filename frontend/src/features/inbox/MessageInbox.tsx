@@ -1465,7 +1465,7 @@ function InboxTaskDialog({
               <HandoffControls
                 key={task.taskId}
                 referenced={task.taskId}
-                canonical={detail.task.canLink ? detail.task.id : undefined}
+                remoteTask={detail.task.canLink ? detail.task : undefined}
                 message={
                   task.message?.taskIds.includes(task.taskId)
                     ? task.message
@@ -1814,7 +1814,7 @@ function InboxConversationView({
                           id={id}
                           onOpen={() => onOpenTask(id, message)}
                         />
-                        <HandoffControls referenced={id} />
+                        <HandoffControls referenced={id} message={message} />
                       </Fragment>
                     ))}
                   </div>

@@ -5,8 +5,15 @@ import type {
 } from "../../bridge/contracts.ts";
 import { newComposerOperationId } from "../composer/drafts.ts";
 
+export type MessageReference = {
+  taskId: string;
+  title?: string;
+  message: InboxMessage;
+};
+
 const prefix = "metawork.handoff.v1.";
 export type HandoffDraft = HandoffCreate & {
+  title?: string;
   aliases: string[];
   model: ModelRef | null;
   pendingWorkspace: string | null;
@@ -18,10 +25,12 @@ export function handoffDraftKey(id: string) {
 export function newHandoffDraft(
   source: HandoffCreate["source"],
   storeId: string,
+  title: string,
 ): HandoffDraft {
   return {
     source,
     storeId,
+    title,
     operationId: newComposerOperationId(),
     aliases: [...new Set([source.referenced, source.canonical])],
     model: null,
@@ -56,6 +65,7 @@ export function readHandoffDrafts(): HandoffDraft[] {
           /^[0-9a-f]{64}$/.test(v.source?.account) &&
           typeof v.source.referenced === "string" &&
           typeof v.source.canonical === "string" &&
+          (v.title === undefined || typeof v.title === "string") &&
           Array.isArray(v.aliases) &&
           v.aliases.every((item: unknown) => typeof item === "string") &&
           (v.model === null ||
@@ -102,12 +112,10 @@ export function quoteMessage(message: InboxMessage, taskId: string) {
   ]
     .filter(Boolean)
     .join(" · ");
-  return (
-    [
-      header,
-      ...message.text.split(/\r\n|[\r\n\v\f\u001c-\u001e\u0085\u2028\u2029]/),
-    ]
-      .map((line) => "> " + line)
-      .join("\n") + "\n"
-  );
+  return [
+    header,
+    ...message.text.split(/\r\n|[\r\n\v\f\u001c-\u001e\u0085\u2028\u2029]/),
+  ]
+    .map((line) => "> " + line)
+    .join("\n");
 }

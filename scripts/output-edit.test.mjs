@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { prepareOutputEditDraft } from "../frontend/src/features/composer/drafts.ts";
+import { prepareReferenceDraft } from "../frontend/src/features/composer/drafts.ts";
 import {
   composerDraftToRunInput,
   maxComposerTextBytes,
@@ -9,7 +9,7 @@ const reference =
   'Continue editing the Workspace file "results/年度报告.docx":';
 test("Continue editing creates an editable reference and preserves the user's current instruction", () => {
   const original = { kind: "text", text: "Make the heading blue" };
-  const prepared = prepareOutputEditDraft(original, reference);
+  const prepared = prepareReferenceDraft(original, reference);
   assert.equal(prepared.kind, "prepared");
   assert.equal(prepared.draft.text, reference + "\nMake the heading blue");
   assert.deepEqual(original, { kind: "text", text: "Make the heading blue" });
@@ -18,7 +18,7 @@ test("Continue editing creates an editable reference and preserves the user's cu
     text: prepared.draft.text,
   });
   assert.equal(
-    prepareOutputEditDraft(prepared.draft, reference).draft.text,
+    prepareReferenceDraft(prepared.draft, reference).draft.text,
     prepared.draft.text,
   );
 });
@@ -31,7 +31,7 @@ test("Continue editing keeps existing attachment tokens in their normal input fl
       sizeBytes: "12",
     },
   ];
-  const prepared = prepareOutputEditDraft(
+  const prepared = prepareReferenceDraft(
     {
       kind: "multimodal",
       text: "Match this template",
@@ -54,7 +54,7 @@ test("Continue editing keeps existing attachment tokens in their normal input fl
     attachmentsReloadRequired: true,
   };
   assert.equal(
-    prepareOutputEditDraft(reloaded, reference).draft.attachmentsReloadRequired,
+    prepareReferenceDraft(reloaded, reference).draft.attachmentsReloadRequired,
     true,
   );
 });
@@ -63,7 +63,7 @@ test("Continue editing does not rewrite Skill arguments or an unresolved slash c
     { kind: "skill", argumentValues: ["keep my arguments"] },
     { kind: "text", text: "/docx update" },
   ]) {
-    const prepared = prepareOutputEditDraft(draft, reference);
+    const prepared = prepareReferenceDraft(draft, reference);
     assert.equal(prepared.kind, "preserved");
     assert.equal(prepared.draft, draft);
   }
@@ -74,9 +74,9 @@ test("Continue editing counts UTF-8 bytes and refuses overflow without truncatin
     kind: "text",
     text: "x".repeat(maxComposerTextBytes - bytes),
   };
-  assert.equal(prepareOutputEditDraft(exact, reference).kind, "prepared");
+  assert.equal(prepareReferenceDraft(exact, reference).kind, "prepared");
   const overflow = { kind: "text", text: exact.text + "中" };
-  const rejected = prepareOutputEditDraft(overflow, reference);
+  const rejected = prepareReferenceDraft(overflow, reference);
   assert.equal(rejected.kind, "too_long");
   assert.equal(rejected.draft, overflow);
 });

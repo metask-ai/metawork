@@ -1130,8 +1130,8 @@ test("task controls keep draft choice separate from default session and verified
     storeId = "c".repeat(32);
   const source = { binding: "1", account, referenced: "old", canonical: "new" };
   const drafts = [
-    newHandoffDraft(source, storeId),
-    newHandoffDraft(source, storeId),
+    newHandoffDraft(source, storeId, "Review fixtures"),
+    newHandoffDraft(source, storeId, "Review fixtures"),
   ];
   assert.equal(
     matchingDrafts(drafts, "b".repeat(64), storeId, "old").length,
@@ -1216,7 +1216,9 @@ test("task controls keep draft choice separate from default session and verified
         api,
         createElement(HandoffControls, {
           referenced: "old",
-          canonical: detail ? "new" : undefined,
+          remoteTask: detail
+            ? taskView({ id: "new", canLink: true })
+            : undefined,
           children: detail
             ? createElement(
                 "details",

@@ -111,6 +111,7 @@ function attachmentErrorMessage(reason: string): MessageId {
 }
 
 export function ComposerFooter({
+  contextHeader,
   textareaRef,
   approvalModeControl,
   archived,
@@ -171,6 +172,7 @@ export function ComposerFooter({
   onSelectWorkspace,
   onSelectModel,
 }: {
+  contextHeader?: ReactNode;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   approvalModeControl?: ReactNode;
   archived: boolean;
@@ -677,6 +679,7 @@ export function ComposerFooter({
                 : "normal"
           }
         >
+          {contextHeader}
           {draft.kind === "multimodal" && (
             <div
               className="composer-attachments"

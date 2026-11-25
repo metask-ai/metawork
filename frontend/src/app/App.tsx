@@ -25,8 +25,9 @@ import {
   removeHandoffDraft,
   saveHandoffDraft,
   type HandoffDraft,
+  type MessageReference,
 } from "../features/inbox/handoff-drafts.ts";
-import type { HandoffSource, InboxMessage } from "../bridge/contracts.ts";
+import type { HandoffSource, InboxTaskView } from "../bridge/contracts.ts";
 import { newComposerOperationId } from "../features/composer/drafts.ts";
 import {
   useCallback,
@@ -165,7 +166,7 @@ import {
 import {
   newTaskDraftStorageId,
   prepareRetryDraft,
-  prepareOutputEditDraft,
+  prepareReferenceDraft,
   remainingAttachmentFiles,
   unscopedNewTaskDraftId,
 } from "../features/composer/drafts.ts";
@@ -523,6 +524,13 @@ export default function App() {
     useState<ModelRef | null>(null);
   const [handoffDrafts, setHandoffDrafts] = useState(readHandoffDrafts);
   const [handoffId, setHandoffId] = useState<string | null>(null);
+  const [messageOrigin, setMessageOrigin] = useState<{
+    scope: string;
+    target: string;
+    taskId: string;
+    title?: string;
+    quote: string;
+  } | null>(null);
   const [handoffNotice, setHandoffNotice] = useState<MessageId | null>(null);
   const handoffRequest = useRef<string | null>(null);
   const [handoffBusy, setHandoffBusy] = useState(false);
@@ -1644,6 +1652,23 @@ export default function App() {
     ? newTaskDrafts.updateDraft
     : taskDrafts.updateDraft;
   const composerDraftRef = useRef(composerDraft);
+  const originScope = JSON.stringify([
+    snapshot.inbox.binding,
+    snapshot.inbox.accountScope,
+    snapshot.historyEpoch,
+  ]);
+  const originTarget = newTaskDraftActive
+    ? newTaskDraftId
+    : `task:${workbench.activeTaskId}`;
+  const origin =
+    route === "workbench" &&
+    messageOrigin?.scope === originScope &&
+    messageOrigin.target === originTarget
+      ? messageOrigin
+      : null;
+  useEffect(() => {
+    if (messageOrigin && !origin) setMessageOrigin(null);
+  }, [messageOrigin, origin]);
   composerDraftRef.current = composerDraft;
   const composerDraftScope = newTaskDraftActive
     ? `new-task:${newTaskDraftId ?? unscopedNewTaskDraftId}:${newTaskSubmissionInstances.current.get(newTaskDraftId ?? unscopedNewTaskDraftId) ?? 0}`
@@ -2505,6 +2530,7 @@ export default function App() {
   }, [workbench.activeTaskId, workbench.draftOpen]);
   const openNewTaskDraft = useCallback(
     (projectId: string | null) => {
+      setMessageOrigin(null);
       setHandoffId(null);
       setHandoffNotice(null);
       pendingTaskSelection.current = null;
@@ -3280,6 +3306,7 @@ export default function App() {
     await refreshSnapshot().catch(() => undefined);
   }
   function openTask(taskId: string) {
+    setMessageOrigin(null);
     setHandoffId(null);
     setHandoffNotice(null);
     pendingTaskSelection.current = null;
@@ -3318,7 +3345,7 @@ export default function App() {
     setHandoffDrafts(readHandoffDrafts());
   }
   const verifyDraftAliases = useCallback(
-    (source: HandoffSource, storeId: string) => {
+    (source: HandoffSource, storeId: string, title: string) => {
       try {
         let changed = false;
         const saved = readHandoffDrafts();
@@ -3335,11 +3362,13 @@ export default function App() {
           ];
           if (
             aliases.length === draft.aliases.length &&
-            draft.source.canonical === source.canonical
+            draft.source.canonical === source.canonical &&
+            draft.title === title
           )
             continue;
           saveHandoffDraft({
             ...draft,
+            title,
             aliases,
             source: { ...draft.source, canonical: source.canonical },
           });
@@ -3352,12 +3381,26 @@ export default function App() {
     },
     [],
   );
-  function showHandoffDraft(draft: HandoffDraft) {
+  function rememberMessageOrigin(target: string, reference?: MessageReference) {
+    setMessageOrigin(
+      reference
+        ? {
+            scope: originScope,
+            target,
+            taskId: reference.taskId,
+            title: reference.title,
+            quote: quoteMessage(reference.message, reference.taskId),
+          }
+        : null,
+    );
+  }
+  function showHandoffDraft(draft: HandoffDraft, reference?: MessageReference) {
     pendingTaskSelection.current = null;
     pendingTaskDraftSource.current = null;
     inboxPage.closeTask();
     setHandoffNotice(null);
     setHandoffId(draft.operationId);
+    rememberMessageOrigin(handoffDraftKey(draft.operationId), reference);
     setNewTaskApprovalOverride(null);
     setNewTaskRequestedModel(draft.model);
     dispatchWorkbench({ type: "task.draft.opened", projectId: null });
@@ -3366,40 +3409,30 @@ export default function App() {
   function startHandoffDraft(
     source: HandoffSource,
     storeId: string,
-    message?: InboxMessage,
+    task: InboxTaskView,
+    reference?: MessageReference,
   ) {
-    const draft = newHandoffDraft(source, storeId);
+    const draft = newHandoffDraft(source, storeId, task.name);
     try {
-      const content = message ? quoteMessage(message, source.canonical) : "";
-      const initial = { kind: "text" as const, text: content };
+      const initial = {
+        kind: "text" as const,
+        text: t("handoff.task_prompt", { id: source.canonical }),
+      };
       if (!composerDraftWithinLimits(initial)) {
-        setHandoffNotice("handoff.quote_failed");
+        setHandoffNotice("handoff.prompt_too_long");
         return;
       }
       rememberHandoff(draft);
       newTaskDrafts.setDraft(handoffDraftKey(draft.operationId), initial);
-      showHandoffDraft(draft);
+      showHandoffDraft(draft, reference);
     } catch {
       setHandoffNotice("handoff.store_failed");
     }
   }
-  function openLinkedSession(
-    id: string,
-    reference?: { message: InboxMessage; id: string },
-  ) {
-    if (reference) {
-      const prepared = prepareOutputEditDraft(
-        taskDrafts.getDraft(id),
-        quoteMessage(reference.message, reference.id),
-      );
-      if (prepared.kind !== "prepared") {
-        setHandoffNotice("handoff.quote_failed");
-        return;
-      }
-      taskDrafts.setDraft(id, prepared.draft);
-    }
+  function openLinkedSession(id: string, reference?: MessageReference) {
     inboxPage.closeTask();
     openTask(id);
+    rememberMessageOrigin(`task:${id}`, reference);
   }
   function finishDraftCreation(
     draft: HandoffDraft,
@@ -4750,7 +4783,7 @@ export default function App() {
     if (!output || output.redacted) return "edit_unavailable";
     const draft = taskDrafts.currentDraft(taskId);
     if (!draft) return "edit_unavailable";
-    const prepared = prepareOutputEditDraft(
+    const prepared = prepareReferenceDraft(
       draft,
       t("outputs.edit_reference", { path: JSON.stringify(output.displayPath) }),
     );
@@ -5112,6 +5145,33 @@ export default function App() {
           },
         }
       : undefined;
+  const handoffStatus =
+    handoffNotice ??
+    (handoff?.pendingWorkspace
+      ? "handoff.pending"
+      : handoff && !composerWorkspace
+        ? "handoff.workdir"
+        : null);
+  const sourceTitle = handoff?.title ?? origin?.title;
+  const sourceId = handoff?.source.canonical ?? origin?.taskId;
+  const composerLocked = Boolean(
+    handoffLocked ||
+    (selectedTaskSummary &&
+      (selectedTaskSummary.archived ||
+        selectedTaskSummary.deletionStatus === "deleting" ||
+        selectedTaskSummary.lifecycle === "closing")),
+  );
+  function quoteOrigin() {
+    if (!origin || composerLocked || !taskCanCompose) return;
+    const result = prepareReferenceDraft(composerDraft, origin.quote, "append");
+    if (result.kind !== "prepared") {
+      setHandoffNotice("handoff.quote_failed");
+      return;
+    }
+    updateComposerDraft(result.draft);
+    setHandoffNotice(null);
+    composer.current?.focus();
+  }
   const composerFooter = (
     <>
       {activeTask?.sessionCloseRetryAvailable && (
@@ -5193,16 +5253,9 @@ export default function App() {
       {activeTask && (
         <ConversationContext key={activeTask.id} context={activeTask.context} />
       )}
-      {(handoff || handoffNotice) && (
+      {handoffStatus && (
         <div className="inbox-handoff-row" role="status">
-          {handoff && <strong>{"#" + handoff.source.canonical}</strong>}
-          {handoffNotice
-            ? t(handoffNotice)
-            : handoff?.pendingWorkspace
-              ? t("handoff.pending")
-              : !composerWorkspace
-                ? t("handoff.workdir")
-                : null}
+          {t(handoffStatus)}
           {handoff?.pendingWorkspace && (
             <Button
               size="sm"
@@ -5216,6 +5269,35 @@ export default function App() {
         </div>
       )}
       <ComposerFooter
+        contextHeader={
+          sourceId && (
+            <div className="composer-task-source">
+              <span>{t("handoff.source_task")}</span>
+              {sourceTitle && (
+                <span
+                  className="composer-task-source-title"
+                  title={sourceTitle}
+                >
+                  {sourceTitle}
+                </span>
+              )}
+              <span>{t("inbox.item_number", { id: sourceId })}</span>
+              {origin && !composerLocked && taskCanCompose && (
+                <button
+                  type="button"
+                  className="composer-source-quote focus-ring"
+                  disabled={
+                    composerDraft.kind !== "skill" &&
+                    composerDraft.text.includes(origin.quote)
+                  }
+                  onClick={quoteOrigin}
+                >
+                  {t("handoff.quote")}
+                </button>
+              )}
+            </div>
+          )
+        }
         modelTriggerRef={composerModelTrigger}
         textareaRef={composer}
         sendDisabledReason={inputDisabledReason}
@@ -5264,13 +5346,7 @@ export default function App() {
         attachmentModelWarning={attachmentModelWarning}
         skillCatalog={skillCatalog}
         slashCommands={slashCommands}
-        composeDisabled={Boolean(
-          handoffLocked ||
-          (selectedTaskSummary &&
-            (selectedTaskSummary.archived ||
-              selectedTaskSummary.deletionStatus === "deleting" ||
-              selectedTaskSummary.lifecycle === "closing")),
-        )}
+        composeDisabled={composerLocked}
         attachmentActionsDisabled={bridgeUnavailable}
         canSubmit={canSubmit}
         runInFlight={Boolean(taskCanCompose && taskOperationInFlight)}

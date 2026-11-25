@@ -302,7 +302,7 @@ export const enUS = {
   "handoff.continue": "Continue in workbench",
   "handoff.choose": "Choose a session or draft",
   "handoff.default": "Default",
-  "handoff.quote": "Bring this message",
+  "handoff.quote": "Quote original message",
   "handoff.prefer": "Set as default",
   "handoff.unlink": "Unlink",
   "handoff.resume": "Resume draft",
@@ -318,6 +318,11 @@ export const enUS = {
   "handoff.change_failed":
     "Could not confirm the change. Reopen details to check.",
   "handoff.workdir": "Choose a working directory to send.",
+  "handoff.source_task": "Source task",
+  "handoff.task_prompt":
+    "Check the latest progress on MetaTeam task #{id}, then continue working on it.",
+  "handoff.prompt_too_long":
+    "The suggested prompt exceeds the input limit for a work session draft.",
   "handoff.pending":
     "The creation result is unconfirmed. The directory and model are locked.",
   "handoff.check": "Check creation result",

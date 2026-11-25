@@ -3193,13 +3193,26 @@ for (const path of ["fresh", "lost", "not-created"]) {
         name: "Review fixtures",
         progress: "doing",
         state: null,
-        path: null,
-        description: null,
+        path: "Metawork / Review fixtures",
+        description: "Check fixture coverage.\r\nKeep the existing cases.",
         assignees: ["Ann"],
         createdBy: null,
         updatedAtMs: null,
-        lastNote: null,
-        notes: [],
+        lastNote:
+          path === "fresh"
+            ? {
+                text: "Review the updated fixtures.\u2028Assignment withdrawn.",
+                by: "Bob",
+                atMs: "1700000000000",
+              }
+            : null,
+        notes: [
+          {
+            text: "Review the updated fixtures.",
+            by: "Bob",
+            atMs: "1700000000000",
+          },
+        ],
         children: [],
       };
       const calls = [];
@@ -3212,7 +3225,15 @@ for (const path of ["fresh", "lost", "not-created"]) {
         readInboxConversation: async () => ({
           state: "ready",
           peerId: "ann",
-          messages: [message],
+          messages: [
+            message,
+            {
+              ...message,
+              id: "10",
+              text: "A different handover message",
+              sentAtMs: "1700000001000",
+            },
+          ],
           hasEarlier: false,
         }),
         readInboxTask: async () => ({
@@ -3222,7 +3243,12 @@ for (const path of ["fresh", "lost", "not-created"]) {
           file: null,
           project: null,
         }),
-        handoffSessions: async () => ({ storeId, sessions: [] }),
+        handoffSessions: async () => ({
+          storeId,
+          sessions: fixture.creations()
+            ? [{ taskId: fixture.task.id, preferred: true }]
+            : [],
+        }),
         reconcileHandoff: async (draft) => {
           calls.push(draft);
           return path === "not-created" ? null : fixture.task.id;
@@ -3256,16 +3282,54 @@ for (const path of ["fresh", "lost", "not-created"]) {
       await user.click(screen.getByRole("button", { name: /^Messages/ }));
       await user.click(await screen.findByRole("button", { name: /^Ann/ }));
       await user.click(
-        await screen.findByRole("button", { name: /Linked item.*#old/ }),
+        (
+          await screen.findAllByRole("button", { name: /Linked item.*#old/ })
+        )[0],
       );
       await user.click(
         await screen.findByRole("button", { name: "Start a work session" }),
       );
-      const area = document.querySelector(".composer-bar textarea");
-      assert.match(
-        area.value,
-        /> Ann · Agent Writer · .*#new\n> First\n> \n> Second/,
+      let area = document.querySelector(".composer-bar textarea");
+      const prompt = area.value;
+      assert.equal(
+        prompt,
+        "Check the latest progress on MetaTeam task #new, then continue working on it.",
       );
+      const quoteButton = () =>
+        screen.getByRole("button", { name: "Quote original message" });
+      const source = screen.getByText("Source task").parentElement;
+      assert.ok(area.closest(".ai-composer").contains(source));
+      assert.match(source.textContent, /Review fixtures.*#new/);
+      if (path === "fresh") {
+        await user.click(quoteButton());
+        assert.ok(
+          area.value.startsWith(prompt + "\n\n> Ann · Agent Writer · "),
+        );
+        assert.match(area.value, /#new\n> First\n> \n> Second$/);
+        assert.ok(quoteButton().disabled);
+        assert.equal(fixture.creations(), 0);
+        await user.click(screen.getByRole("button", { name: /^Messages/ }));
+        await user.click(await screen.findByRole("button", { name: /^Ann/ }));
+        await user.click(
+          (
+            await screen.findAllByRole("button", { name: /Linked item.*#old/ })
+          )[1],
+        );
+        await user.click(
+          await screen.findByRole("button", { name: "Other options" }),
+        );
+        await user.click(
+          await screen.findByRole("menuitem", {
+            name: "Start another session",
+          }),
+        );
+        area = document.querySelector(".composer-bar textarea");
+        assert.equal(area.value, prompt);
+        await user.click(quoteButton());
+        assert.match(area.value, /\n> A different handover message$/);
+        assert.doesNotMatch(area.value, /> First/);
+      }
+      const submitted = area.value;
       assert.equal(fixture.creations(), 0);
       await selectManualSubmissionWorkspace(user);
       fireEvent.keyDown(area, { key: "Enter", code: "Enter" });
@@ -3282,8 +3346,40 @@ for (const path of ["fresh", "lost", "not-created"]) {
       if (path === "fresh") {
         await fixture.created();
         await waitFor(() => assert.equal(fixture.inputs.length, 1));
-        assert.match(fixture.inputs[0][2].text, /> Second/);
+        assert.equal(fixture.inputs[0][2].text, submitted);
         await fixture.settle();
+        fixture.snapshot.tasks = [fixture.task];
+        await fixture.publish();
+        assert.equal(
+          screen.queryByRole("button", { name: "Quote original message" }),
+          null,
+        );
+        await user.click(screen.getByRole("button", { name: /^Messages/ }));
+        await user.click(await screen.findByRole("button", { name: /^Ann/ }));
+        await user.click(
+          (
+            await screen.findAllByRole("button", {
+              name: /Continue in workbench/,
+            })
+          )[0],
+        );
+        await screen.findByRole("button", { name: "Quote original message" });
+        const existing = document.querySelector(".composer-bar textarea");
+        assert.doesNotMatch(existing.value, /> First/);
+        await user.click(quoteButton());
+        assert.match(existing.value, /> First\n> \n> Second$/);
+        assert.equal(fixture.inputs.length, 1);
+        await user.click(
+          screen.getAllByRole("button", { name: /Submission task/ })[0],
+        );
+        assert.equal(
+          screen.queryByRole("button", { name: "Quote original message" }),
+          null,
+        );
+        assert.match(
+          document.querySelector(".composer-bar textarea").value,
+          /> Second$/,
+        );
       } else {
         await fixture.loseCreationReply();
         const check = await screen.findByRole("button", {
@@ -3316,9 +3412,9 @@ for (const path of ["fresh", "lost", "not-created"]) {
         assert.equal(fixture.creations(), 1);
         assert.equal(fixture.inputs.length, 0);
         await waitFor(() =>
-          assert.match(
+          assert.equal(
             document.querySelector(".composer-bar textarea").value,
-            /> Second/,
+            prompt,
           ),
         );
       }
