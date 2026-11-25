@@ -3,11 +3,6 @@ import type {
   InboxMessage,
   ModelRef,
 } from "../../bridge/contracts.ts";
-import {
-  newComposerOperationId,
-  prepareReferenceDraft,
-} from "../composer/drafts.ts";
-import type { ComposerDraft } from "../composer/slash.ts";
 
 const prefix = "metawork.handoff.v1.";
 export type HandoffDraft = HandoffCreate & {
@@ -22,6 +17,7 @@ export function handoffDraftKey(id: string) {
 }
 
 export function newHandoffDraft(
+  operationId: string,
   source: HandoffCreate["source"],
   storeId: string,
   title: string,
@@ -34,21 +30,11 @@ export function newHandoffDraft(
     originalMessage: message
       ? { quote: quoteMessage(message, source.canonical), included: false }
       : undefined,
-    operationId: newComposerOperationId(),
+    operationId,
     aliases: [...new Set([source.referenced, source.canonical])],
     model: null,
     pendingWorkspace: null,
   };
-}
-
-export function handoffInput(draft: ComposerDraft, handoff?: HandoffDraft) {
-  if (!handoff?.originalMessage?.included) return draft;
-  const result = prepareReferenceDraft(
-    draft,
-    handoff.originalMessage.quote,
-    "append",
-  );
-  return result.kind === "prepared" ? result.draft : null;
 }
 
 export function saveHandoffDraft(draft: HandoffDraft) {

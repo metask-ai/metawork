@@ -1208,8 +1208,8 @@ test("task controls keep draft choice separate from default session and verified
     storeId = "c".repeat(32);
   const source = { binding: "1", account, referenced: "old", canonical: "new" };
   const drafts = [
-    newHandoffDraft(source, storeId, "Review fixtures"),
-    newHandoffDraft(source, storeId, "Review fixtures"),
+    newHandoffDraft("1".repeat(32), source, storeId, "Review fixtures"),
+    newHandoffDraft("2".repeat(32), source, storeId, "Review fixtures"),
   ];
   assert.equal(
     matchingDrafts(drafts, "b".repeat(64), storeId, "old").length,

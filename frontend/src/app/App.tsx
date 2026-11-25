@@ -31,7 +31,6 @@ import {
   handoffDraftKey,
   matchingDrafts,
   newHandoffDraft,
-  handoffInput,
   readHandoffDrafts,
   removeHandoffDraft,
   saveHandoffDraft,
@@ -389,6 +388,16 @@ function taskPanelFile(tab: TaskPanelTab): MenuFile | null {
   return target && "displayPath" in tab
     ? menuFile(target, tab.displayPath)
     : null;
+}
+
+function handoffInput(draft: ComposerDraft, handoff?: HandoffDraft) {
+  if (!handoff?.originalMessage?.included) return draft;
+  const result = prepareReferenceDraft(
+    draft,
+    handoff.originalMessage.quote,
+    "append",
+  );
+  return result.kind === "prepared" ? result.draft : null;
 }
 
 export default function App() {
@@ -1985,13 +1994,16 @@ export default function App() {
   ]);
   const canCreateTask =
     snapshot.newTaskAdmission.available &&
-    (!handoffId ||
-      !newTaskDraftActive ||
-      Boolean(handoff && composerWorkspace && !handoffLocked)) &&
     newTaskWorkspaceReady &&
     newTaskModelState.valid;
+  const handoffBlocksSubmission =
+    newTaskDraftActive &&
+    handoffId !== null &&
+    !taskIdentityPending &&
+    (!handoff || !composerWorkspace || handoffLocked);
   const canSubmit =
     taskCanCompose &&
+    !handoffBlocksSubmission &&
     composerContentReady &&
     !attachmentBusy &&
     !bridgeUnavailable &&
@@ -3407,7 +3419,13 @@ export default function App() {
     task: InboxTaskView,
     message?: InboxMessage,
   ) {
-    const draft = newHandoffDraft(source, storeId, task.name, message);
+    const draft = newHandoffDraft(
+      newComposerOperationId(),
+      source,
+      storeId,
+      task.name,
+      message,
+    );
     try {
       const initial = {
         kind: "text" as const,
