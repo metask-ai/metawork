@@ -4994,19 +4994,22 @@ pub const Runtime = struct {
     /// redacted answers; a file attachment, a redacted record and a message
     /// sent before the identity existed all resolve to nothing, and history
     /// keeps the plain metadata chip for them.
+    pub fn messageFile(self: *const Runtime, task_id: u64, message: task_state.MessageIdentity, index: usize) ?task_state.AttachmentRecord {
+        if (!self.mediaReadable(task_id)) return null;
+        const input = messageInput(self.findConst(task_id).?, message) orelse return null;
+        if (input.* != .multimodal or index >= input.multimodal.attachments.len) return null;
+        const record = input.multimodal.attachments[index];
+        return if (record.redacted) null else record;
+    }
+
     pub fn acceptedAttachment(
         self: *const Runtime,
         task_id: u64,
         message: task_state.MessageIdentity,
         index: usize,
     ) ?AcceptedAttachment {
-        if (!self.mediaReadable(task_id)) return null;
-        const input = messageInput(self.findConst(task_id).?, message) orelse return null;
-        if (input.* != .multimodal) return null;
-        const attachments = input.multimodal.attachments;
-        if (index >= attachments.len) return null;
-        const record = attachments[index];
-        if (record.kind != .image or record.redacted) return null;
+        const record = self.messageFile(task_id, message, index) orelse return null;
+        if (record.kind != .image) return null;
         return .{
             .media = record.media orelse return null,
             .format = record.format orelse return null,
@@ -10489,6 +10492,8 @@ fn copyRunInput(
                     .size_bytes = item.size_bytes orelse item.bytes.len,
                     .redacted = display.redacted,
                     .media = item.media,
+                    .referenced = item.referenced,
+                    .original_name = if (display.redacted) null else item.original_name,
                 };
                 initialized += 1;
                 redacted = redacted or display.redacted;
@@ -11384,7 +11389,8 @@ fn messageInput(task: *const task_state.Task, message: task_state.MessageIdentit
                 if (std.mem.eql(u8, operation_id, submission.operationId())) break :taken run;
             };
             for (task.input_submissions.items) |*record| {
-                if (std.mem.eql(u8, operation_id, record.submission.operationId())) return &record.input;
+                if (std.mem.eql(u8, operation_id, record.submission.operationId()))
+                    return if (record.state == .waiting) &record.input else null;
             }
             return null;
         },
@@ -13168,6 +13174,9 @@ test "an accepted attachment answers for its message from waiting through its Ru
     const message: task_state.MessageIdentity = .{ .submission = "op-1" };
     try std.testing.expectEqual(media, runtime.acceptedAttachment(1, message, 0).?.media);
     try std.testing.expect(runtime.acceptedAttachment(1, .{ .submission = "op-2" }, 0) == null);
+    task.input_submissions.items[0].state = .cancelled;
+    try std.testing.expect(runtime.messageFile(1, message, 0) == null);
+    task.input_submissions.items[0].state = .waiting;
 
     // While acceptance still owns its input, the prepared Run already is the
     // message: its record decides, and the submission does not stand in for it.

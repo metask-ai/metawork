@@ -5258,6 +5258,7 @@ pub const Runtime = struct {
                     staged.items[index] = switch (part) {
                         .image => |image| .{
                             .resource_id = image.id,
+                            .original_name = if (self.attachments.acceptedMedia(image.id) == null) self.attachments.acceptedName(image.id) else null,
                             .kind = .image,
                             .format = switch (image.format) {
                                 .png => .png,
@@ -5287,6 +5288,7 @@ pub const Runtime = struct {
                         },
                         .text => |text| .{
                             .resource_id = text.id,
+                            .original_name = self.attachments.acceptedName(text.id),
                             .kind = .file,
                             .format = null,
                             .display_name = descriptor.display_name,

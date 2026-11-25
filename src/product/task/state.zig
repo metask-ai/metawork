@@ -475,6 +475,8 @@ pub const MultimodalAttachment = struct {
     reference: []const u8 = &.{},
     size_bytes: ?u64 = null,
     source_format: ?AttachmentFormat = null,
+    referenced: bool = false,
+    original_name: ?[attachment_media_name_bytes]u8 = null,
     media: ?AttachmentMedia = null,
 };
 
@@ -819,7 +821,7 @@ pub const AttachmentMedia = struct {
     }
 };
 
-fn decodeMediaName(text: []const u8) error{InvalidAttachmentMedia}![attachment_media_name_bytes]u8 {
+pub fn decodeMediaName(text: []const u8) error{InvalidAttachmentMedia}![attachment_media_name_bytes]u8 {
     if (text.len != attachment_media_name_bytes) return error.InvalidAttachmentMedia;
     var name: [attachment_media_name_bytes]u8 = undefined;
     for (text, &name) |byte, *target| {
@@ -836,10 +838,15 @@ pub const AttachmentRecord = struct {
     display_name: []u8,
     size_bytes: u64,
     redacted: bool = false,
-    /// Present only for an image this Task accepted and whose derivative was
-    /// stored. Absent for every file attachment, for an image sent before the
-    /// identity was recorded, and whenever the derivative could not be written.
+    referenced: bool = false,
+    /// Retained original for records without image preview metadata.
+    original_name: ?[attachment_media_name_bytes]u8 = null,
+    /// Present when an accepted image has a stored thumbnail.
     media: ?AttachmentMedia = null,
+
+    pub fn retainedOriginal(self: AttachmentRecord) ?[attachment_media_name_bytes]u8 {
+        return self.original_name orelse if (self.media) |image| image.original_name else null;
+    }
 };
 
 /// Immutable checkpoint description facts captured before executor handoff.

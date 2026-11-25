@@ -664,6 +664,11 @@ pub const Runtime = struct {
     /// The persisted identity of an accepted image, read while the batch is
     /// still borrowed. A derivative that could not be written leaves no
     /// identity at all, so history keeps the plain metadata chip for it.
+    pub fn acceptedName(self: *const Runtime, id: u64) ?[store.name_text_bytes]u8 {
+        const entry = self.slots[self.findIndex(id) orelse return null].?;
+        return if (entry.state == .borrowed) entry.file.name else null;
+    }
+
     pub fn acceptedMedia(self: *const Runtime, id: u64) ?Media {
         const entry = self.slots[self.findIndex(id) orelse return null].?;
         if (entry.state != .borrowed or entry.format == null) return null;

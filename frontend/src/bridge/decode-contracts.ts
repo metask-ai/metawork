@@ -626,6 +626,9 @@ function decodeRunInput(value: unknown, path: string): RunInputView {
           `${attachmentPath}.kind`,
           ["image", "file"] as const,
         );
+        const flags = (["canReference", "referenced"] as const).filter((key) =>
+          Object.hasOwn(candidate, key),
+        );
         const attachment = object(
           attachmentValue,
           attachmentPath,
@@ -636,11 +639,21 @@ function decodeRunInput(value: unknown, path: string): RunInputView {
                 "displayName",
                 "sizeBytes",
                 "media",
+                ...flags,
                 "redacted",
               ]
-            : ["kind", "displayName", "sizeBytes", "redacted"],
+            : ["kind", "displayName", "sizeBytes", "redacted", ...flags],
         );
+        for (const key of flags)
+          if (candidate[key] !== true)
+            fail(attachmentPath, "expected true for " + key);
         const common = {
+          ...(candidate.referenced === true
+            ? { referenced: true as const }
+            : {}),
+          ...(candidate.canReference === true
+            ? { canReference: true as const }
+            : {}),
           displayName: nonEmptyString(
             attachment.displayName,
             `${attachmentPath}.displayName`,

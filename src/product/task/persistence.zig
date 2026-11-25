@@ -1105,6 +1105,8 @@ pub const AttachmentWire = struct {
     /// in every row written before this identity existed, which is why it
     /// carries a default: those rows still decode, and their chips stay plain.
     media: ?AttachmentMediaWire = null,
+    referenced: ?bool = null,
+    original_name: ?[]const u8 = null,
 };
 
 /// The logical identity of an accepted image's Product-owned bytes. These are
@@ -1542,6 +1544,8 @@ fn projectInput(allocator: std.mem.Allocator, record: task_state.RunInputRecord)
                 .display_name = item.display_name,
                 .size_bytes = item.size_bytes,
                 .redacted = item.redacted,
+                .referenced = if (item.referenced) true else null,
+                .original_name = if (item.original_name) |*name| name else null,
                 .media = if (item.media) |*media| .{
                     .original_name = &media.original_name,
                     .thumbnail_name = &media.thumbnail_name,
@@ -2526,6 +2530,8 @@ fn restoreRunInput(
                 try restoreAttachmentMedia(kind, wire_media)
             else
                 null;
+            if (media != null and wire_item.original_name != null) return error.TaskStoreCorrupt;
+            const original_name = if (wire_item.original_name) |name| task_state.decodeMediaName(name) catch return error.TaskStoreCorrupt else null;
             item.* = .{
                 .kind = kind,
                 .format = format,
@@ -2536,6 +2542,8 @@ fn restoreRunInput(
                 .size_bytes = wire_item.size_bytes,
                 .redacted = wire_item.redacted,
                 .media = media,
+                .original_name = original_name,
+                .referenced = wire_item.referenced orelse false,
             };
             initialized += 1;
         }
@@ -6125,10 +6133,10 @@ const accepted_media_wire: AttachmentMediaWire = .{
     .thumbnail_height = 171,
 };
 
-test "an accepted image keeps its stored identity across a restore" {
+test "accepted image and file attachments keep their original identities across a restore" {
     var attachments = [_]AttachmentWire{
         .{ .kind = "image", .format = "jpeg", .display_name = "shot.jpg", .size_bytes = 4096, .redacted = false, .media = accepted_media_wire },
-        .{ .kind = "file", .format = null, .display_name = "notes.txt", .size_bytes = 12, .redacted = false },
+        .{ .kind = "file", .format = null, .display_name = "notes.txt", .size_bytes = 12, .redacted = false, .original_name = "10101010101010101010101010101010" },
     };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -6145,6 +6153,9 @@ test "an accepted image keeps its stored identity across a restore" {
     // A file attachment never carries one, and the identity never reaches the
     // projection as text, so there is nothing to redact in it.
     try std.testing.expect(items[1].media == null);
+    try std.testing.expectEqualStrings(attachments[1].original_name.?, &items[1].original_name.?);
+    attachments[0].original_name = attachments[1].original_name;
+    try std.testing.expectError(error.TaskStoreCorrupt, restoreTestTask(&arena, mediaTestTask(&attachments)));
     try std.testing.expect(!try security.contains(std.testing.allocator, accepted_media_wire, "0123456789abcdef0123456789abcdef"));
 }
 

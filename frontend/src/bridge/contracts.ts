@@ -829,6 +829,8 @@ export type RunInputView =
             kind: "image";
             format: "png" | "jpeg" | "webp";
             displayName: string;
+            canReference?: true;
+            referenced?: true;
             sizeBytes: string;
             /// Whether the Host still has media to serve for this chip. False
             /// for an image sent before its identity was recorded, so that
@@ -839,6 +841,8 @@ export type RunInputView =
         | {
             kind: "file";
             displayName: string;
+            canReference?: true;
+            referenced?: true;
             sizeBytes: string;
             redacted: boolean;
           }

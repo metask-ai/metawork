@@ -877,10 +877,14 @@ pub fn writeInput(writer: *std.Io.Writer, text_projection: TextProjection, input
                 // Whether this image chip has media to ask for. The identity
                 // itself stays inside Product: the Renderer addresses it by the
                 // Task, the message and the position it already displays.
+                const redacted = item.redacted or text_projection.containsSensitive(item.display_name);
+                if (item.referenced) writer.writeAll(",\"referenced\":true") catch return error.SnapshotTooLarge;
+                if (item.retainedOriginal() != null and !redacted)
+                    writer.writeAll(",\"canReference\":true") catch return error.SnapshotTooLarge;
                 if (item.kind == .image) writer.print(",\"media\":{}", .{
-                    item.media != null and !item.redacted,
+                    item.media != null and !redacted,
                 }) catch return error.SnapshotTooLarge;
-                writer.print(",\"redacted\":{}}}", .{item.redacted}) catch
+                writer.print(",\"redacted\":{}}}", .{redacted}) catch
                     return error.SnapshotTooLarge;
             }
             writer.writeAll("],\"skill\":") catch return error.SnapshotTooLarge;

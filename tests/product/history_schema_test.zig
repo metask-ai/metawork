@@ -441,7 +441,7 @@ test "history schema preserves null empty and nonterminal history variants" {
             1 => {
                 const attachments = try allocator.dupe(history.wire.AttachmentWire, &.{
                     .{ .kind = "image", .format = "png", .display_name = "image 世", .size_bytes = 123, .redacted = true },
-                    .{ .kind = "file", .format = null, .display_name = "text\x00file", .size_bytes = std.math.maxInt(u64), .redacted = false },
+                    .{ .kind = "file", .format = null, .display_name = "text\x00file", .size_bytes = std.math.maxInt(u64), .redacted = false, .original_name = "11111111111111111111111111111111", .referenced = true },
                     .{ .kind = "image", .format = "jpeg", .display_name = "sent 世.jpg", .size_bytes = 4096, .redacted = false, .media = .{
                         .original_name = "0123456789abcdef0123456789abcdef",
                         .thumbnail_name = "fedcba9876543210fedcba9876543210",
