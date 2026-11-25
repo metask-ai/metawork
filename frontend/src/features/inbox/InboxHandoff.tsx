@@ -52,6 +52,157 @@ const Context = createContext<
   | null
 >(null);
 
+export type AttachmentSummary = {
+  kind: "task" | "file" | "project";
+  id: string;
+  name: string;
+};
+
+const attachmentIcons = {
+  task: "task-list",
+  file: "skill-file",
+  project: "workspace",
+  unknown: "paperclip",
+} as const;
+
+function useHandoffTargets(referenced: string, canonical = referenced) {
+  const api = useContext(Context);
+  const list = api?.lists[referenced];
+  const sessions = (list?.sessions ?? []).flatMap((link) => {
+    const task = api?.tasks.find((item) => item.id === link.taskId);
+    return task
+      ? [
+          {
+            task,
+            preferred: link.preferred,
+            workspace: api?.workspaces.find((w) => w.id === task.workspaceId),
+          },
+        ]
+      : [];
+  });
+  const drafts =
+    api?.account && list
+      ? matchingDrafts(
+          api.drafts,
+          api.account,
+          list.storeId,
+          referenced,
+          canonical,
+        )
+      : [];
+  return { api, list, sessions, drafts };
+}
+
+type LinkedSession = ReturnType<typeof useHandoffTargets>["sessions"][number];
+
+function availableSession(s: LinkedSession) {
+  return (
+    !s.task.archived &&
+    !s.task.historyReadOnly &&
+    s.task.lifecycle === "open" &&
+    s.task.deletionStatus === "idle"
+  );
+}
+
+function sessionAction(s: LinkedSession) {
+  if (s.task.archived || s.task.historyReadOnly) return "handoff.history";
+  return s.workspace?.authorization === "available"
+    ? "handoff.continue"
+    : "handoff.reauthorize";
+}
+
+export function MessageAttachment({
+  id,
+  summary,
+  message,
+  onOpen,
+}: {
+  id: string;
+  summary?: AttachmentSummary | null;
+  message: InboxMessage;
+  onOpen(): void;
+}) {
+  const { t } = useI18n();
+  const { api, sessions, drafts } = useHandoffTargets(id, summary?.id);
+  const canOfferSessions = !summary || summary.kind === "task";
+  const count = canOfferSessions ? sessions.length + drafts.length : 0;
+  const draftSummary =
+    summary === undefined
+      ? (drafts.find((draft) => draft.title) ?? drafts[0])
+      : undefined;
+  const kind =
+    summary?.kind ?? (summary === undefined && count ? "task" : "unknown");
+  const title = summary?.name ?? draftSummary?.title;
+  const number = summary?.id ?? draftSummary?.source.canonical ?? id;
+  const caption = t(`inbox.attachment_${kind}`, { id: number });
+  const reference = { taskId: number, title, message };
+  const direct =
+    sessions.find((s) => s.preferred && availableSession(s)) ??
+    (count === 1 ? sessions[0] : undefined);
+  return (
+    <div className="inbox-attachment">
+      <button
+        type="button"
+        className="inbox-linked-item"
+        onClick={onOpen}
+        aria-haspopup="dialog"
+        aria-label={title ? `${title} ${caption}` : caption}
+        title={title}
+      >
+        <Icon name={attachmentIcons[kind]} />
+        <span>{title || caption}</span>
+      </button>
+      {title && <span className="inbox-attachment-id">{caption}</span>}
+      {api &&
+        count > 0 &&
+        (direct || count === 1 ? (
+          <button
+            type="button"
+            className="inbox-attachment-action"
+            onClick={() =>
+              direct
+                ? api.onOpen(direct.task.id, reference)
+                : api.onResume(drafts[0], reference)
+            }
+          >
+            {t(direct ? sessionAction(direct) : "handoff.resume")}
+            <Icon name="chevron-right" />
+          </button>
+        ) : (
+          <Menu.Root>
+            <Menu.Trigger className="inbox-attachment-action">
+              {t("handoff.choose_session")}
+              <Icon name="chevron" />
+            </Menu.Trigger>
+            <Menu.Portal>
+              <Menu.Positioner align="end">
+                <Menu.Popup className="handoff-menu">
+                  {sessions.map((s) => (
+                    <Menu.Item
+                      key={s.task.id}
+                      onClick={() => api.onOpen(s.task.id, reference)}
+                    >
+                      {t(sessionAction(s))} · {s.task.title}
+                    </Menu.Item>
+                  ))}
+                  {drafts.map((d, i) => (
+                    <Menu.Item
+                      key={d.operationId}
+                      onClick={() => api.onResume(d, reference)}
+                    >
+                      {t("handoff.resume")}
+                      {drafts.length > 1 && ` ${i + 1}`}
+                    </Menu.Item>
+                  ))}
+                </Menu.Popup>
+              </Menu.Positioner>
+            </Menu.Portal>
+          </Menu.Root>
+        ))}
+    </div>
+  );
+}
+
 export function InboxHandoffProvider({
   children,
   ids,
@@ -102,7 +253,7 @@ type ControlsProps = {
   referenced: string;
   remoteTask?: InboxTaskView;
   message?: InboxMessage;
-  children?: ReactNode;
+  children: ReactNode;
 };
 
 export function HandoffControls(props: ControlsProps) {
@@ -128,9 +279,11 @@ function HandoffView({
 }: ControlsProps) {
   const canonical = remoteTask?.id;
   const title = remoteTask?.name;
-  const api = useContext(Context);
+  const { api, list, sessions, drafts } = useHandoffTargets(
+    referenced,
+    canonical,
+  );
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(false);
   const [picking, setPicking] = useState(false);
   const moreTrigger = useRef<HTMLButtonElement>(null);
   const focusOnReturn = useRef(false);
@@ -149,7 +302,6 @@ function HandoffView({
   });
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
-  const list = api?.lists[referenced];
   const onVerify = api?.onVerify;
   const account = api?.account;
   const binding = api?.binding;
@@ -173,92 +325,53 @@ function HandoffView({
       {children}
     </div>
   );
-  if (!api || (children && !canonical)) return reading;
-  if (!list || !api.account)
-    return canonical ? (
-      <>
-        {reading}
-        <p role="status">
-          {t(
-            list === null || !api.account
-              ? "handoff.unavailable"
-              : "handoff.loading",
+  if (!api) return reading;
+  if (remoteTask && canonical) {
+    if (!list || !api.account)
+      return (
+        <>
+          {reading}
+          <p role="status">
+            {t(
+              list === null || !api.account
+                ? "handoff.unavailable"
+                : "handoff.loading",
+            )}
+          </p>
+          {picking && (
+            <Button size="sm" variant="ghost" onClick={() => setPicking(false)}>
+              {t("inbox.detail_back")}
+            </Button>
           )}
-        </p>
-        {picking && (
-          <Button size="sm" variant="ghost" onClick={() => setPicking(false)}>
-            {t("inbox.detail_back")}
-          </Button>
-        )}
-      </>
-    ) : null;
-  const source = {
-    binding: api.binding,
-    account: api.account,
-    referenced,
-    canonical: canonical ?? referenced,
-  };
-  const reference = message
-    ? { message, taskId: source.canonical, title }
-    : undefined;
-  const sessions = list.sessions.flatMap((link) => {
-    const task = api.tasks.find((item) => item.id === link.taskId);
-    return task
-      ? [
-          {
-            task,
-            preferred: link.preferred,
-            workspace: api.workspaces.find((w) => w.id === task.workspaceId),
-          },
-        ]
-      : [];
-  });
-  const drafts = matchingDrafts(
-    api.drafts,
-    api.account,
-    list.storeId,
-    referenced,
-    source.canonical,
-  );
-  const active = sessions.filter(
-    (s) =>
-      !s.task.archived &&
-      !s.task.historyReadOnly &&
-      s.task.lifecycle === "open" &&
-      s.task.deletionStatus === "idle",
-  );
-  const primary =
-    active.find((s) => s.preferred) ??
-    (sessions.length === 1 ? sessions[0] : undefined);
-  async function mutate(action: "link" | "prefer" | "unlink", id: string) {
-    if (!api || !list || !canonical || busy) return;
-    setBusy(true);
-    setFailed(false);
-    try {
-      await api.client.changeHandoff(source, list.storeId, action, id);
-      api.refresh();
-      if (action === "link" && mounted.current) api.onOpen(id, reference);
-    } catch {
-      setFailed(true);
-    } finally {
-      setBusy(false);
+        </>
+      );
+    const source = {
+      binding: api.binding,
+      account: api.account,
+      referenced,
+      canonical,
+    };
+    const reference = message
+      ? { message, taskId: source.canonical, title }
+      : undefined;
+    const active = sessions.filter(availableSession);
+    async function mutate(action: "link" | "prefer" | "unlink", id: string) {
+      if (!api || !list || !canonical || busy) return;
+      setBusy(true);
+      setFailed(false);
+      try {
+        await api.client.changeHandoff(source, list.storeId, action, id);
+        api.refresh();
+        if (action === "link" && mounted.current) api.onOpen(id, reference);
+      } catch {
+        setFailed(true);
+      } finally {
+        setBusy(false);
+      }
     }
-  }
-  if (!canonical && !sessions.length && !drafts.length) return null;
-  function label(s: (typeof sessions)[number]) {
-    return (
-      t(
-        s.task.archived || s.task.historyReadOnly
-          ? "handoff.history"
-          : s.workspace?.authorization !== "available"
-            ? "handoff.reauthorize"
-            : "handoff.continue",
-      ) +
-      " · " +
-      s.task.title
-    );
-  }
-  if (canonical && remoteTask) {
+    function label(s: (typeof sessions)[number]) {
+      return t(sessionAction(s)) + " · " + s.task.title;
+    }
     if (picking) {
       const linked = new Set(
         Object.values(api.lists).flatMap(
@@ -410,55 +523,5 @@ function HandoffView({
       </>
     );
   }
-  return (
-    <div className="inbox-handoff">
-      {(sessions.length > 1 || drafts.length > 1) && (
-        <Button
-          size="sm"
-          variant="ghost"
-          aria-expanded={expanded}
-          onClick={() => setExpanded(!expanded)}
-        >
-          {t("handoff.choose")} ({sessions.length + drafts.length})
-        </Button>
-      )}
-      {!expanded && primary && (
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => api.onOpen(primary.task.id, reference)}
-        >
-          {label(primary)}
-        </Button>
-      )}
-      {expanded &&
-        sessions.map((s) => (
-          <div className="inbox-handoff-row" key={s.task.id}>
-            <Button
-              size="sm"
-              variant="ghost"
-              title={s.workspace?.canonicalRoot}
-              onClick={() => api.onOpen(s.task.id, reference)}
-            >
-              {label(s)}
-              {s.preferred && sessions.length > 1
-                ? " · " + t("handoff.default")
-                : ""}
-            </Button>
-          </div>
-        ))}
-      {(expanded || drafts.length === 1) &&
-        drafts.map((draft, i) => (
-          <Button
-            size="sm"
-            variant="ghost"
-            key={draft.operationId}
-            onClick={() => api.onResume(draft, reference)}
-          >
-            {t("handoff.resume")}
-            {drafts.length > 1 ? " " + (i + 1) : ""}
-          </Button>
-        ))}
-    </div>
-  );
+  return reading;
 }

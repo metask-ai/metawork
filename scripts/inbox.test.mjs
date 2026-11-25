@@ -724,7 +724,7 @@ test("a linked file, project or task shows its own details, opens nested items a
       9801: { task: taskView({ id: "9801", name: "Write docs" }) },
     },
   });
-  render(element(client, view()));
+  const { rerender } = render(element(client, view()));
   await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
   const body = await screen.findByText("See these");
   const card = body.closest(".inbox-bubble");
@@ -757,6 +757,7 @@ test("a linked file, project or task shows its own details, opens nested items a
   await waitFor(() => assert.ok(screen.getByText("Desktop app")));
   await user.keyboard("{Escape}");
 
+  assert.ok(screen.getByRole("button", { name: /metawork Project #740/ }));
   await user.click(screen.getByRole("button", { name: /#9749/ }));
   await screen.findByText("Latest note");
   assert.ok(screen.getByText(/#9749 .* Closed .* Ann/));
@@ -771,6 +772,11 @@ test("a linked file, project or task shows its own details, opens nested items a
     assert.ok(screen.getByRole("heading", { name: "Write docs" })),
   );
   assert.deepEqual(client.calls.at(-1), ["task", "1", "9801"]);
+  await user.keyboard("{Escape}");
+  assert.ok(screen.getByRole("button", { name: "Open API Task #9749" }));
+  rerender(element(client, view({ accountScope: "b".repeat(64) })));
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  assert.ok(await screen.findByRole("button", { name: "Linked item #9749" }));
 });
 
 test("a reply is sent once, shown from the newer messages, and retried under the same request key", async () => {
@@ -1121,9 +1127,8 @@ test("a refused task or a missing conversation is shown where it was asked for",
 });
 
 test("task controls keep draft choice separate from default session and verified detail actions", async () => {
-  const { InboxHandoffProvider, HandoffControls } = await vite.ssrLoadModule(
-    "/src/features/inbox/InboxHandoff.tsx",
-  );
+  const { InboxHandoffProvider, HandoffControls, MessageAttachment } =
+    await vite.ssrLoadModule("/src/features/inbox/InboxHandoff.tsx");
   const { newHandoffDraft, matchingDrafts, quoteMessage } =
     await vite.ssrLoadModule("/src/features/inbox/handoff-drafts.ts");
   const account = "a".repeat(64),
@@ -1158,6 +1163,7 @@ test("task controls keep draft choice separate from default session and verified
     opened = [],
     resumed = [];
   let saveLink;
+  let preferred = true;
   const client = {
     handoffSessions: async (_binding, _account, id) => ({
       storeId,
@@ -1165,7 +1171,7 @@ test("task controls keep draft choice separate from default session and verified
         id === "other"
           ? [{ taskId: "5", preferred: true }]
           : [
-              { taskId: "1", preferred: true },
+              { taskId: "1", preferred },
               { taskId: "2", preferred: false },
             ],
     }),
@@ -1214,40 +1220,57 @@ test("task controls keep draft choice separate from default session and verified
       createElement(
         InboxHandoffProvider,
         api,
-        createElement(HandoffControls, {
-          referenced: "old",
-          remoteTask: detail
-            ? taskView({ id: "new", canLink: true })
-            : undefined,
-          children: detail
-            ? createElement(
+        detail
+          ? createElement(HandoffControls, {
+              referenced: "old",
+              remoteTask: taskView({ id: "new", canLink: true }),
+              children: createElement(
                 "details",
                 {},
                 createElement("summary", {}, "Past updates"),
-              )
-            : undefined,
-        }),
+              ),
+            })
+          : createElement(MessageAttachment, {
+              id: "old",
+              message: message("8", "in", "Please review", ["old"]),
+              onOpen() {},
+            }),
       ),
     );
   const { rerender } = render(draw());
   const user = userEvent.setup({ document });
   await user.click(
     await screen.findByRole("button", {
-      name: "Continue in workbench · Session 1",
+      name: "Continue in workbench",
     }),
   );
   assert.deepEqual(opened, ["1"]);
+  assert.ok(screen.getByRole("button", { name: "Review fixtures Task #new" }));
+  assert.equal(screen.queryByText(/Session 1/), null);
+  assert.equal(screen.queryByRole("button", { name: "Choose session" }), null);
   assert.equal(operations.length, 0);
   assert.equal(
     screen.queryByRole("button", { name: "Start a work session" }),
     null,
   );
+  preferred = false;
+  api.revision = "2";
+  rerender(draw());
   await user.click(
-    screen.getByRole("button", { name: /Choose a session or draft/ }),
+    await screen.findByRole("button", { name: "Choose session" }),
   );
-  assert.ok(screen.getByRole("button", { name: /View history · Session 2/ }));
-  await user.click(screen.getByRole("button", { name: "Resume draft 2" }));
+  await screen.findByRole("menuitem", { name: /View history · Session 2/ });
+  await user.click(screen.getByRole("menuitem", { name: "Resume draft 2" }));
   assert.deepEqual(resumed, [drafts[1].operationId]);
+  api.tasks = [];
+  api.drafts = [drafts[0]];
+  rerender(draw());
+  await user.click(await screen.findByRole("button", { name: "Resume draft" }));
+  assert.deepEqual(resumed, [drafts[1].operationId, drafts[0].operationId]);
+  api.tasks = tasks;
+  api.drafts = drafts;
+  preferred = true;
+  api.revision = "3";
   rerender(draw(true));
   const past = screen.getByText("Past updates");
   await user.click(past);

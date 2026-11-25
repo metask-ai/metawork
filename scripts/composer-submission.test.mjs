@@ -3312,7 +3312,9 @@ for (const path of ["fresh", "lost", "not-created"]) {
         await user.click(await screen.findByRole("button", { name: /^Ann/ }));
         await user.click(
           (
-            await screen.findAllByRole("button", { name: /Linked item.*#old/ })
+            await screen.findAllByRole("button", {
+              name: "Review fixtures Task #new",
+            })
           )[1],
         );
         await user.click(

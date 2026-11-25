@@ -1,5 +1,4 @@
 import {
-  Fragment,
   type ReactNode,
   useCallback,
   useEffect,
@@ -33,7 +32,11 @@ import {
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { controlFocus } from "../../components/ui/utils.ts";
 import { useI18n } from "../../i18n/context.ts";
-import { HandoffControls } from "./InboxHandoff.tsx";
+import {
+  HandoffControls,
+  MessageAttachment,
+  type AttachmentSummary,
+} from "./InboxHandoff.tsx";
 import { inboxDiagnosticText } from "./inbox-diagnostics.ts";
 
 /** While the inbox page is open and visible the Host is asked this often. */
@@ -190,6 +193,10 @@ export function useInbox(
     null,
   );
   const [task, setTask] = useState<OpenedTask | null>(null);
+  const [attachmentSummaries, setAttachmentSummaries] = useState<
+    ReadonlyMap<string, AttachmentSummary | null>
+  >(() => new Map());
+  const detailSequence = useRef(0);
   // One reply box per conversation: leaving one while it sends keeps it,
   // and an answer only ever lands in the attempt that asked.
   const [composers, setComposers] = useState<
@@ -273,6 +280,8 @@ export function useInbox(
     conversationRef.current = null;
     setConversation(null);
     setTask(null);
+    detailSequence.current++;
+    setAttachmentSummaries(new Map());
     setComposers({});
     readEpoch.current++;
   }, [binding, inbox.accountScope]);
@@ -416,7 +425,6 @@ export function useInbox(
     void read(contact, "latest", null, cached);
   }
 
-  const detailSequence = useRef(0);
   async function openTask(
     taskId: string,
     trail: readonly string[] = [],
@@ -436,6 +444,34 @@ export function useInbox(
       detail = await client.readInboxTask(binding, taskId);
     } catch {
       detail = null;
+    }
+    if (sequence !== detailSequence.current || detail?.state === "superseded")
+      return;
+    // Remember only the label from an explicit detail read. Message lists contain IDs.
+    if (
+      detail?.state === "ready" ||
+      detail?.state === "forbidden" ||
+      detail?.state === "not_found"
+    ) {
+      const item = detail.task ?? detail.file ?? detail.project;
+      const summary: AttachmentSummary | null =
+        detail.state === "ready" && item
+          ? {
+              kind: detail.task ? "task" : detail.file ? "file" : "project",
+              id: item.id || taskId,
+              name: item.name,
+            }
+          : null;
+      setAttachmentSummaries((current) => {
+        const next = new Map(current);
+        const previousId = current.get(taskId)?.id ?? taskId;
+        for (const [alias, known] of current)
+          if (known?.id === previousId || (summary && known?.id === summary.id))
+            next.set(alias, summary);
+        next.set(taskId, summary);
+        if (summary) next.set(summary.id, summary);
+        return next;
+      });
     }
     setTask((current) => {
       if (current?.taskId !== taskId || sequence !== detailSequence.current)
@@ -458,6 +494,7 @@ export function useInbox(
     retryDirectory: () => retryDirectory((n) => n + 1),
     conversation,
     task,
+    attachmentSummaries,
     composer,
     /** A changed message is a new message: it gets a new identity. */
     setDraft(text: string) {
@@ -1012,23 +1049,6 @@ function InboxNotice({
       {hint && <p>{hint}</p>}
       {children && <div className="inbox-notice-actions">{children}</div>}
     </div>
-  );
-}
-
-function LinkedItem({ id, onOpen }: { id: string; onOpen: () => void }) {
-  const { t } = useI18n();
-  return (
-    <button
-      type="button"
-      className="inbox-linked-item"
-      aria-haspopup="dialog"
-      onClick={onOpen}
-    >
-      <Icon name="paperclip" />
-      <span>{t("inbox.linked_item")}</span>
-      <strong>{t("inbox.item_number", { id })}</strong>
-      <Icon name="chevron-right" />
-    </button>
   );
 }
 
@@ -1690,6 +1710,7 @@ export function InboxComposer({
 function InboxConversationView({
   name,
   conversation,
+  attachmentSummaries,
   composer,
   onLoadEarlier,
   onOpenTask,
@@ -1699,6 +1720,7 @@ function InboxConversationView({
 }: {
   name: string;
   conversation: OpenedConversation;
+  attachmentSummaries: InboxController["attachmentSummaries"];
   composer: Composer | null;
   onLoadEarlier: () => void;
   onOpenTask: (taskId: string, message: InboxMessage) => void;
@@ -1809,13 +1831,13 @@ function InboxConversationView({
                   <div className="inbox-bubble">
                     {message.text && <p>{message.text}</p>}
                     {message.taskIds.map((id) => (
-                      <Fragment key={id}>
-                        <LinkedItem
-                          id={id}
-                          onOpen={() => onOpenTask(id, message)}
-                        />
-                        <HandoffControls referenced={id} message={message} />
-                      </Fragment>
+                      <MessageAttachment
+                        key={id}
+                        id={id}
+                        message={message}
+                        summary={attachmentSummaries.get(id)}
+                        onOpen={() => onOpenTask(id, message)}
+                      />
                     ))}
                   </div>
                   <ReadReceipts recipients={receipts} />
@@ -1949,6 +1971,7 @@ export function InboxMain({
             t,
           )}
           conversation={controller.conversation}
+          attachmentSummaries={controller.attachmentSummaries}
           composer={controller.composer}
           onLoadEarlier={controller.loadEarlierMessages}
           onOpenTask={(taskId, message) =>
