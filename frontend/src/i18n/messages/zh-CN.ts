@@ -1178,6 +1178,7 @@ export const zhCN: Record<MessageId, string> = {
   "file_preview.link_unavailable.unsupported_path":
     "无法打开：不支持的文件路径",
   "file_preview.refresh": "刷新",
+  "file_preview.enlarge_image": "查看大图（{name}）",
   "file_preview.mode": "文件展示模式",
   "file_preview.rendered": "预览",
   "file_preview.source": "源码",

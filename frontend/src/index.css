@@ -10240,6 +10240,18 @@ button.reply-image-open {
   object-fit: contain;
 }
 
+.task-panel-preview-image-open {
+  min-width: 0;
+  max-width: 100%;
+  max-height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.task-panel-preview-image-open:not([aria-disabled="true"]) {
+  cursor: zoom-in;
+}
+
 .file-preview-decoded {
   display: grid;
   width: 100%;

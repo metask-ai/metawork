@@ -1483,47 +1483,52 @@ test("what a panel says about a file goes with its tab, and what it is doing doe
   assert.ok(!screen.queryByRole("status"));
 });
 
+function panelFilePreview(preview) {
+  return createElement(FilePreviewView, {
+    state: {
+      selected: {
+        id: reference.fileReferenceId,
+        title: "",
+        displayPath: "a.png",
+      },
+      phase: "settled",
+      preview: {
+        state: "ready",
+        content: "",
+        truncated: false,
+        redacted: false,
+        ...preview,
+      },
+    },
+    file: menuFile(reference, "a.png"),
+    mode: "preview",
+    scrollTop: 0,
+    onModeChange() {},
+    onScrollTopChange() {},
+    onRetry() {},
+    webLink: { failedLabel: "", onOpen: async () => true },
+  });
+}
+
 test("an image in the panel opens the menu of its tab with the image to copy, and text opens none", async (t) => {
   const { writes } = installImageEncoding(t, { decode: async () => {} });
   const { handler, calls } = handlerFixture();
-  const content = (preview) =>
-    createElement(FilePreviewView, {
-      state: {
-        selected: {
-          id: reference.fileReferenceId,
-          title: "",
-          displayPath: "a.png",
-        },
-        phase: "settled",
-        preview: {
-          state: "ready",
-          content: "",
-          truncated: false,
-          redacted: false,
-          ...preview,
-        },
-      },
-      file: menuFile(reference, "a.png"),
-      mode: "preview",
-      scrollTop: 0,
-      onModeChange() {},
-      onScrollTopChange() {},
-      onRetry() {},
-      webLink: { failedLabel: "", onOpen: async () => true },
-    });
   const mounted = render(
-    view(handler, panel({}, content({ image: imageResource().image }))),
+    view(
+      handler,
+      panel({}, panelFilePreview({ image: imageResource().image })),
+    ),
   );
-  const group = screen.getByRole("group", { name: "a.png" });
-  assert.equal(group.tabIndex, 0);
-  let menu = await openMenu(group, "menu key");
+  const opener = screen.getByRole("button", { name: "Enlarge a.png" });
+  assert.equal(opener.tabIndex, 0);
+  let menu = await openMenu(opener, "menu key");
   assert.deepEqual(disabledItems(menu), ["Copy image"]);
   await closeMenu(menu);
   await waitFor(() =>
     assert.ok(mounted.container.querySelector("img")?.getAttribute("src")),
   );
   await act(async () => fireEvent.load(mounted.container.querySelector("img")));
-  menu = await openMenu(group);
+  menu = await openMenu(opener);
   assert.deepEqual(
     menuItems(menu).map((item) => item.name),
     ["Copy image", ...five],
@@ -1542,10 +1547,50 @@ test("an image in the panel opens the menu of its tab with the image to copy, an
 
   // The secondary button stays with the text it selects.
   mounted.rerender(
-    view(handler, panel({}, content({ content: "plain text" }))),
+    view(handler, panel({}, panelFilePreview({ content: "plain text" }))),
   );
   fireEvent.contextMenu(screen.getByText("plain text"));
   assert.ok(!screen.queryByRole("menu"));
+});
+
+test("the panel enlarges its decoded original and restores focus after closing", async (t) => {
+  installImageEncoding(t, { decode: async () => {} });
+  const user = userEvent.setup({ document });
+  const { image } = imageResource();
+  const mounted = render(view(null, panelFilePreview({ image })));
+  const opener = screen.getByRole("button", { name: "Enlarge a.png" });
+  await user.click(opener);
+  assert.equal(screen.queryByRole("dialog"), null);
+  const inline = within(opener).getByRole("img");
+  await waitFor(() => assert.equal(inline.getAttribute("src"), image.src));
+  await act(async () => fireEvent.load(inline));
+  await user.click(opener);
+  const dialog = await screen.findByRole("dialog", { name: "a.png" });
+  const enlarged = within(dialog).getByRole("img", { name: "a.png" });
+  await waitFor(() => assert.equal(enlarged.getAttribute("src"), image.src));
+  await act(async () => fireEvent.load(enlarged));
+  await user.keyboard("{Escape}");
+  await waitFor(() =>
+    assert.ok(
+      !screen.queryByRole("dialog") && document.activeElement === opener,
+    ),
+  );
+  await user.keyboard("{Enter}");
+  await user.click(
+    within(await screen.findByRole("dialog")).getByRole("button", {
+      name: "Close image preview",
+    }),
+  );
+  await waitFor(() =>
+    assert.ok(
+      !screen.queryByRole("dialog") && document.activeElement === opener,
+    ),
+  );
+  await user.keyboard(" ");
+  await screen.findByRole("dialog");
+  mounted.rerender(view(null, panelFilePreview({ content: "replacement" })));
+  assert.equal(screen.queryByRole("dialog"), null);
+  assert.ok(screen.getByText("replacement"));
 });
 
 test("a reply shows each of its files once", () => {

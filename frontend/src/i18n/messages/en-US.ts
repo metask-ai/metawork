@@ -1360,6 +1360,7 @@ export const enUS = {
   "file_preview.link_unavailable.unsupported_path":
     "Can't open: unsupported file path",
   "file_preview.refresh": "Refresh",
+  "file_preview.enlarge_image": "Enlarge {name}",
   "file_preview.mode": "File display mode",
   "file_preview.rendered": "Preview",
   "file_preview.source": "Source",

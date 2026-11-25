@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type {
   FilePreview,
   FilePreviewLoadOptions,
@@ -16,6 +16,41 @@ export type MediaViewerLoader = (
 ) => Promise<FilePreview>;
 
 export type MediaViewerTarget = { media: MediaTarget; name: string };
+
+export function ImageLightboxPopup({
+  name,
+  children,
+}: {
+  name: string;
+  children: ReactNode;
+}) {
+  const { t } = useI18n();
+  return (
+    <Dialog.Portal>
+      <Dialog.Backdrop />
+      <Dialog.Popup className="media-lightbox">
+        <div className="media-lightbox-bar">
+          <Dialog.Title className="media-lightbox-title" dir="auto">
+            {name}
+          </Dialog.Title>
+          <Dialog.Close
+            render={
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label={t("attachment.close_preview")}
+              >
+                <Icon name="close" />
+              </Button>
+            }
+          />
+        </div>
+        <div className="media-lightbox-body">{children}</div>
+      </Dialog.Popup>
+    </Dialog.Portal>
+  );
+}
 
 /// The one viewer surface for an attachment, used from the draft chip and from
 /// a sent message's chip. It is an overlay rather than a Task Panel tab: an
@@ -86,59 +121,37 @@ export function MediaLightbox({
         if (!open) onClose();
       }}
     >
-      <Dialog.Portal>
-        <Dialog.Backdrop />
-        <Dialog.Popup className="media-lightbox">
-          <div className="media-lightbox-bar">
-            <Dialog.Title className="media-lightbox-title" dir="auto">
-              {target?.name ?? ""}
-            </Dialog.Title>
-            <Dialog.Close
-              render={
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={t("attachment.close_preview")}
-                >
-                  <Icon name="close" />
-                </Button>
-              }
-            />
-          </div>
-          <div className="media-lightbox-body">
-            {image ? (
-              <PreviewImageView
-                image={image}
-                alt={target?.name ?? ""}
-                onFailure={() =>
-                  setResult(
-                    key
-                      ? {
-                          key,
-                          value: {
-                            state: "error",
-                            content: "",
-                            truncated: false,
-                            redacted: false,
-                          },
-                        }
-                      : null,
-                  )
-                }
-              />
-            ) : (
-              <p className="media-lightbox-state" aria-live="polite">
-                {preview?.reason
-                  ? t(`file_preview.state.${preview.reason}`)
-                  : failure
-                    ? t(`file_preview.state.${failure}`)
-                    : t("file_preview.loading")}
-              </p>
-            )}
-          </div>
-        </Dialog.Popup>
-      </Dialog.Portal>
+      <ImageLightboxPopup name={target?.name ?? ""}>
+        {image ? (
+          <PreviewImageView
+            image={image}
+            alt={target?.name ?? ""}
+            onFailure={() =>
+              setResult(
+                key
+                  ? {
+                      key,
+                      value: {
+                        state: "error",
+                        content: "",
+                        truncated: false,
+                        redacted: false,
+                      },
+                    }
+                  : null,
+              )
+            }
+          />
+        ) : (
+          <p className="media-lightbox-state" aria-live="polite">
+            {preview?.reason
+              ? t(`file_preview.state.${preview.reason}`)
+              : failure
+                ? t(`file_preview.state.${failure}`)
+                : t("file_preview.loading")}
+          </p>
+        )}
+      </ImageLightboxPopup>
     </Dialog.Root>
   );
 }
