@@ -20,6 +20,7 @@ import {
   type AttachmentThumbnailLoader,
 } from "../../components/AttachmentThumbnail.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
+import { runMessage } from "../../workbench/run-input.ts";
 import { resolveWorkspaceFileLink } from "../../workbench/workspace-file-links.ts";
 import {
   Fragment,
@@ -46,6 +47,7 @@ import {
 import type {
   FileReferenceView,
   MediaTarget,
+  MessageIdentity,
   PendingUi,
   RunInputView,
   RunManifest,
@@ -269,25 +271,9 @@ function outcomeState(
       return "failed";
   }
 }
-/// Addresses the attachments of one sent message. A message that has already
-/// become a Run is addressed by that Run; one still waiting for its turn is
-/// addressed by its submission, because it does not have a Run yet.
-type SentInputMedia =
-  { taskId: string; runId: string } | { taskId: string; operationId: string };
-
-function sentAttachmentTarget(
-  media: SentInputMedia,
-  index: number,
-): MediaTarget {
-  return "runId" in media
-    ? { kind: "runAttachment", taskId: media.taskId, runId: media.runId, index }
-    : {
-        kind: "submissionAttachment",
-        taskId: media.taskId,
-        operationId: media.operationId,
-        index,
-      };
-}
+/// Addresses the attachments of one sent message, by the identity it keeps
+/// while it waits, once a Run took it, and wherever the transcript shows it.
+type SentInputMedia = { taskId: string; message: MessageIdentity };
 
 /**
  * The text of a run's own input, when there is text of ours to edit. A Skill
@@ -420,12 +406,12 @@ function TaskInput({
             // for it: a file attachment, a redacted record and an image sent
             // before its identity was recorded all keep the static chip rather
             // than offering an entry that cannot answer.
-            const target =
+            const target: MediaTarget | null =
               attachment.kind === "image" &&
               attachment.media &&
               !attachment.redacted &&
               media
-                ? sentAttachmentTarget(media, index)
+                ? { kind: "messageAttachment", ...media, index }
                 : null;
             return (
               <span
@@ -788,7 +774,10 @@ export function TaskContent({
             task
               ? {
                   taskId: task.id,
-                  operationId: record.submission.operationId,
+                  message: {
+                    kind: "submission",
+                    operationId: record.submission.operationId,
+                  },
                 }
               : undefined
           }
@@ -820,9 +809,7 @@ export function TaskContent({
     run: RunView,
     anchoredOperationId?: string,
   ) {
-    const readingId = run.submission
-      ? `submission:${run.submission.operationId}`
-      : `${run.id}:root`;
+    const readingId = runMessageReadingId(run);
     const editText =
       onEditInput &&
       run.editAdmitted &&
@@ -873,11 +860,7 @@ export function TaskContent({
     const input = (
       <TaskInput
         input={run.input}
-        media={
-          anchoredOperationId
-            ? { taskId: task.id, operationId: anchoredOperationId }
-            : { taskId: task.id, runId: run.id }
-        }
+        media={{ taskId: task.id, message: runMessage(run) }}
         loadThumbnail={loadAttachmentThumbnail}
         onOpenAttachment={onOpenSentAttachment}
       />

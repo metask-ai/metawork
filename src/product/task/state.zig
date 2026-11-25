@@ -1461,6 +1461,7 @@ pub const DurableTaskRecord = struct {
 pub const RuntimeAttachment = task_attachment.State;
 
 pub const ApprovalFailureReason = @import("product_task_view_contract").ApprovalFailureReason;
+pub const MessageIdentity = @import("product_task_view_contract").MessageIdentity;
 
 pub const ApprovalRecoveryWait = union(enum) {
     session_close: u64,

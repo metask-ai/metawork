@@ -4972,10 +4972,6 @@ pub const Runtime = struct {
         unreachable;
     }
 
-    /// Which message owns an accepted attachment: the submission it was
-    /// accepted with, before and after a Run takes it, or the Run itself.
-    pub const AttachmentMessage = union(enum) { run: u64, submission: []const u8 };
-
     /// What addressing an accepted image needs: the identity persisted with its
     /// message plus the facts that name the stored original. The format is the
     /// source format, which is also the suffix the store gave the file.
@@ -5001,7 +4997,7 @@ pub const Runtime = struct {
     pub fn acceptedAttachment(
         self: *const Runtime,
         task_id: u64,
-        message: AttachmentMessage,
+        message: task_state.MessageIdentity,
         index: usize,
     ) ?AcceptedAttachment {
         if (!self.mediaReadable(task_id)) return null;
@@ -11376,9 +11372,13 @@ fn inputBlocksAutomaticAllow(run: *const task_state.RunRecord) bool {
 /// What this message is now. Once a Run took it, that Run's record is the
 /// message, as in every other projection of it, and the submission record
 /// never answers in its place.
-fn messageInput(task: *const task_state.Task, message: Runtime.AttachmentMessage) ?*const task_state.RunInputRecord {
+fn messageInput(task: *const task_state.Task, message: task_state.MessageIdentity) ?*const task_state.RunInputRecord {
     const run = switch (message) {
-        .run => |run_id| task_state.findRunConst(task.durable.runs, run_id) orelse return null,
+        .run => |run_id| own: {
+            const run = task_state.findRunConst(task.durable.runs, run_id) orelse return null;
+            if (run.submission != null) return null;
+            break :own run;
+        },
         .submission => |operation_id| taken: {
             for (task.durable.runs) |*entry| if (entry.*) |*run| if (run.submission) |*submission| {
                 if (std.mem.eql(u8, operation_id, submission.operationId())) break :taken run;
@@ -13165,7 +13165,7 @@ test "an accepted attachment answers for its message from waiting through its Ru
         .text = "look",
         .attachments = &.{.{ .kind = .image, .format = .png, .display_name = "shot.png", .bytes = "png", .media = media }},
     } }, projection.effects());
-    const message: Runtime.AttachmentMessage = .{ .submission = "op-1" };
+    const message: task_state.MessageIdentity = .{ .submission = "op-1" };
     try std.testing.expectEqual(media, runtime.acceptedAttachment(1, message, 0).?.media);
     try std.testing.expect(runtime.acceptedAttachment(1, .{ .submission = "op-2" }, 0) == null);
 
@@ -13175,7 +13175,8 @@ test "an accepted attachment answers for its message from waiting through its Ru
     var runs = [_]?task_state.RunRecord{ reviewHistoryTestRun(7, "earlier"), reviewHistoryTestRun(9, "") };
     const run = &runs[1].?;
     run.input = .{ .multimodal = .{ .text = null, .attachments = &records } };
-    run.submission = task.input_submissions.items[0].submission;
+    const submission = task.input_submissions.items[0].submission;
+    run.submission = submission;
     task.durable.runs = &runs;
     defer task.durable.runs = &.{};
     try std.testing.expect(runtime.acceptedAttachment(1, message, 0) == null);
@@ -13183,6 +13184,13 @@ test "an accepted attachment answers for its message from waiting through its Ru
     runtime.finishWaitingInput(1, 0, 9, null, projection.effects().release);
     try std.testing.expectEqual(@as(usize, 0), task.input_submissions.items.len);
     try std.testing.expectEqual(media, runtime.acceptedAttachment(1, message, 0).?.media);
+
+    // The Run is not a second name for a message it took. It names only the
+    // message nothing accepted before it.
+    try std.testing.expect(runtime.acceptedAttachment(1, .{ .run = 9 }, 0) == null);
+    run.submission = null;
+    try std.testing.expectEqual(media, runtime.acceptedAttachment(1, .{ .run = 9 }, 0).?.media);
+    run.submission = submission;
 
     // A turn an edited message replaced is shown nowhere, and a Task that
     // accepted a delete stops answering.

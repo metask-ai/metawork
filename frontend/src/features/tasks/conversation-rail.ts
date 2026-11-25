@@ -1,4 +1,5 @@
 import type { RunManifest, RunView } from "../../bridge/contracts.ts";
+import { runMessage } from "../../workbench/run-input.ts";
 
 /** One row of the conversation rail: a projected Run in manifest order. */
 export type RailEntry = {
@@ -118,9 +119,10 @@ export function railScrollForRow(
 export function runMessageReadingId(
   run: Pick<RunView, "id" | "submission">,
 ): string {
-  return run.submission
-    ? `submission:${run.submission.operationId}`
-    : `${run.id}:root`;
+  const message = runMessage(run);
+  return message.kind === "submission"
+    ? `submission:${message.operationId}`
+    : `${message.runId}:root`;
 }
 
 /** A jump waiting for its Run to join the loaded interval. */

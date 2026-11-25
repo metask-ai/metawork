@@ -56,10 +56,12 @@ function mediaKey(target: MediaTarget): string {
   switch (target.kind) {
     case "draftAttachment":
       return `draft:${target.token}`;
-    case "runAttachment":
-      return `run:${target.taskId}:${target.runId}:${target.index}`;
-    case "submissionAttachment":
-      return `submission:${target.taskId}:${target.operationId}:${target.index}`;
+    case "messageAttachment": {
+      const { message } = target;
+      const id =
+        message.kind === "submission" ? message.operationId : message.runId;
+      return `message:${target.taskId}:${message.kind}:${id}:${target.index}`;
+    }
   }
 }
 

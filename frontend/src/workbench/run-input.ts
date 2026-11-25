@@ -1,4 +1,17 @@
-import type { RunInputView, RunView } from "../bridge/contracts.ts";
+import type {
+  MessageIdentity,
+  RunInputView,
+  RunView,
+} from "../bridge/contracts.ts";
+
+/** The identity of a Run's own message, which it had before the Run took it. */
+export function runMessage(
+  run: Pick<RunView, "id" | "submission">,
+): MessageIdentity {
+  return run.submission
+    ? { kind: "submission", operationId: run.submission.operationId }
+    : { kind: "run", runId: run.id };
+}
 
 /** Continuation roots are synthesized from the source additional inputs. */
 export function transferredRunIds(

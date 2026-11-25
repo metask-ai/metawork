@@ -2472,6 +2472,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     task_state.addImport("product_task_view_contract", task_view_contract);
+    media_source.addImport("product_task_view_contract", task_view_contract);
     task_state.addImport("metawork_agent_contract", agent_contract);
     task_state.addImport("metawork_product_instructions", product_instructions);
     task_state.addImport("metawork_product_models_contract", models_contract);

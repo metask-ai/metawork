@@ -322,20 +322,26 @@ Renderer 的目录缓存与请求绑定 Task、Workspace id/epoch、连接和安
 
 ## Attachment media commands
 
-可预览媒体按来源注册，每一类身份自带授权依据；工作区文件使用 File preview command，附件这类不在工作区内的来源使用自己的 command 并精确接收一个 typed target。在册的 target 有三种，分别对应草稿、已进入 Run 的消息和仍在等待的提交：
+可预览媒体按来源注册，每一类身份自带授权依据；工作区文件使用 File preview command，附件这类不在工作区内的来源使用自己的 command 并精确接收一个 typed target。在册的 target 有两种：草稿，和 Task 已接收的一条消息里的附件：
 
 ```json
 {
   "kind": "draftAttachment",
   "token": "0c1d2e3f405162738495a6b7c8d9eafb0c1d2e3f40516273"
 }
-{ "kind": "runAttachment", "taskId": "3", "runId": "9", "index": 2 }
-{ "kind": "submissionAttachment", "taskId": "3", "operationId": "op-7", "index": 0 }
+{
+  "kind": "messageAttachment",
+  "taskId": "3",
+  "message": { "kind": "submission", "operationId": "op-7" },
+  "index": 0
+}
 ```
 
-`kind` 必填且只接受在册名称，每种 kind 的字段集合精确，不接受省略、额外或替代字段：草稿 target 没有 `taskId`，Task 侧 target 没有 `token`，两种消息身份不能混用，也不接受 target 之外的扁平 token。`token` 是文件 attachment commands 签发的同一 48 字符小写十六进制 grant，绑定当前 connection/window 且一次性。`taskId`／`runId` 是 canonical decimal u64 string，`operationId` 是既有 1–64 字节可打印 ASCII 操作标识，`index` 是该消息内附件的位置，必须是 0 到单条消息附件上限减一之间的整数。未在册的 kind、格式非法的 token、缺失或多余的字段一律 fail closed 为 Bridge error；本连接不持有的 token 返回 `missing`，因为草稿被发送或移除不是协议违规。
+`message` 是这条消息唯一的身份，精确为 `{ kind: "submission", operationId }` 或 `{ kind: "run", runId }`：投影里带 `submission` 的消息用前者，没有的用后者。身份从等待到执行、重启前后不变，Renderer 不按状态或显示位置换地址。
 
-草稿附件没有 Task identity，因此 New Task 也能请求；它的字节位于 Product 私有 store，没有 Workspace id/epoch/root 可校验，Host 不得为它虚构这些事实。Task 侧 target 不交换 grant：授权依据就是 command 本身已经校验的 connection/window，加上 Product 侧该消息记录仍登记着可解码的持久化标识且未被脱敏；Host 不据此开放下载或重新发送。记录不存在、位置不是图片、记录已脱敏、Task 正在删除，或该图片是登记标识之前发送的，一律返回 `missing`——Task 里没有那张图片不是协议违规。附件位置是 Renderer 已经显示的顺序，标识本身始终留在 Product 内，不进入投影。
+`kind` 必填且只接受在册名称，每种 kind 的字段集合精确，不接受省略、额外或替代字段：草稿 target 没有 `taskId`，Task 侧 target 没有 `token`，两种消息身份不能混用，也不接受 target 之外的扁平 token。`token` 是文件 attachment commands 签发的同一 48 字符小写十六进制 grant，绑定当前 connection/window 且一次性。`taskId`／`runId` 是非零 canonical decimal u64 string，`operationId` 是既有 1–64 字节可打印 ASCII 操作标识，`index` 是该消息内附件的位置，必须是 0 到单条消息附件上限减一之间的整数。未在册的 kind、格式非法的 token、缺失或多余的字段一律 fail closed 为 Bridge error；本连接不持有的 token 返回 `missing`，因为草稿被发送或移除不是协议违规。
+
+草稿附件没有 Task identity，因此 New Task 也能请求；它的字节位于 Product 私有 store，没有 Workspace id/epoch/root 可校验，Host 不得为它虚构这些事实。Task 侧 target 不交换 grant：授权依据就是 command 本身已经校验的 connection/window，加上 Product 侧该消息记录仍登记着可解码的持久化标识且未被脱敏；Host 不据此开放下载或重新发送。记录不存在、Run 不再投影、用 Run id 寻址带提交的 Run、位置不是图片、记录已脱敏、Task 正在删除，或该图片是登记标识之前发送的，一律返回 `missing`——Task 里没有那张图片不是协议违规。附件位置是 Renderer 已经显示的顺序，标识本身始终留在 Product 内，不进入投影。
 
 `metawork.media.thumbnail` 是同步 command，精确接收 `{ generation, target }`。它交付 Host 在 staging 时从同一张图派生的小图——草稿来自内存，已发送的来自随消息写入 Product store 的同一份派生物，一次有界读取，两者都不读原件、不解码图片、不占原图槽位。ready 精确返回：
 
