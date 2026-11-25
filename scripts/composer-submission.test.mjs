@@ -3297,19 +3297,42 @@ for (const path of ["fresh", "lost", "not-created"]) {
         prompt,
         "Check the latest progress on MetaTeam task #new, then continue working on it.",
       );
-      const quoteButton = () =>
-        screen.getByRole("button", { name: "Quote original message" });
+      const quoteCheckbox = () =>
+        screen.getByRole("checkbox", { name: "Quote original message" });
+      function assertSessionComposer() {
+        assert.equal(screen.queryByText("Source task"), null);
+        assert.equal(
+          screen.queryByRole("checkbox", { name: "Quote original message" }),
+          null,
+        );
+      }
+      assert.equal(quoteCheckbox().checked, false);
       const source = screen.getByText("Source task").parentElement;
       assert.ok(area.closest(".ai-composer").contains(source));
       assert.match(source.textContent, /Review fixtures.*#new/);
       if (path === "fresh") {
-        await user.click(quoteButton());
-        assert.ok(
-          area.value.startsWith(prompt + "\n\n> Ann · Agent Writer · "),
+        await user.click(quoteCheckbox());
+        const edited = "Review the examples I selected.";
+        fireEvent.change(area, { target: { value: edited } });
+        assert.match(
+          screen.getByRole("blockquote").textContent,
+          /> Ann · Agent Writer · .*#new\n> First\n> \n> Second$/,
         );
-        assert.match(area.value, /#new\n> First\n> \n> Second$/);
-        assert.ok(quoteButton().disabled);
+        await user.click(quoteCheckbox());
+        assert.equal(screen.queryByRole("blockquote"), null);
+        assert.equal(area.value, edited);
+        await user.click(quoteCheckbox());
         assert.equal(fixture.creations(), 0);
+        // Reopening the same draft through another card keeps the original reference.
+        await user.click(screen.getByRole("button", { name: /^Messages/ }));
+        await user.click(await screen.findByRole("button", { name: /^Ann/ }));
+        await user.click(
+          (await screen.findAllByRole("button", { name: "Resume draft" }))[1],
+        );
+        area = document.querySelector(".composer-bar textarea");
+        assert.equal(quoteCheckbox().checked, true);
+        assert.match(screen.getByRole("blockquote").textContent, /> Second$/);
+        assert.equal(area.value, edited);
         await user.click(screen.getByRole("button", { name: /^Messages/ }));
         await user.click(await screen.findByRole("button", { name: /^Ann/ }));
         await user.click(
@@ -3329,11 +3352,24 @@ for (const path of ["fresh", "lost", "not-created"]) {
         );
         area = document.querySelector(".composer-bar textarea");
         assert.equal(area.value, prompt);
-        await user.click(quoteButton());
-        assert.match(area.value, /\n> A different handover message$/);
-        assert.doesNotMatch(area.value, /> First/);
+        assert.equal(quoteCheckbox().checked, false);
+        await user.click(quoteCheckbox());
+        assert.match(
+          screen.getByRole("blockquote").textContent,
+          /\n> A different handover message$/,
+        );
+        assert.doesNotMatch(
+          screen.getByRole("blockquote").textContent,
+          /> First/,
+        );
+      } else if (path === "lost") {
+        await user.click(quoteCheckbox());
       }
-      const submitted = area.value;
+      const submitted =
+        area.value +
+        (quoteCheckbox().checked
+          ? "\n\n" + screen.getByRole("blockquote").textContent
+          : "");
       assert.equal(fixture.creations(), 0);
       await selectManualSubmissionWorkspace(user);
       fireEvent.keyDown(area, { key: "Enter", code: "Enter" });
@@ -3353,7 +3389,8 @@ for (const path of ["fresh", "lost", "not-created"]) {
         assert.equal(fixture.inputs[0][2].text, submitted);
         fixture.snapshot.tasks = [fixture.task];
         await fixture.publish();
-        await screen.findByRole("button", { name: "Quote original message" });
+        assertSessionComposer();
+        await fixture.settle();
         await user.click(screen.getByRole("button", { name: /^Messages/ }));
         await user.click(await screen.findByRole("button", { name: /^Ann/ }));
         await user.click(
@@ -3363,36 +3400,10 @@ for (const path of ["fresh", "lost", "not-created"]) {
             })
           )[0],
         );
-        await screen.findByRole("button", { name: "Quote original message" });
-        const existing = document.querySelector(".composer-bar textarea");
-        assert.doesNotMatch(existing.value, /> First/);
-        // A late receipt for the previous message must not dismiss this one.
-        await fixture.settle();
-        await user.click(quoteButton());
-        assert.match(existing.value, /> First\n> \n> Second$/);
-        assert.equal(fixture.inputs.length, 1);
-        await user.click(
-          screen.getAllByRole("button", { name: /Submission task/ })[0],
+        await waitFor(() =>
+          assert.ok(document.querySelector(".composer-bar textarea")),
         );
-        assert.equal(
-          screen.queryByRole("button", { name: "Quote original message" }),
-          null,
-        );
-        assert.match(
-          document.querySelector(".composer-bar textarea").value,
-          /> Second$/,
-        );
-        // Returning from another message offers its reference for this input only.
-        await user.click(screen.getByRole("button", { name: /^Messages/ }));
-        await user.click(await screen.findByRole("button", { name: /^Ann/ }));
-        await user.click(
-          (
-            await screen.findAllByRole("button", {
-              name: /Continue in workbench/,
-            })
-          )[1],
-        );
-        await screen.findByRole("button", { name: "Quote original message" });
+        assertSessionComposer();
         const followup = document.querySelector(".composer-bar textarea");
         fireEvent.change(followup, {
           target: { value: "Continue the analysis" },
@@ -3400,11 +3411,7 @@ for (const path of ["fresh", "lost", "not-created"]) {
         fireEvent.keyDown(followup, { key: "Enter", code: "Enter" });
         await waitFor(() => assert.equal(fixture.inputs.length, 2));
         assert.equal(fixture.inputs[1][2].text, "Continue the analysis");
-        assert.equal(screen.queryByText("Source task"), null);
-        assert.equal(
-          screen.queryByRole("button", { name: "Quote original message" }),
-          null,
-        );
+        assertSessionComposer();
       } else {
         await fixture.loseCreationReply();
         const check = await screen.findByRole("button", {
@@ -3423,6 +3430,9 @@ for (const path of ["fresh", "lost", "not-created"]) {
           await waitFor(() =>
             assert.equal(area.disabled || area.readOnly, false),
           );
+          assert.equal(quoteCheckbox().checked, false);
+          await user.click(quoteCheckbox());
+          await user.click(quoteCheckbox());
           fireEvent.keyDown(area, { key: "Enter", code: "Enter" });
           await waitFor(() => assert.equal(fixture.creations(), 2));
           assert.equal(
@@ -3433,7 +3443,8 @@ for (const path of ["fresh", "lost", "not-created"]) {
           await waitFor(() => assert.equal(fixture.inputs.length, 1));
           fixture.snapshot.tasks = [fixture.task];
           await fixture.publish();
-          await screen.findByRole("button", { name: "Quote original message" });
+          assertSessionComposer();
+          assert.equal(fixture.inputs[0][2].text, prompt);
           fixture.task.inputSubmissions = [
             {
               submission: {
@@ -3458,17 +3469,17 @@ for (const path of ["fresh", "lost", "not-created"]) {
         await waitFor(() =>
           assert.equal(
             document.querySelector(".composer-bar textarea").value,
-            prompt,
+            submitted,
           ),
         );
-        await user.click(quoteButton());
+        assertSessionComposer();
         const recovered = document.querySelector(".composer-bar textarea");
         assert.match(recovered.value, /> First\n> \n> Second$/);
         assert.equal(fixture.inputs.length, 0);
         fireEvent.keyDown(recovered, { key: "Enter", code: "Enter" });
         await waitFor(() => assert.equal(fixture.inputs.length, 1));
         await fixture.settle({ accepted: false, reason: "capacity_reached" });
-        assert.ok(quoteButton());
+        assertSessionComposer();
       }
     },
   );

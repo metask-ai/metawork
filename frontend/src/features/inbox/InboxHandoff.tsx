@@ -21,11 +21,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { HandoffSessionPicker } from "./HandoffSessionPicker.tsx";
-import {
-  matchingDrafts,
-  type HandoffDraft,
-  type MessageReference,
-} from "./handoff-drafts.ts";
+import { matchingDrafts, type HandoffDraft } from "./handoff-drafts.ts";
 
 type Actions = {
   client: Pick<BridgeClient, "handoffSessions" | "changeHandoff">;
@@ -35,14 +31,14 @@ type Actions = {
   workspaces: WorkspaceView[];
   drafts: HandoffDraft[];
   onVerify(source: HandoffSource, storeId: string, title: string): void;
-  onResume(draft: HandoffDraft, reference?: MessageReference): void;
+  onResume(draft: HandoffDraft): void;
   onCreate(
     source: HandoffSource,
     store: string,
     task: InboxTaskView,
-    reference?: MessageReference,
+    message?: InboxMessage,
   ): void;
-  onOpen(taskId: string, reference?: MessageReference): void;
+  onOpen(taskId: string): void;
 };
 const Context = createContext<
   | (Actions & {
@@ -114,12 +110,10 @@ function sessionAction(s: LinkedSession) {
 export function MessageAttachment({
   id,
   summary,
-  message,
   onOpen,
 }: {
   id: string;
   summary?: AttachmentSummary | null;
-  message: InboxMessage;
   onOpen(): void;
 }) {
   const { t } = useI18n();
@@ -135,7 +129,6 @@ export function MessageAttachment({
   const title = summary?.name ?? draftSummary?.title;
   const number = summary?.id ?? draftSummary?.source.canonical ?? id;
   const caption = t(`inbox.attachment_${kind}`, { id: number });
-  const reference = { taskId: number, title, message };
   const direct =
     sessions.find((s) => s.preferred && availableSession(s)) ??
     (count === 1 ? sessions[0] : undefined);
@@ -160,9 +153,7 @@ export function MessageAttachment({
             type="button"
             className="inbox-attachment-action"
             onClick={() =>
-              direct
-                ? api.onOpen(direct.task.id, reference)
-                : api.onResume(drafts[0], reference)
+              direct ? api.onOpen(direct.task.id) : api.onResume(drafts[0])
             }
           >
             {t(direct ? sessionAction(direct) : "handoff.resume")}
@@ -180,7 +171,7 @@ export function MessageAttachment({
                   {sessions.map((s) => (
                     <Menu.Item
                       key={s.task.id}
-                      onClick={() => api.onOpen(s.task.id, reference)}
+                      onClick={() => api.onOpen(s.task.id)}
                     >
                       {t(sessionAction(s))} · {s.task.title}
                     </Menu.Item>
@@ -188,7 +179,7 @@ export function MessageAttachment({
                   {drafts.map((d, i) => (
                     <Menu.Item
                       key={d.operationId}
-                      onClick={() => api.onResume(d, reference)}
+                      onClick={() => api.onResume(d)}
                     >
                       {t("handoff.resume")}
                       {drafts.length > 1 && ` ${i + 1}`}
@@ -351,9 +342,6 @@ function HandoffView({
       referenced,
       canonical,
     };
-    const reference = message
-      ? { message, taskId: source.canonical, title }
-      : undefined;
     const active = sessions.filter(availableSession);
     async function mutate(action: "link" | "prefer" | "unlink", id: string) {
       if (!api || !list || !canonical || busy) return;
@@ -362,7 +350,7 @@ function HandoffView({
       try {
         await api.client.changeHandoff(source, list.storeId, action, id);
         api.refresh();
-        if (action === "link" && mounted.current) api.onOpen(id, reference);
+        if (action === "link" && mounted.current) api.onOpen(id);
       } catch {
         setFailed(true);
       } finally {
@@ -411,7 +399,7 @@ function HandoffView({
       setPicking(true);
     };
     const create = () =>
-      api.onCreate(source, list.storeId, remoteTask, reference);
+      api.onCreate(source, list.storeId, remoteTask, message);
     const current =
       active.find((s) => s.preferred) ??
       (active.length === 1 ? active[0] : undefined);
@@ -435,8 +423,8 @@ function HandoffView({
               size="sm"
               disabled={busy}
               onClick={() => {
-                if (destination) api.onOpen(destination.task.id, reference);
-                else if (resume) api.onResume(resume, reference);
+                if (destination) api.onOpen(destination.task.id);
+                else if (resume) api.onResume(resume);
                 else create();
               }}
             >
@@ -478,7 +466,7 @@ function HandoffView({
                     .map((draft) => (
                       <Menu.Item
                         key={draft.operationId}
-                        onClick={() => api.onResume(draft, reference)}
+                        onClick={() => api.onResume(draft)}
                       >
                         {t("handoff.resume")}
                         {drafts.length > 1 && " " + (drafts.indexOf(draft) + 1)}
@@ -494,9 +482,7 @@ function HandoffView({
                           " · " + t("handoff.default")}
                       </Menu.GroupLabel>
                       {s !== destination && (
-                        <Menu.Item
-                          onClick={() => api.onOpen(s.task.id, reference)}
-                        >
+                        <Menu.Item onClick={() => api.onOpen(s.task.id)}>
                           {label(s)}
                         </Menu.Item>
                       )}

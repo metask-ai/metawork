@@ -1277,7 +1277,7 @@ test("task controls keep draft choice separate from default session and verified
     ids: ["old", "other"],
     revision: "1",
     onVerify() {},
-    onOpen: (id) => opened.push(id),
+    onOpen: (...args) => opened.push(args),
     onResume: (d) => resumed.push(d.operationId),
     onCreate() {},
   };
@@ -1297,6 +1297,7 @@ test("task controls keep draft choice separate from default session and verified
           ? createElement(HandoffControls, {
               referenced: "old",
               remoteTask: taskView({ id: "new", canLink: true }),
+              message: message("8", "in", "Please review", ["old"]),
               children: createElement(
                 "details",
                 {},
@@ -1305,7 +1306,6 @@ test("task controls keep draft choice separate from default session and verified
             })
           : createElement(MessageAttachment, {
               id: "old",
-              message: message("8", "in", "Please review", ["old"]),
               onOpen() {},
             }),
       ),
@@ -1317,7 +1317,7 @@ test("task controls keep draft choice separate from default session and verified
       name: "Continue in workbench",
     }),
   );
-  assert.deepEqual(opened, ["1"]);
+  assert.deepEqual(opened, [["1"]]);
   assert.ok(screen.getByRole("button", { name: "Review fixtures Task #new" }));
   assert.equal(screen.queryByText(/Session 1/), null);
   assert.equal(screen.queryByRole("button", { name: "Choose session" }), null);
@@ -1383,11 +1383,11 @@ test("task controls keep draft choice separate from default session and verified
   await user.click(confirm);
   assert.deepEqual(operations, [[source, storeId, "link", "3"]]);
   assert.ok(confirm.disabled);
-  assert.deepEqual(opened, ["1"]);
+  assert.deepEqual(opened, [["1"]]);
   saveLink.reject(new Error("failed"));
   await screen.findByRole("alert");
-  assert.deepEqual(opened, ["1"]);
+  assert.deepEqual(opened, [["1"]]);
   await user.click(confirm);
   saveLink.resolve();
-  await waitFor(() => assert.deepEqual(opened, ["1", "3"]));
+  await waitFor(() => assert.deepEqual(opened, [["1"], ["3"]]));
 });

@@ -1904,7 +1904,6 @@ function InboxConversationView({
                       <MessageAttachment
                         key={id}
                         id={id}
-                        message={message}
                         summary={attachmentSummaries.get(id)}
                         onOpen={() => onOpenTask(id, message)}
                       />

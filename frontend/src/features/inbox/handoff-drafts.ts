@@ -3,17 +3,16 @@ import type {
   InboxMessage,
   ModelRef,
 } from "../../bridge/contracts.ts";
-import { newComposerOperationId } from "../composer/drafts.ts";
-
-export type MessageReference = {
-  taskId: string;
-  title?: string;
-  message: InboxMessage;
-};
+import {
+  newComposerOperationId,
+  prepareReferenceDraft,
+} from "../composer/drafts.ts";
+import type { ComposerDraft } from "../composer/slash.ts";
 
 const prefix = "metawork.handoff.v1.";
 export type HandoffDraft = HandoffCreate & {
   title?: string;
+  originalMessage?: { quote: string; included: boolean };
   aliases: string[];
   model: ModelRef | null;
   pendingWorkspace: string | null;
@@ -26,16 +25,30 @@ export function newHandoffDraft(
   source: HandoffCreate["source"],
   storeId: string,
   title: string,
+  message?: InboxMessage,
 ): HandoffDraft {
   return {
     source,
     storeId,
     title,
+    originalMessage: message
+      ? { quote: quoteMessage(message, source.canonical), included: false }
+      : undefined,
     operationId: newComposerOperationId(),
     aliases: [...new Set([source.referenced, source.canonical])],
     model: null,
     pendingWorkspace: null,
   };
+}
+
+export function handoffInput(draft: ComposerDraft, handoff?: HandoffDraft) {
+  if (!handoff?.originalMessage?.included) return draft;
+  const result = prepareReferenceDraft(
+    draft,
+    handoff.originalMessage.quote,
+    "append",
+  );
+  return result.kind === "prepared" ? result.draft : null;
 }
 
 export function saveHandoffDraft(draft: HandoffDraft) {
@@ -66,6 +79,9 @@ export function readHandoffDrafts(): HandoffDraft[] {
           typeof v.source.referenced === "string" &&
           typeof v.source.canonical === "string" &&
           (v.title === undefined || typeof v.title === "string") &&
+          (v.originalMessage === undefined ||
+            (typeof v.originalMessage?.quote === "string" &&
+              typeof v.originalMessage.included === "boolean")) &&
           Array.isArray(v.aliases) &&
           v.aliases.every((item: unknown) => typeof item === "string") &&
           (v.model === null ||
