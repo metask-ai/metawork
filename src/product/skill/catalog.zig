@@ -328,10 +328,11 @@ pub const Snapshot = struct {
         return false;
     }
 
+    /// True when any presented text was rewritten.
     pub fn redactPresentationNoFail(
         self: *Snapshot,
         credential: []const u8,
-    ) void {
+    ) bool {
         var redacted = false;
         for (self.skills) |*skill| {
             redacted = redactFixedWidthNoFail(
@@ -358,6 +359,7 @@ pub const Snapshot = struct {
             }
         }
         self.redacted = self.redacted or redacted;
+        return redacted;
     }
 
     pub fn deinit(self: *Snapshot) void {

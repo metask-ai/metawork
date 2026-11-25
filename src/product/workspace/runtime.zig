@@ -1378,8 +1378,10 @@ pub const Runtime = struct {
         self.next_recent_order = 1;
     }
 
-    pub fn redactNoFail(self: *Runtime, credential: []const u8, storage: Storage) void {
-        if (credential.len == 0) return;
+    /// True when any projected text was rewritten.
+    pub fn redactNoFail(self: *Runtime, credential: []const u8, storage: Storage) bool {
+        if (credential.len == 0) return false;
+        var rewrote = false;
         for (self.records) |*entry| {
             const record = &(entry.* orelse continue);
             const root_redacted = storage.redact_fn(
@@ -1396,7 +1398,9 @@ pub const Runtime = struct {
             );
             record.projection_redacted = root_redacted or name_redacted or
                 record.projection_redacted;
+            rewrote = root_redacted or name_redacted or rewrote;
         }
+        return rewrote;
     }
 
     pub fn setAutomaticOwnerFromRestore(self: *Runtime, workspace_id: u64, task_id: u64) void {

@@ -9369,8 +9369,8 @@ pub const Runtime = struct {
     fn redactWorkspaceProjectionsNoFail(
         self: *Runtime,
         credential: []const u8,
-    ) void {
-        self.workspace.redactNoFail(credential, self.workspaceStorage());
+    ) bool {
+        return self.workspace.redactNoFail(credential, self.workspaceStorage());
     }
 
     pub fn setAccountProjectionCredentials(self: *Runtime, source: account_contract.AccessTokenProjection) void {
@@ -9401,12 +9401,11 @@ pub const Runtime = struct {
 
     fn scrubAccountCredential(context: *anyopaque, credential: []const u8) std.mem.Allocator.Error!void {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        self.redactAllProductProjectionsNoFail(credential);
+        _ = self.redactAllProductProjectionsNoFail(credential);
     }
 
     const AccountCredentialQuery = struct {
         value: []const u8,
-        releasing: ?[*]const u8 = null,
         kind: enum { retained, contains, prefix, continuation },
         matched: usize = 0,
 
@@ -9414,7 +9413,7 @@ pub const Runtime = struct {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (credential.len == 0) return;
             const matches = switch (self.kind) {
-                .retained => (self.releasing == null or self.releasing.? != credential.ptr) and std.mem.eql(u8, self.value, credential),
+                .retained => std.mem.eql(u8, self.value, credential),
                 .contains => std.mem.indexOf(u8, self.value, credential) != null,
                 .prefix => std.mem.startsWith(u8, self.value, credential),
                 .continuation => self.value.len < credential.len and std.mem.startsWith(u8, credential, self.value),
@@ -9439,26 +9438,28 @@ pub const Runtime = struct {
         }
     };
 
-    fn retainsProjectionCredential(self: *const Runtime, credential: []const u8, releasing: ?[*]const u8) bool {
+    fn retainsProjectionCredential(self: *const Runtime, credential: []const u8) bool {
         if (credential.len == 0) return false;
-        if (self.accountCredentialQuery(.{ .value = credential, .releasing = releasing, .kind = .retained }).matched != 0) return true;
-        return self.task_runtime.retainsCredential(credential, releasing);
+        if (self.accountCredentialQuery(.{ .value = credential, .kind = .retained }).matched != 0) return true;
+        return self.task_runtime.retainsCredential(credential);
     }
 
+    /// A value not known until now may have been shown in the clear. One that
+    /// was known has been masked wherever it showed, so rewriting it now
+    /// revokes nothing.
     fn learnProjectionCredential(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
-        if (!self.retainsProjectionCredential(credential, null)) self.invalidateProjectionSecurity();
+        if (!self.retainsProjectionCredential(credential)) self.invalidateProjectionSecurity();
         self.reconcileMcpInstallation(credential);
-        self.redactAllProductProjectionsNoFail(credential);
+        _ = self.redactAllProductProjectionsNoFail(credential);
         self.syncHistoryCredentials(credential, null);
     }
 
+    /// What was shown was masked by more than will be known from here on, so
+    /// only rewritten content is revoked.
     fn retireProjectionCredential(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
-        // All aliases into the retiring owner disappear together. Other owned
-        // copies of the exact value still protect the same projection boundary.
-        if (!self.retainsProjectionCredential(credential, credential.ptr)) self.invalidateProjectionSecurity();
-        self.redactAllProductProjectionsNoFail(credential);
+        if (self.redactAllProductProjectionsNoFail(credential)) self.invalidateProjectionSecurity();
         self.syncHistoryCredentials(null, credential.ptr);
     }
 
@@ -9506,27 +9507,29 @@ pub const Runtime = struct {
 
     /// Scrubbing is required at every acquisition/release; it is not itself a
     /// change of security authority and must not revoke unrelated UI state.
-    fn redactAllProductProjectionsNoFail(self: *Runtime, credential: []const u8) void {
-        if (credential.len == 0) return;
+    /// True when it rewrote or dropped anything shown. Preserved originals are
+    /// not shown.
+    fn redactAllProductProjectionsNoFail(self: *Runtime, credential: []const u8) bool {
+        if (credential.len == 0) return false;
         self.task_runtime.redactPreservedHistory(credential) catch self.markTaskPersistenceWriteFailed();
-        self.redactWorkspaceProjectionsNoFail(credential);
-        self.redactCatalogProjectionsNoFail(credential);
-        _ = self.schedule.redactInMemoryNoFail(
+        var rewrote = self.redactWorkspaceProjectionsNoFail(credential);
+        rewrote = self.redactCatalogProjectionsNoFail(credential) or rewrote;
+        rewrote = self.schedule.redactInMemoryNoFail(
             credential,
             self.scheduleRedaction(),
-        );
-        self.task_runtime.redactProjectionsNoFail(credential, .{
+        ) or rewrote;
+        return self.task_runtime.redactProjectionsNoFail(credential, .{
             .context = self,
             .redact_fn = redactFixedWidthNoFail,
             .release_projection_bytes_fn = releaseTaskRuntimeProjectionBytes,
-        });
+        }) or rewrote;
     }
 
     fn redactCatalogProjectionsNoFail(
         self: *Runtime,
         credential: []const u8,
-    ) void {
-        self.skill.redactCatalogsNoFail(
+    ) bool {
+        return self.skill.redactCatalogsNoFail(
             credential,
             self.skillProjectionBudget(),
         );
@@ -15651,7 +15654,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
     );
     run.input = history_input;
 
-    control.redactAllProductProjectionsNoFail("SECRET-KEY");
+    _ = control.redactAllProductProjectionsNoFail("SECRET-KEY");
     var detached = task.runtime.detach(.cold_start);
     var detached_execution = detached.execution;
     detached_execution.deinit();
@@ -16699,7 +16702,7 @@ test "released Task credential is permanently scrubbed from every product projec
     );
     @constCast(compactTerminalPayload(compact).?).diagnostic_len =
         "compact SECRET-KEY".len;
-    control.redactAllProductProjectionsNoFail("SECRET-KEY");
+    _ = control.redactAllProductProjectionsNoFail("SECRET-KEY");
     try std.testing.expect(run.execution.?.automatic_title.generated_redacted);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -16754,13 +16757,13 @@ test "known credential matching chooses the longest overlapping secret" {
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "***-KEY") == null);
 }
 
-test "Product view security epoch invalidates learned and retiring credentials" {
+test "Product view security epoch invalidates learned credentials and fails closed once exhausted" {
     var control = try testRuntime();
     defer control.deinit();
     const epoch = control.projectionSecurityEpoch();
     control.learnProjectionCredential("future-credential");
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
-    control.redactAllProductProjectionsNoFail("");
+    _ = control.redactAllProductProjectionsNoFail("");
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
     var storage: [96 * 1024]u8 = undefined;
     const view = try control.writeViewFixture(&storage, .{});
@@ -16768,7 +16771,7 @@ test "Product view security epoch invalidates learned and retiring credentials" 
     defer parsed.deinit();
     try std.testing.expectEqual(control.projectionSecurityEpoch(), try std.fmt.parseInt(u64, parsed.value.object.get("securityEpoch").?.string, 10));
     control.projection_security_epoch = std.math.maxInt(u64);
-    control.retireProjectionCredential("retiring-credential");
+    control.learnProjectionCredential("last-credential");
     try std.testing.expectEqual(@as(u64, 0), control.projectionSecurityEpoch());
     try std.testing.expectError(error.InvalidViewRequest, control.writeViewFixture(&storage, .{}));
 }
@@ -20345,7 +20348,7 @@ test "Runtime re-scrubs file change diffs with credentials learned after write" 
     // intentionally left untouched; the read boundary must protect it using
     // the complete set of credentials that is live at read time.
     try TestSupport.installFixtureCredential(&control, late_credential);
-    control.redactAllProductProjectionsNoFail(late_credential);
+    _ = control.redactAllProductProjectionsNoFail(late_credential);
 
     const Capture = struct {
         calls: usize = 0,
@@ -23903,7 +23906,7 @@ test "Product view duplicate credential ownership preserves reads while exact ne
     defer control.allocator.free(duplicate);
     control.learnProjectionCredential(duplicate);
     control.retireProjectionCredential(duplicate);
-    control.redactAllProductProjectionsNoFail(duplicate);
+    _ = control.redactAllProductProjectionsNoFail(duplicate);
     try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
     try std.testing.expectEqual(wakes, host.wakes.load(.monotonic));
     try control.writeSnapshotRange(read.id, &output, 0, 64);
@@ -23912,14 +23915,62 @@ test "Product view duplicate credential ownership preserves reads while exact ne
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
     try std.testing.expectEqual(wakes + 1, host.wakes.load(.monotonic));
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
-    const next = try control.writeSnapshot(&output, .{});
-    // The separately owned duplicate above preserved the live credential set;
-    // retiring the remaining Task owner must invalidate captured reads.
+    // The last owner leaves nothing to rewrite, so neither the captured read
+    // nor anything shown is revoked.
+    var next = try control.writeSnapshot(&output, .{ .task_id = 3 });
     const task_credential = (try control.task_runtime.testExecutionInput(3)).api_key;
     control.retireProjectionCredential(task_credential);
+    control.retireProjectionCredential("SECRET");
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    try std.testing.expectEqual(wakes + 1, host.wakes.load(.monotonic));
+    while (next.bytes == 0) next = try control.continueSnapshot(next.id, &output);
+    try control.writeSnapshotRange(next.id, &output, 0, 64);
+    // Learning a released value is learning an unknown one.
+    control.learnProjectionCredential("SECRET");
     try std.testing.expectEqual(epoch + 2, control.projectionSecurityEpoch());
-    try std.testing.expectEqual(wakes + 2, host.wakes.load(.monotonic));
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(next.id, &output, 0, 64));
+}
+
+test "Product view release revokes what its scrub rewrote or dropped and nothing else" {
+    const Owner = enum { task, workspace, pinned_text, pinned_identity, catalog_text, catalog_identity };
+    for (std.enums.values(Owner)) |owner| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const task = control.testTaskSlots()[0].?;
+        switch (owner) {
+            .task => try control.replaceTracked(&task.durable.title, "title late-secret", control.limits.max_task_title_bytes),
+            .workspace => product_workspace.testing.overwriteProjectedRoot(&control.workspace, 1, "late-secret"),
+            .pinned_text, .pinned_identity => {
+                const pinned = try testCommittedSkillCatalog(&control);
+                control.projection_bytes += pinned.projected_bytes;
+                task.runtime.attached().?.pinned_catalog = pinned;
+            },
+            .catalog_text, .catalog_identity => try installTestCommittedSkillAuthorities(&control),
+        }
+        const credential = switch (owner) {
+            .task, .workspace => "late-secret",
+            .pinned_text, .catalog_text => "Review changes",
+            .pinned_identity, .catalog_identity => "builtin.review",
+        };
+        var output: [96 * 1024]u8 = undefined;
+        const read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+        const epoch = control.projectionSecurityEpoch();
+        control.retireProjectionCredential(credential);
+        try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+        try std.testing.expectError(error.StaleSnapshot, control.continueSnapshot(read.id, &output));
+        control.retireProjectionCredential(credential);
+        try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    }
+
+    // A known value showed only masked, so finding it again revokes nothing.
+    var control = try testRuntime();
+    defer control.deinit();
+    const title = &control.testTaskSlots()[0].?.durable.title;
+    try control.replaceTracked(title, "title SECRET-KEY", control.limits.max_task_title_bytes);
+    const epoch = control.projectionSecurityEpoch();
+    control.learnProjectionCredential("SECRET-KEY");
+    try std.testing.expectEqualStrings("title **********", title.*);
+    try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
 }
 
 test "Product view history versions ignore unrelated revisions and observe terminal artifact completion" {
@@ -24146,12 +24197,12 @@ test "learned short credentials scrub Runtime retained and readonly originals wi
     const readonly = try std.fmt.allocPrint(control.allocator, "{s},\"future\":\"none\"}}", .{original[0 .. original.len - 1]});
     control.testTask(record.id).?.read_only_history = .{ .recent_order = record.recent_order, .payload = readonly };
     try control.task_runtime.retainRecord(.{ .kind = .task, .id = 93, .order = 93, .payload = "{\"checkpoint_anchor\":\"none\",\"future\":\"n\\u006fne\"}" });
-    control.redactAllProductProjectionsNoFail("none");
+    _ = control.redactAllProductProjectionsNoFail("none");
     const payload = control.testTask(record.id).?.read_only_history.?.payload;
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"checkpoint_anchor\":\"none\"") != null);
     try std.testing.expect(!try task_persistence.security.contains(control.allocator, task_persistence.ReadOnlyPayload{ .task_id = record.id, .recent_order = record.recent_order, .payload = payload }, "none"));
     try std.testing.expect(!try task_persistence.security.contains(control.allocator, control.task_runtime.retained.items, "none"));
-    control.redactAllProductProjectionsNoFail("none");
+    _ = control.redactAllProductProjectionsNoFail("none");
     try std.testing.expectEqual(@as(usize, 1), control.task_runtime.retained.items.len);
 }
 
@@ -24528,7 +24579,7 @@ test "late credential discovery revokes Output locators in current and durable p
     const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     try std.testing.expect(!run.outputs[0].?.redacted);
-    control.redactAllProductProjectionsNoFail("late-secret");
+    _ = control.redactAllProductProjectionsNoFail("late-secret");
     try std.testing.expect(run.outputs[0].?.redacted);
     try TestSupport.commitTaskHistory(&control);
     var decoded = try task_persistence.decode(std.testing.allocator, storage[0..history.len], testTaskPersistenceLimits());

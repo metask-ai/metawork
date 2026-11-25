@@ -1062,9 +1062,13 @@ pub const RedactionEffects = struct {
     redact_fn: *const fn ([]u8, []const u8) bool,
     release_projection_bytes_fn: *const fn (*anyopaque, usize) void,
     context: *anyopaque,
+    /// Set once any value was rewritten.
+    rewrote: ?*bool = null,
 
     fn redact(self: RedactionEffects, value: []u8, credential: []const u8) bool {
-        return self.redact_fn(value, credential);
+        if (!self.redact_fn(value, credential)) return false;
+        if (self.rewrote) |rewrote| rewrote.* = true;
+        return true;
     }
 
     fn releaseProjectionBytes(self: RedactionEffects, bytes: usize) void {
@@ -6829,15 +6833,14 @@ pub const Runtime = struct {
         return false;
     }
 
-    /// Exact value membership, excluding aliases of an owner about to release.
-    /// The caller borrows bytes synchronously; this creates no secret registry.
-    pub fn retainsCredential(self: *const Runtime, value: []const u8, releasing: ?[*]const u8) bool {
+    /// Exact value membership. The caller borrows bytes synchronously; this
+    /// creates no secret registry.
+    pub fn retainsCredential(self: *const Runtime, value: []const u8) bool {
         if (value.len == 0) return false;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             var credentials = RetainedCredentials{ .task = task };
             while (credentials.next()) |credential| {
-                if (releasing != null and credential.ptr == releasing.?) continue;
                 if (std.mem.eql(u8, credential, value)) return true;
             }
         }
@@ -6911,12 +6914,16 @@ pub const Runtime = struct {
         return false;
     }
 
+    /// True when anything it covers was rewritten or dropped.
     pub fn redactProjectionsNoFail(
         self: *Runtime,
         credential: []const u8,
         effects: RedactionEffects,
-    ) void {
-        if (credential.len == 0) return;
+    ) bool {
+        if (credential.len == 0) return false;
+        var rewrote = false;
+        var observed = effects;
+        observed.rewrote = &rewrote;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             if (task.runtime.pinnedCatalog()) |snapshot| {
@@ -6924,8 +6931,9 @@ pub const Runtime = struct {
                     effects.releaseProjectionBytes(snapshot.projected_bytes);
                     snapshot.deinit();
                     task.runtime.live().?.pinned_catalog = null;
+                    rewrote = true;
                 } else {
-                    snapshot.redactPresentationNoFail(credential);
+                    rewrote = snapshot.redactPresentationNoFail(credential) or rewrote;
                 }
             }
             if (task.runtime.restore_catalog) |*snapshot| {
@@ -6933,10 +6941,12 @@ pub const Runtime = struct {
                     effects.releaseProjectionBytes(snapshot.projected_bytes);
                     snapshot.deinit();
                     task.runtime.restore_catalog = null;
-                } else snapshot.redactPresentationNoFail(credential);
+                    rewrote = true;
+                } else rewrote = snapshot.redactPresentationNoFail(credential) or rewrote;
             }
-            redactTaskProjection(task, credential, effects);
+            redactTaskProjection(task, credential, observed);
         }
+        return rewrote;
     }
 
     pub fn writeProjectionList(

@@ -491,7 +491,7 @@ Product aggregate 独占产品事实、局部事务和执行资格。Product Con
 
 大视图读取使用 Product-owned 的单个有界冻结计划。begin 冻结同一提交的 owned 事实；有界准备步逐块比较版本，不能推进业务或重新采样 aggregate。Tool 记录不进入大视图：Run 只带 Tool 摘要与文件引用，记录由按页读取命令在主线程同步格式化，每页源文本至多 256 KiB 且至少一条，与大视图使用同一 credential 集合。准备期的 credential 副本仅在 Host 临时 owner 内存在，完成或取消即清除；原始工具 JSON 与 credential 不得进入缓存、Bridge payload 或 worker。ready 计划只持已脱敏的 owned 内容、结构和内容版本，按编码预算逐步写入调用期借用的运输 buffer。工具展示只有一个 formatter；解析、脱敏、JSON 编码和缓存回填仍由 Product 拥有，Bridge 只承运准备状态、读取 identity 和 bytes，Renderer 只等待并渲染。版本比较基于精确的脱敏源内容，不能为取得长度或确认稳定版本而先同步编码完整正文；缓存只接纳源内容仍有效的结果。普通业务更新可以使当前缓存失效，但不会把已冻结读取拼接成多个提交；安全失效、读取替换和关闭则直接撤销计划。
 
-安全代次归 Product Control。安装、替换或释放 credential 仍须遵守原地清洗与 durable commit 协议；清洗本身不推进代次。已知凭据按精确字节值及现有 Host owner 判定，包含与对话来源独立的 Account access token；Account 仅通过主线程调用期 visitor 提供脱敏检查或有界冻结读取副本，Product 不长期保留其 token，Account 授权代次提交时撤销旧安全投影。重复取得或释放仍有其他 owner 持有的同值副本不改变安全边界，不额外建立长期凭据副本。真实凭据集合或执行安全 authority 变化使旧代次缓存和在途展示结果失效；即使外围 command 随后失败，也必须主动发布安全失效。缓存命中只在内容版本和安全代次均匹配时成立，新构建内容继续执行交付前的完整检查。Renderer 接收安全代次并清除过期缓存；它不持有 credential，也不执行脱敏。
+安全代次归 Product Control。安装、替换或释放 credential 仍须遵守原地清洗与 durable commit 协议；清洗没有改写展示内容时不推进代次。已知凭据按精确字节值及现有 Host owner 判定，包含与对话来源独立的 Account access token；Account 仅通过主线程调用期 visitor 提供脱敏检查或有界冻结读取副本，Product 不长期保留其 token，Account 授权代次提交时撤销旧安全投影。取得一个此前不是已知凭据的值时推进，因为它在此之前可能已被明文展示；再次取得已知值不推进，不额外建立长期凭据副本。释放只使已知集合变小，已展示的内容只会遮得更多，因此只在清洗改写或丢弃了展示内容时推进。执行安全 authority 变化同样推进。推进使旧代次缓存和在途展示结果失效；即使外围 command 随后失败，也必须主动发布安全失效。缓存命中只在内容版本和安全代次均匹配时成立，新构建内容继续执行交付前的完整检查。Renderer 接收安全代次并清除过期缓存；它不持有 credential，也不执行脱敏。
 
 主线程上的展示构建、编码、复制和分块处理必须满足[验证规范](validation.md#产品视图与执行隔离验收)的连续时间预算。首先使用有界范围与稳定块复用；只有测量表明仍超预算时，才引入有界分片或独立执行容量。异步投影不能持有 credential、Product Runtime 或可变 aggregate 指针，只接受 owned 数据或不可变输入；接纳结果前重新校验对象、连接、内容版本和安全代次。不能以编码已经移出主线程为由接受仍然超预算的脱敏操作。
 
