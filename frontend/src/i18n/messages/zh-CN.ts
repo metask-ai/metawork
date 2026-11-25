@@ -1226,6 +1226,7 @@ export const zhCN: Record<MessageId, string> = {
   "outputs.state.failed": "文件操作失败，请重试",
   "outputs.title": "交付成果",
   "outputs.view": "查看成果",
+  "outputs.more": "更多文件操作",
   "outputs.open_browser": "在浏览器中打开",
   "outputs.view_source": "查看源码",
   "outputs.open": "在默认应用打开",

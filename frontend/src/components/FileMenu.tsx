@@ -26,6 +26,8 @@ export type MenuFile = {
   available?: boolean;
   /** False when the Host said it does not open it. Nobody asked when absent. */
   openable?: boolean;
+  /** The delivery list can compare this file with the recorded delivery. */
+  delivery?: { opensInBrowser: boolean; viewSource?: () => void };
   /**
    * Copies the image it is shown as, from what the interface already holds.
    * Null while there is none to copy, absent for anything but an image.
@@ -34,7 +36,7 @@ export type MenuFile = {
 };
 
 export type FileMenuAction =
-  "open" | "reveal" | "reference" | "copy_path" | "save";
+  "open" | "reveal" | "reference" | "copy_path" | "save" | "check";
 
 /** A failure that needs attention, or null for a silent outcome. */
 export type FileMenuOutcome = { message: MessageId } | null;
@@ -52,7 +54,11 @@ export type FileMenuHandler = {
 const FileMenuHandlerContext = createContext<FileMenuHandler | null>(null);
 export const FileMenuProvider = FileMenuHandlerContext.Provider;
 
-export type OpenFileMenu = (file: MenuFile, event: ContextMenuEvent) => void;
+export type OpenFileMenu = (
+  file: MenuFile,
+  event: ContextMenuEvent,
+  atTrigger?: boolean,
+) => void;
 const OpenFileMenuContext = createContext<OpenFileMenu | null>(null);
 
 type MenuAction = FileMenuAction | "copy_image";
@@ -128,27 +134,30 @@ export function FileMenuScope({
     [resetKey, connected],
   );
   useEffect(() => setNotice(null), [noticeKey]);
-  const openMenu = useCallback<OpenFileMenu>((file, event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const element = event.currentTarget;
-    // Focus returns to what held it, which may be inside the element: a
-    // playing video keeps the focus of its own controls.
-    trigger.current =
-      document.activeElement instanceof HTMLElement &&
-      element.contains(document.activeElement)
-        ? document.activeElement
-        : element;
-    keyboardOpen.current = !("clientX" in event);
-    setMenu({
-      file,
-      anchor:
-        "clientX" in event
-          ? createContextMenuAnchor(element, event.clientX, event.clientY)
-          : element,
-    });
-    setOpen(true);
-  }, []);
+  const openMenu = useCallback<OpenFileMenu>(
+    (file, event, atTrigger = false) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const element = event.currentTarget;
+      // Focus returns to what held it, which may be inside the element: a
+      // playing video keeps the focus of its own controls.
+      trigger.current =
+        document.activeElement instanceof HTMLElement &&
+        element.contains(document.activeElement)
+          ? document.activeElement
+          : element;
+      keyboardOpen.current = atTrigger || !("clientX" in event);
+      setMenu({
+        file,
+        anchor:
+          !atTrigger && "clientX" in event
+            ? createContextMenuAnchor(element, event.clientX, event.clientY)
+            : element,
+      });
+      setOpen(true);
+    },
+    [],
+  );
 
   async function perform(file: MenuFile, action: MenuAction) {
     if (!handler || active.current) return;
@@ -185,6 +194,7 @@ export function FileMenuScope({
       <div
         ref={root}
         aria-busy={pendingPath !== null}
+        data-menu-open={open || undefined}
         className={
           className ? `file-menu-scope ${className}` : "file-menu-scope"
         }
@@ -244,9 +254,34 @@ export function FileMenuScope({
                     onClick={() => void perform(menu.file, action)}
                   >
                     <Icon name={icon} />
-                    {t(label)}
+                    {t(
+                      action === "open" && menu.file.delivery?.opensInBrowser
+                        ? "outputs.open_browser"
+                        : label,
+                    )}
                   </Menu.Item>
                 ))}
+              {menu?.file.delivery && (
+                <>
+                  <Menu.Separator />
+                  {menu.file.delivery.viewSource && (
+                    <Menu.Item
+                      disabled={disabled(menu.file, "check")}
+                      onClick={menu.file.delivery.viewSource}
+                    >
+                      <Icon name="skill-file" />
+                      {t("outputs.view_source")}
+                    </Menu.Item>
+                  )}
+                  <Menu.Item
+                    disabled={disabled(menu.file, "check")}
+                    onClick={() => void perform(menu.file, "check")}
+                  >
+                    <Icon name="check" />
+                    {t("outputs.check")}
+                  </Menu.Item>
+                </>
+              )}
               {menu && pendingPath === menu.file.displayPath && (
                 <>
                   <Menu.Separator />

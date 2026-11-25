@@ -1393,14 +1393,35 @@ export function TaskContent({
               else if (entry.kind !== "video" && entry.kind !== "files") break;
             }
           }
-          const responseInfo = responseInfoAt && (
-            <MessageInfoBar
-              role="assistant"
-              time={finishedTime}
-              model={run.execution.model}
-              latest={run.id === latestCopyableId}
-              onCopy={() => copyResponseMarkdown(run.output.response)}
-            />
+          const outputsEntry = outputsEnabled &&
+            !presentation.active &&
+            onShowOutputs &&
+            task.conversationOutputs?.some(
+              (output) => BigInt(output.runId) <= BigInt(run.id),
+            ) && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="run-outputs-entry"
+                onClick={(event) => onShowOutputs(event.currentTarget)}
+              >
+                <Icon name="folder-open" />
+                {t("outputs.view")}
+                <Icon name="chevron-right" />
+              </Button>
+            );
+          const responseFooter = (
+            <>
+              {outputsEntry}
+              <MessageInfoBar
+                role="assistant"
+                time={finishedTime}
+                model={run.execution.model}
+                latest={run.id === latestCopyableId}
+                onCopy={() => copyResponseMarkdown(run.output.response)}
+              />
+            </>
           );
           const runLinks = runFileReferenceLinks(run);
           const referenceLink = (
@@ -1572,22 +1593,7 @@ export function TaskContent({
                   }
                 />
               )}
-              {outputsEnabled &&
-                !presentation.active &&
-                onShowOutputs &&
-                task.conversationOutputs?.some(
-                  (output) => BigInt(output.runId) <= BigInt(run.id),
-                ) && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="self-start"
-                    onClick={(event) => onShowOutputs(event.currentTarget)}
-                  >
-                    {t("outputs.view")}
-                  </Button>
-                )}
+              {!responseInfoAt && outputsEntry}
               {!presentation.active && (
                 <RunProcess
                   presentation={presentation}
@@ -1783,7 +1789,7 @@ export function TaskContent({
                           )
                         }
                       />
-                      {entry.identity === responseInfoAt && responseInfo}
+                      {entry.identity === responseInfoAt && responseFooter}
                     </Message>
                   ) : entry.kind === "video" ? (
                     videoPreviewLoader && (
@@ -1803,7 +1809,7 @@ export function TaskContent({
                           load={videoPreviewLoader}
                           describe={describeFile}
                         />
-                        {entry.identity === responseInfoAt && responseInfo}
+                        {entry.identity === responseInfoAt && responseFooter}
                       </Message>
                     )
                   ) : entry.kind === "files" ? (
@@ -1826,7 +1832,7 @@ export function TaskContent({
                               onPreviewWorkspaceFile(task.id, path, opener))
                           }
                         />
-                        {entry.identity === responseInfoAt && responseInfo}
+                        {entry.identity === responseInfoAt && responseFooter}
                       </Message>
                     )
                   ) : entry.kind === "supplement" ? (
@@ -1891,7 +1897,7 @@ export function TaskContent({
                             {t("privacy.sensitive_hidden")}
                           </p>
                         )}
-                        {entry.identity === responseInfoAt && responseInfo}
+                        {entry.identity === responseInfoAt && responseFooter}
                       </Message>
                     </Fragment>
                   ) : null,

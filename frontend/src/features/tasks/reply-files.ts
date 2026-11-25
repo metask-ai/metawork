@@ -1,4 +1,5 @@
 import type {
+  FileActionHandler,
   FileActionState,
   FileDescriptionResult,
   FilePreview,
@@ -7,10 +8,15 @@ import type {
   TaskView,
   WorkspaceView,
 } from "../../bridge/contracts.ts";
-import type { FileMenuOutcome, MenuFile } from "../../components/FileMenu.tsx";
+import type {
+  FileMenuAction,
+  FileMenuOutcome,
+  MenuFile,
+} from "../../components/FileMenu.tsx";
 import type { MessageId } from "../../i18n/context.ts";
 import { findRunFileReference } from "../../workbench/run-file-references.ts";
-import type { FileReferenceResult } from "./RunOutputs.tsx";
+export type FileReferenceResult =
+  "edit_prepared" | "cancelled" | "edit_unavailable";
 
 export type FilePreviewLoader = (
   target: FileTarget,
@@ -35,8 +41,38 @@ export function menuFileTarget(file: MenuFile): FileTarget {
   return file.target as FileTarget;
 }
 
+export async function performFileMenuAction(
+  file: MenuFile,
+  action: FileMenuAction,
+  signal: AbortSignal,
+  runAction: FileActionHandler,
+  reference: (
+    target: FileTarget,
+    path: string,
+    signal: AbortSignal,
+  ) => Promise<FileReferenceResult>,
+): Promise<FileMenuOutcome> {
+  const target = menuFileTarget(file);
+  try {
+    const state = await runAction(
+      target,
+      action === "reference" ? "check_current" : action,
+      signal,
+    );
+    if (action === "reference" && state === "ready")
+      return signal.aborted
+        ? null
+        : fileMenuOutcome(await reference(target, file.displayPath, signal));
+    return fileMenuOutcome(state, action);
+  } catch {
+    if (action === "save") return { message: "outputs.state.save_unknown" };
+    return signal.aborted ? null : { message: "outputs.state.failed" };
+  }
+}
+
 export function fileMenuOutcome(
   state: FileActionState | FileReferenceResult,
+  action?: FileMenuAction,
 ): FileMenuOutcome {
   switch (state) {
     case "opened":
@@ -46,9 +82,13 @@ export function fileMenuOutcome(
     case "edit_prepared":
     case "cancelled":
       return null;
-    // Nothing in the menu compares with a delivery.
     case "changed":
-      return { message: "outputs.state.file_changed" };
+      return {
+        message:
+          action === "check"
+            ? "outputs.state.changed"
+            : "outputs.state.file_changed",
+      };
     default:
       return { message: `outputs.state.${state}` };
   }

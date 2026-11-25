@@ -13,17 +13,16 @@ import {
   SkillMessageBody,
   UserInputMessage,
 } from "../features/tasks/UserInputMessage.tsx";
-import type { FileReferenceResult } from "../features/tasks/RunOutputs.tsx";
 import {
   FileMenuProvider,
   type FileMenuHandler,
   type MenuFile,
 } from "../components/FileMenu.tsx";
 import {
-  fileMenuOutcome,
+  performFileMenuAction,
+  type FileReferenceResult,
   fileTargetShown,
   menuFile,
-  menuFileTarget,
 } from "../features/tasks/reply-files.ts";
 import {
   historyProgress,
@@ -4922,28 +4921,14 @@ export default function App() {
     () => ({
       connected: !bridgeUnavailable,
       canReference: fileReferenceAllowed,
-      perform: async (file, action, signal) => {
-        const target = menuFileTarget(file);
-        // The draft this was asked for is the one open now, not the one open
-        // when the Host answers.
-        const reference = prepareFileReferenceRef.current;
-        try {
-          const state = await runFileAction(
-            target,
-            action === "reference" ? "check_current" : action,
-            signal,
-          );
-          return fileMenuOutcome(
-            action === "reference" && state === "ready"
-              ? await reference(target, file.displayPath, signal)
-              : state,
-          );
-        } catch {
-          if (action === "save")
-            return { message: "outputs.state.save_unknown" };
-          return signal.aborted ? null : { message: "outputs.state.failed" };
-        }
-      },
+      perform: (file, action, signal) =>
+        performFileMenuAction(
+          file,
+          action,
+          signal,
+          runFileAction,
+          prepareFileReferenceRef.current,
+        ),
     }),
     [bridgeUnavailable, fileReferenceAllowed, runFileAction],
   );
@@ -6289,10 +6274,6 @@ export default function App() {
                     workspaceFilesAvailable
                       ? openConversationWorkspaceFile
                       : undefined
-                  }
-                  onAction={runFileAction}
-                  onReference={
-                    fileReferenceAllowed ? prepareFileReference : undefined
                   }
                 />
               </div>

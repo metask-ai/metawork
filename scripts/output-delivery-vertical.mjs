@@ -355,7 +355,7 @@ export async function runOutputDeliveryVertical({
       await poll(
         () =>
           webview.evaluate(`(() => {
-        const button = [...document.querySelectorAll(${JSON.stringify(selector)})].findLast(item => !item.disabled && ${JSON.stringify(labels)}.some(label => item.textContent.trim().includes(label)));
+        const button = [...document.querySelectorAll(${JSON.stringify(selector)})].findLast(item => !item.disabled && ${JSON.stringify(labels)}.some(label => (item.textContent.trim().includes(label) || item.getAttribute("aria-label") === label)));
         if (!button) return false;
         button.click(); return true;
       })()`),
@@ -369,7 +369,7 @@ export async function runOutputDeliveryVertical({
     const card = (id) => `.run-files [data-output-id="${id}"] .file-card`;
     const statusOf = (id, list) =>
       list
-        ? `document.querySelector(${JSON.stringify(listed(id))})?.querySelector('.run-output-status')`
+        ? `document.querySelector(${JSON.stringify(listed(id))})?.querySelector('.file-menu-status p')`
         : `[...document.querySelectorAll(${JSON.stringify(card(id))})].at(-1)?.closest('.file-menu-scope')?.querySelector('.file-menu-status p')`;
     async function showMenu(id) {
       await poll(
@@ -414,9 +414,10 @@ export async function runOutputDeliveryVertical({
       const list = action === "check";
       if (list) {
         await clickLabel(labels("outputs.view"));
+        await clickLabel(labels("outputs.more"), `${listed(record.id)} button`);
         await clickLabel(
           labels("outputs.check"),
-          `${listed(record.id)} button`,
+          '.file-menu [role="menuitem"]',
         );
       } else {
         await showMenu(record.id);
@@ -719,7 +720,11 @@ export async function runOutputDeliveryVertical({
     assert.equal(htmlOutput.runId, page.id);
     await clickLabel(labels("outputs.view"));
     const htmlButtons = `#task-panel-tabpanel [data-output-id="${htmlOutput.id}"] button`;
-    await clickLabel(labels("outputs.view_source"), htmlButtons);
+    await clickLabel(labels("outputs.more"), htmlButtons);
+    await clickLabel(
+      labels("outputs.view_source"),
+      '.file-menu [role="menuitem"]',
+    );
     await poll(
       () =>
         webview.evaluate(
@@ -732,7 +737,11 @@ export async function runOutputDeliveryVertical({
     assert.equal(browser.observed(), undefined);
     if (nativeOutputProbe) {
       await clickLabel(labels("outputs.view"));
-      await clickLabel(labels("outputs.open_browser"), htmlButtons);
+      await clickLabel(labels("outputs.more"), htmlButtons);
+      await clickLabel(
+        labels("outputs.open_browser"),
+        '.file-menu [role="menuitem"]',
+      );
       evidence.htmlBrowser = await browser.verify();
       assert.equal(
         await readFile(path.join(workspaceRoot, html), "utf8"),

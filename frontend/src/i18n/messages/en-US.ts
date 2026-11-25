@@ -1413,6 +1413,7 @@ export const enUS = {
   "outputs.state.failed": "File operation failed. Try again.",
   "outputs.title": "Delivered files",
   "outputs.view": "View outputs",
+  "outputs.more": "More file actions",
   "outputs.open_browser": "Open in browser",
   "outputs.view_source": "View source",
   "outputs.open": "Open in default app",
