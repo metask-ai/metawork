@@ -648,12 +648,6 @@ pub const Runtime = struct {
         return wrapPrepareResult(self.account.prepareCommand(command));
     }
 
-    pub fn prepareTokenRefresh(self: *Runtime) PrepareResult {
-        self.assertMainThread();
-        if (self.stopping or self.refresh_blocked) return .{ .rejected = .invalid_state };
-        return wrapPrepareResult(self.account.prepareTokenRefresh());
-    }
-
     pub fn ownsTimer(timer_id: u64) bool {
         return timer_id == beat_timer_id;
     }
@@ -958,16 +952,14 @@ pub const Runtime = struct {
         }
         // A logout drops the credential one turn before it commits.
         if (!self.credentials.available()) return .signed_out;
-        const account_id = self.account.accountId();
         if (self.availableAuthorizationIdentity() != null)
-            return .{ .available = .{ .account_id = account_id, .generation = self.authorization_generation } };
+            return .{ .available = .{ .account_id = self.account.accountId(), .generation = self.authorization_generation } };
         const clock_reads = if (self.platform) |platform|
             platform.wall_clock.nowUnixSeconds() != null
         else
             false;
-        if (!clock_reads and !self.account.refreshInFlight())
-            return .{ .stalled = .{ .account_id = account_id } };
-        return .{ .recovering = .{ .account_id = account_id, .epoch = self.renewal_epoch } };
+        if (!clock_reads and !self.account.refreshInFlight()) return .stalled;
+        return .{ .recovering = self.renewal_epoch };
     }
 
     pub fn preparedFact(
@@ -1932,11 +1924,13 @@ pub const TestSupport = if (builtin.is_test) struct {
         );
     }
 
+    /// The renewal a due moment starts, whether or not one is due.
+    pub fn prepareTokenRefresh(runtime: *Runtime) Prepared {
+        return preparedFromState(runtime.account.prepareTokenRefresh());
+    }
+
     pub fn prepareTokenRefreshWithoutEffect(runtime: *Runtime) Prepared {
-        var prepared = switch (runtime.prepareTokenRefresh()) {
-            .prepared => |value| value,
-            else => @panic("test Account cannot begin token refresh"),
-        };
+        var prepared = prepareTokenRefresh(runtime);
         _ = prepared.transition.takeEffect() orelse
             @panic("test token refresh has no effect");
         runtime.captureRequestBinding(prepared.attemptId().?);
@@ -2661,10 +2655,7 @@ fn beginTestRefresh(runtime: *Runtime, platform: *TestSupport.Platform) !void {
     var authenticated = try TestSupport.prepareAuthenticatedAndSchedule(runtime, "account-1", "Metask", "access-token", "refresh-token", 200);
     defer authenticated.deinit();
     runtime.commit(&authenticated);
-    var refresh = switch (runtime.prepareTokenRefresh()) {
-        .prepared => |prepared| prepared,
-        else => return error.TestUnexpectedResult,
-    };
+    var refresh = TestSupport.prepareTokenRefresh(runtime);
     defer refresh.deinit();
     try std.testing.expect(runtime.admitEffect(&refresh));
     runtime.commit(&refresh);
@@ -2735,10 +2726,7 @@ test "a refresh that cannot read the clock keeps the verified session" {
     var authenticated = try TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask", "access-token", "refresh-token", 200);
     defer authenticated.deinit();
     runtime.commit(&authenticated);
-    var refresh = switch (runtime.prepareTokenRefresh()) {
-        .prepared => |prepared| prepared,
-        else => return error.TestUnexpectedResult,
-    };
+    var refresh = TestSupport.prepareTokenRefresh(&runtime);
     defer refresh.deinit();
     try std.testing.expect(runtime.admitEffect(&refresh));
     runtime.commit(&refresh);
@@ -2937,7 +2925,7 @@ test "every Account state answers one authorization" {
     // An expired token recovers; an attempt underway always has an outcome.
     verified_platform.now_unix_seconds = 200;
     try std.testing.expectEqual(Use{ .wait = 0 }, verified.authorization().use());
-    try std.testing.expectEqualStrings("account-1", verified.authorization().recovering.account_id);
+    try std.testing.expectEqual(@as(u64, 0), verified.authorization().recovering);
     var refresh = TestSupport.prepareTokenRefreshWithoutEffect(&verified);
     defer refresh.deinit();
     verified.commit(&refresh);

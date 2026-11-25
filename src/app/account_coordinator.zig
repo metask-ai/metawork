@@ -1125,8 +1125,10 @@ test "Account follower keeps the authorization of a token still valid or expirin
     // The expiry itself is no commit; the next one reports a recovery, never
     // the loss of the account.
     platform.now_unix_seconds = 150;
-    account_api.TestSupport.publishFailure(&runtime, runtime.account.activeAttempt().?, .account_operation_failed);
-    try std.testing.expectEqual(.recovering, std.meta.activeTag(runtime.authorization()));
+    account_api.TestSupport.publishUnsentRefreshFailure(&runtime, .account_operation_failed);
+    coordinator.drain();
+    try std.testing.expectEqual(@as(usize, 2), follower.calls);
+    try std.testing.expectEqual(.recovering, follower.last);
 }
 
 test "Account commit installs, renews, follows and settles in that order" {
@@ -1210,10 +1212,7 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
         var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
         try std.testing.expect(!coordinator.tick());
         // A direct refresh does not schedule unrelated summary or catalog work.
-        var refresh = switch (runtime.prepareTokenRefresh()) {
-            .prepared => |p| p,
-            else => return error.TestUnexpectedResult,
-        };
+        var refresh = account_api.TestSupport.prepareTokenRefresh(&runtime);
         defer refresh.deinit();
         try std.testing.expect(runtime.admitEffect(&refresh));
         runtime.commit(&refresh);
@@ -1256,10 +1255,7 @@ test "Account shutdown failed rotation save preserves durable block without a se
     runtime.commit(&auth);
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
-    var refresh = switch (runtime.prepareTokenRefresh()) {
-        .prepared => |p| p,
-        else => return error.TestUnexpectedResult,
-    };
+    var refresh = account_api.TestSupport.prepareTokenRefresh(&runtime);
     defer refresh.deinit();
     try std.testing.expect(runtime.admitEffect(&refresh));
     runtime.commit(&refresh);

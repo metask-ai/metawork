@@ -207,6 +207,10 @@ test "Metask message sent while a restart confirms the login runs once after it"
     try characterizeCredentialExpiry(.restart_confirms);
 }
 
+test "Metask detached Task waits while a login is confirmed, for that attempt only" {
+    try characterizeCredentialExpiry(.detached_confirms);
+}
+
 test "Metask restart without a connection keeps the login and each message waits for one attempt" {
     try characterizeCredentialExpiry(.restart_unreachable);
 }
@@ -371,7 +375,7 @@ test "Metask long Run retains more than 128 rotations and protects unrelated Tas
     try characterizeCredentialExpiry(.many_rotations);
 }
 
-const Scenario = enum { recovery_keeps_catalog, restart_confirms, restart_unreachable, login_cancelled, retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, renewal_unsent, renewal_lost, relogin, relogin_during_run, account_switch_during_run, logout_during_run, rebind_original_account_switch, rebind_original_relogin, rebind_original_renewal, account_switch, account_switch_after_logout, logout, detached, detached_account_switch, catalog_failure, catalog_loading_attached, catalog_loading_detached, session_close_retry, catalog_drift, own_declaration, own_protocol, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer, compact_rotation, compact_rebind_original_relogin };
+const Scenario = enum { detached_confirms, recovery_keeps_catalog, restart_confirms, restart_unreachable, login_cancelled, retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, renewal_unsent, renewal_lost, relogin, relogin_during_run, account_switch_during_run, logout_during_run, rebind_original_account_switch, rebind_original_relogin, rebind_original_renewal, account_switch, account_switch_after_logout, logout, detached, detached_account_switch, catalog_failure, catalog_loading_attached, catalog_loading_detached, session_close_retry, catalog_drift, own_declaration, own_protocol, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer, compact_rotation, compact_rebind_original_relogin };
 
 const CatalogRetryTimer = struct {
     id: ?u64 = null,
@@ -516,6 +520,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         return;
     }
     switch (scenario) {
+        .detached_confirms => return characterizeDetachedConfirmation(&wake_loop, &control, &accounts, old_id),
         .recovery_keeps_catalog => return characterizeRecovery(&wake_loop, &control, &accounts, &platform, &coordinator, &network, old_id),
         .restart_unreachable => return characterizeUnreachableRestart(&wake_loop, &control, &accounts, &platform, &coordinator, &network, old_id),
         .restart_confirms => return characterizeRestart(&wake_loop, &control, &accounts, &platform, &coordinator, &network, old_id),
@@ -1383,6 +1388,42 @@ fn characterizeRecovery(
     try std.testing.expectEqual(.none, control.newTaskAdmissionView().metask);
     try drainCatalog(coordinator);
     try expectWaitingInputRuns(wake_loop, control, task_id, "after-expiry");
+}
+
+/// A real restart leaves every Task detached. While the login is confirmed it
+/// takes a message as an attached one does, and restores nothing for it.
+fn characterizeDetachedConfirmation(wake_loop: *fixture.LifecycleWakeLoop, control: *control_api.Runtime, accounts: *account_coordinator.Coordinator, task_id: u64) !void {
+    const Confirming = struct {
+        epoch: u64 = 0,
+        fn status(context: *anyopaque) fixture.account_contract.Authorization {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return .{ .checking = self.epoch };
+        }
+    };
+    const task = control.testTask(task_id).?;
+    try std.testing.expect(try control_api.TestSupport.retryTaskSessionClose(control, task_id));
+    for (0..5000) |_| {
+        try wake_loop.drain(control);
+        if (task.runtime.attachment == .detached and task.runtime.close_thread == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.DetachDidNotSettle;
+    var confirming: Confirming = .{};
+    control.setAccountAuthorization(.{ .context = &confirming, .status_fn = Confirming.status });
+    defer control.setAccountAuthorization(accounts.authorizationQuery());
+
+    _ = try control.sendInput("while-detached", task_id, .{ .text = "Reply with a short text; do not call tools." });
+    for (0..5000) |_| {
+        try wake_loop.drain(control);
+        if (lastSubmission(task).metask_recovery_epoch != null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.DetachedMessageDidNotWait;
+    try std.testing.expectEqual(.waiting, lastSubmission(task).state);
+    confirming.epoch += 1;
+    control.syncLifecycle();
+    const unsent = control.task_runtime.retrySubmission(task_id, "while-detached") orelse
+        return error.WaitingMessageDidNotFail;
+    try std.testing.expectEqual(.metask_connection_unavailable, unsent.reason.?);
+    try std.testing.expect(task.runtime.attachment == .detached and runCalls() == 1);
 }
 
 /// Account starts again over the stored login, as a restart does, while this
