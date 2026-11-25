@@ -325,6 +325,7 @@ pub const max_attachment_thumbnail_bytes = product_attachment.max_image_thumbnai
 pub const max_attachment_thumbnail_side = product_attachment.max_image_thumbnail_side;
 pub const attachmentThumbnailPixelBudget = product_attachment.thumbnailPixelBudget;
 pub const MediaTarget = media_source.Target;
+pub const MessageAttachment = media_source.MessageAttachment;
 pub const max_media_index = media_source.max_index;
 
 comptime {
@@ -2393,23 +2394,21 @@ pub const Runtime = struct {
         };
         return self.queueFilePreview(completion_id, .deliver, switch (target) {
             .draft_attachment => |attachment_id| .{ .draft_attachment = attachment_id },
-            .run_attachment => |value| .{ .task_attachment = value.task_id },
-            .submission_attachment => |value| .{ .task_attachment = value.task_id },
+            .message_attachment => |value| .{ .task_attachment = value.task_id },
         }, .{ .workspace_id = 0, .workspace_epoch = 0, .root = stored.directory, .relative = stored.relative });
     }
 
     /// The record a Task-owned target names, asked of the Task that owns it.
     /// A draft target has no Task record by construction.
     fn acceptedAttachmentMedia(self: *const Runtime, target: MediaTarget) ?media_source.Accepted {
-        const task_id, const message, const index = switch (target) {
+        const sent = switch (target) {
             .draft_attachment => return null,
-            .run_attachment => |value| .{ value.task_id, task_runtime.Runtime.AttachmentMessage{ .run = value.run_id }, value.index },
-            .submission_attachment => |value| .{ value.task_id, task_runtime.Runtime.AttachmentMessage{ .submission = value.operation_id }, value.index },
+            .message_attachment => |value| value,
         };
-        if (index > media_source.max_index) return null;
-        const accepted = self.task_runtime.acceptedAttachment(task_id, message, index) orelse return null;
+        if (sent.index > media_source.max_index) return null;
+        const accepted = self.task_runtime.acceptedAttachment(sent.task_id, sent.message, sent.index) orelse return null;
         return .{
-            .task_id = task_id,
+            .task_id = sent.task_id,
             .media = .{
                 .original_name = accepted.media.original_name,
                 .thumbnail_name = accepted.media.thumbnail_name,
@@ -21147,7 +21146,7 @@ test "a sent image attachment serves both media tiers from the identity its mess
     const previous_input = run.input;
     defer run.input = previous_input;
     run.input = .{ .multimodal = .{ .text = null, .attachments = &records } };
-    const sent: MediaTarget = .{ .run_attachment = .{ .task_id = 3, .run_id = 7, .index = 0 } };
+    const sent: MediaTarget = .{ .message_attachment = .{ .task_id = 3, .message = .{ .run = 7 }, .index = 0 } };
 
     const ready = control.mediaThumbnail(sent, &thumbnail_scratch).ready;
     try std.testing.expectEqualStrings(staged_jpeg, ready.bytes);
@@ -21159,11 +21158,11 @@ test "a sent image attachment serves both media tiers from the identity its mess
 
     // Only this image at this position of this message resolves.
     for ([_]MediaTarget{
-        .{ .run_attachment = .{ .task_id = 3, .run_id = 7, .index = 1 } },
-        .{ .run_attachment = .{ .task_id = 3, .run_id = 7, .index = 2 } },
-        .{ .run_attachment = .{ .task_id = 3, .run_id = 8, .index = 0 } },
-        .{ .run_attachment = .{ .task_id = 4, .run_id = 7, .index = 0 } },
-        .{ .submission_attachment = .{ .task_id = 3, .operation_id = "op-1", .index = 0 } },
+        .{ .message_attachment = .{ .task_id = 3, .message = .{ .run = 7 }, .index = 1 } },
+        .{ .message_attachment = .{ .task_id = 3, .message = .{ .run = 7 }, .index = 2 } },
+        .{ .message_attachment = .{ .task_id = 3, .message = .{ .run = 8 }, .index = 0 } },
+        .{ .message_attachment = .{ .task_id = 4, .message = .{ .run = 7 }, .index = 0 } },
+        .{ .message_attachment = .{ .task_id = 3, .message = .{ .submission = "op-1" }, .index = 0 } },
     }) |target| {
         try std.testing.expectEqual(FilePreviewState.missing, control.mediaThumbnail(target, &thumbnail_scratch).unavailable);
         try std.testing.expectEqual(
@@ -21172,8 +21171,18 @@ test "a sent image attachment serves both media tiers from the identity its mess
         );
     }
 
+    // The same submission resolves once this Run is the one that took it, and
+    // the Run is then not a second address for that message.
+    const accepted_message: MediaTarget = .{ .message_attachment = .{ .task_id = 3, .message = .{ .submission = "op-1" }, .index = 0 } };
+    run.submission = .{ .operation_id_len = "op-1".len };
+    defer run.submission = null;
+    @memcpy(run.submission.?.operation_id[0.."op-1".len], "op-1");
+    try std.testing.expectEqualStrings(staged_jpeg, control.mediaThumbnail(accepted_message, &thumbnail_scratch).ready.bytes);
+    try std.testing.expectEqual(FilePreviewState.missing, control.mediaThumbnail(sent, &thumbnail_scratch).unavailable);
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission{ .immediate = .missing }, control.beginMediaPreview(90, sent));
+
     // The viewer tier reads the retained original on the existing lane.
-    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginMediaPreview(91, sent));
+    try std.testing.expectEqual(Runtime.FilePreviewAdmission.queued, control.beginMediaPreview(91, accepted_message));
     var capture: PreviewTestCapture = .{};
     try capture.wait(control);
     try std.testing.expectEqual(FilePreviewState.ready, capture.state);
@@ -21186,13 +21195,13 @@ test "a sent image attachment serves both media tiers from the identity its mess
     // A redacted record hands out neither tier, and an image sent before the
     // identity existed has nothing to resolve.
     records[0].redacted = true;
-    try std.testing.expectEqual(FilePreviewState.missing, control.mediaThumbnail(sent, &thumbnail_scratch).unavailable);
+    try std.testing.expectEqual(FilePreviewState.missing, control.mediaThumbnail(accepted_message, &thumbnail_scratch).unavailable);
     records[0].redacted = false;
     records[0].media = null;
-    try std.testing.expectEqual(FilePreviewState.missing, control.mediaThumbnail(sent, &thumbnail_scratch).unavailable);
+    try std.testing.expectEqual(FilePreviewState.missing, control.mediaThumbnail(accepted_message, &thumbnail_scratch).unavailable);
     try std.testing.expectEqual(
         Runtime.FilePreviewAdmission{ .immediate = .missing },
-        control.beginMediaPreview(92, sent),
+        control.beginMediaPreview(92, accepted_message),
     );
 }
 

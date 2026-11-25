@@ -3206,6 +3206,13 @@ async function invokePreparedRun(payload) {
 // Task retains. The identity behind both is persisted, so this holds after a
 // cold restart, where the runtime correlation it replaced would not.
 async function assertSentAttachmentMedia(taskId, run) {
+  // A direct tasks.run accepts no submission, so the Run is the message.
+  assert.equal(run.submission, null);
+  const target = {
+    kind: "messageAttachment",
+    taskId,
+    message: { kind: "run", runId: run.id },
+  };
   const identity = JSON.stringify(run.input.attachments);
   for (const leaked of ["originalName", "thumbnailName", 'media":{'])
     assert.equal(
@@ -3219,7 +3226,7 @@ async function assertSentAttachmentMedia(taskId, run) {
   ]) {
     const answer = await invokeBridge("metawork.media.thumbnail", {
       generation: "1",
-      target: { kind: "runAttachment", taskId, runId: run.id, index },
+      target: { ...target, index },
     });
     // What the chip claims and what the tier answers must agree. A derivative
     // is bounded in bytes as well as in pixels, so a high-entropy original can
@@ -3258,7 +3265,7 @@ async function assertSentAttachmentMedia(taskId, run) {
       (
         await invokeBridge("metawork.media.thumbnail", {
           generation: "1",
-          target: { kind: "runAttachment", taskId, runId: run.id, index },
+          target: { ...target, index },
         })
       )?.state,
       "missing",
@@ -3269,7 +3276,7 @@ async function assertSentAttachmentMedia(taskId, run) {
   const viewer = await invokeBridge("metawork.media.preview", {
     generation: "1",
     previewId: String(++sentMediaPreviewId),
-    target: { kind: "runAttachment", taskId, runId: run.id, index: 1 },
+    target: { ...target, index: 1 },
   });
   assert.equal(
     viewer?.state,
@@ -3288,7 +3295,7 @@ async function assertSentAttachmentMedia(taskId, run) {
   const oversized = await invokeBridge("metawork.media.preview", {
     generation: "1",
     previewId: String(++sentMediaPreviewId),
-    target: { kind: "runAttachment", taskId, runId: run.id, index: 0 },
+    target: { ...target, index: 0 },
   });
   assert.equal(oversized?.state, "unsupported");
   assert.equal(oversized?.reason, "image_limit");

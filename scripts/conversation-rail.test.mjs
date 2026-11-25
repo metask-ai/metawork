@@ -634,3 +634,57 @@ test("a new choice replaces a waiting jump and releases its history first", () =
     false,
   );
 });
+
+test("a sent image keeps one address from waiting through its Run", () => {
+  const image = { kind: "image", format: "png", displayName: "shot.png" };
+  const input = {
+    kind: "multimodal",
+    text: "Look",
+    attachments: [{ ...image, sizeBytes: "10", media: true, redacted: false }],
+    skill: null,
+    redacted: false,
+  };
+  const submission = {
+    ...runView("9").submission,
+    operationId: "op-image",
+    anchorRunId: "5",
+  };
+  const loaded = [];
+  const loadAttachmentThumbnail = (target) => {
+    loaded.push(target);
+    return new Promise(() => {});
+  };
+  const show = (task) =>
+    withI18n(
+      createElement(
+        TaskContent,
+        contentProps(task, [], undefined, { loadAttachmentThumbnail }),
+      ),
+    );
+  const executed = (ids, own) => {
+    const task = taskView("1", ids);
+    Object.assign(task.runs.at(-1), { submission: own, input });
+    return show(task);
+  };
+  const address = (message) => ({
+    kind: "messageAttachment",
+    taskId: "1",
+    message,
+    index: 0,
+  });
+  const accepted = address({ kind: "submission", operationId: "op-image" });
+  const waiting = { submission, input, state: "waiting", reason: null };
+
+  const view = render(
+    show({ ...taskView("1", ["5"]), inputSubmissions: [waiting] }),
+  );
+  // Becoming a Run moves nothing and asks for nothing again.
+  view.rerender(executed(["5", "9"], submission));
+  assert.deepEqual(loaded, [accepted]);
+  // Without its anchor loaded the message moves, and its address does not.
+  view.rerender(executed(["9"], submission));
+  assert.deepEqual(loaded, [accepted, accepted]);
+  // Only a Run nothing was accepted for is addressed by itself.
+  view.rerender(executed(["12"], null));
+  assert.deepEqual(loaded.at(-1), address({ kind: "run", runId: "12" }));
+});

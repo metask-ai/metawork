@@ -636,8 +636,7 @@ fn fileTargetId(object: std.json.ObjectMap, name: []const u8) !u64 {
 /// an unregistered kind fails closed rather than resolving to a default.
 pub const MediaTarget = union(product_control.MediaKind) {
     draft_attachment: struct { token: []const u8 },
-    run_attachment: struct { task_id: u64, run_id: u64, index: u32 },
-    submission_attachment: struct { task_id: u64, operation_id: []const u8, index: u32 },
+    message_attachment: product_control.MessageAttachment,
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
         const value = try std.json.innerParse(std.json.Value, allocator, source, options);
@@ -655,19 +654,11 @@ pub const MediaTarget = union(product_control.MediaKind) {
                 if (object.count() != 2) return error.UnexpectedToken;
                 return .{ .draft_attachment = .{ .token = try targetText(object, "token") } };
             },
-            .run_attachment => {
+            .message_attachment => {
                 if (object.count() != 4) return error.UnexpectedToken;
-                return .{ .run_attachment = .{
-                    .task_id = try targetId(object, "taskId"),
-                    .run_id = try targetId(object, "runId"),
-                    .index = try mediaTargetIndex(object),
-                } };
-            },
-            .submission_attachment => {
-                if (object.count() != 4) return error.UnexpectedToken;
-                return .{ .submission_attachment = .{
-                    .task_id = try targetId(object, "taskId"),
-                    .operation_id = try targetText(object, "operationId"),
+                return .{ .message_attachment = .{
+                    .task_id = try fileTargetId(object, "taskId"),
+                    .message = try targetMessage(object),
                     .index = try mediaTargetIndex(object),
                 } };
             },
@@ -680,8 +671,7 @@ pub const MediaTarget = union(product_control.MediaKind) {
     pub fn product(self: @This()) ?product_control.MediaTarget {
         return switch (self) {
             .draft_attachment => null,
-            .run_attachment => |value| .{ .run_attachment = .{ .task_id = value.task_id, .run_id = value.run_id, .index = value.index } },
-            .submission_attachment => |value| .{ .submission_attachment = .{ .task_id = value.task_id, .operation_id = value.operation_id, .index = value.index } },
+            .message_attachment => |value| .{ .message_attachment = value },
         };
     }
 };
@@ -695,6 +685,21 @@ fn targetText(object: std.json.ObjectMap, name: []const u8) ![]const u8 {
 
 fn targetId(object: std.json.ObjectMap, name: []const u8) !u64 {
     return parseWireId(try targetText(object, name)) catch error.UnexpectedToken;
+}
+
+/// Which message owns the attachment, exactly in the shape its identity takes.
+fn targetMessage(object: std.json.ObjectMap) !@FieldType(product_control.MessageAttachment, "message") {
+    const message = switch (object.get("message") orelse return error.UnexpectedToken) {
+        .object => |fields| fields,
+        else => return error.UnexpectedToken,
+    };
+    if (message.count() != 2) return error.UnexpectedToken;
+    const kind = try targetText(message, "kind");
+    if (std.mem.eql(u8, kind, "run")) return .{ .run = try fileTargetId(message, "runId") };
+    if (!std.mem.eql(u8, kind, "submission")) return error.UnexpectedToken;
+    const operation_id = try targetText(message, "operationId");
+    validateInputOperationId(operation_id) catch return error.UnexpectedToken;
+    return .{ .submission = operation_id };
 }
 
 /// The position inside the message that owns the attachment, as a number
@@ -1463,38 +1468,50 @@ test "media payloads require one exact registered target" {
 }
 
 test "a Task-owned attachment media target carries exactly its own message identity" {
+    const prefix = "{\"generation\":\"1\",\"target\":{\"kind\":\"messageAttachment\",\"taskId\":";
     var run = try parsePayload(
         MediaThumbnailRequest,
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":2}}",
+        prefix ++ "\"3\",\"message\":{\"kind\":\"run\",\"runId\":\"9\"},\"index\":2}}",
     );
     defer run.deinit();
-    const run_target = run.value.target.product().?.run_attachment;
+    const run_target = run.value.target.product().?.message_attachment;
     try std.testing.expectEqual(@as(u64, 3), run_target.task_id);
-    try std.testing.expectEqual(@as(u64, 9), run_target.run_id);
+    try std.testing.expectEqual(@as(u64, 9), run_target.message.run);
     try std.testing.expectEqual(@as(u32, 2), run_target.index);
-    var waiting = try parsePayload(
-        MediaPreviewRequest,
-        "{\"generation\":\"1\",\"previewId\":\"4\",\"target\":{\"kind\":\"submissionAttachment\",\"taskId\":\"3\",\"operationId\":\"op-7\",\"index\":0}}",
+    var accepted = try parsePayload(
+        MediaThumbnailRequest,
+        prefix ++ "\"3\",\"message\":{\"kind\":\"submission\",\"operationId\":\"op-7\"},\"index\":0}}",
     );
-    defer waiting.deinit();
-    const waiting_target = waiting.value.target.product().?.submission_attachment;
-    try std.testing.expectEqual(@as(u64, 3), waiting_target.task_id);
-    try std.testing.expectEqualStrings("op-7", waiting_target.operation_id);
+    defer accepted.deinit();
+    const accepted_target = accepted.value.target.product().?.message_attachment;
+    try std.testing.expectEqual(@as(u64, 3), accepted_target.task_id);
+    try std.testing.expectEqualStrings("op-7", accepted_target.message.submission);
     // A kind takes its own fields and no others: no draft token, no mixing the
     // two message identities, no index beyond what one message can carry, and
     // no id in a shape wire ids are never written in.
-    for ([_][]const u8{
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"9\"}}",
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":2,\"token\":\"aa\"}}",
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"operationId\":\"op-7\",\"index\":2}}",
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":8}}",
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":-1}}",
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":\"2\"}}",
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":3,\"runId\":\"9\",\"index\":2}}",
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"03\",\"runId\":\"9\",\"index\":2}}",
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"submissionAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":2}}",
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"taskAttachment\",\"taskId\":\"3\",\"runId\":\"9\",\"index\":2}}",
-    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(MediaThumbnailRequest, payload));
+    const message = "\"message\":{\"kind\":\"run\",\"runId\":\"9\"}";
+    inline for (.{
+        "\"3\"," ++ message ++ "}}",
+        "\"3\"," ++ message ++ ",\"index\":2,\"token\":\"aa\"}}",
+        "\"3\"," ++ message ++ ",\"index\":8}}",
+        "\"3\"," ++ message ++ ",\"index\":-1}}",
+        "\"3\"," ++ message ++ ",\"index\":\"2\"}}",
+        "3," ++ message ++ ",\"index\":2}}",
+        "\"0\"," ++ message ++ ",\"index\":2}}",
+        "\"03\"," ++ message ++ ",\"index\":2}}",
+        "\"3\",\"runId\":\"9\",\"index\":2}}",
+        "\"3\",\"message\":\"9\",\"index\":2}}",
+        "\"3\",\"message\":{\"kind\":\"run\",\"runId\":\"0\"},\"index\":2}}",
+        "\"3\",\"message\":{\"kind\":\"run\",\"operationId\":\"op-7\"},\"index\":2}}",
+        "\"3\",\"message\":{\"kind\":\"run\",\"runId\":\"9\",\"operationId\":\"op-7\"},\"index\":2}}",
+        "\"3\",\"message\":{\"kind\":\"submission\",\"runId\":\"9\"},\"index\":2}}",
+        "\"3\",\"message\":{\"kind\":\"submission\",\"operationId\":\"\"},\"index\":2}}",
+        "\"3\",\"message\":{\"kind\":\"task\",\"runId\":\"9\"},\"index\":2}}",
+    }) |rest| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(MediaThumbnailRequest, prefix ++ rest));
+    try std.testing.expectError(error.InvalidBridgePayload, parsePayload(
+        MediaThumbnailRequest,
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"taskAttachment\",\"taskId\":\"3\"," ++ message ++ ",\"index\":2}}",
+    ));
 }
 
 test "file change diff payload requires exact Task Run and change identity" {

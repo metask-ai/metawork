@@ -92,6 +92,7 @@ pub const MediaTier = runtime_impl.MediaTier;
 pub const MediaThumbnail = runtime_impl.MediaThumbnail;
 pub const MediaThumbnailResult = runtime_impl.MediaThumbnailResult;
 pub const MediaTarget = runtime_impl.MediaTarget;
+pub const MessageAttachment = runtime_impl.MessageAttachment;
 pub const max_media_index = runtime_impl.max_media_index;
 pub const max_attachment_batch_files = product_attachment.max_files_per_message;
 pub const attachment_record_capacity = product_attachment.record_capacity;

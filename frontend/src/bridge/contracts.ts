@@ -418,17 +418,20 @@ export type FileDescriptionResult =
       state: "missing" | "restricted" | "changing" | "error";
       file: null;
     };
+/// The one identity a sent message has from acceptance through its Run: the
+/// submission it was accepted with, or its Run when it had none.
+export type MessageIdentity =
+  { kind: "submission"; operationId: string } | { kind: "run"; runId: string };
 /// A registered media target, in the shape its kind declares. A draft is owned
 /// by the staged grant that issued its token; a sent image is owned by the
 /// message it was accepted with, which is addressed by the Task, the message
 /// and the position the transcript already shows.
 export type MediaTarget =
   | { kind: "draftAttachment"; token: string }
-  | { kind: "runAttachment"; taskId: string; runId: string; index: number }
   | {
-      kind: "submissionAttachment";
+      kind: "messageAttachment";
       taskId: string;
-      operationId: string;
+      message: MessageIdentity;
       index: number;
     };
 /// One synchronous answer per chip: the derived PNG arrives inline, so this

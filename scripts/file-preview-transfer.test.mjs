@@ -461,7 +461,12 @@ test("a text preview can finish while image receipt is blocked", async () => {
 
 const token = "a".repeat(48);
 const draft = { kind: "draftAttachment", token };
-const sent = { kind: "runAttachment", taskId: "3", runId: "7", index: 0 };
+const sent = {
+  kind: "messageAttachment",
+  taskId: "3",
+  message: { kind: "submission", operationId: "7" },
+  index: 0,
+};
 const thumbnailResponse = (overrides = {}) => ({
   state: "ready",
   thumbnail: {
@@ -629,9 +634,13 @@ test("a sent image uses the same two tiers under its own target", async () => {
   const second = await loader.loadThumbnail({ ...sent, index: 1 });
   assert.equal(second.state, "ready");
   assert.notEqual(first.image.id, second.image.id);
+  // Neither does a Run whose id happens to spell another message's operation.
+  const run = { ...sent, message: { kind: "run", runId: "7" } };
+  const third = await loader.loadThumbnail(run);
+  assert.notEqual(third.image.id, first.image.id);
   assert.deepEqual(
     calls.map((call) => call.payload.target),
-    [sent, { ...sent, index: 1 }],
+    [sent, { ...sent, index: 1 }, run],
   );
   const host = new Host();
   const viewer = await host.loader.loadAttachment(sent);
@@ -645,6 +654,7 @@ test("a sent image uses the same two tiers under its own target", async () => {
   assert.equal(host.active.size, 0);
   first.release();
   second.release();
+  third.release();
 });
 
 test("file descriptions decode the Host fixture exactly and carry no content", async () => {

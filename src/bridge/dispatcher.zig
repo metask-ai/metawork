@@ -1869,19 +1869,7 @@ pub const Dispatcher = struct {
             // already establishes, and that Product still holds the identity
             // its message persisted. Product decides the latter, so a target
             // that names nothing is an ordinary `missing` from there.
-            .run_attachment, .submission_attachment => {
-                const value = target.product().?;
-                const task_id = switch (value) {
-                    .draft_attachment => unreachable,
-                    .run_attachment => |run| run.task_id,
-                    .submission_attachment => |waiting| waiting.task_id,
-                };
-                if (task_id == 0) return error.InvalidBridgePayload;
-                if (value == .run_attachment and value.run_attachment.run_id == 0) return error.InvalidBridgePayload;
-                if (value == .submission_attachment)
-                    try handlers.validateInputOperationId(value.submission_attachment.operation_id);
-                return .{ .target = value };
-            },
+            .message_attachment => return .{ .target = target.product().? },
         }
     }
 
@@ -7354,7 +7342,7 @@ test "attachment media commands bind the draft grant to this connection and wind
     // window, and Product answers for the message. This Task's message has no
     // image attachment, so it is an ordinary missing state rather than an
     // error, and another window cannot ask at all.
-    const sent_payload = "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"7\",\"index\":0}}";
+    const sent_payload = "{\"generation\":\"1\",\"target\":{\"kind\":\"messageAttachment\",\"taskId\":\"3\",\"message\":{\"kind\":\"run\",\"runId\":\"7\"},\"index\":0}}";
     const sent: native_sdk.bridge.Invocation = .{
         .request = .{ .id = "thumb", .command = commands.media_thumbnail, .payload = sent_payload },
         .source = request.source,
@@ -7363,9 +7351,9 @@ test "attachment media commands bind the draft grant to this connection and wind
     const sent_foreign: native_sdk.bridge.Invocation = .{ .request = sent.request, .source = .{ .origin = "zero://app", .window_id = 4 } };
     if (thumbnail.invoke_fn(thumbnail.context, sent_foreign, output)) |_| return error.ForeignWindowThumbnailAllowed else |_| {}
     for ([_][]const u8{
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"0\",\"runId\":\"7\",\"index\":0}}",
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"runAttachment\",\"taskId\":\"3\",\"runId\":\"0\",\"index\":0}}",
-        "{\"generation\":\"1\",\"target\":{\"kind\":\"submissionAttachment\",\"taskId\":\"3\",\"operationId\":\"\",\"index\":0}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"messageAttachment\",\"taskId\":\"0\",\"message\":{\"kind\":\"run\",\"runId\":\"7\"},\"index\":0}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"messageAttachment\",\"taskId\":\"3\",\"message\":{\"kind\":\"run\",\"runId\":\"0\"},\"index\":0}}",
+        "{\"generation\":\"1\",\"target\":{\"kind\":\"messageAttachment\",\"taskId\":\"3\",\"message\":{\"kind\":\"submission\",\"operationId\":\"\"},\"index\":0}}",
     }) |invalid| {
         const rejected: native_sdk.bridge.Invocation = .{
             .request = .{ .id = "thumb", .command = commands.media_thumbnail, .payload = invalid },

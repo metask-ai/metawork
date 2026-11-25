@@ -16,26 +16,23 @@
 
 const std = @import("std");
 const attachment = @import("metawork_product_attachment");
+const MessageIdentity = @import("product_task_view_contract").MessageIdentity;
 
 pub const Kind = enum {
     /// A staged image in the Composer draft. Authority is the Bridge grant that
     /// issued its token: connection- and window-bound, one shot. No Task
     /// identity is involved, which is what lets New Task serve a draft chip.
     draft_attachment,
-    /// An image a Run took as its input. Authority is that this window may read
-    /// this Task and that the Run record still carries the identity Product
-    /// persisted for it, not a draft grant: that grant was consumed when the
-    /// message was sent.
-    run_attachment,
-    /// The same, for a message that was accepted but is still waiting for its
-    /// turn. It is addressed by its submission rather than by a Run, because it
-    /// does not have one yet.
-    submission_attachment,
+    /// An image of a message a Task accepted. Authority is that this window may
+    /// read this Task and that the message's record still carries the identity
+    /// Product persisted for it, not a draft grant: that grant was consumed
+    /// when the message was sent. The address names the message and never what
+    /// has become of it, so it holds from waiting through its Run.
+    message_attachment,
 
     pub fn fromWire(text: []const u8) ?Kind {
         if (std.mem.eql(u8, text, "draftAttachment")) return .draft_attachment;
-        if (std.mem.eql(u8, text, "runAttachment")) return .run_attachment;
-        if (std.mem.eql(u8, text, "submissionAttachment")) return .submission_attachment;
+        if (std.mem.eql(u8, text, "messageAttachment")) return .message_attachment;
         return null;
     }
 };
@@ -45,10 +42,12 @@ pub const Kind = enum {
 /// identity for the attachment at it.
 pub const max_index: u32 = attachment.max_files_per_message - 1;
 
+/// One attachment of a message a Task accepted.
+pub const MessageAttachment = struct { task_id: u64, message: MessageIdentity, index: u32 };
+
 pub const Target = union(Kind) {
     draft_attachment: u64,
-    run_attachment: struct { task_id: u64, run_id: u64, index: u32 },
-    submission_attachment: struct { task_id: u64, operation_id: []const u8, index: u32 },
+    message_attachment: MessageAttachment,
 };
 
 /// What a Task-owned target resolved to: the identity history persisted for an
@@ -181,12 +180,11 @@ pub fn resolve(
                 } } else .{ .unavailable = .missing },
             };
         },
-        // The two Task-owned kinds differ only in which message record names
-        // the identity; once its owner resolved that, the bytes are addressed
-        // the same way. The derivative is read rather than re-derived: staging
-        // encoded it when the message was sent, so a history chip never reads
-        // an original and never decodes an image to show itself.
-        .run_attachment, .submission_attachment => {
+        // Once its owner resolved the message, the bytes are addressed by what
+        // that record persisted. The derivative is read rather than re-derived:
+        // staging encoded it when the message was sent, so a history chip never
+        // reads an original and never decodes an image to show itself.
+        .message_attachment => {
             const accepted = sources.accepted orelse return .{ .unavailable = .missing };
             return switch (tier) {
                 .thumbnail => if (sources.staging.readAcceptedThumbnail(
@@ -216,9 +214,8 @@ pub fn resolve(
 
 test "only registered wire kinds resolve to a target" {
     try std.testing.expectEqual(Kind.draft_attachment, Kind.fromWire("draftAttachment").?);
-    try std.testing.expectEqual(Kind.run_attachment, Kind.fromWire("runAttachment").?);
-    try std.testing.expectEqual(Kind.submission_attachment, Kind.fromWire("submissionAttachment").?);
-    for ([_][]const u8{ "", "draft_attachment", "draftattachment", "run_attachment", "inputAttachment", "fileReference", "workspacePath" }) |text|
+    try std.testing.expectEqual(Kind.message_attachment, Kind.fromWire("messageAttachment").?);
+    for ([_][]const u8{ "", "draft_attachment", "draftattachment", "message_attachment", "inputAttachment", "fileReference", "workspacePath" }) |text|
         try std.testing.expect(Kind.fromWire(text) == null);
 }
 
@@ -273,8 +270,8 @@ test "a Task-owned target with no record resolves to missing in both tiers" {
     // all arrive here as the same absent record.
     const sources: Sources = .{ .staging = &staging, .thumbnail_buffer = &thumbnail };
     for ([_]Target{
-        .{ .run_attachment = .{ .task_id = 3, .run_id = 4, .index = 0 } },
-        .{ .submission_attachment = .{ .task_id = 3, .operation_id = "op-1", .index = max_index } },
+        .{ .message_attachment = .{ .task_id = 3, .message = .{ .run = 4 }, .index = 0 } },
+        .{ .message_attachment = .{ .task_id = 3, .message = .{ .submission = "op-1" }, .index = max_index } },
     }) |target| {
         for ([_]Tier{ .thumbnail, .viewer }) |tier|
             try std.testing.expectEqual(Availability.missing, resolve(target, tier, sources, &relative).unavailable);
