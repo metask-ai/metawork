@@ -1670,7 +1670,7 @@ fn expectProductGeneratedImagePreview(control: *image_product.control_api.Runtim
         }
     };
     var capture: Capture = .{};
-    switch (control.beginFilePreview(77, task_id, run_id, reference.?)) {
+    switch (control.beginFilePreview(77, .{ .reference = .{ .task_id = task_id, .run_id = run_id, .id = reference.? } })) {
         .queued => {},
         .immediate => return error.TestUnexpectedResult,
     }

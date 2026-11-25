@@ -48,6 +48,7 @@ const image = {
     listeners.add(listener);
     return () => listeners.delete(listener);
   },
+  current: () => true,
   beginDecode: async () => () => {},
   dispose() {
     valid = false;

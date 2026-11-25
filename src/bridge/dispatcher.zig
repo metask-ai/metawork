@@ -22,8 +22,8 @@ const attachment_grant = @import("attachment_grant.zig");
 const notification_text = @import("notification_text.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 27;
-const output_timer_id: u64 = 0x4d574f55;
+const async_product_handler_count = 28;
+const file_action_timer_id: u64 = 0x4d574f55;
 const preview_timer_id: u64 = 0x4d574950;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
 /// The identity fields and the success envelope fit in the remainder.
@@ -283,7 +283,7 @@ pub const Dispatcher = struct {
     };
     const PreviewMedia = struct { token: []const u8, media: product_control.FilePreviewMedia };
     const PreviewInFlight = struct {
-        directory: bool = false,
+        answer: enum { preview, directory, description } = .preview,
         active: bool = false,
         generation: u64 = 0,
         window_id: native_sdk.platform.WindowId = 0,
@@ -295,7 +295,7 @@ pub const Dispatcher = struct {
         request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined,
         request_id_len: usize = 0,
     };
-    const OutputInFlight = struct {
+    const FileActionInFlight = struct {
         dialog_handle: u64 = 0,
         completion_id: u64,
         generation: u64,
@@ -380,11 +380,11 @@ pub const Dispatcher = struct {
     preview_high_water: u64 = 0,
     preview_grants: [product_control.max_file_preview_media]?PreviewGrant = @splat(null),
     preview_timer_armed: bool = false,
-    output_timer_armed: bool = false,
-    output_in_flight: [2]?OutputInFlight = @splat(null),
-    output_save_completion: product_control.OutputSavePort.Completion = undefined,
-    output_high_water: u64 = 0,
-    next_output_completion_id: u64 = 1,
+    file_action_timer_armed: bool = false,
+    file_actions_in_flight: [2]?FileActionInFlight = @splat(null),
+    file_save_completion: product_control.FileSavePort.Completion = undefined,
+    file_action_high_water: u64 = 0,
+    next_file_action_completion_id: u64 = 1,
     diff_in_flight: [max_diff_in_flight]DiffInFlight = @splat(.{}),
     next_diff_completion_id: u64 = 1,
     attachment_in_flight: [max_attachment_in_flight]AttachmentInFlight = @splat(.{}),
@@ -466,7 +466,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.updates_open_website, .function = openUpdateWebsite },
             .{ .name = commands.inbox_refresh, .function = refreshInbox },
             .{ .name = commands.inbox_load_earlier, .function = loadEarlierInbox },
-            .{ .name = commands.output_action_cancel, .function = cancelOutputAction },
+            .{ .name = commands.cancel_file_action, .function = cancelFileAction },
             .{ .name = commands.remove_workspace, .function = removeWorkspace },
             .{ .name = commands.remove_project, .function = removeProject },
             .{ .name = commands.open_workspace, .function = openWorkspaceDirectory },
@@ -584,9 +584,10 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[6] = .{ .name = commands.finish_attachment_add, .context = self, .invoke_fn = finishAttachmentAdd };
         self.registered_async_handlers[7] = .{ .name = commands.cancel_attachment_add, .context = self, .invoke_fn = cancelAttachmentAdd };
         self.registered_async_handlers[8] = .{ .name = commands.release_preview, .context = self, .invoke_fn = releasePreview };
-        self.registered_async_handlers[9] = .{ .name = commands.output_action, .context = self, .invoke_fn = outputAction };
+        self.registered_async_handlers[9] = .{ .name = commands.file_action, .context = self, .invoke_fn = fileAction };
+        self.registered_async_handlers[26] = .{ .name = commands.register_output, .context = self, .invoke_fn = registerOutput };
+        self.registered_async_handlers[27] = .{ .name = commands.describe_file, .context = self, .invoke_fn = describeFile };
         self.registered_async_handlers[10] = .{ .name = commands.list_directory, .context = self, .invoke_fn = listDirectory };
-        self.registered_async_handlers[11] = .{ .name = commands.preview_workspace_file, .context = self, .invoke_fn = previewWorkspaceFile };
         self.registered_async_handlers[12] = .{ .name = commands.choose_workspace, .context = self, .invoke_fn = chooseWorkspace };
         self.registered_async_handlers[13] = .{ .name = commands.choose_automatic_workspace_root, .context = self, .invoke_fn = chooseAutomaticWorkspaceRoot };
         self.registered_async_handlers[14] = .{ .name = commands.choose_skill_import, .context = self, .invoke_fn = chooseSkillImport };
@@ -601,7 +602,7 @@ pub const Dispatcher = struct {
         self.registered_async_handlers[23] = .{ .name = commands.inbox_read_task, .context = self, .invoke_fn = readInboxTask };
         self.registered_async_handlers[24] = .{ .name = commands.inbox_open_file, .context = self, .invoke_fn = openInboxFile };
         self.registered_async_handlers[25] = .{ .name = commands.inbox_send, .context = self, .invoke_fn = sendInboxMessage };
-        self.registered_async_handlers[26] = .{ .name = commands.inbox_list_people, .context = self, .invoke_fn = listInboxPeople };
+        self.registered_async_handlers[11] = .{ .name = commands.inbox_list_people, .context = self, .invoke_fn = listInboxPeople };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -650,7 +651,7 @@ pub const Dispatcher = struct {
         self.settleDialogs();
         if (self.updates_host) |host| host.cancel_fn(host.context);
         if (self.inbox_host) |host| host.cancel_fn(host.context);
-        self.cancelOutputConnection();
+        self.cancelFileActionConnection();
         self.cancelPreviewConnection();
         if (self.control) |control| control.cancelSnapshot();
         self.delivery.breakConnection(self.transport());
@@ -701,9 +702,9 @@ pub const Dispatcher = struct {
     }
 
     pub fn onTimer(self: *Dispatcher, timer_id: u64) bool {
-        if (timer_id == output_timer_id) {
-            if (self.control) |control| control.drainOutputChecks(self.outputCheckSink());
-            self.updateOutputTimer();
+        if (timer_id == file_action_timer_id) {
+            if (self.control) |control| control.drainFileActions(self.fileActionSink());
+            self.updateFileActionTimer();
             return true;
         }
         if (timer_id == preview_timer_id) {
@@ -850,11 +851,11 @@ pub const Dispatcher = struct {
         if (self.updates_host) |host| host.cancel_fn(host.context);
         if (self.inbox_host) |host| host.cancel_fn(host.context);
         self.settleDialogs();
-        self.cancelOutputConnection();
+        self.cancelFileActionConnection();
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
         self.deliverNotificationTask() catch {};
         self.preview_high_water = 0;
-        self.output_high_water = 0;
+        self.file_action_high_water = 0;
         self.grants.invalidate();
         self.invalidateSkillPreparation();
         self.releaseAllAttachmentGrants();
@@ -1355,86 +1356,111 @@ pub const Dispatcher = struct {
         return writer.buffered();
     }
 
-    fn outputAction(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+    fn fileAction(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        self.beginOutputAction(invocation, responder) catch {
-            responder.fail(invocation.request.id, .handler_failed, "Output action rejected") catch {};
+        self.beginFileAction(invocation, responder) catch {
+            responder.fail(invocation.request.id, .handler_failed, "File action rejected") catch {};
         };
     }
 
-    fn requireOutputConnection(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation: u64, operation: u64) !void {
+    fn registerOutput(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginOutputRegistration(invocation, responder) catch {
+            responder.fail(invocation.request.id, .handler_failed, "Output registration rejected") catch {};
+        };
+    }
+
+    fn requireFileActionConnection(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation: u64, operation: u64) !void {
         try self.requireWindow(invocation.source.window_id);
         if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
         if (generation == 0 or operation == 0) return error.InvalidBridgeId;
         try self.delivery.validateConnection(generation, invocation.source.window_id);
     }
 
-    fn beginOutputAction(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+    fn beginFileAction(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        var parsed = try handlers.parsePayload(handlers.OutputAction, invocation.request.payload);
+        var parsed = try handlers.parsePayload(handlers.FileActionRequest, invocation.request.payload);
         defer parsed.deinit();
         const request = parsed.value;
-        const generation = request.generation.value;
-        const operation = request.operationId.value;
-        try self.requireOutputConnection(invocation, generation, operation);
-        if (operation <= self.output_high_water or request.taskId.value == 0 or request.runId.value == 0) return error.InvalidBridgeId;
-        const target = try request.target();
-        self.output_high_water = operation;
+        const target = request.target.value;
+        const action = request.action.value;
+        if (!action.accepts(target)) return error.InvalidBridgePayload;
         const control = try self.requireProductControl();
-        const vacant = for (&self.output_in_flight) |*slot| {
-            if (slot.* == null) break slot;
-        } else {
-            respondOutputAction(responder, invocation.request.id, generation, operation, .busy);
-            return;
-        };
-        if (self.next_output_completion_id == std.math.maxInt(u64)) return error.Capacity;
-        const completion = self.next_output_completion_id;
-        self.next_output_completion_id += 1;
-        vacant.* = .{ .completion_id = completion, .generation = generation, .operation_id = operation, .window_id = invocation.source.window_id, .responder = responder, .request_len = invocation.request.id.len, .request_id = undefined };
-        @memcpy(vacant.*.?.request_id[0..invocation.request.id.len], invocation.request.id);
-        const admission = switch (target) {
-            .output => |output_id| control.beginOutputCheck(completion, request.taskId.value, request.runId.value, output_id, request.action.value),
-            .change => |change_id| control.beginOutputRegistration(completion, request.taskId.value, request.runId.value, change_id),
-        };
-        self.adoptOutputAdmission(completion, admission);
+        const completion = try self.reserveFileAction(invocation, responder, request.generation.value, request.operationId.value) orelse return;
+        self.adoptFileAction(completion, control.beginFileAction(completion, target, action));
     }
 
-    fn adoptOutputAdmission(self: *Dispatcher, id: u64, admission: product_control.Runtime.OutputCheckAdmission) void {
+    /// Registering a change as an output is not an action on an identity that
+    /// exists yet, so it has its own request; it shares everything after that.
+    fn beginOutputRegistration(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.OutputRegisterRequest, invocation.request.payload);
+        defer parsed.deinit();
+        const request = parsed.value;
+        const change_id = request.changeId.value;
+        if (request.taskId.value == 0 or request.runId.value == 0 or change_id.len == 0 or change_id.len > 128) return error.InvalidBridgeId;
+        const control = try self.requireProductControl();
+        const completion = try self.reserveFileAction(invocation, responder, request.generation.value, request.operationId.value) orelse return;
+        self.adoptFileAction(completion, control.beginOutputRegistration(completion, request.taskId.value, request.runId.value, change_id));
+    }
+
+    /// Admits one operation id on this connection and gives it a slot. Null has
+    /// already answered `busy`.
+    fn reserveFileAction(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder, generation: u64, operation: u64) !?u64 {
+        try self.requireFileActionConnection(invocation, generation, operation);
+        if (operation <= self.file_action_high_water) return error.InvalidBridgeId;
+        self.file_action_high_water = operation;
+        const vacant = for (&self.file_actions_in_flight) |*slot| {
+            if (slot.* == null) break slot;
+        } else {
+            respondFileAction(responder, invocation.request.id, generation, operation, .busy);
+            return null;
+        };
+        if (self.next_file_action_completion_id == std.math.maxInt(u64)) return error.Capacity;
+        const completion = self.next_file_action_completion_id;
+        self.next_file_action_completion_id += 1;
+        vacant.* = .{ .completion_id = completion, .generation = generation, .operation_id = operation, .window_id = invocation.source.window_id, .responder = responder, .request_len = invocation.request.id.len, .request_id = undefined };
+        @memcpy(vacant.*.?.request_id[0..invocation.request.id.len], invocation.request.id);
+        return completion;
+    }
+
+    fn adoptFileAction(self: *Dispatcher, id: u64, admission: product_control.Runtime.FileActionAdmission) void {
         const control = self.control orelse return;
         switch (admission) {
             .choosing => {
-                const slot = self.outputSlot(id) orelse {
-                    _ = control.cancelOutputCheck(id);
+                const slot = self.fileActionSlot(id) orelse {
+                    _ = control.cancelFileAction(id);
                     return;
                 };
-                self.output_save_completion = .{ .context = self, .borrow_source_fn = borrowOutputSave, .complete_fn = outputSaveCompleted };
-                slot.dialog_handle = control.requestOutputSave(id, slot.window_id, &self.output_save_completion) catch |err| {
-                    outputSaveCompleted(self, id, .{ .failed = err });
+                self.file_save_completion = .{ .context = self, .borrow_source_fn = borrowFileSave, .complete_fn = fileSaveCompleted };
+                slot.dialog_handle = control.requestFileSave(id, slot.window_id, &self.file_save_completion) catch |err| {
+                    fileSaveCompleted(self, id, .{ .failed = err });
                     return;
                 };
             },
             .queued => {
-                if (!outputRequestActive(self, id)) self.cancelOutputOperation(id);
-                self.updateOutputTimer();
+                if (!fileActionActive(self, id)) self.cancelFileOperation(id);
+                self.updateFileActionTimer();
             },
-            .immediate => |state| self.completeOutputAction(.{ .completion_id = id, .state = state }),
+            .immediate => |state| self.completeFileAction(.{ .completion_id = id, .state = state }),
         }
     }
-    fn outputSlot(self: *Dispatcher, id: u64) ?*OutputInFlight {
-        for (&self.output_in_flight) |*entry| if (entry.*) |*slot| {
+    fn fileActionSlot(self: *Dispatcher, id: u64) ?*FileActionInFlight {
+        for (&self.file_actions_in_flight) |*entry| if (entry.*) |*slot| {
             if (slot.completion_id == id) return slot;
         };
         return null;
     }
-    fn borrowOutputSave(context: *anyopaque, id: u64) !@import("metawork_product_control").OutputSaveInput {
+    fn borrowFileSave(context: *anyopaque, id: u64) !@import("metawork_product_control").FileSaveInput {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        if (!outputRequestActive(self, id)) return error.UnknownOutput;
-        return (try self.requireProductControl()).borrowOutputSaveSource(id);
+        if (!fileActionActive(self, id)) return error.UnknownFile;
+        return (try self.requireProductControl()).borrowFileSaveSource(id);
     }
-    fn outputSaveCompleted(context: *anyopaque, id: u64, result: product_control.OutputSavePort.Result) void {
+    fn fileSaveCompleted(context: *anyopaque, id: u64, result: product_control.FileSavePort.Result) void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        const slot = self.outputSlot(id) orelse {
+        const slot = self.fileActionSlot(id) orelse {
             if (result == .selected) {
                 var effect = result.selected;
                 effect.deinit();
@@ -1442,38 +1468,38 @@ pub const Dispatcher = struct {
             return;
         };
         slot.dialog_handle = 0;
-        if (self.control) |control| self.adoptOutputAdmission(id, control.completeOutputSave(id, result)) else {
+        if (self.control) |control| self.adoptFileAction(id, control.completeFileSave(id, result)) else {
             if (result == .selected) {
                 var effect = result.selected;
                 effect.deinit();
             }
-            self.completeOutputAction(.{ .completion_id = id, .state = .cancelled });
+            self.completeFileAction(.{ .completion_id = id, .state = .cancelled });
         }
     }
-    fn cancelOutputOperation(self: *Dispatcher, id: u64) void {
-        const slot = self.outputSlot(id) orelse return;
+    fn cancelFileOperation(self: *Dispatcher, id: u64) void {
+        const slot = self.fileActionSlot(id) orelse return;
         const control = self.control orelse {
-            self.completeOutputAction(.{ .completion_id = id, .state = .cancelled });
+            self.completeFileAction(.{ .completion_id = id, .state = .cancelled });
             return;
         };
-        const outcome = control.cancelOutputCheck(id);
+        const outcome = control.cancelFileAction(id);
         if (outcome == .committed) return;
         slot.cancelled = true;
         if (outcome == .pending_cancelled or outcome == .not_found) {
             const handle = slot.dialog_handle;
             slot.dialog_handle = 0;
-            control.cancelOutputDialog(handle);
-            self.completeOutputAction(.{ .completion_id = id, .state = .cancelled });
+            control.cancelFileSaveDialog(handle);
+            self.completeFileAction(.{ .completion_id = id, .state = .cancelled });
         }
     }
 
-    pub fn outputCheckSink(self: *Dispatcher) product_control.OutputCheckSink {
-        return .{ .context = self, .request_active_fn = outputRequestActive, .complete_fn = completeOutputFromSink };
+    pub fn fileActionSink(self: *Dispatcher) product_control.FileActionSink {
+        return .{ .context = self, .request_active_fn = fileActionActive, .complete_fn = completeFileActionFromSink };
     }
 
-    fn outputRequestActive(context: *anyopaque, completion_id: u64) bool {
+    fn fileActionActive(context: *anyopaque, completion_id: u64) bool {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        for (self.output_in_flight) |entry| if (entry) |slot| {
+        for (self.file_actions_in_flight) |entry| if (entry) |slot| {
             if (slot.completion_id != completion_id) continue;
             if (slot.cancelled) return false;
             self.delivery.validateConnection(slot.generation, slot.window_id) catch return false;
@@ -1482,77 +1508,77 @@ pub const Dispatcher = struct {
         return false;
     }
 
-    fn completeOutputFromSink(context: *anyopaque, result: product_control.OutputCheckResult) void {
+    fn completeFileActionFromSink(context: *anyopaque, result: product_control.FileActionResult) void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        self.completeOutputAction(result);
+        self.completeFileAction(result);
     }
 
-    fn completeOutputAction(self: *Dispatcher, result: product_control.OutputCheckResult) void {
-        for (&self.output_in_flight) |*entry| if (entry.*) |slot| {
+    fn completeFileAction(self: *Dispatcher, result: product_control.FileActionResult) void {
+        for (&self.file_actions_in_flight) |*entry| if (entry.*) |slot| {
             if (slot.completion_id != result.completion_id) continue;
-            const active = outputRequestActive(self, result.completion_id);
+            const active = fileActionActive(self, result.completion_id);
             entry.* = null;
-            respondOutputAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, if (active or result.committed or result.state == .cleanup_failed) result.state else .cancelled);
-            self.updateOutputTimer();
+            respondFileAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, if (active or result.committed or result.state == .cleanup_failed) result.state else .cancelled);
+            self.updateFileActionTimer();
             return;
         };
     }
 
-    fn respondOutputAction(responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, generation: u64, operation: u64, state: product_control.OutputCheckState) void {
+    fn respondFileAction(responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, generation: u64, operation: u64, state: product_control.FileActionState) void {
         var buffer: [256]u8 = undefined;
         const result = std.fmt.bufPrint(&buffer, "{{\"generation\":\"{d}\",\"operationId\":\"{d}\",\"state\":\"{s}\"}}", .{ generation, operation, @tagName(state) }) catch unreachable;
         responder.success(request_id, result) catch {};
     }
 
-    fn cancelOutputAction(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn cancelFileAction(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        var parsed = try handlers.parsePayload(handlers.OutputActionCancel, invocation.request.payload);
+        var parsed = try handlers.parsePayload(handlers.FileActionCancel, invocation.request.payload);
         defer parsed.deinit();
         const generation = parsed.value.generation.value;
         const operation = parsed.value.operationId.value;
-        try self.requireOutputConnection(invocation, generation, operation);
+        try self.requireFileActionConnection(invocation, generation, operation);
         var cancelled = false;
-        for (self.output_in_flight) |entry| if (entry) |slot| {
+        for (self.file_actions_in_flight) |entry| if (entry) |slot| {
             if (slot.generation != generation or slot.operation_id != operation or slot.window_id != invocation.source.window_id) continue;
             if (self.control) |control| {
-                if (control.outputPublicationCommitted(slot.completion_id)) break;
+                if (control.fileSaveCommitted(slot.completion_id)) break;
             }
-            self.cancelOutputOperation(slot.completion_id);
+            self.cancelFileOperation(slot.completion_id);
             cancelled = true;
             break;
         };
         return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"operationId\":\"{d}\",\"cancelled\":{}}}", .{ generation, operation, cancelled });
     }
 
-    fn updateOutputTimer(self: *Dispatcher) void {
-        const active = if (self.control) |control| control.hasOutputChecks() else false;
-        if (active and !self.output_timer_armed) {
-            self.platform.start_timer_fn(self.platform.context, output_timer_id, 250 * std.time.ns_per_ms, true) catch {
-                self.cancelOutputConnection();
+    fn updateFileActionTimer(self: *Dispatcher) void {
+        const active = if (self.control) |control| control.hasFileActions() else false;
+        if (active and !self.file_action_timer_armed) {
+            self.platform.start_timer_fn(self.platform.context, file_action_timer_id, 250 * std.time.ns_per_ms, true) catch {
+                self.cancelFileActionConnection();
                 return;
             };
-            self.output_timer_armed = true;
-        } else if (!active and self.output_timer_armed) {
-            self.platform.cancel_timer_fn(self.platform.context, output_timer_id) catch {};
-            self.output_timer_armed = false;
+            self.file_action_timer_armed = true;
+        } else if (!active and self.file_action_timer_armed) {
+            self.platform.cancel_timer_fn(self.platform.context, file_action_timer_id) catch {};
+            self.file_action_timer_armed = false;
         }
     }
 
-    fn cancelOutputConnection(self: *Dispatcher) void {
-        for (self.output_in_flight) |entry| if (entry) |slot| {
-            self.cancelOutputOperation(slot.completion_id);
+    fn cancelFileActionConnection(self: *Dispatcher) void {
+        for (self.file_actions_in_flight) |entry| if (entry) |slot| {
+            self.cancelFileOperation(slot.completion_id);
         };
     }
 
-    pub fn settleOutputActionsForShutdown(self: *Dispatcher) void {
-        if (self.output_timer_armed) self.platform.cancel_timer_fn(self.platform.context, output_timer_id) catch {};
-        self.output_timer_armed = false;
-        for (&self.output_in_flight) |*entry| if (entry.*) |slot| {
-            if (self.control) |control| if (slot.dialog_handle != 0) control.cancelOutputDialog(slot.dialog_handle);
+    pub fn settleFileActionsForShutdown(self: *Dispatcher) void {
+        if (self.file_action_timer_armed) self.platform.cancel_timer_fn(self.platform.context, file_action_timer_id) catch {};
+        self.file_action_timer_armed = false;
+        for (&self.file_actions_in_flight) |*entry| if (entry.*) |slot| {
+            if (self.control) |control| if (slot.dialog_handle != 0) control.cancelFileSaveDialog(slot.dialog_handle);
             entry.* = null;
-            respondOutputAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, .cancelled);
+            respondFileAction(slot.responder, slot.request_id[0..slot.request_len], slot.generation, slot.operation_id, .cancelled);
         };
     }
 
@@ -1627,10 +1653,8 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayload(handlers.FilePreviewRequest, invocation.request.payload);
         defer parsed.deinit();
         const key = try self.requirePreviewKey(invocation, parsed.value.generation, parsed.value.previewId);
-        if (key.preview_id <= self.preview_high_water or parsed.value.fileReferenceId.len == 0 or parsed.value.fileReferenceId.len > 128) return error.InvalidBridgePayload;
+        if (key.preview_id <= self.preview_high_water) return error.InvalidBridgePayload;
         self.preview_high_water = key.preview_id;
-        const task_id = try handlers.parseWireId(parsed.value.taskId);
-        const run_id = try handlers.parseWireId(parsed.value.runId);
         const control = try self.requireProductControl();
         const id = self.reserveFilePreview(responder, invocation.request.id) orelse {
             respondFilePreview(responder, invocation.request.id, .busy, "", false, false, null);
@@ -1642,30 +1666,55 @@ pub const Dispatcher = struct {
             slot.window_id = invocation.source.window_id;
             break;
         };
-        switch (control.beginFilePreview(id, task_id, run_id, parsed.value.fileReferenceId)) {
+        switch (control.beginFilePreview(id, parsed.value.target.value)) {
+            .queued => self.updatePreviewTimer(),
+            .immediate => |state| self.completeFilePreview(.{ .completion_id = id, .state = state, .content = "", .truncated = false, .redacted = false }),
+        }
+    }
+    fn describeFile(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.beginDescription(invocation, responder) catch {
+            respondFileDescription(responder, invocation.request.id, .failed, null);
+        };
+    }
+    fn beginDescription(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.FilePreviewRequest, invocation.request.payload);
+        defer parsed.deinit();
+        const key = try self.requirePreviewKey(invocation, parsed.value.generation, parsed.value.previewId);
+        if (key.preview_id <= self.preview_high_water) return error.InvalidBridgePayload;
+        self.preview_high_water = key.preview_id;
+        const control = try self.requireProductControl();
+        const id = self.reserveFilePreview(responder, invocation.request.id) orelse {
+            respondFileDescription(responder, invocation.request.id, .busy, null);
+            return;
+        };
+        for (&self.preview_in_flight) |*slot| if (slot.active and slot.completion_id == id) {
+            slot.generation = key.generation;
+            slot.preview_id = key.preview_id;
+            slot.window_id = invocation.source.window_id;
+            slot.answer = .description;
+            break;
+        };
+        switch (control.beginFileDescription(id, parsed.value.target.value)) {
             .queued => self.updatePreviewTimer(),
             .immediate => |state| self.completeFilePreview(.{ .completion_id = id, .state = state, .content = "", .truncated = false, .redacted = false }),
         }
     }
     fn listDirectory(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        self.beginWorkspaceFile(invocation, responder, true) catch {
+        self.beginListDirectory(invocation, responder) catch {
             respondDirectory(responder, invocation.request.id, .failed, &.{}, false, false);
         };
     }
-    fn previewWorkspaceFile(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        self.beginWorkspaceFile(invocation, responder, false) catch {
-            respondFilePreview(responder, invocation.request.id, .failed, "", false, false, null);
-        };
-    }
-    fn beginWorkspaceFile(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder, directory: bool) !void {
+    fn beginListDirectory(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) !void {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        var parsed = try handlers.parsePayload(handlers.WorkspaceFileRequest, invocation.request.payload);
+        var parsed = try handlers.parsePayload(handlers.ListDirectoryRequest, invocation.request.payload);
         defer parsed.deinit();
         const key = try self.requirePreviewKey(invocation, parsed.value.generation, parsed.value.previewId);
-        if (key.preview_id <= self.preview_high_water or parsed.value.path.len > 4096) return error.InvalidBridgePayload;
+        if (key.preview_id <= self.preview_high_water or parsed.value.path.len > product_control.max_file_target_path_bytes) return error.InvalidBridgePayload;
         self.preview_high_water = key.preview_id;
         const task_id = try handlers.parseWireId(parsed.value.taskId);
         if (task_id == 0) return error.InvalidBridgePayload;
@@ -1673,17 +1722,17 @@ pub const Dispatcher = struct {
         const workspace_epoch = try handlers.parseWireId(parsed.value.workspaceEpoch);
         const control = try self.requireProductControl();
         const id = self.reserveFilePreview(responder, invocation.request.id) orelse {
-            if (directory) respondDirectory(responder, invocation.request.id, .busy, &.{}, false, false) else respondFilePreview(responder, invocation.request.id, .busy, "", false, false, null);
+            respondDirectory(responder, invocation.request.id, .busy, &.{}, false, false);
             return;
         };
         for (&self.preview_in_flight) |*slot| if (slot.active and slot.completion_id == id) {
             slot.generation = key.generation;
             slot.preview_id = key.preview_id;
             slot.window_id = invocation.source.window_id;
-            slot.directory = directory;
+            slot.answer = .directory;
             break;
         };
-        switch (control.beginWorkspaceFile(id, task_id, workspace_id, workspace_epoch, parsed.value.path, directory)) {
+        switch (control.beginDirectory(id, .{ .task_id = task_id, .workspace_id = workspace_id, .workspace_epoch = workspace_epoch, .path = parsed.value.path })) {
             .queued => self.updatePreviewTimer(),
             .immediate => |state| self.completeFilePreview(.{ .completion_id = id, .state = state, .content = "", .truncated = false, .redacted = false }),
         }
@@ -1731,7 +1780,7 @@ pub const Dispatcher = struct {
                     _ = control.releaseFilePreview(media.id);
                 };
             }
-            if (pending.directory) respondDirectory(pending.responder, pending.request_id_storage[0..pending.request_id_len], state, result.entries, result.truncated, result.redacted) else respondFilePreview(pending.responder, pending.request_id_storage[0..pending.request_id_len], state, result.content, result.truncated, result.redacted, descriptor);
+            answerPreview(&pending, state, result, descriptor);
             if (pending.release_waiter) |waiter| respondPreviewRelease(waiter.responder, waiter.request_id[0..waiter.request_len], pending.generation, pending.preview_id);
             self.updatePreviewTimer();
             return;
@@ -1739,6 +1788,15 @@ pub const Dispatcher = struct {
         if (result.media) |media| if (self.control) |control| {
             _ = control.releaseFilePreview(media.id);
         };
+    }
+    /// One request, one answer, in the shape it asked for.
+    fn answerPreview(pending: *const PreviewInFlight, state: product_control.FilePreviewState, result: product_control.FilePreviewResult, media: ?PreviewMedia) void {
+        const request_id = pending.request_id_storage[0..pending.request_id_len];
+        switch (pending.answer) {
+            .preview => respondFilePreview(pending.responder, request_id, state, result.content, result.truncated, result.redacted, media),
+            .directory => respondDirectory(pending.responder, request_id, state, result.entries, result.truncated, result.redacted),
+            .description => respondFileDescription(pending.responder, request_id, state, result.description),
+        }
     }
     fn respondPreviewRelease(responder: native_sdk.bridge.AsyncResponder, id: []const u8, generation: u64, preview_id: u64) void {
         var buffer: [180]u8 = undefined;
@@ -1991,7 +2049,7 @@ pub const Dispatcher = struct {
             if (!slot.active) continue;
             const pending = slot.*;
             slot.* = .{};
-            if (pending.directory) respondDirectory(pending.responder, pending.request_id_storage[0..pending.request_id_len], .failed, &.{}, false, false) else respondFilePreview(pending.responder, pending.request_id_storage[0..pending.request_id_len], .failed, "", false, false, null);
+            answerPreview(&pending, .failed, .{ .completion_id = pending.completion_id, .state = .failed, .content = "", .truncated = false, .redacted = false }, null);
             if (pending.release_waiter) |waiter| respondPreviewRelease(waiter.responder, waiter.request_id[0..waiter.request_len], pending.generation, pending.preview_id);
         }
     }
@@ -2026,6 +2084,42 @@ pub const Dispatcher = struct {
             .unsupported, .image_limit, .animated_image => "unsupported",
             .changing => "changing",
             .failed => "error",
+        };
+    }
+
+    /// `ready` is the only state with a file, and the file carries no content,
+    /// path or digest.
+    fn respondFileDescription(responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, state: product_control.FilePreviewState, description: ?product_control.FileDescription) void {
+        var buffer: [256]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        const described = if (state == .ready) description else null;
+        writeFileDescription(&writer, if (state == .ready and described == null) .failed else state, described) catch unreachable;
+        responder.success(request_id, writer.buffered()) catch {};
+    }
+
+    fn writeFileDescription(writer: *std.Io.Writer, state: product_control.FilePreviewState, description: ?product_control.FileDescription) !void {
+        try writer.print("{{\"state\":\"{s}\",\"file\":", .{fileDescriptionStateName(state)});
+        if (description) |file| {
+            try writer.print("{{\"kind\":\"{s}\",\"sizeBytes\":\"{d}\"", .{ @tagName(file.kind), file.size_bytes });
+            switch (file.kind) {
+                .image => |image| try writer.print(",\"width\":{d},\"height\":{d}", .{ image.width, image.height }),
+                .video => {},
+                .file => |value| try writer.print(",\"previewable\":{}", .{value.previewable}),
+            }
+            try writer.writeAll("}}");
+        } else try writer.writeAll("null}");
+    }
+
+    /// Every content outcome is a ready description, so the states left are
+    /// about reaching the file.
+    fn fileDescriptionStateName(state: product_control.FilePreviewState) []const u8 {
+        return switch (state) {
+            .ready => "ready",
+            .busy => "busy",
+            .missing => "missing",
+            .restricted, .unsupported, .image_limit, .animated_image => "restricted",
+            .changing => "changing",
+            .stale_security, .failed => "error",
         };
     }
 
@@ -7402,10 +7496,10 @@ test "file preview native grants bind authority and cancellation and expire with
     var released: Capture = .{ .control = control, .released_check = true };
     defer released.deinit();
     try released.invoke(native, commands.release_preview, "{\"generation\":\"1\",\"previewId\":\"1\"}");
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"1\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"state\":\"error\"") != null);
     try std.testing.expect(!control.hasFilePreviews());
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"2\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     try opened.wait(&boundary, 2);
     var descriptor = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, opened.response.?, .{});
     defer descriptor.deinit();
@@ -7430,39 +7524,52 @@ test "file preview native grants bind authority and cancellation and expire with
     try std.testing.expectEqualStrings("{\"state\":\"stale_security\"}", stale);
     try released.invoke(native, commands.release_preview, "{\"generation\":\"1\",\"previewId\":\"2\"}");
     try std.testing.expect(!control.hasFilePreviews());
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"3\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"3\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     try released.invoke(native, commands.release_preview, "{\"generation\":\"1\",\"previewId\":\"3\"}");
     try opened.wait(&boundary, 3);
     try std.testing.expectEqual(@as(usize, 3), released.calls);
     try std.testing.expect(!control.hasFilePreviews());
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"4\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"4\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     try opened.wait(&boundary, 4);
     product_control.TestSupport.expirePreview(control, boundary.preview_grants[0].?.media.id);
     try std.testing.expect(boundary.onTimer(preview_timer_id));
     try std.testing.expect(!control.hasFilePreviews());
     for (boundary.preview_grants) |entry| try std.testing.expect(entry == null);
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"5\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"1\",\"previewId\":\"5\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     try opened.wait(&boundary, 5);
     try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"image\"") != null);
     boundary.breakConnection();
     try std.testing.expect(!control.hasFilePreviews());
     _ = try boundary.delivery.connect(3, boundary.transport());
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"6\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"6\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     try opened.wait(&boundary, 6);
     try opened.invoke(native, commands.list_directory, "{\"generation\":\"2\",\"previewId\":\"7\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"\"}");
     try opened.wait(&boundary, 7);
     try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"entries\":[{\"name\":\"image.jpg\",\"kind\":\"file\"}]") != null);
-    try opened.invoke(native, commands.preview_workspace_file, "{\"generation\":\"2\",\"previewId\":\"8\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"image.jpg\"}");
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"8\",\"target\":{\"kind\":\"workspace\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"image.jpg\"}}");
     try opened.wait(&boundary, 8);
     try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"image\"") != null);
     try released.invoke(native, commands.release_preview, "{\"generation\":\"2\",\"previewId\":\"8\"}");
-    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"9\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}");
+    // A description shares the id space and the lane, and holds no grant: the
+    // one still open here is the preview before it.
+    try released.invoke(native, commands.release_preview, "{\"generation\":\"2\",\"previewId\":\"6\"}");
+    try std.testing.expect(!control.hasFilePreviews());
+    const describe = "{\"generation\":\"2\",\"previewId\":\"10\",\"target\":{\"kind\":\"workspace\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"image.jpg\"}}";
+    try opened.invoke(native, commands.describe_file, describe);
+    try opened.wait(&boundary, 9);
+    try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"file\":{\"kind\":\"image\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "token") == null and std.mem.indexOf(u8, opened.response.?, "image.jpg") == null);
+    try std.testing.expect(!control.hasFilePreviews());
+    for (boundary.preview_grants) |entry| try std.testing.expect(entry == null);
+    try opened.invoke(native, commands.describe_file, describe);
+    try std.testing.expect(std.mem.indexOf(u8, opened.response.?, "\"state\":\"error\",\"file\":null") != null);
+    try opened.invoke(native, commands.preview_file, "{\"generation\":\"2\",\"previewId\":\"11\",\"target\":{\"kind\":\"reference\",\"taskId\":\"3\",\"runId\":\"7\",\"fileReferenceId\":\"file-3-1-1-1\"}}");
     control.beginShutdown();
     boundary.stopIngress();
     control.shutdownFilePreviewExecutor();
     control.drainFilePreviewCompletions(boundary.filePreviewSink());
     boundary.settleFilePreviewsForShutdown();
-    try std.testing.expectEqual(@as(usize, 9), opened.calls);
+    try std.testing.expectEqual(@as(usize, 11), opened.calls);
     try std.testing.expect(!control.hasFilePreviews());
     boundary.assertQuiescent();
 }
@@ -7697,6 +7804,36 @@ test "file preview async response preserves the exact bounded wire shape" {
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, video.value.object.get("result").?, .{});
     defer std.testing.allocator.free(encoded);
     try std.testing.expectEqualStrings(std.mem.trimEnd(u8, @embedFile("file_preview_video.fixture"), "\r\n"), encoded);
+
+    const described = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("file_description.fixture"), .{});
+    defer described.deinit();
+    const Description = product_control.FileDescription;
+    const Described = struct { name: []const u8, state: product_control.FilePreviewState, description: ?Description = null };
+    for ([_]Described{
+        .{ .name = "image", .state = .ready, .description = .{ .size_bytes = 10 * 1024 * 1024, .kind = .{ .image = .{ .width = 1600, .height = 1200 } } } },
+        .{ .name = "video", .state = .ready, .description = .{ .size_bytes = 1546, .kind = .video } },
+        .{ .name = "text", .state = .ready, .description = .{ .size_bytes = 0, .kind = .{ .file = .{ .previewable = true } } } },
+        .{ .name = "opaque", .state = .ready, .description = .{ .size_bytes = std.math.maxInt(u64), .kind = .{ .file = .{ .previewable = false } } } },
+        // Only a ready answer carries a file, whatever came with another one.
+        .{ .name = "busy", .state = .busy, .description = .{ .size_bytes = 1, .kind = .video } },
+        .{ .name = "missing", .state = .missing },
+        .{ .name = "restricted", .state = .restricted },
+        .{ .name = "restricted", .state = .unsupported },
+        .{ .name = "changing", .state = .changing },
+        .{ .name = "error", .state = .failed },
+        .{ .name = "error", .state = .stale_security },
+        .{ .name = "error", .state = .ready },
+    }) |case| {
+        capture.reset();
+        Dispatcher.respondFileDescription(responder, "describe", case.state, case.description);
+        var answer = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+        defer answer.deinit();
+        const actual = try std.json.Stringify.valueAlloc(std.testing.allocator, answer.value.object.get("result").?, .{});
+        defer std.testing.allocator.free(actual);
+        const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, described.value.object.get(case.name).?, .{});
+        defer std.testing.allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
 }
 
 test "file preview workspace directory response matches the cross language fixture" {
@@ -10421,13 +10558,13 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
             self.count += 1;
         }
         fn invoke(self: *@This(), native: native_sdk.bridge.Dispatcher, payload: []const u8, window: u64) !void {
-            const handler = native.async_registry.find(commands.output_action).?;
+            const handler = native.async_registry.find(commands.file_action).?;
             const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = window };
-            try handler.invoke_fn(handler.context, .{ .request = .{ .id = "output-test", .command = commands.output_action, .payload = payload }, .source = source }, .{ .context = self, .source = source, .respond_fn = receive });
+            try handler.invoke_fn(handler.context, .{ .request = .{ .id = "output-test", .command = commands.file_action, .payload = payload }, .source = source }, .{ .context = self, .source = source, .respond_fn = receive });
         }
         fn wait(self: *@This(), control: *product_control.Runtime, boundary: *Dispatcher, count: usize) !void {
             for (0..5000) |_| {
-                _ = boundary.onTimer(output_timer_id);
+                _ = boundary.onTimer(file_action_timer_id);
                 if (self.count >= count) return;
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             }
@@ -10435,7 +10572,7 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
             return error.TestTimeout;
         }
     };
-    var effect: product_control.TestSupport.OutputFileEffect = .{ .main_thread_id = std.Thread.getCurrentId(), .workspace_id = 2 };
+    var effect: product_control.TestSupport.FileActionEffect = .{ .main_thread_id = std.Thread.getCurrentId(), .workspace_id = 2 };
     var capture: Capture = .{};
     defer if (capture.response) |bytes| std.testing.allocator.free(bytes);
     const control = try std.testing.allocator.create(product_control.Runtime);
@@ -10443,13 +10580,13 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try product_control.TestSupport.filePreviewFixture(control, "/tmp/metawork-test");
     try product_control.TestSupport.recordDeliveredOutputFixture(control);
     defer control.deinit();
-    product_control.TestSupport.bindOutputFileEffect(control, &effect);
+    product_control.TestSupport.bindFileActionEffect(control, &effect);
     var boundary = try Dispatcher.init(std.testing.allocator, control, undefined, undefined, .{ .context = null, .wake_fn = Host.wake, .emit_fn = Host.emit, .start_timer_fn = Host.timer, .cancel_timer_fn = Host.cancel, .now_fn = Host.now, .on_main_thread_fn = Host.main, .canonicalize_directory_fn = undefined, .window_chrome_connect_fn = undefined, .window_chrome_refresh_fn = undefined, .window_chrome_control_fn = undefined }, .{}, 3);
     defer boundary.deinit();
     defer {
-        control.shutdownOutputChecks();
-        control.drainOutputChecks(boundary.outputCheckSink());
-        boundary.settleOutputActionsForShutdown();
+        control.shutdownFileActions();
+        control.drainFileActions(boundary.fileActionSink());
+        boundary.settleFileActionsForShutdown();
     }
     _ = try boundary.delivery.connect(3, boundary.transport());
     const native = boundary.register(@import("policy.zig").product(.release));
@@ -10472,26 +10609,26 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try capture.invoke(native, request, 3);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"error\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.prepares);
-    const reveal = "{\"generation\":\"1\",\"operationId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
+    const reveal = "{\"generation\":\"1\",\"operationId\":\"2\",\"target\":{\"kind\":\"output\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\"},\"action\":\"reveal\"}";
     effect.blocked.store(true, .release);
     try capture.invoke(native, reveal, 3);
     var output: [256]u8 = undefined;
-    const cancel = native.registry.find(commands.output_action_cancel).?;
-    const ack = try cancel.invoke_fn(cancel.context, .{ .request = .{ .id = "cancel-output", .command = commands.output_action_cancel, .payload = "{\"generation\":\"1\",\"operationId\":\"2\"}" }, .source = .{ .origin = "zero://app", .window_id = 3 } }, &output);
+    const cancel = native.registry.find(commands.cancel_file_action).?;
+    const ack = try cancel.invoke_fn(cancel.context, .{ .request = .{ .id = "cancel-output", .command = commands.cancel_file_action, .payload = "{\"generation\":\"1\",\"operationId\":\"2\"}" }, .source = .{ .origin = "zero://app", .window_id = 3 } }, &output);
     try std.testing.expect(std.mem.indexOf(u8, ack, "\"cancelled\":true") != null);
     try capture.wait(control, &boundary, 4);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(usize, 0), effect.reveals);
-    const third = "{\"generation\":\"1\",\"operationId\":\"3\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
+    const third = "{\"generation\":\"1\",\"operationId\":\"3\",\"target\":{\"kind\":\"output\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\"},\"action\":\"reveal\"}";
     effect.blocked.store(false, .release);
     try capture.invoke(native, third, 3);
     try capture.wait(control, &boundary, 5);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"revealed\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.reveals);
-    var save_effect: product_control.TestSupport.OutputSaveEffect = .{ .main_thread_id = std.Thread.getCurrentId() };
+    var save_effect: product_control.TestSupport.FileSaveEffect = .{ .main_thread_id = std.Thread.getCurrentId() };
     save_effect.publishing_blocked.store(true, .release);
     defer save_effect.publishing_blocked.store(false, .release);
-    product_control.TestSupport.bindOutputSaveEffect(control, &save_effect);
+    product_control.TestSupport.bindFileSaveEffect(control, &save_effect);
     var save_wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @import("contract_fixture").output_save, .{});
     defer save_wire.deinit();
     const save_request = try std.json.Stringify.valueAlloc(std.testing.allocator, save_wire.value.object.get("request").?, .{});
@@ -10499,11 +10636,11 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try capture.invoke(native, save_request, 3);
     try save_effect.finish();
     for (0..5000) |_| {
-        _ = boundary.onTimer(output_timer_id);
+        _ = boundary.onTimer(file_action_timer_id);
         if (save_effect.publish_entered.load(.acquire)) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.TestTimeout;
-    const late_cancel = try cancel.invoke_fn(cancel.context, .{ .request = .{ .id = "cancel-save", .command = commands.output_action_cancel, .payload = "{\"generation\":\"1\",\"operationId\":\"4\"}" }, .source = .{ .origin = "zero://app", .window_id = 3 } }, &output);
+    const late_cancel = try cancel.invoke_fn(cancel.context, .{ .request = .{ .id = "cancel-save", .command = commands.cancel_file_action, .payload = "{\"generation\":\"1\",\"operationId\":\"4\"}" }, .source = .{ .origin = "zero://app", .window_id = 3 } }, &output);
     const expected_cancel = try std.json.Stringify.valueAlloc(std.testing.allocator, save_wire.value.object.get("cancelTooLate").?, .{});
     defer std.testing.allocator.free(expected_cancel);
     try std.testing.expectEqualStrings(expected_cancel, late_cancel);
@@ -10518,11 +10655,50 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
     try std.testing.expectEqualStrings(expected_save, actual_save);
     try std.testing.expectEqual(@as(usize, 1), save_effect.published.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), save_effect.releases);
+    // `check` compares with a delivery, so any other identity is not a request
+    // at all; the refused id is not spent either.
+    const checked = effect.prepares;
+    try capture.invoke(native, "{\"generation\":\"1\",\"operationId\":\"5\",\"target\":{\"kind\":\"workspace\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"results/年度报告.docx\"},\"action\":\"check\"}", 3);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"error\"") != null);
+    try std.testing.expectEqual(checked, effect.prepares);
+    try capture.invoke(native, "{\"generation\":\"1\",\"operationId\":\"5\",\"target\":{\"kind\":\"workspace\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"results/年度报告.docx\"},\"action\":\"check_current\"}", 3);
+    try capture.wait(control, &boundary, 8);
+    try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"ready\"") != null);
+    // A copied path reaches the clipboard and nothing else: the answer is the
+    // same three fields, whatever identity asked.
+    for ([_][]const u8{
+        "{\"kind\":\"output\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\"}",
+        "{\"kind\":\"workspace\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"results/年度报告.docx\"}",
+    }, 6..) |target, operation| {
+        const copies = effect.copies;
+        const before = capture.count;
+        var copy_buffer: [512]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&copy_buffer, "{{\"generation\":\"1\",\"operationId\":\"{d}\",\"target\":{s},\"action\":\"copy_path\"}}", .{ operation, target });
+        try capture.invoke(native, payload, 3);
+        try capture.wait(control, &boundary, before + 1);
+        try std.testing.expectEqual(copies + 1, effect.copies);
+        var answer = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.response.?, .{});
+        defer answer.deinit();
+        const fields = answer.value.object.get("result").?.object;
+        try std.testing.expectEqual(@as(usize, 3), fields.count());
+        try std.testing.expectEqualStrings("path_copied", fields.get("state").?.string);
+        try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "metawork-test") == null);
+        try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "报告") == null);
+    }
+    // Registration spends the same ids: one it already passed is refused.
+    const register = native.async_registry.find(commands.register_output).?;
+    const register_source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+    for ([_][]const u8{ "5", "39" }, [_][]const u8{ "\"error\"", "\"state\":\"restricted\"" }) |operation, answer| {
+        var register_buffer: [256]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&register_buffer, "{{\"generation\":\"1\",\"operationId\":\"{s}\",\"taskId\":\"3\",\"runId\":\"7\",\"changeId\":\"change-3-1-1\"}}", .{operation});
+        try register.invoke_fn(register.context, .{ .request = .{ .id = "register", .command = commands.register_output, .payload = payload }, .source = register_source }, .{ .context = &capture, .source = register_source, .respond_fn = Capture.receive });
+        try std.testing.expect(std.mem.indexOf(u8, capture.response.?, answer) != null);
+    }
     // Every no-job terminal must release both the Product target and Bridge
     // slot immediately, including Cancel in the system panel itself.
-    for (6..38) |operation| {
+    for (40..72) |operation| {
         var request_buffer: [512]u8 = undefined;
-        const pending_request = try std.fmt.bufPrint(&request_buffer, "{{\"generation\":\"1\",\"operationId\":\"{d}\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"save\"}}", .{operation});
+        const pending_request = try std.fmt.bufPrint(&request_buffer, "{{\"generation\":\"1\",\"operationId\":\"{d}\",\"target\":{{\"kind\":\"output\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\"}},\"action\":\"save\"}}", .{operation});
         const before = capture.count;
         try capture.invoke(native, pending_request, 3);
         try std.testing.expectEqual(before, capture.count);
@@ -10533,22 +10709,22 @@ test "Output action Bridge binds fixture identities and refuses replay cancellat
         } else if (operation % 3 == 1) {
             receiver.complete_fn(receiver.context, pending_id, .{ .failed = error.DialogFailed });
         } else {
-            boundary.cancelOutputOperation(pending_id);
+            boundary.cancelFileOperation(pending_id);
         }
         try std.testing.expectEqual(before + 1, capture.count);
-        for (control.pending_output_saves) |entry| try std.testing.expect(entry == null);
-        for (boundary.output_in_flight) |entry| try std.testing.expect(entry == null);
+        for (control.pending_file_saves) |entry| try std.testing.expect(entry == null);
+        for (boundary.file_actions_in_flight) |entry| try std.testing.expect(entry == null);
         receiver.complete_fn(receiver.context, pending_id, .cancelled);
         try std.testing.expectEqual(before + 1, capture.count);
     }
-    const fourth = "{\"generation\":\"1\",\"operationId\":\"38\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"reveal\"}";
+    const fourth = "{\"generation\":\"1\",\"operationId\":\"72\",\"target\":{\"kind\":\"output\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\"},\"action\":\"reveal\"}";
     effect.blocked.store(true, .release);
     try capture.invoke(native, fourth, 3);
     boundary.breakConnection();
-    try capture.wait(control, &boundary, 39);
+    try capture.wait(control, &boundary, 45);
     try std.testing.expect(std.mem.indexOf(u8, capture.response.?, "\"state\":\"cancelled\"") != null);
     try std.testing.expectEqual(@as(usize, 1), effect.reveals);
-    try std.testing.expect(!control.hasOutputChecks());
+    try std.testing.expect(!control.hasFileActions());
 }
 
 test "Product view Session pressure rejection fixture preserves exact reason and blocking Task" {

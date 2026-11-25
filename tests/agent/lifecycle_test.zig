@@ -15,7 +15,6 @@ const wire = fixture.wire;
 const textChunk = fixture.textChunk;
 const Plan = fixture.Plan;
 const fake_core = &fixture.fake_core;
-const diagnostic_byte: u8 = 0xA5;
 const diagnostic = fixture.diagnostic;
 const runtimeDestroy = fixture.runtimeDestroy;
 const bufferRelease = fixture.bufferRelease;
@@ -3804,7 +3803,8 @@ test "pre-admission resource limit leaves the Session reusable" {
     try std.testing.expectEqual(@as(?u32, wire.STATUS_RESOURCE_LIMIT), first_terminal.raw_status_code);
     try std.testing.expectEqual(@as(?lifecycle.TerminalFailure, .abi_status), first_terminal.failure);
     try std.testing.expectEqual(lifecycle.SessionDisposition.reusable, first_terminal.session_disposition_at_completion);
-    try std.testing.expectEqualSlices(u8, &.{diagnostic_byte}, first_terminal.diagnostic());
+    // The fake Core returns one byte that is not UTF-8.
+    try std.testing.expectEqualStrings("\u{FFFD}", first_terminal.diagnostic());
     try std.testing.expect(!first_terminal.diagnostic_truncated);
     try std.testing.expectEqual(lifecycle.SessionState.idle, first.state);
 

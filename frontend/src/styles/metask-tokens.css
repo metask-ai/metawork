@@ -79,6 +79,14 @@
   --ui-syntax-constant: #8a5515;
   --ui-syntax-function: #2457a6;
   --ui-syntax-punctuation: #4e5360;
+  --ui-file-code: #6639ba;
+  --ui-file-document: #2457a6;
+  --ui-file-sheet: #26734d;
+  --ui-file-slides: #b4541a;
+  --ui-file-pdf: #b3403f;
+  --ui-file-archive: #8a5515;
+  --ui-file-media: #a83279;
+  --ui-file-other: var(--ui-content-muted);
   --ui-action-hover-surface: var(--ui-surface-panel-2);
   --ui-action-hover-content: var(--ui-content-primary);
   --ui-action-selected-surface: color-mix(
@@ -150,6 +158,13 @@
   --ui-syntax-constant: #f5b97a;
   --ui-syntax-function: #8aadf4;
   --ui-syntax-punctuation: #cbd0da;
+  --ui-file-code: #c6a0f6;
+  --ui-file-document: #8aadf4;
+  --ui-file-sheet: #8bd5a5;
+  --ui-file-slides: #f5a97f;
+  --ui-file-pdf: #f28b82;
+  --ui-file-archive: #f5b97a;
+  --ui-file-media: #f0a6d0;
   --ui-action-danger-surface: color-mix(
     in srgb,
     var(--ui-surface-panel) 85%,

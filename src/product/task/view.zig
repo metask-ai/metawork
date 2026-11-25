@@ -207,6 +207,14 @@ pub const ActionBlocker = enum {
     unavailable,
 };
 
+/// Where opening a Workspace file by its name hands it. One rule decides it
+/// for the projection and for the action the projection offers.
+pub const FileOpenKind = enum { browser, default_app };
+pub const FileOpen = struct {
+    context: *anyopaque,
+    kind_fn: *const fn (*anyopaque, []const u8) ?FileOpenKind,
+};
+
 pub const Input = struct {
     now_ms: ?u64 = null,
     task: *const task_state.Task,
@@ -220,8 +228,7 @@ pub const Input = struct {
     compact_blocker: ?ActionBlocker,
     text: TextProjection,
     output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void = null,
-    office_outputs_open: bool = false,
-    browser_outputs_open: bool = false,
+    file_open: ?FileOpen = null,
     catalog: CatalogProjection,
     pending_ui: PendingUiProjection,
     /// A consumer page is an explicit slice of this Task's stable Run order.
@@ -672,9 +679,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"context\":") catch return error.SnapshotTooLarge;
     try writeConversationContext(writer, task.conversation_observation);
-    try writeConversationOutputs(writer, input.text, task);
-    if (input.office_outputs_open) writer.writeAll(",\"officeOutputsOpen\":true") catch return error.SnapshotTooLarge;
-    if (input.browser_outputs_open) writer.writeAll(",\"browserOutputsOpen\":true") catch return error.SnapshotTooLarge;
+    try writeConversationOutputs(writer, input.text, task, input.file_open);
     writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
     var run_count: usize = 0;
     for (task.durable.runs, 0..) |*entry, run_index| {
@@ -700,6 +705,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
             editAdmitted(task, run, input.shutting_down),
             input.now_ms,
             input.output_path_validator,
+            input.file_open,
             input.file_references,
         );
     }
@@ -1046,6 +1052,7 @@ pub fn writeRun(
     edit_admitted: bool,
     now_ms: ?u64,
     output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void,
+    file_open: ?FileOpen,
     /// Range pages pass a scratch allocator and carry the Run's file
     /// reference index; whole-history projections leave it out.
     file_references: ?std.mem.Allocator,
@@ -1133,11 +1140,11 @@ pub fn writeRun(
     writer.writeAll(",\"fileChanges\":") catch return error.SnapshotTooLarge;
     try writeFileChanges(writer, text_projection, task, run, output_path_validator);
     writer.writeAll(",\"outputs\":") catch return error.SnapshotTooLarge;
-    try writeRunOutputs(writer, text_projection, task, run);
+    try writeRunOutputs(writer, text_projection, task, run, file_open);
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 
-fn writeRunOutputs(writer: *std.Io.Writer, text: TextProjection, task: *const task_state.Task, run: *const task_state.RunRecord) Error!void {
+fn writeRunOutputs(writer: *std.Io.Writer, text: TextProjection, task: *const task_state.Task, run: *const task_state.RunRecord, file_open: ?FileOpen) Error!void {
     writer.writeByte('[') catch return error.SnapshotTooLarge;
     var visible_ids: [agent.max_file_deliveries_per_run][16]u8 = undefined;
     var output_count: usize = 0;
@@ -1152,7 +1159,7 @@ fn writeRunOutputs(writer: *std.Io.Writer, text: TextProjection, task: *const ta
             const updated = for (run.updated_output_ids) |id| {
                 if (std.mem.eql(u8, &id, &hex)) break true;
             } else false;
-            try writeDeliveredOutput(writer, text, output, null, updated);
+            try writeDeliveredOutput(writer, text, output, null, updated, file_open);
             visible_ids[output_count] = output.id;
             output_count += 1;
         }
@@ -1169,7 +1176,7 @@ fn writeRunOutputs(writer: *std.Io.Writer, text: TextProjection, task: *const ta
             } else {
                 const output = task_policy.outputByIdentity(task, id) orelse continue;
                 if (!first_observation) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                try writeDeliveredOutput(writer, text, output, null, true);
+                try writeDeliveredOutput(writer, text, output, null, true, file_open);
                 first_observation = false;
             }
         }
@@ -1177,7 +1184,7 @@ fn writeRunOutputs(writer: *std.Io.Writer, text: TextProjection, task: *const ta
     writer.writeByte(']') catch return error.SnapshotTooLarge;
 }
 
-fn writeConversationOutputs(writer: *std.Io.Writer, text: TextProjection, task: *const task_state.Task) Error!void {
+fn writeConversationOutputs(writer: *std.Io.Writer, text: TextProjection, task: *const task_state.Task, file_open: ?FileOpen) Error!void {
     var started = false;
     for (task.durable.runs) |*entry| if (entry.*) |*run| {
         if (!task_policy.runProjected(task, run)) continue;
@@ -1185,17 +1192,19 @@ fn writeConversationOutputs(writer: *std.Io.Writer, text: TextProjection, task: 
             if (task_policy.conversationOutput(task, output) != output) continue;
             writer.writeAll(if (started) "," else ",\"conversationOutputs\":[") catch return error.SnapshotTooLarge;
             started = true;
-            try writeDeliveredOutput(writer, text, output, run.id, false);
+            try writeDeliveredOutput(writer, text, output, run.id, false, file_open);
         };
     };
     if (started) writer.writeByte(']') catch return error.SnapshotTooLarge;
 }
 
-fn writeDeliveredOutput(writer: *std.Io.Writer, text: TextProjection, output: *const task_state.OutputRecord, run_id: ?u64, updated: bool) Error!void {
+fn writeDeliveredOutput(writer: *std.Io.Writer, text: TextProjection, output: *const task_state.OutputRecord, run_id: ?u64, updated: bool, file_open: ?FileOpen) Error!void {
     const hidden = output.redacted or text.containsSensitive(output.locator);
     writer.print("{{\"id\":\"{s}\"", .{std.fmt.bytesToHex(output.id, .lower)}) catch return error.SnapshotTooLarge;
     if (run_id) |id| writer.print(",\"runId\":\"{d}\"", .{id}) catch return error.SnapshotTooLarge;
     if (updated) writer.writeAll(",\"updated\":true") catch return error.SnapshotTooLarge;
+    if (file_open) |open| if (!hidden) if (open.kind_fn(open.context, output.locator)) |kind|
+        writer.print(",\"open\":\"{s}\"", .{@tagName(kind)}) catch return error.SnapshotTooLarge;
     writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
     try text.writeJson(writer, if (hidden) "" else output.locator);
     writer.print(",\"sizeBytes\":\"{d}\",\"redacted\":{}}}", .{ output.size_bytes, hidden }) catch return error.SnapshotTooLarge;

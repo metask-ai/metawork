@@ -108,32 +108,26 @@ pub const ProductViewRequest = struct {
         return request;
     }
 };
-pub const OutputAction = struct {
+pub const FileActionRequest = struct {
+    generation: WireId,
+    operationId: WireId,
+    target: FileTarget,
+    action: struct {
+        value: product_control.FileAction,
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            const name = try WireText.jsonParse(allocator, source, options);
+            return .{ .value = std.meta.stringToEnum(product_control.FileAction, name.value) orelse return error.UnexpectedToken };
+        }
+    },
+};
+pub const OutputRegisterRequest = struct {
     generation: WireId,
     operationId: WireId,
     taskId: WireId,
     runId: WireId,
-    outputId: ?WireText = null,
-    changeId: ?WireText = null,
-    action: struct {
-        value: product_control.OutputCheckKind,
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-            const name = try WireText.jsonParse(allocator, source, options);
-            return .{ .value = std.meta.stringToEnum(product_control.OutputCheckKind, name.value) orelse return error.UnexpectedToken };
-        }
-    },
-
-    pub fn target(self: OutputAction) !union(enum) { output: [16]u8, change: []const u8 } {
-        if (self.action.value == .register) {
-            const change = (self.changeId orelse return error.InvalidBridgeId).value;
-            if (self.outputId != null or change.len == 0 or change.len > 128) return error.InvalidBridgeId;
-            return .{ .change = change };
-        }
-        if (self.changeId != null) return error.InvalidBridgeId;
-        return .{ .output = try parseOutputId((self.outputId orelse return error.InvalidBridgeId).value) };
-    }
+    changeId: WireText,
 };
-pub const OutputActionCancel = struct { generation: WireId, operationId: WireId };
+pub const FileActionCancel = struct { generation: WireId, operationId: WireId };
 pub fn parseOutputId(value: []const u8) ![16]u8 {
     if (value.len != 32) return error.InvalidBridgeId;
     for (value) |byte| if (!(byte >= '0' and byte <= '9') and !(byte >= 'a' and byte <= 'f')) return error.InvalidBridgeId;
@@ -575,7 +569,7 @@ pub const TaskCatalogRefresh = struct {
 };
 pub const TaskIdentity = struct { taskId: []const u8, runId: []const u8 };
 pub const FilePreviewKey = struct { generation: []const u8, previewId: []const u8 };
-pub const WorkspaceFileRequest = struct {
+pub const ListDirectoryRequest = struct {
     generation: []const u8,
     previewId: []const u8,
     taskId: []const u8,
@@ -583,6 +577,58 @@ pub const WorkspaceFileRequest = struct {
     workspaceEpoch: []const u8,
     path: []const u8,
 };
+/// One Workspace file, exactly in the shape its kind declares. Every kind
+/// names its own fields: nothing is optional, nothing is substituted, and an
+/// unknown kind fails closed. A path carries no authority here; Product
+/// decides whether it is one.
+pub const FileTarget = struct {
+    value: product_control.FileTarget,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !FileTarget {
+        const object = switch (try std.json.innerParse(std.json.Value, allocator, source, options)) {
+            .object => |fields| fields,
+            else => return error.UnexpectedToken,
+        };
+        const kind = try targetText(object, "kind");
+        if (std.mem.eql(u8, kind, "reference")) {
+            if (object.count() != 4) return error.UnexpectedToken;
+            const id = try targetText(object, "fileReferenceId");
+            if (id.len == 0 or id.len > 128) return error.UnexpectedToken;
+            return .{ .value = .{ .reference = .{
+                .task_id = try fileTargetId(object, "taskId"),
+                .run_id = try fileTargetId(object, "runId"),
+                .id = id,
+            } } };
+        }
+        if (std.mem.eql(u8, kind, "output")) {
+            if (object.count() != 4) return error.UnexpectedToken;
+            return .{ .value = .{ .output = .{
+                .task_id = try fileTargetId(object, "taskId"),
+                .run_id = try fileTargetId(object, "runId"),
+                .id = parseOutputId(try targetText(object, "outputId")) catch return error.UnexpectedToken,
+            } } };
+        }
+        if (std.mem.eql(u8, kind, "workspace")) {
+            if (object.count() != 5) return error.UnexpectedToken;
+            const path = try targetText(object, "path");
+            if (path.len == 0 or path.len > product_control.max_file_target_path_bytes) return error.UnexpectedToken;
+            return .{ .value = .{ .workspace = .{
+                .task_id = try fileTargetId(object, "taskId"),
+                .workspace_id = try fileTargetId(object, "workspaceId"),
+                .workspace_epoch = try fileTargetId(object, "workspaceEpoch"),
+                .path = path,
+            } } };
+        }
+        return error.UnexpectedToken;
+    }
+};
+
+fn fileTargetId(object: std.json.ObjectMap, name: []const u8) !u64 {
+    const id = try targetId(object, name);
+    if (id == 0) return error.UnexpectedToken;
+    return id;
+}
+
 /// One registered media identity. `kind` is the registry's wire name and the
 /// fields a kind does not use are absent, not null: a target is exact.
 /// One registered media target, exactly in the shape its kind declares. Every
@@ -607,21 +653,21 @@ pub const MediaTarget = union(product_control.MediaKind) {
         switch (kind) {
             .draft_attachment => {
                 if (object.count() != 2) return error.UnexpectedToken;
-                return .{ .draft_attachment = .{ .token = try mediaTargetText(object, "token") } };
+                return .{ .draft_attachment = .{ .token = try targetText(object, "token") } };
             },
             .run_attachment => {
                 if (object.count() != 4) return error.UnexpectedToken;
                 return .{ .run_attachment = .{
-                    .task_id = try mediaTargetId(object, "taskId"),
-                    .run_id = try mediaTargetId(object, "runId"),
+                    .task_id = try targetId(object, "taskId"),
+                    .run_id = try targetId(object, "runId"),
                     .index = try mediaTargetIndex(object),
                 } };
             },
             .submission_attachment => {
                 if (object.count() != 4) return error.UnexpectedToken;
                 return .{ .submission_attachment = .{
-                    .task_id = try mediaTargetId(object, "taskId"),
-                    .operation_id = try mediaTargetText(object, "operationId"),
+                    .task_id = try targetId(object, "taskId"),
+                    .operation_id = try targetText(object, "operationId"),
                     .index = try mediaTargetIndex(object),
                 } };
             },
@@ -640,15 +686,15 @@ pub const MediaTarget = union(product_control.MediaKind) {
     }
 };
 
-fn mediaTargetText(object: std.json.ObjectMap, name: []const u8) ![]const u8 {
+fn targetText(object: std.json.ObjectMap, name: []const u8) ![]const u8 {
     return switch (object.get(name) orelse return error.UnexpectedToken) {
         .string => |text| text,
         else => error.UnexpectedToken,
     };
 }
 
-fn mediaTargetId(object: std.json.ObjectMap, name: []const u8) !u64 {
-    return parseWireId(try mediaTargetText(object, name)) catch error.UnexpectedToken;
+fn targetId(object: std.json.ObjectMap, name: []const u8) !u64 {
+    return parseWireId(try targetText(object, name)) catch error.UnexpectedToken;
 }
 
 /// The position inside the message that owns the attachment, as a number
@@ -672,13 +718,7 @@ pub const RunToolsRequest = struct {
     runId: []const u8,
     afterOrder: []const u8,
 };
-pub const FilePreviewRequest = struct {
-    generation: []const u8,
-    previewId: []const u8,
-    taskId: []const u8,
-    runId: []const u8,
-    fileReferenceId: []const u8,
-};
+pub const FilePreviewRequest = struct { generation: []const u8, previewId: []const u8, target: FileTarget };
 pub const FileChangeDiffRequest = struct {
     taskId: []const u8,
     runId: []const u8,
@@ -1273,33 +1313,117 @@ test "Custom Provider credential replacement requires the exact API key field" {
     );
 }
 
-test "file preview payload requires exact Task Run and reference identity" {
-    var request = try parsePayload(FilePreviewRequest,
-        \\{"generation":"1","previewId":"3","taskId":"1","runId":"2","fileReferenceId":"task:1:run:2:file:3"}
-    );
-    defer request.deinit();
-    try std.testing.expectEqualStrings("1", request.value.taskId);
-    try std.testing.expectEqualStrings("2", request.value.runId);
-    try std.testing.expectEqualStrings(
-        "task:1:run:2:file:3",
-        request.value.fileReferenceId,
-    );
-    try std.testing.expectError(
-        error.InvalidBridgePayload,
-        parsePayload(FilePreviewRequest,
-            \\{"fileReferenceId":"task:1:run:2:file:3"}
-        ),
-    );
-    try std.testing.expectError(
-        error.InvalidBridgePayload,
-        parsePayload(FilePreviewRequest,
-            \\{"generation":"1","previewId":"3","taskId":"1","runId":"2","fileReferenceId":"task:1:run:2:file:3","path":"src/main.zig"}
-        ),
-    );
+test "file preview targets decode exactly the fields their kind declares" {
+    const reference =
+        \\{"kind":"reference","taskId":"1","runId":"2","fileReferenceId":"file-1-2-1-1"}
+    ;
+    const output =
+        \\{"kind":"output","taskId":"1","runId":"2","outputId":"03030303030303030303030303030303"}
+    ;
+    const workspace =
+        \\{"kind":"workspace","taskId":"1","workspaceId":"2","workspaceEpoch":"4","path":"docs/说明.md"}
+    ;
+    {
+        var parsed = try parsePayload(FileTarget, reference);
+        defer parsed.deinit();
+        try std.testing.expectEqualDeep(
+            product_control.FileTarget{ .reference = .{ .task_id = 1, .run_id = 2, .id = "file-1-2-1-1" } },
+            parsed.value.value,
+        );
+    }
+    {
+        var parsed = try parsePayload(FileTarget, output);
+        defer parsed.deinit();
+        try std.testing.expectEqualDeep(
+            product_control.FileTarget{ .output = .{ .task_id = 1, .run_id = 2, .id = @splat(3) } },
+            parsed.value.value,
+        );
+    }
+    {
+        var parsed = try parsePayload(FileTarget, workspace);
+        defer parsed.deinit();
+        try std.testing.expectEqualDeep(
+            product_control.FileTarget{ .workspace = .{ .task_id = 1, .workspace_id = 2, .workspace_epoch = 4, .path = "docs/说明.md" } },
+            parsed.value.value,
+        );
+    }
+    for ([_][]const u8{
+        // Not an object, no kind, a kind nothing registers.
+        "null",
+        "\"reference\"",
+        "{}",
+        \\{"taskId":"1","runId":"2","fileReferenceId":"file-1-2-1-1"}
+        ,
+        \\{"kind":null,"taskId":"1","runId":"2","fileReferenceId":"file-1-2-1-1"}
+        ,
+        \\{"kind":"path","taskId":"1","workspaceId":"2","workspaceEpoch":"4","path":"a"}
+        ,
+        // A field missing, a field too many, a field of another kind.
+        \\{"kind":"reference","taskId":"1","runId":"2"}
+        ,
+        \\{"kind":"reference","taskId":"1","runId":"2","fileReferenceId":"file-1-2-1-1","path":"src/main.zig"}
+        ,
+        \\{"kind":"reference","taskId":"1","workspaceId":"2","fileReferenceId":"file-1-2-1-1"}
+        ,
+        \\{"kind":"output","taskId":"1","runId":"2"}
+        ,
+        \\{"kind":"output","taskId":"1","runId":"2","outputId":"0303"}
+        ,
+        \\{"kind":"output","taskId":"1","runId":"2","fileReferenceId":"03030303030303030303030303030303"}
+        ,
+        \\{"kind":"workspace","taskId":"1","workspaceId":"2","path":"a"}
+        ,
+        \\{"kind":"workspace","taskId":"1","workspaceId":"2","workspaceEpoch":"4","path":"a","runId":"2"}
+        ,
+        // A null, zero, padded or non-string identity.
+        \\{"kind":"reference","taskId":null,"runId":"2","fileReferenceId":"file-1-2-1-1"}
+        ,
+        \\{"kind":"reference","taskId":"0","runId":"2","fileReferenceId":"file-1-2-1-1"}
+        ,
+        \\{"kind":"reference","taskId":"1","runId":"02","fileReferenceId":"file-1-2-1-1"}
+        ,
+        \\{"kind":"reference","taskId":1,"runId":"2","fileReferenceId":"file-1-2-1-1"}
+        ,
+        \\{"kind":"workspace","taskId":"0","workspaceId":"2","workspaceEpoch":"4","path":"a"}
+        ,
+        \\{"kind":"workspace","taskId":"1","workspaceId":"0","workspaceEpoch":"4","path":"a"}
+        ,
+        \\{"kind":"workspace","taskId":"1","workspaceId":"2","workspaceEpoch":"0","path":"a"}
+        ,
+        // No reference, no path.
+        \\{"kind":"reference","taskId":"1","runId":"2","fileReferenceId":""}
+        ,
+        \\{"kind":"workspace","taskId":"1","workspaceId":"2","workspaceEpoch":"4","path":""}
+        ,
+        \\{"kind":"workspace","taskId":"1","workspaceId":"2","workspaceEpoch":"4","path":[97]}
+        ,
+    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(FileTarget, payload));
+    const long_id = "{\"kind\":\"reference\",\"taskId\":\"1\",\"runId\":\"2\",\"fileReferenceId\":\"" ++ "a" ** 129 ++ "\"}";
+    try std.testing.expectError(error.InvalidBridgePayload, parsePayload(FileTarget, long_id));
 }
 
-test "workspace directory and preview payloads require a Task identity" {
-    var request = try parsePayload(WorkspaceFileRequest,
+test "file preview payload carries one exact target and nothing beside it" {
+    var request = try parsePayload(FilePreviewRequest,
+        \\{"generation":"1","previewId":"3","target":{"kind":"reference","taskId":"1","runId":"2","fileReferenceId":"file-1-2-1-1"}}
+    );
+    defer request.deinit();
+    try std.testing.expectEqualStrings("3", request.value.previewId);
+    try std.testing.expectEqualStrings("file-1-2-1-1", request.value.target.value.reference.id);
+    for ([_][]const u8{
+        \\{"target":{"kind":"reference","taskId":"1","runId":"2","fileReferenceId":"file-1-2-1-1"}}
+        ,
+        \\{"generation":"1","previewId":"3"}
+        ,
+        // The shapes this command replaced.
+        \\{"generation":"1","previewId":"3","taskId":"1","runId":"2","fileReferenceId":"file-1-2-1-1"}
+        ,
+        \\{"generation":"1","previewId":"3","target":{"kind":"reference","taskId":"1","runId":"2","fileReferenceId":"file-1-2-1-1"},"path":"src/main.zig"}
+        ,
+    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(FilePreviewRequest, payload));
+}
+
+test "workspace directory payloads require a Task identity" {
+    var request = try parsePayload(ListDirectoryRequest,
         \\{"generation":"1","previewId":"3","taskId":"1","workspaceId":"2","workspaceEpoch":"4","path":"docs"}
     );
     defer request.deinit();
@@ -1309,7 +1433,7 @@ test "workspace directory and preview payloads require a Task identity" {
         ,
         \\{"generation":"1","previewId":"3","workspaceId":"2","workspaceEpoch":"4","path":"docs"}
         ,
-    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(WorkspaceFileRequest, payload));
+    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ListDirectoryRequest, payload));
 }
 
 test "media payloads require one exact registered target" {
@@ -1588,31 +1712,64 @@ test "snapshot request scalars reject JSON coercions and accept only canonical w
     try std.testing.expectEqual(@as(u64, 0), chunk.value.offset.value);
 }
 
-test "Output action strict payload accepts only scoped identities and known actions" {
-    const valid = "{\"generation\":\"1\",\"operationId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"check\"}";
-    var parsed = try parsePayload(OutputAction, valid);
+test "Output action payloads carry one exact file target and a known action" {
+    var parsed = try parsePayload(FileActionRequest,
+        \\{"generation":"1","operationId":"1","target":{"kind":"output","taskId":"3","runId":"7","outputId":"03030303030303030303030303030303"},"action":"check"}
+    );
     defer parsed.deinit();
-    try std.testing.expectEqual(@as([16]u8, @splat(3)), (try parsed.value.target()).output);
-    var registration = try parsePayload(OutputAction, "{\"generation\":\"1\",\"operationId\":\"2\",\"taskId\":\"3\",\"runId\":\"7\",\"changeId\":\"change-3-1-1\",\"action\":\"register\"}");
-    defer registration.deinit();
-    try std.testing.expectEqualStrings("change-3-1-1", (try registration.value.target()).change);
-    registration.value.outputId = parsed.value.outputId;
-    try std.testing.expectError(error.InvalidBridgeId, registration.value.target());
-    parsed.value.changeId = registration.value.changeId;
-    try std.testing.expectError(error.InvalidBridgeId, parsed.value.target());
+    try std.testing.expectEqualDeep(
+        product_control.FileTarget{ .output = .{ .task_id = 3, .run_id = 7, .id = @splat(3) } },
+        parsed.value.target.value,
+    );
+    try std.testing.expectEqual(product_control.FileAction.check, parsed.value.action.value);
+    for ([_][]const u8{ "open", "reveal", "check_current", "save" }) |action| {
+        var buffer: [256]u8 = undefined;
+        var other = try parsePayload(FileActionRequest, try std.fmt.bufPrint(&buffer, "{{\"generation\":\"1\",\"operationId\":\"2\",\"target\":{{\"kind\":\"workspace\",\"taskId\":\"3\",\"workspaceId\":\"2\",\"workspaceEpoch\":\"1\",\"path\":\"a.txt\"}},\"action\":\"{s}\"}}", .{action}));
+        defer other.deinit();
+        try std.testing.expectEqualStrings(action, @tagName(other.value.action.value));
+    }
     for ([_][]const u8{ "", "00000000000000000000000000000000", "ABCDEFABCDEFABCDEFABCDEFABCDEFAB", "030303" }) |id|
         try std.testing.expectError(error.InvalidBridgeId, parseOutputId(id));
     for ([_][]const u8{
-        "{\"generation\":[49],\"operationId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"check\"}",
-        "{\"generation\":\"1\",\"operationId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"shell\"}",
-        "{\"generation\":\"1\",\"operationId\":\"1\",\"taskId\":\"3\",\"runId\":\"7\",\"outputId\":\"03030303030303030303030303030303\",\"action\":\"check\",\"path\":\"C:/secret\"}",
-    }) |invalid| {
-        if (parsePayload(OutputAction, invalid)) |value| {
-            var owned = value;
-            owned.deinit();
-            return error.InvalidPayloadAccepted;
-        } else |_| {}
-    }
+        \\{"generation":[49],"operationId":"1","target":{"kind":"output","taskId":"3","runId":"7","outputId":"03030303030303030303030303030303"},"action":"check"}
+        ,
+        \\{"generation":"1","operationId":"1","target":{"kind":"output","taskId":"3","runId":"7","outputId":"03030303030303030303030303030303"},"action":"shell"}
+        ,
+        // Registration is not an action on a file identity.
+        \\{"generation":"1","operationId":"1","target":{"kind":"output","taskId":"3","runId":"7","outputId":"03030303030303030303030303030303"},"action":"register"}
+        ,
+        \\{"generation":"1","operationId":"1","target":{"kind":"output","taskId":"3","runId":"7","outputId":"03030303030303030303030303030303"},"action":"check","path":"C:/secret"}
+        ,
+        \\{"generation":"1","operationId":"1","target":{"kind":"output","taskId":"3","runId":"7","outputId":"00000000000000000000000000000000"},"action":"check"}
+        ,
+        \\{"generation":"1","operationId":"1","target":{"kind":"output","taskId":"0","runId":"7","outputId":"03030303030303030303030303030303"},"action":"check"}
+        ,
+        \\{"generation":"1","operationId":"1","target":{"kind":"output","taskId":"3","runId":"7","outputId":"03030303030303030303030303030303","path":"a"},"action":"check"}
+        ,
+        \\{"generation":"1","operationId":"1","action":"check"}
+        ,
+        // The shape this command replaced.
+        \\{"generation":"1","operationId":"1","taskId":"3","runId":"7","outputId":"03030303030303030303030303030303","action":"check"}
+        ,
+    }) |invalid| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(FileActionRequest, invalid));
+}
+
+test "Output registration payload names only its recorded change" {
+    var parsed = try parsePayload(OutputRegisterRequest,
+        \\{"generation":"1","operationId":"2","taskId":"3","runId":"7","changeId":"change-3-1-1"}
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("change-3-1-1", parsed.value.changeId.value);
+    for ([_][]const u8{
+        \\{"generation":"1","operationId":"2","taskId":"3","runId":"7"}
+        ,
+        \\{"generation":"1","operationId":"2","taskId":"3","runId":"7","changeId":null}
+        ,
+        \\{"generation":"1","operationId":"2","taskId":"3","runId":"7","changeId":"change-3-1-1","action":"register"}
+        ,
+        \\{"generation":"1","operationId":"2","taskId":"3","runId":"7","changeId":"change-3-1-1","path":"a.txt"}
+        ,
+    }) |invalid| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(OutputRegisterRequest, invalid));
 }
 
 test "Skill import payloads accept only typed target and exact preparation confirmation" {

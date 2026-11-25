@@ -4,8 +4,8 @@ import { FilePreviewLoader } from "./file-preview.ts";
 import { object } from "./wire-codec.ts";
 import {
   decodeRunToolsPage,
-  decodeOutputActionResult,
-  decodeOutputActionCancel,
+  decodeFileActionResult,
+  decodeFileActionCancel,
   decodeSendInputResult,
   decodeTaskProjectResult,
 } from "./decode-contracts.ts";
@@ -18,8 +18,8 @@ import {
 import type { NativeSdkJson, NativeSdkShortcutDetail } from "@native-sdk/cli";
 import type {
   HostSignal,
-  OutputAction,
-  OutputActionState,
+  FileAction,
+  FileActionState,
   RunToolsPage,
   ViewScope,
   McpHttpConnectionInput,
@@ -35,7 +35,9 @@ import type {
   UiResponsePayload,
   WorkspaceChoice,
   AttachmentThumbnailResult,
+  FileDescriptionResult,
   FilePreview,
+  FileTarget,
   FilePreviewLoadOptions,
   MediaTarget,
   FileChangeDiffResult,
@@ -128,6 +130,23 @@ export {
 } from "./contract-error.ts";
 export type NativeBridge = NonNullable<typeof window.zero>;
 const defaultCommandTimeoutMs = 10000;
+// The state that says a file operation did what it was asked. Every other
+// state is a refusal or a failure, which any operation may report.
+const completedFileState: Record<FileAction | "register", FileActionState> = {
+  open: "opened",
+  reveal: "revealed",
+  copy_path: "path_copied",
+  check_current: "ready",
+  save: "saved",
+  check: "ready",
+  register: "registered",
+};
+const completedFileStates = new Set(Object.values(completedFileState));
+const saveOnlyFileStates = new Set<FileActionState>([
+  "save_failed",
+  "target_changed",
+  "cleanup_failed",
+]);
 export class BridgeCommandTimeoutError extends Error {
   readonly command: string;
   readonly timeoutMs: number;
@@ -154,7 +173,7 @@ export class BridgeClient {
       }
     | undefined;
   private nextReceiveBatch = 1n;
-  private nextOutputOperation = 1n;
+  private nextFileOperation = 1n;
   private nextRunToolsRequest = 1n;
   private nextInboxRequest = 1n;
   private readonly previewImages = new PreviewImagePool();
@@ -278,7 +297,7 @@ export class BridgeClient {
       ...result.attachmentInput,
     };
     this.nextReceiveBatch = 1n;
-    this.nextOutputOperation = 1n;
+    this.nextFileOperation = 1n;
     this.nextRunToolsRequest = 1n;
     return result.generation;
   }
@@ -477,22 +496,47 @@ export class BridgeClient {
   ): Promise<void> {
     await this.invoke(commands.registerNotificationText, { ...registration });
   }
-  async outputAction(
+  fileAction(
+    target: FileTarget,
+    action: FileAction,
+    signal: AbortSignal,
+  ): Promise<FileActionState> {
+    return this.fileOperation(
+      commands.fileAction,
+      { target, action },
+      action,
+      signal,
+    );
+  }
+  /** Records one applied change of a finished Run as an output. */
+  registerOutput(
     taskId: string,
     runId: string,
-    targetId: string,
-    action: OutputAction | "register",
+    changeId: string,
     signal: AbortSignal,
-  ): Promise<OutputActionState> {
+  ): Promise<FileActionState> {
+    return this.fileOperation(
+      commands.registerOutput,
+      { taskId, runId, changeId },
+      "register",
+      signal,
+    );
+  }
+  private async fileOperation(
+    command: string,
+    request: Record<string, NativeSdkJson>,
+    operation: FileAction | "register",
+    signal: AbortSignal,
+  ): Promise<FileActionState> {
     const connection = this.attachmentConnection;
     if (!connection) throw new Error("Host connection is unavailable");
     if (signal.aborted)
-      throw new DOMException("Output action cancelled", "AbortError");
-    if (this.nextOutputOperation > 18446744073709551615n)
-      throw new Error("Output operation identity exhausted");
+      throw new DOMException("File action cancelled", "AbortError");
+    if (this.nextFileOperation > 18446744073709551615n)
+      throw new Error("File operation identity exhausted");
     const key = {
       generation: connection.generation,
-      operationId: String(this.nextOutputOperation++),
+      operationId: String(this.nextFileOperation++),
     };
     const matches = (result: { generation: string; operationId: string }) => {
       if (
@@ -501,7 +545,7 @@ export class BridgeClient {
       )
         throw new RendererBridgeContractError(
           "invalid_response",
-          "Output operation identity mismatch",
+          "File operation identity mismatch",
         );
     };
     let cancelled = false;
@@ -509,56 +553,36 @@ export class BridgeClient {
       if (cancelled) return;
       cancelled = true;
       if (this.attachmentConnection?.generation !== key.generation) return;
-      void this.invoke(commands.cancelOutputAction, key)
-        .then(decodeOutputActionCancel)
+      void this.invoke(commands.cancelFileAction, key)
+        .then(decodeFileActionCancel)
         .then(matches)
         .catch(() => undefined);
     };
     signal.addEventListener("abort", cancel, { once: true });
     try {
-      const result = decodeOutputActionResult(
+      const result = decodeFileActionResult(
         await this.invoke(
-          commands.outputAction,
-          {
-            ...key,
-            taskId,
-            runId,
-            action,
-            ...(action === "register"
-              ? { changeId: targetId }
-              : { outputId: targetId }),
-          },
-          action === "save" || this.commandTimeoutMs <= 0
+          command,
+          { ...key, ...request },
+          operation === "save" || this.commandTimeoutMs <= 0
             ? 0
             : Math.max(35000, this.commandTimeoutMs),
         ),
       );
       matches(result);
       if (
-        (signal.aborted && action !== "save") ||
+        (signal.aborted && operation !== "save") ||
         this.attachmentConnection?.generation !== key.generation
       )
-        throw new DOMException("Output action cancelled", "AbortError");
+        throw new DOMException("File action cancelled", "AbortError");
       if (
-        (action === "open" &&
-          (result.state === "ready" || result.state === "revealed")) ||
-        (action !== "open" && result.state === "opened") ||
-        (action === "register" &&
-          (result.state === "ready" || result.state === "revealed")) ||
-        (action !== "register" && result.state === "registered") ||
-        ((action === "check" || action === "check_current") &&
-          result.state === "revealed") ||
-        (action === "reveal" && result.state === "ready") ||
-        (action === "save" &&
-          (result.state === "ready" || result.state === "revealed")) ||
-        (action !== "save" &&
-          ["saved", "save_failed", "target_changed", "cleanup_failed"].includes(
-            result.state,
-          ))
+        (completedFileStates.has(result.state) &&
+          result.state !== completedFileState[operation]) ||
+        (saveOnlyFileStates.has(result.state) && operation !== "save")
       )
         throw new RendererBridgeContractError(
           "invalid_response",
-          "Output action result mismatch",
+          "File action result mismatch",
         );
       return result.state;
     } catch (error) {
@@ -602,12 +626,16 @@ export class BridgeClient {
     return page;
   }
   previewFile(
-    taskId: string,
-    runId: string,
-    fileReferenceId: string,
+    target: FileTarget,
     options?: FilePreviewLoadOptions,
   ): Promise<FilePreview> {
-    return this.previews.load(taskId, runId, fileReferenceId, options);
+    return this.previews.load(target, options);
+  }
+  describeFile(
+    target: FileTarget,
+    options?: FilePreviewLoadOptions,
+  ): Promise<FileDescriptionResult> {
+    return this.previews.describe(target, options);
   }
   /// The viewer tier for a registered image, draft or sent.
   previewAttachment(
@@ -644,21 +672,6 @@ export class BridgeClient {
     options?: FilePreviewLoadOptions,
   ) {
     return this.previews.listDirectory(
-      taskId,
-      workspaceId,
-      workspaceEpoch,
-      path,
-      options,
-    );
-  }
-  previewWorkspaceFile(
-    taskId: string,
-    workspaceId: string,
-    workspaceEpoch: string,
-    path: string,
-    options?: FilePreviewLoadOptions,
-  ) {
-    return this.previews.loadWorkspace(
       taskId,
       workspaceId,
       workspaceEpoch,

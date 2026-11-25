@@ -1,6 +1,15 @@
+import {
+  useFileMenuTrigger,
+  type MenuFile,
+} from "../../components/FileMenu.tsx";
+import { previewImageCopy } from "../../components/preview-image-copy.ts";
 import { PreviewImageView } from "../../components/PreviewImageView.tsx";
-import { useLayoutEffect, useRef } from "react";
-import type { FilePreview, FileReferenceView } from "../../bridge/contracts.ts";
+import { useLayoutEffect, useRef, useState } from "react";
+import type {
+  FilePreview,
+  FilePreviewImage,
+  FileReferenceView,
+} from "../../bridge/contracts.ts";
 import {
   Markdown,
   type MarkdownWebLink,
@@ -16,8 +25,45 @@ export type FilePreviewViewState = {
   phase: "loading" | "settled";
   preview: FilePreview | null;
 };
+function PreviewedImage({
+  image,
+  displayPath,
+  file,
+  onFailure,
+}: {
+  image: FilePreviewImage;
+  displayPath: string;
+  file: MenuFile | null;
+  onFailure: () => void;
+}) {
+  const [decoded, setDecoded] = useState<string | null>(null);
+  const trigger = useFileMenuTrigger(
+    file && {
+      ...file,
+      copyImage: previewImageCopy(image, decoded === image.id),
+    },
+  );
+  return (
+    <div
+      className="task-panel-preview-image focus-ring"
+      role="group"
+      tabIndex={0}
+      aria-label={displayPath}
+      {...trigger}
+    >
+      <PreviewImageView
+        image={image}
+        alt={displayPath}
+        onReady={() => setDecoded(image.id)}
+        onFailure={onFailure}
+      />
+    </div>
+  );
+}
+
 export function FilePreviewView({
   state,
+  file = null,
   mode,
   scrollTop,
   onModeChange,
@@ -26,6 +72,7 @@ export function FilePreviewView({
   webLink,
 }: {
   state: FilePreviewViewState;
+  file?: MenuFile | null;
   mode: FilePreviewMode;
   scrollTop: number;
   onModeChange: (mode: FilePreviewMode) => void;
@@ -91,13 +138,12 @@ export function FilePreviewView({
               </div>
             )}
             {state.preview.image ? (
-              <div className="task-panel-preview-image">
-                <PreviewImageView
-                  image={state.preview.image}
-                  alt={state.selected.displayPath}
-                  onFailure={() => state.preview?.release?.()}
-                />
-              </div>
+              <PreviewedImage
+                image={state.preview.image}
+                displayPath={state.selected.displayPath}
+                file={file}
+                onFailure={() => state.preview?.release?.()}
+              />
             ) : markdown ? (
               <>
                 <Tabs.Panel

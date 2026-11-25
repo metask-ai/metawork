@@ -61,3 +61,26 @@ export async function writePlainClipboard(text: string): Promise<void> {
     throw new Error("Clipboard text API is unavailable");
   await clipboard.writeText(text);
 }
+
+/** Whether this runtime can put a PNG on the clipboard at all. */
+export function imageClipboardAvailable(): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    typeof navigator.clipboard?.write === "function" &&
+    typeof ClipboardItem === "function" &&
+    (typeof ClipboardItem.supports !== "function" ||
+      ClipboardItem.supports("image/png"))
+  );
+}
+
+/**
+ * Must be called within the user's own action: the write starts before this
+ * returns and the image follows. Nothing is written when `encode` fails.
+ */
+export async function writeImageClipboard(
+  encode: () => Promise<Blob>,
+): Promise<void> {
+  await browserClipboard().write([
+    new ClipboardItem({ "image/png": Promise.resolve().then(encode) }),
+  ]);
+}

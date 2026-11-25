@@ -1260,8 +1260,7 @@ pub const ProjectionEffects = struct {
     authority_fn: *const fn (*anyopaque, ProjectionAuthorityQuery) ProjectionAuthority,
     text: task_view.TextProjection,
     output_path_validator: ?*const fn ([]const u8) error{InvalidOutputPath}!void = null,
-    office_outputs_open: bool = false,
-    browser_outputs_open: bool = false,
+    file_open: ?task_view.FileOpen = null,
     catalog: task_view.CatalogProjection,
     max_pending_ui_json_bytes: usize,
 
@@ -1644,6 +1643,9 @@ pub const Runtime = struct {
     fn queueApprovalHistoryWork(self: *Runtime, recipient: ApprovalJobRecipient, input: approval_job.HistoryInput, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
         const leases = if (recipient.taskId()) |task_id| leases: {
             const task = self.find(task_id) orelse return error.UnknownTask;
+            // Work that reaches the Session is refused once its close starts.
+            // This job only writes history, so the same rule is stated here.
+            if (recipient == .approval and sessionCloseRunning(task)) return error.TaskBusy;
             break :leases &task.runtime.worker_leases;
         } else &self.approval_cleanup_leases;
         const slot = try self.approvalJobSlot();
@@ -1911,6 +1913,13 @@ pub const Runtime = struct {
         return task.runtime.close_thread != null or task.runtime.close_requested;
     }
 
+    /// From the start of a Session close until its result is consumed. A close
+    /// starts only without a live lease and releases the Session only without
+    /// one, so the Task must gain none in between.
+    fn sessionCloseRunning(task: *const task_state.Task) bool {
+        return task.runtime.close_completion.load(.acquire) != .none;
+    }
+
     pub fn pendingSessionCloseTask(self: *const Runtime) ?u64 {
         for (self.tasks) |entry| {
             const task = entry orelse continue;
@@ -2169,7 +2178,8 @@ pub const Runtime = struct {
                     },
                 },
                 .baseline_commit, .mode_commit => {
-                    if (effects.history_blocked_fn(effects.context) or !self.approvalJobCapacityAvailable()) continue;
+                    if (effects.history_blocked_fn(effects.context) or !self.approvalJobCapacityAvailable() or
+                        sessionCloseRunning(task)) continue;
                     var candidate = self.captureApprovalCandidate(effects, task.durable.id) catch {
                         self.rejectApprovalChange(effects, task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
                         changed = true;
@@ -5023,7 +5033,9 @@ pub const Runtime = struct {
         reference_id: []const u8,
     ) ?FileReference {
         const task = self.findConst(task_id) orelse return null;
+        if (task.deletion != .idle) return null;
         const run = task_state.findRun(task.durable.runs, run_id) orelse return null;
+        if (!task_policy.runProjected(task, run)) return null;
         for (run.tools) |*tool_entry| {
             const tool = &(tool_entry.* orelse continue);
             const references = tool.file_refs orelse continue;
@@ -6962,8 +6974,7 @@ pub const Runtime = struct {
                 .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
                 .text = effects.text,
                 .output_path_validator = if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
-                .office_outputs_open = effects.office_outputs_open and external.workspace_identity_exact and !external.shutting_down,
-                .browser_outputs_open = effects.browser_outputs_open and external.workspace_identity_exact and !external.shutting_down,
+                .file_open = if (external.workspace_identity_exact and !external.shutting_down) effects.file_open else null,
                 .catalog = effects.catalog,
                 .pending_ui = .{
                     .context = &pending_ui_context,
@@ -7224,6 +7235,7 @@ pub const Runtime = struct {
                 task_view.editAdmitted(task, run, external.shutting_down),
                 effects.now_ms,
                 if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
+                if (external.workspace_identity_exact and !external.shutting_down) effects.file_open else null,
                 self.allocator,
             );
         }
@@ -7270,8 +7282,7 @@ pub const Runtime = struct {
             .compact_blocker = compactBlocker(task, external.shutting_down, recovery, effects.checkpoint_health),
             .text = effects.text,
             .output_path_validator = if (external.workspace_identity_exact and !external.shutting_down) effects.output_path_validator else null,
-            .office_outputs_open = effects.office_outputs_open and external.workspace_identity_exact and !external.shutting_down,
-            .browser_outputs_open = effects.browser_outputs_open and external.workspace_identity_exact and !external.shutting_down,
+            .file_open = if (external.workspace_identity_exact and !external.shutting_down) effects.file_open else null,
             .catalog = effects.catalog,
             .pending_ui = .{ .context = &pending_ui_context, .write_fn = writePendingUiProjection },
             .run_start = start,

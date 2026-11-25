@@ -3,6 +3,7 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import {
   decodeAttachmentThumbnail,
+  decodeFileDescription,
   decodeFilePreview,
   decodeWorkspaceDirectory,
 } from "../frontend/src/bridge/decode-contracts.ts";
@@ -35,7 +36,7 @@ test("generated MP4 shares file preview admission and revokes its source on secu
     }),
   );
   const calls = [];
-  const fileReferenceId = "file-3-1-1-1";
+  const target = referenceTarget("7", "file-3-1-1-1");
   const loader = new FilePreviewLoader(
     async (command, payload) => {
       calls.push({ command, payload });
@@ -58,7 +59,7 @@ test("generated MP4 shares file preview admission and revokes its source on secu
     },
     () => "1",
   );
-  const result = await loader.load("3", "7", fileReferenceId);
+  const result = await loader.load(target);
   assert.equal(result.state, "ready");
   assert.deepEqual(
     calls.map((call) => call.command),
@@ -67,15 +68,13 @@ test("generated MP4 shares file preview admission and revokes its source on secu
   assert.deepEqual(calls[0].payload, {
     generation: "1",
     previewId: "1",
-    taskId: "3",
-    runId: "7",
-    fileReferenceId,
+    target,
   });
   const src = result.video.src;
   const media = await fetch(src);
   assert.equal(media.headers.get("content-type"), "video/mp4");
   assert.deepEqual(Buffer.from(await media.arrayBuffer()), bytes);
-  const second = await loader.load("3", "8", "file-3-2-1-1");
+  const second = await loader.load(referenceTarget("8", "file-3-2-1-1"));
   assert.equal(second.state, "ready");
   assert.equal(result.video.valid(), true);
   const secondSrc = second.video.src;
@@ -85,6 +84,10 @@ test("generated MP4 shares file preview admission and revokes its source on secu
   await assert.rejects(fetch(src));
   await assert.rejects(fetch(secondSrc));
 });
+
+function referenceTarget(runId, fileReferenceId) {
+  return { kind: "reference", taskId: "3", runId, fileReferenceId };
+}
 
 function deferred() {
   let resolve;
@@ -112,7 +115,7 @@ class Host {
     if (command === commands.previewFile || command === commands.mediaPreview) {
       if (this.cancelled.has(payload.previewId))
         return { ...empty, state: "error" };
-      if (payload.fileReferenceId === "text")
+      if (payload.target.fileReferenceId === "text")
         return { ...empty, state: "ready", content: "text is available" };
       if (this.busy > 0) {
         this.busy--;
@@ -159,7 +162,15 @@ class Host {
     };
   }
   load(reference = "image", options) {
-    return this.loader.load("17", "23", reference, options);
+    return this.loader.load(
+      {
+        kind: "reference",
+        taskId: "17",
+        runId: "23",
+        fileReferenceId: reference,
+      },
+      options,
+    );
   }
 }
 
@@ -221,20 +232,18 @@ test("workspace preview and directory reads share request IDs and preserve their
     () => "7",
   );
   await loader.listDirectory("17", "2", "3", "docs");
-  const preview = await loader.loadWorkspace(
-    "17",
-    "2",
-    "3",
-    "docs/unreferenced.md",
-  );
+  const target = {
+    kind: "workspace",
+    taskId: "17",
+    workspaceId: "2",
+    workspaceEpoch: "3",
+    path: "docs/unreferenced.md",
+  };
+  const preview = await loader.load(target);
   assert.equal(preview.content, "workspace file");
   assert.deepEqual(
     calls.map((call) => call.command),
-    [
-      commands.listDirectory,
-      commands.previewWorkspaceFile,
-      commands.releasePreview,
-    ],
+    [commands.listDirectory, commands.previewFile, commands.releasePreview],
   );
   assert.deepEqual(calls[0].payload, {
     generation: "7",
@@ -247,10 +256,7 @@ test("workspace preview and directory reads share request IDs and preserve their
   assert.deepEqual(calls[1].payload, {
     generation: "7",
     previewId: "2",
-    taskId: "17",
-    workspaceId: "2",
-    workspaceEpoch: "3",
-    path: "docs/unreferenced.md",
+    target,
   });
 });
 
@@ -398,6 +404,22 @@ test("window pixel quota admits two 4096-square resources, retains them and free
   assert.equal(replacement.state, "ready");
   second.release();
   replacement.release();
+});
+
+test("an image stays what was checked after its release and only until its security epoch ends", async () => {
+  const host = new Host();
+  const first = await host.load();
+  const second = await host.load();
+  first.release();
+  assert.equal(first.image.valid(), false);
+  assert.equal(first.image.current(), true);
+  host.loader.observeSecurityEpoch(String(BigInt(host.epoch) + 1n));
+  assert.equal(first.image.current(), false);
+  assert.equal(second.image.current(), false);
+  const later = new Host();
+  const third = await later.load();
+  later.loader.reset();
+  assert.equal(third.image.current(), false);
 });
 
 test("reset invalidates held resources and decode admission is serial and cancellable", async () => {
@@ -623,4 +645,108 @@ test("a sent image uses the same two tiers under its own target", async () => {
   assert.equal(host.active.size, 0);
   first.release();
   second.release();
+});
+
+test("file descriptions decode the Host fixture exactly and carry no content", async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      new URL("../src/bridge/file_description.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  for (const value of Object.values(fixture))
+    assert.deepEqual(decodeFileDescription(value), value);
+  const { image, video, text, missing } = fixture;
+  for (const bad of [
+    { ...missing, file: video.file },
+    { ...video, file: null },
+    { ...video, state: "unsupported" },
+    { ...video, content: "" },
+    { ...video, file: { ...video.file, sizeBytes: 1546 } },
+    { ...video, file: { ...video.file, previewable: true } },
+    { ...text, file: { ...text.file, previewable: "true" } },
+    { ...text, file: { kind: "file", sizeBytes: "1" } },
+    { ...text, file: { ...text.file, path: "C:/secret" } },
+    { ...text, file: { ...text.file, open: "default_app" } },
+    { ...image, file: { ...image.file, width: 0 } },
+    { ...image, file: { ...image.file, height: 8193 } },
+    { ...image, file: { ...image.file, sizeBytes: "01" } },
+    { ...image, file: { ...image.file, kind: "audio" } },
+  ])
+    assert.throws(() => decodeFileDescription(bad));
+});
+
+test("a description waits out a busy Host and is cancelled with its caller", async () => {
+  const calls = [];
+  let busy = 1;
+  let pending;
+  const loader = new FilePreviewLoader(
+    async (command, payload) => {
+      calls.push({ command, payload });
+      if (command === commands.releasePreview)
+        return { ...payload, released: true };
+      if (busy-- > 0) return { state: "busy", file: null };
+      if (payload.target.outputId === "held")
+        return new Promise((resolve) => {
+          pending = resolve;
+        });
+      return {
+        state: "ready",
+        file: { kind: "file", sizeBytes: "3", previewable: false },
+      };
+    },
+    () => "1",
+  );
+  const target = { kind: "output", taskId: "3", runId: "7", outputId: "done" };
+  assert.deepEqual(await loader.describe(target), {
+    state: "ready",
+    file: { kind: "file", sizeBytes: "3", previewable: false },
+  });
+  assert.deepEqual(
+    calls.map((call) => [call.command, call.payload]),
+    [
+      [commands.describeFile, { generation: "1", previewId: "1", target }],
+      [commands.describeFile, { generation: "1", previewId: "2", target }],
+    ],
+  );
+  const controller = new AbortController();
+  const held = loader.describe(
+    { ...target, outputId: "held" },
+    { signal: controller.signal },
+  );
+  while (!pending) await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  assert.deepEqual(calls.at(-1).payload, { generation: "1", previewId: "3" });
+  pending({ state: "ready", file: { kind: "video", sizeBytes: "20" } });
+  await assert.rejects(held, { name: "AbortError" });
+});
+
+test("descriptions wait out a full window queue instead of failing", async () => {
+  const held = [];
+  let described = 0;
+  const loader = new FilePreviewLoader(
+    (command, payload) =>
+      command === commands.describeFile
+        ? new Promise((resolve) => {
+            described++;
+            held.push(() =>
+              resolve({
+                state: "ready",
+                file: { kind: "video", sizeBytes: "20" },
+              }),
+            );
+          })
+        : Promise.resolve({ ...payload, released: true }),
+    () => "1",
+  );
+  const target = { kind: "output", taskId: "3", runId: "7", outputId: "a" };
+  // Two in flight and eight waiting is a full queue; the rest keep asking.
+  const asked = Array.from({ length: 14 }, () => loader.describe(target));
+  let settled = 0;
+  for (const request of asked) void request.then(() => settled++);
+  while (settled < asked.length) {
+    for (const finish of held.splice(0)) finish();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(described, 14);
 });

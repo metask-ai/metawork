@@ -22,8 +22,8 @@ function decode(value: string): string {
 }
 
 // An explicit Markdown destination is a URL naming a local file. This maps it
-// to the Workspace-relative form accepted by `metawork.files.previewWorkspace`
-// without touching the filesystem; the Host independently re-checks Task,
+// to the Workspace-relative form a `workspace` file target accepts, without
+// touching the filesystem; the Host independently re-checks Task,
 // Workspace authority, containment and links before reading anything.
 export function resolveWorkspaceFileLink(
   destination: string,

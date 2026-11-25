@@ -1,54 +1,48 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../components/ui/button.tsx";
 import type {
-  OutputAction,
-  OutputActionHandler,
-  OutputActionState,
+  FileAction,
+  FileActionHandler,
+  FileActionState,
   DeliveredOutputView,
+  FileTarget,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
-export type OutputEditResult =
+export type FileReferenceResult =
   "edit_prepared" | "edit_draft_busy" | "edit_too_long" | "edit_unavailable";
-export type OutputEditHandler = (
-  taskId: string,
-  runId: string,
-  outputId: string,
-) => OutputEditResult;
-type RowAction = Exclude<OutputAction, "check_current"> | "edit" | "preview";
+export type FileReferenceHandler = (
+  target: FileTarget,
+  displayPath: string,
+) => FileReferenceResult;
+type RowAction =
+  Exclude<FileAction, "check_current" | "copy_path"> | "edit" | "preview";
 type OutputPreview = (
   taskId: string,
   path: string,
   opener: HTMLButtonElement,
 ) => void;
+/** The outputs of a conversation, in the right panel. */
 export function RunOutputs({
   outputs,
   taskId,
   runId,
   disabled = false,
   onAction,
-  onPrepareEdit,
+  onReference,
   onPreview,
-  officeOpen = false,
-  browserOpen = false,
-  layout = "outputs",
 }: {
   outputs: readonly (DeliveredOutputView & { runId?: string })[];
   taskId?: string;
   runId?: string;
   disabled?: boolean;
-  onAction?: OutputActionHandler;
-  onPrepareEdit?: OutputEditHandler;
+  onAction?: FileActionHandler;
+  onReference?: FileReferenceHandler;
   onPreview?: OutputPreview;
-  officeOpen?: boolean;
-  browserOpen?: boolean;
-  layout?: "outputs" | "file-actions" | "conversation";
 }) {
-  const { t } = useI18n();
   if (outputs.length === 0) return null;
-  const actionsOnly = layout === "file-actions";
-  const rows = (
+  return (
     <ul className="run-outputs-list">
       {outputs.map((output) => (
         <OutputRow
@@ -58,21 +52,11 @@ export function RunOutputs({
           runId={output.runId ?? runId}
           disabled={disabled}
           onAction={onAction}
-          onPrepareEdit={onPrepareEdit}
+          onReference={onReference}
           onPreview={onPreview}
-          officeOpen={officeOpen}
-          browserOpen={browserOpen}
-          actionsOnly={actionsOnly}
         />
       ))}
     </ul>
-  );
-  if (layout !== "outputs") return rows;
-  return (
-    <section className="run-outputs" aria-label={t("outputs.title")}>
-      <h3 className="run-outputs-title">{t("outputs.title")}</h3>
-      {rows}
-    </section>
   );
 }
 function OutputRow({
@@ -81,30 +65,27 @@ function OutputRow({
   runId,
   disabled,
   onAction,
-  onPrepareEdit,
+  onReference,
   onPreview,
-  officeOpen,
-  browserOpen,
-  actionsOnly,
 }: {
   output: DeliveredOutputView;
   taskId?: string;
   runId?: string;
   disabled: boolean;
-  onAction?: OutputActionHandler;
-  onPrepareEdit?: OutputEditHandler;
+  onAction?: FileActionHandler;
+  onReference?: FileReferenceHandler;
   onPreview?: OutputPreview;
-  officeOpen: boolean;
-  browserOpen: boolean;
-  actionsOnly: boolean;
 }) {
   const { locale, t } = useI18n();
-  const html = /\.html?$/i.test(output.displayPath);
   const nameId = useId();
   const [pending, setPending] = useState<RowAction | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [state, setState] = useState<
-    OutputActionState | "save_unknown" | OutputEditResult | null
+    | FileActionState
+    | "file_changed"
+    | "save_unknown"
+    | FileReferenceResult
+    | null
   >(null);
   const active = useRef<AbortController | null>(null);
   useEffect(() => {
@@ -135,6 +116,12 @@ function OutputRow({
       active.current
     )
       return;
+    const target: FileTarget = {
+      kind: "output",
+      taskId,
+      runId,
+      outputId: output.id,
+    };
     const controller = new AbortController();
     active.current = controller;
     setPending(action);
@@ -142,9 +129,7 @@ function OutputRow({
     setState(null);
     try {
       const result = await onAction(
-        taskId,
-        runId,
-        output.id,
+        target,
         action === "edit" || action === "preview" ? "check_current" : action,
         controller.signal,
       );
@@ -165,13 +150,18 @@ function OutputRow({
         active.current === controller
       ) {
         setState(
-          onPrepareEdit?.(taskId, runId, output.id) ?? "edit_unavailable",
+          onReference?.(target, output.displayPath) ?? "edit_unavailable",
         );
         return;
       }
       if (active.current === controller)
         setState(
-          controller.signal.aborted && action !== "save" ? "cancelled" : result,
+          controller.signal.aborted && action !== "save"
+            ? "cancelled"
+            : // Only `check` compares with what was delivered.
+              result === "changed" && action !== "check"
+              ? "file_changed"
+              : result,
         );
     } catch {
       if (active.current === controller)
@@ -190,53 +180,45 @@ function OutputRow({
     }
   };
   return (
-    <li
-      className={actionsOnly ? undefined : "run-output"}
-      data-output-id={output.id}
-    >
-      {!actionsOnly && (
-        <span className="run-output-icon" aria-hidden="true">
-          <Icon name="skill-file" />
-        </span>
-      )}
+    <li className="run-output" data-output-id={output.id}>
+      <span className="run-output-icon" aria-hidden="true">
+        <Icon name="skill-file" />
+      </span>
       <div className="run-output-content">
         <p className="run-output-name" id={nameId}>
           {output.redacted
             ? t("outputs.hidden_path")
             : output.displayPath.split("/").at(-1)}
         </p>
-        {!actionsOnly &&
-          !output.redacted &&
-          output.displayPath.includes("/") && (
-            <p className="run-output-path">{output.displayPath}</p>
-          )}
-        {!actionsOnly && (
-          <p className="run-output-meta">
-            {output.updated
-              ? t("outputs.updated")
-              : t("outputs.delivered_size", {
-                  bytes: formatInteger(locale, BigInt(output.sizeBytes)),
-                })}
-          </p>
+        {!output.redacted && output.displayPath.includes("/") && (
+          <p className="run-output-path">{output.displayPath}</p>
         )}
+        <p className="run-output-meta">
+          {output.updated
+            ? t("outputs.updated")
+            : t("outputs.delivered_size", {
+                bytes: formatInteger(locale, BigInt(output.sizeBytes)),
+              })}
+        </p>
         {onAction && taskId && runId && (
           <div className="run-output-actions">
-            {!actionsOnly &&
-              ((officeOpen &&
-                /\.(?:docx|xlsx|pptx)$/i.test(output.displayPath)) ||
-                (browserOpen && html)) && (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  aria-describedby={nameId}
-                  disabled={disabled || pending !== null || output.redacted}
-                  onClick={() => void perform("open")}
-                >
-                  {t(html ? "outputs.open_browser" : "outputs.open")}
-                </Button>
-              )}
-            {!actionsOnly && onPreview && html && (
+            {output.open && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                aria-describedby={nameId}
+                disabled={disabled || pending !== null || output.redacted}
+                onClick={() => void perform("open")}
+              >
+                {t(
+                  output.open === "browser"
+                    ? "outputs.open_browser"
+                    : "outputs.open",
+                )}
+              </Button>
+            )}
+            {onPreview && output.open === "browser" && (
               <Button
                 type="button"
                 variant="ghost"
@@ -250,17 +232,15 @@ function OutputRow({
                 {t("outputs.view_source")}
               </Button>
             )}
-            {!actionsOnly && (
-              <Button
-                variant="ghost"
-                size="sm"
-                aria-describedby={nameId}
-                disabled={disabled || pending !== null || output.redacted}
-                onClick={() => void perform("check")}
-              >
-                {t("outputs.check")}
-              </Button>
-            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-describedby={nameId}
+              disabled={disabled || pending !== null || output.redacted}
+              onClick={() => void perform("check")}
+            >
+              {t("outputs.check")}
+            </Button>
             <Button
               variant="ghost"
               size="sm"
@@ -279,7 +259,7 @@ function OutputRow({
             >
               {t("outputs.save")}
             </Button>
-            {!actionsOnly && onPrepareEdit && (
+            {onReference && (
               <Button
                 variant="ghost"
                 size="sm"

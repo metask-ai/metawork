@@ -2574,11 +2574,9 @@ pub const Session = struct {
             .ptr = diagnostic.ptr,
             .len = diagnostic.len,
         }) catch return false;
-        const storage = self.compact_terminal_diagnostic orelse unreachable;
-        const len = @min(bytes.len, storage.len);
-        @memcpy(storage[0..len], bytes[0..len]);
-        self.compact_terminal_diagnostic_len = len;
-        self.compact_terminal_diagnostic_truncated = bytes.len != len;
+        const kept = copyDiagnosticText(self.compact_terminal_diagnostic orelse unreachable, bytes);
+        self.compact_terminal_diagnostic_len = kept.len;
+        self.compact_terminal_diagnostic_truncated = kept.truncated;
         return true;
     }
 
@@ -2620,11 +2618,9 @@ pub const Session = struct {
     fn copyTerminalDiagnostic(self: *Session, diagnostic: wire.OwnedBytesV1) bool {
         const bytes = sdk.borrowedBytes(.{ .ptr = diagnostic.ptr, .len = diagnostic.len }) catch
             return false;
-        const storage = self.terminal_diagnostic orelse unreachable;
-        const len = @min(bytes.len, storage.len);
-        @memcpy(storage[0..len], bytes[0..len]);
-        self.terminal_diagnostic_len = len;
-        self.terminal_diagnostic_truncated = bytes.len != len;
+        const kept = copyDiagnosticText(self.terminal_diagnostic orelse unreachable, bytes);
+        self.terminal_diagnostic_len = kept.len;
+        self.terminal_diagnostic_truncated = kept.truncated;
         return true;
     }
 
@@ -4183,6 +4179,25 @@ fn secureZero(bytes: []u8) void {
     std.crypto.secureZero(u8, bytes);
 }
 
+/// Keeps as much of a Core diagnostic as fits and reads as UTF-8: the end never
+/// splits a character and each byte that is not UTF-8 becomes U+FFFD. A
+/// diagnostic explains an outcome and never decides one, so what Core did not
+/// encode is replaced here rather than refused by whoever stores it.
+fn copyDiagnosticText(storage: []u8, bytes: []const u8) struct { len: usize, truncated: bool } {
+    var read: usize = 0;
+    var written: usize = 0;
+    while (read < bytes.len) {
+        const len = std.unicode.utf8ByteSequenceLength(bytes[read]) catch 1;
+        const valid = len <= bytes.len - read and std.unicode.utf8ValidateSlice(bytes[read..][0..len]);
+        const text: []const u8 = if (valid) bytes[read..][0..len] else "\u{FFFD}";
+        if (text.len > storage.len - written) return .{ .len = written, .truncated = true };
+        @memcpy(storage[written..][0..text.len], text);
+        written += text.len;
+        read += if (valid) len else 1;
+    }
+    return .{ .len = written, .truncated = false };
+}
+
 fn emptyOwnedBytes() wire.OwnedBytesV1 {
     return .{ .ptr = null, .len = 0 };
 }
@@ -4202,6 +4217,31 @@ test {
     _ = session_runtime;
     _ = session_prompt;
     _ = session_guidance;
+}
+
+test "a Core diagnostic is kept as whole characters within the Host capacity" {
+    const Case = struct { capacity: usize, text: []const u8, kept: []const u8, truncated: bool };
+    for ([_]Case{
+        .{ .capacity = 8, .text = "", .kept = "", .truncated = false },
+        .{ .capacity = 8, .text = "12345678", .kept = "12345678", .truncated = false },
+        .{ .capacity = 8, .text = "123456789", .kept = "12345678", .truncated = true },
+        .{ .capacity = 9, .text = "诊断字", .kept = "诊断字", .truncated = false },
+        // The capacity ends inside the third character, then inside the first.
+        .{ .capacity = 8, .text = "诊断字", .kept = "诊断", .truncated = true },
+        .{ .capacity = 2, .text = "诊", .kept = "", .truncated = true },
+        // Not UTF-8, a continuation byte alone, a character Core cut itself.
+        .{ .capacity = 16, .text = "a\xA5b\x80", .kept = "a\u{FFFD}b\u{FFFD}", .truncated = false },
+        .{ .capacity = 16, .text = "a\xE8\xAFb", .kept = "a\u{FFFD}\u{FFFD}b", .truncated = false },
+        .{ .capacity = 16, .text = "a\xE8\xAF", .kept = "a\u{FFFD}\u{FFFD}", .truncated = false },
+        // A surrogate is not a character either.
+        .{ .capacity = 16, .text = "\xED\xA0\x80", .kept = "\u{FFFD}\u{FFFD}\u{FFFD}", .truncated = false },
+        .{ .capacity = 4, .text = "ab\xA5", .kept = "ab", .truncated = true },
+    }) |case| {
+        var storage: [16]u8 = undefined;
+        const kept = copyDiagnosticText(storage[0..case.capacity], case.text);
+        try std.testing.expectEqualStrings(case.kept, storage[0..kept.len]);
+        try std.testing.expectEqual(case.truncated, kept.truncated);
+    }
 }
 
 test "generated image attestation requires one matching committed Host receipt" {

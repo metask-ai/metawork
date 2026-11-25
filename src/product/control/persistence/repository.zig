@@ -18,7 +18,7 @@ const Entry = struct {
     table: []const u8,
     names: []const []const u8,
     primary: []const sql.Value,
-    digest: [32]u8,
+    digest: codec.RowDigest,
     position: ?i64,
 };
 
@@ -35,13 +35,9 @@ const Index = struct {
         const a = self.arena.allocator();
         try self.entries.ensureTotalCapacity(a, @intCast(rows.len));
         for (rows) |row| {
-            const names = try a.alloc([]const u8, row.primary.len);
             const primary = try a.alloc(sql.Value, row.primary.len);
-            for (row.primary, 0..) |field, i| {
-                names[i] = row.columns[field];
-                primary[i] = try copyValue(a, row.values[field]);
-            }
-            self.entries.putAssumeCapacity(try a.dupe(u8, row.key), .{ .table = row.table, .names = names, .primary = primary, .digest = row.digest, .position = row.position() });
+            for (row.primary, primary) |field, *value| value.* = try copyValue(a, row.values[field]);
+            self.entries.putAssumeCapacity(try a.dupe(u8, row.key), .{ .table = row.table, .names = row.primary_names, .primary = primary, .digest = row.digest, .position = row.position() });
         }
         return self;
     }
@@ -255,13 +251,16 @@ pub const Prepared = struct {
 };
 
 pub const Repository = struct {
+    pub const DigestKey = codec.DigestKey;
     allocator: std.mem.Allocator,
     database: sql.Database,
     limits: wire.Limits,
+    /// Fixed for this Repository, so every index it holds is comparable.
+    digest_key: DigestKey,
     index: ?*Index = null,
     witness: Witness = .{},
-    pub fn init(a: std.mem.Allocator, database: sql.Database, limits: wire.Limits) Repository {
-        return .{ .allocator = a, .database = database, .limits = limits };
+    pub fn init(a: std.mem.Allocator, database: sql.Database, limits: wire.Limits, digest_key: DigestKey) Repository {
+        return .{ .allocator = a, .database = database, .limits = limits, .digest_key = digest_key };
     }
     pub fn deinit(self: *Repository) void {
         if (self.index) |index| index.deinit();
@@ -286,7 +285,7 @@ pub const Repository = struct {
     pub fn seed(self: *Repository, state: wire.StateWire, preserved: wire.PreservedFrames) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        const rows = try codec.rowsFor(arena.allocator(), state, preserved, self.limits);
+        const rows = try codec.rowsFor(arena.allocator(), state, preserved, self.limits, &self.digest_key);
         const index = try Index.create(self.allocator, rows);
         errdefer index.deinit();
         const witness = try readWitness(self.database);
@@ -307,7 +306,7 @@ pub const Repository = struct {
             self.allocator.destroy(arena);
         }
         const a = arena.allocator();
-        const rows = try codec.rowsFor(a, state, preserved, self.limits);
+        const rows = try codec.rowsFor(a, state, preserved, self.limits, &self.digest_key);
         const next_index = try Index.create(self.allocator, rows);
         errdefer next_index.deinit();
         var mutations: std.ArrayList(sql.Mutation) = .empty;

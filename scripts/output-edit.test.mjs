@@ -5,9 +5,8 @@ import {
   composerDraftToRunInput,
   maxComposerTextBytes,
 } from "../frontend/src/features/composer/slash.ts";
-const reference =
-  'Continue editing the Workspace file "results/年度报告.docx":';
-test("Continue editing creates an editable reference and preserves the user's current instruction", () => {
+const reference = 'Workspace file "results/年度报告.docx":';
+test("Referencing a file creates an editable reference and preserves the user's current instruction", () => {
   const original = { kind: "text", text: "Make the heading blue" };
   const prepared = prepareReferenceDraft(original, reference);
   assert.equal(prepared.kind, "prepared");
@@ -22,7 +21,7 @@ test("Continue editing creates an editable reference and preserves the user's cu
     prepared.draft.text,
   );
 });
-test("Continue editing keeps existing attachment tokens in their normal input flow", () => {
+test("Referencing a file keeps existing attachment tokens in their normal input flow", () => {
   const attachments = [
     {
       token: "owned-token",
@@ -58,7 +57,7 @@ test("Continue editing keeps existing attachment tokens in their normal input fl
     true,
   );
 });
-test("Continue editing does not rewrite Skill arguments or an unresolved slash command", () => {
+test("Referencing a file does not rewrite Skill arguments or an unresolved slash command", () => {
   for (const draft of [
     { kind: "skill", argumentValues: ["keep my arguments"] },
     { kind: "text", text: "/docx update" },
@@ -68,7 +67,7 @@ test("Continue editing does not rewrite Skill arguments or an unresolved slash c
     assert.equal(prepared.draft, draft);
   }
 });
-test("Continue editing counts UTF-8 bytes and refuses overflow without truncating the draft", () => {
+test("Referencing a file counts UTF-8 bytes and refuses overflow without truncating the draft", () => {
   const bytes = new TextEncoder().encode(reference + "\n").byteLength;
   const exact = {
     kind: "text",

@@ -131,9 +131,9 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
 
 `output`、`activity`、`toolLog`、`fileReferences`、Tool 页与 `context` 只定义 Renderer 可消费的产品事实和 fail-closed 边界，不规定最终组件、布局、展开策略或更新节奏。当前 Agent 对话的 owner 链、Run exchange 槽位与 active→terminal 呈现收口由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；wire 字段存在、scripted Provider vertical 或静态 DOM 通过都不能替代真实 Provider cadence 与长任务阅读体验的独立验收。后续纯呈现调整仍可在不改变 revision 1 wire 语义的前提下进行。
 
-每个 Run 另精确发布必需的 `outputs` 数组，每项为 `{ id, displayPath, sizeBytes, redacted }`，对监测到本轮期间内容变化的成果追加 `updated: true`。单轮明确交付最多八项，更新可以引用会话中其他已登记成果。id 是非零、32 位小写十六进制的 opaque Task 成果身份，同一成果可由多个可见 Run 引用，同一 Run 内只发布一次；sizeBytes 是可为零的 canonical decimal `u64` string。displayPath 只包含用于展示及下述普通指令引用的相对文本，必须是容量不超过 512 UTF-8 bytes 的 Workspace 相对路径，不能包含路径逃逸、绝对路径或控制字符；redacted 为 true 时必须为空。Host 还须在投影时防御性检查已知 credential，不能因旧 redacted flag 不一致而泄露路径。协议不运输 locator authority、摘要或组件路径，Renderer 不从 Tool 文本构建成果。`capabilities.typedOutputs` 表示可信交付记录的呈现能力；记录不证明当前文件可用，文件动作须按自己的 Host 授权与内容校验收口。该字段与严格 decoder、scoped/history Run projection 和 fixture 在 revision 1 原位同步替换，不接纳缺失字段的旧 wire。
+每个 Run 另精确发布必需的 `outputs` 数组，每项为 `{ id, displayPath, sizeBytes, redacted }`，对监测到本轮期间内容变化的成果追加 `updated: true`，对当前可以打开的成果追加 `open: "browser" | "default_app"`。`open` 与 `metawork.files.action` 的 `open` 在 Host 用同一处判定：路径已隐藏、类型不在名单、平台没有对应能力、工作区身份不再精确或正在关闭时省略。单轮明确交付最多八项，更新可以引用会话中其他已登记成果。id 是非零、32 位小写十六进制的 opaque Task 成果身份，同一成果可由多个可见 Run 引用，同一 Run 内只发布一次；sizeBytes 是登记时的大小，可为零的 canonical decimal `u64` string。displayPath 只包含用于展示及下述普通指令引用的相对文本，必须是容量不超过 512 UTF-8 bytes 的 Workspace 相对路径，不能包含路径逃逸、绝对路径或控制字符；redacted 为 true 时必须为空。Host 还须在投影时防御性检查已知 credential，不能因旧 redacted flag 不一致而泄露路径。协议不运输 locator authority、摘要或组件路径，Renderer 不从 Tool 文本构建成果。`capabilities.typedOutputs` 表示可信交付记录的呈现能力；记录不证明当前文件可用，文件操作须按自己的 Host 授权与文件校验收口。该字段与严格 decoder、scoped/history Run projection 和 fixture 在 revision 1 原位同步替换，不接纳缺失字段的旧 wire。
 
-非空时 Task 投影追加 `conversationOutputs`。每项为 `{ id, displayPath, sizeBytes, redacted, runId }`，由首个可见登记的 Run 提供 action scope，覆盖未加载正文的历史轮次。
+非空时 Task 投影追加 `conversationOutputs`。每项为 `{ id, displayPath, sizeBytes, redacted, runId }` 加上同样可选的 `open`，由首个可见登记的 Run 提供 action scope，覆盖未加载正文的历史轮次。
 
 ## Global instructions commands
 
@@ -152,21 +152,36 @@ Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或�
   - `text` 是要写入的字节：载入的正文用 CRLF 换行时，Renderer 按 CRLF 提交编辑后的正文（textarea 只报告 LF），字节计数也按提交的正文算；判断是否有改动时比较统一换行后的正文。
 - 两条命令都不发布 Snapshot revision：保存的效果由下一轮准入读取文件时体现。
 
-## Delivered file actions
+## File actions
 
-`metawork.outputs.action` 是异步请求，精确输入 `{ generation, operationId, taskId, runId, outputId, action }`。前四项为非零 canonical decimal u64 string；outputId 为所属 Task/Run 内非零 32 位小写十六进制成果 ID；action 支持 `check | check_current | reveal | save | open`。Renderer 不提交路径、摘要、文件字节或任意 OS intent。operationId 在当前 connection 内严格递增，不接受重放；Host 独立绑定当前 window/connection、Task/Run/成果和 Workspace authority。
+`metawork.files.action` 是异步请求，精确输入 `{ generation, operationId, target, action }`。前两项为非零 canonical decimal u64 string；target 是一个 [File target](#file-target)。Renderer 不提交物理路径、摘要、文件字节或任意 OS intent。operationId 在当前 connection 内严格递增，不接受重放；Host 独立绑定当前 window/connection 并解析 target。
 
-登记使用同一 command 的 `{ generation, operationId, taskId, runId, changeId, action: "register" }`。changeId 是所属 Run 的 File Change 身份。Host 对可提交登记的记录追加 `outputRegistrationAdmitted: true`，其余记录省略该字段。登记成功只返回 `registered`，不运输成果字节或新的文件 authority；通过正常 Task 投影返回成果。
+| action | reference | output | workspace | worker | 主线程 |
+| --- | --- | --- | --- | --- | --- |
+| `reveal` | ✓ | ✓ | ✓ | 定位 | 再解析，请系统在文件管理器中选中该文件 |
+| `copy_path` | ✓ | ✓ | ✓ | 定位 | 再解析，把完整路径写入系统剪贴板 |
+| `check_current` | ✓ | ✓ | ✓ | 定位 | 再解析 |
+| `save` | ✓ | ✓ | ✓ | 复制当前内容 | 再解析，作出一次性发布决定 |
+| `open` | ✓ | ✓ | ✓ | 定位，Office 另核 OOXML | 再解析，按名字复核是同一文件，交给浏览器或默认应用 |
+| `check` | — | ✓ | — | 整文件摘要，与交付时比对 | 再解析 |
 
-结果精确为 `{ generation, operationId, state }`，身份与请求一致。state 为 `ready | revealed | saved | registered | opened | save_failed | target_changed | cleanup_failed | busy | missing | restricted | changed | too_large | cancelled | timed_out | stale_security | unavailable | failed`。`check` 读取当前字节并与交付身份对比。`check_current` 验证当前工作区文件可访问且读取期间稳定。两者只在当前授权成立时返回 `ready`。`reveal` 通过当前文件验证后把定位请求交给系统，`revealed` 只表示系统接收了请求。`saved` 只证明选定目标已原子发布。save_failed、target_changed 与 cleanup_failed 分别说明保存失败、目标身份已变化及临时文件清理未完成，只出现在保存请求。后续每次操作都重新校验。
+表中没有的组合是格式错误，直接拒绝且不消耗 operationId。**定位**指逐段 no-follow 打开、确认是普通文件、再按名字重新打开确认是同一文件：不读内容，也没有大小上限。`save` 只复制 256 MiB 以内的文件，超出为 `too_large`。
 
-有效 Workspace 下，Office 和浏览器打开能力分别由 Task 投影的 `officeOutputsOpen: true` 和 `browserOutputsOpen: true` 表示，未开放时省略相应字段。`open` 由 Host 根据已验证的成果类型选择交接目标，成功返回 `opened` 只表示系统接收打开原文件的请求。
+文件操作接受预览接受的路径，只拒绝本平台不能有的名字：Windows 不接受含 `<>"|?*`、以点或空格结尾、或是保留设备名的段，段长最多 255 个 UTF-16 单元；其他平台段长最多 255 字节。不满足时立即返回 `restricted`，`save` 不弹保存对话框；另存的目标文件名适用同一规则。成果登记的路径仍受回执规则约束，两个平台相同。
 
-Bridge 与 Product 分别有界限制在途请求；文件读取在独立 worker，不能占普通 File Preview worker。Product 发布校验结果或执行 Application 定位 effect 前，Bridge 必须再次证明该请求的 connection/window 仍有效且未取消。Renderer 换 Task、成果身份失效、断连或组件卸载时丢弃旧响应并取消在途请求，不持久化检查状态。`metawork.outputs.cancel` 精确输入 `{ generation, operationId }`，同步结果精确为 `{ generation, operationId, cancelled }`；boolean 只表示该连接下仍存在的请求已接受取消，不证明 worker 已物理退出；保存发布决定一旦提交，取消返回 false，不能再把实际保存结果改写为 cancelled。原异步请求只在 worker 静止后完成并释放 owned effect；关闭应用须 join 后逐一结算 responder。文件工作期限覆盖排队、复制和等待发布决定；系统保存对话框的用户选择时间不计算为文件工作。save 的 Renderer transport 不使用普通短 command timeout 催促用户选位置。超时或 transport 失败不自动重放系统动作。
+`metawork.outputs.register` 是异步请求，精确输入 `{ generation, operationId, taskId, runId, changeId }`，与 `metawork.files.action` 共用 operationId 空间和在途名额。changeId 是所属 Run 的 File Change 身份，长度 1–128 bytes。Host 对可提交登记的记录追加 `outputRegistrationAdmitted: true`，其余记录省略该字段。登记成功只返回 `registered`，不运输成果字节或新的文件 authority；通过正常 Task 投影返回成果。
 
-save 由 Application 消费 Native SDK Runtime 保存对话框选择目标，路径只在 Host 有界持有。复制并校验完成后，Product 再检查当前成果/Workspace/安全代次，Bridge 再检查请求；通过后形成一次性发布决定，worker 才原子替换目标。决定前取消、失效或超时使 worker 丢弃暂存；决定后等待实际发布结果，不再撤销已授权的动作。断连仍阻止旧内容用于新连接，但不能把已经提交的保存改写成未发生。保存不创建历史成果副本。
+两个请求的结果精确为 `{ generation, operationId, state }`，身份与请求一致。state 为 `ready | revealed | saved | registered | opened | open_unsupported | open_failed | path_copied | copy_failed | save_failed | target_changed | cleanup_failed | busy | missing | restricted | changed | too_large | cancelled | timed_out | stale_security | unavailable | failed`。每种请求只有一个成功状态：`open` 为 `opened`，`reveal` 为 `revealed`，`copy_path` 为 `path_copied`，`check_current` 与 `check` 为 `ready`，`save` 为 `saved`，登记为 `registered`。`revealed` 与 `opened` 只表示系统接收了请求，`saved` 只证明选定目标已原子发布。`changed` 在 `check` 中表示与交付时不同，在其他请求中表示操作期间文件变化。save_failed、target_changed 与 cleanup_failed 分别说明保存失败、目标身份已变化及临时文件清理未完成，只出现在保存请求。后续每次操作都重新校验。
 
-“继续修改”使用 check_current：通过 owning Task/Run/成果 ID 校验后，Renderer 在同一 Task 的普通可编辑草稿中引用相对显示文本；该文本不是 Host locator authority，不调用文件读取/编辑 command、不伪造 Attachment token，也不自动发送。用户手动发送后仍沿原 Task 输入、权限和 Skill/Shell 路径执行。准备草稿须复核当前 UI audience、Task、成果呈现及输入准入，保留现有文字和附件；Skill 或未完成的斜杠输入发生冲突时保留原草稿，超限不得截断。换 Task、断连或源呈现失效后的旧检查结果不能修改其他草稿。
+`open` 只接受 Host 名单内的类型，按最后一个扩展名判定、ASCII 大小写不敏感，Renderer 不持有名单。身份解析通过之后、排入 worker 之前判定：类型不在名单或平台没有对应能力时立即返回 `open_unsupported`。HTML 交给系统默认浏览器，其余交给系统默认应用；macOS 没有交给默认应用的能力，名单内除 HTML 外都是 `open_unsupported`，成果也不投影 `open`；DOCX、XLSX、PPTX 另在 worker 核对 OOXML 主部件与扩展名一致，上限 256 MiB，其余类型不读内容。系统没有接受交接时返回 `open_failed`。
+
+`copy_path` 由 Application 在主线程把系统原生格式的完整路径以 `text/plain` 写入系统剪贴板，Windows 为反斜杠且不带 `\\?\` 前缀，不加引号和换行；路径不是合法 UTF-8 或含控制字符时拒绝。系统拒绝写入时返回 `copy_failed`，不重试。响应仍只有三个字段，路径不进入响应、Snapshot 或日志。
+
+Bridge 与 Product 分别有界限制在途请求；文件读取在独立 worker，不能占普通 File Preview worker。worker 完成后 Product 以同一身份再解析一次，结果与接纳时不同即不再继续；发布结果或执行 Application 的文件 effect 前，Bridge 还必须再次证明该请求的 connection/window 仍有效且未取消。取消、断连或安全代次变化之后不补做系统动作。Renderer 换 Task、身份失效、断连或组件卸载时丢弃旧响应并取消在途请求，不持久化检查状态。`metawork.files.cancelAction` 精确输入 `{ generation, operationId }`，同步结果精确为 `{ generation, operationId, cancelled }`；boolean 只表示该连接下仍存在的请求已接受取消，不证明 worker 已物理退出；保存发布决定一旦提交，取消返回 false，不能再把实际保存结果改写为 cancelled。原异步请求只在 worker 静止后完成并释放 owned effect；关闭应用须 join 后逐一结算 responder。文件工作期限覆盖排队、复制和等待发布决定；系统保存对话框的用户选择时间不计算为文件工作。save 的 Renderer transport 不使用普通短 command timeout 催促用户选位置。超时或 transport 失败不自动重放系统动作。
+
+save 由 Application 消费 Native SDK Runtime 保存对话框选择目标，路径只在 Host 有界持有。保存的是文件的当前内容：worker 复制一次稳定读取的字节，核对读取期间源文件未变、临时文件未被替换，不要求与交付时相同。复制完成后，Product 再解析当前身份，Bridge 再检查请求；通过后形成一次性发布决定，worker 才原子替换目标。决定前取消、失效或超时使 worker 丢弃暂存；决定后等待实际发布结果，不再撤销已授权的动作。断连仍阻止旧内容用于新连接，但不能把已经提交的保存改写成未发生。保存不创建历史成果副本。
+
+“在对话中引用”使用 check_current：通过同一身份校验后，Renderer 在同一 Task 的普通可编辑草稿中引用相对显示文本；该文本不是 Host locator authority，不调用文件读取/编辑 command、不伪造 Attachment token，也不自动发送。用户手动发送后仍沿原 Task 输入、权限和 Skill/Shell 路径执行。准备草稿须复核当前 UI audience、Task、成果呈现及输入准入，保留现有文字和附件；Skill 或未完成的斜杠输入发生冲突时保留原草稿，超限不得截断。换 Task、断连或源呈现失效后的旧检查结果不能修改其他草稿。
 
 ## Skill directory discovery
 
@@ -204,21 +219,47 @@ response result 精确为 `{ generation, requestId, state, securityEpoch, revisi
 
 inbox 的 command 都要求绑定窗口与主线程；格式错误、多余字段、连接代不符、零 `requestId`、非法 `page`、锚点与 `page` 不配、id 为点段、`peerId` 与 `username` 不是恰好一个、空文本或非法 `requestKey` 时返回 handler failure，不透露消息。Bridge 连接断开或重连时，Host 立即以 `superseded` 回答所有未决的请求，之后到达的结果不再发送。
 
+## File target
+
+工作区文件在 Bridge 上只有一种身份 `FileTarget`，按 `kind` 精确取下列三种形状之一：
+
+```json
+{ "kind": "reference", "taskId": "17", "runId": "23", "fileReferenceId": "file-17-1-1-1" }
+{ "kind": "output", "taskId": "17", "runId": "23", "outputId": "03030303030303030303030303030303" }
+{ "kind": "workspace", "taskId": "17", "workspaceId": "2", "workspaceEpoch": "3", "path": "docs/说明.md" }
+```
+
+每种形状的字段均不可省略、为 null 或增加替代字段，未知 `kind` 直接拒绝；各 id 与 epoch 是非零 canonical decimal `u64` string，`fileReferenceId` 是 1–128 bytes 的 opaque identity，`outputId` 是非零、32 位小写十六进制的成果 ID。`reference` 是该 Run 的文件引用，`output` 是该 Run 呈现的成果，Host 都只在精确 Task + Run 内解析，不做全局扫描。`workspace` 是该 Task 所属工作区内的一个文件，`path` 只接受 UTF-8、最多 4096 bytes、最多 64 段的 `/` 分隔工作区相对路径，不接受空路径、空段、`.`、`..`、反斜杠、冒号、控制字符或绝对路径。Renderer 永不提交物理根路径、绝对路径、URI、shell command、range、Tool name 或 AgentCore handle。
+
+三种形状由 Product Control 在一处解析成工作区 id、epoch、根与相对路径，解析在主线程进行且不读文件。引用先把记录的定位写成根内的相对路径：Windows 上 `/` 与反斜杠都是分隔符并统一成 `/`，其他平台反斜杠是文件名字符；`.` 段和重复的分隔符去掉，`..` 保留并由路径规则拒绝，以分隔符开头的相对定位和以目录结尾的定位不是文件；之后三种形状适用上面同一路径规则，worker 都逐段 no-follow 打开，文件或它的任一上级目录不存在为 `missing`。各身份按下表判定：
+
+| 事实 | reference | output | workspace |
+| --- | --- | --- | --- |
+| Task 不存在或正在删除 | `missing` | `missing` | `restricted` |
+| Task 正在关闭 | 不影响 | 不影响 | `restricted` |
+| Run 不存在或已被取代、引用或成果不存在 | `missing` | `missing` | — |
+| 采用的工作区 | Task 记录的 id、epoch 与根 | 同 reference | 请求的 id 与 epoch；工作区不存在为 `missing`，epoch 与当前不符或不属于该 Task 为 `restricted` |
+| 工作区未授权，或 epoch、根与当前不一致 | `restricted` | `restricted` | `restricted` |
+| 路径不符规则，或引用的绝对路径不在根内 | `restricted` | `restricted` | `restricted` |
+| 成果路径已隐藏 | — | `restricted` | — |
+| 路径或根含已知凭据 | `restricted` | `restricted` | `restricted` |
+| URI 引用，或生成视频不以工作区相对路径记录 | 预览 `unsupported`，文件操作 `restricted` | — | — |
+
+worker 完成后以同一身份再解析一次，结果与接纳时不同即 `restricted`，之后才交付任何内容。
+
 ## File preview command
 
 `metawork.files.preview` 是 revision 1 command catalog 中的异步 command，原地 hard cut 使用 Native SDK async registry；它不出现在同步 handler registry。request 精确为：
 
 ```json
 {
-  "taskId": "17",
-  "runId": "23",
-  "fileReferenceId": "task:17:run:23:file:1",
   "generation": "1",
-  "previewId": "1"
+  "previewId": "1",
+  "target": { "kind": "reference", "taskId": "17", "runId": "23", "fileReferenceId": "file-17-1-1-1" }
 }
 ```
 
-五个字段均不可省略或增加替代字段；Task/Run、connection generation 和递增 previewId 必须是 canonical decimal `u64`，reference id 必须是 1–128 bytes 的 opaque identity。Renderer 永不提交文件系统路径、URI、shell command、range、Tool name 或 AgentCore handle。Host 只在精确 Task + Run 内解析 reference，不做全局 reference id 扫描。
+三个字段均不可省略或增加替代字段；connection generation 和递增 previewId 必须是 canonical decimal `u64`，target 是一个 [File target](#file-target)。
 
 response result 精确为：
 
@@ -233,7 +274,7 @@ response result 精确为：
 
 `loading` 只属于 Renderer 临时状态，不进入 wire。仅 `ready` 可以携带正文与 true 的 `truncated/redacted`；其他状态必须返回空 `content` 和两个 false。`unsupported` 可以附带 `reason: "image_limit" | "animated_image"`。`changing` 表示同一次有界读取的 before/after metadata 连续两次不稳定，不是 FileChange observation。Host 结果编码必须容纳 256 KiB 正文在 JSON escaping 后仍落在 Native SDK 1 MiB async response 上限内；容量不足独立返回 `busy`，解析、authority 或 shutdown failure 以一次 terminal result 收口，不悬挂 responder。
 
-Product Control 使用独立 2-worker、最多 8 个 in-flight 的 File Preview lane 执行 no-follow、root-contained、regular-file-only 的有界读取；worker 不持有 Product Control/Bridge/Renderer。图片类型及实际大小识别后才在 lane 锁内预留原图额度，文本不占图片槽，锁内不执行文件 IO。主线程交付前重新校验 Task、Run、reference locator、Workspace id/epoch/root/authorization，并有界分步扫描当前及历史 Task execution credential（含分步边界及全部尾部字节）。文本仅在 callback 期间借用；图片由 Product 保留不可变原图，释放时 secure-zero。正文不进入 Snapshot、Task persistence、日志或磁盘缓存。
+Product Control 使用独立 2-worker、最多 8 个 in-flight 的 File Preview lane 执行 no-follow、root-contained、regular-file-only 的有界读取；worker 不持有 Product Control/Bridge/Renderer。图片类型及实际大小识别后才在 lane 锁内预留原图额度，文本不占图片槽，锁内不执行文件 IO。主线程交付前重新解析同一 target，并有界分步扫描当前及历史 Task execution credential（含分步边界及全部尾部字节）。文本仅在 callback 期间借用；图片由 Product 保留不可变原图，释放时 secure-zero。正文不进入 Snapshot、Task persistence、日志或磁盘缓存。
 
 同一 `metawork.files.preview` 接纳静态 PNG、JPEG 和静态 WebP；不解码、不缩小、不转码。图片成功响应保留 `state: "ready"`、空 `content` 与两个 false flag，额外且精确提供 `image: { token, mediaType, sizeBytes, chunkBytes, width, height, securityEpoch }`。token 是 24 随机字节的小写十六进制串，三个 byte/epoch 字段使用 canonical decimal u64 string，尺寸使用正整数。mediaType 只允许 `image/png | image/jpeg | image/webp`；chunkBytes 固定 `"262143"`。文本响应不含 image；非 ready 响应不得携带图片。容器结构校验允许有效主图或 RIFF 容器之后的尾部数据，但完整原件仍受大小及凭据检查；APNG/动画 WebP 拒绝。
 
@@ -245,25 +286,43 @@ Renderer 完整接收后释放 Host grant，以受限 MIME 的 data URL 交给�
 
 Tool `fileRefs[]`（及 Run `fileReferences` 的条目）普通 entry 精确包含 `{ id, title, displayPath }`；仅经 Agent 验证的 Host 生图凭据派生的 entry 额外包含 `generatedImage: true` 及必填 nullable `presentationAnchor: { afterOutputCount, presentationOrder } | null`。afterOutputCount 为不超过输出槽位容量的非负整数，presentationOrder 为非零 canonical u64 string；null 只表示旧历史位置未知。缺失表示无此来源，不从内容或路径推断。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
 
-### Generated MP4 preview
+### MP4 preview
 
-Tool `fileRefs[]` 中的可信 Host 生视频引用精确增加 `generatedVideo: true` 和非空 `presentationAnchor`，沿用生图锚点语义。两种来源标记互斥。Renderer 通过同一个 `metawork.files.preview` 请求精确 Task、Run 和 reference，Host 按该来源及当前 Workspace 授权读取 16 字节至 64 MiB 的 MP4，检查容器标识并对完整字节执行有界凭据检查。文件变化、缺失、受限或格式不支持分别使用既有预览状态。
+Tool `fileRefs[]` 中的可信 Host 生视频引用精确增加 `generatedVideo: true` 和非空 `presentationAnchor`，沿用生图锚点语义。两种来源标记互斥。Renderer 通过同一个 `metawork.files.preview` 请求该 reference，Host 按该来源及当前 Workspace 授权读取 16 字节至 64 MiB 的 MP4，检查容器标识并对完整字节执行有界凭据检查。`output` 身份按内容识别 MP4：16 字节至 64 MiB、`ftyp` 容器，且主品牌为 `isom`、`iso2`、`iso4`、`iso5`、`iso6`、`mp41`、`mp42`、`avc1`、`M4V `、`dash`、`MSNV` 之一；HEIC、AVIF、QuickTime 与 M4A 也是 `ftyp`，不算视频。`workspace` 身份和普通引用不识别视频，MP4 走文本判定，结果为 `unsupported`。文件变化、缺失、受限或格式不支持分别使用既有预览状态。
 
 成功响应沿用空正文的 `ready` shape，额外且精确携带 `video: { token, mediaType, sizeBytes, chunkBytes, securityEpoch }`，其中 mediaType 固定为 `video/mp4`。token、字段编码与分块长度沿用图片 grant；`metawork.files.preview.readVideoChunk` 复用相同的 request、response、连续 offset 和授权校验，并且只接受视频 grant。取消及释放使用既有 `metawork.files.preview.release`。Host 至多保留一份视频资源，复用预览期限与安全代次失效规则。Renderer 至多保留四份且合计不超过 64 MiB 编码字节，完整收到并释放 grant 后才以本地 blob URL 提供给播放器。离开保留区域、Task 或引用失效、断连及安全代次改变时撤销 URL。文件原件与 URL 不持久化。
 
+## File description command
+
+`metawork.files.describe` 是异步 command，request 与 File preview command 相同，精确为 `{ generation, previewId, target }`，`previewId` 共享连接内单调递增空间；取消使用 `metawork.files.preview.release`，没有 grant。它回答这个文件现在是图片、视频还是文件、多大、能不能预览，结果精确为：
+
+```json
+{ "state": "ready | busy | missing | restricted | changing | error", "file": null }
+```
+
+只有 `ready` 携带 `file`，按 `kind` 精确取下列一种，`sizeBytes` 是 canonical decimal `u64` string，尺寸是 1–8192 的整数：
+
+```json
+{ "kind": "image", "sizeBytes": "10485760", "width": 1600, "height": 1200 }
+{ "kind": "video", "sizeBytes": "1546" }
+{ "kind": "file", "sizeBytes": "51712", "previewable": true }
+```
+
+描述就是不交付正文的预览：同一个 lane、同一次读取、同一段判定，读完只留下结论，正文和图片字节在 worker 上清零释放。图片是能内联显示的那些；视频按 [MP4 preview](#mp4-preview) 的规则，只看头部，不读正文、不占视频资源；其余都是文件，`previewable` 表示同一文件的 `workspace` 预览能不能显示内容，超限图片、动图和不合格的文本为 false。不是普通文件、路径或授权不符为 `restricted`。判断只看当前内容，不看扩展名；结果不携带正文、路径、摘要，也不携带能否在默认应用打开。描述不做正文凭据扫描，因为没有正文离开 Host；真正预览时的脱敏与拒绝不变。描述图片占用与预览相同的图片名额直到 worker 判完，名额满时为 `busy`，Renderer 退避重试。
+
 ## Workspace file browsing commands
 
-`metawork.files.listDirectory` 与 `metawork.files.previewWorkspace` 是异步 command，精确接收 `{ generation, previewId, taskId, workspaceId, workspaceEpoch, path }`。前五项是 canonical decimal u64 string。两种请求均需要非零 Task identity，并校验该 Task 的 Workspace 归属和授权。`previewId` 与原 File Preview command 共享连接内单调递增空间；`path` 只接受 UTF-8、最多 4096 bytes、最多 64 段的 `/` 分隔工作区相对路径，不接受空段、`.`、`..`、反斜杠、冒号、控制字符或绝对路径。仅列根目录可使用空 `path`。这些 command 不接受 Run/reference identity、物理根路径或 URI；不改变原引用预览 command 的 request。
+`metawork.files.listDirectory` 是异步 command，精确接收 `{ generation, previewId, taskId, workspaceId, workspaceEpoch, path }`。前五项是 canonical decimal u64 string，Task identity 非零。`previewId` 与 File preview command 共享连接内单调递增空间；`path` 的规则与 `workspace` 文件身份相同，只有列目录可以用空 `path` 表示根目录。它不接受 Run/reference identity、物理根路径或 URI。
 
-Host 校验当前工作区 epoch 与授权。带 Task identity 时还校验其所属工作区。校验通过后向同一 File Preview lane 提交 owned 输入。目录与工作区路径逐段拒绝 symlink/reparse 跳转；目录只列一层普通文件与目录，不返回链接或其他特殊文件。worker 在最多观察 4096 个条目、保留 512 项或累计 64 KiB 文件名时停止，达到边界以 `truncated` 说明，不能声称列出全部文件。
+Host 以 [File target](#file-target) 的同一套工作区规则解析目录，通过后向同一 File Preview lane 提交 owned 输入。目录与工作区路径逐段拒绝 symlink/reparse 跳转；目录只列一层普通文件与目录，不返回链接或其他特殊文件。worker 在最多观察 4096 个条目、保留 512 项或累计 64 KiB 文件名时停止，达到边界以 `truncated` 说明，不能声称列出全部文件。
 
-目录精确返回 `{ state: "ready" | "busy" | "missing" | "restricted" | "error", entries: [{ name, kind: "file" | "directory" }], truncated, redacted }`。`name` 是单个合法路径段；Renderer 不从展示文字扩大读取权限。仅 ready 可包含 entries 和 true flags。已知凭据命中的名称整体省略并标记 redacted；结果交付前重新验证相同的 Workspace 授权及适用的 Task 归属，失效时整份结果清空。工作区文件预览返回与原引用预览相同的文本/图片结果，复用其分块、release、连接绑定、安全检查、超时及资源额度；每次刷新独立重新授权。
+目录精确返回 `{ state: "ready" | "busy" | "missing" | "restricted" | "error", entries: [{ name, kind: "file" | "directory" }], truncated, redacted }`。`name` 是单个合法路径段；Renderer 不从展示文字扩大读取权限。仅 ready 可包含 entries 和 true flags。已知凭据命中的名称整体省略并标记 redacted；结果交付前以同一身份重新解析，失效时整份结果清空。每次刷新独立重新授权。
 
 Renderer 的目录缓存与请求绑定 Task、Workspace id/epoch、连接和安全代次；关闭 Task、工作区失效或换代后旧结果不可显示。隐藏视图可保留同一有效 Task 的目录数据，不自动轮询。每个 Task 会话最多缓存 64 个目录，超限明确提示用户刷新；刷新清空缓存及展开状态。目录与打开文件的请求共享准备并发和取消链路，不新增持久读取授权。
 
 ## Attachment media commands
 
-可预览媒体按来源注册，每一类身份自带授权依据；wire 上既有 File preview command 的五字段 request 一字不改，新来源使用自己的 command 并精确接收一个 typed target。在册的 target 有三种，分别对应草稿、已进入 Run 的消息和仍在等待的提交：
+可预览媒体按来源注册，每一类身份自带授权依据；工作区文件使用 File preview command，附件这类不在工作区内的来源使用自己的 command 并精确接收一个 typed target。在册的 target 有三种，分别对应草稿、已进入 Run 的消息和仍在等待的提交：
 
 ```json
 {

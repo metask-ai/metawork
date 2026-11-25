@@ -336,6 +336,8 @@ export type FilePreviewImage = {
   readonly src: string;
   readonly securityEpoch: string;
   valid: () => boolean;
+  /** Whether what it was checked under still holds, released or not. */
+  current: () => boolean;
   subscribe: (changed: () => void) => () => void;
   beginDecode: (signal: AbortSignal) => Promise<() => void>;
 };
@@ -385,6 +387,37 @@ export type FilePreviewResponse = Omit<
     securityEpoch: string;
   };
 };
+/// One Workspace file, in the shape its kind declares: a file a Run already
+/// refers to, a delivered output, or a path in the Task's Workspace. The Host
+/// alone decides which file that is; no kind carries an absolute path.
+export type FileTarget =
+  | {
+      kind: "reference";
+      taskId: string;
+      runId: string;
+      fileReferenceId: string;
+    }
+  | { kind: "output"; taskId: string; runId: string; outputId: string }
+  | {
+      kind: "workspace";
+      taskId: string;
+      workspaceId: string;
+      workspaceEpoch: string;
+      path: string;
+    };
+/// What one file is right now, by its content. `previewable` is whether the
+/// Workspace preview of it shows anything; an image always does, and a video is
+/// played where it is.
+export type FileDescription =
+  | { kind: "image"; sizeBytes: string; width: number; height: number }
+  | { kind: "video"; sizeBytes: string }
+  | { kind: "file"; sizeBytes: string; previewable: boolean };
+export type FileDescriptionResult =
+  | { state: "ready"; file: FileDescription }
+  | {
+      state: "missing" | "restricted" | "changing" | "error";
+      file: null;
+    };
 /// A registered media target, in the shape its kind declares. A draft is owned
 /// by the staged grant that issued its token; a sent image is owned by the
 /// message it was accepted with, which is addressed by the Task, the message
@@ -955,12 +988,16 @@ export type RunActivity =
       kind: "stopping";
     };
 export type ConversationCoverage = "included" | "excluded";
-export const outputActionStates = [
+export const fileActionStates = [
   "ready",
   "revealed",
   "saved",
   "registered",
   "opened",
+  "open_unsupported",
+  "open_failed",
+  "path_copied",
+  "copy_failed",
   "save_failed",
   "target_changed",
   "cleanup_failed",
@@ -975,18 +1012,20 @@ export const outputActionStates = [
   "unavailable",
   "failed",
 ] as const;
-export type OutputActionState = (typeof outputActionStates)[number];
-export type OutputAction =
-  "check" | "check_current" | "reveal" | "save" | "open";
-export type OutputActionHandler = (
-  taskId: string,
-  runId: string,
-  outputId: string,
-  action: OutputAction,
+export type FileActionState = (typeof fileActionStates)[number];
+export type FileAction =
+  "open" | "reveal" | "copy_path" | "check_current" | "save" | "check";
+export type FileActionHandler = (
+  target: FileTarget,
+  action: FileAction,
   signal: AbortSignal,
-) => Promise<OutputActionState>;
+) => Promise<FileActionState>;
+export const fileOpenKinds = ["browser", "default_app"] as const;
+export type FileOpenKind = (typeof fileOpenKinds)[number];
 export type DeliveredOutputView = {
   updated?: true;
+  // Where the Host opens this file; absent when it does not.
+  open?: FileOpenKind;
   id: string;
   displayPath: string;
   sizeBytes: string;
@@ -1369,8 +1408,6 @@ export const modelInputBlockers = [
 
 export type TaskView = {
   conversationOutputs?: (DeliveredOutputView & { runId: string })[];
-  officeOutputsOpen?: true;
-  browserOutputsOpen?: true;
   modelInputBlocker?: (typeof modelInputBlockers)[number];
   sessionCloseRetryAvailable?: true;
   signal: (typeof taskNavigationSignals)[number] | null;

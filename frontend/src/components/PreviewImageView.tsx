@@ -14,6 +14,8 @@ export interface PreviewImageResource {
 export function PreviewImageView(props: {
   image: PreviewImageResource;
   alt: string;
+  /** The size it is shown at, once its orientation is known. */
+  onReady?: (width: number, height: number) => void;
   onFailure?: () => void;
 }) {
   return <DecodedPreviewImage key={props.image.id} {...props} />;
@@ -22,10 +24,12 @@ export function PreviewImageView(props: {
 function DecodedPreviewImage({
   image,
   alt,
+  onReady,
   onFailure,
 }: {
   image: PreviewImageResource;
   alt: string;
+  onReady?: (width: number, height: number) => void;
   onFailure?: () => void;
 }) {
   const { t } = useI18n();
@@ -111,6 +115,7 @@ function DecodedPreviewImage({
             if (lifetime.current?.signal.aborted || !image.valid()) return;
             setRatio(`${element.naturalWidth} / ${element.naturalHeight}`);
             setReady(true);
+            onReady?.(element.naturalWidth, element.naturalHeight);
             finish();
           }, reject);
         }}
