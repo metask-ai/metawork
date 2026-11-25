@@ -65,12 +65,6 @@ pub const Transport = struct {
 /// For transports that hold no pooled connections, such as test fakes.
 pub fn retireNothing(_: *anyopaque, _: []const u8) void {}
 
-/// The principal bound to a token set, or null before identity binding.
-pub fn principalOf(tokens: *const oauth.TokenSet) ?[]const u8 {
-    const account_id = tokens.accountId();
-    return if (account_id.len == 0) null else account_id;
-}
-
 pub const ClientError = error{
     OAuthExchangeFailed,
     TokenRefreshFailed,
@@ -81,8 +75,6 @@ pub const ClientError = error{
     Cancelled,
     DeadlineExceeded,
 };
-
-pub const AuthorizationResult = oauth.TokenSet;
 
 pub fn errorCode(client_error: ClientError) contract.ErrorCode {
     return switch (client_error) {
@@ -129,23 +121,6 @@ pub fn exchangeAuthorizationCode(
     ) catch return error.ProtocolInvalid;
 }
 
-pub fn refresh(
-    allocator: std.mem.Allocator,
-    transport: Transport,
-    previous: *const oauth.TokenSet,
-    now_unix_seconds: i64,
-    control: ?RequestControl,
-) ClientError!oauth.TokenSet {
-    return refreshWithToken(
-        allocator,
-        transport,
-        &previous.refresh_token,
-        principalOf(previous),
-        now_unix_seconds,
-        control,
-    );
-}
-
 pub fn refreshWithToken(
     allocator: std.mem.Allocator,
     transport: Transport,
@@ -180,9 +155,11 @@ pub fn refreshWithToken(
     return tokens.take();
 }
 
+/// The identity an access token belongs to. Until it is known the request
+/// acts for no principal.
 pub fn fetchIdentity(
     transport: Transport,
-    tokens: *const oauth.TokenSet,
+    access_token: []const u8,
     control: ?RequestControl,
 ) ClientError!state.AccountIdentity {
     var userinfo_storage: [oauth.Limits.current_user_body_bytes]u8 = undefined;
@@ -190,8 +167,8 @@ pub fn fetchIdentity(
     const response = transport.perform(
         .{
             .kind = .userinfo,
-            .principal = principalOf(tokens),
-            .bearer = tokens.access_token.view(),
+            .principal = null,
+            .bearer = access_token,
             .control = control,
         },
         &userinfo_storage,
@@ -372,7 +349,7 @@ test "login exchanges tokens before resolving a strict identity" {
     defer tokens.deinit();
     try std.testing.expectEqualStrings("access", tokens.access_token.view());
     try std.testing.expectEqual(@as(usize, 1), fake.step);
-    const identity = try fetchIdentity(fake.transport(), &tokens, null);
+    const identity = try fetchIdentity(fake.transport(), tokens.access_token.view(), null);
     try std.testing.expectEqualStrings(
         "1",
         identity.accountId(),
@@ -391,14 +368,6 @@ test "login exchanges tokens before resolving a strict identity" {
 }
 
 test "userinfo failure never infers a principal from the token" {
-    var tokens = try oauth.TokenSet.fromStored(
-        std.testing.allocator,
-        "access",
-        "refresh",
-        100,
-        "1",
-    );
-    defer tokens.deinit();
     var failing = struct {
         fn perform(
             _: *anyopaque,
@@ -415,19 +384,14 @@ test "userinfo failure never infers a principal from the token" {
         error.ServiceUnavailable,
         fetchIdentity(
             .{ .context = &failing, .perform_fn = @TypeOf(failing).perform, .retire_fn = retireNothing },
-            &tokens,
+            "access",
             null,
         ),
     );
 }
 
 test "refresh requires and installs the rotated refresh token" {
-    var previous = try oauth.parseTokenResponse(
-        std.testing.allocator,
-        \\{"access_token":"old-access","refresh_token":"old-refresh","token_type":"Bearer","expires_in":20,"scope":"read model:invoke"}
-    ,
-        0,
-    );
+    var previous = try oauth.Secret.init(std.testing.allocator, "old-refresh");
     defer previous.deinit();
     var fake = struct {
         fn perform(
@@ -449,10 +413,11 @@ test "refresh requires and installs the rotated refresh token" {
             return .{ .status = 200, .body = response_buffer[0..body.len] };
         }
     }{};
-    var tokens = try refresh(
+    var tokens = try refreshWithToken(
         std.testing.allocator,
         .{ .context = &fake, .perform_fn = @TypeOf(fake).perform, .retire_fn = retireNothing },
         &previous,
+        null,
         20,
         null,
     );

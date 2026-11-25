@@ -140,31 +140,10 @@ pub const TokenSet = struct {
     access_token: Secret,
     refresh_token: Secret,
     expires_at: i64,
-    account_id: [contract.Limits.account_id_bytes]u8 = undefined,
-    account_id_len: usize = 0,
-
-    pub fn accountId(self: *const TokenSet) []const u8 {
-        return self.account_id[0..self.account_id_len];
-    }
-
-    pub fn bindAccountId(
-        self: *TokenSet,
-        account_id: []const u8,
-    ) ProtocolError!void {
-        if (account_id.len == 0 or account_id.len > self.account_id.len)
-            return error.FieldTooLarge;
-        if (!std.unicode.utf8ValidateSlice(account_id))
-            return error.InvalidEncoding;
-        std.crypto.secureZero(u8, &self.account_id);
-        @memcpy(self.account_id[0..account_id.len], account_id);
-        self.account_id_len = account_id.len;
-    }
 
     pub fn deinit(self: *TokenSet) void {
         self.access_token.deinit();
         self.refresh_token.deinit();
-        std.crypto.secureZero(u8, &self.account_id);
-        self.account_id_len = 0;
         self.expires_at = 0;
     }
 
@@ -172,33 +151,7 @@ pub const TokenSet = struct {
         var result = self.*;
         result.access_token = self.access_token.take();
         result.refresh_token = self.refresh_token.take();
-        std.crypto.secureZero(u8, &self.account_id);
-        self.account_id_len = 0;
         self.expires_at = 0;
-        return result;
-    }
-
-    pub fn fromStored(
-        allocator: std.mem.Allocator,
-        access_token: []const u8,
-        refresh_token: []const u8,
-        expires_at: i64,
-        stored_account_id: []const u8,
-    ) (ProtocolError || std.mem.Allocator.Error)!TokenSet {
-        if (expires_at < 0 or
-            stored_account_id.len == 0 or
-            stored_account_id.len > contract.Limits.account_id_bytes)
-            return error.InvalidTokenResponse;
-        var result: TokenSet = .{
-            .access_token = try Secret.init(allocator, access_token),
-            .refresh_token = undefined,
-            .expires_at = expires_at,
-        };
-        errdefer result.access_token.deinit();
-        result.refresh_token = try Secret.init(allocator, refresh_token);
-        errdefer result.refresh_token.deinit();
-        @memcpy(result.account_id[0..stored_account_id.len], stored_account_id);
-        result.account_id_len = stored_account_id.len;
         return result;
     }
 };
@@ -575,9 +528,6 @@ test "token decoder validates consumed fields and tolerates additive metadata" {
     try std.testing.expectEqualStrings("new-access", tokens.access_token.view());
     try std.testing.expectEqualStrings("new-refresh", tokens.refresh_token.view());
     try std.testing.expectEqual(@as(i64, 3700), tokens.expires_at);
-    try std.testing.expectEqualStrings("", tokens.accountId());
-    try tokens.bindAccountId("account-1");
-    try std.testing.expectEqualStrings("account-1", tokens.accountId());
     var extended = try parseTokenResponse(
         std.testing.allocator,
         \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"unknown":true}

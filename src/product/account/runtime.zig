@@ -7,6 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("metawork_account_contract");
 const state_impl = @import("account_state");
+const oauth = @import("account_oauth");
 const metask_client = @import("metask_client");
 const credential_store = @import("account_credential_store");
 const ports_impl = @import("account_ports");
@@ -194,26 +195,25 @@ const EffectQueue = struct {
 };
 
 const Effects = struct {
+    const TokenAnswer = struct {
+        attempt_id: u64,
+        /// Null once its owner took it.
+        grant: ?*credentials_impl.Grant,
+    };
+
     const MailboxResult = union(enum) {
         login_callback: struct {
             attempt_id: u64,
             result: login_attempt.WorkerResult,
         },
-        login_exchange: struct {
-            attempt_id: u64,
-            tokens: metask_client.AuthorizationResult,
-        },
-        refresh: struct {
-            attempt_id: u64,
-            rotation: credentials_impl.CredentialRotation,
-        },
+        login_exchange: TokenAnswer,
+        refresh: TokenAnswer,
         completion: state_impl.WorkerCompletion,
 
         fn deinit(self: *MailboxResult) void {
             switch (self.*) {
                 .login_callback => |*entry| entry.result.deinit(),
-                .login_exchange => |*entry| entry.tokens.deinit(),
-                .refresh => |*entry| entry.rotation.deinit(),
+                .login_exchange, .refresh => |*entry| if (entry.grant) |grant| grant.destroy(),
                 .completion => |*completion| completion.deinit(),
             }
         }
@@ -221,8 +221,7 @@ const Effects = struct {
         fn attemptId(self: *const MailboxResult) u64 {
             return switch (self.*) {
                 .login_callback => |entry| entry.attempt_id,
-                .login_exchange => |entry| entry.attempt_id,
-                .refresh => |entry| entry.attempt_id,
+                .login_exchange, .refresh => |entry| entry.attempt_id,
                 .completion => |completion| completion.attempt_id,
             };
         }
@@ -299,14 +298,8 @@ const Effects = struct {
             return false;
         }
         self.mailbox = switch (result.take()) {
-            .login => |tokens| .{ .login_exchange = .{
-                .attempt_id = attempt_id,
-                .tokens = tokens,
-            } },
-            .refresh => |rotation| .{ .refresh = .{
-                .attempt_id = attempt_id,
-                .rotation = rotation,
-            } },
+            .login => |grant| .{ .login_exchange = .{ .attempt_id = attempt_id, .grant = grant } },
+            .refresh => |grant| .{ .refresh = .{ .attempt_id = attempt_id, .grant = grant } },
             .completion => |completion| .{ .completion = completion },
             .consumed => {
                 self.unlockMailbox();
@@ -379,23 +372,23 @@ const Effects = struct {
         );
     }
 
-    fn startLoginExchange(
+    fn startRequest(
         self: *Effects,
         attempt_id: u64,
-        input: *login_attempt.CallbackExchangeInput,
+        work: network_attempt.Work,
         now_unix_seconds: i64,
     ) void {
-        self.network_attempt.startLoginExchange(
-            self.allocator,
+        const refreshing = work == .refresh;
+        self.network_attempt.start(
             self.io,
             attempt_id,
             self.transport,
-            input,
+            work,
             self.networkSink(),
             now_unix_seconds,
         ) catch self.publishCompletion(.{
             .attempt_id = attempt_id,
-            .payload = .{ .failed = .fromCode(.local_resource_exhausted) },
+            .payload = .{ .failed = .{ .error_code = .local_resource_exhausted, .refresh_not_consumed = refreshing } },
         });
     }
 
@@ -415,44 +408,6 @@ const Effects = struct {
         self.publishCompletion(.{
             .attempt_id = attempt_id,
             .payload = .{ .failed = .fromCode(error_code) },
-        });
-    }
-
-    fn startRefresh(
-        self: *Effects,
-        attempt_id: u64,
-        credential_owner: *const credentials_impl.CredentialOwner,
-        now_unix_seconds: i64,
-    ) void {
-        self.network_attempt.startRefresh(
-            self.allocator,
-            self.io,
-            attempt_id,
-            self.transport,
-            credential_owner,
-            self.networkSink(),
-            now_unix_seconds,
-        ) catch self.publishCompletion(.{
-            .attempt_id = attempt_id,
-            .payload = .{ .failed = .{ .error_code = .local_resource_exhausted, .refresh_not_consumed = true } },
-        });
-    }
-
-    fn startLoadIdentity(
-        self: *Effects,
-        attempt_id: u64,
-        credential_owner: *const credentials_impl.CredentialOwner,
-    ) void {
-        self.network_attempt.startLoadIdentity(
-            self.allocator,
-            self.io,
-            attempt_id,
-            self.transport,
-            credential_owner,
-            self.networkSink(),
-        ) catch self.publishCompletion(.{
-            .attempt_id = attempt_id,
-            .payload = .{ .failed = .fromCode(.local_resource_exhausted) },
         });
     }
 
@@ -571,7 +526,7 @@ pub const Runtime = struct {
     account: state_impl.Account = .initRestoring(),
     effects: Effects,
     platform: ?ports_impl.Platform = null,
-    credentials: credentials_impl.CredentialOwner = .{},
+    credentials: credentials_impl.Credentials = .{},
     authorization_generation: u64 = 0,
     summary: summary_impl.State = .{},
     summary_job: ?*SummaryJob = null,
@@ -775,7 +730,7 @@ pub const Runtime = struct {
         self.discardQueuedEffectForShutdown();
         // Refresh keeps its original network deadline. Join before taking the
         // mailbox so a complete rotation is saved once while ports are alive.
-        if (self.effects.network_attempt.started and self.effects.network_attempt.kind == .refresh) {
+        if (self.effects.network_attempt.refreshing()) {
             self.effects.network_attempt.join();
             if (self.prepareNextCompletion()) |result| switch (result) {
                 .prepared => |value| {
@@ -815,7 +770,7 @@ pub const Runtime = struct {
                     break :result .ignored_stale;
                 if (collision)
                     break :result self.prepareFailure(entry.attempt_id, .account_operation_failed);
-                break :result self.prepareAuthorizedLogin(entry.attempt_id, &entry.tokens);
+                break :result self.prepareAuthorizedLogin(entry.attempt_id, &entry.grant);
             },
             .refresh => |*entry| result: {
                 self.effects.joinNetwork(entry.attempt_id);
@@ -823,7 +778,7 @@ pub const Runtime = struct {
                     break :result .ignored_stale;
                 if (collision)
                     break :result self.prepareRenewalFailure(entry.attempt_id, .account_operation_failed);
-                break :result self.prepareRefreshedTokens(entry.attempt_id, &entry.rotation);
+                break :result self.prepareRefreshedTokens(entry.attempt_id, &entry.grant);
             },
             .completion => |*completion| self.prepareWorkerCompletion(completion, collision),
         };
@@ -921,7 +876,7 @@ pub const Runtime = struct {
     fn visitProjectionToken(context: *anyopaque, visitor_context: *anyopaque, visitor: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
         const self: *Runtime = @ptrCast(@alignCast(context));
         self.assertMainThread();
-        if (self.credentials.tokens) |*tokens| try visitor(visitor_context, tokens.access_token.view());
+        if (self.credentials.accessToken()) |token| try visitor(visitor_context, token);
     }
 
     /// The current credential, taken whole: account, access token and
@@ -931,9 +886,10 @@ pub const Runtime = struct {
     ) std.mem.Allocator.Error!?contract.OwnedAuthorizationLease {
         self.assertMainThread();
         const identity = self.availableAuthorizationIdentity() orelse return null;
-        return self.credentials.authorizationLease(
+        return contract.OwnedAuthorizationLease.init(
             self.allocator,
             identity.accountId(),
+            self.credentials.accessToken().?,
             self.authorization_generation,
         ) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
@@ -1128,15 +1084,6 @@ pub const Runtime = struct {
             self.account.activeRequestUsesCredential() and self.matchesRequestBinding(completion.attempt_id))
             completion.payload.failed.error_code = self.deleteInvalidCredential();
 
-        if (completion.payload == .identity_loaded and
-            self.matchesRequestBinding(completion.attempt_id))
-        {
-            const identity = completion.payload.identity_loaded;
-            self.credentials.bindPrincipal(identity.accountId()) catch {
-                const error_code = self.deleteInvalidCredential();
-                completion.payload = .{ .failed = .fromCode(error_code) };
-            };
-        }
         // Only a refresh proven unsent, whose marker is gone, can be sent
         // again. An explicit request or client rejection was not consumed,
         // but sending it again cannot succeed.
@@ -1211,13 +1158,13 @@ pub const Runtime = struct {
     fn prepareAuthorizedLogin(
         self: *Runtime,
         attempt_id: u64,
-        tokens: *metask_client.AuthorizationResult,
+        grant: *?*credentials_impl.Grant,
     ) PrepareResult {
         const platform = self.platform orelse
             return self.prepareFailure(attempt_id, .credential_store_write_failed);
-        credential_store.commitRefresh(platform.credentials, &tokens.refresh_token) catch |err|
+        credential_store.commitRefresh(platform.credentials, &grant.*.?.refresh_token) catch |err|
             return self.prepareFailure(attempt_id, accountStoreError(err));
-        self.credentials.replace(tokens);
+        self.credentials.install(credentials_impl.Grant.take(grant));
         self.noteTokenInstalled(platform);
         self.refresh_blocked = false;
         platform.credentials.clearRefreshMarker() catch {};
@@ -1248,19 +1195,14 @@ pub const Runtime = struct {
     fn prepareRefreshedTokens(
         self: *Runtime,
         attempt_id: u64,
-        rotation: *credentials_impl.CredentialRotation,
+        grant: *?*credentials_impl.Grant,
     ) PrepareResult {
-        const identity = self.account.currentIdentity();
-        if (identity) |current|
-            rotation.bindAccountId(current.accountId()) catch
-                return self.prepareRenewalFailure(attempt_id, .metask_protocol_invalid);
+        const verified = self.account.currentIdentity() != null;
         const platform = self.platform orelse
             return self.prepareRenewalFailure(attempt_id, .credential_store_write_failed);
-        credential_store.commitRefresh(
-            platform.credentials,
-            &rotation.persistenceInput().refresh_token,
-        ) catch |err| return self.prepareRenewalFailure(attempt_id, accountStoreError(err));
-        self.credentials.replaceRotation(rotation);
+        credential_store.commitRefresh(platform.credentials, &grant.*.?.refresh_token) catch |err|
+            return self.prepareRenewalFailure(attempt_id, accountStoreError(err));
+        self.credentials.install(credentials_impl.Grant.take(grant));
         self.noteTokenInstalled(platform);
         self.refresh_blocked = false;
         platform.credentials.clearRefreshMarker() catch {};
@@ -1273,7 +1215,7 @@ pub const Runtime = struct {
         return switch (self.account.prepareCompletion(&completion)) {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
-                .renewal = if (identity != null) .token else .keep,
+                .renewal = if (verified) .token else .keep,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
@@ -1327,16 +1269,20 @@ pub const Runtime = struct {
                     self.publishFailure(attempt_id, .account_operation_failed);
                     return;
                 };
+                const grant = credentials_impl.Grant.create(self.allocator) catch {
+                    self.publishFailure(attempt_id, .local_resource_exhausted);
+                    return;
+                };
                 self.token_requested = .{ .wall = now, .boot = platform.boot_clock.nowSeconds() };
-                self.effects.startLoginExchange(attempt_id, input, now);
+                self.effects.startRequest(attempt_id, .{ .login_exchange = .{ .input = input.take(), .grant = grant } }, now);
             },
             .refresh_token => {
                 const attempt_id = entry.attempt_id orelse
                     @panic("token refresh effect has no attempt");
-                if (!self.credentials.refreshAvailable()) {
+                const refresh_token = self.credentials.refreshToken() orelse {
                     self.publishFailure(attempt_id, .credential_store_read_failed);
                     return;
-                }
+                };
                 const platform = self.platform orelse {
                     self.publishFailure(attempt_id, .credential_store_read_failed);
                     return;
@@ -1349,25 +1295,34 @@ pub const Runtime = struct {
                     self.publishFailure(attempt_id, .token_refresh_failed);
                     return;
                 }
-                // No marker means no HTTP: this failure is safely retryable.
-                platform.credentials.beginRefresh(self.credentials.refreshToken().?) catch |err| {
+                // No marker means no HTTP: these failures are safely retryable.
+                var work = self.refreshWork(refresh_token) catch {
+                    self.publishUnsentRefreshFailure(attempt_id, .local_resource_exhausted);
+                    return;
+                };
+                platform.credentials.beginRefresh(refresh_token) catch |err| {
+                    work.deinit();
                     self.publishUnsentRefreshFailure(attempt_id, accountStoreError(err));
                     return;
                 };
                 self.captureRequestBinding(attempt_id);
                 self.token_requested = .{ .wall = now, .boot = platform.boot_clock.nowSeconds() };
                 self.refresh_blocked = true;
-                self.effects.startRefresh(attempt_id, &self.credentials, now);
+                self.effects.startRequest(attempt_id, work, now);
             },
             .load_identity => {
                 const attempt_id = entry.attempt_id orelse
                     @panic("identity effect has no attempt");
-                if (!self.credentials.available()) {
+                const access_token = self.credentials.accessToken() orelse {
                     self.publishFailure(attempt_id, .credential_store_read_failed);
                     return;
-                }
+                };
+                const copy = oauth.Secret.init(self.allocator, access_token) catch {
+                    self.publishFailure(attempt_id, .local_resource_exhausted);
+                    return;
+                };
                 self.captureRequestBinding(attempt_id);
-                self.effects.startLoadIdentity(attempt_id, &self.credentials);
+                self.effects.startRequest(attempt_id, .{ .load_identity = copy }, 0);
             },
             .cancel_attempt => |attempt_id| self.effects.cancelAttemptAndDiscard(attempt_id),
             .delete_credential => self.persistSignedOut(entry.attempt_id orelse
@@ -1378,6 +1333,16 @@ pub const Runtime = struct {
                 self.platform = null;
             },
         }
+    }
+
+    fn refreshWork(self: *Runtime, refresh_token: *const oauth.Secret) !network_attempt.Work {
+        var token = try oauth.Secret.init(self.allocator, refresh_token.view());
+        errdefer token.deinit();
+        return .{ .refresh = .{
+            .token = token,
+            .principal = .init(self.account.accountId()),
+            .grant = try credentials_impl.Grant.create(self.allocator),
+        } };
     }
 
     fn publishFailure(self: *Runtime, attempt_id: u64, error_code: contract.ErrorCode) void {
@@ -1421,7 +1386,7 @@ pub const Runtime = struct {
     }
 
     fn noteTokenInstalled(self: *Runtime, platform: ports_impl.Platform) void {
-        const expires_at = self.credentials.expiresAt().?;
+        const expires_at = self.credentials.current.?.expires_at;
         const requested = self.token_requested;
         const boot_expires_at = requested.boot +| (expires_at -| requested.wall);
         const wall_now = platform.wall_clock.nowUnixSeconds() orelse requested.wall;
@@ -1466,9 +1431,7 @@ pub const Runtime = struct {
         const platform = self.platform orelse return null;
         const times = self.token_times orelse return null;
         if (platform.wall_clock.nowUnixSeconds() == null or times.expires.reached(platform)) return null;
-        const identity = self.account.currentIdentity() orelse return null;
-        if (!self.credentials.belongsToPrincipal(identity.accountId())) return null;
-        return identity;
+        return self.account.currentIdentity();
     }
 
     fn captureRequestBinding(self: *Runtime, attempt_id: u64) void {
@@ -1495,7 +1458,8 @@ pub const Runtime = struct {
         // The only place Account drops credentials: logout, sign-out after a
         // rejected refresh, and shutdown. Pooled connections for the principal
         // end with them.
-        if (self.credentials.principal()) |principal| self.effects.transport.retire(principal);
+        if (self.credentials.available() and self.account.accountId().len != 0)
+            self.effects.transport.retire(self.account.accountId());
         self.credentials.clear();
         self.token_times = null;
         self.bumpAuthorizationGeneration();
@@ -1528,7 +1492,8 @@ pub const Runtime = struct {
                 break :blk preparedFromState(self.account.prepareRestore(&value));
             },
             .account => |*account| blk: {
-                self.credentials.installRefreshToken(&account.refresh_token);
+                self.credentials.install(credentials_impl.Grant.createStored(self.allocator, account.refresh_token.view()) catch |err|
+                    return self.preparedSignedOutRestoreFailure(accountRestoreError(err)));
                 var value: state_impl.RestoreResult = .{ .refresh_only = {} };
                 var prepared = preparedFromState(self.account.prepareRestore(&value));
                 prepared.refresh_after_commit = true;
@@ -1776,8 +1741,8 @@ pub const TestSupport = if (builtin.is_test) struct {
     }
 
     /// Installs a token requested now, as a completed token request does.
-    fn installToken(runtime: *Runtime, account_id: []const u8, access_token: []const u8, refresh_token: []const u8, expires_at: i64) !void {
-        try runtime.credentials.installStored(runtime.allocator, access_token, refresh_token, expires_at, account_id);
+    fn installToken(runtime: *Runtime, access_token: []const u8, refresh_token: []const u8, expires_at: i64) !void {
+        runtime.credentials.install(try credentials_impl.TestSupport.issued(runtime.allocator, access_token, refresh_token, expires_at));
         if (runtime.platform) |platform| {
             const boot = platform.boot_clock.nowSeconds();
             runtime.token_requested = .{ .wall = platform.wall_clock.nowUnixSeconds() orelse 0, .boot = boot };
@@ -1794,33 +1759,11 @@ pub const TestSupport = if (builtin.is_test) struct {
         refresh_token: []const u8,
         expires_at: i64,
     ) !Prepared {
-        try installToken(runtime, account_id, access_token, refresh_token, expires_at);
+        try installToken(runtime, access_token, refresh_token, expires_at);
         return .{ .transition = try state_impl.TestSupport.prepareAuthenticated(
             &runtime.account,
             try state_impl.AccountIdentity.init(
                 account_id,
-                display_name,
-                "u***@example.com",
-                "",
-                5,
-            ),
-        ) };
-    }
-
-    pub fn prepareAuthenticatedWithCredentialPrincipal(
-        runtime: *Runtime,
-        identity_account_id: []const u8,
-        credential_account_id: []const u8,
-        display_name: []const u8,
-        access_token: []const u8,
-        refresh_token: []const u8,
-        expires_at: i64,
-    ) !Prepared {
-        try installToken(runtime, credential_account_id, access_token, refresh_token, expires_at);
-        return .{ .transition = try state_impl.TestSupport.prepareAuthenticated(
-            &runtime.account,
-            try state_impl.AccountIdentity.init(
-                identity_account_id,
                 display_name,
                 "u***@example.com",
                 "",
@@ -2161,7 +2104,7 @@ test "incomplete profile identity still issues an authorization lease" {
         TestSupport.detachPlatform(&runtime);
         runtime.deinit();
     }
-    try TestSupport.installToken(&runtime, "account-1", "access-token", "refresh-token", 200);
+    try TestSupport.installToken(&runtime, "access-token", "refresh-token", 200);
     var authenticated: Prepared = .{
         .transition = try state_impl.TestSupport.prepareAuthenticated(
             &runtime.account,
@@ -2305,13 +2248,7 @@ test "explicit login starts new OAuth even when a retained refresh remains" {
     var signed_out = runtime.prepareAutomationStart();
     defer signed_out.deinit();
     runtime.commit(&signed_out);
-    try runtime.credentials.installStored(
-        std.testing.allocator,
-        "stale-access",
-        "retained-refresh",
-        200,
-        "account-1",
-    );
+    runtime.credentials.install(try credentials_impl.TestSupport.issued(std.testing.allocator, "stale-access", "retained-refresh", 200));
 
     var login = switch (runtime.prepareCommand(.begin_login)) {
         .prepared => |prepared| prepared,
@@ -2406,17 +2343,10 @@ test "unauthorized login identity validation deletes the newly committed credent
         return error.TestUnexpectedResult;
     runtime.commit(&exchange);
 
-    var tokens = try metask_client.AuthorizationResult.fromStored(
-        std.testing.allocator,
-        "new-access",
-        "new-refresh",
-        200,
-        "account-2",
-    );
-    defer tokens.deinit();
+    var grant: ?*credentials_impl.Grant = try credentials_impl.TestSupport.issued(std.testing.allocator, "new-access", "new-refresh", 200);
     var loading_identity = switch (runtime.prepareAuthorizedLogin(
         runtime.account.activeAttempt().?,
-        &tokens,
+        &grant,
     )) {
         .prepared => |prepared| prepared,
         else => return error.TestUnexpectedResult,
@@ -2446,7 +2376,7 @@ test "unauthorized login identity validation deletes the newly committed credent
     try std.testing.expect((try runtime.credential()) == null);
 }
 
-test "authorization lease rejects authorizing and mismatched principals" {
+test "authorization lease is refused while authorizing" {
     var transport: RuntimeTestTransport = .{};
     var runtime = try initRuntimeForUnitTest(&transport);
     var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
@@ -2467,27 +2397,6 @@ test "authorization lease rejects authorizing and mismatched principals" {
     runtime.commit(&authenticated);
     _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
     try std.testing.expect((try runtime.credential()) == null);
-
-    var mismatched_transport: RuntimeTestTransport = .{};
-    var mismatched = try initRuntimeForUnitTest(&mismatched_transport);
-    var mismatched_platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
-    TestSupport.attachPlatform(&mismatched, &mismatched_platform);
-    defer {
-        TestSupport.detachPlatform(&mismatched);
-        mismatched.deinit();
-    }
-    var mismatched_authenticated = try TestSupport.prepareAuthenticatedWithCredentialPrincipal(
-        &mismatched,
-        "account-1",
-        "account-2",
-        "Metask User",
-        "access-token",
-        "refresh-token",
-        200,
-    );
-    defer mismatched_authenticated.deinit();
-    mismatched.commit(&mismatched_authenticated);
-    try std.testing.expect((try mismatched.credential()) == null);
 }
 
 test "healthy refresh window preserves authorization generation" {
@@ -3517,6 +3426,36 @@ test "failed replacement save retains matching marker and forbids another attemp
     try std.testing.expectEqual(@as(usize, 1), transport.calls);
 }
 
+test "a rotation answered when no memory is left is saved and installed" {
+    const Exhausting = struct {
+        memory: std.testing.FailingAllocator,
+        fn perform(context: *anyopaque, request: metask_client.Request, output: []u8) metask_client.TransportError!metask_client.Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (request.kind != .refresh_token) return error.ProtocolFailed;
+            self.memory.fail_index = self.memory.alloc_index;
+            const body = "{\"access_token\":\"" ++ longest_access ++ "\",\"refresh_token\":\"" ++ longest_refresh ++ "\",\"token_type\":\"Bearer\",\"expires_in\":3600}";
+            @memcpy(output[0..body.len], body);
+            return .{ .status = 200, .body = output[0..body.len] };
+        }
+        const longest_access = "a" ** oauth.Limits.secret_bytes;
+        const longest_refresh = "r" ** oauth.Limits.secret_bytes;
+    };
+    var transport: Exhausting = .{ .memory = .init(std.testing.allocator, .{}) };
+    var runtime = Runtime.init(transport.memory.allocator(), std.testing.io, std.Thread.getCurrentId(), .{ .context = &transport, .perform_fn = Exhausting.perform, .retire_fn = metask_client.retireNothing }, TestSupport.loopbackEndpoint(), .{ .context = &transport, .notify_fn = runtimeTestWake });
+    var platform: TestSupport.Platform = .{};
+    try platform.setStoredRefreshToken("refresh-token");
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try beginTestRefresh(&runtime, &platform);
+    try finishTestRefresh(&runtime);
+    try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
+    try std.testing.expectEqualStrings(Exhausting.longest_refresh, platform.refresh_token[0..platform.refresh_token_len.?]);
+    try std.testing.expectEqualStrings(Exhausting.longest_access, runtime.credentials.accessToken().?);
+    try std.testing.expect(!transport.memory.has_induced_failure);
+}
+
 test "stale unauthorized cannot erase a replacement credential" {
     var transport: RuntimeTestTransport = .{};
     var runtime = try initRuntimeForUnitTest(&transport);
@@ -3534,7 +3473,7 @@ test "stale unauthorized cannot erase a replacement credential" {
     runtime.commit(&refresh);
     const active = runtime.account.activeAttempt().?;
     try platform.setStoredRefreshToken("new-refresh");
-    try runtime.credentials.installStored(runtime.allocator, "new-access", "new-refresh", 300, "account-1");
+    runtime.credentials.install(try credentials_impl.TestSupport.issued(runtime.allocator, "new-access", "new-refresh", 300));
     runtime.bumpAuthorizationGeneration();
     var stale: state_impl.WorkerCompletion = .{ .attempt_id = active, .payload = .{ .failed = .fromCode(.metask_unauthorized) } };
     try std.testing.expect(runtime.prepareWorkerCompletion(&stale, false) == .ignored_stale);

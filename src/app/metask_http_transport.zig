@@ -188,7 +188,12 @@ pub const Adapter = struct {
 
     fn fetchHttp(operation: *http.Operation, endpoint: []const u8, method: std.http.Method, headers: []const std.http.Header, body: []const u8, output: []u8) FetchResult {
         const uri = std.Uri.parse(endpoint) catch return operation.fail(error.InvalidRequest);
-        var request = try operation.open(method, uri, .{ .headers = headers });
+        var request = try operation.open(method, uri, .{
+            .headers = headers,
+            // Only token requests POST, and a rotation must be readable without
+            // allocating. An absent header would accept any encoding.
+            .standard_headers = if (method == .POST) .{ .accept_encoding = .{ .override = "identity" } } else .{},
+        });
         defer request.deinit();
         try request.send(if (method == .POST) body else null);
         var response = try request.receiveHead();
@@ -300,6 +305,7 @@ test "Account HTTP send boundary preserves lost-response blocking and bounded re
         listener: *std.Io.net.Server,
         mode: Mode,
         received_body: bool = false,
+        identity_only: bool = false,
         failure: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -325,6 +331,10 @@ test "Account HTTP send boundary preserves lost-response blocking and bounded re
             }
             var server: std.http.Server = .init(&reader.interface, &writer.interface);
             var request = try server.receiveHead();
+            var request_headers = request.iterateHeaders();
+            while (request_headers.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "accept-encoding")) {
+                self.identity_only = std.mem.eql(u8, header.value, "identity");
+            };
             const body = request.readerExpectNone(&.{});
             var bytes: [9]u8 = undefined;
             try body.readSliceAll(&bytes);
@@ -361,6 +371,7 @@ test "Account HTTP send boundary preserves lost-response blocking and bounded re
         try std.testing.expectEqual(@as(?anyerror, null), server.failure);
         try std.testing.expectEqual(mode != .tls_failure, send_started);
         try std.testing.expectEqual(mode != .tls_failure, server.received_body);
+        try std.testing.expectEqual(mode != .tls_failure, server.identity_only);
         switch (mode) {
             .tls_failure => try std.testing.expectError(error.NetworkNotSent, Adapter.selectedFetch(.{ .kind = .refresh_token, .principal = null }, result, &buffer, send_started)),
             .lost_response => try std.testing.expectError(error.NetworkFailed, Adapter.selectedFetch(.{ .kind = .refresh_token, .principal = null }, result, &buffer, send_started)),

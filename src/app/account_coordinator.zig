@@ -1235,7 +1235,7 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
         try std.testing.expect(coordinator.commandSink().submit(.begin_login).error_code == .invalid_state);
         try std.testing.expect(runtime.platform == null);
         try std.testing.expect(runtime.summary_job == null);
-        try std.testing.expect(!runtime.credentials.refreshAvailable());
+        try std.testing.expect(runtime.credentials.current == null);
     }
 }
 
