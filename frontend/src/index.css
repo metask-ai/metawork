@@ -10171,13 +10171,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .reply-media {
   margin: 16px 0;
 }
-.reply-image,
-.reply-video {
-  max-width: min(100%, 576px);
-}
 .reply-image {
   margin: 0;
   width: fit-content;
+  max-width: 100%;
 }
 .reply-image-open {
   display: block;
@@ -10198,7 +10195,6 @@ button.reply-image-open {
   width: auto;
   height: auto;
   max-width: 100%;
-  max-height: 360px;
   object-fit: contain;
   background: var(--ui-surface-panel-2);
 }
@@ -10212,7 +10208,7 @@ button.reply-image-open {
 .reply-image-placeholder {
   display: grid;
   place-items: center;
-  min-height: 160px;
+  min-height: 80px;
   padding: 16px;
   color: var(--ui-content-muted);
 }
@@ -10449,6 +10445,7 @@ button.file-card:hover {
 
 .reply-video {
   position: relative;
+  max-width: min(100%, 576px);
   aspect-ratio: 16 / 9;
   max-height: min(60vh, 480px);
   border-radius: 8px;

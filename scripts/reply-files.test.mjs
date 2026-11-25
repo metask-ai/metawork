@@ -728,6 +728,22 @@ async function shownImage(handler, resource) {
   };
 }
 
+test("large reply images fit the compact thumbnail before and after decoding", async (t) => {
+  installImageEncoding(t, { decode: async () => {} });
+  const resource = imageResource();
+  Object.assign(resource.image, { width: 1200, height: 2400 });
+  const { button, decode } = await shownImage(
+    handlerFixture().handler,
+    resource,
+  );
+  assert.equal(button.style.width, "90px");
+  assert.match(button.style.aspectRatio, /1200 ?\/ ?2400/);
+  // The displayed image's decoded dimensions take precedence over its header.
+  await decode();
+  assert.equal(button.style.width, "288px");
+  assert.match(button.style.aspectRatio, /400 ?\/ ?200/);
+});
+
 test("copying an image is offered first, on an image alone, once it is shown", async (t) => {
   installImageEncoding(t, { decode: async () => {} });
   const { handler, calls } = handlerFixture();
