@@ -3347,13 +3347,9 @@ for (const path of ["fresh", "lost", "not-created"]) {
         await fixture.created();
         await waitFor(() => assert.equal(fixture.inputs.length, 1));
         assert.equal(fixture.inputs[0][2].text, submitted);
-        await fixture.settle();
         fixture.snapshot.tasks = [fixture.task];
         await fixture.publish();
-        assert.equal(
-          screen.queryByRole("button", { name: "Quote original message" }),
-          null,
-        );
+        await screen.findByRole("button", { name: "Quote original message" });
         await user.click(screen.getByRole("button", { name: /^Messages/ }));
         await user.click(await screen.findByRole("button", { name: /^Ann/ }));
         await user.click(
@@ -3366,6 +3362,8 @@ for (const path of ["fresh", "lost", "not-created"]) {
         await screen.findByRole("button", { name: "Quote original message" });
         const existing = document.querySelector(".composer-bar textarea");
         assert.doesNotMatch(existing.value, /> First/);
+        // A late receipt for the previous message must not dismiss this one.
+        await fixture.settle();
         await user.click(quoteButton());
         assert.match(existing.value, /> First\n> \n> Second$/);
         assert.equal(fixture.inputs.length, 1);
@@ -3379,6 +3377,29 @@ for (const path of ["fresh", "lost", "not-created"]) {
         assert.match(
           document.querySelector(".composer-bar textarea").value,
           /> Second$/,
+        );
+        // Returning from another message offers its reference for this input only.
+        await user.click(screen.getByRole("button", { name: /^Messages/ }));
+        await user.click(await screen.findByRole("button", { name: /^Ann/ }));
+        await user.click(
+          (
+            await screen.findAllByRole("button", {
+              name: /Continue in workbench/,
+            })
+          )[1],
+        );
+        await screen.findByRole("button", { name: "Quote original message" });
+        const followup = document.querySelector(".composer-bar textarea");
+        fireEvent.change(followup, {
+          target: { value: "Continue the analysis" },
+        });
+        fireEvent.keyDown(followup, { key: "Enter", code: "Enter" });
+        await waitFor(() => assert.equal(fixture.inputs.length, 2));
+        assert.equal(fixture.inputs[1][2].text, "Continue the analysis");
+        assert.equal(screen.queryByText("Source task"), null);
+        assert.equal(
+          screen.queryByRole("button", { name: "Quote original message" }),
+          null,
         );
       } else {
         await fixture.loseCreationReply();
@@ -3406,7 +3427,26 @@ for (const path of ["fresh", "lost", "not-created"]) {
           );
           await fixture.created(fixture.task, 1);
           await waitFor(() => assert.equal(fixture.inputs.length, 1));
-          await fixture.settle();
+          fixture.snapshot.tasks = [fixture.task];
+          await fixture.publish();
+          await screen.findByRole("button", { name: "Quote original message" });
+          fixture.task.inputSubmissions = [
+            {
+              submission: {
+                operationId: fixture.operationIds[0],
+                receivedAtUnixMs: null,
+                presentationOrder: null,
+                anchorRunId: null,
+                afterOutputCount: 0,
+              },
+              input: { kind: "text", text: prompt, redacted: false },
+              state: "waiting",
+              reason: null,
+            },
+          ];
+          await fixture.settle(new Error("input receipt lost"));
+          await fixture.publish();
+          await waitFor(() => assert.ok(!screen.queryByText("Source task")));
           return;
         }
         assert.equal(fixture.creations(), 1);
@@ -3417,6 +3457,14 @@ for (const path of ["fresh", "lost", "not-created"]) {
             prompt,
           ),
         );
+        await user.click(quoteButton());
+        const recovered = document.querySelector(".composer-bar textarea");
+        assert.match(recovered.value, /> First\n> \n> Second$/);
+        assert.equal(fixture.inputs.length, 0);
+        fireEvent.keyDown(recovered, { key: "Enter", code: "Enter" });
+        await waitFor(() => assert.equal(fixture.inputs.length, 1));
+        await fixture.settle({ accepted: false, reason: "capacity_reached" });
+        assert.ok(quoteButton());
       }
     },
   );

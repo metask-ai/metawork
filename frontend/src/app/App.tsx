@@ -527,9 +527,8 @@ export default function App() {
   const [messageOrigin, setMessageOrigin] = useState<{
     scope: string;
     target: string;
-    taskId: string;
-    title?: string;
-    quote: string;
+    reference: { taskId: string; title?: string; quote: string };
+    pendingInputs: string[];
   } | null>(null);
   const [handoffNotice, setHandoffNotice] = useState<MessageId | null>(null);
   const handoffRequest = useRef<string | null>(null);
@@ -1664,11 +1663,38 @@ export default function App() {
     route === "workbench" &&
     messageOrigin?.scope === originScope &&
     messageOrigin.target === originTarget
-      ? messageOrigin
+      ? messageOrigin.reference
       : null;
   useEffect(() => {
-    if (messageOrigin && !origin) setMessageOrigin(null);
-  }, [messageOrigin, origin]);
+    if (!messageOrigin) return;
+    const selectingTarget =
+      route === "workbench" &&
+      messageOrigin.scope === originScope &&
+      pendingTaskSelection.current !== null &&
+      messageOrigin.target === `task:${pendingTaskSelection.current}`;
+    if (!origin && selectingTarget) return;
+    if (
+      !origin ||
+      messageOrigin.pendingInputs.some(
+        (id) =>
+          taskHasSubmission(activeTask ?? undefined, id) ||
+          snapshot.receipts.some(
+            (receipt) =>
+              receipt.taskId === activeTask?.id &&
+              receipt.operationId === id &&
+              receipt.observed,
+          ),
+      )
+    )
+      setMessageOrigin(null);
+  }, [
+    messageOrigin,
+    origin,
+    originScope,
+    route,
+    activeTask,
+    snapshot.receipts,
+  ]);
   composerDraftRef.current = composerDraft;
   const composerDraftScope = newTaskDraftActive
     ? `new-task:${newTaskDraftId ?? unscopedNewTaskDraftId}:${newTaskSubmissionInstances.current.get(newTaskDraftId ?? unscopedNewTaskDraftId) ?? 0}`
@@ -3387,9 +3413,12 @@ export default function App() {
         ? {
             scope: originScope,
             target,
-            taskId: reference.taskId,
-            title: reference.title,
-            quote: quoteMessage(reference.message, reference.taskId),
+            reference: {
+              taskId: reference.taskId,
+              title: reference.title,
+              quote: quoteMessage(reference.message, reference.taskId),
+            },
+            pendingInputs: [],
           }
         : null,
     );
@@ -3446,6 +3475,11 @@ export default function App() {
       recovered && composerDraftHasContent(taskDrafts.getDraft(id));
     if (!keepSource) {
       if (recovered) taskDrafts.setDraft(id, newTaskDrafts.getDraft(key));
+      setMessageOrigin((current) =>
+        current?.target === key && current.reference === origin
+          ? { ...current, target: `task:${id}` }
+          : current,
+      );
       removeHandoffDraft(draft.operationId);
       newTaskDrafts.discardDraft(key);
       setHandoffDrafts(readHandoffDrafts());
@@ -3648,6 +3682,15 @@ export default function App() {
       submissionSessions.current.set(key, session);
     }
     // The submission owns this draft now. Responses never clear a later draft.
+    if (origin)
+      setMessageOrigin((current) =>
+        current?.reference === origin
+          ? {
+              ...current,
+              pendingInputs: [...current.pendingInputs, operationId],
+            }
+          : current,
+      );
     if (draftId) newTaskDrafts.clearDraft(draftId);
     else if (taskId) taskDrafts.clearDraft(taskId);
     composerDraftRef.current = emptyComposerDraft();
@@ -3708,6 +3751,17 @@ export default function App() {
       },
     );
     if (bridgeGenerationRef.current !== generation) return;
+    if (origin && result.kind !== "unknown")
+      setMessageOrigin((current) => {
+        if (current?.reference !== origin) return current;
+        if (result.kind === "accepted") return null;
+        return {
+          ...current,
+          pendingInputs: current.pendingInputs.filter(
+            (id) => id !== operationId,
+          ),
+        };
+      });
     const reusableDraft =
       result.kind === "create_rejected" || result.kind === "rejected";
     if (
