@@ -2124,20 +2124,35 @@ test("Account authorization and Models provider state remain separate owners", (
   assert.match(accountCommitFields, /token_changed: bool/);
   assert.doesNotMatch(accountCommitFields, /\[\](?:const )?u8/);
 
-  const commitPrepared = accountCoordinator.slice(
-    accountCoordinator.indexOf("fn commitPrepared("),
-    accountCoordinator.indexOf("fn settle(self: *Coordinator)"),
-  );
-  const commitSteps = [
-    "self.runtime.commit(&prepared);",
-    "self.control.commitNoFail",
-    "self.deliverCredential();",
-    "follower.follow(self.runtime.authorization());",
-    "self.settle();",
-  ].map((step) => commitPrepared.indexOf(step));
-  assert.ok(commitSteps[0] >= 0);
-  for (let step = 1; step < commitSteps.length; step++)
-    assert.ok(commitSteps[step] > commitSteps[step - 1]);
+  for (const [start, end, steps] of [
+    [
+      "fn commitPrepared(",
+      "fn publish(self: *Coordinator)",
+      [
+        "self.runtime.commit(&prepared);",
+        "self.control.commitNoFail",
+        "self.publish();",
+      ],
+    ],
+    [
+      "fn publish(self: *Coordinator)",
+      "pub fn beginShutdown(",
+      [
+        "self.deliverCredential();",
+        "follower.follow(self.runtime.authorization());",
+        "self.control.settleNoFail();",
+      ],
+    ],
+  ]) {
+    const body = accountCoordinator.slice(
+      accountCoordinator.indexOf(start),
+      accountCoordinator.indexOf(end),
+    );
+    const found = steps.map((step) => body.indexOf(step));
+    assert.ok(found[0] >= 0);
+    for (let step = 1; step < found.length; step++)
+      assert.ok(found[step] > found[step - 1]);
+  }
   assert.match(accountRuntime, /pub fn credential\(/);
   assert.match(modelsCoordinator, /self\.credentials\.take\(\)/);
   assert.doesNotMatch(modelsCoordinator, /@import\("metawork_account"\)/);
