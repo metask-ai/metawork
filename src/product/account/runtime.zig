@@ -48,7 +48,6 @@ const SummaryJob = struct {
     transport: metask_client.Transport,
     wake: WakeSink,
     attempt_id: u64,
-    authorization_generation: u64,
     synced_at_unix_ms: summary_impl.Decimal,
     history_range: ?summary_impl.HistoryRange,
     lease: contract.OwnedAuthorizationLease,
@@ -75,7 +74,6 @@ const SummaryJob = struct {
             .transport = transport,
             .wake = wake,
             .attempt_id = attempt_id,
-            .authorization_generation = lease.authorization_generation,
             .synced_at_unix_ms = synced_at_unix_ms,
             .history_range = history_range,
             .lease = lease.take(),
@@ -97,7 +95,6 @@ const SummaryJob = struct {
         }
         var completion: summary_impl.Completion = .{
             .attempt_id = self.attempt_id,
-            .authorization_generation = self.authorization_generation,
             .principal_ref_len = self.lease.principal_ref.len,
             .synced_at_unix_ms = self.synced_at_unix_ms,
             .history = .not_requested,
@@ -578,6 +575,8 @@ pub const Runtime = struct {
     authorization_generation: u64 = 0,
     summary: summary_impl.State = .{},
     summary_job: ?*SummaryJob = null,
+    /// The credential generation the summary was last fetched with.
+    summary_generation: u64 = 0,
     refresh_blocked: bool = false,
     /// The clocks when the current token request was issued.
     token_requested: struct { wall: i64, boot: i64 } = .{ .wall = 0, .boot = 0 },
@@ -773,7 +772,7 @@ pub const Runtime = struct {
         if (self.stopping) return;
         self.stopping = true;
         self.clearRenewal();
-        _ = self.shutdownSummary();
+        _ = self.clearSummary();
     }
 
     pub fn prepareShutdown(self: *Runtime) Prepared {
@@ -873,59 +872,45 @@ pub const Runtime = struct {
         return .acceptedAttempt(null);
     }
 
-    pub fn reconcileSummaryAuthorization(self: *Runtime) bool {
+    /// The summary belongs to the account. Each credential it was not yet
+    /// fetched with fetches it again behind what is shown; true when changed.
+    pub fn reconcileSummary(self: *Runtime) bool {
         self.assertMainThread();
         if (self.stopping) return false;
-        if (self.account.view().state != .authenticated) {
-            self.cancelSummaryJob();
-            return self.summary.clearAuthorization();
-        }
-        if (self.account.activeAttempt() != null) {
-            const job = self.summary_job orelse return false;
-            if (job.authorization_generation == self.authorization_generation)
-                return false;
-            const attempt_id = job.attempt_id;
-            self.cancelSummaryJob();
-            return self.summary.fail(attempt_id, .generation_mismatch);
-        }
-        var lease = (self.credential() catch {
-            self.cancelSummaryJob();
-            return self.summary.clearAuthorization();
-        }) orelse {
-            self.cancelSummaryJob();
-            return self.summary.clearAuthorization();
+        const current = switch (self.authorization()) {
+            .checking, .signed_out, .authorizing => return self.clearSummary(),
+            // Still the same account; its next credential fetches again.
+            .recovering, .stalled => return false,
+            .available => |value| value,
         };
+        if (self.summary.belongsTo(current.account_id)) {
+            if (self.summary_job != null or current.generation == self.summary_generation) return false;
+        } else _ = self.clearSummary();
+        var lease = (self.credential() catch return false) orelse return false;
         defer lease.deinit();
-        if (self.summary.matchesAuthority(
-            lease.principal_ref,
-            lease.authorization_generation,
-        )) return false;
-        self.cancelSummaryJob();
-        _ = self.summary.clearAuthorization();
-        _ = self.startSummaryJob(&lease);
-        return true;
+        return self.startSummaryJob(&lease).changed;
     }
 
+    /// True when a job ended. A credential that came meanwhile is reconciled
+    /// after it.
     pub fn drainSummary(self: *Runtime) bool {
         self.assertMainThread();
         const job = self.summary_job orelse return false;
         if (!job.finished.load(.acquire)) return false;
         job.join();
-        const changed = if (job.completion) |*completion|
-            completion.authorization_generation == self.authorization_generation and
-                self.availableAuthorizationIdentity() != null and
-                self.summary.complete(completion)
+        if (job.completion) |*completion|
+            _ = self.summary.complete(completion)
         else
-            self.summary.fail(job.attempt_id, .account_operation_failed);
+            _ = self.summary.fail(job.attempt_id, .account_operation_failed);
         self.summary_job = null;
         job.deinit();
-        return changed;
+        return true;
     }
 
-    pub fn shutdownSummary(self: *Runtime) bool {
-        self.assertMainThread();
+    fn clearSummary(self: *Runtime) bool {
         self.cancelSummaryJob();
-        return self.summary.clearAuthorization();
+        self.summary_generation = 0;
+        return self.summary.clear();
     }
 
     pub fn accessTokenProjection(self: *Runtime) contract.AccessTokenProjection {
@@ -1020,10 +1005,9 @@ pub const Runtime = struct {
         const synced_at = summary_impl.Decimal.fromInteger(now_ms, false) catch
             return .{ .result = .rejected(.account_operation_failed), .changed = false };
         const history_range = summary_impl.HistoryRange.fromUnixSeconds(now_seconds) catch null;
-        const preparation = self.summary.begin(
-            lease.principal_ref,
-            lease.authorization_generation,
-        ) catch return .{ .result = .rejected(.operation_in_progress), .changed = false };
+        // The job takes the lease.
+        const generation = lease.authorization_generation;
+        const preparation = self.summary.begin(lease.principal_ref) catch return .{ .result = .rejected(.operation_in_progress), .changed = false };
         const job = SummaryJob.create(
             self.allocator,
             self.io,
@@ -1043,6 +1027,7 @@ pub const Runtime = struct {
             return .{ .result = .rejected(.local_resource_exhausted), .changed = true };
         };
         self.summary_job = job;
+        self.summary_generation = generation;
         return .{
             .result = .acceptedAttempt(preparation.attempt_id),
             .changed = true,

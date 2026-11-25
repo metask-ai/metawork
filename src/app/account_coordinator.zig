@@ -158,7 +158,10 @@ pub const Coordinator = struct {
             }
         }
         _ = self.tick();
-        if (self.runtime.drainSummary()) self.commitSummaryNoFail();
+        if (self.runtime.drainSummary()) {
+            _ = self.runtime.reconcileSummary();
+            self.commitSummaryNoFail();
+        }
         self.renewDeferredCredential();
     }
 
@@ -228,7 +231,7 @@ pub const Coordinator = struct {
         self.deliverCredential();
         if (self.follower) |follower| follower.follow(self.runtime.authorization());
         self.control.settleNoFail();
-        if (!self.stopping and self.runtime.reconcileSummaryAuthorization())
+        if (!self.stopping and self.runtime.reconcileSummary())
             self.commitSummaryNoFail();
 
         // A continuation effect can fail admission only after its preceding
@@ -443,6 +446,12 @@ const SummaryTransport = struct {
     fail_history: bool = false,
     request_count: usize = 0,
     history_request_count: usize = 0,
+    /// Keeps a history request underway.
+    held: bool = false,
+    started: std.Io.Event = .unset,
+    release: std.Io.Event = .unset,
+    renewals: usize = 0,
+    bearer: []const u8 = "access-token",
 
     fn port(self: *SummaryTransport) account_api.Transport {
         return .{ .context = self, .perform_fn = perform, .retire_fn = account_api.retireNothing };
@@ -454,12 +463,25 @@ const SummaryTransport = struct {
         output: []u8,
     ) account_api.TransportError!account_api.TransportResponse {
         const self: *SummaryTransport = @ptrCast(@alignCast(context));
-        if (!std.mem.eql(u8, request.bearer orelse "", "access-token"))
+        if (request.kind == .refresh_token) {
+            self.renewals += 1;
+            const body = if (self.renewals % 2 == 1)
+                "{\"access_token\":\"access-odd\",\"refresh_token\":\"refresh-odd\",\"token_type\":\"Bearer\",\"expires_in\":3600}"
+            else
+                "{\"access_token\":\"access-even\",\"refresh_token\":\"refresh-even\",\"token_type\":\"Bearer\",\"expires_in\":3600}";
+            @memcpy(output[0..body.len], body);
+            return .{ .status = 200, .body = output[0..body.len] };
+        }
+        if (!std.mem.eql(u8, request.bearer orelse "", self.bearer))
             return error.ProtocolFailed;
         self.request_count += 1;
         const body = switch (request.kind) {
             .usage_stats => {
                 self.history_request_count += 1;
+                if (self.held) {
+                    self.started.set(std.testing.io);
+                    self.release.wait(std.testing.io) catch return error.NetworkFailed;
+                }
                 if (self.fail_history) {
                     const failure = "{}";
                     @memcpy(output[0..failure.len], failure);
@@ -536,6 +558,81 @@ test "Account summary auto-sync requests usage stats directly and preserves stal
     try std.testing.expectEqual(account_contract.SummaryAvailability.stale, history_stale.summary.history.availability);
     try std.testing.expectEqual(account_contract.ErrorCode.metask_service_unavailable, history_stale.summary.history.error_code);
     try std.testing.expectEqualStrings("60", history_stale.summary.history.days[0].total_tokens);
+}
+
+test "Account summary stays across renewals and is fetched again behind them" {
+    var transport: SummaryTransport = .{};
+    var runtime = initRuntimeForSummaryTest(&transport);
+    const start: i64 = 1_789_440_000;
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = start };
+    try platform.setStoredRefreshToken("refresh-token");
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+    _ = coordinator.commitPrepared(try account_api.TestSupport.prepareAuthenticatedAndSchedule(&runtime, "42", "Meta User", "access-token", "refresh-token", start + 200));
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    try expectHistory(&runtime, .ready, 1, &transport);
+
+    // Expiry and the renewal of the same account leave it as it is.
+    platform.now_unix_seconds = start + 200;
+    try std.testing.expect(coordinator.tick());
+    try expectHistory(&runtime, .ready, 1, &transport);
+    transport.bearer = "access-odd";
+    account_api.TestSupport.joinNetwork(&runtime);
+    coordinator.drain();
+    try std.testing.expectEqual(account_contract.SummaryOperation.refreshing, runtime.view().summary.operation);
+    try std.testing.expectEqual(account_contract.SummaryAvailability.ready, runtime.view().summary.history.availability);
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    try expectHistory(&runtime, .ready, 2, &transport);
+
+    // Failing to read it again only marks what is shown.
+    transport.fail_history = true;
+    transport.bearer = "access-even";
+    platform.now_unix_seconds = start + 4000;
+    try std.testing.expect(coordinator.tick());
+    account_api.TestSupport.joinNetwork(&runtime);
+    coordinator.drain();
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    try expectHistory(&runtime, .stale, 3, &transport);
+
+    sink.count = 0;
+    // A renewal during a request does not repeat it; its end does, once.
+    transport.fail_history = false;
+    transport.held = true;
+    try std.testing.expect(coordinator.commandSink().submit(.refresh_summary).accepted);
+    try transport.started.wait(std.testing.io);
+    platform.now_unix_seconds = start + 8000;
+    try std.testing.expect(coordinator.tick());
+    account_api.TestSupport.joinNetwork(&runtime);
+    coordinator.drain();
+    try expectHistory(&runtime, .stale, 4, &transport);
+    transport.held = false;
+    transport.bearer = "access-odd";
+    transport.release.set(std.testing.io);
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    try expectHistory(&runtime, .ready, 5, &transport);
+    try std.testing.expect(runtime.summary_job == null);
+
+    // Another account's sign-in takes it away.
+    _ = coordinator.commitPrepared(account_api.TestSupport.prepareBeginLoginWithoutEffect(&runtime));
+    try std.testing.expectEqual(account_contract.SummaryAvailability.unavailable, runtime.summary.view().history.availability);
+}
+
+fn expectHistory(runtime: *account_api.Runtime, availability: account_contract.SummaryAvailability, requests: usize, transport: *const SummaryTransport) !void {
+    const history = runtime.view().summary.history;
+    try std.testing.expectEqual(availability, history.availability);
+    try std.testing.expectEqualStrings("60", history.days[0].total_tokens);
+    try std.testing.expectEqual(requests, transport.history_request_count);
 }
 
 test "Account summary does not depend on a legacy account mode" {

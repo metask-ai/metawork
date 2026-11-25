@@ -124,7 +124,7 @@ none
 
 Account coordinator 必须先提交 Account Runtime，再依次：把 canonical Account fact 与新 token 交给 Product Control；把新 credential 交给已接纳的执行；把授权状态交给 Models coordinator；最后由 Product Control 重排定时任务并发布。后几步都不会失败，定时任务只对照全部完成后的事实重排。generation 不进入 fact。Models 的 refresh/clear/install 结果不得回写、回滚或补充 Account transaction。
 
-Account summary 使用独立于 identity transaction 的有界单飞 attempt。authenticated identity commit 或 authorization generation变化后，Application可启动一次自动同步；用户可用 `refresh_summary` 启动一次显式同步。两类触发都必须取得 generation-bound authorization lease，completion同时匹配 `account_id + authorization generation + summary attempt id` 才能提交。history 失败不能清除已有成功值，已有值在失败后转为 stale；初次无值则保持 unavailable。不得轮询、定时刷新或无界重试。logout、identity replacement、generation变化与 shutdown必须取消并 join旧 attempt，迟到 completion只能销毁owned token和数据。
+Account summary 归账号，使用独立于 identity transaction 的有界单飞 attempt。authenticated identity commit 后启动一次自动同步；每个新的 authorization generation 在后台再取一次，不清空已显示的内容，在途时来的新 generation 等它结束后补取一次；用户可用 `refresh_summary` 启动一次显式同步。每次触发都取得当次 authorization lease，completion 匹配 `account_id + summary attempt id` 才能提交。history 失败不能清除已有成功值，已有值在失败后转为 stale；初次无值则保持 unavailable。不得轮询、定时刷新或无界重试。token 到期、续期和读不到墙钟都不改变摘要；logout、登录进行中、identity replacement 与 shutdown 必须取消并 join 旧 attempt、清空摘要，迟到 completion只能销毁owned token和数据。
 
 续期由一个节拍发起。装入 token 时按墙钟与 boot 时钟各记一个续期点：到期前 90 秒，但不早于装入后 30 秒；任一时钟到点即到点。节拍是一个 30 秒的 Host 重复 timer，只在有续期点时开；事件循环的每一轮、每个平台 timer 和窗口激活也做同一个检查，所以没有哪一个 timer 单独决定续期是否发生。检查不看谁在查询授权，授权查询也不发起续期。在途 attempt 期间不发起第二个，登录或退出期间错过的续期在其结束后的下一次检查发起；读不到墙钟时不发起，也不让消费方等。已退出的会话、正在关闭的 Runtime，以及 token 已被登录换掉而新 identity 未确认的会话都没有续期点，因此没有任何自动刷新。
 
