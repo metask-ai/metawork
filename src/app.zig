@@ -14,7 +14,8 @@ const account_api = @import("metawork_account");
 const product_identity = @import("metawork_product_identity");
 const mcp_platform = @import("metawork_mcp_platform");
 const mcp_oauth = @import("metawork_mcp_oauth");
-const account_coordinator = @import("app/account_coordinator.zig");
+const account_coordinator = @import("account_coordinator");
+const account_contract = @import("metawork_account_contract");
 const account_platform_binding = @import("app/account_platform_binding.zig");
 const models_coordinator = @import("models_coordinator");
 const models_automation_vault = @import("app/models_automation_vault.zig");
@@ -364,8 +365,8 @@ const App = struct {
         control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
         control_storage.setImageRunPreparation(models_management.imageRunPreparation());
         control_storage.setVideoRunPreparation(models_management.videoRunPreparation());
-        control_storage.setMetaskAuthorizationCheck(models_management.metaskAuthorizationCheck());
-        models_management.setCredentialRenewal(control_storage.metaskCredentialRenewal());
+        control_storage.setAccountAuthorization(account.authorizationQuery());
+        account.setCredentialRenewal(control_storage.metaskCredentialRenewal());
         control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery, .validate_path_fn = output_file.validatePath });
         control_storage.setFileEffects(self.platform.fileEffects());
         control_storage.setFileSave(self.platform.fileSave());
@@ -604,6 +605,8 @@ const App = struct {
                 // Product consumes catalog completion before management can
                 // observe the shared boundary and decide whether to advance.
                 self.drainAgentEvents();
+                // Product may only now have made a message wait for Account.
+                if (self.account_coordinator) |coordinator| _ = coordinator.tick();
                 if (self.mcp_oauth_refresh) |*coordinator| _ = coordinator.drain();
                 self.advanceMcp();
                 if (self.control) |control|
@@ -624,6 +627,13 @@ const App = struct {
                 };
             },
             .timer => |timer| {
+                // Any timer may find a renewal due: the Account beat can be
+                // late, and what this timer asks for may need the result.
+                if (self.account_coordinator) |coordinator| {
+                    if (coordinator.tick()) if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null)
+                        try dispatcher.emitProductChanged();
+                    if (coordinator.ownsTimer(timer.id)) return;
+                }
                 if (timer.id == update_coordinator.timer_id) {
                     if (self.updates) |*coordinator| coordinator.onTimer();
                     if (self.dispatcher) |dispatcher| try dispatcher.emitProductChanged();
@@ -634,9 +644,6 @@ const App = struct {
                     if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
                     return;
                 }
-                if (self.account_coordinator) |coordinator|
-                    if (coordinator.onTimer(timer.id))
-                        return;
                 if (self.models_coordinator) |coordinator| {
                     if (coordinator.onCatalogRetryTimer(timer.id)) {
                         if (self.dispatcher) |dispatcher| try dispatcher.emitProductChanged();
@@ -687,6 +694,7 @@ const App = struct {
             // The inbox asks MetaTeam only while MetaWork is in front.
             .lifecycle => |phase| if (phase == .activate or phase == .deactivate) {
                 if (self.inbox) |*coordinator| coordinator.setActive(phase == .activate);
+                if (phase == .activate) if (self.account_coordinator) |coordinator| coordinator.activate();
                 if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
             },
             else => {},
@@ -1169,7 +1177,7 @@ pub fn run(init: std.process.Init) !void {
         app.main_thread_id,
     );
     var models_coordinator_state = models_coordinator.Coordinator.init(
-        &account_runtime,
+        account_coordinator_state.credentialSource(),
         account_http.modelsTransport(),
         control.modelsManagement(),
         app.main_thread_id,
@@ -1191,9 +1199,9 @@ pub fn run(init: std.process.Init) !void {
     models_coordinator_state.setCompletionTransport(
         app.completion_transport.transport(),
     );
-    account_coordinator_state.setCommitObserver(.{
+    account_coordinator_state.setFollower(.{
         .context = &models_coordinator_state,
-        .notify_fn = notifyModelsAuthorizationChanged,
+        .follow_fn = followAuthorization,
     });
     app.account_coordinator = &account_coordinator_state;
     app.models_coordinator = &models_coordinator_state;
@@ -1236,9 +1244,9 @@ pub fn run(init: std.process.Init) !void {
     }, init);
 }
 
-fn notifyModelsAuthorizationChanged(context: *anyopaque) void {
+fn followAuthorization(context: *anyopaque, authorization: account_contract.Authorization) void {
     const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
-    coordinator.authorizationChanged();
+    coordinator.follow(authorization);
 }
 
 fn refreshModelsCatalog(context: *anyopaque) models_contract.CommandResult {

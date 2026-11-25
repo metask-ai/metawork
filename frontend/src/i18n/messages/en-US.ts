@@ -171,6 +171,12 @@ export const enUS = {
     "Complete sign-in in your browser. Your draft will be kept.",
   "model_setup.cancel_login": "Cancel sign-in",
   "model_setup.loading": "Loading models…",
+  "model_setup.unconfirmed":
+    "Can't confirm your sign-in yet. Your text is kept.",
+  "model_setup.recovering":
+    "Connecting to Metask. You can send once it's connected; your text is kept.",
+  "model_setup.unreachable":
+    "Can't reach Metask right now. MetaWork keeps retrying; your text is kept.",
   "model_setup.preparing": "Preparing the model…",
   "model_setup.choose": "Choose an available model before sending.",
   "model_setup.catalog_failed":
@@ -464,6 +470,9 @@ export const enUS = {
   "account.checking.title": "Checking sign-in",
   "account.checking.body":
     "MetaWork is checking whether this device can sign in.",
+  "account.unconfirmed.title": "Can't confirm your sign-in yet",
+  "account.unconfirmed.body":
+    "MetaWork keeps retrying. You won't need to sign in again once it's back.",
   "account.sign_in_required.title": "Sign in to MetaWork",
   "account.sign_in_required.body":
     "Use your Metask account to load the models available to you.",
@@ -504,6 +513,8 @@ export const enUS = {
   "account.cancel": "Cancel current action",
   "account.refresh_catalog": "Sync again",
   "account.retry_refresh": "Retry sign-in refresh",
+  "account.retry_now": "Try again now",
+  "account.login_again": "Sign in again",
   "account.logout": "Sign out",
   "account.logout_confirm":
     "Signing out removes your Metask sign-in credentials from this device. Sign in again to create new tasks using Metask models. Your custom models, local tasks and history, and workspace files will remain.",
@@ -2035,7 +2046,7 @@ export const enUS = {
   "mutation.reason.metask_authorization_required":
     "Sign in to Metask to use this model.",
   "mutation.reason.metask_authorization_recovering":
-    "Reconnecting to Metask. Messages run once the connection is back.",
+    "Connecting to Metask. This message runs once connected, or is marked not run if this attempt fails.",
   "mutation.reason.metask_connection_unavailable":
     "Can't reach Metask right now. The message was not run.",
   "mutation.reason.session_poisoned":

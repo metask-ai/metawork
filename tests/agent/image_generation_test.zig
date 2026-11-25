@@ -1166,6 +1166,7 @@ const image_product = struct {
     const models = fixture_api.models_contract;
     const ports = fixture_api.models_ports;
     const account_api = @import("metawork_account");
+    const account_coordinator = @import("account_coordinator");
     const coordinator_api = @import("models_coordinator");
     const catalog_transport = @import("metask_transport");
 
@@ -1250,33 +1251,16 @@ const image_product = struct {
 
     const History = @import("lifecycle_fixture").TypedHistory;
 
-    fn rotateCredential(account: *account_api.Runtime, control: *control_api.Runtime, coordinator: *coordinator_api.Coordinator) !void {
-        const generation = account.authorizationGeneration().?;
-        var refresh = switch (account.prepareTokenRefresh()) {
-            .prepared => |value| value,
-            else => return error.TestUnexpectedResult,
-        };
-        defer refresh.deinit();
-        try std.testing.expect(account.admitEffect(&refresh));
-        account.commit(&refresh);
-        try std.testing.expect(account.dispatchCommitted(&refresh) == null);
-        account_api.TestSupport.joinNetwork(account);
-        var rotated = switch (account.prepareNextCompletion().?) {
-            .prepared => |value| value,
-            else => return error.TestUnexpectedResult,
-        };
-        defer rotated.deinit();
-        try std.testing.expect(account.admitEffect(&rotated));
-        account.commit(&rotated);
-        try std.testing.expect(account.dispatchCommitted(&rotated) == null);
-        control.commitAccountFactNoFail(account.preparedFact(&rotated));
-        coordinator.authorizationChanged();
+    fn rotateCredential(accounts: *account_coordinator.Coordinator, platform: *account_api.TestSupport.Platform, coordinator: *coordinator_api.Coordinator) !void {
+        const generation = accounts.runtime.authorization().use().ready;
+        platform.now_unix_seconds = 950;
+        try fixture_api.renewAccountToken(accounts);
         for (0..5000) |_| {
             coordinator.drain();
             if (coordinator.catalog_job == null) break;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         } else return error.TestUnexpectedResult;
-        try std.testing.expect(account.authorizationGeneration().? != generation);
+        try std.testing.expect(accounts.runtime.authorization().use().ready != generation);
     }
 
     fn configureDialogue(control: *control_api.Runtime, endpoint: []const u8, image_input: bool) !void {
@@ -1391,9 +1375,6 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
         image_product.account_api.TestSupport.detachPlatform(&account);
         account.deinit();
     }
-    var authenticated = try image_product.account_api.TestSupport.prepareAuthenticated(&account, "image-account", "Image User", "synthetic-image-key", "synthetic-refresh-key", 1000);
-    defer authenticated.deinit();
-    account.commit(&authenticated);
     var history = try image_product.task_api.history.FileStore.init(std.testing.io, h.root);
     defer history.deinit();
     var typed_history: image_product.History = .{ .file_store = &history };
@@ -1411,18 +1392,20 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     try control.startCustomProviders(h.root, effects.vault());
     const large_read = std.mem.eql(u8, mode, "read-large");
     try image_product.configureDialogue(&control, h.fixture.provider_endpoint, large_read);
-    var coordinator = image_product.coordinator_api.Coordinator.init(&account, .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
+    var accounts = image_product.account_coordinator.Coordinator.init(&account, control.accountCommitSink(), std.Thread.getCurrentId());
+    var coordinator = image_product.coordinator_api.Coordinator.init(accounts.credentialSource(), .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
     coordinator.setProbeNotifier(.{ .context = &effects, .notify_fn = image_product.Effects.notify });
     coordinator.setCompletionTransport(effects.imageTransport());
-    control.setMetaskAuthorizationCheck(coordinator.metaskAuthorizationCheck());
-    coordinator.setCredentialRenewal(control.metaskCredentialRenewal());
+    control.setAccountAuthorization(accounts.authorizationQuery());
+    accounts.setCredentialRenewal(control.metaskCredentialRenewal());
+    accounts.setFollower(image_product.fixture_api.catalogFollower(&coordinator));
     var coordinator_live = true;
     defer if (coordinator_live) {
         control.setImageRunPreparation(null);
         coordinator.shutdown();
         coordinator.drain();
     };
-    try std.testing.expect(coordinator.refreshCatalog().accepted);
+    try std.testing.expect(image_product.account_coordinator.TestSupport.commit(&accounts, try image_product.account_api.TestSupport.prepareAuthenticatedAndSchedule(&account, "image-account", "Image User", "synthetic-image-key", "synthetic-refresh-key", 1000)).accepted);
     for (0..5000) |_| {
         coordinator.drain();
         const current = control.modelsView().providers[0];
@@ -1454,14 +1437,11 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     // The Core cannot send the image request before manual once approval.
     try std.testing.expectEqual(@as(usize, 0), effects.image_calls.load(.acquire));
     if (logout_after_admission) {
-        control.custom_providers.setMetaskAuthorizationUnavailable();
-        var logout = image_product.account_api.TestSupport.prepareLoggedOutAfterExternalCommit(&account);
-        defer logout.deinit();
-        account.commit(&logout);
-        coordinator.authorizationChanged();
+        try std.testing.expect(accounts.commandSink().submit(.logout).accepted);
+        accounts.drain();
     }
     if (rotate_after_admission) {
-        try image_product.rotateCredential(&account, &control, &coordinator);
+        try image_product.rotateCredential(&accounts, &platform, &coordinator);
         try std.testing.expectEqualStrings("synthetic-dialogue-key", task.runtime.executionConst().?.secret);
         try std.testing.expectEqual(@as(usize, 1), task.durable.runs[0].?.image_execution.?.authorization.versions.items.len);
     }
@@ -1546,7 +1526,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     control_live = true;
     control.setAccountProjectionCredentials(account.accessTokenProjection());
     try control.startCustomProviders(h.root, effects.vault());
-    coordinator = image_product.coordinator_api.Coordinator.init(&account, .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
+    coordinator = image_product.coordinator_api.Coordinator.init(accounts.credentialSource(), .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
     coordinator.setCompletionTransport(effects.imageTransport());
     coordinator_live = true;
     control.setImageRunPreparation(coordinator.imageRunPreparation());
@@ -2229,9 +2209,6 @@ test "GenerateVideo canonical Product prepares an ordinary Run and delivers its 
         image_product.account_api.TestSupport.detachPlatform(&account);
         account.deinit();
     }
-    var authenticated = try image_product.account_api.TestSupport.prepareAuthenticated(&account, "image-account", "Media User", "synthetic-image-key", "synthetic-refresh-key", 1000);
-    defer authenticated.deinit();
-    account.commit(&authenticated);
     var history = try image_product.task_api.history.FileStore.init(std.testing.io, h.root);
     defer history.deinit();
     var typed_history: image_product.History = .{ .file_store = &history };
@@ -2252,17 +2229,19 @@ test "GenerateVideo canonical Product prepares an ordinary Run and delivers its 
     try image_product.configureDialogue(&control, h.fixture.provider_endpoint, false);
     control.setAccountProjectionCredentials(account.accessTokenProjection());
     var gateway: VideoGateway = .{ .harness = &h };
-    var coordinator = image_product.coordinator_api.Coordinator.init(&account, .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
+    var accounts = image_product.account_coordinator.Coordinator.init(&account, control.accountCommitSink(), std.Thread.getCurrentId());
+    var coordinator = image_product.coordinator_api.Coordinator.init(accounts.credentialSource(), .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
     coordinator.setProbeNotifier(.{ .context = &effects, .notify_fn = image_product.Effects.notify });
     coordinator.setCompletionTransport(gateway.transport());
-    control.setMetaskAuthorizationCheck(coordinator.metaskAuthorizationCheck());
-    coordinator.setCredentialRenewal(control.metaskCredentialRenewal());
+    control.setAccountAuthorization(accounts.authorizationQuery());
+    accounts.setCredentialRenewal(control.metaskCredentialRenewal());
+    accounts.setFollower(image_product.fixture_api.catalogFollower(&coordinator));
     defer {
         control.setVideoRunPreparation(null);
         coordinator.shutdown();
         coordinator.drain();
     }
-    try std.testing.expect(coordinator.refreshCatalog().accepted);
+    try std.testing.expect(image_product.account_coordinator.TestSupport.commit(&accounts, try image_product.account_api.TestSupport.prepareAuthenticatedAndSchedule(&account, "image-account", "Media User", "synthetic-image-key", "synthetic-refresh-key", 1000)).accepted);
     for (0..5000) |_| {
         coordinator.drain();
         const catalog = control.modelsView().providers[0];
@@ -2313,7 +2292,7 @@ test "GenerateVideo canonical Product prepares an ordinary Run and delivers its 
             const trace = try h.trace();
             defer std.testing.allocator.free(trace);
             if (count(trace, "video_create") == 1) {
-                try image_product.rotateCredential(&account, &control, &coordinator);
+                try image_product.rotateCredential(&accounts, &platform, &coordinator);
                 try std.testing.expectEqual(@as(usize, 1), run.video_execution.?.authorization.versions.items.len);
                 try std.testing.expectEqualStrings("synthetic-dialogue-key", task.runtime.executionConst().?.secret);
                 renewed = true;

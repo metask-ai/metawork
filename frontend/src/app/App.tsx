@@ -269,6 +269,7 @@ import {
   selectableTask,
 } from "../workbench/task-visibility.ts";
 import { PendingScopes } from "../workbench/pendingScopes.ts";
+import { accountUnconfirmed } from "../workbench/account-identity.ts";
 import {
   readyModelOptions,
   modelOptionId,
@@ -279,6 +280,7 @@ import {
 } from "./task-model-selection.ts";
 import { AttachmentRemovalCoordinator } from "./attachment-removal.ts";
 import {
+  metaskAdmission,
   modelSetupNotice,
   supportsCustomProviders,
   type ModelSetupAction,
@@ -970,6 +972,9 @@ export default function App() {
     force = false,
   ) {
     if (accountFeedbackRequest.current.awaitingSync) return;
+    // A login keeps its failure while it is tried again; that failure is not
+    // the outcome of the attempt underway.
+    if (announce && accountUnconfirmed(account) && !account.canRetry) return;
     const observation = JSON.stringify([
       account.errorCode,
       account.safeDiagnostic,
@@ -1995,7 +2000,11 @@ export default function App() {
   const canCreateTask =
     snapshot.newTaskAdmission.available &&
     newTaskWorkspaceReady &&
-    newTaskModelState.valid;
+    newTaskModelState.valid &&
+    !metaskAdmission(
+      snapshot.newTaskAdmission,
+      newTaskModelState.intent?.targetModelRef,
+    );
   const handoffBlocksSubmission =
     newTaskDraftActive &&
     handoffId !== null &&
@@ -2060,7 +2069,10 @@ export default function App() {
           account: snapshot.account,
           models: snapshot.models,
           admission: snapshot.newTaskAdmission,
-          selected: newTaskRequestedModel ?? snapshot.models.defaultSelection,
+          selected:
+            newTaskModelState.intent?.targetModelRef ??
+            newTaskRequestedModel ??
+            snapshot.models.defaultSelection,
           valid: newTaskModelState.valid,
           hasReadyModels,
           customProvidersAvailable,
@@ -2162,6 +2174,9 @@ export default function App() {
         break;
       case "cancel":
         void cancelAccountOperation();
+        break;
+      case "confirm":
+        void runAccountCommand(() => client.retryAccountRefresh());
         break;
       case "refresh":
         {
@@ -5553,7 +5568,9 @@ export default function App() {
                   bridgeUnavailable ||
                   accountBusy ||
                   executionBusy ||
-                  accountCancelBusy
+                  accountCancelBusy ||
+                  (setupNotice.action === "confirm" &&
+                    !snapshot.account.canRetry)
                 }
                 onAction={runModelSetupAction}
                 onChooseSetup={
@@ -5926,6 +5943,9 @@ export default function App() {
             onOpenSettings={openSettings}
             onBeginLogin={() =>
               void runAccountCommand(() => client.beginLogin())
+            }
+            onRetryRefresh={() =>
+              void runAccountCommand(() => client.retryAccountRefresh())
             }
             onCancel={() => void cancelAccountOperation()}
             onLogout={() => void runAccountCommand(() => client.logout())}

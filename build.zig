@@ -316,6 +316,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-runtime", .root_module = test_modules.account_runtime },
         .{ .name = "metawork-account", .root_module = test_modules.account },
         .{ .name = "metawork-app", .root_module = test_modules.app },
+        .{ .name = "metawork-app-account-coordinator", .root_module = test_modules.account_coordinator },
         .{ .name = "metawork-app-models-coordinator", .root_module = test_modules.models_coordinator },
         .{ .name = "metawork-automation-enabled", .root_module = test_modules.automation_enabled },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
@@ -639,8 +640,7 @@ pub fn build(b: *std.Build) void {
     }
     const account_coordinator_tests = b.addTest(.{
         .name = "metawork-account-coordinator-focused",
-        .root_module = test_modules.app,
-        .filters = &.{"Account"},
+        .root_module = test_modules.account_coordinator,
     });
     account_test_step.dependOn(&b.addRunArtifact(account_coordinator_tests).step);
     const account_bridge_tests = b.addTest(.{
@@ -1092,6 +1092,7 @@ const WiredModules = struct {
     image_output: *std.Build.Module,
     video_output: *std.Build.Module,
     output_file: *std.Build.Module,
+    account_coordinator: *std.Build.Module,
     models_coordinator: *std.Build.Module,
     product_workspace_view: *std.Build.Module,
     product_schedule: *std.Build.Module,
@@ -1162,6 +1163,7 @@ fn createLifecycleFixture(
     fixture.addImport("metawork_product_workspace", modules.product_workspace);
     fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("metawork_account", modules.account);
+    fixture.addImport("account_coordinator", modules.account_coordinator);
     fixture.addImport("models_coordinator", modules.models_coordinator);
     fixture.addImport("metask_transport", modules.metask_transport);
     fixture.addImport("metawork_product_models_contract", modules.models_contract);
@@ -1452,6 +1454,7 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     cases.addImport("image_output", modules.image_output);
     cases.addImport("video_output", modules.video_output);
     cases.addImport("app_output_file", modules.output_file);
+    cases.addImport("account_coordinator", modules.account_coordinator);
     cases.addImport("models_coordinator", modules.models_coordinator);
     cases.addImport("metawork_account", modules.account);
     cases.addImport("product_models_metask", modules.models_metask);
@@ -2918,13 +2921,20 @@ fn wireAgentCore(
     mcp_oauth.addImport("metawork_oauth_loopback_transport", metawork_oauth_loopback_transport);
     mcp_platform.addImport("metawork_mcp_oauth", mcp_oauth);
 
+    const account_coordinator = b.createModule(.{
+        .root_source_file = b.path("src/app/account_coordinator.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_coordinator.addImport("metawork_account", account);
+    account_coordinator.addImport("metawork_account_contract", account_contract);
+    account_coordinator.addImport("metawork_product_control_ports", product_control_ports);
     const models_coordinator = b.createModule(.{
         .root_source_file = b.path("src/app/models_coordinator.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     models_coordinator.addImport("metawork_agent", agent);
-    models_coordinator.addImport("metawork_account", account);
     models_coordinator.addImport("metawork_account_contract", account_contract);
     models_coordinator.addImport("metawork_product_models_contract", models_contract);
     models_coordinator.addImport("product_models_ports", models_ports);
@@ -2970,6 +2980,7 @@ fn wireAgentCore(
     );
     app.addImport("metawork_product_mcp", product_mcp);
     app.addImport("metawork_product_control_ports", product_control_ports);
+    app.addImport("account_coordinator", account_coordinator);
     app.addImport("models_coordinator", models_coordinator);
     app.addImport("metawork_product_skill", product_skill);
     app.addImport("metawork_product_task", product_task);
@@ -3091,6 +3102,7 @@ fn wireAgentCore(
         .image_output = image_output,
         .video_output = video_output,
         .output_file = output_file,
+        .account_coordinator = account_coordinator,
         .models_coordinator = models_coordinator,
         .product_workspace_view = product_workspace_view,
         .product_schedule = product_schedule,

@@ -135,6 +135,11 @@ export const zhCN: Record<MessageId, string> = {
   "model_setup.authorizing": "请在浏览器中完成登录，已输入的内容会保留。",
   "model_setup.cancel_login": "取消登录",
   "model_setup.loading": "正在加载模型…",
+  "model_setup.unconfirmed": "暂时无法确认登录状态，已输入的内容会保留。",
+  "model_setup.recovering":
+    "正在连接 Metask，连上后即可发送，已输入的内容会保留。",
+  "model_setup.unreachable":
+    "暂时连不上 Metask，会自动重试，已输入的内容会保留。",
   "model_setup.preparing": "正在准备模型…",
   "model_setup.choose": "选择可用模型后即可发送。",
   "model_setup.catalog_failed": "模型加载失败，请重试。",
@@ -402,6 +407,8 @@ export const zhCN: Record<MessageId, string> = {
   "account.ready": "可执行",
   "account.checking.title": "正在检查登录状态",
   "account.checking.body": "MetaWork 正在确认这台设备是否可以登录。",
+  "account.unconfirmed.title": "暂时无法确认登录状态",
+  "account.unconfirmed.body": "MetaWork 会自动重试，恢复后无需重新登录。",
   "account.sign_in_required.title": "登录 MetaWork",
   "account.sign_in_required.body": "使用 Metask 账号加载你可用的模型。",
   "account.authorizing.title": "正在完成 Metask 登录",
@@ -433,6 +440,8 @@ export const zhCN: Record<MessageId, string> = {
   "account.cancel": "取消当前操作",
   "account.refresh_catalog": "重新同步",
   "account.retry_refresh": "重试登录刷新",
+  "account.retry_now": "立即重试",
+  "account.login_again": "重新登录",
   "account.logout": "退出登录",
   "account.logout_confirm":
     "退出将清除这台设备上的 Metask 登录凭据。创建使用 Metask 模型的新任务前，需要重新登录。自定义模型、本地任务及历史记录、工作区文件都会保留。",
@@ -1766,7 +1775,7 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.metask_authorization_required":
     "请登录 Metask 后使用此模型。",
   "mutation.reason.metask_authorization_recovering":
-    "正在恢复 Metask 连接，消息会在恢复后执行。",
+    "正在连接 Metask。连上后执行这条消息，这次没连上就标为未执行。",
   "mutation.reason.metask_connection_unavailable":
     "暂时无法连接 Metask，消息未执行。",
   "mutation.reason.session_poisoned": "当前会话已无法继续。",

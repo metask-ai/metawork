@@ -54,10 +54,22 @@ pub const WallClock = struct {
     }
 };
 
+/// Time since boot, asleep or not. Unlike the wall clock it always reads, and
+/// nothing sets it back.
+pub const BootClock = struct {
+    context: *anyopaque,
+    now_seconds_fn: *const fn (*anyopaque) i64,
+
+    pub fn nowSeconds(self: BootClock) i64 {
+        return self.now_seconds_fn(self.context);
+    }
+};
+
 pub const Platform = struct {
     credentials: credential_store.Backend,
     authorization_url: AuthorizationUrl,
     recharge_page: RechargePage,
     timer: Timer,
     wall_clock: WallClock,
+    boot_clock: BootClock,
 };

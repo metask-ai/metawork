@@ -128,6 +128,7 @@ export const initialWorkbenchState: WorkbenchState = {
     account: {
       state: "checking",
       canCancel: false,
+      canRetry: false,
       accountId: "",
       displayName: "",
       emailHint: "",
@@ -179,6 +180,7 @@ export const initialWorkbenchState: WorkbenchState = {
     newTaskAdmission: {
       available: false,
       reason: "workspace_unavailable",
+      metask: "none",
     },
     skillCatalog: {
       availability: "uninitialized",

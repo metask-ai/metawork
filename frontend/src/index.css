@@ -997,12 +997,28 @@ summary::-webkit-details-marker {
   min-height: 44px;
 }
 
+.settings-identity-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-identity-actions > * {
+  flex: 1 0 auto;
+  min-height: 44px;
+}
+
 .settings-identity-copy strong,
 .settings-identity-copy > span {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.settings-identity-row[data-session-state="checking"]
+  .settings-identity-copy
+  > span {
+  white-space: normal;
 }
 
 .settings-identity-copy strong {

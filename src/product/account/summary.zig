@@ -510,7 +510,6 @@ pub const HistoryOutcome = union(enum) {
 
 pub const Completion = struct {
     attempt_id: u64,
-    authorization_generation: u64,
     principal_ref: [contract.Limits.account_id_bytes]u8 = undefined,
     principal_ref_len: usize,
     synced_at_unix_ms: Decimal,
@@ -523,18 +522,15 @@ pub const Completion = struct {
     }
 };
 
+/// The account a summary belongs to. Its credential changes every renewal
+/// and says nothing about the summary.
 const Authority = struct {
-    generation: u64,
     principal_ref: [contract.Limits.account_id_bytes]u8 = undefined,
     principal_ref_len: usize,
 
-    fn init(principal_ref: []const u8, generation: u64) Authority {
+    fn init(principal_ref: []const u8) Authority {
         std.debug.assert(principal_ref.len > 0 and principal_ref.len <= contract.Limits.account_id_bytes);
-        std.debug.assert(generation != 0);
-        var result: Authority = .{
-            .generation = generation,
-            .principal_ref_len = principal_ref.len,
-        };
+        var result: Authority = .{ .principal_ref_len = principal_ref.len };
         @memcpy(result.principal_ref[0..principal_ref.len], principal_ref);
         return result;
     }
@@ -543,9 +539,8 @@ const Authority = struct {
         return self.principal_ref[0..self.principal_ref_len];
     }
 
-    fn matches(self: Authority, principal_ref: []const u8, generation: u64) bool {
-        return self.generation == generation and
-            std.mem.eql(u8, self.principalRef(), principal_ref);
+    fn matches(self: Authority, principal_ref: []const u8) bool {
+        return std.mem.eql(u8, self.principalRef(), principal_ref);
     }
 };
 
@@ -704,27 +699,20 @@ pub const State = struct {
     active_attempt_id: ?u64 = null,
     next_attempt_id: u64 = 1,
 
-    pub fn matchesAuthority(
-        self: *const State,
-        principal_ref: []const u8,
-        authorization_generation: u64,
-    ) bool {
+    pub fn belongsTo(self: *const State, principal_ref: []const u8) bool {
         const current = self.authority orelse return false;
-        return current.matches(principal_ref, authorization_generation);
+        return current.matches(principal_ref);
     }
 
     pub fn begin(
         self: *State,
         principal_ref: []const u8,
-        authorization_generation: u64,
     ) error{OperationInProgress}!RefreshPreparation {
         if (self.active_attempt_id != null) return error.OperationInProgress;
-        if (self.authority == null or
-            !self.authority.?.matches(principal_ref, authorization_generation))
-        {
+        if (!self.belongsTo(principal_ref)) {
             const next_attempt_id = self.next_attempt_id;
             self.* = .{
-                .authority = Authority.init(principal_ref, authorization_generation),
+                .authority = Authority.init(principal_ref),
                 .next_attempt_id = next_attempt_id,
             };
         }
@@ -751,9 +739,8 @@ pub const State = struct {
     }
 
     pub fn complete(self: *State, completion: *const Completion) bool {
-        const authority = self.authority orelse return false;
         if (self.active_attempt_id != completion.attempt_id or
-            !authority.matches(completion.principalRef(), completion.authorization_generation))
+            !self.belongsTo(completion.principalRef()))
             return false;
         self.active_attempt_id = null;
         self.operation = .idle;
@@ -777,7 +764,7 @@ pub const State = struct {
         return true;
     }
 
-    pub fn clearAuthorization(self: *State) bool {
+    pub fn clear(self: *State) bool {
         const changed = self.authority != null or self.active_attempt_id != null or
             self.operation != .idle or self.usage_eligibility != .unknown or
             self.wallet.availability != .unavailable or
@@ -897,10 +884,9 @@ test "daily usage stats strictly validates contract range totals and values" {
 
 test "summary state preserves partial success as stale and clears on authorization loss" {
     var state: State = .{};
-    const first = try state.begin("42", 3);
+    const first = try state.begin("42");
     var completion: Completion = .{
         .attempt_id = first.attempt_id,
-        .authorization_generation = 3,
         .principal_ref_len = 2,
         .synced_at_unix_ms = try Decimal.fromInteger(1000, false),
         .wallet = .{ .succeeded = .{
@@ -919,25 +905,26 @@ test "summary state preserves partial success as stale and clears on authorizati
     };
     @memcpy(completion.principal_ref[0..2], "42");
     try std.testing.expect(state.complete(&completion));
-    const retry = try state.begin("42", 3);
+    const retry = try state.begin("42");
+    // What was read stays while it is read again.
+    try std.testing.expectEqual(contract.SummaryAvailability.ready, state.view().history.availability);
     try std.testing.expect(state.fail(retry.attempt_id, .metask_service_unavailable));
     const stale = state.view();
     try std.testing.expectEqual(contract.SummaryAvailability.ready, stale.wallet.availability);
     try std.testing.expectEqual(contract.SummaryAvailability.ready, stale.usage.availability);
     try std.testing.expectEqual(contract.SummaryAvailability.stale, stale.history.availability);
     try std.testing.expectEqualStrings("10.5", stale.wallet.balance_u);
-    try std.testing.expect(state.clearAuthorization());
+    try std.testing.expect(state.clear());
     try contract.validateView(.{ .state = .signed_out, .summary = state.view() });
 }
 
-test "summary state ignores stale generation completion and enables gateway history" {
+test "summary state ignores a completion of another attempt or account and enables gateway history" {
     var state: State = .{};
-    const first = try state.begin("42", 1);
-    try std.testing.expect(state.clearAuthorization());
-    const second = try state.begin("42", 2);
+    const first = try state.begin("42");
+    try std.testing.expect(state.clear());
+    const second = try state.begin("42");
     var stale: Completion = .{
         .attempt_id = first.attempt_id,
-        .authorization_generation = 1,
         .principal_ref_len = 2,
         .synced_at_unix_ms = try Decimal.fromInteger(1000, false),
         .wallet = .{ .failed = .metask_service_unavailable },
@@ -945,9 +932,11 @@ test "summary state ignores stale generation completion and enables gateway hist
     };
     @memcpy(stale.principal_ref[0..2], "42");
     try std.testing.expect(!state.complete(&stale));
+    stale.attempt_id = second.attempt_id;
+    @memcpy(stale.principal_ref[0..2], "43");
+    try std.testing.expect(!state.complete(&stale));
     var current: Completion = .{
         .attempt_id = second.attempt_id,
-        .authorization_generation = 2,
         .principal_ref_len = 2,
         .synced_at_unix_ms = try Decimal.fromInteger(2000, false),
         .history = .{ .failed = .metask_service_unavailable },

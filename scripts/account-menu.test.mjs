@@ -371,6 +371,58 @@ test("account menu offers keyboard sign-in once a lost renewal or cancelled sign
   }
 });
 
+test("an unconfirmed account keeps its two ways out, and neither before a failure", async () => {
+  for (const [errorCode, canRetry] of [
+    ["none", false],
+    ["metask_service_unavailable", false],
+    ["metask_service_unavailable", true],
+  ]) {
+    const calls = [];
+    const user = userEvent.setup({ document: dom.window.document });
+    renderIdentity(
+      {
+        onRetryRefresh: () => calls.push("retry"),
+        onBeginLogin: () => calls.push("login"),
+      },
+      {
+        ...account,
+        state: "checking",
+        displayName: "",
+        emailHint: "",
+        errorCode,
+        canRetry,
+      },
+    );
+    const trigger = screen.getByRole("button", {
+      name: "Account and application menu",
+    });
+    assert.equal(
+      trigger.getAttribute("aria-description"),
+      errorCode === "none"
+        ? "Checking sign-in"
+        : "Can't confirm your sign-in yet",
+    );
+    for (const [name, call] of [
+      ["Try again now", "retry"],
+      ["Sign in again", "login"],
+    ]) {
+      await user.click(trigger);
+      await screen.findByRole("menu");
+      const item = screen.queryByRole("menuitem", { name });
+      if (errorCode === "none") {
+        assert.equal(item, null);
+      } else {
+        assert.equal(item.getAttribute("aria-disabled") === "true", !canRetry);
+        await user.click(item);
+        assert.equal(calls.at(-1) === call, canRetry);
+      }
+      await user.keyboard("{Escape}");
+      await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+    }
+    cleanup();
+  }
+});
+
 test("a signed-in account never offers sign-in, whatever its recent error", async () => {
   // Host signs a session out when it needs signing in again; an error on a
   // verified identity is feedback, not a reason to sign in.

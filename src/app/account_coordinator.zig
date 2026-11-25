@@ -1,22 +1,30 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
 const control_ports = @import("metawork_product_control_ports");
 
-pub const CommitObserver = struct {
+/// The Application owner whose effects follow the Account authorization each
+/// commit leaves. It learns the fact; it never asks Account for it.
+pub const AuthorizationFollower = struct {
     context: *anyopaque,
-    notify_fn: *const fn (*anyopaque) void,
+    follow_fn: *const fn (*anyopaque, account_contract.Authorization) void,
 
-    fn notify(self: CommitObserver) void {
-        self.notify_fn(self.context);
+    fn follow(self: AuthorizationFollower, authorization: account_contract.Authorization) void {
+        self.follow_fn(self.context, authorization);
     }
 };
 
+/// Application binder for Account: terminal commits, the authorization query,
+/// and the only way out for the current credential.
 pub const Coordinator = struct {
     runtime: *account_api.Runtime,
     control: control_ports.AccountCommitSink,
     main_thread_id: std.Thread.Id,
-    commit_observer: ?CommitObserver = null,
+    follower: ?AuthorizationFollower = null,
+    credential_renewal: ?control_ports.MetaskCredentialRenewal = null,
+    /// The credential generation running executions already received.
+    delivered_generation: u64 = 0,
     stopping: bool = false,
 
     pub fn init(
@@ -35,9 +43,34 @@ pub const Coordinator = struct {
         return .{ .context = self, .submit_fn = submitCommand };
     }
 
-    pub fn setCommitObserver(self: *Coordinator, observer: ?CommitObserver) void {
+    pub fn setFollower(self: *Coordinator, follower: ?AuthorizationFollower) void {
         self.assertMainThread();
-        self.commit_observer = observer;
+        self.follower = follower;
+    }
+
+    pub fn setCredentialRenewal(self: *Coordinator, renewal: control_ports.MetaskCredentialRenewal) void {
+        self.assertMainThread();
+        self.credential_renewal = renewal;
+    }
+
+    pub fn authorizationQuery(self: *Coordinator) account_contract.AuthorizationQuery {
+        return .{ .context = self, .status_fn = currentAuthorization };
+    }
+
+    pub fn credentialSource(self: *Coordinator) account_contract.CredentialSource {
+        return .{ .context = self, .take_fn = takeCredential };
+    }
+
+    fn currentAuthorization(context: *anyopaque) account_contract.Authorization {
+        const self: *Coordinator = @ptrCast(@alignCast(context));
+        self.assertMainThread();
+        return self.runtime.authorization();
+    }
+
+    fn takeCredential(context: *anyopaque) std.mem.Allocator.Error!?account_contract.OwnedAuthorizationLease {
+        const self: *Coordinator = @ptrCast(@alignCast(context));
+        self.assertMainThread();
+        return self.runtime.credential();
     }
 
     fn submitCommand(
@@ -82,18 +115,34 @@ pub const Coordinator = struct {
         std.debug.assert(result.accepted);
     }
 
-    pub fn onTimer(self: *Coordinator, timer_id: u64) bool {
+    pub fn ownsTimer(_: *const Coordinator, timer_id: u64) bool {
+        return account_api.Runtime.ownsTimer(timer_id);
+    }
+
+    /// The window came to the front.
+    pub fn activate(self: *Coordinator) void {
         self.assertMainThread();
-        const prepared_result = self.runtime.prepareTimer(timer_id) orelse
-            return false;
-        switch (prepared_result) {
-            .prepared => |prepared| {
-                const result = self.commitPrepared(prepared);
-                std.debug.assert(result.accepted);
-            },
-            .rejected, .ignored_stale => {},
+        if (self.stopping) return;
+        self.runtime.expedite();
+        _ = self.tick();
+    }
+
+    /// Commits what the clocks ask now; true when anything was. Cheap enough
+    /// for every event, so no single timer decides whether a renewal happens.
+    pub fn tick(self: *Coordinator) bool {
+        self.assertMainThread();
+        if (self.stopping) return false;
+        // A message that began to wait is a reason to try now.
+        if (self.credential_renewal) |renewal| switch (self.runtime.authorization().use()) {
+            .wait => |epoch| if (renewal.waits(epoch)) self.runtime.expedite(),
+            .ready, .stop => {},
+        };
+        var committed = false;
+        while (self.runtime.prepareDue()) |prepared| {
+            if (!self.commitPrepared(prepared).accepted) break;
+            committed = true;
         }
-        return true;
+        return committed;
     }
 
     pub fn drain(self: *Coordinator) void {
@@ -108,7 +157,48 @@ pub const Coordinator = struct {
                 .rejected, .ignored_stale => {},
             }
         }
-        if (self.runtime.drainSummary()) self.commitSummaryNoFail();
+        _ = self.tick();
+        if (self.runtime.drainSummary()) {
+            _ = self.runtime.reconcileSummary();
+            self.commitSummaryNoFail();
+        }
+        self.renewDeferredCredential();
+    }
+
+    /// Hands a new credential to executions already admitted. Account alone
+    /// decides it; a catalog failure cannot roll this handoff back.
+    fn deliverCredential(self: *Coordinator) void {
+        const renewal = self.credential_renewal orelse return;
+        const generation = self.readyGeneration() orelse return;
+        if (generation == self.delivered_generation) return;
+        self.renew(renewal, generation);
+    }
+
+    /// A Task busy compacting or checkpointing takes the current credential
+    /// on the first turn after it settles.
+    fn renewDeferredCredential(self: *Coordinator) void {
+        const renewal = self.credential_renewal orelse return;
+        const generation = self.readyGeneration() orelse return;
+        if (renewal.needs(generation)) self.renew(renewal, generation);
+    }
+
+    fn renew(self: *Coordinator, renewal: control_ports.MetaskCredentialRenewal, generation: u64) void {
+        var credential = (self.runtime.credential() catch {
+            self.delivered_generation = generation;
+            renewal.renew(generation, null);
+            return;
+        }) orelse return;
+        defer credential.deinit();
+        std.debug.assert(credential.authorization_generation == generation);
+        self.delivered_generation = generation;
+        renewal.renew(generation, credential.access_token);
+    }
+
+    fn readyGeneration(self: *Coordinator) ?u64 {
+        return switch (self.runtime.authorization().use()) {
+            .ready => |generation| generation,
+            .wait, .stop => null,
+        };
     }
 
     fn commitPrepared(
@@ -127,16 +217,21 @@ pub const Coordinator = struct {
         if (!effect_admitted and attempt_disposition != .continues)
             return .rejected(.local_resource_exhausted);
 
-        // Account commits its own state first. The Product callback is no-fail,
-        // so no Product result can re-enter or roll back the Account transaction.
+        // Account commits its own state first; every later step is no-fail and
+        // cannot re-enter or roll back that transaction. Product learns the
+        // fact and its credential before anyone uses it, running executions
+        // take the credential before the catalog follows, and scheduled work
+        // rearms only once all of them agree.
         self.runtime.commit(&prepared);
         self.control.commitNoFail(.{
             .fact = fact,
             .attempt_id = attempt_id,
             .attempt_terminal = attempt_terminal,
         });
-        if (self.commit_observer) |observer| observer.notify();
-        if (!self.stopping and self.runtime.reconcileSummaryAuthorization())
+        self.deliverCredential();
+        if (self.follower) |follower| follower.follow(self.runtime.authorization());
+        self.control.settleNoFail();
+        if (!self.stopping and self.runtime.reconcileSummary())
             self.commitSummaryNoFail();
 
         // A continuation effect can fail admission only after its preceding
@@ -150,11 +245,7 @@ pub const Coordinator = struct {
             );
 
         const refresh_after_commit = self.runtime.takeRefreshAfterCommit(&prepared);
-        const dispatch_follow_up = self.runtime.dispatchCommitted(&prepared);
-        if (dispatch_follow_up) |follow_up| {
-            const followed = self.commitPrepared(follow_up);
-            std.debug.assert(followed.accepted);
-        }
+        self.runtime.dispatchCommitted();
         if (refresh_after_commit) {
             const refreshed = self.commitPrepared(
                 self.runtime.prepareRestoredRefresh(),
@@ -168,7 +259,8 @@ pub const Coordinator = struct {
         self.assertMainThread();
         if (self.stopping) return;
         self.stopping = true;
-        self.commit_observer = null;
+        self.follower = null;
+        self.credential_renewal = null;
         self.runtime.stopAdmission();
     }
 
@@ -189,12 +281,20 @@ pub const Coordinator = struct {
             .attempt_id = null,
             .attempt_terminal = false,
         });
+        self.control.settleNoFail();
     }
 
     fn assertMainThread(self: *const Coordinator) void {
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread_id);
     }
 };
+
+pub const TestSupport = if (builtin.is_test) struct {
+    /// Commits what a test prepared, through every production step.
+    pub fn commit(coordinator: *Coordinator, prepared: account_api.Prepared) account_contract.AccountCommandResult {
+        return coordinator.commitPrepared(prepared);
+    }
+} else struct {};
 
 const RecordedCommit = struct {
     kind: account_contract.AccountFactKind,
@@ -207,12 +307,22 @@ const RecordingSink = struct {
     runtime: *account_api.Runtime,
     records: [16]RecordedCommit = undefined,
     count: usize = 0,
+    unsettled: bool = false,
+    steps: ?*CommitSteps = null,
 
     fn port(self: *RecordingSink) control_ports.AccountCommitSink {
         return .{
             .context = self,
             .commit_fn = commit,
+            .settle_fn = settle,
         };
+    }
+
+    fn settle(context: *anyopaque) void {
+        const self: *RecordingSink = @ptrCast(@alignCast(context));
+        std.debug.assert(self.unsettled);
+        self.unsettled = false;
+        if (self.steps) |steps| steps.add(.settle);
     }
 
     fn commit(context: *anyopaque, value: control_ports.AccountCommit) void {
@@ -236,32 +346,67 @@ const RecordingSink = struct {
             .attempt_terminal = value.attempt_terminal,
         };
         self.count += 1;
+        std.debug.assert(!self.unsettled);
+        self.unsettled = true;
+        if (self.steps) |steps| steps.add(.commit);
     }
 };
 
-const AuthorizationObserver = struct {
-    runtime: *account_api.Runtime,
-    expected_generation: u64,
-    calls: usize = 0,
-    unavailable: bool = false,
+const CommitSteps = struct {
+    const Step = enum { commit, renew, renew_failed, follow, settle };
+    items: [16]Step = undefined,
+    count: usize = 0,
 
-    fn port(self: *AuthorizationObserver) CommitObserver {
-        return .{ .context = self, .notify_fn = notify };
+    fn add(self: *CommitSteps, step: Step) void {
+        self.items[self.count] = step;
+        self.count += 1;
     }
 
-    fn notify(context: *anyopaque) void {
-        const self: *AuthorizationObserver = @ptrCast(@alignCast(context));
+    fn take(self: *CommitSteps) []const Step {
+        defer self.count = 0;
+        return self.items[0..self.count];
+    }
+
+    fn renewal(self: *CommitSteps) control_ports.MetaskCredentialRenewal {
+        return .{ .context = self, .renew_fn = renew, .needs_fn = needs, .waits_fn = waits };
+    }
+
+    fn renew(context: *anyopaque, generation: u64, credential: ?[]const u8) void {
+        const self: *CommitSteps = @ptrCast(@alignCast(context));
+        std.debug.assert(generation != 0);
+        self.add(if (credential == null) .renew_failed else .renew);
+    }
+
+    fn needs(_: *anyopaque, _: u64) bool {
+        return false;
+    }
+
+    fn waits(_: *anyopaque, _: u64) bool {
+        return false;
+    }
+
+    fn follower(self: *CommitSteps) AuthorizationFollower {
+        return .{ .context = self, .follow_fn = follow };
+    }
+
+    fn follow(context: *anyopaque, _: account_contract.Authorization) void {
+        const self: *CommitSteps = @ptrCast(@alignCast(context));
+        self.add(.follow);
+    }
+};
+
+const RecordingFollower = struct {
+    calls: usize = 0,
+    last: std.meta.Tag(account_contract.Authorization) = .signed_out,
+
+    fn port(self: *RecordingFollower) AuthorizationFollower {
+        return .{ .context = self, .follow_fn = follow };
+    }
+
+    fn follow(context: *anyopaque, authorization: account_contract.Authorization) void {
+        const self: *RecordingFollower = @ptrCast(@alignCast(context));
         self.calls += 1;
-        var lease = (self.runtime.authorizationLease() catch {
-            self.unavailable = true;
-            return;
-        }) orelse {
-            self.unavailable = true;
-            return;
-        };
-        defer lease.deinit();
-        if (lease.authorization_generation != self.expected_generation)
-            self.unavailable = true;
+        self.last = authorization;
     }
 };
 
@@ -301,6 +446,12 @@ const SummaryTransport = struct {
     fail_history: bool = false,
     request_count: usize = 0,
     history_request_count: usize = 0,
+    /// Keeps a history request underway.
+    held: bool = false,
+    started: std.Io.Event = .unset,
+    release: std.Io.Event = .unset,
+    renewals: usize = 0,
+    bearer: []const u8 = "access-token",
 
     fn port(self: *SummaryTransport) account_api.Transport {
         return .{ .context = self, .perform_fn = perform, .retire_fn = account_api.retireNothing };
@@ -312,12 +463,25 @@ const SummaryTransport = struct {
         output: []u8,
     ) account_api.TransportError!account_api.TransportResponse {
         const self: *SummaryTransport = @ptrCast(@alignCast(context));
-        if (!std.mem.eql(u8, request.bearer orelse "", "access-token"))
+        if (request.kind == .refresh_token) {
+            self.renewals += 1;
+            const body = if (self.renewals % 2 == 1)
+                "{\"access_token\":\"access-odd\",\"refresh_token\":\"refresh-odd\",\"token_type\":\"Bearer\",\"expires_in\":3600}"
+            else
+                "{\"access_token\":\"access-even\",\"refresh_token\":\"refresh-even\",\"token_type\":\"Bearer\",\"expires_in\":3600}";
+            @memcpy(output[0..body.len], body);
+            return .{ .status = 200, .body = output[0..body.len] };
+        }
+        if (!std.mem.eql(u8, request.bearer orelse "", self.bearer))
             return error.ProtocolFailed;
         self.request_count += 1;
         const body = switch (request.kind) {
             .usage_stats => {
                 self.history_request_count += 1;
+                if (self.held) {
+                    self.started.set(std.testing.io);
+                    self.release.wait(std.testing.io) catch return error.NetworkFailed;
+                }
                 if (self.fail_history) {
                     const failure = "{}";
                     @memcpy(output[0..failure.len], failure);
@@ -394,6 +558,81 @@ test "Account summary auto-sync requests usage stats directly and preserves stal
     try std.testing.expectEqual(account_contract.SummaryAvailability.stale, history_stale.summary.history.availability);
     try std.testing.expectEqual(account_contract.ErrorCode.metask_service_unavailable, history_stale.summary.history.error_code);
     try std.testing.expectEqualStrings("60", history_stale.summary.history.days[0].total_tokens);
+}
+
+test "Account summary stays across renewals and is fetched again behind them" {
+    var transport: SummaryTransport = .{};
+    var runtime = initRuntimeForSummaryTest(&transport);
+    const start: i64 = 1_789_440_000;
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = start };
+    try platform.setStoredRefreshToken("refresh-token");
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+    _ = coordinator.commitPrepared(try account_api.TestSupport.prepareAuthenticatedAndSchedule(&runtime, "42", "Meta User", "access-token", "refresh-token", start + 200));
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    try expectHistory(&runtime, .ready, 1, &transport);
+
+    // Expiry and the renewal of the same account leave it as it is.
+    platform.now_unix_seconds = start + 200;
+    try std.testing.expect(coordinator.tick());
+    try expectHistory(&runtime, .ready, 1, &transport);
+    transport.bearer = "access-odd";
+    account_api.TestSupport.joinNetwork(&runtime);
+    coordinator.drain();
+    try std.testing.expectEqual(account_contract.SummaryOperation.refreshing, runtime.view().summary.operation);
+    try std.testing.expectEqual(account_contract.SummaryAvailability.ready, runtime.view().summary.history.availability);
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    try expectHistory(&runtime, .ready, 2, &transport);
+
+    // Failing to read it again only marks what is shown.
+    transport.fail_history = true;
+    transport.bearer = "access-even";
+    platform.now_unix_seconds = start + 4000;
+    try std.testing.expect(coordinator.tick());
+    account_api.TestSupport.joinNetwork(&runtime);
+    coordinator.drain();
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    try expectHistory(&runtime, .stale, 3, &transport);
+
+    sink.count = 0;
+    // A renewal during a request does not repeat it; its end does, once.
+    transport.fail_history = false;
+    transport.held = true;
+    try std.testing.expect(coordinator.commandSink().submit(.refresh_summary).accepted);
+    try transport.started.wait(std.testing.io);
+    platform.now_unix_seconds = start + 8000;
+    try std.testing.expect(coordinator.tick());
+    account_api.TestSupport.joinNetwork(&runtime);
+    coordinator.drain();
+    try expectHistory(&runtime, .stale, 4, &transport);
+    transport.held = false;
+    transport.bearer = "access-odd";
+    transport.release.set(std.testing.io);
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    try expectHistory(&runtime, .ready, 5, &transport);
+    try std.testing.expect(runtime.summary_job == null);
+
+    // Another account's sign-in takes it away.
+    _ = coordinator.commitPrepared(account_api.TestSupport.prepareBeginLoginWithoutEffect(&runtime));
+    try std.testing.expectEqual(account_contract.SummaryAvailability.unavailable, runtime.summary.view().history.availability);
+}
+
+fn expectHistory(runtime: *account_api.Runtime, availability: account_contract.SummaryAvailability, requests: usize, transport: *const SummaryTransport) !void {
+    const history = runtime.view().summary.history;
+    try std.testing.expectEqual(availability, history.availability);
+    try std.testing.expectEqualStrings("60", history.days[0].total_tokens);
+    try std.testing.expectEqual(requests, transport.history_request_count);
 }
 
 test "Account summary does not depend on a legacy account mode" {
@@ -497,7 +736,7 @@ test "Account test platform exposes deterministic clock timer and credential fau
     );
     try std.testing.expectEqual(@as(?i64, 100), ports.wall_clock.nowUnixSeconds());
 
-    try ports.timer.start(7, 123, false);
+    try ports.timer.start(7, 123, true);
     try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
     try std.testing.expectEqual(@as(?u64, 7), platform.last_timer_id);
     try std.testing.expectEqual(@as(u64, 123), platform.last_timer_interval_ns);
@@ -505,7 +744,7 @@ test "Account test platform exposes deterministic clock timer and credential fau
     platform.timer_start_fails = true;
     try std.testing.expectError(
         error.TimerStartFailed,
-        ports.timer.start(8, 456, false),
+        ports.timer.start(8, 456, true),
     );
     platform.credential_read_fails = true;
     try std.testing.expectError(
@@ -797,13 +1036,17 @@ test "Account refresh scheduling failure is visible and explicitly retryable" {
     );
 
     try std.testing.expect(authenticated.accepted);
-    // Identity, automatic summary start, then refresh-schedule failure.
+    // Identity, then automatic summary start.
+    try std.testing.expectEqual(@as(usize, 2), sink.count);
+    // However many turns find the beat not running, it is reported once.
+    try std.testing.expect(coordinator.tick());
+    try std.testing.expect(!coordinator.tick());
     try std.testing.expectEqual(@as(usize, 3), sink.count);
     try std.testing.expectEqual(
         account_contract.ErrorCode.refresh_schedule_failed,
         runtime.view().error_code,
     );
-    var lease = (try runtime.authorizationLease()).?;
+    var lease = (try runtime.credential()).?;
     lease.deinit();
 
     platform.timer_start_fails = false;
@@ -813,14 +1056,15 @@ test "Account refresh scheduling failure is visible and explicitly retryable" {
     try std.testing.expect(retried.accepted);
     try std.testing.expectEqual(@as(usize, 1), sink.count);
     try std.testing.expectEqual(account_contract.ErrorCode.none, runtime.view().error_code);
-    try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
-    try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_s), platform.last_timer_interval_ns);
+    try std.testing.expectEqual(@as(u64, 30 * std.time.ns_per_s), platform.last_timer_interval_ns);
+    try std.testing.expect(!coordinator.tick());
 }
 
-test "Account clock and explicit refresh schedule retry failures remain observable" {
+test "Account explicit refresh schedule retry reports a beat that still cannot start" {
     var runtime = try initRuntimeForTest();
     var platform: account_api.TestSupport.Platform = .{
-        .now_unix_seconds = null,
+        .now_unix_seconds = 100,
+        .timer_start_fails = true,
     };
     account_api.TestSupport.attachPlatform(&runtime, &platform);
     defer {
@@ -844,25 +1088,18 @@ test "Account clock and explicit refresh schedule retry failures remain observab
             200,
         ),
     );
-    try std.testing.expectEqual(
-        account_contract.ErrorCode.refresh_schedule_failed,
-        runtime.view().error_code,
-    );
-
-    platform.now_unix_seconds = 100;
-    platform.timer_start_fails = true;
+    try std.testing.expect(coordinator.tick());
     sink.count = 0;
     const retried = coordinator.commandSink().submit(.retry_refresh);
     try std.testing.expect(retried.accepted);
-    // The newly available clock also admits the generation-bound summary job.
-    try std.testing.expectEqual(@as(usize, 3), sink.count);
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
     try std.testing.expectEqual(
         account_contract.ErrorCode.refresh_schedule_failed,
         runtime.view().error_code,
     );
 }
 
-test "Account observer retains a healthy in-flight authorization during refresh" {
+test "Account follower keeps the authorization of a token still valid or expiring during refresh" {
     var runtime = try initRuntimeForTest();
     var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
     account_api.TestSupport.attachPlatform(&runtime, &platform);
@@ -871,37 +1108,62 @@ test "Account observer retains a healthy in-flight authorization during refresh"
         runtime.deinit();
     }
     var sink: RecordingSink = .{ .runtime = &runtime };
-    var coordinator = Coordinator.init(
-        &runtime,
-        sink.port(),
-        std.Thread.getCurrentId(),
-    );
+    var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
     _ = coordinator.commitPrepared(
-        try account_api.TestSupport.prepareAuthenticated(
-            &runtime,
-            "account-1",
-            "Metask User",
-            "access-token",
-            "refresh-token",
-            150,
-        ),
+        try account_api.TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask User", "access-token", "refresh-token", 150),
     );
-    var lease = (try runtime.authorizationLease()).?;
-    const generation = lease.authorization_generation;
-    lease.deinit();
-    var observer: AuthorizationObserver = .{
-        .runtime = &runtime,
-        .expected_generation = generation,
-    };
-    coordinator.setCommitObserver(observer.port());
+    var follower: RecordingFollower = .{};
+    coordinator.setFollower(follower.port());
 
     const refreshed = coordinator.commitPrepared(
         account_api.TestSupport.prepareTokenRefreshWithoutEffect(&runtime),
     );
 
     try std.testing.expect(refreshed.accepted);
-    try std.testing.expectEqual(@as(usize, 1), observer.calls);
-    try std.testing.expect(!observer.unavailable);
+    try std.testing.expectEqual(@as(usize, 1), follower.calls);
+    try std.testing.expectEqual(.available, follower.last);
+    // The expiry itself is no commit; the next one reports a recovery, never
+    // the loss of the account.
+    platform.now_unix_seconds = 150;
+    account_api.TestSupport.publishUnsentRefreshFailure(&runtime, .account_operation_failed);
+    coordinator.drain();
+    try std.testing.expectEqual(@as(usize, 2), follower.calls);
+    try std.testing.expectEqual(.recovering, follower.last);
+}
+
+test "Account commit installs, renews, follows and settles in that order" {
+    var runtime = try initRuntimeForTest();
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var steps: CommitSteps = .{};
+    var sink: RecordingSink = .{ .runtime = &runtime, .steps = &steps };
+    var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+    coordinator.setFollower(steps.follower());
+    coordinator.setCredentialRenewal(steps.renewal());
+    _ = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask User", "access-token", "refresh-token", 200),
+    );
+    try std.testing.expectEqualSlices(CommitSteps.Step, &.{ .commit, .renew, .follow, .settle }, steps.take()[0..4]);
+    // The same credential is not delivered twice.
+    _ = coordinator.commandSink().submit(.begin_login);
+    _ = coordinator.commandSink().submit(.cancel_operation);
+    try std.testing.expect(std.mem.indexOfScalar(CommitSteps.Step, steps.take(), .renew) == null);
+
+    // Without memory for the copy, running executions end; none may go on
+    // with a credential Account already replaced.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    runtime.authorization_generation += 1;
+    const allocator = runtime.allocator;
+    runtime.allocator = failing.allocator();
+    defer runtime.allocator = allocator;
+    coordinator.deliverCredential();
+    try std.testing.expectEqualSlices(CommitSteps.Step, &.{.renew_failed}, steps.take());
+    coordinator.deliverCredential();
+    try std.testing.expectEqual(@as(usize, 0), steps.take().len);
 }
 
 const ClosingRefreshTransport = struct {
@@ -934,14 +1196,6 @@ const ClosingRefreshTransport = struct {
     }
 };
 
-const ClosingObserver = struct {
-    calls: usize = 0,
-    fn notify(context: *anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        self.calls += 1;
-    }
-};
-
 test "Account shutdown saves mailbox or in-flight rotation once before detaching ports" {
     for ([_]bool{ false, true }) |in_flight| {
         var transport: ClosingRefreshTransport = .{ .gated = in_flight };
@@ -951,23 +1205,21 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
         try platform.setStoredRefreshToken("old-refresh");
         account_api.TestSupport.attachPlatform(&runtime, &platform);
         if (in_flight) runtime.platform.?.timer = .{ .context = &transport, .start_fn = ClosingTimer.start, .cancel_fn = ClosingRefreshTransport.releaseOnTimerStop };
-        var auth = try account_api.TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask", "old-access", "old-refresh", 200);
+        var auth = try account_api.TestSupport.prepareAuthenticatedAndSchedule(&runtime, "account-1", "Metask", "old-access", "old-refresh", 200);
         defer auth.deinit();
         runtime.commit(&auth);
         var sink: RecordingSink = .{ .runtime = &runtime };
         var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+        try std.testing.expect(!coordinator.tick());
         // A direct refresh does not schedule unrelated summary or catalog work.
-        var refresh = switch (runtime.prepareTokenRefresh()) {
-            .prepared => |p| p,
-            else => return error.TestUnexpectedResult,
-        };
+        var refresh = account_api.TestSupport.prepareTokenRefresh(&runtime);
         defer refresh.deinit();
         try std.testing.expect(runtime.admitEffect(&refresh));
         runtime.commit(&refresh);
-        _ = runtime.dispatchCommitted(&refresh);
+        runtime.dispatchCommitted();
         if (in_flight) try transport.started.wait(std.testing.io) else account_api.TestSupport.joinNetwork(&runtime);
-        var observer: ClosingObserver = .{};
-        coordinator.setCommitObserver(.{ .context = &observer, .notify_fn = ClosingObserver.notify });
+        var follower: RecordingFollower = .{};
+        coordinator.setFollower(follower.port());
         coordinator.shutdown();
         coordinator.drain();
         try std.testing.expectEqualStrings("new-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
@@ -975,8 +1227,8 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
         try std.testing.expect(platform.refresh_marker == null);
         try std.testing.expectEqual(@as(usize, 1), transport.calls);
         try std.testing.expect(!transport.observed_cancel);
-        try std.testing.expectEqual(@as(usize, 0), observer.calls);
-        try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
+        try std.testing.expectEqual(@as(usize, 0), follower.calls);
+        try std.testing.expectEqual(@as(usize, if (in_flight) 0 else 1), platform.timer_start_count);
         try std.testing.expectEqual(@as(usize, 1), sink.count);
         try std.testing.expect(sink.records[0].attempt_terminal);
         try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
@@ -988,9 +1240,7 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
 }
 
 const ClosingTimer = struct {
-    fn start(_: *anyopaque, _: u64, _: u64, _: bool) !void {
-        return error.UnexpectedTimer;
-    }
+    fn start(_: *anyopaque, _: u64, _: u64, _: bool) !void {}
 };
 
 test "Account shutdown failed rotation save preserves durable block without a second write" {
@@ -1005,14 +1255,11 @@ test "Account shutdown failed rotation save preserves durable block without a se
     runtime.commit(&auth);
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
-    var refresh = switch (runtime.prepareTokenRefresh()) {
-        .prepared => |p| p,
-        else => return error.TestUnexpectedResult,
-    };
+    var refresh = account_api.TestSupport.prepareTokenRefresh(&runtime);
     defer refresh.deinit();
     try std.testing.expect(runtime.admitEffect(&refresh));
     runtime.commit(&refresh);
-    _ = runtime.dispatchCommitted(&refresh);
+    runtime.dispatchCommitted();
     coordinator.shutdown();
     try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
     try std.testing.expectEqualStrings("old-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);

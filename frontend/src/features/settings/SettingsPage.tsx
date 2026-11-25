@@ -17,6 +17,7 @@ import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
 import {
   accountIdentityInitial,
   accountIdentityLabel,
+  accountUnconfirmed,
 } from "../../workbench/account-identity.ts";
 import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
 import { ArchivedTasks, type ArchivedTasksProps } from "./ArchivedTasks.tsx";
@@ -137,16 +138,17 @@ export function SettingsPage({
   const automaticRootGeneration = useRef(automaticWorkspaceRoot.generation);
   automaticRootGeneration.current = automaticWorkspaceRoot.generation;
   const authenticated = account.state === "authenticated";
+  const unconfirmed = accountUnconfirmed(account);
   const accountIdentityTitle = authenticated
     ? accountIdentityLabel(account, t("account.signed_in"))
     : account.state === "checking"
-      ? t("account.checking.title")
+      ? t(unconfirmed ? "account.unconfirmed.title" : "account.checking.title")
       : account.state === "authorizing"
         ? t("account.authorizing.title")
         : t("account.sign_in_required.title");
   const accountIdentityBody =
     account.state === "checking"
-      ? t("account.checking.body")
+      ? t(unconfirmed ? "account.unconfirmed.body" : "account.checking.body")
       : account.state === "authorizing"
         ? t("account.authorizing.body")
         : t("account.sign_in_required.body");
@@ -589,8 +591,30 @@ export function SettingsPage({
                     >
                       {t("common.cancel")}
                     </Button>
-                  ) : authenticated &&
-                    account.errorCode === "refresh_schedule_failed" ? (
+                  ) : unconfirmed ? (
+                    <div className="settings-identity-action settings-identity-actions">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={
+                          disabled || accountDisabled || !account.canRetry
+                        }
+                        onClick={onRetryRefresh}
+                      >
+                        {t("account.retry_now")}
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={
+                          disabled || accountDisabled || !account.canRetry
+                        }
+                        onClick={onBeginLogin}
+                      >
+                        {t("account.login_again")}
+                      </Button>
+                    </div>
+                  ) : account.canRetry ? (
                     <Button
                       className="settings-identity-action"
                       variant="secondary"

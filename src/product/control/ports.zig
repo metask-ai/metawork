@@ -30,13 +30,20 @@ pub const AccountCommit = struct {
 
 /// Narrow no-fail sink for a committed Account revision. No model catalog,
 /// selection, source candidate, or credential crosses this identity boundary.
+/// The coordinator settles after everything that follows the commit did.
 pub const AccountCommitSink = struct {
     context: *anyopaque,
     commit_fn: *const fn (*anyopaque, AccountCommit) void,
+    settle_fn: *const fn (*anyopaque) void,
 
     pub fn commitNoFail(self: AccountCommitSink, commit: AccountCommit) void {
         commit.assertValid();
         self.commit_fn(self.context, commit);
+    }
+
+    /// Rearms scheduled work against the new facts and publishes them.
+    pub fn settleNoFail(self: AccountCommitSink) void {
+        self.settle_fn(self.context);
     }
 };
 
@@ -110,51 +117,26 @@ pub const ModelsManagement = struct {
     }
 };
 
-/// Main-thread, secret-free proof supplied by the Application Account owner.
-/// The generation changes on every token refresh, login and credential loss.
-pub const MetaskAuthorization = struct {
-    generation: u64,
-};
-
-/// Account's one Metask authorization fact. A verified identity is never
-/// `unavailable`: once its token expires it is `recovering`.
-pub const MetaskAuthorizationStatus = union(enum) {
-    unavailable,
-    available: MetaskAuthorization,
-    /// Account's renewal epoch, which advances when a refresh attempt ends.
-    recovering: u64,
-};
-
-pub const MetaskAuthorizationCheck = struct {
-    context: *anyopaque,
-    status_fn: *const fn (*anyopaque) MetaskAuthorizationStatus,
-
-    pub fn status(self: MetaskAuthorizationCheck) MetaskAuthorizationStatus {
-        return self.status_fn(self.context);
-    }
-
-    /// The authorization an admission may use now, if any.
-    pub fn current(self: MetaskAuthorizationCheck) ?MetaskAuthorization {
-        return switch (self.status()) {
-            .available => |authorization| authorization,
-            .unavailable, .recovering => null,
-        };
-    }
-};
-
-/// Account-only handoff for an already admitted execution. A null credential
-/// reports lease allocation failure, never logout or a catalog rejection.
+/// Account-only handoff for an already admitted execution, by credential
+/// generation. A null credential reports allocation failure, never logout or
+/// a catalog rejection.
 pub const MetaskCredentialRenewal = struct {
     context: *anyopaque,
-    renew_fn: *const fn (*anyopaque, MetaskAuthorization, ?[]const u8) void,
-    needs_fn: *const fn (*anyopaque, MetaskAuthorization) bool,
+    renew_fn: *const fn (*anyopaque, u64, ?[]const u8) void,
+    needs_fn: *const fn (*anyopaque, u64) bool,
+    waits_fn: *const fn (*anyopaque, u64) bool,
 
-    pub fn renew(self: MetaskCredentialRenewal, authority: MetaskAuthorization, credential: ?[]const u8) void {
-        self.renew_fn(self.context, authority, credential);
+    pub fn renew(self: MetaskCredentialRenewal, generation: u64, credential: ?[]const u8) void {
+        self.renew_fn(self.context, generation, credential);
     }
 
-    pub fn needs(self: MetaskCredentialRenewal, authority: MetaskAuthorization) bool {
-        return self.needs_fn(self.context, authority);
+    pub fn needs(self: MetaskCredentialRenewal, generation: u64) bool {
+        return self.needs_fn(self.context, generation);
+    }
+
+    /// A message waits for the attempt that ends this epoch.
+    pub fn waits(self: MetaskCredentialRenewal, epoch: u64) bool {
+        return self.waits_fn(self.context, epoch);
     }
 };
 

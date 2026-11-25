@@ -928,6 +928,7 @@ test("schedule selection submits exact source proof independently of generic New
   stale.newTaskAdmission = {
     available: false,
     reason: "workspace_unavailable",
+    metask: "none",
   };
   renderDom(scheduledElement(stale));
   fireEvent.click(screen.getByRole("button", { name: "New" }));
@@ -938,6 +939,28 @@ test("schedule selection submits exact source proof independently of generic New
     target: { value: "Summarize current work" },
   });
   assert.equal(screen.getByRole("button", { name: "Confirm" }).disabled, false);
+});
+
+test("a newly chosen Metask model waits out its connection before saving", async () => {
+  const snapshot = scheduleSnapshot();
+  snapshot.newTaskAdmission.metask = "unreachable";
+  renderDom(scheduledElement(snapshot));
+  fireEvent.click(screen.getByRole("button", { name: "New" }));
+  fireEvent.change(screen.getByLabelText("Name"), {
+    target: { value: "Work summary" },
+  });
+  fireEvent.change(screen.getByLabelText("Instruction"), {
+    target: { value: "Summarize current work" },
+  });
+  assert.equal(screen.getByRole("button", { name: "Confirm" }).disabled, true);
+  assert.ok(screen.getByText(/Can't reach Metask right now/));
+  cleanup();
+
+  // An edit that keeps the stored binding resolves no model.
+  renderDom(scheduledElement(snapshot));
+  fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
+  assert.equal(screen.getByRole("button", { name: "Confirm" }).disabled, false);
+  assert.equal(screen.queryByText(/Can't reach Metask right now/), null);
 });
 
 test("schedule instructions have no separate Skill or Workspace configuration", () => {

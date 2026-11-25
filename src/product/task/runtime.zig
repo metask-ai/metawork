@@ -4757,6 +4757,16 @@ pub const Runtime = struct {
         return false;
     }
 
+    pub fn waitsForMetask(self: *const Runtime, epoch: u64) bool {
+        for (self.tasks) |entry| if (entry) |task| {
+            for (task.input_submissions.items) |record| {
+                const waited = record.metask_recovery_epoch orelse continue;
+                if (record.state == .waiting and waited == epoch) return true;
+            }
+        };
+        return false;
+    }
+
     pub fn deferMetaskCredentialRenewals(self: *Runtime) void {
         for (self.tasks) |entry| if (entry) |task| {
             if (self.renewsMetaskCredential(task.durable.id))

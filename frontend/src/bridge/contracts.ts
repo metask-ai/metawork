@@ -58,6 +58,7 @@ export type ModelsCatalogState =
   | "unavailable";
 export type NewTaskAdmissionReason =
   "none" | "shutting_down" | "workspace_unavailable";
+export type NewTaskMetaskAdmission = "none" | "recovering" | "unreachable";
 export type AccountErrorCode =
   | "none"
   | "invalid_command"
@@ -200,6 +201,7 @@ export type ModelMetadata = {
 export type AccountView = {
   state: AccountState;
   canCancel: boolean;
+  canRetry: boolean;
   accountId: string;
   displayName: string;
   emailHint: string;
@@ -297,6 +299,7 @@ export type ModelsView = {
 export type NewTaskAdmissionView = {
   available: boolean;
   reason: NewTaskAdmissionReason;
+  metask: NewTaskMetaskAdmission;
 };
 export type AccountCommandResult = {
   accepted: boolean;
@@ -1407,6 +1410,7 @@ export const modelInputBlockers = [
   "models_catalog_failed",
   "metask_authorization_required",
   "metask_authorization_recovering",
+  "metask_connection_unavailable",
 ] as const;
 
 export type TaskView = {

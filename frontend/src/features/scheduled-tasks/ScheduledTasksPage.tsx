@@ -11,6 +11,7 @@ import {
   modelOptionId,
   readyModelOptions,
 } from "../../app/new-task-model-selection.ts";
+import { metaskAdmission } from "../../workbench/model-setup.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { BrandIcon } from "../../components/ui/BrandIcon.tsx";
 import { ConfirmationNotice } from "../../components/ConfirmationNotice.tsx";
@@ -181,7 +182,11 @@ function toMutation(
   const option = availableModels.find(
     (candidate) => candidate.selectionId === draft.modelId,
   );
-  if (draft.modelChanged && !option) return null;
+  if (
+    draft.modelChanged &&
+    (!option || metaskAdmission(snapshot.newTaskAdmission, option.modelRef))
+  )
+    return null;
   return {
     title: draft.title.trim(),
     modelSelection:
@@ -305,6 +310,13 @@ export function ScheduledTasksPage({
   const availableModels = modelOptions(snapshot);
   const draftStart = draftUnixSeconds(draft);
   const mutation = toMutation(snapshot, draft, draftStart, availableModels);
+  const modelHeldBack = draft.modelChanged
+    ? metaskAdmission(
+        snapshot.newTaskAdmission,
+        availableModels.find((option) => option.selectionId === draft.modelId)
+          ?.modelRef,
+      )
+    : null;
   const absolute =
     draft.recurrenceKind === "once" || draft.recurrenceKind === "interval";
   const invalidStart = absolute && draftStart === null;
@@ -1216,6 +1228,11 @@ export function ScheduledTasksPage({
                 </>
               )}
 
+              {!historyView && modelHeldBack && (
+                <p className="scheduled-attention" role="status">
+                  {t(`model_setup.${modelHeldBack}`)}
+                </p>
+              )}
               {error && (
                 <p className="scheduled-error" role="alert">
                   {error}

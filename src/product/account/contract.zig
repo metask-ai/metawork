@@ -178,6 +178,61 @@ pub const OwnedAuthorizationLease = struct {
     }
 };
 
+/// The one Metask authorization fact. Main-thread only: its slices borrow
+/// committed Account state for the call that receives them.
+pub const Authorization = union(enum) {
+    /// A stored login is being confirmed. The epoch counts finished renewal
+    /// attempts, so a waiter waits for exactly one of them.
+    checking: u64,
+    signed_out,
+    authorizing,
+    available: struct { account_id: []const u8, generation: u64 },
+    /// The access token expired and Account will renew it. The epoch is
+    /// waited out as above.
+    recovering: u64,
+    /// A verified identity whose token no wall clock can judge.
+    stalled,
+
+    /// What a consumer may do with it. Every consumer reads only this.
+    pub const Use = union(enum) {
+        /// Use the credential of this generation.
+        ready: u64,
+        /// Wait until this epoch moves on.
+        wait: u64,
+        stop: enum { sign_in, no_connection },
+    };
+
+    pub fn use(self: Authorization) Use {
+        return switch (self) {
+            .available => |value| .{ .ready = value.generation },
+            .checking, .recovering => |epoch| .{ .wait = epoch },
+            .stalled => .{ .stop = .no_connection },
+            .signed_out, .authorizing => .{ .stop = .sign_in },
+        };
+    }
+};
+
+/// Secret-free view of Account authorization for admission and projection.
+pub const AuthorizationQuery = struct {
+    context: *anyopaque,
+    status_fn: *const fn (*anyopaque) Authorization,
+
+    pub fn status(self: AuthorizationQuery) Authorization {
+        return self.status_fn(self.context);
+    }
+};
+
+/// The current credential: account, access token and generation taken
+/// together. Null when none may be used now; the receiver zeroes it.
+pub const CredentialSource = struct {
+    context: *anyopaque,
+    take_fn: *const fn (*anyopaque) std.mem.Allocator.Error!?OwnedAuthorizationLease,
+
+    pub fn take(self: CredentialSource) std.mem.Allocator.Error!?OwnedAuthorizationLease {
+        return self.take_fn(self.context);
+    }
+};
+
 /// Stable Account error identity. Model catalog errors are defined by Models.
 pub const ErrorCode = enum {
     none,
@@ -212,6 +267,9 @@ pub const ErrorCode = enum {
 pub const AccountView = struct {
     state: AccountState,
     can_cancel: bool = false,
+    /// `retry_refresh` acts now; while a login could not be confirmed, so does
+    /// `begin_login`.
+    can_retry: bool = false,
     account_id: []const u8 = "",
     display_name: []const u8 = "",
     email_hint: []const u8 = "",
@@ -292,6 +350,10 @@ pub fn validateView(view: AccountView) ValidationError!void {
         return error.InconsistentState;
     if (view.can_cancel and view.state != .authorizing)
         return error.InconsistentState;
+    if (view.can_retry) switch (view.state) {
+        .checking, .authenticated => if (view.error_code == .none) return error.InconsistentState,
+        .signed_out, .authorizing => return error.InconsistentState,
+    };
     switch (view.state) {
         .checking, .signed_out, .authorizing => {
             if (view.account_id.len != 0 or view.display_name.len != 0 or

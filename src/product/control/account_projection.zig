@@ -39,6 +39,7 @@ pub const Projection = struct {
     allocator: std.mem.Allocator,
     state: account.AccountState = .checking,
     can_cancel: bool = false,
+    can_retry: bool = false,
     account_id: FixedText(account.Limits.account_id_bytes) = .{},
     display_name: FixedText(account.Limits.display_name_bytes) = .{},
     email_hint: FixedText(account.Limits.email_hint_bytes) = .{},
@@ -92,6 +93,7 @@ pub const Projection = struct {
         const source = fact.view;
         self.state = source.state;
         self.can_cancel = source.can_cancel;
+        self.can_retry = source.can_retry;
         self.account_id.setNoFail(source.account_id);
         self.display_name.setNoFail(source.display_name);
         self.email_hint.setNoFail(source.email_hint);
@@ -165,6 +167,7 @@ pub const Projection = struct {
         return .{
             .state = self.state,
             .can_cancel = self.can_cancel,
+            .can_retry = self.can_retry,
             .account_id = self.account_id.view(),
             .display_name = self.display_name.view(),
             .email_hint = self.email_hint.view(),

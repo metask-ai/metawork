@@ -12,6 +12,7 @@ pub const product_task = @import("metawork_product_task");
 pub const product_workspace = @import("metawork_product_workspace");
 pub const account_contract = @import("metawork_account_contract");
 pub const account = @import("metawork_account");
+pub const account_coordinator = @import("account_coordinator");
 pub const models_coordinator = @import("models_coordinator");
 pub const metask_transport = @import("metask_transport");
 pub const models_contract = @import("metawork_product_models_contract");
@@ -60,6 +61,23 @@ pub fn runPreparedTask(workbench: *product_control.Runtime, task_id: u64, input:
         };
     }
     return error.TestUnexpectedResult;
+}
+
+/// The catalog follows every Account commit, as the Application wires it.
+pub fn catalogFollower(coordinator: *models_coordinator.Coordinator) account_coordinator.AuthorizationFollower {
+    return .{ .context = coordinator, .follow_fn = struct {
+        fn follow(context: *anyopaque, authorization: account_contract.Authorization) void {
+            const self: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
+            self.follow(authorization);
+        }
+    }.follow };
+}
+
+/// One whole token renewal, from the tick that finds it due to its outcome.
+pub fn renewAccountToken(accounts: *account_coordinator.Coordinator) !void {
+    try std.testing.expect(accounts.tick());
+    account.TestSupport.joinNetwork(accounts.runtime);
+    accounts.drain();
 }
 
 /// Framed storage is a test double here; production history uses typed SQLite.

@@ -1241,6 +1241,36 @@ test("App empty catalog after creation rejection keeps input and exposes catalog
   assert.equal(fixture.inputs.length, 0);
 });
 
+test("A Metask draft waits out its connection, then sends the same text", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "Keep this input");
+  for (const [metask, message] of [
+    [
+      "recovering",
+      "Connecting to Metask. You can send once it's connected; your text is kept.",
+    ],
+    [
+      "unreachable",
+      "Can't reach Metask right now. MetaWork keeps retrying; your text is kept.",
+    ],
+  ]) {
+    fixture.snapshot.newTaskAdmission.metask = metask;
+    await fixture.publish();
+    await screen.findByText(message);
+    assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+  }
+  fixture.snapshot.newTaskAdmission.metask = "none";
+  await fixture.publish();
+  await waitFor(() =>
+    assert.equal(screen.getByRole("button", { name: "Send" }).disabled, false),
+  );
+  assert.equal(fixture.textarea.value, "Keep this input");
+  assert.equal(fixture.creations(), 0);
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+});
+
 test("An existing Task offers model catalog retry while preserving its draft", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx);
   const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
@@ -1264,6 +1294,11 @@ test("An existing Task offers model catalog retry while preserving its draft", a
     await screen.findByRole("button", { name: "Retry model refresh" }),
   );
   await waitFor(() => assert.equal(refresh.mock.callCount(), 1));
+  fixture.task.modelInputBlocker = "metask_connection_unavailable";
+  await fixture.publish();
+  await screen.findByText(
+    "Can't reach Metask right now. The message was not run.",
+  );
   assert.equal(fixture.textarea.value, "Keep this input");
   assert.equal(fixture.inputs.length, 0);
 });

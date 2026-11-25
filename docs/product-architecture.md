@@ -11,7 +11,7 @@ Product 由两个 named owner 组成，跨 owner 用例由对应的 Application 
 
 Agent 位于 Product 之外，拥有 MetaWork 对 AgentCore Runtime、Session、Conversation、callback、event pump 与 terminal execution fact 的集成生命周期。Product Control 只调用 Agent 的公共执行能力，不管理 Agent Runtime 生命周期、不读取其内部状态，也不借 Agent 获取通用 I/O。Application 创建和关闭 Agent、安排主线程 wake，并协调 Account 与 Product Control；它不持有领域运行状态，也不独立决定这些 owner 的 policy。
 
-Application 必须分别组装 Account coordinator 与 Models coordinator。前者只编排 Account Runtime terminal commit；后者只取得 Account 的窄 authorization lease，并绑定 Models Metask catalog worker、credential vault、Agent-owned model probe 与 Models 管理生命周期。Account commit 后，Application 先发布 Account fact，再通知 Models observer；observer 只能请求当次 lease、查询无 secret 的三值授权状态（查询会让 Account 立即重新安排已逾期的刷新），或声明授权不可用，不能读取 Account 内部 token owner或把 Models 结果写回 Account。用户在桌面 Renderer 中显式填写的 Custom Provider API Key 只经专用 create/replace typed command 调用期转交 Models credential mutation；Bridge 不保留副本，Models 立即将其写入 credential vault，canonical metadata、projection、result、event、日志和历史均不得包含该值。Models 来源提交、实际 credential 的 Schedule scrub 和 Task-owned execution 安装属于 Product Control 内部事务，不得由 Application coordinator 重新拼装。
+Application 必须分别组装 Account coordinator 与 Models coordinator。前者编排 Account Runtime terminal commit，并拥有授权查询、当次 credential 的唯一出口与已接纳执行的换凭据交付；后者只取得当次 credential，并绑定 Models Metask catalog worker、credential vault、Agent-owned model probe 与 Models 管理生命周期。Account commit 后，Application 先把 Account fact 交给 Product Control，再交付换凭据，再把授权状态交给 Models coordinator，最后重排定时任务并发布；Models coordinator 只接收这份授权状态和当次 credential，不查询 Account，不能读取 Account 内部 token owner或把 Models 结果写回 Account。用户在桌面 Renderer 中显式填写的 Custom Provider API Key 只经专用 create/replace typed command 调用期转交 Models credential mutation；Bridge 不保留副本，Models 立即将其写入 credential vault，canonical metadata、projection、result、event、日志和历史均不得包含该值。Models 来源提交、实际 credential 的 Schedule scrub 和 Task-owned execution 安装属于 Product Control 内部事务，不得由 Application coordinator 重新拼装。
 
 Models、Workspace、Task、Schedule、Skill、MCP、Update 与 Inbox 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
 
@@ -113,7 +113,7 @@ Metask 的凭据续期与新执行接纳分开：Account 刷新或任意一次�
 
 自动审批仍在主线程准备后立即派发，准备时复制 attachment 当前凭据；已发出的独立请求保留自己的副本。自动标题与生图在每次请求准备时读取当前凭据，目标、模型、可用性和 effect 生命周期保持冻结；读取失败使用各自既有失败语义，不回退到初始 token。生图的 Metask 授权独立于主对话来源，不能把 Metask token 注入 Custom Provider Session。旧凭据仍参与全局脱敏，不能仅因过期或进入 waiting_ui 而删除；相关 operation 返回并经过 canonical event drain、Host 请求静止且历史维护完成后，才释放最后的保留副本。单个长 operation 的保留量及扫描成本可以随刷新次数增长，不以刷新次数上限终止 Run。
 
-Task 不与登录或账号绑定。新登录（相同或不同 principal）与正常刷新一样，已接纳的 Run 及 Session 仍在的 Task 原位采用当前凭据，binding 保持不变；Session 已释放的 Task 沿既有恢复路径以当前凭据重建。退出登录或凭据清除不撤销在飞 Run 已持有的凭据，也不伪造热撤权。hard expiry 本身不阻止发送：此时 Account 处于恢复中，新消息先被 Task 接收，只等待下一次续期的结果，续期成功后按当前授权执行。下一次续期失败、clock 不可用、目录失败或候选失去授权，仍阻止新的执行。准入、各 Task 的阻塞原因与 Schedule 预检，读的都是同一个 Account 授权状态。目标模型自己的 provider、protocol、endpoint 或图片声明与已安装会话不同时，走既有 checkpoint 与 binding 事务；仅改选模型且这些一致时使用 setModel。比较不含账号、凭据和其他模型的声明；Custom Provider 改选时另比 source generation。排队和未采用的追加输入保留精确一次语义，失败或取消明确收口，不能重放已采用输入或复活已取消批次。
+Task 不与登录或账号绑定。新登录（相同或不同 principal）与正常刷新一样，已接纳的 Run 及 Session 仍在的 Task 原位采用当前凭据，binding 保持不变；Session 已释放的 Task 沿既有恢复路径以当前凭据重建。退出登录或凭据清除不撤销在飞 Run 已持有的凭据，也不伪造热撤权。hard expiry 本身不阻止发送：此时 Account 处于恢复中，新消息先被 Task 接收，只等待下一次续期的结果，续期成功后按当前授权执行；冷启动正在确认登录时同样先接收，只等待这一次确认的结果。读不到墙钟时没有可等的结果，按连不上拒绝。等待的那次结果失败、目录失败或候选失去授权，仍阻止新的执行。准入、各 Task 的阻塞原因与 Schedule 预检，读的都是同一个 Account 授权状态。目标模型自己的 provider、protocol、endpoint 或图片声明与已安装会话不同时，走既有 checkpoint 与 binding 事务；仅改选模型且这些一致时使用 setModel。比较不含账号、凭据和其他模型的声明；Custom Provider 改选时另比 source generation。排队和未采用的追加输入保留精确一次语义，失败或取消明确收口，不能重放已采用输入或复活已取消批次。
 
 普通 Task 已接收的队首消息在当前授权与代次有效、且匹配代次的 Metask 目录刷新仍在运行时等待新 Run 准入或恢复。目录完成事件经 Application 的常规生命周期唤醒推进队列。目录失败或授权失效按当时事实结算。Application 对网络、超时和 5xx 的目录失败在同授权代次最多延迟重试一次，重试重新取得当次 lease；旧 timer 和 completion 不得跨代次采纳。目录重试只恢复目录资格，失败的用户提交由用户显式重发。
 
@@ -123,7 +123,7 @@ Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取�
 
 Identity transition、Task-owned execution 安装/释放与 durable Task history 是不同边界。history 保存实际 protocol/model、execution generation、binding facts 及独立 Task model intent，不保存 Account identity、credential locator 或可重建 secret。
 
-Canonical snapshot 保持 owner 边界：Account 发布身份与授权事实，Models 发布来源、目录、起始偏好及健康，newTaskAdmission 只发布通用创建资格。Task modelIntent 是后续选择，binding/Run 是安装与历史事实；模型候选不以全局偏好或 attachment 已恢复为前提。无 intent Task 允许全部 ready 来源明确选模，不猜测旧来源。
+Canonical snapshot 保持 owner 边界：Account 发布身份与授权事实，Models 发布来源、目录、起始偏好及健康，newTaskAdmission 只发布通用创建资格，以及以 Metask 模型新建任务是否被连接挡住。Task modelIntent 是后续选择，binding/Run 是安装与历史事实；模型候选不以全局偏好或 attachment 已恢复为前提。无 intent Task 允许全部 ready 来源明确选模，不猜测旧来源。
 
 Models 每次 resolve 只产生精确 `ModelRef + source_generation + protocol` 的调用方 owned candidate。Product Control 在 Task 创建、恢复/rebind 安装、凭据续期及释放边界执行产品文本与 Schedule durable scrub；完成必要持久提交后才安装、转移或 secure-zero 对应 credential。失败保留所需 owner 与诊断，不建立 default desired/active mismatch。
 

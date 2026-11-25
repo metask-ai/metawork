@@ -414,6 +414,7 @@ test("SelectionMenu exposes a visible busy state without a false chevron", () =>
 const readySettingsAccount = {
   state: "authenticated",
   canCancel: false,
+  canRetry: false,
   accountId: "account-1",
   displayName: "Metask User",
   emailHint: "m***@example.com",

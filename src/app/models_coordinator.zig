@@ -1,6 +1,5 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
-const account_api = @import("metawork_account");
 const account_contract = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
@@ -227,9 +226,9 @@ const CatalogJob = struct {
     }
 };
 
-/// Application binder for Account credential delivery and Models effects.
-/// Product Control owns consumer scope and registry/default-selection policy;
-/// credential delivery uses a separate port before catalog work.
+/// Application binder for Models effects. Product Control owns consumer scope
+/// and registry/default-selection policy; Account is one borrowed credential
+/// per operation and the authorization each of its commits leaves.
 pub const Coordinator = struct {
     pub const RetryTimer = struct {
         context: ?*anyopaque,
@@ -238,7 +237,7 @@ pub const Coordinator = struct {
     };
 
     io: std.Io,
-    account: *account_api.Runtime,
+    credentials: account_contract.CredentialSource,
     metask_transport: metask_transport.Transport,
     management: control_ports.ModelsManagement,
     main_thread_id: std.Thread.Id,
@@ -251,10 +250,9 @@ pub const Coordinator = struct {
     catalog_retry: ?struct { id: u64, generation: u64 } = null,
     next_retry_timer_id: u64 = 0x4d57_4d44_0000_0001,
     retry_used_generation: u64 = 0,
-    credential_renewal: ?control_ports.MetaskCredentialRenewal = null,
 
     pub fn init(
-        account: *account_api.Runtime,
+        credentials: account_contract.CredentialSource,
         transport: metask_transport.Transport,
         management: control_ports.ModelsManagement,
         main_thread_id: std.Thread.Id,
@@ -262,7 +260,7 @@ pub const Coordinator = struct {
     ) Coordinator {
         return .{
             .io = io,
-            .account = account,
+            .credentials = credentials,
             .metask_transport = transport,
             .management = management,
             .main_thread_id = main_thread_id,
@@ -288,22 +286,6 @@ pub const Coordinator = struct {
         return .{ .context = self, .submit_fn = submitCommand };
     }
 
-    pub fn metaskAuthorizationCheck(self: *Coordinator) control_ports.MetaskAuthorizationCheck {
-        return .{ .context = self, .status_fn = metaskAuthorizationStatus };
-    }
-
-    /// Every Product query passes through Account's status, which also
-    /// re-arms a refresh whose timer is overdue.
-    fn metaskAuthorizationStatus(context: *anyopaque) control_ports.MetaskAuthorizationStatus {
-        const self: *Coordinator = @ptrCast(@alignCast(context));
-        self.assertMainThread();
-        return switch (self.account.authorizationStatus()) {
-            .unavailable => .unavailable,
-            .available => |generation| .{ .available = .{ .generation = generation } },
-            .recovering => |epoch| .{ .recovering = epoch },
-        };
-    }
-
     pub fn imageRunPreparation(self: *Coordinator) control_ports.ImageRunPreparation {
         return .{ .context = self, .prepare_fn = prepareImageRun };
     }
@@ -319,10 +301,8 @@ pub const Coordinator = struct {
 
     fn prepareMedia(self: *Coordinator, kind: models_contract.MediaKind) ?PreparedMedia {
         self.assertMainThread();
-        const generation = self.account.authorizationGeneration() orelse return null;
-        var lease = (self.account.authorizationLease() catch return null) orelse return null;
+        var lease = (self.credentials.take() catch return null) orelse return null;
         defer lease.deinit();
-        if (generation != lease.authorization_generation) return null;
         const candidate = switch (self.management.prepareMediaCandidate(.{
             .kind = kind,
             .principal_ref = lease.principal_ref,
@@ -332,7 +312,7 @@ pub const Coordinator = struct {
             .ready => |value| value,
             .rejected => return null,
         };
-        return .{ .candidate = candidate, .generation = generation };
+        return .{ .candidate = candidate, .generation = lease.authorization_generation };
     }
 
     fn prepareImageRun(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
@@ -460,23 +440,6 @@ pub const Coordinator = struct {
         self.management.startCustomProvidersUnavailable();
     }
 
-    pub fn setCredentialRenewal(self: *Coordinator, renewal: control_ports.MetaskCredentialRenewal) void {
-        self.credential_renewal = renewal;
-    }
-
-    fn renewDeferredCredential(self: *Coordinator) void {
-        const renewal = self.credential_renewal orelse return;
-        const authority: control_ports.MetaskAuthorization = .{ .generation = self.account.authorizationGeneration() orelse return };
-        if (!renewal.needs(authority)) return;
-        var lease = (self.account.authorizationLease() catch {
-            renewal.renew(authority, null);
-            return;
-        }) orelse return;
-        defer lease.deinit();
-        if (lease.authorization_generation != authority.generation) return;
-        renewal.renew(authority, lease.access_token);
-    }
-
     fn cancelCatalog(self: *Coordinator) void {
         const job = self.catalog_job orelse return;
         job.cancel();
@@ -486,34 +449,30 @@ pub const Coordinator = struct {
         self.catalog_job = null;
     }
 
-    pub fn authorizationChanged(self: *Coordinator) void {
+    /// Follows the authorization an Account commit left. Only a lost account
+    /// clears the catalog: an expired token is renewed for the same account.
+    pub fn follow(self: *Coordinator, authorization: account_contract.Authorization) void {
         self.assertMainThread();
-        // Existing executions renew before any catalog work, using Account
-        // authority alone. Catalog failure cannot roll this handoff back.
-        var lease = (self.account.authorizationLease() catch {
-            self.cancelCatalogRetry();
-            if (self.account.authorizationGeneration()) |generation| if (self.credential_renewal) |renewal| {
-                renewal.renew(.{ .generation = generation }, null);
-            };
-            self.cancelCatalog();
-            self.management.setMetaskAuthorizationUnavailable();
-            self.observed_authorization_generation = 0;
-            return;
-        }) orelse {
-            self.cancelCatalogRetry();
-            self.cancelCatalog();
-            if (self.observed_authorization_generation != 0)
-                self.management.setMetaskAuthorizationUnavailable();
-            self.observed_authorization_generation = 0;
-            return;
-        };
+        switch (authorization) {
+            .checking, .recovering, .stalled => {},
+            .signed_out, .authorizing => {
+                self.cancelCatalogRetry();
+                self.cancelCatalog();
+                if (self.observed_authorization_generation != 0)
+                    self.management.setMetaskAuthorizationUnavailable();
+                self.observed_authorization_generation = 0;
+            },
+            .available => |current| if (current.generation != self.observed_authorization_generation)
+                self.followCredential(),
+        }
+    }
+
+    fn followCredential(self: *Coordinator) void {
+        // Without memory for the copy the content stays and the generation
+        // stays unseen, so the next commit tries again.
+        var lease = (self.credentials.take() catch return) orelse return;
         defer lease.deinit();
-        if (lease.authorization_generation == self.observed_authorization_generation) return;
         self.cancelCatalogRetry();
-        if (self.account.authorizationGeneration()) |generation| if (self.credential_renewal) |renewal| {
-            if (generation == lease.authorization_generation)
-                renewal.renew(.{ .generation = generation }, lease.access_token);
-        };
         self.cancelCatalog();
         self.observed_authorization_generation = lease.authorization_generation;
         _ = self.startCatalogJob(&lease);
@@ -524,20 +483,16 @@ pub const Coordinator = struct {
         if (self.catalog_job != null)
             return .rejected(.operation_in_progress);
         self.cancelCatalogRetry();
-        var lease = (self.account.authorizationLease() catch
-            return .rejected(.local_resource_exhausted)) orelse {
-            self.management.setMetaskAuthorizationUnavailable();
-            self.observed_authorization_generation = 0;
+        var lease = (self.credentials.take() catch
+            return .rejected(.local_resource_exhausted)) orelse
             return .rejected(.authorization_unavailable);
-        };
         defer lease.deinit();
         self.observed_authorization_generation = lease.authorization_generation;
         return self.startCatalogJob(&lease);
     }
 
     /// Resets Product-owned Models state through the snapshot CAS boundary,
-    /// then lets the normal authorization change path repopulate Metask
-    /// catalog data when an account is available. Acceptance only confirms
+    /// then repopulates Metask catalog data when a credential may be used. Acceptance only confirms
     /// the durable reset; catalog readiness is observed asynchronously.
     pub fn resetModelsStore(
         self: *Coordinator,
@@ -550,7 +505,7 @@ pub const Coordinator = struct {
         if (!result.accepted) return result;
         self.cancelCatalogRetry();
         self.observed_authorization_generation = 0;
-        self.authorizationChanged();
+        self.followCredential();
         return result;
     }
 
@@ -602,32 +557,27 @@ pub const Coordinator = struct {
 
     pub fn drain(self: *Coordinator) void {
         self.assertMainThread();
-        self.renewDeferredCredential();
         if (self.catalog_job) |job| {
             if (job.finished.load(.acquire)) {
                 job.join();
-                if (self.account.acceptsAuthorizationGeneration(
-                    job.authorization_generation,
-                )) {
-                    if (job.completion) |*completion| {
-                        var completion_port = completion.ownedPort();
-                        _ = self.management.completeMetaskCatalogRefresh(
-                            job.attempt_id,
-                            job.authorization_generation,
-                            &completion_port,
-                        );
-                        job.completion = null;
-                    } else {
-                        self.management.failMetaskCatalogRefresh(
-                            job.attempt_id,
-                            job.authorization_generation,
-                            job.error_code,
-                            "",
-                        );
-                        if (job.retryable_failure) self.armCatalogRetry(job.authorization_generation);
-                    }
+                // A job another credential or a lost account superseded was
+                // cancelled when that commit was followed.
+                if (job.completion) |*completion| {
+                    var completion_port = completion.ownedPort();
+                    _ = self.management.completeMetaskCatalogRefresh(
+                        job.attempt_id,
+                        job.authorization_generation,
+                        &completion_port,
+                    );
+                    job.completion = null;
                 } else {
-                    self.management.setMetaskAuthorizationUnavailable();
+                    self.management.failMetaskCatalogRefresh(
+                        job.attempt_id,
+                        job.authorization_generation,
+                        job.error_code,
+                        "",
+                    );
+                    if (job.retryable_failure) self.armCatalogRetry(job.authorization_generation);
                 }
                 self.catalog_job = null;
                 job.deinit();
@@ -684,7 +634,7 @@ pub const Coordinator = struct {
         const pending = self.catalog_retry orelse return false;
         if (pending.id != id) return false;
         self.catalog_retry = null;
-        if (self.catalog_job != null or !self.account.acceptsAuthorizationGeneration(pending.generation)) return true;
+        if (self.catalog_job != null or pending.generation != self.observed_authorization_generation) return true;
         _ = self.refreshCatalog();
         return true;
     }
@@ -709,30 +659,31 @@ fn managementError(error_code: models_contract.ModelsError) models_contract.Mana
     };
 }
 
-test "image Run preparation borrows a fresh Account lease and freezes owned output authority" {
+test "image Run preparation takes one whole credential and freezes owned output authority" {
     const Fixture = struct {
         available: bool = false,
         reject: bool = false,
         calls: usize = 0,
-        expected_generation: u64 = 0,
-        expected_token: []const u8 = "image-access-a",
+        credential: ?struct { token: []const u8, generation: u64 } = null,
         model: []const u8 = "image-model-a",
 
+        fn take(context: *anyopaque) std.mem.Allocator.Error!?account_contract.OwnedAuthorizationLease {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const current = self.credential orelse return null;
+            return account_contract.OwnedAuthorizationLease.init(std.testing.allocator, "account-image", current.token, current.generation) catch |err| switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => unreachable,
+            };
+        }
         fn prepare(context: *anyopaque, input: models_contract.MediaPreparationInput) models_contract.MediaPreparation {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (!self.available) return .{ .rejected = .model_not_found };
             self.calls += 1;
             std.testing.expectEqualStrings("account-image", input.principal_ref) catch unreachable;
-            std.testing.expectEqual(self.expected_generation, input.authorization_generation) catch unreachable;
-            std.testing.expectEqualStrings(self.expected_token, input.bearer) catch unreachable;
+            std.testing.expectEqual(self.credential.?.generation, input.authorization_generation) catch unreachable;
+            std.testing.expectEqualStrings(self.credential.?.token, input.bearer) catch unreachable;
             if (self.reject) return .{ .rejected = .generation_mismatch };
             return .{ .ready = models_contract.OwnedMediaCandidate.copy(std.testing.allocator, .image, self.model, input.bearer, 7) catch unreachable };
-        }
-        fn accountHttp(_: *anyopaque, request: account_api.TransportRequest, output: []u8) account_api.TransportError!account_api.TransportResponse {
-            if (request.kind != .refresh_token) return error.ProtocolFailed;
-            const body = "{\"access_token\":\"image-access-b\",\"refresh_token\":\"synthetic-refresh-b\",\"token_type\":\"Bearer\",\"expires_in\":3600}";
-            @memcpy(output[0..body.len], body);
-            return .{ .status = 200, .body = output[0..body.len] };
         }
         fn modelsHttp(_: *anyopaque, _: metask_transport.Request, _: []u8) metask_transport.TransportError!metask_transport.Response {
             @panic("image preparation must not refresh the catalog");
@@ -740,28 +691,14 @@ test "image Run preparation borrows a fresh Account lease and freezes owned outp
         fn imageHttp(_: ?*anyopaque, _: agent.CompletionHttpRequest, _: *const agent.CompletionCancellation, _: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
             @panic("image preparation must not generate or reserve a file");
         }
-        fn wake(_: *anyopaque) void {}
     };
     var fixture: Fixture = .{};
-    var account = account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &fixture, .perform_fn = Fixture.accountHttp, .retire_fn = account_api.retireNothing }, account_api.TestSupport.loopbackEndpoint(), .{ .context = &fixture, .notify_fn = Fixture.wake });
-    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
-    account_api.TestSupport.attachPlatform(&account, &platform);
-    defer {
-        account_api.TestSupport.detachPlatform(&account);
-        account.deinit();
-    }
-    var authenticated = try account_api.TestSupport.prepareAuthenticated(&account, "account-image", "Image User", fixture.expected_token, "synthetic-refresh", 200);
-    defer authenticated.deinit();
-    account.commit(&authenticated);
-    var lease = (try account.authorizationLease()).?;
-    fixture.expected_generation = lease.authorization_generation;
-    lease.deinit();
     // This unit observes only the two image management methods; catalog and
     // selection behavior are independently tested against the real Models owner.
     var management: control_ports.ModelsManagement = undefined;
     management.context = &fixture;
     management.prepare_media_candidate_fn = Fixture.prepare;
-    var coordinator = Coordinator.init(&account, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
+    var coordinator = Coordinator.init(.{ .context = &fixture, .take_fn = Fixture.take }, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
     coordinator.setCompletionTransport(.{ .perform_fn = Fixture.imageHttp });
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -769,6 +706,10 @@ test "image Run preparation borrows a fresh Account lease and freezes owned outp
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
     const authority: product_workspace.TaskAuthority = .{ .id = 5, .epoch = 2, .kind = .manual, .canonical_root = root[0..root_len], .trust = .explicitly_trusted };
     const port = coordinator.imageRunPreparation();
+    fixture.available = true;
+    try std.testing.expect(port.prepare(authority) == null);
+    fixture.available = false;
+    fixture.credential = .{ .token = "image-access-a", .generation = 3 };
     try std.testing.expect(port.prepare(authority) == null);
     try std.testing.expectEqual(@as(usize, 0), fixture.calls);
     fixture.available = true;
@@ -777,38 +718,16 @@ test "image Run preparation borrows a fresh Account lease and freezes owned outp
     try std.testing.expectEqualStrings(models_contract.metask_images_generations_url, first.input().binding.endpoint);
     try std.testing.expectEqualStrings("image-model-a", first.input().binding.model);
     try std.testing.expectEqualStrings("image-access-a", first.input().binding.credential);
+    try std.testing.expectEqual(@as(u64, 3), first.authorization.generation);
     const output: *image_output.Output = @ptrCast(@alignCast(first.output_owner));
     @memset(root[0..root_len], 'x');
     try std.testing.expect(!std.mem.eql(u8, root[0..root_len], output.root));
-    // Hard expiry requires no Account notification or cached-view change.
-    platform.now_unix_seconds = 200;
-    try std.testing.expect(port.prepare(authority) == null);
-    platform.now_unix_seconds = null;
+    // Without a usable credential nothing is prepared for this Run.
+    fixture.credential = null;
     try std.testing.expect(port.prepare(authority) == null);
     try std.testing.expectEqual(@as(usize, 1), fixture.calls);
-    platform.now_unix_seconds = 150;
-    fixture.expected_token = "image-access-b";
+    fixture.credential = .{ .token = "image-access-b", .generation = 4 };
     fixture.model = "image-model-b";
-    // Drive the real Account refresh transition with a synthetic in-process
-    // transport. Image preparation itself never dispatches Account work.
-    var refresh = switch (account.prepareTokenRefresh()) {
-        .prepared => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    defer refresh.deinit();
-    try std.testing.expect(account.admitEffect(&refresh));
-    account.commit(&refresh);
-    try std.testing.expect(account.dispatchCommitted(&refresh) == null);
-    account_api.TestSupport.joinNetwork(&account);
-    var rotated = switch (account.prepareNextCompletion().?) {
-        .prepared => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    defer rotated.deinit();
-    account.commit(&rotated);
-    lease = (try account.authorizationLease()).?;
-    fixture.expected_generation = lease.authorization_generation;
-    lease.deinit();
     _ = try tmp.dir.realPath(std.testing.io, &root);
     var second = port.prepare(authority).?;
     defer second.deinit();
@@ -820,11 +739,4 @@ test "image Run preparation borrows a fresh Account lease and freezes owned outp
     fixture.available = false;
     try std.testing.expect(port.prepare(authority) == null);
     try std.testing.expectEqual(@as(usize, 3), fixture.calls);
-    var logged_out = account_api.TestSupport.prepareLoggedOutAfterExternalCommit(&account);
-    defer logged_out.deinit();
-    account.commit(&logged_out);
-    fixture.available = true;
-    try std.testing.expect(port.prepare(authority) == null);
-    try std.testing.expectEqual(@as(usize, 3), fixture.calls);
-    try std.testing.expectEqualStrings("image-access-a", first.input().binding.credential);
 }
