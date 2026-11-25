@@ -692,9 +692,14 @@ test "Account coordinator commits identity before notifying Product" {
     try std.testing.expect(!sink.records[0].attempt_terminal);
 }
 
-test "Account coordinator publishes explicit terminal attempt metadata" {
+test "Account logout reaches Product as one commit of no attempt" {
     var runtime = try initRuntimeForTest();
-    defer runtime.deinit();
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
         &runtime,
@@ -712,16 +717,14 @@ test "Account coordinator publishes explicit terminal attempt metadata" {
         ),
     );
 
-    const result = coordinator.commitPrepared(
-        account_api.TestSupport.prepareLoggedOutAfterExternalCommit(&runtime),
-    );
+    const result = coordinator.commandSink().submit(.logout);
 
     try std.testing.expect(result.accepted);
-    try std.testing.expectEqual(@as(usize, 2), sink.count);
-    try std.testing.expectEqual(account_contract.AccountFactKind.signed_out, sink.records[1].kind);
-    try std.testing.expectEqual(account_contract.AccountState.signed_out, sink.records[1].state);
-    try std.testing.expect(sink.records[1].attempt_id != null);
-    try std.testing.expect(sink.records[1].attempt_terminal);
+    const logout = sink.records[sink.count - 1];
+    try std.testing.expectEqual(account_contract.AccountFactKind.signed_out, logout.kind);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, logout.state);
+    try std.testing.expect(logout.attempt_id == null and !logout.attempt_terminal);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
 }
 
 test "Account test platform exposes deterministic clock timer and credential faults" {
@@ -1156,7 +1159,7 @@ test "Account commit installs, renews, follows and settles in that order" {
     // Without memory for the copy, running executions end; none may go on
     // with a credential Account already replaced.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    runtime.authorization_generation += 1;
+    runtime.credentials.current.?.generation += 1;
     const allocator = runtime.allocator;
     runtime.allocator = failing.allocator();
     defer runtime.allocator = allocator;

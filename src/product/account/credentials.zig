@@ -3,6 +3,19 @@ const std = @import("std");
 const builtin = @import("builtin");
 const oauth = @import("account_oauth");
 
+/// A moment on both clocks. Whichever reaches it first decides: the wall
+/// clock can be set back, and only it survives a restart of the machine.
+pub const Moment = struct {
+    wall: ?i64,
+    boot: i64,
+
+    pub fn reached(self: Moment, wall_now: ?i64, boot_now: i64) bool {
+        if (self.boot <= boot_now) return true;
+        const at = self.wall orelse return false;
+        return at <= (wall_now orelse return false);
+    }
+};
+
 /// What one token response issued. Made before its request is sent, so a
 /// rotation the server already made is never lost to a local allocation.
 /// Lives on the heap and is never copied: its secrets are its own storage.
@@ -14,6 +27,13 @@ pub const Grant = struct {
     /// Absent for a stored login whose refresh token was not exchanged yet.
     access_token: oauth.Secret = .{},
     expires_at: i64 = 0,
+    /// When the access token is over and when it is renewed, once dated.
+    times: ?struct { expires: Moment, renews: Moment } = null,
+    /// Counts the access tokens installed in this process.
+    generation: u64 = 0,
+    /// False once a logout could not delete the stored refresh token: its
+    /// marker is stored beside it, so nothing may send it any more.
+    renewable: bool = true,
 
     pub fn create(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Grant {
         const self = try allocator.create(Grant);
@@ -61,14 +81,25 @@ pub const Grant = struct {
     }
 };
 
-/// Concrete Account-owned secret lifetime. Requests are sent with their own
-/// copies, so nothing borrows what is held here beyond a main-thread call.
+/// What this process holds of the login. Only a commit changes it. Requests are
+/// sent with their own copies, so nothing borrows it beyond a main-thread call.
 pub const Credentials = struct {
     current: ?*Grant = null,
+    generation: u64 = 0,
 
     pub fn install(self: *Credentials, grant: *Grant) void {
-        self.clear();
+        self.drop();
+        if (grant.accessToken() != null) {
+            self.advance();
+            grant.generation = self.generation;
+        }
         self.current = grant;
+    }
+
+    pub fn end(self: *Credentials) void {
+        if (self.current == null) return;
+        self.drop();
+        self.advance();
     }
 
     /// An access token is held; a stored login may have none yet.
@@ -84,13 +115,18 @@ pub const Credentials = struct {
         return &(self.current orelse return null).refresh_token;
     }
 
-    pub fn clear(self: *Credentials) void {
+    pub fn deinit(self: *Credentials) void {
+        self.drop();
+    }
+
+    fn drop(self: *Credentials) void {
         if (self.current) |grant| grant.destroy();
         self.current = null;
     }
 
-    pub fn deinit(self: *Credentials) void {
-        self.clear();
+    fn advance(self: *Credentials) void {
+        self.generation +%= 1;
+        if (self.generation == 0) self.generation = 1;
     }
 };
 
@@ -129,6 +165,7 @@ test "credentials hold one grant and a stored login has no access token" {
     credentials.install(try TestSupport.issued(std.testing.allocator, "access-1", "refresh-1", 10));
     try std.testing.expectEqualStrings("access-1", credentials.accessToken().?);
     try std.testing.expectEqualStrings("refresh-1", credentials.refreshToken().?.view());
-    credentials.clear();
+    try std.testing.expectEqual(@as(u64, 1), credentials.current.?.generation);
+    credentials.end();
     try std.testing.expect(!credentials.available() and credentials.current == null);
 }

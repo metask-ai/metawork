@@ -453,6 +453,8 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         account.TestSupport.detachPlatform(&account_runtime);
         account_runtime.deinit();
     }
+    control.setAccountProjectionCredentials(account_runtime.accessTokenProjection());
+    defer control.clearAccountProjectionCredentials();
     var accounts = account_coordinator.Coordinator.init(&account_runtime, control.accountCommitSink(), std.Thread.getCurrentId());
     var coordinator = coordinator_api.Coordinator.init(accounts.credentialSource(), .{ .context = &network, .perform_fn = Network.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
     var catalog_timer: CatalogRetryTimer = .{};
@@ -639,11 +641,8 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         return;
     }
     if (scenario == .logout) {
-        // Logging out drops the credential one turn before it commits.
         try std.testing.expect(accounts.commandSink().submit(.logout).accepted);
-        try std.testing.expectEqual(.authenticated, account_runtime.view().state);
-        try expectBlockedFor(&control, old_id, "logging-out", .metask_authorization_required);
-        accounts.drain();
+        try std.testing.expectEqual(.signed_out, account_runtime.view().state);
         try expectBlockedFor(&control, old_id, "logged-out", .metask_authorization_required);
         network.expected_access = access_b;
         try relogin(&accounts);
@@ -1437,11 +1436,13 @@ fn restartAccount(
 ) !void {
     try platform.setStoredRefreshToken("synthetic-lifecycle-refresh-a");
     const runtime = accounts.runtime;
+    control.clearAccountProjectionCredentials();
     account.TestSupport.detachPlatform(runtime);
     runtime.deinit();
     runtime.* = account.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = network, .perform_fn = Network.refresh, .retire_fn = account.retireNothing }, account.TestSupport.loopbackEndpoint(), .{ .context = network, .notify_fn = Network.wake });
+    control.setAccountProjectionCredentials(runtime.accessTokenProjection());
     // Only a real restart also starts Product and Models again.
-    runtime.authorization_generation = 100;
+    runtime.credentials.generation = 100;
     accounts.* = account_coordinator.Coordinator.init(runtime, control.accountCommitSink(), std.Thread.getCurrentId());
     accounts.setCredentialRenewal(control.metaskCredentialRenewal());
     accounts.setFollower(fixture.catalogFollower(coordinator));
