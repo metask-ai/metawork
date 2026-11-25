@@ -3161,3 +3161,326 @@ test("opening a project preserves the unscoped draft when the project draft alre
   );
   assert.equal(fixture.textarea.value, "Keep the unscoped draft");
 });
+
+for (const path of ["fresh", "lost", "not-created"]) {
+  test(
+    "Inbox handoff takes the verified task into the workbench: " + path,
+    async (ctx) => {
+      const fixture = await renderSubmissionApp(ctx, { newTask: true });
+      window.localStorage.clear();
+      ctx.after(() => window.localStorage.clear());
+      const { BridgeClient } = await vite.ssrLoadModule(
+        "/src/bridge/client.ts",
+      );
+      const account = "a".repeat(64);
+      const storeId = "c".repeat(32);
+      const message = {
+        id: "9",
+        direction: "in",
+        fromPeerId: "ann",
+        fromName: "Ann",
+        fromAgent: "Writer",
+        text: "First\r\n\nSecond",
+        isNew: false,
+        recipients: [],
+        truncated: false,
+        sentAtMs: "1700000000000",
+        taskIds: ["old"],
+      };
+      const remote = {
+        id: "new",
+        canLink: true,
+        name: "Review fixtures",
+        progress: "doing",
+        state: null,
+        path: "Metawork / Review fixtures",
+        description: "Check fixture coverage.\r\nKeep the existing cases.",
+        assignees: ["Ann"],
+        createdBy: null,
+        updatedAtMs: null,
+        lastNote:
+          path === "fresh"
+            ? {
+                text: "Review the updated fixtures.\u2028Assignment withdrawn.",
+                by: "Bob",
+                atMs: "1700000000000",
+              }
+            : null,
+        notes: [
+          {
+            text: "Review the updated fixtures.",
+            by: "Bob",
+            atMs: "1700000000000",
+          },
+        ],
+        children: [],
+      };
+      const calls = [];
+      for (const [name, fn] of Object.entries({
+        listInboxPeople: async () => ({
+          state: "ready",
+          people: [{ id: "ann", name: "Ann", username: "ann" }],
+        }),
+        refreshInbox: async () => ({ outcome: "accepted" }),
+        readInboxConversation: async () => ({
+          state: "ready",
+          peerId: "ann",
+          messages: [
+            message,
+            {
+              ...message,
+              id: "10",
+              text: "A different handover message",
+              sentAtMs: "1700000001000",
+            },
+          ],
+          hasEarlier: false,
+        }),
+        readInboxTask: async () => ({
+          state: "ready",
+          requestId: "4",
+          task: remote,
+          file: null,
+          project: null,
+        }),
+        handoffSessions: async () => ({
+          storeId,
+          sessions: fixture.creations()
+            ? [{ taskId: fixture.task.id, preferred: true }]
+            : [],
+        }),
+        reconcileHandoff: async (draft) => {
+          calls.push(draft);
+          return path === "not-created" ? null : fixture.task.id;
+        },
+      }))
+        ctx.mock.method(BridgeClient.prototype, name, fn);
+      Object.assign(fixture.snapshot.inbox, {
+        state: "ready",
+        binding: "1",
+        accountScope: account,
+        unreadTotal: "0",
+        conversationsLoaded: true,
+        conversations: [
+          {
+            peerId: "ann",
+            name: "Ann",
+            username: "ann",
+            unread: "0",
+            lastAtMs: null,
+            latest: {
+              id: "9",
+              direction: "in",
+              preview: "First",
+              sentAtMs: message.sentAtMs,
+            },
+          },
+        ],
+      });
+      await fixture.publish();
+      const user = userEvent.setup({ document });
+      await user.click(screen.getByRole("button", { name: /^Messages/ }));
+      await user.click(await screen.findByRole("button", { name: /^Ann/ }));
+      await user.click(
+        (
+          await screen.findAllByRole("button", {
+            name: "Review fixtures Task #new",
+          })
+        )[0],
+      );
+      await user.click(
+        await screen.findByRole("button", { name: "Start a work session" }),
+      );
+      let area = document.querySelector(".composer-bar textarea");
+      const prompt = area.value;
+      assert.equal(
+        prompt,
+        "Check the latest progress on MetaTeam task #new, then continue working on it.",
+      );
+      const quoteCheckbox = () =>
+        screen.getByRole("checkbox", { name: "Quote original message" });
+      function assertSessionComposer() {
+        assert.equal(screen.queryByText("Source task"), null);
+        assert.equal(
+          screen.queryByRole("checkbox", { name: "Quote original message" }),
+          null,
+        );
+      }
+      assert.equal(quoteCheckbox().checked, false);
+      const source = screen.getByText("Source task").parentElement;
+      assert.ok(area.closest(".ai-composer").contains(source));
+      assert.match(source.textContent, /Review fixtures.*#new/);
+      if (path === "fresh") {
+        await user.click(quoteCheckbox());
+        const edited = "Review the examples I selected.";
+        fireEvent.change(area, { target: { value: edited } });
+        assert.match(
+          screen.getByRole("blockquote").textContent,
+          /> Ann · Agent Writer · .*#new\n> First\n> \n> Second$/,
+        );
+        await user.click(quoteCheckbox());
+        assert.equal(screen.queryByRole("blockquote"), null);
+        assert.equal(area.value, edited);
+        await user.click(quoteCheckbox());
+        assert.equal(fixture.creations(), 0);
+        // Reopening the same draft through another card keeps the original reference.
+        await user.click(screen.getByRole("button", { name: /^Messages/ }));
+        await user.click(await screen.findByRole("button", { name: /^Ann/ }));
+        await user.click(
+          (await screen.findAllByRole("button", { name: "Resume draft" }))[1],
+        );
+        area = document.querySelector(".composer-bar textarea");
+        assert.equal(quoteCheckbox().checked, true);
+        assert.match(screen.getByRole("blockquote").textContent, /> Second$/);
+        assert.equal(area.value, edited);
+        await user.click(screen.getByRole("button", { name: /^Messages/ }));
+        await user.click(await screen.findByRole("button", { name: /^Ann/ }));
+        await user.click(
+          (
+            await screen.findAllByRole("button", {
+              name: "Review fixtures Task #new",
+            })
+          )[1],
+        );
+        await user.click(
+          await screen.findByRole("button", { name: "Other options" }),
+        );
+        await user.click(
+          await screen.findByRole("menuitem", {
+            name: "Start another session",
+          }),
+        );
+        area = document.querySelector(".composer-bar textarea");
+        assert.equal(area.value, prompt);
+        assert.equal(quoteCheckbox().checked, false);
+        await user.click(quoteCheckbox());
+        assert.match(
+          screen.getByRole("blockquote").textContent,
+          /\n> A different handover message$/,
+        );
+        assert.doesNotMatch(
+          screen.getByRole("blockquote").textContent,
+          /> First/,
+        );
+      } else if (path === "lost") {
+        await user.click(quoteCheckbox());
+      }
+      const submitted =
+        area.value +
+        (quoteCheckbox().checked
+          ? "\n\n" + screen.getByRole("blockquote").textContent
+          : "");
+      assert.equal(fixture.creations(), 0);
+      await selectManualSubmissionWorkspace(user);
+      fireEvent.keyDown(area, { key: "Enter", code: "Enter" });
+      await waitFor(() => assert.equal(fixture.creations(), 1));
+      const creation = fixture.createRequests[0][6];
+      assert.deepEqual(creation.source, {
+        account,
+        binding: "1",
+        referenced: "old",
+        canonical: "new",
+      });
+      assert.equal(creation.storeId, storeId);
+      assert.match(creation.operationId, /^[a-f0-9]{32}$/);
+      if (path === "fresh") {
+        await fixture.created();
+        await waitFor(() => assert.equal(fixture.inputs.length, 1));
+        assert.equal(fixture.inputs[0][2].text, submitted);
+        fixture.snapshot.tasks = [fixture.task];
+        await fixture.publish();
+        assertSessionComposer();
+        await fixture.settle();
+        await user.click(screen.getByRole("button", { name: /^Messages/ }));
+        await user.click(await screen.findByRole("button", { name: /^Ann/ }));
+        await user.click(
+          (
+            await screen.findAllByRole("button", {
+              name: /Continue in workbench/,
+            })
+          )[0],
+        );
+        await waitFor(() =>
+          assert.ok(document.querySelector(".composer-bar textarea")),
+        );
+        assertSessionComposer();
+        const followup = document.querySelector(".composer-bar textarea");
+        fireEvent.change(followup, {
+          target: { value: "Continue the analysis" },
+        });
+        fireEvent.keyDown(followup, { key: "Enter", code: "Enter" });
+        await waitFor(() => assert.equal(fixture.inputs.length, 2));
+        assert.equal(fixture.inputs[1][2].text, "Continue the analysis");
+        assertSessionComposer();
+      } else {
+        await fixture.loseCreationReply();
+        const check = await screen.findByRole("button", {
+          name: "Check creation result",
+        });
+        assert.equal(fixture.inputs.length, 0);
+        assert.equal(area.disabled || area.readOnly, true);
+        if (path === "lost") fixture.snapshot.tasks = [fixture.task];
+        await user.click(check);
+        await waitFor(() => assert.equal(calls.length, 1));
+        await fixture.publish();
+        assert.equal(calls[0].operationId, creation.operationId);
+        if (path === "not-created") {
+          assert.equal(fixture.creations(), 1);
+          assert.equal(fixture.inputs.length, 0);
+          await waitFor(() =>
+            assert.equal(area.disabled || area.readOnly, false),
+          );
+          assert.equal(quoteCheckbox().checked, false);
+          await user.click(quoteCheckbox());
+          await user.click(quoteCheckbox());
+          fireEvent.keyDown(area, { key: "Enter", code: "Enter" });
+          await waitFor(() => assert.equal(fixture.creations(), 2));
+          assert.equal(
+            fixture.createRequests[1][6].operationId,
+            creation.operationId,
+          );
+          await fixture.created(fixture.task, 1);
+          await waitFor(() => assert.equal(fixture.inputs.length, 1));
+          fixture.snapshot.tasks = [fixture.task];
+          await fixture.publish();
+          assertSessionComposer();
+          assert.equal(fixture.inputs[0][2].text, prompt);
+          fixture.task.inputSubmissions = [
+            {
+              submission: {
+                operationId: fixture.operationIds[0],
+                receivedAtUnixMs: null,
+                presentationOrder: null,
+                anchorRunId: null,
+                afterOutputCount: 0,
+              },
+              input: { kind: "text", text: prompt, redacted: false },
+              state: "waiting",
+              reason: null,
+            },
+          ];
+          await fixture.settle(new Error("input receipt lost"));
+          await fixture.publish();
+          await waitFor(() => assert.ok(!screen.queryByText("Source task")));
+          return;
+        }
+        assert.equal(fixture.creations(), 1);
+        assert.equal(fixture.inputs.length, 0);
+        await waitFor(() =>
+          assert.equal(
+            document.querySelector(".composer-bar textarea").value,
+            submitted,
+          ),
+        );
+        assertSessionComposer();
+        const recovered = document.querySelector(".composer-bar textarea");
+        assert.match(recovered.value, /> First\n> \n> Second$/);
+        assert.equal(fixture.inputs.length, 0);
+        fireEvent.keyDown(recovered, { key: "Enter", code: "Enter" });
+        await waitFor(() => assert.equal(fixture.inputs.length, 1));
+        await fixture.settle({ accepted: false, reason: "capacity_reached" });
+        assertSessionComposer();
+      }
+    },
+  );
+}

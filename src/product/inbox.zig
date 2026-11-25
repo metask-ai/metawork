@@ -10,6 +10,7 @@ const update = @import("metawork_product_update");
 
 pub const database_name = "message.sqlite";
 pub const database_schema = @embedFile("message/schema.sql");
+pub const binding_owner_schema = @embedFile("message/binding_owner.sql");
 
 pub const Limits = struct {
     /// Response bodies are parsed whole. These bound what is read from the
@@ -532,6 +533,7 @@ pub const Child = struct {
 
 pub const TaskFacts = struct {
     id: ?Id,
+    verified_kind: bool = false,
     name: []const u8,
     progress: ?[]const u8,
     state: ?[]const u8,
@@ -597,6 +599,14 @@ pub const Detail = struct {
         file: FileFacts,
         project: ProjectFacts,
     },
+
+    /// The display view tolerates absent metadata. Linking a local Task needs
+    /// positive evidence of both the kind and the current remote identifier.
+    pub fn verifiedTaskId(self: *const Detail) ?Id {
+        if (self.kind != .task or !self.kind.task.verified_kind) return null;
+        const id = self.kind.task.id orelse return null;
+        return if (validTaskId(id.slice())) id else null;
+    }
 
     pub fn deinit(self: *Detail) void {
         self.arena.deinit();
@@ -935,7 +945,15 @@ pub fn parseDetail(allocator: std.mem.Allocator, bytes: []const u8) ParseError!D
             if (seen.id.eql(child_id.slice())) break;
         } else try children.append(a, .{ .id = child_id, .name = child_name, .progress = nonEmptyString(field(entry.object, "progress")) });
     };
+    const progress = nonEmptyString(field(object, "progress"));
+    const Progress = enum { plan, todo, doing, done };
+    const verified_kind = if (field(object, "type") != null)
+        declared == .task
+    else
+        progress != null and std.meta.stringToEnum(Progress, progress.?) != null and
+            field(object, "files") == null and field(object, "fileTags") == null;
     return .{ .arena = arena, .kind = .{ .task = .{
+        .verified_kind = verified_kind,
         .id = id,
         .name = name,
         .progress = nonEmptyString(field(object, "progress")),
@@ -1154,9 +1172,35 @@ pub const Failure = union(enum) {
 /// exact connection it had when found. A different fingerprint is a different
 /// binding even for the same server.
 pub const BindingKey = struct {
+    /// Digest of the service base only. Device replacement preserves this.
+    service: ?[32]u8 = null,
     server_id: []const u8,
     fingerprint: [64]u8,
 };
+
+pub fn serviceIdentity(base: []const u8) ?[32]u8 {
+    const uri = std.Uri.parse(base) catch return null;
+    const address = uri.host orelse return null;
+    const tls = std.ascii.eqlIgnoreCase(uri.scheme, "https");
+    if (!tls and !std.ascii.eqlIgnoreCase(uri.scheme, "http")) return null;
+    if (uri.user != null or uri.password != null or uri.query != null or uri.fragment != null) return null;
+    var digest = std.crypto.hash.sha2.Sha256.init(.{});
+    digest.update(if (tls) "https:" else "http:");
+    const host = switch (address) {
+        inline else => |value| value,
+    };
+    for (host) |c| digest.update(&.{std.ascii.toLower(c)});
+    var port: [2]u8 = undefined;
+    std.mem.writeInt(u16, &port, uri.port orelse if (tls) @as(u16, 443) else 80, .big);
+    digest.update(&.{0});
+    digest.update(&port);
+    digest.update(switch (uri.path) {
+        inline else => |value| value,
+    });
+    return digest.finalResult();
+}
+
+pub const VerifiedTask = struct { requested: Id, canonical: Id };
 
 pub const ListPreparation = struct {
     id: u64,
@@ -1230,6 +1274,7 @@ pub const ConversationView = struct {
 
 /// Borrowed, key-free and URL-free projection; serialize from the main thread.
 pub const View = struct {
+    accountScope: ?[]const u8 = null,
     binding: U64,
     state: State,
     unreadTotal: ?U64,
@@ -1254,6 +1299,9 @@ pub const Runtime = struct {
     active: bool = false,
     unread_total: ?u64 = null,
     owner_id: ?Id = null,
+    service: ?[32]u8 = null,
+    account_scope: ?[64]u8 = null,
+    verified_task: ?VerifiedTask = null,
     by_peer: std.ArrayList(PeerUnread) = .empty,
     summaries: std.ArrayList(Summary) = .empty,
     rows: std.ArrayList(ConversationView) = .empty,
@@ -1303,6 +1351,9 @@ pub const Runtime = struct {
     fn clearData(self: *Runtime) void {
         self.unread_total = null;
         self.owner_id = null;
+        self.service = null;
+        self.account_scope = null;
+        self.verified_task = null;
         self.by_peer.clearRetainingCapacity();
         self.summaries.clearRetainingCapacity();
         self.list_loaded = false;
@@ -1333,6 +1384,7 @@ pub const Runtime = struct {
             self.bound = true;
             self.server_id = server_id;
             self.fingerprint = value.fingerprint;
+            self.service = value.service;
             self.binding +%= 1;
             self.state = .checking;
             self.next_poll_ms = now_ms;
@@ -1432,6 +1484,9 @@ pub const Runtime = struct {
         switch (failure) {
             .reauthorize => {
                 self.state = .reauthorize;
+                self.verified_task = null;
+                self.account_scope = null;
+                self.owner_id = null;
                 self.diagnostic = null;
                 self.next_poll_ms = null;
                 self.list_requested = false;
@@ -1543,11 +1598,30 @@ pub const Runtime = struct {
 
     /// Unread facts can arrive before the directory identifies this device.
     pub fn setOwner(self: *Runtime, binding: u64, id: Id) !bool {
-        if (!self.accepts(binding)) return false;
-        self.owner_id = id;
-        if (!self.normalizeSelfUnread()) return false;
+        if (!self.accepts(binding) or self.state == .reauthorize) return false;
+        const changed = self.owner_id == null or !self.owner_id.?.eql(id.slice());
+        if (changed) {
+            self.verified_task = null;
+            self.owner_id = id;
+            if (self.service) |service| {
+                var digest = std.crypto.hash.sha2.Sha256.init(.{});
+                digest.update(&service);
+                digest.update(id.slice());
+                self.account_scope = std.fmt.bytesToHex(digest.finalResult(), .lower);
+            }
+        }
+        if (!self.normalizeSelfUnread()) return changed;
         try self.rebuild();
         return true;
+    }
+
+    pub fn recordDetail(self: *Runtime, binding: u64, requested: Id, canonical: ?Id) bool {
+        if (!self.accepts(binding)) return false;
+        self.verified_task = if (self.account_scope != null and self.state != .reauthorize and canonical != null)
+            .{ .requested = requested, .canonical = canonical.? }
+        else
+            null;
+        return self.verified_task != null;
     }
 
     fn normalizeSelfUnread(self: *Runtime) bool {
@@ -1637,6 +1711,7 @@ pub const Runtime = struct {
         return .{
             .binding = .{ .value = self.binding },
             .state = self.state,
+            .accountScope = if (self.account_scope) |*scope| scope else null,
             .unreadTotal = if (counted) if (self.unread_total) |total| U64{ .value = total } else null else null,
             .syncedAtMs = if (self.synced_at_ms) |at| U64{ .value = at } else null,
             .conversations = self.rows.items,
@@ -1705,6 +1780,7 @@ pub const ChildView = struct {
 
 pub const TaskView = struct {
     id: []const u8,
+    canLink: bool = false,
     name: []const u8,
     progress: ?[]const u8,
     state: ?[]const u8,
@@ -1875,6 +1951,7 @@ pub const Management = struct {
     begin_list_fn: *const fn (*anyopaque) ?ListPreparation,
     complete_list_fn: *const fn (*anyopaque, u64, u64, ListCompletion) void,
     knows_peer_fn: *const fn (*anyopaque, u64, []const u8) bool,
+    record_detail_fn: *const fn (*anyopaque, u64, Id, ?Id) bool,
     set_owner_fn: *const fn (*anyopaque, u64, Id) void,
     accepts_fn: *const fn (*anyopaque, u64) bool,
     peer_address_fn: *const fn (*anyopaque, u64, []const u8) ?Address,
@@ -2569,4 +2646,52 @@ test "messages to oneself belong to the me conversation and never break the page
     try testing.expectEqualStrings(self_peer_id, view.conversations[1].peerId);
     try testing.expectEqual(Direction.self, view.conversations[1].latest.?.direction);
     try testing.expect(runtime.knowsPeer(runtime.binding, self_peer_id));
+}
+
+test "workbench account proof survives device rotation and is cleared on a binding or owner change" {
+    const service = serviceIdentity("https://EXAMPLE.org:443/team").?;
+    try testing.expectEqual(service, serviceIdentity("HTTPS://example.org/team").?);
+    try testing.expect(!std.mem.eql(u8, &service, &serviceIdentity("https://example.org/Team").?));
+    try testing.expect(!std.mem.eql(u8, &service, &serviceIdentity("http://example.org/team").?));
+    var runtime = Runtime.init(testing.allocator);
+    defer runtime.deinit();
+    runtime.start(true);
+    const from = try Id.init("old");
+    const to = try Id.init("current");
+    const owner = try Id.init("one");
+    _ = try runtime.bind(0, .{ .server_id = "s", .fingerprint = @splat('a'), .service = service });
+    const first = runtime.binding;
+    try testing.expect(!runtime.recordDetail(first, from, to));
+    _ = try runtime.setOwner(first, owner);
+    const scope = runtime.account_scope.?;
+    try testing.expect(runtime.recordDetail(first, from, to));
+    _ = try runtime.bind(1, .{ .server_id = "s", .fingerprint = @splat('b'), .service = service });
+    try testing.expect(runtime.account_scope == null and runtime.verified_task == null);
+    try testing.expect(!try runtime.setOwner(first, owner));
+    _ = try runtime.setOwner(runtime.binding, owner);
+    try testing.expectEqual(scope, runtime.account_scope.?);
+    try testing.expect(runtime.recordDetail(runtime.binding, from, to));
+    _ = try runtime.setOwner(runtime.binding, try Id.init("two"));
+    try testing.expect(!std.mem.eql(u8, &scope, &runtime.account_scope.?) and runtime.verified_task == null);
+}
+
+test "workbench task identity requires a returned id and positive task evidence" {
+    const cases = [_]struct { []const u8, bool }{
+        .{ "{\"name\":\"T\",\"id\":5,\"type\":\"task\"}", true },
+        .{ "{\"name\":\"T\",\"id\":5,\"progress\":\"doing\"}", true },
+        .{ "{\"name\":\"T\",\"type\":\"task\"}", false },
+        .{ "{\"name\":\"T\",\"id\":5}", false },
+        .{ "{\"name\":\"T\",\"id\":5,\"progress\":null}", false },
+        .{ "{\"name\":\"T\",\"id\":5,\"type\":\"future\",\"progress\":\"doing\"}", false },
+        .{ "{\"name\":\"T\",\"id\":5,\"type\":\"file\",\"progress\":\"doing\"}", false },
+        .{ "{\"name\":\"T\",\"id\":5,\"type\":\"project\"}", false },
+        .{ "{\"name\":\"T\",\"id\":5,\"files\":[],\"progress\":\"doing\"}", false },
+    };
+    for (cases) |case| {
+        const json = try std.fmt.allocPrint(testing.allocator, "{{\"data\":{s}}}", .{case[0]});
+        defer testing.allocator.free(json);
+        var detail = try parseDetail(testing.allocator, json);
+        defer detail.deinit();
+        try testing.expectEqual(case[1], detail.verifiedTaskId() != null);
+    }
 }

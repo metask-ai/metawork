@@ -53,6 +53,7 @@ export const initialWorkbenchState: WorkbenchState = {
       downloadError: "none",
     },
     inbox: {
+      accountScope: null,
       binding: "0",
       state: "unavailable",
       unreadTotal: null,

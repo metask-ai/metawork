@@ -26,6 +26,21 @@ import {
   type HistoryGoal,
 } from "../workbench/history.ts";
 import { Message } from "../components/ai/Message.tsx";
+import { InboxHandoffProvider } from "../features/inbox/InboxHandoff.tsx";
+import {
+  handoffDraftKey,
+  matchingDrafts,
+  newHandoffDraft,
+  readHandoffDrafts,
+  removeHandoffDraft,
+  saveHandoffDraft,
+  type HandoffDraft,
+} from "../features/inbox/handoff-drafts.ts";
+import type {
+  HandoffSource,
+  InboxMessage,
+  InboxTaskView,
+} from "../bridge/contracts.ts";
 import { newComposerOperationId } from "../features/composer/drafts.ts";
 import {
   useCallback,
@@ -166,7 +181,7 @@ import {
 import {
   newTaskDraftStorageId,
   prepareRetryDraft,
-  prepareOutputEditDraft,
+  prepareReferenceDraft,
   remainingAttachmentFiles,
   unscopedNewTaskDraftId,
 } from "../features/composer/drafts.ts";
@@ -375,6 +390,16 @@ function taskPanelFile(tab: TaskPanelTab): MenuFile | null {
     : null;
 }
 
+function handoffInput(draft: ComposerDraft, handoff?: HandoffDraft) {
+  if (!handoff?.originalMessage?.included) return draft;
+  const result = prepareReferenceDraft(
+    draft,
+    handoff.originalMessage.quote,
+    "append",
+  );
+  return result.kind === "prepared" ? result.draft : null;
+}
+
 export default function App() {
   const { t } = useI18n();
   const inputRetryActions = useRef(new Set<string>());
@@ -530,6 +555,16 @@ export default function App() {
     useState<ApprovalMode | null>(null);
   const [newTaskRequestedModel, setNewTaskRequestedModel] =
     useState<ModelRef | null>(null);
+  const [handoffDrafts, setHandoffDrafts] = useState(readHandoffDrafts);
+  const [handoffId, setHandoffId] = useState<string | null>(null);
+  const [handoffNotice, setHandoffNotice] = useState<MessageId | null>(null);
+  const handoffRequest = useRef<string | null>(null);
+  const [handoffBusy, setHandoffBusy] = useState(false);
+  useEffect(() => {
+    const reload = () => setHandoffDrafts(readHandoffDrafts());
+    window.addEventListener("storage", reload);
+    return () => window.removeEventListener("storage", reload);
+  }, []);
   const composerCatalogRefreshPending = useRef(new Set<string>());
   const skillRefreshPending = useRef(false);
   const [skillRefreshRequest, setSkillRefreshRequest] = useState<{
@@ -1631,10 +1666,17 @@ export default function App() {
   const taskDrafts = useTaskDrafts(workbench.activeTaskId);
   const newTaskDraftActive =
     workbench.draftOpen || workbench.activeTaskId === null;
-  const newTaskDraftId = newTaskDraftStorageId(
-    newTaskDraftActive,
-    workbench.draftProjectId,
-  );
+  const handoff = newTaskDraftActive
+    ? handoffDrafts.find(
+        (d) =>
+          d.operationId === handoffId &&
+          d.source.account === snapshot.inbox.accountScope,
+      )
+    : undefined;
+  const handoffLocked = Boolean(handoff?.pendingWorkspace || handoffBusy);
+  const newTaskDraftId = handoff
+    ? handoffDraftKey(handoff.operationId)
+    : newTaskDraftStorageId(newTaskDraftActive, workbench.draftProjectId);
   const newTaskDrafts = useNewTaskDrafts(newTaskDraftId);
   const composerDraft = newTaskDraftActive
     ? newTaskDrafts.draft
@@ -1846,9 +1888,10 @@ export default function App() {
   const taskDraftActionContext = useRef(taskDraftAction);
   taskDraftActionContext.current = taskDraftAction;
   const draftDirectoryId =
-    newTaskDrafts.directory.kind === "explicit"
+    handoff?.pendingWorkspace ??
+    (newTaskDrafts.directory.kind === "explicit"
       ? newTaskDrafts.directory.workspaceId
-      : workbench.draftProjectId;
+      : workbench.draftProjectId);
   const composerWorkspaceId = newTaskDraftActive
     ? draftDirectoryId
     : (activeTask?.workspaceId ?? selectedTaskSummary?.workspaceId);
@@ -1893,13 +1936,16 @@ export default function App() {
   const skillDraftCurrent =
     draftSkillSelection(composerDraft) === null ||
     isSkillDraftCurrent(composerDraft, skillCatalog);
-  const composerRunInput = composerDraftToRunInput(currentComposerDraft);
+  const outgoingDraft = handoffInput(currentComposerDraft, handoff);
+  const composerRunInput =
+    outgoingDraft && composerDraftToRunInput(outgoingDraft);
   const newTaskModelState = newTaskModelSelectionState(
     snapshot.models,
-    newTaskRequestedModel,
+    handoff?.model ?? newTaskRequestedModel,
   );
   const composerContentReady =
-    composerDraftHasContent(composerDraft) &&
+    outgoingDraft !== null &&
+    composerDraftHasContent(outgoingDraft) &&
     composerRunInput !== null &&
     composerDraftWithinLimits(composerDraft) &&
     skillDraftCurrent;
@@ -1950,8 +1996,14 @@ export default function App() {
     snapshot.newTaskAdmission.available &&
     newTaskWorkspaceReady &&
     newTaskModelState.valid;
+  const handoffBlocksSubmission =
+    newTaskDraftActive &&
+    handoffId !== null &&
+    !taskIdentityPending &&
+    (!handoff || !composerWorkspace || handoffLocked);
   const canSubmit =
     taskCanCompose &&
+    !handoffBlocksSubmission &&
     composerContentReady &&
     !attachmentBusy &&
     !bridgeUnavailable &&
@@ -2501,6 +2553,8 @@ export default function App() {
   }, [workbench.activeTaskId, workbench.draftOpen]);
   const openNewTaskDraft = useCallback(
     (projectId: string | null) => {
+      setHandoffId(null);
+      setHandoffNotice(null);
       pendingTaskSelection.current = null;
       setNewTaskApprovalOverride(null);
       setNewTaskRequestedModel(null);
@@ -3103,6 +3157,7 @@ export default function App() {
     );
     return (
       !workbenchMutationDisabled &&
+      !handoffLocked &&
       !(session && !session.creationUnknown) &&
       !workspaceBusyRef.current
     );
@@ -3273,6 +3328,8 @@ export default function App() {
     await refreshSnapshot().catch(() => undefined);
   }
   function openTask(taskId: string) {
+    setHandoffId(null);
+    setHandoffNotice(null);
     pendingTaskSelection.current = null;
     setRoute("workbench");
     dispatchWorkbench({ type: "task.selected", taskId });
@@ -3304,6 +3361,161 @@ export default function App() {
       settingsRestoreFocus.current = null;
     });
   }
+  function rememberHandoff(draft: HandoffDraft) {
+    saveHandoffDraft(draft);
+    setHandoffDrafts(readHandoffDrafts());
+  }
+  const verifyDraftAliases = useCallback(
+    (source: HandoffSource, storeId: string, title: string) => {
+      try {
+        let changed = false;
+        const saved = readHandoffDrafts();
+        for (const draft of matchingDrafts(
+          saved,
+          source.account,
+          storeId,
+          source.referenced,
+          source.canonical,
+        )) {
+          if (draft.pendingWorkspace) continue;
+          const aliases = [
+            ...new Set([...draft.aliases, source.referenced, source.canonical]),
+          ];
+          if (
+            aliases.length === draft.aliases.length &&
+            draft.source.canonical === source.canonical &&
+            draft.title === title
+          )
+            continue;
+          saveHandoffDraft({
+            ...draft,
+            title,
+            aliases,
+            source: { ...draft.source, canonical: source.canonical },
+          });
+          changed = true;
+        }
+        if (changed) setHandoffDrafts(readHandoffDrafts());
+      } catch {
+        setHandoffNotice("handoff.store_failed");
+      }
+    },
+    [],
+  );
+  function showHandoffDraft(draft: HandoffDraft) {
+    pendingTaskSelection.current = null;
+    pendingTaskDraftSource.current = null;
+    inboxPage.closeTask();
+    setHandoffNotice(null);
+    setHandoffId(draft.operationId);
+    setNewTaskApprovalOverride(null);
+    setNewTaskRequestedModel(draft.model);
+    dispatchWorkbench({ type: "task.draft.opened", projectId: null });
+    setRoute("workbench");
+  }
+  function startHandoffDraft(
+    source: HandoffSource,
+    storeId: string,
+    task: InboxTaskView,
+    message?: InboxMessage,
+  ) {
+    const draft = newHandoffDraft(
+      newComposerOperationId(),
+      source,
+      storeId,
+      task.name,
+      message,
+    );
+    try {
+      const initial = {
+        kind: "text" as const,
+        text: t("handoff.task_prompt", { id: source.canonical }),
+      };
+      if (!composerDraftWithinLimits(initial)) {
+        setHandoffNotice("handoff.prompt_too_long");
+        return;
+      }
+      rememberHandoff(draft);
+      newTaskDrafts.setDraft(handoffDraftKey(draft.operationId), initial);
+      showHandoffDraft(draft);
+    } catch {
+      setHandoffNotice("handoff.store_failed");
+    }
+  }
+  function openLinkedSession(id: string) {
+    inboxPage.closeTask();
+    openTask(id);
+  }
+  function finishDraftCreation(
+    draft: HandoffDraft,
+    id: string,
+    recovered: boolean,
+  ) {
+    const key = handoffDraftKey(draft.operationId);
+    // A recovery transfers the unsent input only to an empty composer.
+    // If both drafts have edits, leave the source available for explicit use.
+    const recoveredInput = recovered
+      ? handoffInput(newTaskDrafts.getDraft(key), draft)
+      : null;
+    const keepSource =
+      recovered &&
+      (!recoveredInput || composerDraftHasContent(taskDrafts.getDraft(id)));
+    if (!keepSource) {
+      if (recoveredInput) taskDrafts.setDraft(id, recoveredInput);
+      removeHandoffDraft(draft.operationId);
+      newTaskDrafts.discardDraft(key);
+      setHandoffDrafts(readHandoffDrafts());
+    }
+    setHandoffId(null);
+    setHandoffNotice(
+      recovered && !recoveredInput
+        ? "handoff.quote_failed"
+        : keepSource
+          ? "handoff.both_drafts"
+          : recovered
+            ? "handoff.recovered"
+            : null,
+    );
+    pendingTaskDraftRetention.current.add(id);
+    pendingTaskDraftSource.current = null;
+    pendingTaskSelection.current = id;
+    setRoute("workbench");
+    void refreshSnapshot();
+  }
+  async function reconcileDraft() {
+    if (!handoff || !handoff.pendingWorkspace || handoffRequest.current) return;
+    const draft = handoff;
+    const generation = bridgeGenerationRef.current;
+    const scope = composerDraftScope;
+    const binding = snapshot.inbox.binding;
+    handoffRequest.current = draft.operationId;
+    setHandoffBusy(true);
+    try {
+      const id = await client.reconcileHandoff({
+        operationId: draft.operationId,
+        storeId: draft.storeId,
+        source: { ...draft.source, binding },
+      });
+      if (
+        generation !== bridgeGenerationRef.current ||
+        latestSnapshotRef.current?.inbox.accountScope !==
+          draft.source.account ||
+        composerDraftScopeRef.current !== scope ||
+        attachmentAudience.current.route !== "workbench"
+      )
+        return;
+      if (id) finishDraftCreation(draft, id, true);
+      else {
+        rememberHandoff({ ...draft, pendingWorkspace: null });
+        setHandoffNotice("handoff.not_created");
+      }
+    } catch {
+      setHandoffNotice("handoff.pending");
+    } finally {
+      handoffRequest.current = null;
+      setHandoffBusy(false);
+    }
+  }
   async function submitRun() {
     if (
       !canSubmit ||
@@ -3311,17 +3523,101 @@ export default function App() {
       attachmentRemoval.current.busy
     )
       return;
-    const submitted = reconcileSkillDraft(
-      composerDraftRef.current,
-      skillCatalog,
+    const submitted = handoffInput(
+      reconcileSkillDraft(composerDraftRef.current, skillCatalog),
+      handoff,
     );
+    if (!submitted) return;
     const input = composerDraftToRunInput(submitted);
     if (!input) return;
     const scope = composerDraftScope;
     const generation = bridgeGenerationRef.current;
     const operationId = newComposerOperationId();
     const draftId = newTaskDraftId;
-    const taskId = !newTaskDraftActive ? (activeTask?.id ?? null) : null;
+    let taskId = !newTaskDraftActive ? (activeTask?.id ?? null) : null;
+    if (handoff) {
+      if (
+        !composerWorkspace ||
+        !newTaskModelState.intent ||
+        handoff.pendingWorkspace ||
+        handoffRequest.current
+      )
+        return;
+      handoffRequest.current = handoff.operationId;
+      setHandoffBusy(true);
+      let issued = false;
+      const binding = snapshot.inbox.binding;
+      const current = () =>
+        bridgeGenerationRef.current === generation &&
+        composerDraftScopeRef.current === scope &&
+        latestSnapshotRef.current?.inbox.binding === binding &&
+        latestSnapshotRef.current.inbox.accountScope ===
+          handoff.source.account &&
+        attachmentAudience.current.route === "workbench";
+      try {
+        const detail = await client.readInboxTask(
+          binding,
+          handoff.source.referenced,
+        );
+        if (!current()) return;
+        if (
+          detail.state !== "ready" ||
+          !detail.task?.canLink ||
+          detail.task.id !== handoff.source.canonical
+        ) {
+          setHandoffNotice("handoff.stale");
+          return;
+        }
+        const source = {
+          ...handoff.source,
+          binding,
+          canonical: detail.task.id,
+        };
+        const pending = {
+          ...handoff,
+          source,
+          aliases: [...new Set([...handoff.aliases, source.canonical])],
+          model: newTaskModelState.intent.targetModelRef,
+          pendingWorkspace: composerWorkspace.id,
+        };
+        rememberHandoff(pending);
+        issued = true;
+        const created = await client.createTask(
+          {
+            kind: "manual",
+            workspaceId: composerWorkspace.id,
+            expectedWorkspaceEpoch: composerWorkspace.epoch,
+          },
+          newTaskModelState.intent,
+          runInputSkill(input)?.catalogRevision ?? null,
+          runInputSkill(input)?.selectionRevision ?? null,
+          newTaskApprovalMode,
+          composerWorkspace.projectEntry ? composerWorkspace.id : null,
+          {
+            source,
+            storeId: pending.storeId,
+            operationId: pending.operationId,
+          },
+        );
+        if (!created.accepted) {
+          rememberHandoff({ ...pending, pendingWorkspace: null });
+          if (current())
+            setHandoffNotice(mutationReasonMessageId(created.reason));
+          return;
+        }
+        if (!current()) return;
+        taskId = created.taskId;
+        finishDraftCreation(pending, taskId, Boolean(created.existing));
+        if (created.existing) return;
+      } catch {
+        if (current())
+          setHandoffNotice(issued ? "handoff.pending" : "handoff.unavailable");
+        return;
+      } finally {
+        handoffRequest.current = null;
+        setHandoffBusy(false);
+      }
+    }
     const key = `${generation}:${scope}`;
     const audience = attachmentAudience.current;
     let session = submissionSessions.current.get(key);
@@ -4506,7 +4802,7 @@ export default function App() {
       return "edit_unavailable";
     const draft = taskDrafts.currentDraft(taskId);
     if (!draft) return "edit_unavailable";
-    const prepared = prepareOutputEditDraft(
+    const prepared = prepareReferenceDraft(
       draft,
       t("outputs.edit_reference", { path: JSON.stringify(displayPath) }),
     );
@@ -4905,6 +5201,23 @@ export default function App() {
           },
         }
       : undefined;
+  const handoffStatus =
+    handoffNotice ??
+    (handoff?.pendingWorkspace
+      ? "handoff.pending"
+      : !outgoingDraft
+        ? "handoff.quote_failed"
+        : handoff && !composerWorkspace
+          ? "handoff.workdir"
+          : null);
+  const originalMessage = handoff?.originalMessage;
+  const composerLocked = Boolean(
+    handoffLocked ||
+    (selectedTaskSummary &&
+      (selectedTaskSummary.archived ||
+        selectedTaskSummary.deletionStatus === "deleting" ||
+        selectedTaskSummary.lifecycle === "closing")),
+  );
   const composerFooter = (
     <>
       {activeTask?.sessionCloseRetryAvailable && (
@@ -4986,7 +5299,71 @@ export default function App() {
       {activeTask && (
         <ConversationContext key={activeTask.id} context={activeTask.context} />
       )}
+      {handoffStatus && (
+        <div className="inbox-handoff-row" role="status">
+          {t(handoffStatus)}
+          {handoff?.pendingWorkspace && (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={handoffBusy || bridgeUnavailable}
+              onClick={() => void reconcileDraft()}
+            >
+              {t("handoff.check")}
+            </Button>
+          )}
+        </div>
+      )}
       <ComposerFooter
+        contextHeader={
+          handoff && (
+            <>
+              <div className="composer-task-source">
+                <span>{t("handoff.source_task")}</span>
+                {handoff.title && (
+                  <span
+                    className="composer-task-source-title"
+                    title={handoff.title}
+                  >
+                    {handoff.title}
+                  </span>
+                )}
+                <span>
+                  {t("inbox.item_number", { id: handoff.source.canonical })}
+                </span>
+                {originalMessage && (
+                  <label className="composer-source-quote">
+                    <input
+                      type="checkbox"
+                      checked={originalMessage.included}
+                      disabled={handoffLocked || !taskCanCompose}
+                      onChange={(event) => {
+                        try {
+                          rememberHandoff({
+                            ...handoff,
+                            originalMessage: {
+                              ...originalMessage,
+                              included: event.currentTarget.checked,
+                            },
+                          });
+                          setHandoffNotice(null);
+                        } catch {
+                          setHandoffNotice("handoff.store_failed");
+                        }
+                      }}
+                    />
+                    {t("handoff.quote")}
+                  </label>
+                )}
+              </div>
+              {originalMessage?.included && (
+                <blockquote className="composer-source-preview">
+                  {originalMessage.quote}
+                </blockquote>
+              )}
+            </>
+          )
+        }
         modelTriggerRef={composerModelTrigger}
         textareaRef={composer}
         sendDisabledReason={inputDisabledReason}
@@ -5035,12 +5412,7 @@ export default function App() {
         attachmentModelWarning={attachmentModelWarning}
         skillCatalog={skillCatalog}
         slashCommands={slashCommands}
-        composeDisabled={Boolean(
-          selectedTaskSummary &&
-          (selectedTaskSummary.archived ||
-            selectedTaskSummary.deletionStatus === "deleting" ||
-            selectedTaskSummary.lifecycle === "closing"),
-        )}
+        composeDisabled={composerLocked}
         attachmentActionsDisabled={bridgeUnavailable}
         canSubmit={canSubmit}
         runInFlight={Boolean(taskCanCompose && taskOperationInFlight)}
@@ -5094,7 +5466,8 @@ export default function App() {
             label: t("workspace.automatic_directory"),
             triggerLabel: t("workspace.select"),
             authorization: "available" as const,
-            disabled: !snapshot.capabilities.automaticWorkspaces,
+            disabled:
+              Boolean(handoff) || !snapshot.capabilities.automaticWorkspaces,
           },
           ...snapshot.workspaces
             .filter((workspace) => workspace.kind === "manual")
@@ -5110,7 +5483,7 @@ export default function App() {
             : ""
         }
         workspaceEditable={newTaskDraftActive}
-        workspaceSelectionPending={taskIdentityPending}
+        workspaceSelectionPending={taskIdentityPending || handoffLocked}
         modelLabel={
           newTaskDraftActive
             ? setupNotice?.action === "start" &&
@@ -5133,10 +5506,13 @@ export default function App() {
         }
         modelEditable={
           newTaskDraftActive
-            ? newTaskModelState.editable && !taskIdentityPending
+            ? newTaskModelState.editable &&
+              !taskIdentityPending &&
+              !handoffLocked
             : taskModelPolicy.showsSelector
         }
         modelSelectionDisabled={
+          handoffLocked ||
           bridgeUnavailable ||
           (newTaskDraftActive
             ? newTaskModelState.options.length === 0
@@ -5252,6 +5628,14 @@ export default function App() {
             );
             if (option && beginDraftContextChange()) {
               retireUnknownDraftSubmission();
+              if (handoff) {
+                try {
+                  rememberHandoff({ ...handoff, model: option.modelRef });
+                } catch {
+                  setHandoffNotice("handoff.store_failed");
+                  return;
+                }
+              }
               setNewTaskRequestedModel(option.modelRef);
             }
             return;
@@ -6084,11 +6468,36 @@ export default function App() {
       }
     >
       {inboxOpen ? (
-        <InboxMain
-          inbox={snapshot.inbox}
-          controller={inboxPage}
-          onOpenConnectors={() => openWorkbenchPage("mcp")}
-        />
+        <InboxHandoffProvider
+          client={client}
+          account={snapshot.inbox.accountScope}
+          binding={snapshot.inbox.binding}
+          tasks={snapshot.taskIndex}
+          workspaces={snapshot.workspaces}
+          drafts={handoffDrafts}
+          ids={[
+            ...(inboxPage.conversation?.messages.flatMap((m) => m.taskIds) ??
+              []),
+            ...(inboxPage.task ? [inboxPage.task.taskId] : []),
+          ]}
+          revision={[
+            bridgeGeneration,
+            snapshot.historyEpoch,
+            snapshot.blockVersions.taskIndex,
+            inboxPage.task?.detail?.requestId,
+          ].join("/")}
+          onVerify={verifyDraftAliases}
+          onOpen={openLinkedSession}
+          onCreate={startHandoffDraft}
+          onResume={showHandoffDraft}
+        >
+          {handoffNotice && <p role="status">{t(handoffNotice)}</p>}
+          <InboxMain
+            inbox={snapshot.inbox}
+            controller={inboxPage}
+            onOpenConnectors={() => openWorkbenchPage("mcp")}
+          />
+        </InboxHandoffProvider>
       ) : route === "skills" ? (
         snapshot.skillManagement ? (
           <SkillsPage

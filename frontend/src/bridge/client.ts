@@ -45,6 +45,8 @@ import type {
   NotificationTextRegistration,
   InboxConversationPage,
   InboxTaskDetail,
+  HandoffSource,
+  HandoffCreate,
   InboxFileOpen,
   InboxSendResult,
   InboxSendTarget,
@@ -64,6 +66,9 @@ import {
   decodeInboxCommandResult,
   decodeInboxConversationPage,
   decodeInboxTaskDetail,
+  decodeHandoffSessions,
+  decodeHandoffReceipt,
+  assertHandoffSaved,
   decodeInboxFileOpen,
   decodeInboxSendResult,
   decodeInboxPeople,
@@ -1243,6 +1248,45 @@ export class BridgeClient {
       await this.invoke(commands.accountLogout, {}),
     );
   }
+  async handoffSessions(binding: string, account: string, referenced: string) {
+    return decodeHandoffSessions(
+      await this.invoke(commands.taskHandoff, {
+        action: "list",
+        binding,
+        account,
+        referenced,
+      }),
+    );
+  }
+  async reconcileHandoff({ source, operationId, storeId }: HandoffCreate) {
+    const { binding, account, referenced } = source;
+    return decodeHandoffReceipt(
+      await this.invoke(commands.taskHandoff, {
+        action: "reconcile",
+        binding,
+        account,
+        referenced,
+        operationId,
+        storeId,
+      }),
+    );
+  }
+  async changeHandoff(
+    source: HandoffSource,
+    storeId: string,
+    action: "link" | "prefer" | "unlink",
+    taskId: string,
+  ) {
+    assertHandoffSaved(
+      await this.invoke(commands.taskHandoff, {
+        ...source,
+        storeId,
+        action,
+        taskId,
+      }),
+    );
+  }
+
   async createTask(
     workspace: TaskWorkspaceIntent,
     modelSelection: NewTaskModelSelectionIntent,
@@ -1250,9 +1294,11 @@ export class BridgeClient {
     expectedSkillSelectionRevision: string | null,
     approvalMode: ApprovalMode,
     projectId: string | null,
+    handoff?: HandoffCreate,
   ) {
     return decodeTaskCreateResult(
       await this.invoke(commands.createTask, {
+        ...(handoff ? { handoff } : {}),
         workspace,
         projectId,
         modelSelection,

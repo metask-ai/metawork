@@ -8106,6 +8106,48 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   }
 }
 
+.composer-task-source {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px 0;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+}
+
+.composer-task-source > span {
+  white-space: nowrap;
+}
+
+.composer-task-source-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-source-quote {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  margin-inline-start: auto;
+  cursor: pointer;
+}
+.composer-source-quote input {
+  accent-color: var(--ui-content-primary);
+}
+.composer-source-preview {
+  margin: 6px 12px 0;
+  padding-inline-start: 8px;
+  border-inline-start: 2px solid var(--ui-border);
+  max-height: 5em;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+}
+
 .ai-composer textarea {
   display: block;
   width: 100%;

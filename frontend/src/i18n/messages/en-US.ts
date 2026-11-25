@@ -33,6 +33,10 @@ export const enUS = {
     "Your model preference could not be saved. Confirmed task choices are unchanged.",
   "mutation.reason.schedule_persistence_unavailable":
     "Schedule storage is unavailable. Open Scheduled tasks to recover it before trying again.",
+  "mutation.reason.handoff_changed":
+    "The task or account changed. Reopen task details.",
+  "mutation.reason.history_unavailable":
+    "Session history could not be saved. Try again shortly.",
   "mutation.reason.schedule_persistence_failed":
     "Schedule storage could not be updated. Open Scheduled tasks to recover it before trying again.",
   "mutation.reason.schedule_persistence_outcome_unknown":
@@ -256,13 +260,18 @@ export const enUS = {
   "inbox.list_separator": ", ",
   "inbox.message_truncated":
     "This message is too long; only its beginning is shown.",
-  "inbox.linked_item": "Linked item",
+  "inbox.attachment_unknown": "Linked item #{id}",
+  "inbox.attachment_task": "Task #{id}",
+  "inbox.attachment_file": "File #{id}",
+  "inbox.attachment_project": "Project #{id}",
   "inbox.item_number": "#{id}",
   "inbox.detail_back": "Back",
   "inbox.task_state": "State",
   "inbox.task_created_by": "Created by",
   "inbox.task_last_note": "Latest note",
-  "inbox.task_notes": "Notes",
+  "inbox.task_notes": "Earlier notes",
+  "inbox.task_more": "More information",
+  "inbox.task_description": "Task description",
   "inbox.task_children": "Sub-tasks",
   "inbox.progress_plan": "Unclaimed",
   "inbox.progress_todo": "To do",
@@ -287,6 +296,48 @@ export const enUS = {
   "inbox.project_files": "Files",
   "inbox.project_no_files": "No files.",
   "inbox.project_files_more": "More files exist than are shown.",
+  "handoff.both_drafts":
+    "The session already has a draft. Finish that draft, then return to the message to retrieve this one.",
+  "handoff.unavailable": "Local session links are unavailable",
+  "handoff.loading": "Loading work sessions…",
+  "handoff.history": "View history",
+  "handoff.reauthorize": "Open session and check directory",
+  "handoff.continue": "Continue in workbench",
+  "handoff.choose": "Choose a session or draft",
+  "handoff.choose_session": "Choose session",
+  "handoff.default": "Default",
+  "handoff.quote": "Quote original message",
+  "handoff.prefer": "Set as default",
+  "handoff.unlink": "Unlink",
+  "handoff.resume": "Resume draft",
+  "handoff.another": "Start another session",
+  "handoff.new": "Start a work session",
+  "handoff.link": "Link session",
+  "handoff.pick": "Choose an existing session",
+  "handoff.other": "Other options",
+  "handoff.search": "Search sessions or directories",
+  "handoff.confirm_open": "Confirm link and open",
+  "handoff.no_matches": "No matching sessions",
+  "handoff.no_candidates": "No work sessions available to link",
+  "handoff.change_failed":
+    "Could not confirm the change. Reopen details to check.",
+  "handoff.workdir": "Choose a working directory to send.",
+  "handoff.source_task": "Source task",
+  "handoff.task_prompt":
+    "Check the latest progress on MetaTeam task #{id}, then continue working on it.",
+  "handoff.prompt_too_long":
+    "The suggested prompt exceeds the input limit for a work session draft.",
+  "handoff.pending":
+    "The creation result is unconfirmed. The directory and model are locked.",
+  "handoff.check": "Check creation result",
+  "handoff.store_failed": "The draft could not be saved. Check local storage.",
+  "handoff.quote_failed":
+    "The current draft cannot accept this quote. Your draft was preserved.",
+  "handoff.stale":
+    "The task or account has changed. Reopen the message details.",
+  "handoff.recovered":
+    "Work session found. Review the input in that session before sending.",
+  "handoff.not_created": "No session was created. You can edit and send again.",
   "inbox.task_loading": "Reading the task…",
   "inbox.task_failed": "This task can't be read right now.",
   "inbox.task_forbidden": "This device may not view this task.",
@@ -294,7 +345,7 @@ export const enUS = {
     "MetaTeam can't find this task; it may have been deleted.",
   "inbox.task_id": "Number",
   "inbox.task_status": "Progress",
-  "inbox.task_assignees": "Assignees",
+  "inbox.task_assignees": "Assigned to {names}",
   "inbox.task_path": "Location",
   "inbox.task_updated": "Updated",
   "app.resize_sidebar": "Resize task sidebar",

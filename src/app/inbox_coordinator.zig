@@ -251,6 +251,7 @@ const Job = struct {
     page_mutex: *std.Io.Mutex,
     list_arena: std.heap.ArenaAllocator,
     local_list: ?inbox.ListPage = null,
+    cached_owner: ?inbox.Id = null,
     cached_has_earlier: ?bool = null,
     work: Work,
     cancellation: http.Cancellation,
@@ -303,6 +304,7 @@ const Job = struct {
             },
             .list => |preparation| {
                 const cache = self.cache orelse return error.CacheUnavailable;
+                if (preparation.anchor == null) self.cached_owner = cache.knownOwner() catch null;
                 self.local_list = try cache.list(self.list_arena.allocator(), preparation.anchor);
             },
             .conversation => |work| {
@@ -392,6 +394,7 @@ const Job = struct {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidResponse => return self.unusable(.identity, brief.len),
                 };
+                if (self.cache) |cache| cache.rememberOwner(owner.id) catch {};
                 const body = (self.fetch(.people, buffer) catch return self.unusable(.people, 0)) orelse return;
                 self.people = inbox.parsePeople(self.allocator, body, owner) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -607,7 +610,7 @@ pub const Coordinator = struct {
             },
             .found => |found_value| {
                 var found = found_value;
-                self.management.bind_fn(self.management.context, self.now(), .{ .server_id = found.server_id, .fingerprint = found.fingerprint });
+                self.management.bind_fn(self.management.context, self.now(), .{ .server_id = found.server_id, .fingerprint = found.fingerprint, .service = inbox.serviceIdentity(found.base) });
                 const revision = self.management.current_binding_fn(self.management.context) orelse {
                     found.release(self.allocator);
                     self.dropBinding();
@@ -900,6 +903,7 @@ pub const Coordinator = struct {
             respondTaskState(target, value);
             return true;
         }
+        _ = self.management.record_detail_fn(self.management.context, request.binding, task, null);
         if (self.task_next) |previous| respondTaskState(previous.reply, .superseded);
         self.task_next = .{ .reply = target, .task = task };
         if (self.task) |job| if (!job.replied) {
@@ -1118,6 +1122,11 @@ pub const Coordinator = struct {
             self.management.complete_list_fn(self.management.context, now_ms, preparation.id, .{ .failed = job.failure orelse .{ .@"unreachable" = null } });
             return;
         };
+        if (self.bound) |bound| {
+            if (bound.revision == preparation.binding and bound.directory == null) {
+                if (job.cached_owner) |owner| self.management.set_owner_fn(self.management.context, preparation.binding, owner);
+            }
+        }
         self.management.complete_list_fn(self.management.context, now_ms, preparation.id, .{ .page = page });
     }
 
@@ -1247,6 +1256,9 @@ pub const Coordinator = struct {
             return respondTaskState(work.reply, .failed);
         var result = detailView(arena.allocator(), work, detail) catch
             return respondTaskState(work.reply, .failed);
+        if (result.task) |*task| {
+            task.canLink = self.management.record_detail_fn(self.management.context, work.reply.binding, work.task, detail.verifiedTaskId());
+        }
         while (true) {
             var writer = std.Io.Writer.fixed(output);
             if (std.json.Stringify.value(result, .{}, &writer)) |_| {
@@ -1602,6 +1614,7 @@ const TestManagement = struct {
             .complete_list_fn = completeList,
             .knows_peer_fn = knowsPeer,
             .set_owner_fn = setOwner,
+            .record_detail_fn = recordDetail,
             .accepts_fn = accepts,
             .peer_address_fn = peerAddress,
             .complete_conversation_fn = completeConversation,
@@ -1652,6 +1665,9 @@ const TestManagement = struct {
     }
     fn knowsPeer(context: *anyopaque, binding: u64, peer: []const u8) bool {
         return of(context).knowsPeer(binding, peer);
+    }
+    fn recordDetail(context: *anyopaque, binding: u64, requested: inbox.Id, canonical: ?inbox.Id) bool {
+        return of(context).recordDetail(binding, requested, canonical);
     }
     fn setOwner(context: *anyopaque, binding: u64, id: inbox.Id) void {
         _ = of(context).setOwner(binding, id) catch unreachable;
@@ -2143,6 +2159,7 @@ test "inbox history resumes at a same-millisecond gap after reopening and reconn
         \\{"data":{"messages":[{"id":"1","time":1,"direction":"in","from":{"id":"a"},"text":"original","new":true}]}}
     );
     defer first.deinit();
+    try cache.rememberOwner(try .init("member-17"));
     try cache.save(testing.allocator, "a", null, .latest, null, &first, 50);
     var repeat = try inbox.parseMessages(testing.allocator,
         \\{"data":{"messages":[{"id":"1","time":1,"direction":"in","from":{"id":"a"},"text":"original","new":false}]}}
@@ -2160,6 +2177,9 @@ test "inbox history resumes at a same-millisecond gap after reopening and reconn
     db = try cache_store.open(testing.io, testing.allocator, dir);
     db_open = true;
     cache.db = db.capability();
+    try testing.expect((try cache.knownOwner()).?.eql("member-17"));
+    const replacement: cache_store.Store = .{ .db = cache.db, .scope = @splat(2) };
+    try testing.expect(try replacement.knownOwner() == null);
     var last = (try cache.latest(testing.allocator, "a")).?;
     defer last.page.deinit();
     try testing.expect(last.has_earlier);

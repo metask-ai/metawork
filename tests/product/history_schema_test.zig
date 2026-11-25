@@ -65,6 +65,8 @@ const added_columns = [_]struct { column: []const u8, version: usize }{
     .{ .column = "compact_boundary", .version = 10 },
     .{ .column = "updated_output_ids_json", .version = 11 },
     .{ .column = "project_id", .version = 12 },
+    .{ .column = "handoff_json", .version = 15 },
+    .{ .column = "creation_receipt", .version = 15 },
 };
 
 /// Writes today's rows into a store migrated only through `version`, which is
@@ -103,6 +105,49 @@ fn insertAtVersion(
         } });
     }
     try std.testing.expectEqual(sql.MutationOutcome.committed, database.mutate(mutations.items));
+}
+
+test "handoff headers migrate without inventing links and persist with the local task" {
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try temporaryPath(a, temp.dir);
+    const state = try history.fixture(a);
+    var first_store: [32]u8 = undefined;
+    {
+        const old = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..14]);
+        defer old.destroy() catch unreachable;
+        try insertAtVersion(a, old.capability(), state, 14);
+    }
+    {
+        const current = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        defer current.destroy() catch unreachable;
+        try expectSame(a, current.capability(), state);
+        var repo = schema.repository.Repository.init(std.testing.allocator, current.capability(), history.limits, digest_key);
+        defer repo.deinit();
+        first_store = repo.instance() orelse return error.MissingStoreIdentity;
+        try repo.seed(state, .{});
+        state.tasks[0].handoff = .{ .account = "a" ** 64, .ids = &.{ "new", "old" }, .preferred = true };
+        state.tasks[0].creation_receipt = @splat(17);
+        try std.testing.expectError(error.OutsideCommitScope, repo.prepareHeaders(state, .{}, @splat(1), .{ .task_ids = &.{} }));
+        var tx = try repo.prepareHeaders(state, .{}, @splat(1), .{ .task_ids = &.{state.tasks[0].id} });
+        defer tx.deinit();
+        try std.testing.expectEqual(sql.MutationOutcome.committed, repo.commit(&tx));
+    }
+    const reopened = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    defer reopened.destroy() catch unreachable;
+    try expectSame(a, reopened.capability(), state);
+    var repo = schema.repository.Repository.init(a, reopened.capability(), history.limits, digest_key);
+    defer repo.deinit();
+    try std.testing.expectEqual(first_store, repo.instance().?);
+
+    const second = try sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = try std.mem.concat(a, u8, &.{ path, ".rebuilt" }) }, schema.migrations);
+    defer second.destroy() catch unreachable;
+    var fresh = schema.repository.Repository.init(a, second.capability(), history.limits, digest_key);
+    defer fresh.deinit();
+    try std.testing.expect(!std.mem.eql(u8, &first_store, &fresh.instance().?));
 }
 
 fn modelErrorFixture() history.wire.ModelErrorWire {

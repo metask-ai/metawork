@@ -32,6 +32,11 @@ import {
 import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { controlFocus } from "../../components/ui/utils.ts";
 import { useI18n } from "../../i18n/context.ts";
+import {
+  HandoffControls,
+  MessageAttachment,
+  type AttachmentSummary,
+} from "./InboxHandoff.tsx";
 import { inboxDiagnosticText } from "./inbox-diagnostics.ts";
 
 /** While the inbox page is open and visible the Host is asked this often. */
@@ -145,6 +150,7 @@ export type OpenedTask = {
   detail: InboxTaskDetail | null;
   trail: readonly string[];
   download: DownloadStatus;
+  message?: InboxMessage;
 };
 
 function mergeMessages(
@@ -187,6 +193,30 @@ export function useInbox(
     null,
   );
   const [task, setTask] = useState<OpenedTask | null>(null);
+  const [attachmentSummaries, setAttachmentSummaries] = useState<
+    ReadonlyMap<string, AttachmentSummary | null>
+  >(() => new Map());
+  const [failedTitles, setFailedTitles] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const detailSequence = useRef(0);
+  // The Host has one detail slot. A click on the item being read can use
+  // that same response; clicking another item takes precedence.
+  const readDetail = useMemo(() => {
+    let pending: {
+      id: string;
+      result: Promise<InboxTaskDetail | null>;
+    } | null = null;
+    return (id: string) => {
+      if (pending?.id === id) return pending.result;
+      const result = client.readInboxTask(binding, id).catch(() => null);
+      pending = { id, result };
+      void result.then(() => {
+        if (pending?.result === result) pending = null;
+      });
+      return result;
+    };
+  }, [client, binding, inbox.accountScope]);
   // One reply box per conversation: leaving one while it sends keeps it,
   // and an answer only ever lands in the attempt that asked.
   const [composers, setComposers] = useState<
@@ -270,9 +300,12 @@ export function useInbox(
     conversationRef.current = null;
     setConversation(null);
     setTask(null);
+    detailSequence.current++;
+    setAttachmentSummaries(new Map());
+    setFailedTitles(new Set());
     setComposers({});
     readEpoch.current++;
-  }, [binding]);
+  }, [binding, inbox.accountScope]);
 
   useEffect(() => {
     if (!open || disabled) return;
@@ -294,6 +327,7 @@ export function useInbox(
         (current.failure && current.failure !== "failed")
       )
         return;
+      setFailedTitles((failed) => (failed.size ? new Set() : failed));
       const last = current.messages.at(-1);
       await readRef.current(
         current,
@@ -398,6 +432,7 @@ export function useInbox(
 
   function select(contact: Contact) {
     setTask(null);
+    setFailedTitles(new Set());
     const cached = inbox.conversations.some(
       (c) => c.peerId === contact.target && c.latest !== null,
     );
@@ -413,23 +448,104 @@ export function useInbox(
     void read(contact, "latest", null, cached);
   }
 
-  async function openTask(taskId: string, trail: readonly string[] = []) {
+  const rememberTitle = useCallback(
+    (taskId: string, detail: InboxTaskDetail | null) => {
+      if (
+        detail?.state === "ready" ||
+        detail?.state === "forbidden" ||
+        detail?.state === "not_found"
+      ) {
+        const item = detail.task ?? detail.file ?? detail.project;
+        const summary: AttachmentSummary | null =
+          detail.state === "ready" && item
+            ? {
+                kind: detail.task ? "task" : detail.file ? "file" : "project",
+                id: item.id || taskId,
+                name: item.name,
+              }
+            : null;
+        setAttachmentSummaries((current) => {
+          const next = new Map(current);
+          const previousId = current.get(taskId)?.id ?? taskId;
+          for (const [alias, known] of current)
+            if (
+              known?.id === previousId ||
+              (summary && known?.id === summary.id)
+            )
+              next.set(alias, summary);
+          next.set(taskId, summary);
+          if (summary) next.set(summary.id, summary);
+          return next;
+        });
+        return true;
+      }
+      return false;
+    },
+    [],
+  );
+
+  // Fill one missing title at a time, starting at the newest message.
+  const messages = conversation?.messages;
+  const missingTitle = useMemo(() => {
+    if (!messages) return;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const id = messages[i].taskIds.find(
+        (id) => !attachmentSummaries.has(id) && !failedTitles.has(id),
+      );
+      if (id) return id;
+    }
+  }, [messages, attachmentSummaries, failedTitles]);
+  const conversationKey = conversation?.key;
+  const loadTitles =
+    usable && inbox.state === "ready" && !task && !conversation?.failure;
+  useEffect(() => {
+    if (!loadTitles || !missingTitle) return;
+    let current = true;
+    let started = false;
+    const sequence = detailSequence.current;
+    const load = async () => {
+      if (
+        started ||
+        document.visibilityState !== "visible" ||
+        sequence !== detailSequence.current ||
+        conversationRef.current?.key !== conversationKey
+      )
+        return;
+      started = true;
+      const detail = await readDetail(missingTitle);
+      if (!current || sequence !== detailSequence.current) return;
+      if (!rememberTitle(missingTitle, detail))
+        setFailedTitles((failed) => new Set(failed).add(missingTitle));
+    };
+    void load();
+    document.addEventListener("visibilitychange", load);
+    return () => {
+      current = false;
+      document.removeEventListener("visibilitychange", load);
+    };
+  }, [loadTitles, missingTitle, conversationKey, readDetail, rememberTitle]);
+
+  async function openTask(
+    taskId: string,
+    trail: readonly string[] = [],
+    message?: InboxMessage,
+  ) {
+    const sequence = ++detailSequence.current;
     setTask({
       taskId,
       status: "loading",
       detail: null,
       trail,
+      message,
       download: "idle",
     });
-    let detail: InboxTaskDetail | null = null;
-    try {
-      detail = await client.readInboxTask(binding, taskId);
-    } catch {
-      detail = null;
-    }
+    const detail = await readDetail(taskId);
+    if (sequence !== detailSequence.current || detail?.state === "superseded")
+      return;
+    rememberTitle(taskId, detail);
     setTask((current) => {
-      if (current?.taskId !== taskId) return current;
-      if (detail?.state === "superseded") return current;
+      if (current?.taskId !== taskId || sequence !== detailSequence.current)
+        return current;
       if (detail?.state === "ready")
         return { ...current, status: "ready", detail };
       const status =
@@ -447,6 +563,7 @@ export function useInbox(
     retryDirectory: () => retryDirectory((n) => n + 1),
     conversation,
     task,
+    attachmentSummaries,
     composer,
     /** A changed message is a new message: it gets a new identity. */
     setDraft(text: string) {
@@ -541,6 +658,7 @@ export function useInbox(
     },
     /** The user's own retry: past any retry delay or refusal. */
     retry() {
+      setFailedTitles(new Set());
       void client.refreshInbox(binding, true).catch(() => undefined);
       if (conversation?.failure) {
         const last = conversation.messages.at(-1);
@@ -550,12 +668,16 @@ export function useInbox(
     openTask,
     /** A sub-task or a project's file, opened from the item on screen. */
     openNested(taskId: string) {
-      void openTask(taskId, task ? [...task.trail, task.taskId] : []);
+      void openTask(
+        taskId,
+        task ? [...task.trail, task.taskId] : [],
+        task?.message,
+      );
     },
     back() {
       const previous = task?.trail.at(-1);
       if (task && previous !== undefined)
-        void openTask(previous, task.trail.slice(0, -1));
+        void openTask(previous, task.trail.slice(0, -1), task.message);
     },
     async downloadFile(fileId: string) {
       setTask((current) =>
@@ -1000,30 +1122,6 @@ function InboxNotice({
   );
 }
 
-function LinkedTask({
-  taskId,
-  onOpen,
-}: {
-  taskId: string;
-  onOpen: () => void;
-}) {
-  const { t } = useI18n();
-  return (
-    <button type="button" className="inbox-task-card" onClick={onOpen}>
-      <span className="inbox-task-icon">
-        <Icon name="new-task" />
-      </span>
-      <span className="inbox-task-caption">
-        <span>{t("inbox.linked_item")}</span>
-        <strong>{t("inbox.item_number", { id: taskId })}</strong>
-      </span>
-      <span className="inbox-task-end">
-        <Icon name="chevron-right" />
-      </span>
-    </button>
-  );
-}
-
 /** Sizes as the composer shows attachments: decimal units. */
 function formatSize(value: string) {
   const bytes = Number(value);
@@ -1105,84 +1203,118 @@ function TaskDetailBody({
 }) {
   const { t } = useI18n();
   const formats = useTimeFormats();
-  // The latest note already leads the list when MetaTeam includes it.
-  const notes = task.notes;
+  // MetaTeam returns the history oldest first and may also return its last entry separately.
+  const tail = task.notes.at(-1);
+  const latest = task.lastNote ?? tail;
+  const history =
+    tail &&
+    latest &&
+    tail.text === latest.text &&
+    tail.by === latest.by &&
+    tail.atMs === latest.atMs
+      ? task.notes.slice(0, -1)
+      : task.notes;
+  const parentPath = task.path?.endsWith(" / " + task.name)
+    ? task.path.slice(0, -(task.name.length + 3))
+    : null;
+  const project = parentPath?.split(" / ", 1)[0];
+  const summary = [
+    [project, t("inbox.item_number", { id: task.id })]
+      .filter(Boolean)
+      .join(" / "),
+    task.progress && progressLabel(task.progress, t),
+    task.state && task.state !== "active" && stateLabel(task.state, t),
+    task.assignees.length > 0 &&
+      t("inbox.task_assignees", {
+        names: task.assignees.join(t("inbox.list_separator")),
+      }),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const more =
+    task.path || task.createdBy || task.updatedAtMs || task.state === "active";
   return (
     <>
-      {task.description && (
-        <Dialog.Description className="inbox-task-description">
-          {task.description}
-        </Dialog.Description>
-      )}
-      <dl className="inbox-task-facts">
-        <Fact label={t("inbox.task_id")}>{task.id}</Fact>
-        {task.progress && (
-          <Fact label={t("inbox.task_status")}>
-            <Badge className="whitespace-nowrap">
-              {progressLabel(task.progress, t)}
-            </Badge>
-          </Fact>
-        )}
-        {task.state && (
-          <Fact label={t("inbox.task_state")}>{stateLabel(task.state, t)}</Fact>
-        )}
-        {task.assignees.length > 0 && (
-          <Fact label={t("inbox.task_assignees")}>
-            {task.assignees.join(t("inbox.list_separator"))}
-          </Fact>
-        )}
-        {task.createdBy && (
-          <Fact label={t("inbox.task_created_by")}>{task.createdBy}</Fact>
-        )}
-        {task.path && <Fact label={t("inbox.task_path")}>{task.path}</Fact>}
-        {task.updatedAtMs && (
-          <Fact label={t("inbox.task_updated")}>
-            {formats.dateTime.format(new Date(Number(task.updatedAtMs)))}
-          </Fact>
-        )}
-      </dl>
-      {task.lastNote && (
+      <Dialog.Description className="inbox-task-summary">
+        {summary}
+      </Dialog.Description>
+      {latest && (
         <section className="inbox-detail-section">
           <h3>{t("inbox.task_last_note")}</h3>
-          <NoteLine note={task.lastNote} />
+          <NoteLine note={latest} />
         </section>
       )}
-      {notes.length > 0 && (
-        <section className="inbox-detail-section">
-          <h3>{t("inbox.task_notes")}</h3>
-          <ol className="inbox-notes">
-            {notes.map((note, index) => (
-              <li key={index}>
-                <NoteLine note={note} />
-              </li>
-            ))}
-          </ol>
+      {task.description && (
+        <section className="inbox-task-overview">
+          <h3>{t("inbox.task_description")}</h3>
+          <p className="inbox-task-description">{task.description}</p>
         </section>
       )}
-      {task.children.length > 0 && (
-        <section className="inbox-detail-section">
-          <h3>{t("inbox.task_children")}</h3>
-          <ul className="inbox-detail-links">
-            {task.children.map((child) => (
-              <li key={child.id}>
-                <button
-                  type="button"
-                  className="inbox-detail-link focus-ring"
-                  onClick={() => onOpen(child.id)}
-                >
-                  <span>{child.name}</span>
-                  {child.progress && (
-                    <Badge className="whitespace-nowrap">
-                      {progressLabel(child.progress, t)}
-                    </Badge>
-                  )}
-                  <Icon name="chevron-right" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      <div className="inbox-task-disclosures">
+        {history.length > 0 && (
+          <details>
+            <summary className="focus-ring">
+              {t("inbox.task_notes")} ({history.length})
+            </summary>
+            <ol className="inbox-notes">
+              {history.map((note, index) => (
+                <li key={index}>
+                  <NoteLine note={note} />
+                </li>
+              ))}
+            </ol>
+          </details>
+        )}
+        {task.children.length > 0 && (
+          <details>
+            <summary className="focus-ring">
+              {t("inbox.task_children")} ({task.children.length})
+            </summary>
+            <ul className="inbox-detail-links">
+              {task.children.map((child) => (
+                <li key={child.id}>
+                  <button
+                    type="button"
+                    className="inbox-detail-link focus-ring"
+                    onClick={() => onOpen(child.id)}
+                  >
+                    <span>{child.name}</span>
+                    {child.progress && (
+                      <Badge className="whitespace-nowrap">
+                        {progressLabel(child.progress, t)}
+                      </Badge>
+                    )}
+                    <Icon name="chevron-right" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+        {more && (
+          <details>
+            <summary className="focus-ring">{t("inbox.task_more")}</summary>
+            <dl className="inbox-task-facts">
+              {task.createdBy && (
+                <Fact label={t("inbox.task_created_by")}>{task.createdBy}</Fact>
+              )}
+              {task.path && (
+                <Fact label={t("inbox.task_path")}>{task.path}</Fact>
+              )}
+              {task.updatedAtMs && (
+                <Fact label={t("inbox.task_updated")}>
+                  {formats.dateTime.format(new Date(Number(task.updatedAtMs)))}
+                </Fact>
+              )}
+              {task.state === "active" && (
+                <Fact label={t("inbox.task_state")}>
+                  {stateLabel(task.state, t)}
+                </Fact>
+              )}
+            </dl>
+          </details>
+        )}
+      </div>
     </>
   );
 }
@@ -1386,9 +1518,11 @@ function InboxTaskDialog({
                 <Icon name="arrow-left" />
               </button>
             )}
-            <span className="inbox-task-icon">
-              <Icon name={icon} />
-            </span>
+            {!detail?.task && (
+              <span className="inbox-task-icon">
+                <Icon name={icon} />
+              </span>
+            )}
             <Dialog.Title>
               {item?.name ??
                 (task ? t("inbox.item_number", { id: task.taskId }) : "")}
@@ -1417,8 +1551,19 @@ function InboxTaskDialog({
                     : t("inbox.task_failed")}
               </Dialog.Description>
             )}
-            {detail?.task && (
-              <TaskDetailBody task={detail.task} onOpen={onOpen} />
+            {detail?.task && task && (
+              <HandoffControls
+                key={task.taskId}
+                referenced={task.taskId}
+                remoteTask={detail.task.canLink ? detail.task : undefined}
+                message={
+                  task.message?.taskIds.includes(task.taskId)
+                    ? task.message
+                    : undefined
+                }
+              >
+                <TaskDetailBody task={detail.task} onOpen={onOpen} />
+              </HandoffControls>
             )}
             {detail?.file && task && (
               <FileDetailBody
@@ -1635,6 +1780,7 @@ export function InboxComposer({
 function InboxConversationView({
   name,
   conversation,
+  attachmentSummaries,
   composer,
   onLoadEarlier,
   onOpenTask,
@@ -1644,9 +1790,10 @@ function InboxConversationView({
 }: {
   name: string;
   conversation: OpenedConversation;
+  attachmentSummaries: InboxController["attachmentSummaries"];
   composer: Composer | null;
   onLoadEarlier: () => void;
-  onOpenTask: (taskId: string) => void;
+  onOpenTask: (taskId: string, message: InboxMessage) => void;
   onRetry: () => void;
   onDraft: (text: string) => void;
   onSend: () => void;
@@ -1729,7 +1876,7 @@ function InboxConversationView({
                 <div
                   className="inbox-message"
                   data-direction={outgoing ? "outgoing" : "incoming"}
-                  data-linked-task={message.taskIds.length > 0}
+                  data-linked={message.taskIds.length > 0}
                 >
                   <div className="inbox-message-meta">
                     <span>
@@ -1752,7 +1899,15 @@ function InboxConversationView({
                     )}
                   </div>
                   <div className="inbox-bubble">
-                    <p>{message.text}</p>
+                    {message.text && <p>{message.text}</p>}
+                    {message.taskIds.map((id) => (
+                      <MessageAttachment
+                        key={id}
+                        id={id}
+                        summary={attachmentSummaries.get(id)}
+                        onOpen={() => onOpenTask(id, message)}
+                      />
+                    ))}
                   </div>
                   <ReadReceipts recipients={receipts} />
                   {message.truncated && (
@@ -1760,13 +1915,6 @@ function InboxConversationView({
                       {t("inbox.message_truncated")}
                     </p>
                   )}
-                  {message.taskIds.map((taskId) => (
-                    <LinkedTask
-                      key={taskId}
-                      taskId={taskId}
-                      onOpen={() => onOpenTask(taskId)}
-                    />
-                  ))}
                 </div>
               </li>
             );
@@ -1892,9 +2040,12 @@ export function InboxMain({
             t,
           )}
           conversation={controller.conversation}
+          attachmentSummaries={controller.attachmentSummaries}
           composer={controller.composer}
           onLoadEarlier={controller.loadEarlierMessages}
-          onOpenTask={(taskId) => void controller.openTask(taskId)}
+          onOpenTask={(taskId, message) =>
+            void controller.openTask(taskId, [], message)
+          }
           onRetry={controller.retry}
           onDraft={controller.setDraft}
           onSend={() => void controller.send()}

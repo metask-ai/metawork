@@ -116,8 +116,7 @@
   background: var(--ui-surface-panel);
 }
 
-.inbox-row-copy,
-.inbox-task-caption {
+.inbox-row-copy {
   display: grid;
   min-width: 0;
   gap: 3px;
@@ -129,8 +128,7 @@
   white-space: nowrap;
 }
 
-.inbox-row-copy strong,
-.inbox-task-caption strong {
+.inbox-row-copy strong {
   font-size: var(--text-body);
   font-weight: 600;
 }
@@ -148,7 +146,6 @@
 .inbox-row-copy > span,
 .inbox-row-meta,
 .inbox-message-meta,
-.inbox-task-caption > span,
 .inbox-transcript-date {
   color: var(--ui-content-muted);
   font-size: var(--text-label);
@@ -259,8 +256,8 @@
   align-self: flex-start;
 }
 
-.inbox-message[data-linked-task="true"] {
-  width: 376px;
+.inbox-message[data-linked="true"] {
+  width: 25rem;
 }
 
 .inbox-message[data-direction="outgoing"] {
@@ -312,25 +309,95 @@
   overflow-wrap: anywhere;
 }
 
-.inbox-task-card {
-  display: grid;
+.inbox-message[data-linked="true"] .inbox-bubble {
   width: 100%;
-  min-height: 64px;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  margin-top: 8px;
-  padding: 9px 10px;
-  border: 1px solid var(--ui-border);
-  border-radius: 12px;
-  background: var(--ui-surface-panel);
-  overflow-wrap: anywhere;
-  text-align: start;
+  display: grid;
+  gap: 12px;
+  padding: 12px 14px;
 }
 
-.inbox-task-card:hover {
-  border-color: var(--ui-control-focus-border);
-  background: var(--ui-action-hover-surface);
+.inbox-message[data-linked="true"] .inbox-bubble > p {
+  user-select: text;
+}
+
+.inbox-attachment {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) fit-content(58%);
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+  padding-inline-start: 11px;
+  border-inline-start: 2px solid var(--ui-border);
+}
+
+.inbox-linked-item {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: start;
+  min-width: 0;
+  gap: 8px;
+  color: var(--ui-content-primary);
+  font-size: var(--text-body);
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: start;
+  cursor: pointer;
+}
+
+.inbox-linked-item > svg {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  color: var(--ui-content-muted);
+}
+
+.inbox-linked-item > span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  text-wrap: pretty;
+}
+
+.inbox-attachment-id {
+  grid-column: 1;
+  padding-inline-start: 24px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  font-variant-numeric: tabular-nums;
+}
+
+.inbox-attachment-action {
+  grid-column: 2;
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  min-height: 24px;
+  color: var(--ui-content-primary);
+  font-size: var(--text-label);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.inbox-attachment-action svg {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+.inbox-linked-item:hover > span,
+.inbox-attachment-action:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.inbox-linked-item:focus-visible,
+.inbox-attachment-action:focus-visible {
+  outline: 2px solid var(--ui-control-focus-border);
+  outline-offset: 2px;
 }
 
 .inbox-task-icon {
@@ -338,13 +405,6 @@
   height: 36px;
   border-radius: 8px;
   font-size: 16px;
-}
-
-.inbox-task-end {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--ui-content-muted);
 }
 
 .inbox-task-dialog-header {
@@ -356,6 +416,9 @@
 
 .inbox-task-dialog-header .icon-button {
   flex: none;
+}
+
+.inbox-task-dialog-header .icon-button:last-child {
   margin-inline-start: auto;
 }
 
@@ -389,18 +452,204 @@
 .inbox-detail-body {
   display: grid;
   min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+  overflow-wrap: anywhere;
+}
+
+.inbox-detail-dialog:has(.inbox-task-summary) {
+  gap: 6px;
+}
+
+.inbox-task-summary {
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  overflow-wrap: anywhere;
+}
+
+.inbox-task-overview {
+  display: grid;
+  gap: 6px;
+  font-size: var(--text-control);
+}
+
+.inbox-task-disclosures {
+  border-top: 1px solid var(--ui-border);
+  padding-block-start: 8px;
+  font-size: var(--text-control);
+}
+
+.inbox-task-disclosures:empty {
+  display: none;
+}
+
+.inbox-task-disclosures summary {
+  padding-block: 6px;
+  color: var(--ui-content-muted);
+  cursor: pointer;
+}
+
+.inbox-task-disclosures details[open] > :last-child {
+  padding-block: 6px 12px;
+  border-top: 0;
+}
+
+.inbox-detail-dialog:has(.inbox-task-reading) {
+  overflow: hidden;
+}
+
+.inbox-detail-dialog:has(.inbox-task-reading) .inbox-detail-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 12px;
+}
+
+.inbox-task-reading:not([hidden]) {
+  display: grid;
+  gap: 16px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.handoff-toolbar,
+.handoff-picker-footer {
+  display: flex;
+  flex: none;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--ui-border);
+  padding-top: 12px;
+}
+
+.handoff-primary {
+  max-width: 100%;
+  background: var(--ui-content-primary);
+  color: var(--ui-surface-panel);
+}
+.handoff-primary:hover {
+  background: color-mix(
+    in srgb,
+    var(--ui-content-primary) 85%,
+    var(--ui-surface-panel)
+  );
+}
+.handoff-primary:disabled,
+.handoff-primary[data-disabled] {
+  opacity: 0.45;
+}
+.handoff-toolbar .handoff-primary {
+  min-width: 0;
+  flex-shrink: 1;
+}
+.handoff-toolbar .handoff-primary span,
+.handoff-choice-text > *,
+.handoff-picker-footer small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.handoff-toolbar svg,
+.handoff-choice svg,
+.handoff-picker-heading svg {
+  width: 16px;
+  height: 16px;
+}
+.handoff-menu {
+  max-height: min(24rem, var(--available-height));
+  max-width: min(25rem, 85vw);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.handoff-picker {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 10px;
+}
+.handoff-picker-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-control);
+  font-weight: 600;
+}
+.handoff-picker-heading button {
+  width: 28px;
+  height: 28px;
+}
+.handoff-picker-heading small {
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  font-weight: 400;
+}
+.handoff-picker-list {
+  min-height: 0;
+  height: min(16rem, 36dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.handoff-picker-list > p {
+  text-align: center;
+  padding: 24px 8px;
+  color: var(--ui-content-muted);
+}
+.handoff-choice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.handoff-choice:hover,
+.handoff-choice:has(:checked) {
+  background: var(--ui-action-hover-surface);
+}
+.handoff-choice:has(:focus-visible) {
+  outline: 1px solid var(--ui-control-focus-border);
+  outline-offset: -1px;
+}
+.handoff-choice-text {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  font-size: var(--text-control);
+}
+.handoff-choice-text strong {
+  font-weight: 500;
+}
+.handoff-choice-text small,
+.handoff-picker-footer small {
+  font-size: var(--text-label);
+  color: var(--ui-content-muted);
+}
+.handoff-picker-footer small {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.handoff-picker [role="alert"] {
+  font-size: var(--text-control);
+  color: var(--ui-content-error);
 }
 
 .inbox-detail-section {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   padding-top: 12px;
   border-top: 1px solid var(--ui-border);
   font-size: var(--text-control);
 }
 
-.inbox-detail-section h3 {
+.inbox-detail-section h3,
+.inbox-task-overview h3 {
   color: var(--ui-content-muted);
   font-size: var(--text-label);
   font-weight: 600;

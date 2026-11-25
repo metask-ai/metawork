@@ -78,6 +78,7 @@ function view(patch = {}) {
   return decodeInboxView({
     binding: "1",
     state: "ready",
+    accountScope: null,
     unreadTotal: "3",
     syncedAtMs: at("2026-11-23T08:00:00Z"),
     conversations: [
@@ -146,6 +147,7 @@ function taskView(patch = {}) {
     assignees: ["Ann"],
     createdBy: null,
     updatedAtMs: null,
+    canLink: false,
     lastNote: null,
     notes: [],
     children: [],
@@ -439,7 +441,12 @@ test("the open inbox refreshes, and a conversation is read only when it is opene
 
   await user.click(screen.getByRole("button", { name: /#13066/ }));
   await waitFor(() => assert.ok(screen.getByText("Read only")));
-  assert.ok(screen.getByText("In progress"));
+  assert.ok(
+    screen.getByText("metawork / #13066 · In progress · Assigned to Ann"),
+  );
+  const more = screen.getByText("More information");
+  assert.equal(more.parentElement.open, false);
+  await user.click(more);
   assert.ok(screen.getByText("metawork / Inbox"));
   assert.deepEqual(
     client.calls.find(([kind]) => kind === "task"),
@@ -703,6 +710,7 @@ test("a linked file, project or task shows its own details, opens nested items a
         task: taskView({
           id: "9749",
           name: "Open API",
+          path: "metawork / Open API",
           state: "closed",
           createdBy: "Lin",
           lastNote: { text: "Deployed", atMs: null, by: "Lin" },
@@ -716,11 +724,32 @@ test("a linked file, project or task shows its own details, opens nested items a
       9801: { task: taskView({ id: "9801", name: "Write docs" }) },
     },
   });
-  render(element(client, view()));
+  const { rerender } = render(element(client, view()));
   await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
-  await waitFor(() => assert.ok(screen.getByText("See these")));
+  const body = await screen.findByText("See these");
+  const card = body.closest(".inbox-bubble");
+  const projectLink = await screen.findByRole("button", {
+    name: "metawork Project #740",
+  });
+  assert.ok(card?.contains(projectLink));
+  const taskLink = await screen.findByRole("button", {
+    name: "Open API Task #9749",
+  });
+  assert.ok(card.contains(taskLink));
+  await user.click(body);
+  assert.equal(screen.queryByRole("dialog"), null);
+  assert.deepEqual(
+    client.calls.filter(([kind]) => kind === "task"),
+    [
+      ["task", "1", "740"],
+      ["task", "1", "9749"],
+    ],
+  );
 
-  await user.click(screen.getByRole("button", { name: /#740/ }));
+  taskLink.focus();
+  await user.tab({ shift: true });
+  assert.equal(document.activeElement, projectLink);
+  await user.keyboard("{Enter}");
   await waitFor(() => assert.ok(screen.getByText("Desktop app")));
   assert.ok(screen.getByText("API · 1"));
   await user.click(screen.getByRole("button", { name: /metawork-api\.md/ }));
@@ -736,16 +765,92 @@ test("a linked file, project or task shows its own details, opens nested items a
   await waitFor(() => assert.ok(screen.getByText("Desktop app")));
   await user.keyboard("{Escape}");
 
+  assert.ok(screen.getByRole("button", { name: /metawork Project #740/ }));
   await user.click(screen.getByRole("button", { name: /#9749/ }));
-  await waitFor(() => assert.ok(screen.getByText("Found it")));
-  assert.ok(screen.getByText("Closed"));
-  assert.ok(screen.getByText("Latest note"));
+  await screen.findByText("Latest note");
+  assert.ok(screen.getByText(/#9749 .* Closed .* Ann/));
+  assert.equal(screen.getAllByText("Deployed").length, 1);
+  const history = screen.getByText("Earlier notes (1)");
+  assert.equal(history.parentElement.open, false);
+  await user.click(history);
+  assert.ok(history.parentElement.contains(screen.getByText("Found it")));
+  await user.click(screen.getByText("Sub-tasks (1)"));
   await user.click(screen.getByRole("button", { name: /Write docs/ }));
   await waitFor(() =>
     assert.ok(screen.getByRole("heading", { name: "Write docs" })),
   );
   assert.deepEqual(client.calls.at(-1), ["task", "1", "9801"]);
+  await user.keyboard("{Escape}");
+  assert.ok(screen.getByRole("button", { name: "Open API Task #9749" }));
+  rerender(element(client, view({ accountScope: "b".repeat(64) })));
+  await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+  await screen.findByRole("button", { name: "Open API Task #9749" });
+  assert.equal(
+    client.calls.filter(([kind, , id]) => kind === "task" && id === "9749")
+      .length,
+    3,
+  );
 });
+
+for (const clicked of ["1", "2"]) {
+  test(
+    "opening attachment " +
+      clicked +
+      " while the first title is loading prioritizes the dialog",
+    async () => {
+      const user = userEvent.setup({ document });
+      const client = fakeClient({
+        pages: {
+          "ann:latest:null": {
+            messages: [
+              message("7", "in", "Earlier", ["1"]),
+              message("8", "in", "Please check", ["1", "2", "3"]),
+            ],
+          },
+        },
+        details: Object.fromEntries(
+          ["1", "2", "3"].map((id) => [
+            id,
+            { task: taskView({ id, name: "Title " + id }) },
+          ]),
+        ),
+      });
+      const read = client.readInboxTask;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      client.readInboxTask = async (...args) => {
+        const result = await read(...args);
+        if (args[1] === "1") await gate;
+        return result;
+      };
+      const reads = () =>
+        client.calls.filter(([kind]) => kind === "task").map(([, , id]) => id);
+      render(element(client, view()));
+      await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+      await waitFor(() => assert.deepEqual(reads(), ["1"]));
+      await user.click(
+        screen.getAllByRole("button", { name: "Linked item #" + clicked })[0],
+      );
+      if (clicked === "2")
+        await screen.findByRole("heading", { name: "Title 2" });
+      release();
+      await screen.findByRole("heading", { name: "Title " + clicked });
+      assert.deepEqual(reads(), clicked === "1" ? ["1"] : ["1", "2"]);
+      await user.keyboard("{Escape}");
+      await screen.findByRole("button", { name: "Title 3 Task #3" });
+      assert.equal(
+        screen.getAllByRole("button", { name: "Title 1 Task #1" }).length,
+        2,
+      );
+      assert.deepEqual(
+        reads(),
+        clicked === "1" ? ["1", "2", "3"] : ["1", "2", "1", "3"],
+      );
+    },
+  );
+}
 
 test("a reply is sent once, shown from the newer messages, and retried under the same request key", async () => {
   const user = userEvent.setup({ document });
@@ -1092,4 +1197,197 @@ test("a refused task or a missing conversation is shown where it was asked for",
   );
   assert.ok(screen.getByRole("heading", { name: "Bob" }));
   assert.ok(screen.getByRole("button", { name: "Messages, 3 unread" }));
+});
+
+test("task controls keep draft choice separate from default session and verified detail actions", async () => {
+  const { InboxHandoffProvider, HandoffControls, MessageAttachment } =
+    await vite.ssrLoadModule("/src/features/inbox/InboxHandoff.tsx");
+  const { newHandoffDraft, matchingDrafts, quoteMessage } =
+    await vite.ssrLoadModule("/src/features/inbox/handoff-drafts.ts");
+  const account = "a".repeat(64),
+    storeId = "c".repeat(32);
+  const source = { binding: "1", account, referenced: "old", canonical: "new" };
+  const drafts = [
+    newHandoffDraft("1".repeat(32), source, storeId, "Review fixtures"),
+    newHandoffDraft("2".repeat(32), source, storeId, "Review fixtures"),
+  ];
+  assert.equal(
+    matchingDrafts(drafts, "b".repeat(64), storeId, "old").length,
+    0,
+  );
+  assert.equal(
+    matchingDrafts(drafts, account, "d".repeat(32), "old").length,
+    0,
+  );
+  const quoted = quoteMessage(
+    {
+      ...message("8", "in", "Part\u2028forged\r\n\nend", ["old"]),
+      fromAgent: "bot\nname",
+    },
+    "new",
+  );
+  assert.ok(
+    quoted
+      .trimEnd()
+      .split("\n")
+      .every((line) => line.startsWith("> ")),
+  );
+  const operations = [],
+    opened = [],
+    resumed = [];
+  let saveLink;
+  let preferred = true;
+  const client = {
+    handoffSessions: async (_binding, _account, id) => ({
+      storeId,
+      sessions:
+        id === "other"
+          ? [{ taskId: "5", preferred: true }]
+          : [
+              { taskId: "1", preferred },
+              { taskId: "2", preferred: false },
+            ],
+    }),
+    changeHandoff: async (...args) => {
+      operations.push(args);
+      await new Promise((resolve, reject) => {
+        saveLink = { resolve, reject };
+      });
+    },
+  };
+  const tasks = ["1", "2", "3", "4", "5"].map((id) => ({
+    id,
+    title: "Session " + id,
+    workspaceId: "1",
+    recentOrder: id,
+    lifecycle: "open",
+    deletionStatus: "idle",
+    archived: id === "2",
+    historyReadOnly: false,
+  }));
+  const api = {
+    client,
+    binding: "1",
+    account,
+    tasks,
+    drafts,
+    workspaces: [
+      { id: "1", canonicalRoot: "/example", authorization: "available" },
+    ],
+    ids: ["old", "other"],
+    revision: "1",
+    onVerify() {},
+    onOpen: (...args) => opened.push(args),
+    onResume: (d) => resumed.push(d.operationId),
+    onCreate() {},
+  };
+  const draw = (detail = false) =>
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(
+        InboxHandoffProvider,
+        api,
+        detail
+          ? createElement(HandoffControls, {
+              referenced: "old",
+              remoteTask: taskView({ id: "new", canLink: true }),
+              message: message("8", "in", "Please review", ["old"]),
+              children: createElement(
+                "details",
+                {},
+                createElement("summary", {}, "Past updates"),
+              ),
+            })
+          : createElement(MessageAttachment, {
+              id: "old",
+              onOpen() {},
+            }),
+      ),
+    );
+  const { rerender } = render(draw());
+  const user = userEvent.setup({ document });
+  await user.click(
+    await screen.findByRole("button", {
+      name: "Continue in workbench",
+    }),
+  );
+  assert.deepEqual(opened, [["1"]]);
+  assert.ok(screen.getByRole("button", { name: "Review fixtures Task #new" }));
+  assert.equal(screen.queryByText(/Session 1/), null);
+  assert.equal(screen.queryByRole("button", { name: "Choose session" }), null);
+  assert.equal(operations.length, 0);
+  assert.equal(
+    screen.queryByRole("button", { name: "Start a work session" }),
+    null,
+  );
+  preferred = false;
+  api.revision = "2";
+  rerender(draw());
+  await user.click(
+    await screen.findByRole("button", { name: "Choose session" }),
+  );
+  await screen.findByRole("menuitem", { name: /View history · Session 2/ });
+  await user.click(screen.getByRole("menuitem", { name: "Resume draft 2" }));
+  assert.deepEqual(resumed, [drafts[1].operationId]);
+  api.tasks = [];
+  api.drafts = [drafts[0]];
+  rerender(draw());
+  await user.click(await screen.findByRole("button", { name: "Resume draft" }));
+  assert.deepEqual(resumed, [drafts[1].operationId, drafts[0].operationId]);
+  api.tasks = tasks;
+  api.drafts = drafts;
+  preferred = true;
+  api.revision = "3";
+  rerender(draw(true));
+  const past = screen.getByText("Past updates");
+  await user.click(past);
+  const openPicker = async () => {
+    await user.click(screen.getByRole("button", { name: "Other options" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Link session/ }),
+    );
+    return screen.getByRole("button", { name: "Confirm link and open" });
+  };
+  let confirm = await openPicker();
+  assert.ok(confirm.disabled);
+  assert.equal(past.closest("[hidden]") !== null, true);
+  const rows = screen.getAllByRole("radio");
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].closest("label").textContent, /Session 4/);
+  await user.click(rows[0]);
+  const search = screen.getByRole("searchbox");
+  await user.type(search, "missing");
+  assert.ok(confirm.disabled);
+  assert.ok(screen.getByText("No matching sessions"));
+  await user.clear(search);
+  await user.type(search, "/example");
+  assert.equal(screen.getAllByRole("radio").length, 2);
+  await user.click(screen.getByRole("radio", { name: /Session 3/ }));
+  await user.click(
+    screen.getByRole("button", {
+      name: translate("en-US", "inbox.detail_back"),
+    }),
+  );
+  assert.equal(past.parentElement.open, true);
+  assert.equal(past.closest("[hidden]"), null);
+  assert.equal(operations.length, 0);
+  confirm = await openPicker();
+  assert.ok(confirm.disabled);
+  await user.click(screen.getByRole("radio", { name: /Session 3/ }));
+  await user.click(confirm);
+  assert.deepEqual(operations, [[source, storeId, "link", "3"]]);
+  assert.ok(confirm.disabled);
+  assert.deepEqual(opened, [["1"]]);
+  saveLink.reject(new Error("failed"));
+  await screen.findByRole("alert");
+  assert.deepEqual(opened, [["1"]]);
+  await user.click(confirm);
+  saveLink.resolve();
+  await waitFor(() => assert.deepEqual(opened, [["1"], ["3"]]));
 });

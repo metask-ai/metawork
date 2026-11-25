@@ -19,6 +19,9 @@ import {
   assertTaskFlag,
   decodeHostSignalEvent,
   decodePingResponse,
+  decodeHandoffSessions,
+  decodeHandoffReceipt,
+  assertHandoffSaved,
   decodeTaskCreateResult,
   decodeTaskProjectResult,
   decodeTaskCompactResult,
@@ -4555,4 +4558,38 @@ test("Task project results validate identity, nullable target and exact business
     reason: "project_unavailable",
   };
   assert.deepEqual(decodeTaskProjectResult(rejected, "3"), rejected);
+});
+
+test("handoff contracts distinguish an empty confirmed history, ambiguous defaults and a recovered creation", () => {
+  const storeId = "a".repeat(32);
+  assert.deepEqual(decodeHandoffSessions({ storeId, sessions: [] }), {
+    storeId,
+    sessions: [],
+  });
+  assert.throws(() =>
+    decodeHandoffSessions({ storeId: "stale", sessions: [] }),
+  );
+  assert.throws(() =>
+    decodeHandoffSessions({
+      storeId,
+      sessions: [
+        { taskId: "1", preferred: true },
+        { taskId: "2", preferred: true },
+      ],
+    }),
+  );
+  assert.equal(decodeHandoffReceipt({ taskId: null }), null);
+  assert.equal(decodeHandoffReceipt({ taskId: "7" }), "7");
+  assert.throws(() => decodeHandoffReceipt({ taskId: "07" }));
+  assert.throws(() => assertHandoffSaved({ saved: false }));
+  const result = {
+    accepted: true,
+    taskId: "7",
+    bindingEpoch: "1",
+    mcpAuthority: { kind: "ready", selection: "none" },
+    reason: null,
+    projectId: null,
+    existing: true,
+  };
+  assert.deepEqual(decodeTaskCreateResult(result), result);
 });

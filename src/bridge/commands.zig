@@ -106,6 +106,7 @@ pub const custom_model_add = "metawork.models.customModels.add";
 pub const custom_model_replace = "metawork.models.customModels.replace";
 pub const custom_model_remove = "metawork.models.customModels.remove";
 pub const account_logout = "metawork.account.logout";
+pub const task_handoff = "metawork.tasks.handoff";
 pub const create_task = "metawork.tasks.create";
 pub const run = "metawork.tasks.run";
 pub const send_input = "metawork.tasks.sendInput";
@@ -240,6 +241,7 @@ pub const product = [_][]const u8{
     custom_model_remove,
     account_logout,
     create_task,
+    task_handoff,
     run,
     send_input,
     retry_input,

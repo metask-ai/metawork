@@ -11,6 +11,7 @@ import {
   ChevronRight,
   ChevronDown,
   Clock3,
+  ClipboardList,
   Copy,
   Folder,
   FolderOpen,
@@ -100,6 +101,7 @@ type IconName =
   | "copy"
   | "clock"
   | "new-task"
+  | "task-list"
   | "terminal"
   | "skills"
   | "skill-file"
@@ -164,6 +166,7 @@ const icons: Record<IconName, LucideIcon> = {
   copy: Copy,
   clock: Clock3,
   "new-task": SquarePen,
+  "task-list": ClipboardList,
   terminal: Terminal,
   skills: Puzzle,
   "skill-file": FileText,

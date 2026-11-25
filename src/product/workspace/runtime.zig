@@ -263,6 +263,7 @@ pub const RemovalPreparation = struct {
 };
 
 pub const OrderPreparation = struct {
+    workspace_id: u64 = 0,
     index: usize,
     recent_order: u64,
     previous_order: u64,
@@ -1100,6 +1101,7 @@ pub const Runtime = struct {
         return .{
             .index = index,
             .recent_order = recent_order,
+            .workspace_id = id,
             .previous_order = record.recent_order,
         };
     }
@@ -1116,8 +1118,12 @@ pub const Runtime = struct {
 
     pub fn rollbackOrder(self: *Runtime, preparation: *OrderPreparation) void {
         std.debug.assert(preparation.active);
-        self.records[preparation.index].?.recent_order = preparation.previous_order;
-        self.next_recent_order = preparation.recent_order;
+        if (self.records[preparation.index]) |*record| {
+            if (record.id == preparation.workspace_id and record.recent_order == preparation.recent_order)
+                record.recent_order = preparation.previous_order;
+        }
+        if (self.next_recent_order - 1 == preparation.recent_order)
+            self.next_recent_order = preparation.recent_order;
         preparation.active = false;
     }
 

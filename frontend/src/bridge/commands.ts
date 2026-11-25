@@ -106,6 +106,7 @@ export const commands = {
   customModelReplace: "metawork.models.customModels.replace",
   customModelRemove: "metawork.models.customModels.remove",
   accountLogout: "metawork.account.logout",
+  taskHandoff: "metawork.tasks.handoff",
   createTask: "metawork.tasks.create",
   run: "metawork.tasks.run",
   sendInput: "metawork.tasks.sendInput",
