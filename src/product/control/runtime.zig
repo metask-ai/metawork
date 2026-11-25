@@ -7442,10 +7442,11 @@ pub const Runtime = struct {
     ) Error!void {
         const view = self.accountView();
         writer.print(
-            "{{\"state\":\"{s}\",\"canCancel\":{},\"accountId\":",
+            "{{\"state\":\"{s}\",\"canCancel\":{},\"canRetry\":{},\"accountId\":",
             .{
                 @tagName(view.state),
                 view.can_cancel,
+                view.can_retry,
             },
         ) catch return error.SnapshotTooLarge;
         try text.writeJson(writer, view.account_id);
@@ -10125,7 +10126,12 @@ pub const Runtime = struct {
     }
 
     pub fn metaskCredentialRenewal(self: *Runtime) control_ports.MetaskCredentialRenewal {
-        return .{ .context = self, .renew_fn = renewMetaskExecutionCredentials, .needs_fn = needsDeferredMetaskCredential };
+        return .{
+            .context = self,
+            .renew_fn = renewMetaskExecutionCredentials,
+            .needs_fn = needsDeferredMetaskCredential,
+            .waits_fn = waitsForMetask,
+        };
     }
 
     fn currentCredentialGeneration(self: *Runtime, generation: u64) bool {
@@ -10140,6 +10146,11 @@ pub const Runtime = struct {
     fn needsDeferredMetaskCredential(context: *anyopaque, generation: u64) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
         return self.currentCredentialGeneration(generation) and self.task_runtime.needsDeferredMetaskCredential();
+    }
+
+    fn waitsForMetask(context: *anyopaque, epoch: u64) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.task_runtime.waitsForMetask(epoch);
     }
 
     fn renewMetaskExecutionCredentials(context: *anyopaque, generation: u64, credential: ?[]const u8) void {

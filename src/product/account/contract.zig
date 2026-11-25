@@ -267,6 +267,9 @@ pub const ErrorCode = enum {
 pub const AccountView = struct {
     state: AccountState,
     can_cancel: bool = false,
+    /// `retry_refresh` acts now; while a login could not be confirmed, so does
+    /// `begin_login`.
+    can_retry: bool = false,
     account_id: []const u8 = "",
     display_name: []const u8 = "",
     email_hint: []const u8 = "",
@@ -347,6 +350,10 @@ pub fn validateView(view: AccountView) ValidationError!void {
         return error.InconsistentState;
     if (view.can_cancel and view.state != .authorizing)
         return error.InconsistentState;
+    if (view.can_retry) switch (view.state) {
+        .checking, .authenticated => if (view.error_code == .none) return error.InconsistentState,
+        .signed_out, .authorizing => return error.InconsistentState,
+    };
     switch (view.state) {
         .checking, .signed_out, .authorizing => {
             if (view.account_id.len != 0 or view.display_name.len != 0 or

@@ -90,6 +90,7 @@ const emptyAccountSummary = {
 const signedOut = {
   state: "signed_out",
   canCancel: false,
+  canRetry: false,
   accountId: "",
   displayName: "",
   emailHint: "",
@@ -265,7 +266,35 @@ test("Account settings render each public session state with only its valid acti
     { initialSection: "account" },
   );
   assert.match(checkingMarkup, /Checking sign-in/);
-  assert.doesNotMatch(checkingMarkup, />Sign in</);
+  assert.doesNotMatch(
+    checkingMarkup,
+    />Sign in<|>Try again now<|>Sign in again</,
+  );
+
+  // A login that could not be confirmed offers both ways out; trying again
+  // keeps them in place without accepting them.
+  for (const canRetry of [true, false]) {
+    const markup = renderSettings(
+      {
+        ...signedOut,
+        state: "checking",
+        errorCode: "metask_service_unavailable",
+        canRetry,
+      },
+      unavailableModels,
+      { initialSection: "account" },
+    );
+    assert.match(markup, /Can&#x27;t confirm your sign-in yet/);
+    assert.match(markup, /MetaWork keeps retrying/);
+    for (const label of ["Try again now", "Sign in again"]) {
+      const button = markup.match(
+        new RegExp(`<button[^>]*>${label}</button>`),
+      )?.[0];
+      assert.ok(button, label);
+      assert.equal(/ disabled=""/.test(button), !canRetry);
+    }
+    assert.doesNotMatch(markup, /Checking sign-in/);
+  }
 
   const callbackMarkup = renderSettings(
     { ...signedOut, state: "authorizing", canCancel: true },
@@ -308,12 +337,22 @@ test("refresh scheduling failure exposes the explicit Account retry", () => {
     {
       ...readyAccount,
       errorCode: "refresh_schedule_failed",
+      canRetry: true,
     },
     readyModels,
     { initialSection: "account" },
   );
   assert.match(markup, /Automatic sign-in refresh could not be scheduled/);
   assert.match(markup, />Retry sign-in refresh</);
+  // Host says when it may be retried; the error code alone does not.
+  assert.doesNotMatch(
+    renderSettings(
+      { ...readyAccount, errorCode: "refresh_schedule_failed" },
+      readyModels,
+      { initialSection: "account" },
+    ),
+    />Retry sign-in refresh</,
+  );
 });
 
 test("Account settings render gateway usage history without legacy summaries", () => {

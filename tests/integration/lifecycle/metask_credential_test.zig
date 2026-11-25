@@ -207,6 +207,10 @@ test "Metask message sent while a restart confirms the login runs once after it"
     try characterizeCredentialExpiry(.restart_confirms);
 }
 
+test "Metask restart without a connection keeps the login and each message waits for one attempt" {
+    try characterizeCredentialExpiry(.restart_unreachable);
+}
+
 test "Metask login cancelled on a signed-in account refetches the same generation's catalog" {
     try characterizeCredentialExpiry(.login_cancelled);
 }
@@ -367,7 +371,7 @@ test "Metask long Run retains more than 128 rotations and protects unrelated Tas
     try characterizeCredentialExpiry(.many_rotations);
 }
 
-const Scenario = enum { recovery_keeps_catalog, restart_confirms, login_cancelled, retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, renewal_unsent, renewal_lost, relogin, relogin_during_run, account_switch_during_run, logout_during_run, rebind_original_account_switch, rebind_original_relogin, rebind_original_renewal, account_switch, account_switch_after_logout, logout, detached, detached_account_switch, catalog_failure, catalog_loading_attached, catalog_loading_detached, session_close_retry, catalog_drift, own_declaration, own_protocol, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer, compact_rotation, compact_rebind_original_relogin };
+const Scenario = enum { recovery_keeps_catalog, restart_confirms, restart_unreachable, login_cancelled, retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, renewal_unsent, renewal_lost, relogin, relogin_during_run, account_switch_during_run, logout_during_run, rebind_original_account_switch, rebind_original_relogin, rebind_original_renewal, account_switch, account_switch_after_logout, logout, detached, detached_account_switch, catalog_failure, catalog_loading_attached, catalog_loading_detached, session_close_retry, catalog_drift, own_declaration, own_protocol, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer, compact_rotation, compact_rebind_original_relogin };
 
 const CatalogRetryTimer = struct {
     id: ?u64 = null,
@@ -513,6 +517,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     }
     switch (scenario) {
         .recovery_keeps_catalog => return characterizeRecovery(&wake_loop, &control, &accounts, &platform, &coordinator, &network, old_id),
+        .restart_unreachable => return characterizeUnreachableRestart(&wake_loop, &control, &accounts, &platform, &coordinator, &network, old_id),
         .restart_confirms => return characterizeRestart(&wake_loop, &control, &accounts, &platform, &coordinator, &network, old_id),
         .login_cancelled => return characterizeCancelledLogin(&wake_loop, &control, &accounts, &coordinator, &network, old_id),
         else => {},
@@ -1382,14 +1387,12 @@ fn characterizeRecovery(
 
 /// Account starts again over the stored login, as a restart does, while this
 /// Product keeps the Task that receives the message.
-fn characterizeRestart(
-    wake_loop: *fixture.LifecycleWakeLoop,
+fn restartAccount(
     control: *control_api.Runtime,
     accounts: *account_coordinator.Coordinator,
     platform: *account.TestSupport.Platform,
     coordinator: *coordinator_api.Coordinator,
     network: *Network,
-    task_id: u64,
 ) !void {
     try platform.setStoredRefreshToken("synthetic-lifecycle-refresh-a");
     const runtime = accounts.runtime;
@@ -1401,22 +1404,84 @@ fn characterizeRestart(
     accounts.* = account_coordinator.Coordinator.init(runtime, control.accountCommitSink(), std.Thread.getCurrentId());
     accounts.setCredentialRenewal(control.metaskCredentialRenewal());
     accounts.setFollower(fixture.catalogFollower(coordinator));
-
-    network.expected_access = access_b;
     accounts.start(platform.ports());
     try std.testing.expectEqual(.checking, control.accountView().state);
+}
+
+/// Token exchange, then the identity it belongs to.
+fn confirmLogin(control: *control_api.Runtime, accounts: *account_coordinator.Coordinator) !void {
+    for (0..2) |_| {
+        account.TestSupport.joinNetwork(accounts.runtime);
+        accounts.drain();
+    }
+    try std.testing.expectEqual(.authenticated, control.accountView().state);
+}
+
+fn characterizeRestart(
+    wake_loop: *fixture.LifecycleWakeLoop,
+    control: *control_api.Runtime,
+    accounts: *account_coordinator.Coordinator,
+    platform: *account.TestSupport.Platform,
+    coordinator: *coordinator_api.Coordinator,
+    network: *Network,
+    task_id: u64,
+) !void {
+    network.expected_access = access_b;
+    try restartAccount(control, accounts, platform, coordinator, network);
     try std.testing.expectEqual(.recovering, control.newTaskAdmissionView().metask);
     _ = try control.sendInput("while-checking", task_id, .{ .text = "Reply with a short text; do not call tools." });
     try std.testing.expectEqual(.waiting, lastSubmission(control.testTask(task_id).?).state);
     try std.testing.expectEqual(.metask_authorization_recovering, control_api.TestSupport.taskModelInputBlocker(control, task_id).?);
-    // Token exchange, then the identity it belongs to.
-    for (0..2) |_| {
-        account.TestSupport.joinNetwork(runtime);
-        accounts.drain();
-    }
-    try std.testing.expectEqual(.authenticated, control.accountView().state);
+    try confirmLogin(control, accounts);
     try drainCatalog(coordinator);
     try expectWaitingInputRuns(wake_loop, control, task_id, "while-checking");
+}
+
+fn characterizeUnreachableRestart(
+    wake_loop: *fixture.LifecycleWakeLoop,
+    control: *control_api.Runtime,
+    accounts: *account_coordinator.Coordinator,
+    platform: *account.TestSupport.Platform,
+    coordinator: *coordinator_api.Coordinator,
+    network: *Network,
+    task_id: u64,
+) !void {
+    network.refresh_failure = error.NetworkNotSent;
+    try restartAccount(control, accounts, platform, coordinator, network);
+    _ = try control.sendInput("while-checking", task_id, .{ .text = "Reply with a short text; do not call tools." });
+    for ([_]i64{ 100, 130 }) |now| {
+        // A second attempt, not waited for by anyone, doubles the distance.
+        platform.now_unix_seconds = now;
+        _ = accounts.tick();
+        account.TestSupport.joinNetwork(accounts.runtime);
+        accounts.drain();
+    }
+    try std.testing.expectEqual(.checking, control.accountView().state);
+    try std.testing.expect(control.accountView().can_retry);
+    try std.testing.expectEqual(.@"unreachable", control.newTaskAdmissionView().metask);
+    control.syncLifecycle();
+    const unsent = control.task_runtime.retrySubmission(task_id, "while-checking") orelse
+        return error.WaitingMessageDidNotFail;
+    try std.testing.expectEqual(.metask_connection_unavailable, unsent.reason.?);
+
+    // The resend waits for the next attempt, and brings it forward.
+    network.refresh_failure = null;
+    network.expected_access = access_b;
+    platform.now_unix_seconds = 160;
+    try std.testing.expect(!accounts.tick());
+    const resent = try control.retryTaskInput(task_id, "while-checking", "resent-while-checking");
+    try std.testing.expectEqual(.accepted, resent.outcome);
+    try std.testing.expectEqual(.waiting, lastSubmission(control.testTask(task_id).?).state);
+    for (0..5000) |_| {
+        try wake_loop.drain(control);
+        if (accounts.tick()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.ResendBroughtNothingForward;
+    try std.testing.expect(accounts.runtime.account.refreshInFlight());
+    try confirmLogin(control, accounts);
+    try std.testing.expectEqual(@as(usize, 3), network.refresh_attempts.load(.acquire));
+    try drainCatalog(coordinator);
+    try expectWaitingInputRuns(wake_loop, control, task_id, "resent-while-checking");
 }
 
 /// Cancelling returns to the same credential generation, whose catalog the

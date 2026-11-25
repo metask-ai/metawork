@@ -119,11 +119,24 @@ pub const Coordinator = struct {
         return account_api.Runtime.ownsTimer(timer_id);
     }
 
+    /// The window came to the front.
+    pub fn activate(self: *Coordinator) void {
+        self.assertMainThread();
+        if (self.stopping) return;
+        self.runtime.expedite();
+        _ = self.tick();
+    }
+
     /// Commits what the clocks ask now; true when anything was. Cheap enough
     /// for every event, so no single timer decides whether a renewal happens.
     pub fn tick(self: *Coordinator) bool {
         self.assertMainThread();
         if (self.stopping) return false;
+        // A message that began to wait is a reason to try now.
+        if (self.credential_renewal) |renewal| switch (self.runtime.authorization().use()) {
+            .wait => |epoch| if (renewal.waits(epoch)) self.runtime.expedite(),
+            .ready, .stop => {},
+        };
         var committed = false;
         while (self.runtime.prepareDue()) |prepared| {
             if (!self.commitPrepared(prepared).accepted) break;
@@ -352,7 +365,7 @@ const CommitSteps = struct {
     }
 
     fn renewal(self: *CommitSteps) control_ports.MetaskCredentialRenewal {
-        return .{ .context = self, .renew_fn = renew, .needs_fn = needs };
+        return .{ .context = self, .renew_fn = renew, .needs_fn = needs, .waits_fn = waits };
     }
 
     fn renew(context: *anyopaque, generation: u64, credential: ?[]const u8) void {
@@ -362,6 +375,10 @@ const CommitSteps = struct {
     }
 
     fn needs(_: *anyopaque, _: u64) bool {
+        return false;
+    }
+
+    fn waits(_: *anyopaque, _: u64) bool {
         return false;
     }
 

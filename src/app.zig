@@ -605,6 +605,8 @@ const App = struct {
                 // Product consumes catalog completion before management can
                 // observe the shared boundary and decide whether to advance.
                 self.drainAgentEvents();
+                // Product may only now have made a message wait for Account.
+                if (self.account_coordinator) |coordinator| _ = coordinator.tick();
                 if (self.mcp_oauth_refresh) |*coordinator| _ = coordinator.drain();
                 self.advanceMcp();
                 if (self.control) |control|
@@ -692,9 +694,7 @@ const App = struct {
             // The inbox asks MetaTeam only while MetaWork is in front.
             .lifecycle => |phase| if (phase == .activate or phase == .deactivate) {
                 if (self.inbox) |*coordinator| coordinator.setActive(phase == .activate);
-                if (phase == .activate) if (self.account_coordinator) |coordinator| {
-                    _ = coordinator.tick();
-                };
+                if (phase == .activate) if (self.account_coordinator) |coordinator| coordinator.activate();
                 if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
             },
             else => {},

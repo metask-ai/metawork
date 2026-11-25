@@ -1281,6 +1281,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
   const item = object(value, path, [
     "state",
     "canCancel",
+    "canRetry",
     "accountId",
     "displayName",
     "emailHint",
@@ -1292,6 +1293,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
   ]);
   const state = enumValue(item.state, `${path}.state`, accountStates);
   const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
+  const canRetry = booleanValue(item.canRetry, `${path}.canRetry`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
   const emailHint = stringValue(item.emailHint, `${path}.emailHint`);
@@ -1538,6 +1540,12 @@ function decodeAccount(value: unknown, path: string): AccountView {
     fail(path, "a non-authenticated Account must hide identity");
   if (state === "authenticated" && accountId.length === 0)
     fail(path, "an authenticated Account requires identity");
+  if (
+    canRetry &&
+    (errorCode === "none" ||
+      (state !== "checking" && state !== "authenticated"))
+  )
+    fail(path, "only a failed check or renewal may be retried");
   if (canCancel && state !== "authorizing")
     fail(path, "cancellation requires active authorization");
   if (errorCode === "none" && safeDiagnostic.length !== 0)
@@ -1598,6 +1606,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
   return {
     state,
     canCancel,
+    canRetry,
     accountId,
     displayName,
     emailHint,

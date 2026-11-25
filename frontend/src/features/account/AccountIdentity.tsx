@@ -10,6 +10,7 @@ import { useI18n } from "../../i18n/context.ts";
 import {
   accountIdentityInitial,
   accountIdentityLabel,
+  accountUnconfirmed,
 } from "../../workbench/account-identity.ts";
 import {
   AboutMetaWorkDialog,
@@ -23,6 +24,7 @@ export function AccountIdentity({
   cancelDisabled,
   onOpenSettings,
   onBeginLogin,
+  onRetryRefresh,
   onCancel,
   onLogout,
   updates,
@@ -34,6 +36,7 @@ export function AccountIdentity({
   cancelDisabled: boolean;
   onOpenSettings: () => void;
   onBeginLogin: () => void;
+  onRetryRefresh: () => void;
   onCancel: () => void;
   onLogout: () => void;
   updates: UpdateView;
@@ -49,9 +52,10 @@ export function AccountIdentity({
   const identityName = authenticated
     ? accountIdentityLabel(account, t("account.signed_in"))
     : t("account.provider");
+  const unconfirmed = accountUnconfirmed(account);
   const identityStatus =
     account.state === "checking"
-      ? t("account.checking.title")
+      ? t(unconfirmed ? "account.unconfirmed.title" : "account.checking.title")
       : account.state === "authorizing"
         ? t("account.authorizing.title")
         : account.state === "signed_out"
@@ -99,6 +103,24 @@ export function AccountIdentity({
                     {t("account.login")}
                   </Menu.Item>
                 )}
+                {unconfirmed && (
+                  <>
+                    <Menu.Item
+                      disabled={disabled || !account.canRetry}
+                      onClick={() => choose(onRetryRefresh)}
+                    >
+                      <Icon name="refresh" />
+                      {t("account.retry_now")}
+                    </Menu.Item>
+                    <Menu.Item
+                      disabled={disabled || !account.canRetry}
+                      onClick={() => choose(onBeginLogin)}
+                    >
+                      <Icon name="account" />
+                      {t("account.login_again")}
+                    </Menu.Item>
+                  </>
+                )}
                 {account.state === "authorizing" && account.canCancel && (
                   <Menu.Item
                     disabled={cancelDisabled}
@@ -109,6 +131,7 @@ export function AccountIdentity({
                   </Menu.Item>
                 )}
                 {(account.state === "signed_out" ||
+                  unconfirmed ||
                   (account.state === "authorizing" && account.canCancel)) && (
                   <Menu.Separator />
                 )}

@@ -4,6 +4,7 @@ import type {
   NewTaskAdmissionView,
   ModelRef,
 } from "../bridge/contracts.ts";
+import { accountUnconfirmed } from "./account-identity.ts";
 
 export function supportsCustomProviders(capabilities: {
   management: boolean;
@@ -24,12 +25,14 @@ export type ModelSetupAction =
   | "models"
   | "choose_model"
   | "refresh"
-  | "schedules";
+  | "schedules"
+  | "confirm";
 export type ModelSetupReason =
   | "persistence"
   | "preparing"
   | "execution_unavailable"
   | "checking"
+  | "unconfirmed"
   | "authorizing"
   | "loading"
   | "recovering"
@@ -94,6 +97,8 @@ export function modelSetupNotice({
   const needsMetask =
     selected?.sourceId === "metask" ||
     (!selected && !hasReadyModels && models.customProviders.length === 0);
+  if (needsMetask && accountUnconfirmed(account))
+    return { reason: "unconfirmed", action: "confirm" };
   if (needsMetask && account.state === "checking")
     return { reason: "checking", action: null };
   if (needsMetask && account.state === "authorizing")

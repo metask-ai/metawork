@@ -124,6 +124,7 @@ pub const MetaskCredentialRenewal = struct {
     context: *anyopaque,
     renew_fn: *const fn (*anyopaque, u64, ?[]const u8) void,
     needs_fn: *const fn (*anyopaque, u64) bool,
+    waits_fn: *const fn (*anyopaque, u64) bool,
 
     pub fn renew(self: MetaskCredentialRenewal, generation: u64, credential: ?[]const u8) void {
         self.renew_fn(self.context, generation, credential);
@@ -131,6 +132,11 @@ pub const MetaskCredentialRenewal = struct {
 
     pub fn needs(self: MetaskCredentialRenewal, generation: u64) bool {
         return self.needs_fn(self.context, generation);
+    }
+
+    /// A message waits for the attempt that ends this epoch.
+    pub fn waits(self: MetaskCredentialRenewal, epoch: u64) bool {
+        return self.waits_fn(self.context, epoch);
     }
 };
 

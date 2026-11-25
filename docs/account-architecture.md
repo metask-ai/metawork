@@ -60,9 +60,9 @@ Application 可以同时持有 Account Runtime 与 Models 管理 capability，�
 checking | signed_out | authorizing | authenticated
 ```
 
-`AccountView` 只包含 `state`、`can_cancel`、经过验证的 `account_id`、best-effort `display_name/email_hint/phone_hint/concurrency_limit`、Account-owned error，以及嵌套的 `summary`；四个资料字段都可以缺失，`concurrency_limit = null` 表示后端资料缺失或不可用，`concurrency_limit = 0` 精确表示 Metask 后端的不限并发语义。完整邮箱和手机号不得进入view、fact、Snapshot、日志或安全诊断；非authenticated状态必须隐藏全部identity字段。`summary` 保留全局 `operation = idle | refreshing`、`usage_eligibility = unknown | disabled | enabled` 与 `wallet/usage/history` 的稳定 wire shape；当前 OAuth 合同在 authenticated history 同步时将 eligibility 置为 enabled，wallet 与 usage 保持 unavailable且不携带数据或错误，history 发布后端返回的日历范围以及最多 371 个严格递增且日期唯一的每日 input/output/cache creation/cache read/total Token与 recorded cost。日期精确为 `YYYY-MM-DD`，金额和 Token 都以 canonical decimal string 越过 Bridge，Host 不发布浮点数。模型目录、默认模型、source、generation、Task admission、API Key和 connection 均不得进入 `AccountView` 或 `AccountFact`。
+`AccountView` 只包含 `state`、`can_cancel`、`can_retry`、经过验证的 `account_id`、best-effort `display_name/email_hint/phone_hint/concurrency_limit`、Account-owned error，以及嵌套的 `summary`；四个资料字段都可以缺失，`concurrency_limit = null` 表示后端资料缺失或不可用，`concurrency_limit = 0` 精确表示 Metask 后端的不限并发语义。完整邮箱和手机号不得进入view、fact、Snapshot、日志或安全诊断；非authenticated状态必须隐藏全部identity字段。`can_retry` 只在没有在途 attempt 时为真，且只有两种情况：`checking` 带错误，或 `authenticated` 带 `refresh_schedule_failed`；`checking` 没有错误却为真是无效的 view。`summary` 保留全局 `operation = idle | refreshing`、`usage_eligibility = unknown | disabled | enabled` 与 `wallet/usage/history` 的稳定 wire shape；当前 OAuth 合同在 authenticated history 同步时将 eligibility 置为 enabled，wallet 与 usage 保持 unavailable且不携带数据或错误，history 发布后端返回的日历范围以及最多 371 个严格递增且日期唯一的每日 input/output/cache creation/cache read/total Token与 recorded cost。日期精确为 `YYYY-MM-DD`，金额和 Token 都以 canonical decimal string 越过 Bridge，Host 不发布浮点数。模型目录、默认模型、source、generation、Task admission、API Key和 connection 均不得进入 `AccountView` 或 `AccountFact`。
 
-公开命令只有 `begin_login | cancel_operation | retry_refresh | refresh_summary | open_recharge | logout`。`retry_refresh` 只恢复已验证会话的 Account-owned token refresh 调度：token 已到续期点时立即启动 refresh，否则重新启动续期节拍；`refresh_summary` 只在 authenticated 时显式刷新 usage history，不刷新 token或 Models目录。`open_recharge` 只在authenticated时请求平台通过系统浏览器打开Account-owned固定充值页 `https://www.metask-ai.com/app/billing`，不接收URL、token、account id或query，也不改变Account状态或发布fact。Account error space只描述 OAuth、identity、refresh token、summary、平台 effect 和自身资源失败，不包含 catalog、model、source、execution、Task、Session 或 consumer 语义。
+公开命令只有 `begin_login | cancel_operation | retry_refresh | refresh_summary | open_recharge | logout`。`retry_refresh` 只恢复已验证会话的 Account-owned token refresh 调度：token 已到续期点时立即启动 refresh，否则重新启动续期节拍；冷启动的登录没能确认时（`checking` 且 `can_retry`），它当场再确认一次，此时也接受 `begin_login`；`refresh_summary` 只在 authenticated 时显式刷新 usage history，不刷新 token或 Models目录。`open_recharge` 只在authenticated时请求平台通过系统浏览器打开Account-owned固定充值页 `https://www.metask-ai.com/app/billing`，不接收URL、token、account id或query，也不改变Account状态或发布fact。Account error space只描述 OAuth、identity、refresh token、summary、平台 effect 和自身资源失败，不包含 catalog、model、source、execution、Task、Session 或 consumer 语义。
 
 ## 4. Authorization lease 与 Metask provider
 
@@ -146,13 +146,17 @@ Account durable authority 由系统安全存储中的 Metask refresh token 与�
 - production 与 automation 的 credential service 隔离，不得相互恢复。
 - Account Runtime 和平台 binding 不拥有数据目录、路径创建或文件权限；Models 等其他 owner 的持久化路径不得作为 Account 初始化前置条件。
 
-冷启动是唯一可以消费 retained refresh token 的入口。没有 token 时进入 `signed_out`，合法残留记录仅尝试清理；有 token 且记录缺失时尝试一次 restore；记录合法且摘要匹配当前 token 时，禁止刷新并以普通登录入口要求重新登录；记录合法但摘要不匹配时，本地 token 已被替换，可以 restore 当前 token。任何读取失败、未知版本、损坏或超长记录都 fail closed，不发 refresh HTTP，发布 Account 存储错误。每次 restore 必须先 refresh并 durable commit，再以 Userinfo 建立 identity；后续显式登录总是新 OAuth，不形成隐式 restore 循环。
+冷启动是唯一可以消费 retained refresh token 的入口。没有 token 时进入 `signed_out`，合法残留记录仅尝试清理；有 token 且记录缺失时尝试 restore；记录合法且摘要匹配当前 token 时，禁止刷新并以普通登录入口要求重新登录；记录合法但摘要不匹配时，本地 token 已被替换，可以 restore 当前 token。任何读取失败、未知版本、损坏或超长记录都 fail closed，不发 refresh HTTP，发布 Account 存储错误。每次 restore 必须先 refresh并 durable commit，再以 Userinfo 建立 identity；后续显式登录总是新 OAuth，`signed_out` 之后没有任何自动 restore。
+
+没有证明任何事的 restore 停在 `checking` 并保留错误，不算未登录：一是 refresh 能证明没有发出且记录已清除（与已验证会话的重试是同一个判断）；二是 token 已换并已保存，只是 Userinfo 暂时不可达（网络、deadline、429、5xx 或 worker 启动失败）。它按 boot 时钟隔 30 秒、1 分钟、2 分钟、之后每 5 分钟再确认一次，再试时不清错误；已换好的 token 到自己的续期点之前只重取 identity，不再换。窗口激活或有消息开始等待时，间隔回到起点，下一次提前到上次结束后 30 秒；`retry_refresh` 当场发起。试到成功、被证明无效、结果不确定、用户重新登录或退出为止；结果不确定、服务端明确拒绝、保存失败与 identity 明确失效仍按各自规则进入 `signed_out`。节拍无法启动时不另换错误，由事件循环的检查驱动；读不到墙钟时的尝试以没有发出结束，等待它的消息因此有结果。
+
+没能确认时也可以重新登录，而且可以换账号。授权取消、回调失败、超时或换 token 失败时，保存的 refresh token 没有被替换，回到原来的确认，重试时间不变；换 token 成功后它已被替换，identity 失败即 `signed_out`。
 
 每次 refresh 先成功写入绑定当前 token 的阻断记录，再发送唯一 HTTP。记录写入失败不发 HTTP；调用 transport 前的明确本地失败、transport 证明未发送或服务端明确未消费结果只尝试一次清理记录，清理失败保持阻断。合法轮换必须返回不同的新 refresh token，主线程只尝试一次保存新 token；失败保留旧记录并阻断刷新，释放未提交新 token，不建立本地保存恢复流程。新 token 保存成功后安装当前 credential，再清理旧记录；清理失败不回滚成功轮换，因为记录与新 token 摘要不匹配，重启可恢复新 token，下一次 HTTP 前仍必须成功覆盖记录。
 
 已验证会话的 refresh 在两种情况下保留已验证 identity，并在 terminal commit 后按 boot 时钟固定 30 秒自动重试，次数不限：一是遇到明确未发送的 network、deadline 或取消故障，且阻断记录已成功清除；二是在写入阻断记录之前就失败（记录写入、时钟读取或 worker 启动失败）。每次到点只发起一个新的 attempt；后续同类失败再延迟一次，不立即循环。保留原失败诊断；只有续期节拍无法启动才发布 `refresh_schedule_failed`，并提供显式 retry。服务端明确拒绝的请求或配置错误不重试，按下一段结束会话；signed_out restore 不增加隐式重试循环。
 
-结果不确定时保持阻断；timer、`retry_refresh`、错误展示变化、登录取消或时间经过都不能解除。`retry_refresh` 只恢复未被阻断的已验证会话的安全调度，不增加 signed_out restore 或保存恢复入口。除上一段的可重试失败外，已验证会话的 refresh 失败一律在本进程内立即进入 `signed_out`，包括结果不确定、收到的响应不是轮换、服务端明确拒绝、新 token 保存失败：
+结果不确定时保持阻断；timer、`retry_refresh`、错误展示变化、登录取消或时间经过都不能解除。`retry_refresh` 只用于未被阻断的已验证会话和没能确认的冷启动登录，不增加 signed_out restore 或保存恢复入口。除上一段的可重试失败外，已验证会话的 refresh 失败一律在本进程内立即进入 `signed_out`，包括结果不确定、收到的响应不是轮换、服务端明确拒绝、新 token 保存失败：
 
 - 清除内存中的 credential，durable token 与阻断记录保持原样；
 - 错误发布为 `token_refresh_failed`，原因码作为安全诊断；invalid_grant 与删除失败沿用各自的错误。

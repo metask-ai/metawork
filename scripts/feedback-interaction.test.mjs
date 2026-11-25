@@ -112,6 +112,7 @@ async function setup(ctx, errorCode = "metask_service_unavailable") {
   Object.assign(snapshot.account, {
     state: "signed_out",
     canCancel: false,
+    canRetry: false,
     accountId: "",
     displayName: "",
     emailHint: "",
@@ -226,6 +227,7 @@ test("dismissing a refresh scheduling failure keeps its live recovery action ava
   const app = await setup(ctx, "refresh_schedule_failed");
   Object.assign(app.snapshot.account, {
     state: "authenticated",
+    canRetry: true,
     accountId: "1",
     displayName: "Fixture account",
   });
@@ -239,6 +241,7 @@ test("dismissing a refresh scheduling failure keeps its live recovery action ava
     "recovery belongs to the permanent Account action area",
   );
   app.controls.invoke = () => {
+    app.snapshot.account.canRetry = false;
     app.snapshot.account.errorCode = "none";
     app.snapshot.account.safeDiagnostic = "";
     return { accepted: true, errorCode: "none", attemptId: "retry-refresh" };

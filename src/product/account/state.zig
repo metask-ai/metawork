@@ -122,6 +122,8 @@ const CommittedState = struct {
     email_hint: EmailHint = .{},
     phone_hint: PhoneHint = .{},
     concurrency_limit: ?u32 = null,
+    /// A stored login is held whose identity nothing has confirmed or denied.
+    unconfirmed: bool = false,
     error_code: contract.ErrorCode = .none,
     safe_diagnostic: SafeDiagnostic = .{},
     /// Internal transport evidence only; never projected to the public Account wire.
@@ -157,6 +159,21 @@ const CommittedState = struct {
         return self.transaction == .oauth_callback;
     }
 
+    fn canRetry(self: *const CommittedState) bool {
+        if (self.activeAttempt() != null) return false;
+        return switch (self.session_state) {
+            .restoring => self.unconfirmed and self.error_code != .none,
+            .authenticated => self.error_code == .refresh_schedule_failed,
+            .signed_out, .authorizing, .refreshing, .shutting_down => false,
+        };
+    }
+
+    /// Where an attempt that proved nothing returns: to what is still held.
+    fn home(self: *const CommittedState) SessionState {
+        if (self.account_id.len != 0) return .authenticated;
+        return if (self.unconfirmed) .restoring else .signed_out;
+    }
+
     fn view(self: *const CommittedState) contract.AccountView {
         const state: contract.AccountState = switch (self.session_state) {
             .restoring => .checking,
@@ -169,6 +186,7 @@ const CommittedState = struct {
         return .{
             .state = state,
             .can_cancel = self.canCancel(),
+            .can_retry = self.canRetry(),
             .account_id = if (publish_identity) self.account_id.view() else "",
             .display_name = if (publish_identity) self.display_name.view() else "",
             .email_hint = if (publish_identity) self.email_hint.view() else "",
@@ -208,9 +226,25 @@ pub const Account = struct {
     pub fn renewable(self: *const Account) bool {
         return switch (self.state.session_state) {
             .authenticated, .refreshing => true,
-            .authorizing => self.state.account_id.len != 0 and self.state.transaction != .loading_identity,
-            .restoring, .signed_out, .shutting_down => false,
+            .authorizing => self.state.home() != .signed_out and self.state.transaction != .loading_identity,
+            .restoring => self.state.unconfirmed,
+            .signed_out, .shutting_down => false,
         };
+    }
+
+    /// A stored login waits for its next confirmation.
+    pub fn confirming(self: *const Account) bool {
+        return self.state.session_state == .restoring and self.state.unconfirmed;
+    }
+
+    pub fn unconfirmed(self: *const Account) bool {
+        return self.state.unconfirmed;
+    }
+
+    /// The stored login's token is exchanged; only its identity is missing.
+    pub fn confirmingIdentity(self: *const Account) bool {
+        return self.state.unconfirmed and self.state.transaction == .loading_identity and
+            self.state.session_state == .refreshing;
     }
 
     pub fn activeRequestUsesCredential(self: *const Account) bool {
@@ -273,6 +307,7 @@ pub const Account = struct {
                 break :blk transitionNoAttempt(next, .restored);
             },
             .refresh_only => blk: {
+                next.unconfirmed = true;
                 next.clearError();
                 break :blk transitionNoAttempt(next, .restored);
             },
@@ -319,8 +354,24 @@ pub const Account = struct {
             .kind = .refresh_token,
         } };
         next.next_attempt_id = attempt.next;
-        next.clearError();
+        // Trying again does not yet say anything else about the login.
+        if (!next.unconfirmed) next.clearError();
         return transition(next, .session_changed, attempt.current, .refresh_token);
+    }
+
+    /// Reads the identity of a login whose token is already exchanged.
+    pub fn prepareRestoredIdentity(self: *const Account) PrepareResult {
+        if (!self.confirming()) return .{ .rejected = .invalid_state };
+        const attempt = nextAttempt(self.state.next_attempt_id) orelse
+            return .{ .rejected = .generation_mismatch };
+        var next = self.state;
+        next.session_state = .refreshing;
+        next.transaction = .{ .loading_identity = .{
+            .attempt_id = attempt.current,
+            .kind = .refresh_token,
+        } };
+        next.next_attempt_id = attempt.next;
+        return transition(next, .session_changed, attempt.current, .load_identity);
     }
 
     pub fn prepareLoginExchange(
@@ -367,6 +418,7 @@ pub const Account = struct {
     pub fn prepareShutdown(self: *const Account) PreparedTransition {
         var next = self.state;
         next.session_state = .shutting_down;
+        next.unconfirmed = false;
         next.clearIdentity();
         next.clearError();
         const active_attempt = next.activeAttempt();
@@ -412,9 +464,12 @@ pub const Account = struct {
     }
 
     fn prepareBeginLogin(self: *const Account) PrepareResult {
-        if ((self.state.session_state != .signed_out and
-            self.state.session_state != .authenticated) or
-            self.state.activeAttempt() != null)
+        const accepted = switch (self.state.session_state) {
+            .signed_out, .authenticated => true,
+            .restoring => self.state.canRetry(),
+            .authorizing, .refreshing, .shutting_down => false,
+        };
+        if (!accepted or self.state.activeAttempt() != null)
             return .{ .rejected = .invalid_state };
         const attempt = nextAttempt(self.state.next_attempt_id) orelse
             return .{ .rejected = .generation_mismatch };
@@ -430,7 +485,7 @@ pub const Account = struct {
         if (!self.state.canCancel()) return .{ .rejected = .invalid_state };
         const attempt_id = self.state.activeAttempt().?;
         var next = self.state;
-        next.session_state = if (next.account_id.len == 0) .signed_out else .authenticated;
+        next.session_state = next.home();
         next.clearTransaction();
         next.error_code = .user_cancelled;
         next.safe_diagnostic.clear();
@@ -472,7 +527,11 @@ pub const Account = struct {
                 .attempt_id = attempt_id,
                 .kind = if (kind == .login) .login else .refresh_token,
             } };
-            next.clearError();
+            // A login's stored token has replaced the unconfirmed one.
+            if (kind == .login) {
+                next.unconfirmed = false;
+                next.clearError();
+            }
             return transition(next, .session_changed, attempt_id, .load_identity);
         }
         next.session_state = .authenticated;
@@ -500,6 +559,7 @@ pub const Account = struct {
         next.email_hint = identity.email_hint;
         next.phone_hint = identity.phone_hint;
         next.concurrency_limit = identity.concurrency_limit;
+        next.unconfirmed = false;
         next.clearError();
         return transitionNoEffect(next, .session_changed, loading.attempt_id);
     }
@@ -527,17 +587,14 @@ pub const Account = struct {
         const authentication_invalid = kind == .refresh_token and !failure.retryable;
         var next = self.state;
         next.session_state = switch (kind) {
-            .login => if (login_replaced or next.account_id.len == 0)
-                .signed_out
-            else
-                .authenticated,
-            .refresh_token => if (authentication_invalid or next.account_id.len == 0)
-                .signed_out
-            else
-                .authenticated,
+            .login => if (login_replaced) .signed_out else next.home(),
+            .refresh_token => if (authentication_invalid) .signed_out else next.home(),
             .logout => .authenticated,
         };
-        if (next.session_state == .signed_out) next.clearIdentity();
+        if (next.session_state == .signed_out) {
+            next.unconfirmed = false;
+            next.clearIdentity();
+        }
         next.clearTransaction();
         next.error_code = failure.error_code;
         next.safe_diagnostic = failure.safe_diagnostic;
@@ -569,10 +626,12 @@ fn transitionNoAttempt(next: CommittedState, fact_kind: contract.AccountFactKind
 
 fn stateIsValid(state: *const CommittedState) bool {
     return switch (state.session_state) {
-        .restoring, .signed_out, .shutting_down => state.activeAttempt() == null,
+        .restoring => state.activeAttempt() == null,
+        .signed_out, .shutting_down => state.activeAttempt() == null and !state.unconfirmed,
         .authorizing => state.attemptKind() == .login,
         .refreshing => state.attemptKind() == .refresh_token,
-        .authenticated => state.transaction == .none or state.transaction == .logging_out,
+        .authenticated => !state.unconfirmed and
+            (state.transaction == .none or state.transaction == .logging_out),
     };
 }
 
@@ -718,6 +777,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         if (account.state.session_state != .restoring) return error.InvalidState;
         var next = account.state;
         next.session_state = .authenticated;
+        next.unconfirmed = false;
         next.account_id = identity.account_id;
         next.display_name = identity.display_name;
         next.email_hint = identity.email_hint;
@@ -996,6 +1056,31 @@ test "refresh failure distinguishes retryable and invalid credentials" {
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&cold, &cold_refresh);
+    // Nothing proven about the stored login: it stays, and says why.
+    var unreached_failure: WorkerFailure = .fromCode(.deadline_exceeded);
+    unreached_failure.retryable = true;
+    var unreached: WorkerCompletion = .{
+        .attempt_id = cold.activeAttempt().?,
+        .payload = .{ .failed = unreached_failure },
+    };
+    var waiting = switch (cold.prepareCompletion(&unreached)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&cold, &waiting);
+    try std.testing.expectEqual(contract.AccountState.checking, cold.view().state);
+    try std.testing.expectEqual(contract.ErrorCode.deadline_exceeded, cold.view().error_code);
+    try std.testing.expect(cold.view().can_retry);
+    var again = switch (cold.prepareRestoredTokenRefresh()) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&cold, &again);
+    // Trying again neither shows another state nor offers its actions.
+    try std.testing.expectEqual(contract.ErrorCode.deadline_exceeded, cold.view().error_code);
+    try std.testing.expect(!cold.view().can_retry);
+    try contract.validateView(cold.view());
+
     var unavailable: WorkerCompletion = .{
         .attempt_id = cold.activeAttempt().?,
         .payload = .{ .failed = .fromCode(.metask_service_unavailable) },

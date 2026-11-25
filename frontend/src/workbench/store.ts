@@ -128,6 +128,7 @@ export const initialWorkbenchState: WorkbenchState = {
     account: {
       state: "checking",
       canCancel: false,
+      canRetry: false,
       accountId: "",
       displayName: "",
       emailHint: "",

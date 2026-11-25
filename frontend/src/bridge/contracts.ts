@@ -201,6 +201,7 @@ export type ModelMetadata = {
 export type AccountView = {
   state: AccountState;
   canCancel: boolean;
+  canRetry: boolean;
   accountId: string;
   displayName: string;
   emailHint: string;

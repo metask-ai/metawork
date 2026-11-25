@@ -20,3 +20,8 @@ export function accountIdentityLabel(
 export function accountIdentityInitial(account: IdentityFields): string {
   return [...account.displayName.trim()][0]?.toLocaleUpperCase() || "M";
 }
+
+/** A stored login the Host is still trying to confirm after a failure. */
+export function accountUnconfirmed(account: AccountView): boolean {
+  return account.state === "checking" && account.errorCode !== "none";
+}

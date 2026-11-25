@@ -1130,6 +1130,7 @@ test("durable Metask intent remains decodable when the current catalog is unavai
   catalogUnavailable.account = {
     state: "signed_out",
     canCancel: false,
+    canRetry: false,
     accountId: "",
     displayName: "",
     emailHint: "",
@@ -2557,6 +2558,7 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
   snapshot.account = {
     state: "signed_out",
     canCancel: false,
+    canRetry: false,
     accountId: "",
     displayName: "",
     emailHint: "",
@@ -3028,6 +3030,34 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     /cancellation requires active authorization/,
   );
 
+  for (const [state, errorCode, accepted] of [
+    ["checking", "metask_service_unavailable", true],
+    ["checking", "none", false],
+    ["signed_out", "token_refresh_failed", false],
+    ["authorizing", "metask_service_unavailable", false],
+  ]) {
+    const retryable = clone(fixture);
+    Object.assign(retryable.account, {
+      state,
+      errorCode,
+      canRetry: true,
+      accountId: "",
+      displayName: "",
+      emailHint: "",
+      phoneHint: "",
+      concurrencyLimit: null,
+      safeDiagnostic: "",
+      summary: emptyAccountSummary,
+    });
+    if (accepted)
+      assert.equal(decodeWorkbenchSnapshot(retryable).account.canRetry, true);
+    else
+      assert.throws(
+        () => decodeWorkbenchSnapshot(retryable),
+        /only a failed check or renewal may be retried/,
+      );
+  }
+
   const authenticatedWithoutDisplayName = clone(fixture);
   authenticatedWithoutDisplayName.account.displayName = "";
   authenticatedWithoutDisplayName.account.emailHint = "";
@@ -3127,6 +3157,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   signedOut.account = {
     state: "signed_out",
     canCancel: false,
+    canRetry: false,
     accountId: "",
     displayName: "",
     emailHint: "",

@@ -103,6 +103,7 @@ function signedOut() {
   Object.assign(snapshot.account, {
     state: "signed_out",
     canCancel: false,
+    canRetry: false,
     accountId: "",
     displayName: "",
     emailHint: "",
@@ -428,6 +429,12 @@ test("Host preparation, failures and default selection are not first-use setup",
   const state = signedOut();
   state.account.state = "checking";
   assert.deepEqual(classify(state), { reason: "checking", action: null });
+  state.account.errorCode = "metask_service_unavailable";
+  assert.deepEqual(classify(state), {
+    reason: "unconfirmed",
+    action: "confirm",
+  });
+  state.account.errorCode = "none";
   state.account.state = "authorizing";
   assert.deepEqual(classify(state), { reason: "authorizing", action: null });
   state.account.canCancel = true;
@@ -905,6 +912,40 @@ test("a saved service with no tested model goes directly to Models", () => {
     reason: "provider_unavailable",
     action: "models",
   });
+});
+
+test("an unconfirmed login offers one retry that waits out the attempt underway", async (ctx) => {
+  window.localStorage.setItem("metawork.model-setup-handled", "true");
+  const state = signedOut();
+  Object.assign(state.account, {
+    state: "checking",
+    errorCode: "metask_service_unavailable",
+    canRetry: true,
+  });
+  state.models.defaultSelection = structuredClone(
+    fixture.models.defaultSelection,
+  );
+  let retries = 0;
+  ctx.mock.method(BridgeClient.prototype, "retryAccountRefresh", async () => {
+    retries++;
+    state.account.canRetry = false;
+    state.revision = String(BigInt(state.revision) + 1n);
+    return { accepted: true, errorCode: "none", attemptId: "retry-1" };
+  });
+  await renderApp(ctx, state);
+  const user = userEvent.setup({ document: dom.window.document });
+  assert.match(
+    document.querySelector(".composer-model-notice").textContent,
+    /Can't confirm your sign-in yet\. Your text is kept\./,
+  );
+  await user.click(screen.getByRole("button", { name: "Try again now" }));
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Try again now" }).disabled,
+      true,
+    ),
+  );
+  assert.equal(retries, 1);
 });
 
 test("generic workspace admission does not masquerade as a model failure", () => {

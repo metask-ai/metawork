@@ -2171,6 +2171,9 @@ export default function App() {
       case "cancel":
         void cancelAccountOperation();
         break;
+      case "confirm":
+        void runAccountCommand(() => client.retryAccountRefresh());
+        break;
       case "refresh":
         {
           const token = beginOperationFeedback("models:catalog", {
@@ -5561,7 +5564,9 @@ export default function App() {
                   bridgeUnavailable ||
                   accountBusy ||
                   executionBusy ||
-                  accountCancelBusy
+                  accountCancelBusy ||
+                  (setupNotice.action === "confirm" &&
+                    !snapshot.account.canRetry)
                 }
                 onAction={runModelSetupAction}
                 onChooseSetup={
@@ -5934,6 +5939,9 @@ export default function App() {
             onOpenSettings={openSettings}
             onBeginLogin={() =>
               void runAccountCommand(() => client.beginLogin())
+            }
+            onRetryRefresh={() =>
+              void runAccountCommand(() => client.retryAccountRefresh())
             }
             onCancel={() => void cancelAccountOperation()}
             onLogout={() => void runAccountCommand(() => client.logout())}

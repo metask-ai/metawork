@@ -17,6 +17,7 @@ const actionLabels: Record<ModelSetupAction, MessageId> = {
   choose_model: "account.choose_model",
   refresh: "model_setup.retry",
   schedules: "model_setup.view_schedules",
+  confirm: "account.retry_now",
 };
 
 const reasonMessages: Record<ModelSetupReason, MessageId> = {
@@ -24,6 +25,7 @@ const reasonMessages: Record<ModelSetupReason, MessageId> = {
   preparing: "model_setup.preparing",
   execution_unavailable: "model_setup.execution_unavailable",
   checking: "account.checking.title",
+  unconfirmed: "model_setup.unconfirmed",
   authorizing: "model_setup.authorizing",
   loading: "model_setup.loading",
   recovering: "model_setup.recovering",
