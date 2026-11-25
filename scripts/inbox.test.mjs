@@ -728,14 +728,22 @@ test("a linked file, project or task shows its own details, opens nested items a
   await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
   const body = await screen.findByText("See these");
   const card = body.closest(".inbox-bubble");
-  const projectLink = screen.getByRole("button", { name: /#740/ });
+  const projectLink = await screen.findByRole("button", {
+    name: "metawork Project #740",
+  });
   assert.ok(card?.contains(projectLink));
-  const taskLink = screen.getByRole("button", { name: /#9749/ });
+  const taskLink = await screen.findByRole("button", {
+    name: "Open API Task #9749",
+  });
   assert.ok(card.contains(taskLink));
   await user.click(body);
-  assert.equal(
-    client.calls.some(([kind]) => kind === "task"),
-    false,
+  assert.equal(screen.queryByRole("dialog"), null);
+  assert.deepEqual(
+    client.calls.filter(([kind]) => kind === "task"),
+    [
+      ["task", "1", "740"],
+      ["task", "1", "9749"],
+    ],
   );
 
   taskLink.focus();
@@ -776,8 +784,73 @@ test("a linked file, project or task shows its own details, opens nested items a
   assert.ok(screen.getByRole("button", { name: "Open API Task #9749" }));
   rerender(element(client, view({ accountScope: "b".repeat(64) })));
   await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
-  assert.ok(await screen.findByRole("button", { name: "Linked item #9749" }));
+  await screen.findByRole("button", { name: "Open API Task #9749" });
+  assert.equal(
+    client.calls.filter(([kind, , id]) => kind === "task" && id === "9749")
+      .length,
+    3,
+  );
 });
+
+for (const clicked of ["1", "2"]) {
+  test(
+    "opening attachment " +
+      clicked +
+      " while the first title is loading prioritizes the dialog",
+    async () => {
+      const user = userEvent.setup({ document });
+      const client = fakeClient({
+        pages: {
+          "ann:latest:null": {
+            messages: [
+              message("7", "in", "Earlier", ["1"]),
+              message("8", "in", "Please check", ["1", "2", "3"]),
+            ],
+          },
+        },
+        details: Object.fromEntries(
+          ["1", "2", "3"].map((id) => [
+            id,
+            { task: taskView({ id, name: "Title " + id }) },
+          ]),
+        ),
+      });
+      const read = client.readInboxTask;
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      client.readInboxTask = async (...args) => {
+        const result = await read(...args);
+        if (args[1] === "1") await gate;
+        return result;
+      };
+      const reads = () =>
+        client.calls.filter(([kind]) => kind === "task").map(([, , id]) => id);
+      render(element(client, view()));
+      await user.click(screen.getByRole("button", { name: "Ann, 2 unread" }));
+      await waitFor(() => assert.deepEqual(reads(), ["1"]));
+      await user.click(
+        screen.getAllByRole("button", { name: "Linked item #" + clicked })[0],
+      );
+      if (clicked === "2")
+        await screen.findByRole("heading", { name: "Title 2" });
+      release();
+      await screen.findByRole("heading", { name: "Title " + clicked });
+      assert.deepEqual(reads(), clicked === "1" ? ["1"] : ["1", "2"]);
+      await user.keyboard("{Escape}");
+      await screen.findByRole("button", { name: "Title 3 Task #3" });
+      assert.equal(
+        screen.getAllByRole("button", { name: "Title 1 Task #1" }).length,
+        2,
+      );
+      assert.deepEqual(
+        reads(),
+        clicked === "1" ? ["1", "2", "3"] : ["1", "2", "1", "3"],
+      );
+    },
+  );
+}
 
 test("a reply is sent once, shown from the newer messages, and retried under the same request key", async () => {
   const user = userEvent.setup({ document });

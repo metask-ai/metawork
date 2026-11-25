@@ -196,7 +196,27 @@ export function useInbox(
   const [attachmentSummaries, setAttachmentSummaries] = useState<
     ReadonlyMap<string, AttachmentSummary | null>
   >(() => new Map());
+  const [failedTitles, setFailedTitles] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const detailSequence = useRef(0);
+  // The Host has one detail slot. A click on the item being read can use
+  // that same response; clicking another item takes precedence.
+  const readDetail = useMemo(() => {
+    let pending: {
+      id: string;
+      result: Promise<InboxTaskDetail | null>;
+    } | null = null;
+    return (id: string) => {
+      if (pending?.id === id) return pending.result;
+      const result = client.readInboxTask(binding, id).catch(() => null);
+      pending = { id, result };
+      void result.then(() => {
+        if (pending?.result === result) pending = null;
+      });
+      return result;
+    };
+  }, [client, binding, inbox.accountScope]);
   // One reply box per conversation: leaving one while it sends keeps it,
   // and an answer only ever lands in the attempt that asked.
   const [composers, setComposers] = useState<
@@ -282,6 +302,7 @@ export function useInbox(
     setTask(null);
     detailSequence.current++;
     setAttachmentSummaries(new Map());
+    setFailedTitles(new Set());
     setComposers({});
     readEpoch.current++;
   }, [binding, inbox.accountScope]);
@@ -306,6 +327,7 @@ export function useInbox(
         (current.failure && current.failure !== "failed")
       )
         return;
+      setFailedTitles((failed) => (failed.size ? new Set() : failed));
       const last = current.messages.at(-1);
       await readRef.current(
         current,
@@ -410,6 +432,7 @@ export function useInbox(
 
   function select(contact: Contact) {
     setTask(null);
+    setFailedTitles(new Set());
     const cached = inbox.conversations.some(
       (c) => c.peerId === contact.target && c.latest !== null,
     );
@@ -425,6 +448,83 @@ export function useInbox(
     void read(contact, "latest", null, cached);
   }
 
+  const rememberTitle = useCallback(
+    (taskId: string, detail: InboxTaskDetail | null) => {
+      if (
+        detail?.state === "ready" ||
+        detail?.state === "forbidden" ||
+        detail?.state === "not_found"
+      ) {
+        const item = detail.task ?? detail.file ?? detail.project;
+        const summary: AttachmentSummary | null =
+          detail.state === "ready" && item
+            ? {
+                kind: detail.task ? "task" : detail.file ? "file" : "project",
+                id: item.id || taskId,
+                name: item.name,
+              }
+            : null;
+        setAttachmentSummaries((current) => {
+          const next = new Map(current);
+          const previousId = current.get(taskId)?.id ?? taskId;
+          for (const [alias, known] of current)
+            if (
+              known?.id === previousId ||
+              (summary && known?.id === summary.id)
+            )
+              next.set(alias, summary);
+          next.set(taskId, summary);
+          if (summary) next.set(summary.id, summary);
+          return next;
+        });
+        return true;
+      }
+      return false;
+    },
+    [],
+  );
+
+  // Fill one missing title at a time, starting at the newest message.
+  const messages = conversation?.messages;
+  const missingTitle = useMemo(() => {
+    if (!messages) return;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const id = messages[i].taskIds.find(
+        (id) => !attachmentSummaries.has(id) && !failedTitles.has(id),
+      );
+      if (id) return id;
+    }
+  }, [messages, attachmentSummaries, failedTitles]);
+  const conversationKey = conversation?.key;
+  const loadTitles =
+    usable && inbox.state === "ready" && !task && !conversation?.failure;
+  useEffect(() => {
+    if (!loadTitles || !missingTitle) return;
+    let current = true;
+    let started = false;
+    const sequence = detailSequence.current;
+    const load = async () => {
+      if (
+        started ||
+        document.visibilityState !== "visible" ||
+        sequence !== detailSequence.current ||
+        conversationRef.current?.key !== conversationKey
+      )
+        return;
+      started = true;
+      const detail = await readDetail(missingTitle);
+      if (!current || sequence !== detailSequence.current) return;
+      if (!rememberTitle(missingTitle, detail))
+        setFailedTitles((failed) => new Set(failed).add(missingTitle));
+    };
+    void load();
+    document.addEventListener("visibilitychange", load);
+    return () => {
+      current = false;
+      document.removeEventListener("visibilitychange", load);
+    };
+  }, [loadTitles, missingTitle, conversationKey, readDetail, rememberTitle]);
+
   async function openTask(
     taskId: string,
     trail: readonly string[] = [],
@@ -439,44 +539,13 @@ export function useInbox(
       message,
       download: "idle",
     });
-    let detail: InboxTaskDetail | null = null;
-    try {
-      detail = await client.readInboxTask(binding, taskId);
-    } catch {
-      detail = null;
-    }
+    const detail = await readDetail(taskId);
     if (sequence !== detailSequence.current || detail?.state === "superseded")
       return;
-    // Remember only the label from an explicit detail read. Message lists contain IDs.
-    if (
-      detail?.state === "ready" ||
-      detail?.state === "forbidden" ||
-      detail?.state === "not_found"
-    ) {
-      const item = detail.task ?? detail.file ?? detail.project;
-      const summary: AttachmentSummary | null =
-        detail.state === "ready" && item
-          ? {
-              kind: detail.task ? "task" : detail.file ? "file" : "project",
-              id: item.id || taskId,
-              name: item.name,
-            }
-          : null;
-      setAttachmentSummaries((current) => {
-        const next = new Map(current);
-        const previousId = current.get(taskId)?.id ?? taskId;
-        for (const [alias, known] of current)
-          if (known?.id === previousId || (summary && known?.id === summary.id))
-            next.set(alias, summary);
-        next.set(taskId, summary);
-        if (summary) next.set(summary.id, summary);
-        return next;
-      });
-    }
+    rememberTitle(taskId, detail);
     setTask((current) => {
       if (current?.taskId !== taskId || sequence !== detailSequence.current)
         return current;
-      if (detail?.state === "superseded") return current;
       if (detail?.state === "ready")
         return { ...current, status: "ready", detail };
       const status =
@@ -589,6 +658,7 @@ export function useInbox(
     },
     /** The user's own retry: past any retry delay or refusal. */
     retry() {
+      setFailedTitles(new Set());
       void client.refreshInbox(binding, true).catch(() => undefined);
       if (conversation?.failure) {
         const last = conversation.messages.at(-1);
