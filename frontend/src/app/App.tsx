@@ -4934,20 +4934,14 @@ export default function App() {
             signal,
           );
           return fileMenuOutcome(
-            action,
             action === "reference" && state === "ready"
               ? await reference(target, file.displayPath, signal)
               : state,
           );
         } catch {
-          return {
-            message:
-              action === "save"
-                ? "outputs.state.save_unknown"
-                : signal.aborted
-                  ? "outputs.state.cancelled"
-                  : "outputs.state.failed",
-          };
+          if (action === "save")
+            return { message: "outputs.state.save_unknown" };
+          return signal.aborted ? null : { message: "outputs.state.failed" };
         }
       },
     }),

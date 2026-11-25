@@ -442,7 +442,7 @@ export async function runOutputDeliveryVertical({
           webview.evaluate(
             expectedLabel
               ? `${JSON.stringify(expectedLabel)}.includes(${statusOf(record.id, list)}?.textContent.trim())`
-              : `!${statusOf(record.id, list)}`,
+              : `(() => { const scope = [...document.querySelectorAll(${JSON.stringify(card(record.id))})].at(-1)?.closest(".file-menu-scope"); return scope?.getAttribute("aria-busy") === "false" && !scope.querySelector(".file-menu-status"); })()`,
           ),
         35_000,
         `Output visible ${expected ?? "silent"} status`,
@@ -458,13 +458,13 @@ export async function runOutputDeliveryVertical({
         mode: "save",
         source,
         destination,
-        trigger: () => click("save", "saved"),
+        trigger: () => click("save", null),
       });
       assert.deepEqual(await readFile(destination), bytes);
       const cancelled = await nativeOutputProbe({
         mode: "cancel",
         source,
-        trigger: () => click("save", "cancelled"),
+        trigger: () => click("save", null),
       });
       // What is saved is the file as it is now, not as it was delivered.
       const edited = `${content}changed before Save As`;
@@ -473,7 +473,7 @@ export async function runOutputDeliveryVertical({
         mode: "save",
         source,
         destination,
-        trigger: () => click("save", "saved"),
+        trigger: () => click("save", null),
       });
       assert.equal(await readFile(destination, "utf8"), edited);
       assert.deepEqual(
@@ -515,10 +515,7 @@ export async function runOutputDeliveryVertical({
     );
     await webview.send("Input.insertText", { text: unsent });
     const requestsBeforeEdit = provider.requests.length;
-    assert.equal(
-      (await click("edit", "edit_prepared")).action,
-      "check_current",
-    );
+    assert.equal((await click("edit", null)).action, "check_current");
     const draft = await webview.evaluate(
       `document.querySelector('.composer-shell textarea')?.value`,
     );
@@ -830,7 +827,7 @@ export async function runOutputDeliveryVertical({
       }
       evidence.office.openedWorkbookAndSlides = true;
       evidence.officeStage = "working_from_saved_original";
-      await click("edit", "edit_prepared", word);
+      await click("edit", null, word);
       await poll(
         () =>
           webview.evaluate(

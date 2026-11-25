@@ -7,11 +7,7 @@ import type {
   TaskView,
   WorkspaceView,
 } from "../../bridge/contracts.ts";
-import type {
-  FileMenuAction,
-  FileMenuOutcome,
-  MenuFile,
-} from "../../components/FileMenu.tsx";
+import type { FileMenuOutcome, MenuFile } from "../../components/FileMenu.tsx";
 import type { MessageId } from "../../i18n/context.ts";
 import { findRunFileReference } from "../../workbench/run-file-references.ts";
 import type { FileReferenceResult } from "./RunOutputs.tsx";
@@ -39,20 +35,17 @@ export function menuFileTarget(file: MenuFile): FileTarget {
   return file.target as FileTarget;
 }
 
-/**
- * What to say about a finished action. A file that was opened or shown in its
- * folder answers for itself; the rest is said where it was asked.
- */
 export function fileMenuOutcome(
-  action: FileMenuAction,
   state: FileActionState | FileReferenceResult,
 ): FileMenuOutcome {
   switch (state) {
     case "opened":
     case "revealed":
-      return null;
+    case "saved":
     case "path_copied":
-      return { message: "outputs.state.path_copied", brief: true };
+    case "edit_prepared":
+    case "cancelled":
+      return null;
     // Nothing in the menu compares with a delivery.
     case "changed":
       return { message: "outputs.state.file_changed" };
