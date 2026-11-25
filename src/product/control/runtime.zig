@@ -5334,8 +5334,8 @@ pub const Runtime = struct {
             return error.BindingEpochMismatch;
         // Compaction declares that it calls the model, so the Task must hold
         // the current login's credential before it starts. It is admitted
-        // through the same path as every other model entry, including the
-        // rebind an installed source change requires.
+        // through the same plan as every other model entry, including the
+        // rebuild that plan may ask for.
         if (product_task.mutationImpact(.manual_compact).model_access == .required) {
             var binding = try self.prepareTaskBinding(task_id);
             defer binding.deinit();
@@ -14733,33 +14733,41 @@ test "Scheduled Task keeps its Metask model across renewals, logins and restarts
     const id = try fixture.schedule();
     const generation = fixture.control.modelsView().providers[0].source_generation;
     const commits = fixture.persistence.commits;
-    for ([_][]const u8{ "token-a", "token-b" }) |token| try fixture.loadCatalog(token);
-    try fixture.restartModels();
+    try fixture.loadCatalog("token-b");
+    // A login passes through no authorization at all.
+    fixture.control.setMetaskAuthorizationUnavailable();
     try fixture.loadCatalog("token-c");
+    try fixture.restartModels();
+    try fixture.loadCatalog("token-d");
     try fixture.expectRunnable(id, generation);
     try std.testing.expectEqual(@as(?u64, 2_000), fixture.clock.armed_at);
     try std.testing.expectEqual(commits, fixture.persistence.commits);
 }
 
 test "Scheduled Task follows its account's generation out of an older version's store" {
-    for ([_]enum { adopted, schedule_write_fails, interrupted }{ .adopted, .schedule_write_fails, .interrupted }) |case| {
+    for ([_]enum { adopted, schedule_write_fails, interrupted, reset }{ .adopted, .schedule_write_fails, .interrupted, .reset }) |case| {
         var fixture: MetaskScheduleFixture = undefined;
         try fixture.init();
         defer fixture.deinit();
         try fixture.loadCatalog("token-a");
         const id = try fixture.schedule();
         const derived = fixture.control.modelsView().providers[0].source_generation;
-        // The same account under a value an older version drew. Interrupted
-        // adoption already wrote Schedule, but not Models.
+        // The same account under a value an older version drew. An adoption
+        // whose Models write never landed already moved Schedule.
         fixture.control.custom_providers.registry.metask_source_generation = 1234;
         try std.testing.expect(fixture.control.custom_providers.rememberPreference(.{ .source_id = "metask", .model_id = "fixture-model" }).accepted);
-        if (case != .interrupted) fixture.control.schedule.store.find(id).?.binding.source_generation = 1234;
+        const moves = case == .adopted or case == .schedule_write_fails;
+        if (moves) fixture.control.schedule.store.find(id).?.binding.source_generation = 1234;
         if (case == .schedule_write_fails) fixture.persistence.result = .failed;
         const commits = fixture.persistence.commits;
-        try fixture.restartModels();
+        if (case == .reset) {
+            fixture.control.custom_providers.registry.metask_source_generation = derived;
+            fixture.control.custom_providers.store_healthy = false;
+            try std.testing.expect(fixture.control.resetModelsStore(fixture.control.currentRevision()).accepted);
+        } else try fixture.restartModels();
         try fixture.loadCatalog("token-b");
         try fixture.expectRunnable(id, if (case == .schedule_write_fails) 1234 else derived);
-        try std.testing.expectEqual(commits + @as(usize, if (case == .interrupted) 0 else 1), fixture.persistence.commits);
+        try std.testing.expectEqual(commits + @intFromBool(moves), fixture.persistence.commits);
         if (case != .schedule_write_fails) continue;
         // Neither side moved, so the next start can.
         fixture.persistence.result = .committed;

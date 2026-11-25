@@ -109,7 +109,7 @@ New task 创建只接受完整 `ModelRef + source generation + catalog generatio
 
 既有 Task 的模型选择由 Task owner 准备完整 ModelRef 与独立 revision 的 history overlay，Product Control 验证目标来源并完成 confirmed commit；选择不调用忙碌的 Session，不改变当前 Run 或实际 binding。明确失败回滚 overlay；未知结果保留精确历史候选与原意图，复用既有 history worker 读回，确认前禁止该 Task 新 Run 和再次选择。确认提交后保留新意图，确认未提交则恢复原意图；不能用后来状态重写未知候选来推断原结果。尚未安装的新意图在执行接纳前重新解析目标；已安装的同一意图保持自己的模型，不借用目录刷新或全局默认改变用户意图。Custom Provider 的 protocol、endpoint 与 credential 保持到用户再次选择；Metask 模型自己的 protocol、endpoint 或图片声明与已安装会话不同时，下一次接纳按当前目录重建一次会话，同来源其他模型的变化不影响它。
 
-Metask 的凭据续期与新执行接纳分开：Account 刷新或任意一次登录后，Application 在目录刷新前通过独立 capability 交付当前 lease；Product Control 以该凭据更新已接纳的 Metask 执行，不经过 Models catalog gate。idle、queued、在飞或等待审批的 Session 使用官方原位更新，同步替换 attachment 的当前凭据；单纯轮换不改变 Task binding epoch、execution generation、模型意图、对话或权限，也不重建 Session、重放 Run 或工具。新的 Run 接纳仍校验 Account 与当前目录；Task 的凭据新旧只比较已安装的凭据代次与 Account 当前代次；代次随解析出的候选带入，安装时不读取 Account 现值，因此恢复期间的续期不会把旧凭据记为当前凭据，下一次接纳原位更新。投影与接纳共用同一个绑定判断（保持、换凭据、setModel、重建、恢复、阻塞），投影不解析 credential。恢复候选沿用既有接纳校验，过时的配置、来源或目录代次拒绝发布，不新增候选热更新或自动重试路径。
+Metask 的凭据续期与新执行接纳分开：Account 刷新或任意一次登录后，Application 在目录刷新前通过独立 capability 交付当前 lease；Product Control 以该凭据更新已接纳的 Metask 执行，不经过 Models catalog gate。idle、queued、在飞或等待审批的 Session 使用官方原位更新，同步替换 attachment 的当前凭据；单纯轮换不改变 Task binding epoch、execution generation、模型意图、对话或权限，也不重建 Session、重放 Run 或工具。新的 Run 接纳仍校验 Account 与当前目录；Task 已安装的凭据代次与 Account 当前代次不同，或上次原位更新失败，才算凭据旧；代次随解析出的候选带入，安装时不读取 Account 现值，因此恢复期间的续期不会把旧凭据记为当前凭据，下一次接纳原位更新。投影与接纳共用同一个绑定判断（保持、换凭据、setModel、重建、恢复、阻塞），投影不解析 credential。恢复候选沿用既有接纳校验，过时的配置、来源或目录代次拒绝发布，不新增候选热更新或自动重试路径。
 
 自动审批仍在主线程准备后立即派发，准备时复制 attachment 当前凭据；已发出的独立请求保留自己的副本。自动标题与生图在每次请求准备时读取当前凭据，目标、模型、可用性和 effect 生命周期保持冻结；读取失败使用各自既有失败语义，不回退到初始 token。生图的 Metask 授权独立于主对话来源，不能把 Metask token 注入 Custom Provider Session。旧凭据仍参与全局脱敏，不能仅因过期或进入 waiting_ui 而删除；相关 operation 返回并经过 canonical event drain、Host 请求静止且历史维护完成后，才释放最后的保留副本。单个长 operation 的保留量及扫描成本可以随刷新次数增长，不以刷新次数上限终止 Run。
 
@@ -127,7 +127,7 @@ Canonical snapshot 保持 owner 边界：Account 发布身份与授权事实，M
 
 Models 每次 resolve 只产生精确 `ModelRef + source_generation + protocol` 的调用方 owned candidate。Product Control 在 Task 创建、恢复/rebind 安装、凭据续期及释放边界执行产品文本与 Schedule durable scrub；完成必要持久提交后才安装、转移或 secure-zero 对应 credential。失败保留所需 owner 与诊断，不建立 default desired/active mismatch。
 
-`models.json` 是 Models aggregate 的唯一 canonical store；当前 schema 3 保存 Metask 无 secret 来源 authority（principal 与 source generation）、source-qualified 起始偏好及其 revision、Metask 起始偏好的可选 `default_selection.display_name`、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone。旧版写入的随机 Metask source generation 在启动时改写为派生值：先改 Schedule 中等于它的绑定，未写成则两边都保持原值；再写本文件，未写成则文件留着原值；下次启动重做。它不保存 Provider-local 模型选择、OAuth token、API credential、credential locator 或 Product binding generation；Custom Provider credential 只进入系统安全存储。Metask source id 固定为 `metask`。确认交互选择时，Models 从当时的有效 Metask 目录保存非空显示名。Metask 偏好缺少显示名时，新任务要求用户明确重选。读取偏好和目录刷新均不改写已保存偏好。生图不形成用户选择、独立 revision 或持久化 intent。
+`models.json` 是 Models aggregate 的唯一 canonical store；当前 schema 3 保存 Metask 无 secret 来源 authority（principal 与 source generation）、source-qualified 起始偏好及其 revision、Metask 起始偏好的可选 `default_selection.display_name`、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone。旧版写入的随机 Metask source generation 在启动或重置 Models 时改写为派生值：先改 Schedule 中等于它的绑定，未写成则两边都保持原值；再写本文件，未写成则文件留着原值；下次启动或重置时重做。它不保存 Provider-local 模型选择、OAuth token、API credential、credential locator 或 Product binding generation；Custom Provider credential 只进入系统安全存储。Metask source id 固定为 `metask`。确认交互选择时，Models 从当时的有效 Metask 目录保存非空显示名。Metask 偏好缺少显示名时，新任务要求用户明确重选。读取偏好和目录刷新均不改写已保存偏好。生图不形成用户选择、独立 revision 或持久化 intent。
 
 Models 退役格式硬切前只提取可验证的 Custom Provider id 和已有待删除 id，合并去重后持久写入当前空 registry 的 credential deletion 队列；canonical 提交确认后才删除系统凭据，删除失败保留 tombstone 并跨重启重试。该过程不恢复旧 Provider、模型、偏好或执行 authority；无法完整保全清理义务时保留原文件并报告恢复失败。
 
@@ -234,7 +234,7 @@ Schedule 的可执行定义保存 `ModelRef + source_generation + protocol`。Pr
 
 Schedule persistence recovery 由 Schedule owner 决策；旧格式自动 hard cut 时先保留 exact quarantine，再安装空当前 store。当前格式的显式恢复校验全局 snapshot revision，先stage并sync当前内存候选，再保留旧canonical并安装；中断证据不丢失，再次恢复收口精确pending artifacts。只有提交确认后重新开放mutation与timer；quarantine不进入decoder或自动迁移。
 
-Schedule store 保持 canonical `schema_version = 1`，严格保存 `ModelRef + source_generation + protocol`，删除 global selection revision。被替代旧格式先 exact quarantine 再原子安装空当前 store，无转换、双读或重放；失败保持真实错误。当前格式的提交、未知结果与显式恢复仍由 Schedule owner 处理，不用起始偏好作为恢复依据。Metask 来源代次的启动改写只替换绑定中的代次，不改 epoch、启用状态与健康；已经 needs_attention 的定义不自动恢复。
+Schedule store 保持 canonical `schema_version = 1`，严格保存 `ModelRef + source_generation + protocol`，删除 global selection revision。被替代旧格式先 exact quarantine 再原子安装空当前 store，无转换、双读或重放；失败保持真实错误。当前格式的提交、未知结果与显式恢复仍由 Schedule owner 处理，不用起始偏好作为恢复依据。启动或重置 Models 时对 Metask 来源代次的改写只替换绑定中的代次，不改 epoch、启用状态与健康；已经 needs_attention 的定义不自动恢复。
 
 ### 2.4 Skill authority 与本地资产
 

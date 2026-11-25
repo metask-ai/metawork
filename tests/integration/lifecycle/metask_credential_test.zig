@@ -686,6 +686,8 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         try std.testing.expectEqual(old_generation, old.durable.execution_generation);
         try std.testing.expectEqual(old_revision, old.durable.model_intent.?.revision);
         const new_id = try createTask(&control, workspace);
+        // Before any admission could correct it.
+        try std.testing.expectEqual(account_runtime.authorizationGeneration().?, control.testTask(new_id).?.runtime.executionConst().?.credential_generation);
         try runAndExpect(&wake_loop, &control, new_id, "new-authorization", .completed);
         return;
     }
@@ -706,6 +708,9 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         });
         fake_core.forceNextCheckpointRestoreStatus(fixture.wire.STATUS_CHECKPOINT_CORRUPT);
         fake_core.armControlledRestoreAfterCreate();
+        // Neither Account's generation nor the candidate's.
+        const original_credential = account_runtime.authorizationGeneration().? + 100;
+        old.runtime.execution().?.credential_generation = original_credential;
         _ = try control.restoreTaskConversation(old_id, old_epoch);
         for (0..5000) |_| {
             try wake_loop.drain(&control);
@@ -739,6 +744,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         try std.testing.expectEqual(old_generation, old.durable.execution_generation);
         try std.testing.expectEqualStrings(model_id, old.durable.execution_model);
         try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
+        try std.testing.expectEqual(original_credential, old.runtime.executionConst().?.credential_generation);
         try std.testing.expectEqual(@as(usize, 2), fake_core.session_created);
         fake_core.lock();
         const restores = fake_core.checkpoint_restores;
@@ -972,6 +978,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
                 try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             } else return error.RestoreDidNotSettle;
             try std.testing.expectEqualStrings(renewed_token, old.runtime.executionConst().?.secret);
+            try std.testing.expectEqual(account_runtime.authorizationGeneration().?, old.runtime.executionConst().?.credential_generation);
             try std.testing.expectEqual(@as(usize, 1), runCalls());
             return;
         }

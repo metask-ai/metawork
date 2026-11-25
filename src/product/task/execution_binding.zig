@@ -12,10 +12,13 @@ pub const OwnedTaskExecution = struct {
     model: []u8,
     base_url: []u8,
     execution_generation: u64,
+    /// The source this was installed from. For Metask that is the account of
+    /// the moment and decides nothing later: any login renews it in place.
     source_generation: u64 = 0,
     /// Process-local proof that this attachment installed the committed intent.
     model_intent_revision: u64 = 0,
     secret: []u8,
+    /// The Account generation `secret` was leased at, for Metask.
     credential_generation: u64 = 0,
     credential_source: ?*credential.Source = null,
     retired_credentials: std.ArrayList([]u8) = .empty,

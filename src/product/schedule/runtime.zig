@@ -654,7 +654,9 @@ pub const Runtime = struct {
         return self.reconcileBindingsNoFail(binding, redaction);
     }
 
-    /// True once no definition, in memory or stored, names `previous`.
+    /// True once no definition names `previous`. A store that cannot be written
+    /// now answers from memory, its last confirmed content, as long as nothing
+    /// has to move.
     pub fn rebindSourceNoFail(
         self: *Runtime,
         source_id: []const u8,
@@ -663,10 +665,11 @@ pub const Runtime = struct {
         redaction: Redaction,
     ) bool {
         switch (self.persistence_health) {
-            .ready => {},
+            .ready, .write_failed, .outcome_unknown => {},
             // Without a store there is no definition.
             .unavailable => return true,
-            .read_failed, .corrupt, .write_failed, .outcome_unknown => return false,
+            // What is stored was never read.
+            .read_failed, .corrupt => return false,
         }
         var candidate = self.store.clone(self.allocator) catch return false;
         var owned = true;
@@ -1572,6 +1575,10 @@ test "source rebinding moves one source's identity and nothing else" {
     effects.commit_result = .committed;
     // The second call finds nothing left to move and writes nothing.
     for (0..2) |_| try std.testing.expect(runtime.rebindSourceNoFail("metask", 7, 9, redaction));
+    for ([_]PersistenceHealth{ .write_failed, .outcome_unknown, .read_failed, .corrupt }, [_]bool{ true, true, false, false }) |health, settled| {
+        runtime.persistence_health = health;
+        try std.testing.expectEqual(settled, runtime.rebindSourceNoFail("metask", 7, 9, redaction));
+    }
     try std.testing.expectEqual(commits + 2, effects.commits);
     for (bound, ids, [_]Health{ .ready, .paused, .needs_attention, .ready, .ready }, 0..) |value, id, health, index| {
         const item = runtime.store.find(id).?;
