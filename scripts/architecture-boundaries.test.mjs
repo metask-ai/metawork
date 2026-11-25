@@ -2126,14 +2126,14 @@ test("Account authorization and Models provider state remain separate owners", (
 
   const commitPrepared = accountCoordinator.slice(
     accountCoordinator.indexOf("fn commitPrepared("),
-    accountCoordinator.indexOf("pub fn beginShutdown("),
+    accountCoordinator.indexOf("fn settle(self: *Coordinator)"),
   );
   const commitSteps = [
     "self.runtime.commit(&prepared);",
     "self.control.commitNoFail",
     "self.deliverCredential();",
     "follower.follow(self.runtime.authorization());",
-    "self.control.settleNoFail();",
+    "self.settle();",
   ].map((step) => commitPrepared.indexOf(step));
   assert.ok(commitSteps[0] >= 0);
   for (let step = 1; step < commitSteps.length; step++)

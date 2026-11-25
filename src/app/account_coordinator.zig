@@ -15,6 +15,23 @@ pub const AuthorizationFollower = struct {
     }
 };
 
+/// What Product was last told of the authorization. Its epochs change only with
+/// a commit, which tells Product anyway.
+const Published = struct {
+    state: std.meta.Tag(account_contract.Authorization),
+    generation: u64,
+
+    fn of(authorization: account_contract.Authorization) Published {
+        return .{
+            .state = authorization,
+            .generation = switch (authorization) {
+                .available => |value| value.generation,
+                .checking, .signed_out, .authorizing, .recovering, .stalled => 0,
+            },
+        };
+    }
+};
+
 /// Application binder for Account: terminal commits, the authorization query,
 /// and the only way out for the current credential.
 pub const Coordinator = struct {
@@ -25,6 +42,7 @@ pub const Coordinator = struct {
     credential_renewal: ?control_ports.MetaskCredentialRenewal = null,
     /// The credential generation running executions already received.
     delivered_generation: u64 = 0,
+    published: ?Published = null,
     stopping: bool = false,
 
     pub fn init(
@@ -147,6 +165,13 @@ pub const Coordinator = struct {
             if (self.credential_renewal) |renewal| renewal.retire(grant.accessToken().?);
             self.runtime.forgetGrant(grant);
         }
+        // A token that expired, or a clock that reads again, is no commit. The
+        // follower has nothing to do for it; what Product shows changes.
+        const current: Published = .of(self.runtime.authorization());
+        if (self.published) |published| if (!std.meta.eql(published, current)) {
+            self.settle();
+            committed = true;
+        };
         return committed;
     }
 
@@ -229,7 +254,7 @@ pub const Coordinator = struct {
         });
         self.deliverCredential();
         if (self.follower) |follower| follower.follow(self.runtime.authorization());
-        self.control.settleNoFail();
+        self.settle();
         if (!self.stopping and self.runtime.reconcileSummary())
             self.commitSummaryNoFail();
 
@@ -252,6 +277,11 @@ pub const Coordinator = struct {
             std.debug.assert(refreshed.accepted);
         }
         return .acceptedAttempt(attempt_id);
+    }
+
+    fn settle(self: *Coordinator) void {
+        self.published = .of(self.runtime.authorization());
+        self.control.settleNoFail();
     }
 
     pub fn beginShutdown(self: *Coordinator) void {
@@ -307,6 +337,7 @@ const RecordingSink = struct {
     records: [16]RecordedCommit = undefined,
     count: usize = 0,
     unsettled: bool = false,
+    settles: usize = 0,
     steps: ?*CommitSteps = null,
 
     fn port(self: *RecordingSink) control_ports.AccountCommitSink {
@@ -319,8 +350,8 @@ const RecordingSink = struct {
 
     fn settle(context: *anyopaque) void {
         const self: *RecordingSink = @ptrCast(@alignCast(context));
-        std.debug.assert(self.unsettled);
         self.unsettled = false;
+        self.settles += 1;
         if (self.steps) |steps| steps.add(.settle);
     }
 
@@ -1137,6 +1168,38 @@ test "Account follower keeps the authorization of a token still valid or expirin
     coordinator.drain();
     try std.testing.expectEqual(@as(usize, 2), follower.calls);
     try std.testing.expectEqual(.recovering, follower.last);
+}
+
+test "Account publishes an authorization that only time changed and nothing follows it" {
+    var runtime = try initRuntimeForTest();
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+    _ = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask User", "access-token", "refresh-token", 150),
+    );
+    var follower: RecordingFollower = .{};
+    coordinator.setFollower(follower.port());
+    const committed = sink.count;
+    var settles = sink.settles;
+    // Expired, then no clock to judge it by, then the clock again.
+    for ([_]?i64{ 149, 150, null, 150 }) |now| {
+        platform.now_unix_seconds = now;
+        const changed = now == null or now.? == 150;
+        try std.testing.expectEqual(changed, coordinator.tick());
+        if (changed) settles += 1;
+        try std.testing.expectEqual(settles, sink.settles);
+        try std.testing.expect(!coordinator.tick());
+    }
+    try std.testing.expectEqual(committed, sink.count);
+    try std.testing.expectEqual(@as(usize, 0), follower.calls);
+    // What a wait counts is no change of its own.
+    try std.testing.expectEqual(Published.of(.{ .recovering = 1 }), Published.of(.{ .recovering = 2 }));
 }
 
 test "Account commit installs, renews, follows and settles in that order" {

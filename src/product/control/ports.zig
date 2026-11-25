@@ -44,7 +44,8 @@ pub const AccountCommitSink = struct {
         self.commit_fn(self.context, commit);
     }
 
-    /// Rearms scheduled work against the new facts and publishes them.
+    /// Rearms scheduled work against the new facts and publishes them: after a
+    /// commit, or when only time changed what Account answers.
     pub fn settleNoFail(self: AccountCommitSink) void {
         self.settle_fn(self.context);
     }
