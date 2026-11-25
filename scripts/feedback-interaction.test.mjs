@@ -105,7 +105,11 @@ test.after(async () => {
   dom.window.close();
 });
 
-async function setup(ctx, errorCode = "metask_service_unavailable") {
+async function setup(
+  ctx,
+  errorCode = "metask_service_unavailable",
+  account = {},
+) {
   window.localStorage.setItem("metawork.model-setup-handled", "true");
   const snapshot = structuredClone(fixture);
   snapshot.tasks = [];
@@ -120,6 +124,7 @@ async function setup(ctx, errorCode = "metask_service_unavailable") {
     concurrencyLimit: null,
     errorCode,
     safeDiagnostic: "request-id: example-safe-id\n<plain text>",
+    ...account,
   });
   let revision;
   const controls = {
@@ -251,6 +256,42 @@ test("dismissing a refresh scheduling failure keeps its live recovery action ava
   await waitFor(() =>
     assert.ok(!screen.queryByRole("button", { name: "Retry sign-in refresh" })),
   );
+});
+
+test("retrying an unconfirmed login reports only its own outcome, once", async (ctx) => {
+  const app = await setup(ctx, "metask_service_unavailable", {
+    state: "checking",
+    canRetry: true,
+  });
+  const user = await app.openAccount();
+  app.controls.invoke = () => {
+    app.snapshot.account.canRetry = false;
+    return { accepted: true, errorCode: "none", attemptId: "retry-1" };
+  };
+  await user.click(screen.getByRole("button", { name: "Try again now" }));
+  const notice = () =>
+    document.querySelector(".settings-page .feedback-notice")?.textContent;
+  await waitFor(() => assert.match(notice(), /request received/));
+  const live = document.querySelector(".commandbar-alert-slot > [role=status]");
+  await app.publish();
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  assert.match(notice(), /request received/);
+  assert.doesNotMatch(live.textContent, /at the time/);
+
+  // It ends as the attempt before it did, and is reported all the same.
+  app.snapshot.account.canRetry = true;
+  await app.publish();
+  await waitFor(() => assert.match(notice(), /at the time/));
+  assert.match(live.textContent, /at the time/);
+  const announced = live.firstElementChild;
+
+  // Attempts nobody asked for say nothing new.
+  for (const canRetry of [false, true]) {
+    app.snapshot.account.canRetry = canRetry;
+    await app.publish();
+    await new Promise((resolve) => setTimeout(resolve, 75));
+  }
+  assert.ok(live.firstElementChild === announced);
 });
 
 test("restored account result is local and silent; details collapse keeps focus and dismissal survives repeated snapshots", async (ctx) => {

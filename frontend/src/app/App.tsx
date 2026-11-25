@@ -269,6 +269,7 @@ import {
   selectableTask,
 } from "../workbench/task-visibility.ts";
 import { PendingScopes } from "../workbench/pendingScopes.ts";
+import { accountUnconfirmed } from "../workbench/account-identity.ts";
 import {
   readyModelOptions,
   modelOptionId,
@@ -971,6 +972,9 @@ export default function App() {
     force = false,
   ) {
     if (accountFeedbackRequest.current.awaitingSync) return;
+    // A login keeps its failure while it is tried again; that failure is not
+    // the outcome of the attempt underway.
+    if (announce && accountUnconfirmed(account) && !account.canRetry) return;
     const observation = JSON.stringify([
       account.errorCode,
       account.safeDiagnostic,
