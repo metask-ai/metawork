@@ -24,6 +24,8 @@ import {
   useAutosizeTextarea,
 } from "../../components/ui/textarea.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
+import { ConversationFilePicker } from "./ConversationFilePicker.tsx";
+import type { ConversationFile } from "./conversation-files.ts";
 import { ComposerAddMenu } from "./ComposerAddMenu.tsx";
 import {
   AttachmentThumbnail,
@@ -99,6 +101,7 @@ function attachmentErrorMessage(reason: string): MessageId {
     staging_capacity: "attachment.error.staging_capacity",
     read_failed: "attachment.error.read_failed",
     file_changed: "attachment.error.file_changed",
+    reference_unavailable: "attachment.error.reference_unavailable",
     shutting_down: "attachment.error.shutting_down",
     invalid_transfer: "attachment.error.invalid_transfer",
     stale_transfer: "attachment.error.stale_transfer",
@@ -159,6 +162,10 @@ export function ComposerFooter({
   stopDisabled,
   onDraftChange,
   onChooseAttachments,
+  referenceFiles,
+  onChooseReference,
+  onLoadEarlierFiles,
+  loadingEarlierFiles,
   onDropFiles,
   onPasteImages,
   onCancelAttachments,
@@ -224,6 +231,10 @@ export function ComposerFooter({
   stopDisabled: boolean;
   onDraftChange: (value: ComposerDraft) => void;
   onChooseAttachments: () => void;
+  referenceFiles?: () => ConversationFile[];
+  onChooseReference?: (file: ConversationFile, detail: string) => void;
+  onLoadEarlierFiles?: () => void;
+  loadingEarlierFiles?: boolean;
   onDropFiles?: (files: File[]) => void;
   onPasteImages?: (files: File[]) => void;
   onCancelAttachments?: () => void;
@@ -245,6 +256,10 @@ export function ComposerFooter({
   onSelectModel: (id: string) => void;
 }) {
   const { t } = useI18n();
+  const [referenceScope, setReferenceScope] = useState<string | null>(null);
+  useEffect(() => {
+    setReferenceScope(null);
+  }, [draftScope, composeDisabled, attachmentActionsDisabled]);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [activeCandidateKey, setActiveCandidateKey] = useState<string | null>(
     null,
@@ -680,6 +695,22 @@ export function ComposerFooter({
           }
         >
           {contextHeader}
+          {referenceFiles &&
+            onChooseReference &&
+            referenceScope === draftScope &&
+            !composeDisabled &&
+            !attachmentActionsDisabled && (
+              <ConversationFilePicker
+                loadThumbnail={loadAttachmentThumbnail}
+                files={referenceFiles}
+                anchor={attachmentButtonRef}
+                onClose={() => setReferenceScope(null)}
+                onChoose={onChooseReference}
+                onLoadEarlier={onLoadEarlierFiles}
+                loading={loadingEarlierFiles}
+                textareaRef={textareaRef}
+              />
+            )}
           {draft.kind === "multimodal" && (
             <div
               className="composer-attachments"
@@ -715,15 +746,25 @@ export function ComposerFooter({
                       <Icon name="skill-file" />
                     </span>
                   )}
-                  <span className="composer-attachment-copy">
-                    <strong dir="auto" title={attachment.displayName}>
-                      {attachment.displayName}
-                    </strong>
+                  <div className="composer-attachment-copy">
+                    {attachment.reference ? (
+                      <details className="composer-reference-detail">
+                        <summary title={attachment.displayName}>
+                          <strong dir="auto">{attachment.displayName}</strong>
+                          <Icon name="chevron-right" aria-hidden="true" />
+                        </summary>
+                        <small dir="auto">{attachment.reference.detail}</small>
+                      </details>
+                    ) : (
+                      <strong dir="auto" title={attachment.displayName}>
+                        {attachment.displayName}
+                      </strong>
+                    )}
                     <small>
                       {attachmentTypeLabel(attachment, t)} ·{" "}
                       {formatAttachmentSize(attachment.sizeBytes)}
                     </small>
-                  </span>
+                  </div>
                   <Button
                     type="button"
                     variant="ghost"
@@ -828,7 +869,21 @@ export function ComposerFooter({
                 setMenuDismissed(false);
                 updateText(event.target.value);
               }}
-              onKeyDown={keyboard.onTextKeyDown}
+              onKeyDown={(event) => {
+                const input = event.currentTarget;
+                if (
+                  event.key === "@" &&
+                  referenceFiles &&
+                  fileDropEnabled &&
+                  !event.nativeEvent.isComposing &&
+                  input.selectionStart === input.selectionEnd &&
+                  (input.selectionStart === 0 ||
+                    /\s/.test(input.value[input.selectionStart - 1]!))
+                ) {
+                  event.preventDefault();
+                  setReferenceScope(draftScope);
+                } else keyboard.onTextKeyDown(event);
+              }}
               onPaste={pasteImages}
             />
           </div>
@@ -887,7 +942,7 @@ export function ComposerFooter({
             aria-label={t("run.context")}
           >
             <div className="composer-context-actions">
-              {draft.kind !== "skill" &&
+              {(draft.kind !== "skill" || attachmentsEnabled) &&
                 (attachmentBusy ? (
                   <Button
                     type="button"
@@ -934,6 +989,9 @@ export function ComposerFooter({
                     skillText={selectedSkill ? null : text}
                     skillCatalog={skillCatalog}
                     onChooseAttachments={onChooseAttachments}
+                    onReferenceFiles={
+                      referenceFiles && (() => setReferenceScope(draftScope))
+                    }
                     onRefreshSkills={onRefreshSkillCatalog}
                     onChooseSkill={chooseCandidate}
                   />

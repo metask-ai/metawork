@@ -3819,6 +3819,45 @@ test("Composer Add menu selects an enabled Skill and preserves the message", asy
   assert.deepEqual(draftChanges.at(-1).argumentValues, ["请检查当前实现"]);
 });
 
+test("Add and @ select the same conversation file without changing the instruction or sending", async () => {
+  const user = userEvent.setup({ document });
+  const chosen = [];
+  const file = {
+    key: "run:7:0",
+    name: "quote.xlsx",
+    time: "1000",
+    available: true,
+    source: {
+      kind: "message_file",
+      attachment: {
+        kind: "messageAttachment",
+        taskId: "3",
+        message: { kind: "run", runId: "7" },
+        index: 0,
+      },
+    },
+  };
+  const composer = renderComposer({
+    attachmentsEnabled: true,
+    referenceFiles: () => [file],
+    onChooseReference: (item) => chosen.push(item.key),
+  });
+  await user.click(screen.getByRole("button", { name: "Add to message" }));
+  await user.click(
+    await screen.findByRole("menuitem", {
+      name: "Reference conversation files",
+    }),
+  );
+  await user.click(await screen.findByRole("button", { name: /quote.xlsx/ }));
+  composer.textarea.focus();
+  composer.textarea.setSelectionRange(0, 0);
+  await user.keyboard("@");
+  await user.click(await screen.findByRole("button", { name: /quote.xlsx/ }));
+  assert.deepEqual(chosen, [file.key, file.key]);
+  assert.equal(composer.textarea.value, "请检查当前实现");
+  assert.equal(composer.submissions(), 0);
+});
+
 test("removing the last attachment returns keyboard focus to the Add menu", async () => {
   const removed = [];
   let composer;

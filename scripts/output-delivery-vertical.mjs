@@ -522,13 +522,81 @@ export async function runOutputDeliveryVertical({
     const draft = await webview.evaluate(
       `document.querySelector('.composer-shell textarea')?.value`,
     );
-    assert.ok(
-      draft.includes(unsent) && draft.includes(relative),
-      JSON.stringify(draft),
+    assert.equal(draft, unsent);
+    assert.equal(
+      await webview.evaluate(
+        "document.querySelector('.composer-reference-detail small')?.textContent",
+      ),
+      relative,
     );
     assert.equal(draft.split(unsent).length, 2);
     assert.equal(provider.requests.length, requestsBeforeEdit);
     evidence.editDraftOnlyAndExistingTextPreserved = true;
+    await unlink(source);
+    await webview.evaluate(
+      "document.querySelector('.composer-send:not(:disabled)').click()",
+    );
+    await poll(
+      () =>
+        webview.evaluate(
+          "(" +
+            JSON.stringify(labels("attachment.error.reference_unavailable")) +
+            ").some(label => document.body.innerText.includes(label))",
+        ),
+      10000,
+      "Missing workspace reference blocked before sending",
+    );
+    assert.equal(provider.requests.length, requestsBeforeEdit);
+    assert.equal(
+      await webview.evaluate(
+        "document.querySelector('.composer-shell textarea').value",
+      ),
+      unsent,
+    );
+    await writeFile(source, bytes);
+    evidence.missingReferencePreservedDraft = true;
+    const pictureName = "conversation-reference.png";
+    const png = await readFile(
+      new URL("../src/agent/testdata/generated.png", import.meta.url),
+    );
+    await webview.evaluate(`(()=>{
+      const bytes = Uint8Array.from(atob(${JSON.stringify(png.toString("base64"))}), c => c.charCodeAt(0));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([bytes], ${JSON.stringify(pictureName)}, {type:"image/png"}));
+      document.querySelector(".composer-shell textarea").dispatchEvent(new ClipboardEvent("paste",{bubbles:true,cancelable:true,clipboardData:transfer}));
+    })()`);
+    await poll(
+      () =>
+        webview.evaluate(
+          "document.querySelectorAll('.composer-attachments .composer-attachment').length === 2",
+        ),
+      10000,
+      "Uploaded picture and referenced file ready",
+    );
+    const checkUserParts = (label, marker, withWorkspace) => (payload) => {
+      const last = payload.messages.filter((m) => m.role === "user").at(-1);
+      assert.ok(Array.isArray(last?.content));
+      assert.ok(
+        last.content.some(
+          (p) => p.type === "image" && p.source?.data?.length > 0,
+        ),
+      );
+      const text = last.content
+        .filter((p) => p.type === "text")
+        .map((p) => p.text)
+        .join("\n");
+      assert.ok(text.includes(label));
+      if (withWorkspace)
+        assert.ok(text.includes("file_path=" + JSON.stringify(relative)), text);
+      return textSse(marker, marker);
+    };
+    const firstLabel = "Inspect both attachments";
+    const withFiles = await run(firstLabel, "OUTPUT_REFERENCE_SENT", [
+      checkUserParts(firstLabel, "OUTPUT_REFERENCE_SENT", true),
+    ]);
+    assert.equal(withFiles.input.attachments.length, 2);
+    assert.equal(withFiles.input.attachments[0].referenced, true);
+    evidence.workspacePathAndImageSent = true;
     await writeFile(source, bytes);
     webview.close();
     webview = undefined;
@@ -540,8 +608,57 @@ export async function runOutputDeliveryVertical({
     assert.deepEqual(restored.outputs, [output]);
     const checked = await click("check", "ready");
     evidence.coldHistoryAndRecheck = true;
-    assert.equal(provider.requests.length, callsBeforeChecks);
+    assert.equal(requestsBeforeEdit, callsBeforeChecks);
+    assert.equal(provider.requests.length, requestsBeforeEdit + 1);
     evidence.fileActionsDidNotCallProvider = true;
+    await webview.evaluate(
+      "document.querySelector('.composer-shell textarea').focus()",
+    );
+    await webview.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "@",
+      code: "Digit2",
+      modifiers: 8,
+    });
+    await poll(
+      () =>
+        webview.evaluate(
+          "Boolean(document.querySelector('[role=dialog] button'))",
+        ),
+      10000,
+      "Conversation file picker open",
+    );
+    await mkdir(evidenceDirectory, { recursive: true });
+    const pickerCapture = await webview.send("Page.captureScreenshot", {
+      format: "png",
+    });
+    await writeFile(
+      path.join(evidenceDirectory, "conversation-files.png"),
+      Buffer.from(pickerCapture.data, "base64"),
+    );
+    await clickLabel([pictureName], '[role="dialog"] button');
+    await poll(
+      () =>
+        webview.evaluate(
+          "Boolean(document.querySelector('.composer-reference-detail'))",
+        ),
+      10000,
+      "Restored upload selected from the conversation",
+    );
+    const draftCapture = await webview.send("Page.captureScreenshot", {
+      format: "png",
+    });
+    await writeFile(
+      path.join(evidenceDirectory, "referenced-attachment.png"),
+      Buffer.from(draftCapture.data, "base64"),
+    );
+    const againLabel = "Inspect the earlier upload again";
+    const again = await run(againLabel, "OUTPUT_REFERENCE_RESTORED", [
+      checkUserParts(againLabel, "OUTPUT_REFERENCE_RESTORED", false),
+    ]);
+    assert.equal(again.input.attachments[0].referenced, true);
+    assert.equal(again.input.attachments[0].displayName, pictureName);
+    evidence.restoredUploadResent = true;
     assert.equal(
       (await task()).conversationOutputs.find(
         (record) => record.id === output.id,
@@ -717,7 +834,7 @@ export async function runOutputDeliveryVertical({
       await poll(
         () =>
           webview.evaluate(
-            `document.querySelector('.composer-shell textarea')?.value.includes(${JSON.stringify(wordPath)})`,
+            `document.querySelector('.composer-reference-detail small')?.textContent.includes(${JSON.stringify(wordPath)})`,
           ),
         10_000,
         "The Office edit draft references the Workspace original",

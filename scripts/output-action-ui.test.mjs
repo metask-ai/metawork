@@ -231,10 +231,10 @@ test("Referencing a file in the conversation waits for the scoped Host check bef
   assert.deepEqual(prepared, []);
   complete("ready");
   await screen.findByText("File reference added to the input.");
-  assert.deepEqual(prepared, [[target, output.displayPath]]);
+  assert.deepEqual(prepared, [[target, output.displayPath, checks[0][2]]]);
   assert.equal(checks.length, 1);
 });
-test("Referencing a file in the conversation preserves a conflicting draft and cannot prepare a changed source", async () => {
+test("Referencing a file in the conversation reports an unavailable source and cannot prepare a changed file", async () => {
   let result = "changed";
   let preparations = 0;
   render(
@@ -242,7 +242,7 @@ test("Referencing a file in the conversation preserves a conflicting draft and c
       onAction: async () => result,
       onReference: () => {
         preparations++;
-        return "edit_draft_busy";
+        return "edit_unavailable";
       },
     }),
   );
@@ -255,9 +255,7 @@ test("Referencing a file in the conversation preserves a conflicting draft and c
   fireEvent.click(
     screen.getByRole("button", { name: "Reference in conversation" }),
   );
-  await screen.findByText(
-    "Skill draft preserved. Finish the current input first.",
-  );
+  await screen.findByText("Cannot reference this file now. Check it again.");
   assert.equal(preparations, 1);
 });
 test("Referencing a file in the conversation discards a late check after switching Tasks or disabling the source", async () => {

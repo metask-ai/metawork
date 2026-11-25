@@ -1,5 +1,6 @@
 import type {
   AttachmentDescriptor,
+  FileTarget,
   SkillCatalogView,
   TaskActionBlocker,
   TaskRunInput,
@@ -11,7 +12,9 @@ export type ComposerTextDraft = {
   attachmentsReloadRequired?: true;
 };
 
-export type ComposerAttachment = AttachmentDescriptor;
+export type ComposerAttachment = AttachmentDescriptor & {
+  reference?: { key: string; detail: string; target?: FileTarget };
+};
 
 /** One exact Skill selection, as a Skill draft and an attachment draft hold it. */
 export type ComposerSkillSelection = {

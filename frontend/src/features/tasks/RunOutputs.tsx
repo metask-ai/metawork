@@ -11,11 +11,12 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
 export type FileReferenceResult =
-  "edit_prepared" | "edit_draft_busy" | "edit_too_long" | "edit_unavailable";
+  "edit_prepared" | "cancelled" | "edit_unavailable";
 export type FileReferenceHandler = (
   target: FileTarget,
   displayPath: string,
-) => FileReferenceResult;
+  signal?: AbortSignal,
+) => FileReferenceResult | Promise<FileReferenceResult>;
 type RowAction =
   Exclude<FileAction, "check_current" | "copy_path"> | "edit" | "preview";
 type OutputPreview = (
@@ -149,9 +150,13 @@ function OutputRow({
         !controller.signal.aborted &&
         active.current === controller
       ) {
-        setState(
-          onReference?.(target, output.displayPath) ?? "edit_unavailable",
+        const prepared = await onReference?.(
+          target,
+          output.displayPath,
+          controller.signal,
         );
+        if (active.current === controller)
+          setState(prepared ?? "edit_unavailable");
         return;
       }
       if (active.current === controller)

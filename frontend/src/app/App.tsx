@@ -2,6 +2,11 @@ import {
   localReadingAnchor,
   type LocalReadingInput,
 } from "../features/tasks/assistant-output.ts";
+import {
+  conversationFiles,
+  workspaceConversationFile,
+  type ConversationFile,
+} from "../features/composer/conversation-files.ts";
 import { editCustomModel } from "./edit-custom-model.ts";
 import { notificationTextRegistration } from "../features/tasks/notification-text.ts";
 import {
@@ -181,7 +186,7 @@ import {
 import {
   newTaskDraftStorageId,
   prepareRetryDraft,
-  prepareReferenceDraft,
+  appendHandoffQuote,
   remainingAttachmentFiles,
   unscopedNewTaskDraftId,
 } from "../features/composer/drafts.ts";
@@ -392,11 +397,7 @@ function taskPanelFile(tab: TaskPanelTab): MenuFile | null {
 
 function handoffInput(draft: ComposerDraft, handoff?: HandoffDraft) {
   if (!handoff?.originalMessage?.included) return draft;
-  const result = prepareReferenceDraft(
-    draft,
-    handoff.originalMessage.quote,
-    "append",
-  );
+  const result = appendHandoffQuote(draft, handoff.originalMessage.quote);
   return result.kind === "prepared" ? result.draft : null;
 }
 
@@ -577,6 +578,8 @@ export default function App() {
     new AttachmentRemovalCoordinator(setAttachmentRemoving),
   );
   const attachmentBusy = attachmentView !== null || attachmentRemoving;
+  const referenceCheck = useRef<AbortController | null>(null);
+  const [checkingReferences, setCheckingReferences] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [attachmentViewer, setAttachmentViewer] =
     useState<MediaViewerTarget | null>(null);
@@ -1752,6 +1755,7 @@ export default function App() {
   useEffect(() => setAttachmentError(null), [composerDraftScope]);
   useLayoutEffect(
     () => () => {
+      referenceCheck.current?.abort();
       const operation = attachmentOperation.current;
       if (!operation) return;
       operation.cancelled = true;
@@ -2004,6 +2008,7 @@ export default function App() {
   const canSubmit =
     taskCanCompose &&
     !handoffBlocksSubmission &&
+    !checkingReferences &&
     composerContentReady &&
     !attachmentBusy &&
     !bridgeUnavailable &&
@@ -3523,13 +3528,54 @@ export default function App() {
       attachmentRemoval.current.busy
     )
       return;
+    const drafted = composerDraftRef.current;
     const submitted = handoffInput(
-      reconcileSkillDraft(composerDraftRef.current, skillCatalog),
+      reconcileSkillDraft(drafted, skillCatalog),
       handoff,
     );
     if (!submitted) return;
     const input = composerDraftToRunInput(submitted);
-    if (!input) return;
+    if (!input || referenceCheck.current) return;
+    if (submitted.kind === "multimodal") {
+      const targets = submitted.attachments.flatMap((a) =>
+        a.reference?.target ? [a.reference.target] : [],
+      );
+      if (targets.length) {
+        const controller = new AbortController();
+        const audience = attachmentAudience.current;
+        const current = () =>
+          !controller.signal.aborted &&
+          audience === attachmentAudience.current &&
+          taskDraftActionContext.current.allowed &&
+          composerDraftRef.current === drafted &&
+          !attachmentBusyRef.current &&
+          !attachmentRemoval.current.busy;
+        referenceCheck.current = controller;
+        setCheckingReferences(true);
+        try {
+          for (const target of targets) {
+            const result = await runFileAction(
+              target,
+              "check_current",
+              controller.signal,
+            );
+            if (!current()) return;
+            if (result !== "ready") {
+              setAttachmentError(
+                result === "changed" ? "file_changed" : "reference_unavailable",
+              );
+              return;
+            }
+          }
+        } catch {
+          if (current()) setAttachmentError("reference_unavailable");
+          return;
+        } finally {
+          referenceCheck.current = null;
+          setCheckingReferences(false);
+        }
+      }
+    }
     const scope = composerDraftScope;
     const generation = bridgeGenerationRef.current;
     const operationId = newComposerOperationId();
@@ -3936,7 +3982,13 @@ export default function App() {
     );
   }
 
-  async function addAttachments(source: AddSource = { kind: "picker" }) {
+  async function addAttachments(
+    source: AddSource = { kind: "picker" },
+    reference?: { file: ConversationFile; detail: string },
+    signal?: AbortSignal,
+  ) {
+    if (signal?.aborted) return;
+    const requestedAudience = attachmentAudience.current;
     if (attachmentBusyRef.current || attachmentRemoval.current.busy) {
       setAttachmentError("input_busy");
       return;
@@ -3957,6 +4009,14 @@ export default function App() {
       : (activeTask?.id ?? null);
     const requestedDraft = target.currentDraft(targetId);
     if (!requestedDraft) return;
+    if (
+      reference &&
+      requestedDraft.kind === "multimodal" &&
+      requestedDraft.attachments.some(
+        (item) => item.reference?.key === reference.file.key,
+      )
+    )
+      return true;
     const maxFiles = snapshot.capabilities.attachments.maxFiles;
     const remainingFiles = remainingAttachmentFiles(requestedDraft, maxFiles);
     const selectedCount =
@@ -3985,6 +4045,11 @@ export default function App() {
       return;
     }
     const operation = { cancelled: false, add };
+    const abort = () => {
+      operation.cancelled = true;
+      void add.cancel().catch(() => {});
+    };
+    signal?.addEventListener("abort", abort, { once: true });
     attachmentOperation.current = operation;
     attachmentBusyRef.current = true;
     setAttachmentView("adding");
@@ -3993,7 +4058,8 @@ export default function App() {
       attachmentOperation.current === operation &&
       composerDraftScopeRef.current === requestedScope &&
       bridgeGenerationRef.current === requestedGeneration &&
-      !operation.cancelled;
+      !operation.cancelled &&
+      requestedAudience === attachmentAudience.current;
     try {
       // Ready grants from rejected sends yield when the user adds new files.
       const rejectedDrafts = localSubmissionsRef.current.filter(
@@ -4057,7 +4123,17 @@ export default function App() {
       }
       const next: ComposerDraft = draftWithAttachments(
         current,
-        result.attachments,
+        reference
+          ? result.attachments.map((item) => ({
+              ...item,
+              reference: {
+                key: reference.file.key,
+                detail: reference.detail,
+                target:
+                  source.kind === "workspace_file" ? source.target : undefined,
+              },
+            }))
+          : result.attachments,
       );
       const handedOff = add.handoff(() => {
         if (!currentOperation() || !target.commitDraft(targetId, next))
@@ -4073,10 +4149,12 @@ export default function App() {
         )
           setAttachmentError("cleanup_failed");
       }
+      return handedOff;
     } catch (error) {
       if (!(error instanceof AttachmentCleanupError) && currentOperation())
         setAttachmentError(errorText(error));
     } finally {
+      signal?.removeEventListener("abort", abort);
       if (attachmentOperation.current === operation) {
         attachmentOperation.current = null;
         attachmentBusyRef.current = false;
@@ -4780,50 +4858,63 @@ export default function App() {
     await refreshCommittedView();
   }
   const fileReferenceAudience = attachmentAudience.current;
-  const fileReferenceAllowed = taskCanCompose && !newTaskDraftActive;
-  /**
-   * Puts the path the interface shows for a file into the Task's draft. The
-   * Host has just reached the file; what is asked again here is only whether
-   * the interface still shows it and the draft still belongs to this Task.
-   */
-  function prepareFileReference(
-    target: FileTarget,
-    displayPath: string,
-  ): FileReferenceResult {
-    const { taskId } = target;
+  const fileReferenceAllowed =
+    taskCanCompose &&
+    !newTaskDraftActive &&
+    snapshot.capabilities.attachments.enabled;
+  const filesInConversation = useCallback(
+    () =>
+      activeTask
+        ? conversationFiles(
+            activeTask,
+            workspaceFilesAvailable ? panelWorkspace : null,
+          )
+        : [],
+    [activeTask, workspaceFilesAvailable, panelWorkspace],
+  );
+
+  async function chooseConversationFile(
+    file: ConversationFile,
+    detail: string,
+    signal?: AbortSignal,
+  ): Promise<FileReferenceResult> {
     const current = taskDraftActionContext.current;
+    const source = file.source;
+    const target =
+      source.kind === "workspace_file" ? source.target : source.attachment;
     if (
-      current.audience !== fileReferenceAudience ||
+      !file.available ||
+      signal?.aborted ||
       !current.allowed ||
       !current.task ||
-      composerDraftScopeRef.current !== `task:${taskId}` ||
-      !fileTargetShown(current.task, current.workspaces, target)
+      current.audience !== fileReferenceAudience ||
+      current.task.id !== target.taskId ||
+      composerDraftScopeRef.current !== "task:" + target.taskId ||
+      (source.kind === "workspace_file" &&
+        !fileTargetShown(current.task, current.workspaces, source.target))
     )
       return "edit_unavailable";
-    const draft = taskDrafts.currentDraft(taskId);
-    if (!draft) return "edit_unavailable";
-    const prepared = prepareReferenceDraft(
-      draft,
-      t("outputs.edit_reference", { path: JSON.stringify(displayPath) }),
-    );
-    if (prepared.kind === "preserved") return "edit_draft_busy";
-    if (prepared.kind === "too_long") return "edit_too_long";
-    if (!taskDrafts.commitDraft(taskId, prepared.draft))
-      return "edit_unavailable";
-    composerDraftRef.current = prepared.draft;
+    if (!(await addAttachments(source, { file, detail }, signal)))
+      return signal?.aborted ? "cancelled" : "edit_unavailable";
     window.requestAnimationFrame(() => {
-      const latest = taskDraftActionContext.current;
       if (
-        latest.audience === fileReferenceAudience &&
-        latest.allowed &&
-        latest.task?.id === taskId
-      ) {
-        const input = composer.current;
-        input?.focus();
-        input?.setSelectionRange(input.value.length, input.value.length);
-      }
+        taskDraftActionContext.current.audience === fileReferenceAudience &&
+        taskDraftActionContext.current.allowed
+      )
+        composer.current?.focus();
     });
     return "edit_prepared";
+  }
+  function prepareFileReference(
+    target: FileTarget,
+    path: string,
+    signal?: AbortSignal,
+  ) {
+    return chooseConversationFile(
+      workspaceConversationFile(target, path),
+      path,
+      signal,
+    );
   }
   const prepareFileReferenceRef = useRef(prepareFileReference);
   prepareFileReferenceRef.current = prepareFileReference;
@@ -4845,7 +4936,7 @@ export default function App() {
           return fileMenuOutcome(
             action,
             action === "reference" && state === "ready"
-              ? reference(target, file.displayPath)
+              ? await reference(target, file.displayPath, signal)
               : state,
           );
         } catch {
@@ -5403,6 +5494,25 @@ export default function App() {
         draft={currentComposerDraft}
         draftScope={`${bridgeGeneration}:${snapshot.securityEpoch}:${snapshot.historyEpoch}:${composerDraftScope}`}
         inputHistory={composerInputHistory}
+        referenceFiles={fileReferenceAllowed ? filesInConversation : undefined}
+        onChooseReference={(file, detail) =>
+          void chooseConversationFile(file, detail)
+        }
+        onLoadEarlierFiles={
+          nextHistoryCursor && !historyLoading
+            ? () => {
+                if (activeTask) {
+                  const goal = earlierHistoryGoal(
+                    snapshot,
+                    activeTask.id,
+                    nextHistoryCursor,
+                  );
+                  if (goal) retainTaskHistory(goal.taskId, goal.oldestRunId);
+                }
+              }
+            : undefined
+        }
+        loadingEarlierFiles={historyLoading}
         attachmentsEnabled={snapshot.capabilities.attachments.enabled}
         attachmentMaxFileBytes={snapshot.capabilities.attachments.maxFileBytes}
         attachmentBusy={attachmentBusy}

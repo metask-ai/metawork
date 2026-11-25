@@ -8307,6 +8307,48 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   white-space: nowrap;
 }
 
+.conversation-file-icon {
+  display: grid;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--ui-surface-panel-2);
+  color: var(--ui-content-muted);
+}
+.conversation-file-icon .attachment-thumbnail {
+  --attachment-thumbnail-size: 36px;
+}
+
+.composer-reference-detail summary {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-reference-detail summary::-webkit-details-marker {
+  display: none;
+}
+.composer-reference-detail summary svg {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-content-muted);
+}
+.composer-reference-detail[open] summary svg {
+  transform: rotate(90deg);
+}
+.composer-reference-detail[open] > small {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  user-select: text;
+}
+
 .composer-attachment-copy strong {
   font-size: var(--text-label);
   font-weight: 650;

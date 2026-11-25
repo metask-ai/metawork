@@ -1196,6 +1196,15 @@ export const enUS = {
   "run.activity.requesting_stop": "Requesting stop…",
   "attachment.add": "Add files",
   "composer.add": "Add to message",
+  "attachment.error.reference_unavailable":
+    "The referenced workspace file is unavailable. Check the original file or remove its attachment card.",
+  "composer.upload_number": "Attachment {index}",
+  "composer.reference_files": "Reference conversation files",
+  "composer.uploaded_file": "Uploaded by you",
+  "composer.no_files": "No files to reference",
+  "composer.old_file": "Add the original file again to use it",
+  "composer.older_files": "Load earlier files",
+  "composer.loading_files": "Loading earlier files…",
   "composer.add_skill": "Add Skill",
   "composer.add_skill_selected":
     "Each message uses one Skill. Remove the selected Skill to choose another.",
@@ -1379,12 +1388,7 @@ export const enUS = {
   "outputs.copying_image": "Copying image…",
   "outputs.register": "Add to outputs",
   "outputs.state.registered": "Added to outputs",
-  "outputs.edit_reference": "Workspace file {path}:",
   "outputs.state.edit_prepared": "File reference added to the input.",
-  "outputs.state.edit_draft_busy":
-    "Skill draft preserved. Finish the current input first.",
-  "outputs.state.edit_too_long":
-    "The draft is near its limit and was preserved.",
   "outputs.state.edit_unavailable":
     "Cannot reference this file now. Check it again.",
   "outputs.check": "Check file",

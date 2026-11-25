@@ -69,12 +69,10 @@ export function prepareRetryDraft(
   };
 }
 
-// A visible, editable instruction reference in the existing Task input. This
-// does not create an attachment, locator grant or automatic model submission.
-export function prepareReferenceDraft(
+// Preserve an Inbox message quote alongside the handoff instruction.
+export function appendHandoffQuote(
   currentDraft: ComposerDraft,
   referenceLine: string,
-  position: "prepend" | "append" = "prepend",
 ): {
   draft: ComposerDraft;
   kind: "prepared" | "preserved" | "too_long";
@@ -85,12 +83,8 @@ export function prepareReferenceDraft(
   )
     return { draft: currentDraft, kind: "preserved" };
   let text = currentDraft.text;
-  if (position === "append") {
-    if (text !== referenceLine && !text.endsWith("\n" + referenceLine))
-      text = text ? text + "\n\n" + referenceLine : referenceLine;
-  } else if (text !== referenceLine && !text.startsWith(referenceLine + "\n")) {
-    text = referenceLine + "\n" + text;
-  }
+  if (text !== referenceLine && !text.endsWith("\n" + referenceLine))
+    text = text ? text + "\n\n" + referenceLine : referenceLine;
   const draft = { ...currentDraft, text };
   if (!composerDraftWithinLimits(draft))
     return { draft: currentDraft, kind: "too_long" };
