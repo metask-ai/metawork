@@ -1254,7 +1254,7 @@ const image_product = struct {
     fn rotateCredential(accounts: *account_coordinator.Coordinator, platform: *account_api.TestSupport.Platform, coordinator: *coordinator_api.Coordinator) !void {
         const generation = accounts.runtime.authorization().use().ready;
         platform.now_unix_seconds = 950;
-        try fixture_api.renewAccountToken(accounts, platform);
+        try fixture_api.renewAccountToken(accounts);
         for (0..5000) |_| {
             coordinator.drain();
             if (coordinator.catalog_job == null) break;

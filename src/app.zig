@@ -625,6 +625,13 @@ const App = struct {
                 };
             },
             .timer => |timer| {
+                // Any timer may find a renewal due: the Account beat can be
+                // late, and what this timer asks for may need the result.
+                if (self.account_coordinator) |coordinator| {
+                    if (coordinator.tick()) if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null)
+                        try dispatcher.emitProductChanged();
+                    if (coordinator.ownsTimer(timer.id)) return;
+                }
                 if (timer.id == update_coordinator.timer_id) {
                     if (self.updates) |*coordinator| coordinator.onTimer();
                     if (self.dispatcher) |dispatcher| try dispatcher.emitProductChanged();
@@ -635,9 +642,6 @@ const App = struct {
                     if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
                     return;
                 }
-                if (self.account_coordinator) |coordinator|
-                    if (coordinator.onTimer(timer.id))
-                        return;
                 if (self.models_coordinator) |coordinator| {
                     if (coordinator.onCatalogRetryTimer(timer.id)) {
                         if (self.dispatcher) |dispatcher| try dispatcher.emitProductChanged();
@@ -688,6 +692,9 @@ const App = struct {
             // The inbox asks MetaTeam only while MetaWork is in front.
             .lifecycle => |phase| if (phase == .activate or phase == .deactivate) {
                 if (self.inbox) |*coordinator| coordinator.setActive(phase == .activate);
+                if (phase == .activate) if (self.account_coordinator) |coordinator| {
+                    _ = coordinator.tick();
+                };
                 if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
             },
             else => {},

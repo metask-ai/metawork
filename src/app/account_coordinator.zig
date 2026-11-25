@@ -115,18 +115,21 @@ pub const Coordinator = struct {
         std.debug.assert(result.accepted);
     }
 
-    pub fn onTimer(self: *Coordinator, timer_id: u64) bool {
+    pub fn ownsTimer(_: *const Coordinator, timer_id: u64) bool {
+        return account_api.Runtime.ownsTimer(timer_id);
+    }
+
+    /// Commits what the clocks ask now; true when anything was. Cheap enough
+    /// for every event, so no single timer decides whether a renewal happens.
+    pub fn tick(self: *Coordinator) bool {
         self.assertMainThread();
-        const prepared_result = self.runtime.prepareTimer(timer_id) orelse
-            return false;
-        switch (prepared_result) {
-            .prepared => |prepared| {
-                const result = self.commitPrepared(prepared);
-                std.debug.assert(result.accepted);
-            },
-            .rejected, .ignored_stale => {},
+        if (self.stopping) return false;
+        var committed = false;
+        while (self.runtime.prepareDue()) |prepared| {
+            if (!self.commitPrepared(prepared).accepted) break;
+            committed = true;
         }
-        return true;
+        return committed;
     }
 
     pub fn drain(self: *Coordinator) void {
@@ -141,6 +144,7 @@ pub const Coordinator = struct {
                 .rejected, .ignored_stale => {},
             }
         }
+        _ = self.tick();
         if (self.runtime.drainSummary()) self.commitSummaryNoFail();
         self.renewDeferredCredential();
     }
@@ -225,11 +229,7 @@ pub const Coordinator = struct {
             );
 
         const refresh_after_commit = self.runtime.takeRefreshAfterCommit(&prepared);
-        const dispatch_follow_up = self.runtime.dispatchCommitted(&prepared);
-        if (dispatch_follow_up) |follow_up| {
-            const followed = self.commitPrepared(follow_up);
-            std.debug.assert(followed.accepted);
-        }
+        self.runtime.dispatchCommitted();
         if (refresh_after_commit) {
             const refreshed = self.commitPrepared(
                 self.runtime.prepareRestoredRefresh(),
@@ -622,7 +622,7 @@ test "Account test platform exposes deterministic clock timer and credential fau
     );
     try std.testing.expectEqual(@as(?i64, 100), ports.wall_clock.nowUnixSeconds());
 
-    try ports.timer.start(7, 123, false);
+    try ports.timer.start(7, 123, true);
     try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
     try std.testing.expectEqual(@as(?u64, 7), platform.last_timer_id);
     try std.testing.expectEqual(@as(u64, 123), platform.last_timer_interval_ns);
@@ -630,7 +630,7 @@ test "Account test platform exposes deterministic clock timer and credential fau
     platform.timer_start_fails = true;
     try std.testing.expectError(
         error.TimerStartFailed,
-        ports.timer.start(8, 456, false),
+        ports.timer.start(8, 456, true),
     );
     platform.credential_read_fails = true;
     try std.testing.expectError(
@@ -922,7 +922,11 @@ test "Account refresh scheduling failure is visible and explicitly retryable" {
     );
 
     try std.testing.expect(authenticated.accepted);
-    // Identity, automatic summary start, then refresh-schedule failure.
+    // Identity, then automatic summary start.
+    try std.testing.expectEqual(@as(usize, 2), sink.count);
+    // However many turns find the beat not running, it is reported once.
+    try std.testing.expect(coordinator.tick());
+    try std.testing.expect(!coordinator.tick());
     try std.testing.expectEqual(@as(usize, 3), sink.count);
     try std.testing.expectEqual(
         account_contract.ErrorCode.refresh_schedule_failed,
@@ -938,14 +942,15 @@ test "Account refresh scheduling failure is visible and explicitly retryable" {
     try std.testing.expect(retried.accepted);
     try std.testing.expectEqual(@as(usize, 1), sink.count);
     try std.testing.expectEqual(account_contract.ErrorCode.none, runtime.view().error_code);
-    try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
-    try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_s), platform.last_timer_interval_ns);
+    try std.testing.expectEqual(@as(u64, 30 * std.time.ns_per_s), platform.last_timer_interval_ns);
+    try std.testing.expect(!coordinator.tick());
 }
 
-test "Account clock and explicit refresh schedule retry failures remain observable" {
+test "Account explicit refresh schedule retry reports a beat that still cannot start" {
     var runtime = try initRuntimeForTest();
     var platform: account_api.TestSupport.Platform = .{
-        .now_unix_seconds = null,
+        .now_unix_seconds = 100,
+        .timer_start_fails = true,
     };
     account_api.TestSupport.attachPlatform(&runtime, &platform);
     defer {
@@ -969,18 +974,11 @@ test "Account clock and explicit refresh schedule retry failures remain observab
             200,
         ),
     );
-    try std.testing.expectEqual(
-        account_contract.ErrorCode.refresh_schedule_failed,
-        runtime.view().error_code,
-    );
-
-    platform.now_unix_seconds = 100;
-    platform.timer_start_fails = true;
+    try std.testing.expect(coordinator.tick());
     sink.count = 0;
     const retried = coordinator.commandSink().submit(.retry_refresh);
     try std.testing.expect(retried.accepted);
-    // The newly available clock also admits the generation-bound summary job.
-    try std.testing.expectEqual(@as(usize, 3), sink.count);
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
     try std.testing.expectEqual(
         account_contract.ErrorCode.refresh_schedule_failed,
         runtime.view().error_code,
@@ -1091,11 +1089,12 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
         try platform.setStoredRefreshToken("old-refresh");
         account_api.TestSupport.attachPlatform(&runtime, &platform);
         if (in_flight) runtime.platform.?.timer = .{ .context = &transport, .start_fn = ClosingTimer.start, .cancel_fn = ClosingRefreshTransport.releaseOnTimerStop };
-        var auth = try account_api.TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask", "old-access", "old-refresh", 200);
+        var auth = try account_api.TestSupport.prepareAuthenticatedAndSchedule(&runtime, "account-1", "Metask", "old-access", "old-refresh", 200);
         defer auth.deinit();
         runtime.commit(&auth);
         var sink: RecordingSink = .{ .runtime = &runtime };
         var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+        try std.testing.expect(!coordinator.tick());
         // A direct refresh does not schedule unrelated summary or catalog work.
         var refresh = switch (runtime.prepareTokenRefresh()) {
             .prepared => |p| p,
@@ -1104,7 +1103,7 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
         defer refresh.deinit();
         try std.testing.expect(runtime.admitEffect(&refresh));
         runtime.commit(&refresh);
-        _ = runtime.dispatchCommitted(&refresh);
+        runtime.dispatchCommitted();
         if (in_flight) try transport.started.wait(std.testing.io) else account_api.TestSupport.joinNetwork(&runtime);
         var follower: RecordingFollower = .{};
         coordinator.setFollower(follower.port());
@@ -1116,7 +1115,7 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
         try std.testing.expectEqual(@as(usize, 1), transport.calls);
         try std.testing.expect(!transport.observed_cancel);
         try std.testing.expectEqual(@as(usize, 0), follower.calls);
-        try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
+        try std.testing.expectEqual(@as(usize, if (in_flight) 0 else 1), platform.timer_start_count);
         try std.testing.expectEqual(@as(usize, 1), sink.count);
         try std.testing.expect(sink.records[0].attempt_terminal);
         try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
@@ -1128,9 +1127,7 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
 }
 
 const ClosingTimer = struct {
-    fn start(_: *anyopaque, _: u64, _: u64, _: bool) !void {
-        return error.UnexpectedTimer;
-    }
+    fn start(_: *anyopaque, _: u64, _: u64, _: bool) !void {}
 };
 
 test "Account shutdown failed rotation save preserves durable block without a second write" {
@@ -1152,7 +1149,7 @@ test "Account shutdown failed rotation save preserves durable block without a se
     defer refresh.deinit();
     try std.testing.expect(runtime.admitEffect(&refresh));
     runtime.commit(&refresh);
-    _ = runtime.dispatchCommitted(&refresh);
+    runtime.dispatchCommitted();
     coordinator.shutdown();
     try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
     try std.testing.expectEqualStrings("old-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);

@@ -488,7 +488,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         } else return error.RunDidNotStart;
         platform.now_unix_seconds = 150;
         network.expected_access = access_b;
-        try fixture.renewAccountToken(&accounts, &platform);
+        try fixture.renewAccountToken(&accounts);
         try drainCatalog(&coordinator);
         fake_core.releaseControlled();
         for (0..5000) |_| {
@@ -523,7 +523,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         // binding, no second renewal and no rebuild.
         platform.now_unix_seconds = 150;
         network.expected_access = access_b;
-        try fixture.renewAccountToken(&accounts, &platform);
+        try fixture.renewAccountToken(&accounts);
         try drainCatalog(&coordinator);
         try std.testing.expectEqual(@as(usize, 1), fake_core.credential_updates);
         _ = try control.compactTaskAtBinding(old_id, old_epoch);
@@ -596,7 +596,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         }
         platform.now_unix_seconds = 150;
         network.expected_access = access_b;
-        try fixture.renewAccountToken(&accounts, &platform);
+        try fixture.renewAccountToken(&accounts);
         try std.testing.expectEqual(.loading, control.modelsView().providers[0].catalog_state);
         const accepted = try control.sendInput("wait-for-model-catalog", old_id, .{ .text = "Send after the catalog is ready." });
         try std.testing.expectEqual(.accepted, accepted.outcome);
@@ -718,7 +718,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         network.expected_access = access_b;
         if (scenario == .rebind_original_renewal) {
             platform.now_unix_seconds = 150;
-            try fixture.renewAccountToken(&accounts, &platform);
+            try fixture.renewAccountToken(&accounts);
         } else try relogin(&accounts);
         try drainCatalog(&coordinator);
         try std.testing.expectEqual(@as(usize, 0), fake_core.credential_updates);
@@ -902,7 +902,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
                 return .{ .epoch = 1, .ready = false };
             }
         }.credentials;
-        try fixture.renewAccountToken(&accounts, &platform);
+        try fixture.renewAccountToken(&accounts);
         try drainCatalog(&coordinator);
         if (scenario == .retirement_not_ready) {
             for (0..32) |_| {
@@ -1009,7 +1009,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
                 network.next_access = token;
                 platform.now_unix_seconds = platform.now_unix_seconds.? + 3540;
                 network.expected_access = token;
-                try fixture.renewAccountToken(&accounts, &platform);
+                try fixture.renewAccountToken(&accounts);
                 try drainCatalog(&coordinator);
             }
             try std.testing.expectEqual(@as(usize, 131), fake_core.credential_updates);
@@ -1245,7 +1245,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
 }
 
 /// The token expired with no refresh underway. The next message waits for the
-/// one renewal its authorization query armed, and that outcome decides it.
+/// one renewal the next tick starts, and that outcome decides it.
 fn characterizeRenewal(
     scenario: Scenario,
     wake_loop: *fixture.LifecycleWakeLoop,
@@ -1265,19 +1265,18 @@ fn characterizeRenewal(
         else => null,
     };
     platform.now_unix_seconds = 201;
-    const armed = platform.timer_start_count;
     const accepted = try control.sendInput("after-expiry", task_id, .{ .text = "Reply with a short text; do not call tools." });
     try std.testing.expectEqual(.accepted, accepted.outcome);
     try std.testing.expectEqual(.waiting, lastSubmission(task).state);
     try std.testing.expectEqual(.metask_authorization_recovering, control_api.TestSupport.taskModelInputBlocker(control, task_id).?);
     try std.testing.expectEqual(.authenticated, control.accountView().state);
-    // Observing the expiry armed the one refresh timer; nothing else did.
-    try std.testing.expect(platform.timer_start_count > armed);
+    // Observing the expiry starts nothing.
+    try std.testing.expect(accounts.runtime.account.activeAttempt() == null);
     try std.testing.expectEqual(@as(usize, 0), network.refresh_attempts.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), runCalls());
 
     network.expected_access = access_b;
-    try fixture.renewAccountToken(accounts, platform);
+    try fixture.renewAccountToken(accounts);
     try std.testing.expectEqual(@as(usize, 1), network.refresh_attempts.load(.acquire));
     switch (scenario) {
         .expiry => {
@@ -1299,7 +1298,7 @@ fn characterizeRenewal(
             try std.testing.expectEqual(.accepted, resent.outcome);
             try std.testing.expectEqual(.waiting, lastSubmission(task).state);
             platform.now_unix_seconds = 231;
-            try fixture.renewAccountToken(accounts, platform);
+            try fixture.renewAccountToken(accounts);
             try std.testing.expectEqual(@as(usize, 2), network.refresh_attempts.load(.acquire));
             try drainCatalog(coordinator);
             try expectWaitingInputRuns(wake_loop, control, task_id, "resent-after-reconnect");
@@ -1356,7 +1355,7 @@ fn characterizeRecovery(
     platform.now_unix_seconds = 201;
     try std.testing.expectEqual(.recovering, control.newTaskAdmissionView().metask);
     network.refresh_failure = error.NetworkNotSent;
-    try fixture.renewAccountToken(accounts, platform);
+    try fixture.renewAccountToken(accounts);
     try std.testing.expectEqual(.@"unreachable", control.newTaskAdmissionView().metask);
     try std.testing.expectEqual(job, coordinator.catalog_job.?);
     network.hold_catalog.store(false, .release);
@@ -1371,7 +1370,7 @@ fn characterizeRecovery(
     network.refresh_failure = null;
     network.expected_access = access_b;
     platform.now_unix_seconds = 231;
-    try std.testing.expect(accounts.onTimer(platform.last_timer_id.?));
+    try std.testing.expect(accounts.tick());
     try std.testing.expectEqual(.recovering, control.newTaskAdmissionView().metask);
     try std.testing.expectEqual(.ready, control.modelsView().providers[0].catalog_state);
     account.TestSupport.joinNetwork(accounts.runtime);

@@ -73,9 +73,9 @@ pub fn catalogFollower(coordinator: *models_coordinator.Coordinator) account_coo
     }.follow };
 }
 
-/// One whole token renewal, from its timer to the committed outcome.
-pub fn renewAccountToken(accounts: *account_coordinator.Coordinator, platform: *account.TestSupport.Platform) !void {
-    try std.testing.expect(accounts.onTimer(platform.last_timer_id.?));
+/// One whole token renewal, from the tick that finds it due to its outcome.
+pub fn renewAccountToken(accounts: *account_coordinator.Coordinator) !void {
+    try std.testing.expect(accounts.tick());
     account.TestSupport.joinNetwork(accounts.runtime);
     accounts.drain();
 }

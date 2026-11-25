@@ -203,6 +203,16 @@ pub const Account = struct {
         return self.state.attemptKind() == .refresh_token;
     }
 
+    /// Whether a renewal may still follow: not once a login replaced the
+    /// token this session would renew, nor after it ended.
+    pub fn renewable(self: *const Account) bool {
+        return switch (self.state.session_state) {
+            .authenticated, .refreshing => true,
+            .authorizing => self.state.account_id.len != 0 and self.state.transaction != .loading_identity,
+            .restoring, .signed_out, .shutting_down => false,
+        };
+    }
+
     pub fn activeRequestUsesCredential(self: *const Account) bool {
         return switch (self.state.transaction) {
             .token_exchange => |value| value.kind == .refresh_token,
@@ -376,6 +386,19 @@ pub const Account = struct {
         var next = self.state;
         next.error_code = .refresh_schedule_failed;
         next.safe_diagnostic.clear();
+        return transitionNoAttempt(next, .operation_failed);
+    }
+
+    /// Ends a verified session between attempts, as a failed renewal does.
+    pub fn prepareSessionLost(self: *const Account, failure: WorkerFailure) PrepareResult {
+        if (self.state.session_state != .authenticated or
+            self.state.activeAttempt() != null)
+            return .{ .rejected = .invalid_state };
+        var next = self.state;
+        next.session_state = .signed_out;
+        next.clearIdentity();
+        next.error_code = failure.error_code;
+        next.safe_diagnostic = failure.safe_diagnostic;
         return transitionNoAttempt(next, .operation_failed);
     }
 
