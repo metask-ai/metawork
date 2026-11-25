@@ -13,6 +13,20 @@ pub const store_file_name = "models.json";
 pub const max_pending_credential_deletions: usize =
     contract.Limits.custom_provider_entries * 4;
 
+/// A Metask source is one account, so its generation is the account's own:
+/// equal across renewals, restarts and logins, and its own again after another
+/// account came between. Models and Schedule persist it, so changing this
+/// derivation abandons every stored binding.
+pub fn metaskSourceGeneration(principal_ref: []const u8) u64 {
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("metawork.models.metask-source.v1\x00");
+    hasher.update(principal_ref);
+    hasher.final(&digest);
+    // Zero means no source.
+    return @max(1, std.mem.readInt(u64, digest[0..8], .big));
+}
+
 pub const Error = error{
     Capacity,
     InvalidProvider,
@@ -1102,6 +1116,12 @@ test "retired cleanup validates and deduplicates only credential slot identities
         defer invalid.deinit();
         try std.testing.expectError(error.InvalidData, collectRetiredCredentialDeletions(&invalid, bytes));
     }
+}
+
+test "Metask source generation is one fixed value per account" {
+    try std.testing.expectEqual(@as(u64, 2823016248421222614), metaskSourceGeneration("account-1"));
+    try std.testing.expectEqual(@as(u64, 4166013085655294001), metaskSourceGeneration("account-2"));
+    try std.testing.expect(metaskSourceGeneration("") != 0);
 }
 
 test "canonical decode preserves allocation exhaustion" {

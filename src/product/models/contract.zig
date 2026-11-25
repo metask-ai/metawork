@@ -222,12 +222,10 @@ pub const ModelImageCapability = struct {
 
 pub const max_model_image_capabilities: usize = 256;
 
-pub fn sameImageCapabilities(a: []const ModelImageCapability, b: []const ModelImageCapability) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |left, right| {
-        if (!std.mem.eql(u8, left.model, right.model) or left.supported != right.supported) return false;
-    }
-    return true;
+/// What a route says about one model's image input; null when it says nothing.
+pub fn declaredImageInput(entries: []const ModelImageCapability, model: []const u8) ?bool {
+    for (entries) |entry| if (std.mem.eql(u8, entry.model, model)) return entry.supported;
+    return null;
 }
 
 pub const OwnedImageCapabilities = struct {
@@ -287,7 +285,41 @@ pub const SourceCandidateInput = struct {
     target: Target,
     api_key: []const u8,
     source_generation: u64,
+    /// The Account generation a Metask credential was leased at. Zero for a
+    /// Custom Provider, whose credential is part of its source generation.
+    credential_generation: u64 = 0,
+
+    pub fn facts(self: SourceCandidateInput) TargetFacts {
+        return .{
+            .source_id = providerSourceId(self.target.provider_id) orelse "",
+            .model_id = self.target.model,
+            .protocol = self.target.protocol,
+            .base_url = self.target.base_url,
+            .image_input = declaredImageInput(self.target.image_capabilities, self.target.model),
+            .source_generation = self.source_generation,
+        };
+    }
 };
+
+/// Everything an exact model resolves to except its credential. Text is
+/// borrowed until the next Models mutation.
+pub const TargetFacts = struct {
+    source_id: []const u8,
+    model_id: []const u8,
+    protocol: Protocol,
+    base_url: []const u8,
+    image_input: ?bool,
+    source_generation: u64,
+};
+
+const custom_provider_prefix = @tagName(Source.custom_provider) ++ ":";
+
+/// The source a resolved provider identity names.
+pub fn providerSourceId(provider_id: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, provider_id, metask_source_id)) return metask_source_id;
+    if (std.mem.startsWith(u8, provider_id, custom_provider_prefix)) return provider_id[custom_provider_prefix.len..];
+    return null;
+}
 
 pub const CustomProviderState = enum {
     configuring,
@@ -611,6 +643,7 @@ pub const OwnedSourceCandidate = struct {
     model: OwnedBuffer,
     base_url: OwnedBuffer,
     source_generation: u64,
+    credential_generation: u64 = 0,
     secret: SecretBuffer,
     source: Source,
 
@@ -674,6 +707,7 @@ pub const OwnedSourceCandidate = struct {
             .model = self.model.take(),
             .base_url = self.base_url.take(),
             .source_generation = self.source_generation,
+            .credential_generation = self.credential_generation,
             .secret = self.secret.take(),
             .source = self.source,
         };
@@ -690,6 +724,7 @@ pub const OwnedSourceCandidate = struct {
             },
             .api_key = self.secret.view(),
             .source_generation = self.source_generation,
+            .credential_generation = self.credential_generation,
         };
     }
 
@@ -710,6 +745,7 @@ pub const OwnedSourceCandidate = struct {
             .source = self.source,
         };
         self.source_generation = 0;
+        self.credential_generation = 0;
         validateConfigStructure(result.input()) catch {
             result.deinit();
             return error.InvalidExecutionConfig;
@@ -725,6 +761,7 @@ pub const OwnedSourceCandidate = struct {
         self.secret.deinit();
         self.protocol = undefined;
         self.source_generation = 0;
+        self.credential_generation = 0;
         self.source = undefined;
     }
 };

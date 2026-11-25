@@ -654,6 +654,33 @@ pub const Runtime = struct {
         return self.reconcileBindingsNoFail(binding, redaction);
     }
 
+    /// True once no definition names `previous`. A store that cannot be written
+    /// now answers from memory, its last confirmed content, as long as nothing
+    /// has to move.
+    pub fn rebindSourceNoFail(
+        self: *Runtime,
+        source_id: []const u8,
+        previous: u64,
+        next: u64,
+        redaction: Redaction,
+    ) bool {
+        switch (self.persistence_health) {
+            .ready, .write_failed, .outcome_unknown => {},
+            // Without a store there is no definition.
+            .unavailable => return true,
+            // What is stored was never read.
+            .read_failed, .corrupt => return false,
+        }
+        var candidate = self.store.clone(self.allocator) catch return false;
+        var owned = true;
+        defer if (owned) candidate.deinit();
+        if (!candidate.rebindSource(source_id, previous, next)) return true;
+        self.commitCandidate(&candidate, redaction) catch return false;
+        self.replace(&candidate);
+        owned = false;
+        return true;
+    }
+
     pub fn bindingAt(self: *Runtime, id: u64, expected_epoch: u64) Error!ModelBinding {
         const item = self.store.find(id) orelse return error.UnknownScheduledTask;
         if (expected_epoch == 0 or item.epoch != expected_epoch) return error.ScheduledTaskEpochMismatch;
@@ -1509,6 +1536,57 @@ fn testDefinition(title: []const u8, input: []const u8) Definition {
         .input = input,
         .recurrence = .{ .once = .{ .at_unix_seconds = 200 } },
     };
+}
+
+test "source rebinding moves one source's identity and nothing else" {
+    var effects: TestEffects = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 5, .max_projection_bytes = 16 * 1024 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const Bound = struct { source: []const u8, generation: u64, moved: u64 };
+    const bound = [_]Bound{
+        .{ .source = "metask", .generation = 7, .moved = 9 },
+        .{ .source = "metask", .generation = 7, .moved = 9 },
+        .{ .source = "metask", .generation = 7, .moved = 9 },
+        .{ .source = "metask", .generation = 6, .moved = 6 },
+        .{ .source = "slot", .generation = 7, .moved = 7 },
+    };
+    var ids: [bound.len]u64 = undefined;
+    for (bound, &ids) |value, *id| {
+        var definition = testDefinition("plan", "inspect");
+        definition.binding.model_ref.source_id = value.source;
+        definition.binding.source_generation = value.generation;
+        id.* = try runtime.create(definition, testBinding(), redaction);
+    }
+    // Paused and stopped definitions keep their identity like any other.
+    try runtime.store.setEnabled(ids[1], 1, false, 100);
+    runtime.store.markNeedsAttention(runtime.store.find(ids[2]).?, .permission_required);
+    const commits = effects.commits;
+    for ([_]PersistenceHealth{ .read_failed, .corrupt, .write_failed, .outcome_unknown }) |health| {
+        runtime.persistence_health = health;
+        try std.testing.expect(!runtime.rebindSourceNoFail("metask", 7, 9, redaction));
+    }
+    try std.testing.expectEqual(commits, effects.commits);
+    runtime.persistence_health = .ready;
+    effects.commit_result = .failed;
+    try std.testing.expect(!runtime.rebindSourceNoFail("metask", 7, 9, redaction));
+    try std.testing.expectEqual(@as(u64, 7), runtime.store.find(ids[0]).?.binding.source_generation);
+    runtime.persistence_health = .ready;
+    effects.commit_result = .committed;
+    // The second call finds nothing left to move and writes nothing.
+    for (0..2) |_| try std.testing.expect(runtime.rebindSourceNoFail("metask", 7, 9, redaction));
+    for ([_]PersistenceHealth{ .write_failed, .outcome_unknown, .read_failed, .corrupt }, [_]bool{ true, true, false, false }) |health, settled| {
+        runtime.persistence_health = health;
+        try std.testing.expectEqual(settled, runtime.rebindSourceNoFail("metask", 7, 9, redaction));
+    }
+    try std.testing.expectEqual(commits + 2, effects.commits);
+    for (bound, ids, [_]Health{ .ready, .paused, .needs_attention, .ready, .ready }, 0..) |value, id, health, index| {
+        const item = runtime.store.find(id).?;
+        try std.testing.expectEqual(value.moved, item.binding.source_generation);
+        try std.testing.expectEqual(@as(u64, if (index == 1) 2 else 1), item.epoch);
+        try std.testing.expectEqual(health, item.health);
+        try std.testing.expectEqual(health == .ready, item.enabled);
+    }
 }
 
 test "credential release retains its protecting owner until a dirty Schedule commits" {

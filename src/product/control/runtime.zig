@@ -3151,7 +3151,18 @@ pub const Runtime = struct {
     ) models_aggregate.StartError!void {
         try self.custom_providers.start(absolute_directory, vault);
 
+        self.adoptMetaskSourceNoFail();
         self.finishModelsCommitNoFail();
+    }
+
+    /// Settles an older version's Metask generation before Schedule sees any
+    /// Models fact. Schedule moves first: an interrupted adoption still finds
+    /// the older value in Models and repeats, and until then that value stays
+    /// in use on both sides.
+    fn adoptMetaskSourceNoFail(self: *Runtime) void {
+        const adoption = self.custom_providers.pendingMetaskAdoption() orelse return;
+        if (self.schedule.rebindSourceNoFail(models_contract.metask_source_id, adoption.stored, adoption.derived, self.scheduleRedaction()))
+            self.custom_providers.adoptMetaskGeneration(adoption);
     }
 
     pub fn startCustomProvidersUnavailable(self: *Runtime) void {
@@ -3179,6 +3190,7 @@ pub const Runtime = struct {
         const result = self.custom_providers.resetStore();
         if (!result.accepted) return result;
 
+        self.adoptMetaskSourceNoFail();
         self.finishModelsCommitNoFail();
         return result;
     }
@@ -4259,6 +4271,7 @@ pub const Runtime = struct {
             else => return error.ExecutionUnavailable,
         }) orelse return error.ExecutionUnavailable;
         defer source.deinit();
+        const credential_generation = source.input().credential_generation;
         const generation = self.nextExecutionGeneration(self.executionGeneration()) catch return error.ExecutionUnavailable;
         var execution = source.intoConfig(generation) catch return error.ExecutionUnavailable;
         defer execution.deinit();
@@ -4298,6 +4311,7 @@ pub const Runtime = struct {
             .model = execution_input.target.model,
             .model_ref = model_selection.target,
             .source_generation = model_selection.expected_source_generation,
+            .credential_generation = credential_generation,
             .permission_profile = permission_profile,
             .permission_review_delegated = switch (permission) {
                 .interactive => |mode| (mode orelse self.default_approval_mode) == .auto_review,
@@ -4420,8 +4434,8 @@ pub const Runtime = struct {
         );
         const binding_epoch = self.task_runtime.taskBindingEpoch(task.id()) orelse
             unreachable;
-        var model_target = try self.resolveTaskRunModel(task.id());
-        defer if (model_target) |*target| target.deinit();
+        var binding = try self.prepareTaskBinding(task.id());
+        defer binding.deinit();
         var run_effects = self.taskRuntimeOperationEffects();
         const image_workspace = try self.workspace.taskRunAuthority(workspace.id, workspace.epoch);
         var image = self.prepareRunImage(image_workspace);
@@ -4430,7 +4444,7 @@ pub const Runtime = struct {
         defer if (delivery) |*value| value.deinit();
         run_effects.image_execution = &image;
         run_effects.file_delivery = &delivery;
-        run_effects.model_target = if (model_target) |*target| target.input() else null;
+        run_effects.model_target = binding.modelTarget();
         // A scheduled Task always runs in its own Automatic Workspace, so only
         // the global file applies.
         var instructions = try self.prepareRunInstructions(task.id(), image_workspace);
@@ -4569,6 +4583,7 @@ pub const Runtime = struct {
             },
             .execution = config,
             .source_generation = execution.source_generation,
+            .credential_generation = execution.credential_generation,
             .continuation_source_id = continuation_source_id,
             .approval_revision = approval_revision,
             .agent_runtime = self.agent_runtime.*,
@@ -4611,8 +4626,8 @@ pub const Runtime = struct {
 
     fn admitTaskConversationRestore(self: *Runtime, task_id: u64, expected_binding_epoch: u64, approval_revision: ?u64) Error!u64 {
         const detached = try self.task_runtime.restoreAdmissionDetached(task_id);
-        var target = try self.resolveTaskRunModel(task_id);
-        defer if (target) |*value| value.deinit();
+        var binding = try self.prepareTaskBinding(task_id);
+        defer binding.deinit();
         if (detached) {
             _ = self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects()) catch |err| switch (err) {
                 error.SessionCapacity => return self.sessionPressureError(task_id),
@@ -4625,9 +4640,10 @@ pub const Runtime = struct {
                 .unavailable => return error.RecoveryUnavailable,
             }
         }
-        if (target) |*value| if (self.task_runtime.restoreCandidateNeedsRebind(task_id, value.input()))
-            return self.beginTaskModelRebind(task_id, expected_binding_epoch, value, null, approval_revision);
-        return error.RecoveryUnavailable;
+        return switch (binding.plan) {
+            .rebind, .restore => self.beginTaskModelRebind(task_id, expected_binding_epoch, &binding.candidate.?, null, approval_revision),
+            .keep, .renew, .set_model, .blocked => error.RecoveryUnavailable,
+        };
     }
 
     pub fn setApprovalMode(self: *Runtime, task_id: u64, target: product_task.ApprovalMode, expected_binding_epoch: u64, expected_revision: u64) Error!u64 {
@@ -5305,15 +5321,13 @@ pub const Runtime = struct {
         const facts = try self.task_runtime.runAdmissionFacts(task_id);
         _ = self.workspace.taskRunAuthority(facts.workspace_id, facts.workspace_epoch) catch return error.TaskClosing;
         if (facts.validate_binding) try self.task_runtime.validateExecutionBinding(task_id);
-        var model_target = try self.resolveTaskRunModel(task_id);
-        defer if (model_target) |*target| target.deinit();
-        if (model_target) |*target| {
-            if (self.task_runtime.installedModelNeedsSourceChange(task_id, target.input())) {
-                if (input == .queued and !self.task_runtime.beginInputPreparation(task_id, input.queued))
-                    return error.ExecutionUnavailable;
-                _ = try self.beginTaskModelRebind(task_id, binding_epoch, target, null, null);
-                return error.RestoreBusy;
-            }
+        var binding = try self.prepareTaskBinding(task_id);
+        defer binding.deinit();
+        if (binding.plan == .rebind) {
+            if (input == .queued and !self.task_runtime.beginInputPreparation(task_id, input.queued))
+                return error.ExecutionUnavailable;
+            _ = try self.beginTaskModelRebind(task_id, binding_epoch, &binding.candidate.?, null, null);
+            return error.RestoreBusy;
         }
         if (!self.task_runtime.continuationAvailable(task_id, self.taskRuntimeProjectionEffects(&self.liveViewText()))) return error.TaskClosing;
         const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse
@@ -5377,7 +5391,7 @@ pub const Runtime = struct {
         operation_effects.image_execution = &image;
         operation_effects.video_execution = &video;
         operation_effects.file_delivery = &delivery;
-        operation_effects.model_target = if (model_target) |*target| target.input() else null;
+        operation_effects.model_target = binding.modelTarget();
         var instructions = try self.prepareRunInstructions(task_id, workspace);
         defer instructions.deinit();
         operation_effects.instructions = &instructions;
@@ -5439,16 +5453,14 @@ pub const Runtime = struct {
             return error.BindingEpochMismatch;
         // Compaction declares that it calls the model, so the Task must hold
         // the current login's credential before it starts. It is admitted
-        // through the same path as every other model entry, including the
-        // rebind an installed source change requires.
+        // through the same plan as every other model entry, including the
+        // rebuild that plan may ask for.
         if (product_task.mutationImpact(.manual_compact).model_access == .required) {
-            var model_target = try self.resolveTaskRunModel(task_id);
-            defer if (model_target) |*target| target.deinit();
-            if (model_target) |*target| {
-                if (self.task_runtime.installedModelNeedsSourceChange(task_id, target.input())) {
-                    _ = try self.beginTaskModelRebind(task_id, binding_epoch, target, null, null);
-                    return error.RestoreBusy;
-                }
+            var binding = try self.prepareTaskBinding(task_id);
+            defer binding.deinit();
+            if (binding.plan == .rebind) {
+                _ = try self.beginTaskModelRebind(task_id, binding_epoch, &binding.candidate.?, null, null);
+                return error.RestoreBusy;
             }
         }
         if (!self.task_runtime.continuationAvailable(
@@ -6269,20 +6281,20 @@ pub const Runtime = struct {
             .ready => |batch| {
                 // Resolve before consuming the batch. A replacement is one
                 // bounded preparation, not a failed Run admission or replay.
-                var target = self.resolveTaskRunModel(task_id) catch |err| {
+                var binding = self.prepareTaskBinding(task_id) catch |err| {
                     _ = self.task_runtime.cancelInputContinuation(task_id, batch.source_id, sendInputRejection(err));
                     self.bumpRevision();
                     return true;
                 };
-                defer if (target) |*value| value.deinit();
-                if (target) |*value| if (self.task_runtime.installedModelNeedsSourceChange(task_id, value.input())) {
-                    _ = self.beginTaskModelRebind(task_id, batch.binding_epoch, value, batch.source_id, null) catch |err| {
+                defer binding.deinit();
+                if (binding.plan == .rebind) {
+                    _ = self.beginTaskModelRebind(task_id, batch.binding_epoch, &binding.candidate.?, batch.source_id, null) catch |err| {
                         _ = self.task_runtime.cancelInputContinuation(task_id, batch.source_id, sendInputRejection(err));
                         self.bumpRevision();
                         return true;
                     };
                     return false;
-                };
+                }
                 // Keep the continuation's owned payload until fresh Skill
                 // preparation finishes; catalog waits are not failed Runs.
                 self.prepareTaskSkills(task_id, batch.binding_epoch) catch |err| switch (err) {
@@ -7946,20 +7958,16 @@ pub const Runtime = struct {
             query.workspace_root,
             query.task_id,
         );
-        const model_rebind_required = self.taskModelNeedsRebind(query.task_id);
+        const binding = self.taskBindingPlan(query.task_id);
+        const model_rebind_required = binding == .rebind;
         const releasing_route_id = if (model_rebind_required) self.task_runtime.recoveryReleaseRoute(query.task_id) else null;
-        const facts = self.task_runtime.modelFacts(query.task_id);
-        const execution_available = if (facts != null and facts.?.intent != null) intent: {
-            const authority = self.taskModelIntentAuthority(query.task_id) orelse break :intent false;
-            break :intent self.custom_providers.sourceModelProtocol(facts.?.intent.?.target, authority.source_generation, authority.catalog_generation) != null;
-        } else self.installedTaskModelAvailable(query.task_id);
         const metask_input = self.taskMetaskInput(query.task_id);
         return .{
             .shutting_down = self.shutting_down,
             .task_persistence_ready = self.task_persistence_health.operational(),
             .checkpoint_store_ready = self.checkpoint_store != null and
                 self.checkpoint_store_health.load(.acquire) == .ready,
-            .execution_admission = if (execution_available) .available else .unavailable,
+            .execution_admission = if (binding == .blocked) .unavailable else .available,
             .workspace_identity_exact = workspace.identity_exact,
             .automatic_owner_exact = workspace.automatic_owner_exact,
             .runtime_admission = admission: {
@@ -7997,20 +8005,28 @@ pub const Runtime = struct {
         };
     }
 
-    fn taskModelNeedsRebind(self: *Runtime, task_id: u64) bool {
-        const facts = self.task_runtime.modelFacts(task_id) orelse return false;
-        const intent = facts.intent orelse return false;
+    /// Reads no credential, so a projection answers as an admission would.
+    fn taskBindingPlan(self: *Runtime, task_id: u64) task_runtime.Runtime.BindingPlan {
+        const facts = self.task_runtime.modelFacts(task_id) orelse return .{ .blocked = .unknown_task };
+        const credential_generation = if (usesMetask(facts)) self.admittedMetaskGeneration() orelse
+            return self.task_runtime.bindingPlan(task_id, .{ .authorized = false }) else 0;
+        const target = if (facts.intent) |intent| self.custom_providers.currentTarget(intent.target) else null;
+        return self.task_runtime.bindingPlan(task_id, .{
+            .credential_generation = credential_generation,
+            .target = target,
+            .installed_available = target == null and self.installedModelAvailable(facts),
+        });
+    }
+
+    fn usesMetask(facts: task_runtime.Runtime.ModelFacts) bool {
+        if (facts.intent) |intent| return std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id);
+        return if (facts.installed) |installed| installed.is_metask else false;
+    }
+
+    fn installedModelAvailable(self: *Runtime, facts: task_runtime.Runtime.ModelFacts) bool {
         const installed = facts.installed orelse return false;
-        const renews_credential = self.renewsMetaskCredential(installed.is_metask);
-        if (self.task_runtime.installedIntentCurrent(task_id) and !renews_credential) return false;
-        const authority = self.taskModelIntentAuthority(task_id) orelse return false;
-        const protocol = self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) orelse return false;
-        if (!self.task_runtime.installedModelProviderMatches(task_id, intent.target, protocol)) return true;
-        if (self.task_runtime.installedModelSourceCurrent(task_id, authority.source_generation)) return false;
-        if (!renews_credential) return true;
-        var candidate = (self.custom_providers.resolveModel(intent.target, authority.source_generation, authority.catalog_generation) catch return true) orelse return true;
-        defer candidate.deinit();
-        return !self.task_runtime.installedModelMatchesTarget(task_id, candidate.input());
+        const target = installed.target orelse return false;
+        return self.custom_providers.installedModelAvailable(target, installed.source_generation, installed.protocol);
     }
 
     fn taskModelIntentAuthority(self: *Runtime, task_id: u64) ?task_runtime.ModelIntentAuthority {
@@ -8030,37 +8046,36 @@ pub const Runtime = struct {
         };
     }
 
-    fn installedTaskModelAvailable(self: *Runtime, task_id: u64) bool {
-        const facts = self.task_runtime.modelFacts(task_id) orelse return false;
-        const installed = facts.installed orelse return false;
-        self.validateTaskMetaskAuthorization(task_id) catch return false;
-        const target = installed.target orelse return false;
-        return self.custom_providers.installedModelAvailable(target, installed.source_generation, installed.protocol);
-    }
+    /// A Task's binding plan and, when the plan installs something, the one
+    /// owned candidate it installs. A plan that only renews is done on return.
+    const PreparedBinding = struct {
+        plan: task_runtime.Runtime.BindingPlan,
+        candidate: ?models_contract.OwnedSourceCandidate = null,
 
-    fn resolveTaskRunModel(self: *Runtime, task_id: u64) Error!?models_contract.OwnedSourceCandidate {
-        const facts = self.task_runtime.modelFacts(task_id) orelse return error.UnknownTask;
-        if (facts.intent_pending) return error.TaskPersistenceOutcomeUnknown;
-        try self.validateTaskMetaskAuthorization(task_id);
-        const intent = facts.intent orelse {
-            if (!self.installedTaskModelAvailable(task_id)) return error.ExecutionUnavailable;
-            return null;
+        fn deinit(self: *PreparedBinding) void {
+            if (self.candidate) |*value| value.deinit();
+        }
+
+        fn modelTarget(self: *const PreparedBinding) ?models_contract.SourceCandidateInput {
+            return if (self.candidate) |*value| value.input() else null;
+        }
+    };
+
+    fn prepareTaskBinding(self: *Runtime, task_id: u64) Error!PreparedBinding {
+        const plan = self.taskBindingPlan(task_id);
+        const renew = switch (plan) {
+            .blocked => |reason| return switch (reason) {
+                .unknown_task => error.UnknownTask,
+                .intent_unconfirmed => error.TaskPersistenceOutcomeUnknown,
+                .authorization, .model_unavailable => error.ExecutionUnavailable,
+            },
+            .keep => return .{ .plan = plan },
+            .renew => true,
+            .set_model => |change| change.renew,
+            .rebind, .restore => false,
         };
+        const intent = self.task_runtime.modelFacts(task_id).?.intent.?;
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
-        const renews_credential = if (facts.installed) |installed| self.renewsMetaskCredential(installed.is_metask) else false;
-        if (facts.installed != null)
-            if (self.task_runtime.installedIntentCurrent(task_id)) {
-                // Membership is checked against current source authority. A
-                // renewed Metask credential must reach the renewal path below,
-                // rather than being rejected for the old owned generation.
-                if (self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) == null and
-                    !self.installedTaskModelAvailable(task_id)) return error.ExecutionUnavailable;
-                if (!renews_credential) return null;
-                const current = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
-                if (self.task_runtime.installedCredentialCurrent(task_id, current.source_generation)) return null;
-            };
-        if (self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) == null)
-            return error.ExecutionUnavailable;
         var candidate = (self.custom_providers.resolveModel(intent.target, authority.source_generation, authority.catalog_generation) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.ExecutionUnavailable,
@@ -8068,11 +8083,9 @@ pub const Runtime = struct {
         errdefer candidate.deinit();
         const input = candidate.input();
         try self.prepareTaskCredential(input.api_key);
-        if (renews_credential and self.task_runtime.installedModelMatchesTarget(task_id, input)) {
-            const check = self.metask_authorization_check orelse return error.ExecutionUnavailable;
-            const current = check.current() orelse return error.ExecutionUnavailable;
-            const renewal = self.task_runtime.renewMetaskCredential(task_id, current.generation, input.api_key, input.source_generation) catch |err| {
-                self.task_runtime.failMetaskCredentialUpdate(task_id, current.generation, err, self.taskRuntimeOperationEffects());
+        if (renew) {
+            const renewal = self.task_runtime.renewMetaskCredential(task_id, input.credential_generation, input.api_key, .admission) catch |err| {
+                self.task_runtime.failMetaskCredentialUpdate(task_id, input.credential_generation, err, self.taskRuntimeOperationEffects());
                 return if (err == error.OutOfMemory) error.OutOfMemory else error.ExecutionUnavailable;
             };
             switch (renewal) {
@@ -8080,16 +8093,12 @@ pub const Runtime = struct {
                 .deferred => return error.TaskBusy,
                 .updated, .unchanged => {},
             }
-            if (self.task_runtime.installedIntentCurrent(task_id)) {
-                candidate.deinit();
-                return null;
-            }
         }
-        if (renews_credential and self.task_runtime.installedIntentCurrent(task_id)) {
-            if (!self.task_runtime.installedModelEndpointMatches(task_id, input.target))
-                return error.ExecutionUnavailable;
+        if (plan == .renew) {
+            candidate.deinit();
+            return .{ .plan = .keep };
         }
-        return candidate;
+        return .{ .plan = plan, .candidate = candidate };
     }
 
     fn writeTaskCatalogProjection(
@@ -10142,33 +10151,25 @@ pub const Runtime = struct {
 
     fn checkMetaskAuthorization(self: *Runtime, provider_id: []const u8) Error!void {
         if (!std.mem.eql(u8, provider_id, models_contract.metask_source_id)) return;
-        if (self.shutting_down) return error.ExecutionUnavailable;
-        const check = self.metask_authorization_check orelse {
-            // Isolated Product tests have no Account composition. Desktop
-            // admission must fail closed if its required capability is absent.
-            if (builtin.is_test) return;
-            return error.ExecutionUnavailable;
-        };
-        const current = check.current() orelse return error.ExecutionUnavailable;
-        if (current.generation == 0 or
-            !self.custom_providers.acceptsMetaskAuthorization(current.generation)) return error.ExecutionUnavailable;
+        _ = self.admittedMetaskGeneration() orelse return error.ExecutionUnavailable;
     }
 
-    /// Every installed Metask execution renews from the current Account
-    /// authorization. Isolated Product tests have no Account composition and
-    /// keep the installed credential, matching checkMetaskAuthorization.
-    fn renewsMetaskCredential(self: *const Runtime, is_metask: bool) bool {
-        return is_metask and (!builtin.is_test or self.metask_authorization_check != null);
+    /// The Account generation a Metask use may run on now. Isolated Product
+    /// tests have no Account composition and read zero; desktop admission
+    /// fails closed if that capability is absent.
+    fn admittedMetaskGeneration(self: *Runtime) ?u64 {
+        if (self.shutting_down) return null;
+        const check = self.metask_authorization_check orelse return if (builtin.is_test) 0 else null;
+        const current = check.current() orelse return null;
+        if (current.generation == 0 or
+            !self.custom_providers.acceptsMetaskAuthorization(current.generation)) return null;
+        return current.generation;
     }
 
     /// A Task is not bound to a login: any current login admits it.
     fn validateTaskMetaskAuthorization(self: *Runtime, task_id: u64) Error!void {
         const facts = self.task_runtime.modelFacts(task_id) orelse return error.UnknownTask;
-        const uses_metask = if (facts.intent) |intent|
-            std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id)
-        else if (facts.installed) |installed| installed.is_metask else false;
-        if (!uses_metask) return;
-        try self.checkMetaskAuthorization(models_contract.metask_source_id);
+        if (usesMetask(facts)) try self.checkMetaskAuthorization(models_contract.metask_source_id);
     }
 
     fn taskMetaskInputBlocker(self: *Runtime, task_id: u64) ?task_runtime.SendInputReason {
@@ -10185,10 +10186,7 @@ pub const Runtime = struct {
     /// epoch, so a projection and an admission never see two facts.
     fn taskMetaskInput(self: *Runtime, task_id: u64) MetaskInput {
         const facts = self.task_runtime.modelFacts(task_id) orelse return .{};
-        const uses_metask = if (facts.intent) |intent|
-            std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id)
-        else if (facts.installed) |installed| installed.is_metask else false;
-        if (!uses_metask) return .{};
+        if (!usesMetask(facts)) return .{};
         const check = self.metask_authorization_check orelse
             return .{ .blocker = if (builtin.is_test) null else .metask_authorization_required };
         const current = switch (check.status()) {
@@ -14810,6 +14808,120 @@ test "Scheduled Task ignores Product binding generation drift for stable source 
     try std.testing.expectEqual(@as(usize, 1), persistence.commits);
 }
 
+/// One Scheduled Task on a Metask model, beside a real Models store.
+const MetaskScheduleFixture = struct {
+    control: Runtime = undefined,
+    models_tmp: std.testing.TmpDir,
+    automatic_tmp: std.testing.TmpDir,
+    automatic_root: product_workspace.AutomaticRoot = undefined,
+    vault: TestCustomProviderVault = .{},
+    clock: TestScheduleClock = .{ .now = 1_000 },
+    persistence: TestSchedulePersistence = .{},
+
+    fn init(self: *@This()) !void {
+        self.* = .{ .models_tmp = std.testing.tmpDir(.{}), .automatic_tmp = std.testing.tmpDir(.{}) };
+        self.control = try testRuntime();
+        var storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        self.automatic_root = try product_workspace.AutomaticRoot.open(std.testing.io, std.testing.allocator, storage[0..try self.automatic_tmp.dir.realPath(std.testing.io, &storage)]);
+        product_schedule.testing.configure(&self.control.schedule, self.clock.timer(), self.persistence.capability(), .ready);
+        product_workspace.testing.installAutomaticRoot(&self.control.workspace, &self.automatic_root);
+        self.control.setScheduleBackgroundAvailableNoFail(true);
+        try self.restartModels();
+    }
+
+    fn deinit(self: *@This()) void {
+        self.control.stopCustomProviders();
+        self.control.deinit();
+        self.automatic_root.deinit();
+        self.automatic_tmp.cleanup();
+        self.models_tmp.cleanup();
+    }
+
+    fn restartModels(self: *@This()) !void {
+        var storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        self.control.stopCustomProviders();
+        try self.control.startCustomProviders(storage[0..try self.models_tmp.dir.realPath(std.testing.io, &storage)], self.vault.port());
+    }
+
+    fn loadCatalog(self: *@This(), credential: []const u8) !void {
+        const models = [_]models_contract.ModelView{.{ .id = "fixture-model", .display_name = "Fixture model" }};
+        try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogWithCredential(&self.control.custom_providers, "account-1", credential, &models));
+        self.control.finishModelsCommitNoFail();
+    }
+
+    fn schedule(self: *@This()) !u64 {
+        return self.control.createScheduledTask(.{
+            .title = "Review current work",
+            .model_selection = try TestSupport.fixtureModelSelection(&self.control),
+            .permission_profile = .approval_required,
+            .input = "Review current work",
+            .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+        });
+    }
+
+    /// The task still runs on its own binding, which names `generation`.
+    fn expectRunnable(self: *@This(), id: u64, generation: u64) !void {
+        const item = product_schedule.testing.item(&self.control.schedule, id).?;
+        try std.testing.expect(item.enabled and item.health == .ready);
+        try std.testing.expectEqual(generation, item.binding.source_generation);
+        try std.testing.expectEqual(generation, self.control.modelsView().providers[0].source_generation);
+        try std.testing.expect(self.control.scheduledModelBinding(item.binding) == .ready);
+    }
+};
+
+test "Scheduled Task keeps its Metask model across renewals, logins and restarts" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const id = try fixture.schedule();
+    const generation = fixture.control.modelsView().providers[0].source_generation;
+    const commits = fixture.persistence.commits;
+    try fixture.loadCatalog("token-b");
+    // A login passes through no authorization at all.
+    fixture.control.setMetaskAuthorizationUnavailable();
+    try fixture.loadCatalog("token-c");
+    try fixture.restartModels();
+    try fixture.loadCatalog("token-d");
+    try fixture.expectRunnable(id, generation);
+    try std.testing.expectEqual(@as(?u64, 2_000), fixture.clock.armed_at);
+    try std.testing.expectEqual(commits, fixture.persistence.commits);
+}
+
+test "Scheduled Task follows its account's generation out of an older version's store" {
+    for ([_]enum { adopted, schedule_write_fails, interrupted, reset }{ .adopted, .schedule_write_fails, .interrupted, .reset }) |case| {
+        var fixture: MetaskScheduleFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        try fixture.loadCatalog("token-a");
+        const id = try fixture.schedule();
+        const derived = fixture.control.modelsView().providers[0].source_generation;
+        // The same account under a value an older version drew. An adoption
+        // whose Models write never landed already moved Schedule.
+        fixture.control.custom_providers.registry.metask_source_generation = 1234;
+        try std.testing.expect(fixture.control.custom_providers.rememberPreference(.{ .source_id = "metask", .model_id = "fixture-model" }).accepted);
+        const moves = case == .adopted or case == .schedule_write_fails;
+        if (moves) fixture.control.schedule.store.find(id).?.binding.source_generation = 1234;
+        if (case == .schedule_write_fails) fixture.persistence.result = .failed;
+        const commits = fixture.persistence.commits;
+        if (case == .reset) {
+            fixture.control.custom_providers.registry.metask_source_generation = derived;
+            fixture.control.custom_providers.store_healthy = false;
+            try std.testing.expect(fixture.control.resetModelsStore(fixture.control.currentRevision()).accepted);
+        } else try fixture.restartModels();
+        try fixture.loadCatalog("token-b");
+        try fixture.expectRunnable(id, if (case == .schedule_write_fails) 1234 else derived);
+        try std.testing.expectEqual(commits + @intFromBool(moves), fixture.persistence.commits);
+        if (case != .schedule_write_fails) continue;
+        // Neither side moved, so the next start can.
+        fixture.persistence.result = .committed;
+        product_schedule.testing.setPersistenceHealth(&fixture.control.schedule, .ready);
+        try fixture.restartModels();
+        try fixture.loadCatalog("token-c");
+        try fixture.expectRunnable(id, derived);
+    }
+}
+
 test "Skill catalog snapshot reports redaction without exposing credential bytes" {
     var control = try testRuntime();
     defer control.deinit();
@@ -16336,12 +16448,12 @@ test "unchanged Task binding skips candidate allocation and credential publicati
     defer control.custom_providers.metask_catalog.allocator = original;
     const revision = control.currentRevision();
     const security_epoch = control.projection_security_epoch;
-    try std.testing.expect((try control.resolveTaskRunModel(3)) == null);
+    try std.testing.expectEqualDeep(Runtime.PreparedBinding{ .plan = .keep }, try control.prepareTaskBinding(3));
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
     try std.testing.expectEqual(revision, control.currentRevision());
     try std.testing.expectEqual(security_epoch, control.projection_security_epoch);
     task.runtime.execution().?.model_intent_revision = 0;
-    try std.testing.expectError(error.OutOfMemory, control.resolveTaskRunModel(3));
+    try std.testing.expectError(error.OutOfMemory, control.prepareTaskBinding(3));
 }
 
 test "Task model installed intent does not borrow a catalog refresh as new execution authority" {
@@ -16356,12 +16468,47 @@ test "Task model installed intent does not borrow a catalog refresh as new execu
         .rejected => return error.TestUnexpectedResult,
     };
     control.failMetaskCatalogRefresh(preparation.attempt_id, preparation.authorization_generation, .catalog_unavailable, "unavailable catalog");
-    try std.testing.expect((try control.resolveTaskRunModel(3)) == null);
+    try std.testing.expectEqualDeep(Runtime.PreparedBinding{ .plan = .keep }, try control.prepareTaskBinding(3));
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     // An uninstalled/newly selected revision still needs exact current source
     // authority; a matching model name alone cannot establish that proof.
     task.runtime.execution().?.model_intent_revision = 0;
-    try std.testing.expectError(error.ExecutionUnavailable, control.resolveTaskRunModel(3));
+    try std.testing.expectError(error.ExecutionUnavailable, control.prepareTaskBinding(3));
+}
+
+test "Task model projection reads its binding plan without resolving a credential" {
+    const Account = struct {
+        fn status(_: *anyopaque) control_ports.MetaskAuthorizationStatus {
+            return .{ .available = .{ .generation = 17 } };
+        }
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.testTask(3).?;
+    _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
+    task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
+    var account: u8 = 0;
+    control.setMetaskAuthorizationCheck(.{ .context = &account, .status_fn = Account.status });
+    try std.testing.expectEqualDeep(task_runtime.Runtime.BindingPlan.renew, control.taskBindingPlan(3));
+    var failing = std.testing.FailingAllocator.init(control.allocator, .{ .fail_index = 0 });
+    const original = control.custom_providers.metask_catalog.allocator;
+    control.custom_providers.metask_catalog.allocator = failing.allocator();
+    defer control.custom_providers.metask_catalog.allocator = original;
+    const projected = control.observeTaskRecoveryAuthority(.{
+        .task_id = 3,
+        .workspace_id = task.durable.workspace_id,
+        .workspace_epoch = task.durable.workspace_epoch,
+        .workspace_root = task.durable.workspace_root,
+        .execution_generation = task.durable.execution_generation,
+        .execution_protocol = task.durable.execution_protocol,
+        .execution_model = task.durable.execution_model,
+        .runtime_attached = true,
+    });
+    try std.testing.expect(!projected.model_rebind_required);
+    try std.testing.expectEqual(.available, projected.execution_admission);
+    try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    // Only an admission resolves the candidate the plan asks for.
+    try std.testing.expectError(error.OutOfMemory, control.prepareTaskBinding(3));
 }
 
 test "Task model selection does not depend on a starting preference" {
@@ -16381,7 +16528,7 @@ test "a removed installed model cannot start another Run while its Task retains 
     _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
     try models_aggregate.TestSupport.installMetaskDefault(&control.custom_providers, "account-1", "SECRET-KEY", &.{.{ .id = "fixture-model-2", .display_name = "Second", .metadata = .{} }}, "fixture-model-2", 1, 1, 1, 5);
-    try std.testing.expectError(error.ExecutionUnavailable, control.resolveTaskRunModel(3));
+    try std.testing.expectError(error.ExecutionUnavailable, control.prepareTaskBinding(3));
     try std.testing.expect(control.newTaskAdmissionView().available);
     _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 1, "fixture-model-2"));
     try std.testing.expectEqualStrings("fixture-model-2", task.durable.model_intent.?.model_id);
