@@ -1097,6 +1097,41 @@ pub const Runtime = struct {
         );
     }
 
+    /// What resolving this model now would install, without its credential.
+    pub fn currentTarget(self: *Runtime, target: contract.ModelRef) ?contract.TargetFacts {
+        const generations = self.sourceGenerations(target.source_id) orelse return null;
+        return self.targetFacts(target, generations.source, generations.catalog);
+    }
+
+    fn targetFacts(
+        self: *Runtime,
+        target: contract.ModelRef,
+        expected_source_generation: u64,
+        expected_catalog_generation: u64,
+    ) ?contract.TargetFacts {
+        const protocol = self.sourceModelProtocol(target, expected_source_generation, expected_catalog_generation) orelse return null;
+        if (std.mem.eql(u8, target.source_id, contract.metask_source_id)) return .{
+            .source_id = contract.metask_source_id,
+            .model_id = target.model_id,
+            .protocol = protocol,
+            .base_url = contract.metaskEndpoint(protocol) orelse return null,
+            .image_input = self.metask_catalog.imageInput(target.model_id),
+            .source_generation = expected_source_generation,
+        };
+        const provider = findProviderView(self.registry.views(), target.source_id) orelse return null;
+        const image_input = for (provider.models) |model| {
+            if (std.mem.eql(u8, model.id, target.model_id)) break model.metadata.capabilities.image_input;
+        } else null;
+        return .{
+            .source_id = provider.id,
+            .model_id = target.model_id,
+            .protocol = protocol,
+            .base_url = provider.normalized_base_url,
+            .image_input = image_input,
+            .source_generation = provider.source_generation,
+        };
+    }
+
     /// Produces a complete owned execution candidate for an explicit model.
     /// A stale/unavailable target never falls back to the global selection.
     pub fn resolveModel(
@@ -1105,18 +1140,21 @@ pub const Runtime = struct {
         expected_source_generation: u64,
         expected_catalog_generation: u64,
     ) !?contract.OwnedSourceCandidate {
-        const protocol = self.sourceModelProtocol(target, expected_source_generation, expected_catalog_generation) orelse return null;
+        const facts = self.targetFacts(target, expected_source_generation, expected_catalog_generation) orelse return null;
         if (std.mem.eql(u8, target.source_id, contract.metask_source_id)) {
-            return self.metask_catalog.prepareSourceCandidate(target.model_id, expected_source_generation) catch |err| return switch (err) {
+            var candidate = self.metask_catalog.prepareSourceCandidate(target.model_id, expected_source_generation) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => error.InvalidProvider,
             };
+            // The catalog and this generation came from one Account lease.
+            candidate.credential_generation = self.metask_catalog_authorization_generation;
+            return candidate;
         }
         const provider = findProviderView(self.registry.views(), target.source_id) orelse return null;
         const binding: ModelBinding = .{
             .provider_id = provider.id,
             .model_id = target.model_id,
-            .protocol = protocol,
+            .protocol = facts.protocol,
             .normalized_base_url = provider.normalized_base_url,
             .provider_revision = provider.provider_revision,
             .source_generation = provider.source_generation,

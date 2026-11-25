@@ -306,6 +306,12 @@ pub const CatalogSession = struct {
         return self.models.items[index].protocol != null;
     }
 
+    /// The model's own declaration, as a candidate for its route carries it.
+    pub fn imageInput(self: *const CatalogSession, model_id: []const u8) ?bool {
+        const index = self.findModel(model_id) orelse return null;
+        return self.models.items[index].metadata.capabilities.image_input;
+    }
+
     pub fn firstImageModelId(self: *const CatalogSession) ?[]const u8 {
         for (self.models.items) |*entry| if (entry.image_generation) return entry.id.view();
         return null;

@@ -14,6 +14,9 @@ const model_id = "glm-5.3-flash";
 /// A Responses-only model: switching to it needs a new Session, not setModel.
 const responses_model_id = "glm-5.3-responses";
 const catalog_with_responses = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"" ++ model_id ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}},{\"id\":\"" ++ responses_model_id ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"responses\":{\"supported\":true}}}}]}";
+/// The Task's own model, with another declaration or another endpoint.
+const catalog_own_model_with_images = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"" ++ model_id ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"input\":{\"image\":{\"supported\":true}}}}]}";
+const catalog_own_model_on_responses = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"" ++ model_id ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"responses\":{\"supported\":true}}}}]}";
 const switched_principal = "different-principal";
 /// Initial stored refresh token and the one issued by the login exchange.
 const switch_secrets = [_][]const u8{ access_a, access_b, "synthetic-lifecycle-refresh-a", "synthetic-lifecycle-refresh-0" };
@@ -25,6 +28,7 @@ const Network = struct {
     fail_catalog: bool = false,
     login_principal: []const u8 = "credential-lifecycle",
     catalog_drift: bool = false,
+    own_change: enum { none, declaration, protocol } = .none,
     responses_model: bool = false,
     rotate_token: bool = true,
     next_access: ?[]const u8 = null,
@@ -55,7 +59,8 @@ const Network = struct {
         if (request.kind != .models or !std.mem.eql(u8, request.bearer orelse "", self.expected_access)) return error.ProtocolFailed;
         _ = self.catalog_calls.fetchAdd(1, .monotonic);
         if (self.fail_catalog) return .{ .status = 503, .body = "unavailable" };
-        const body = if (self.responses_model) catalog_with_responses else if (self.catalog_drift and std.mem.eql(u8, self.expected_access, access_a)) "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"catalog-default-model\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}},{\"id\":\"" ++ model_id ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}" else "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"" ++ model_id ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}";
+        const renewed = std.mem.eql(u8, self.expected_access, access_b);
+        const body = if (self.responses_model) catalog_with_responses else if (self.own_change == .declaration and renewed) catalog_own_model_with_images else if (self.own_change == .protocol and renewed) catalog_own_model_on_responses else if (self.catalog_drift and std.mem.eql(u8, self.expected_access, access_a)) "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"catalog-default-model\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}},{\"id\":\"" ++ model_id ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}" else "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"" ++ model_id ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}";
         @memcpy(buffer[0..body.len], body);
         return .{ .status = 200, .body = buffer[0..body.len] };
     }
@@ -263,6 +268,10 @@ test "Metask original configuration restored across relogin is rebuilt with the 
     try characterizeCredentialExpiry(.rebind_original_relogin);
 }
 
+test "Metask original configuration restored across a renewal renews at the next admission" {
+    try characterizeCredentialExpiry(.rebind_original_renewal);
+}
+
 test "Metask manual compaction uses the credential of the current login" {
     try characterizeCredentialExpiry(.compact_rotation);
 }
@@ -283,8 +292,12 @@ test "Metask detached Task restores with the new account credential after accoun
     try characterizeCredentialExpiry(.detached_account_switch);
 }
 
-test "Metask catalog capability change keeps model intent and uses renewed credentials" {
+test "Metask catalog change to other models keeps the Session and renews it in place" {
     try characterizeCredentialExpiry(.catalog_drift);
+}
+
+test "Metask model's own declaration or protocol change rebuilds its Session once" {
+    for ([_]Scenario{ .own_declaration, .own_protocol }) |scenario| try characterizeCredentialExpiry(scenario);
 }
 
 test "Metask unadopted additional input survives credential renewal exactly once" {
@@ -356,7 +369,7 @@ fn commitRefresh(account_runtime: *account.Runtime, control: *control_api.Runtim
     control.commitAccountFactNoFail(account_runtime.preparedFact(&rotated));
 }
 
-const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, renewal_unsent, renewal_lost, relogin, relogin_during_run, account_switch_during_run, logout_during_run, rebind_original_account_switch, rebind_original_relogin, account_switch, account_switch_after_logout, logout, detached, detached_account_switch, catalog_failure, catalog_loading_attached, catalog_loading_detached, session_close_retry, catalog_drift, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer, compact_rotation, compact_rebind_original_relogin };
+const Scenario = enum { retirement_not_ready, checkpoint_rotation, title_rotation, waiting_ui_rotation, active_update_rejected, active_update_oom, many_rotations, rotation, expiry, renewal_unsent, renewal_lost, relogin, relogin_during_run, account_switch_during_run, logout_during_run, rebind_original_account_switch, rebind_original_relogin, rebind_original_renewal, account_switch, account_switch_after_logout, logout, detached, detached_account_switch, catalog_failure, catalog_loading_attached, catalog_loading_detached, session_close_retry, catalog_drift, own_declaration, own_protocol, update_rejected, update_contract, candidate_rotation, candidate_relogin, candidate_same_token_relogin, queued_rotation, continuation_rotation, continuation_unchanged, continuation_cancelled, continuation_stale_auth, continuation_expired, reviewer, compact_rotation, compact_rebind_original_relogin };
 
 const CatalogRetryTimer = struct {
     id: ?u64 = null,
@@ -426,7 +439,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     defer fake_core.releaseControlledRestore();
     defer fake_core.releaseControlled();
 
-    var network: Network = .{ .catalog_drift = scenario == .catalog_drift, .responses_model = scenario == .rebind_original_account_switch or scenario == .rebind_original_relogin or scenario == .compact_rebind_original_relogin, .rotate_token = scenario != .continuation_unchanged and scenario != .candidate_same_token_relogin };
+    var network: Network = .{ .catalog_drift = scenario == .catalog_drift, .own_change = if (scenario == .own_declaration) .declaration else if (scenario == .own_protocol) .protocol else .none, .responses_model = scenario == .rebind_original_account_switch or scenario == .rebind_original_relogin or scenario == .rebind_original_renewal or scenario == .compact_rebind_original_relogin, .rotate_token = scenario != .continuation_unchanged and scenario != .candidate_same_token_relogin };
     var account_runtime = account.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &network, .perform_fn = Network.refresh, .retire_fn = account.retireNothing }, account.TestSupport.loopbackEndpoint(), .{ .context = &network, .notify_fn = Network.wake });
     var platform: account.TestSupport.Platform = .{ .now_unix_seconds = 100 };
     account.TestSupport.attachPlatform(&account_runtime, &platform);
@@ -530,6 +543,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         return;
     }
 
+    const rebuilds = scenario == .own_declaration or scenario == .own_protocol;
     const old_generation = old.durable.execution_generation;
     try std.testing.expect(old.durable.checkpoint != null);
     fake_core.setRestoredLogicalId(old.durable.checkpoint.?.session.logical_session_id);
@@ -675,12 +689,14 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         try runAndExpect(&wake_loop, &control, new_id, "new-authorization", .completed);
         return;
     }
-    if (scenario == .rebind_original_account_switch or scenario == .rebind_original_relogin or
+    // Selecting the original model again admits the restored Session as it is.
+    const reselects_original = scenario == .rebind_original_account_switch or scenario == .rebind_original_renewal;
+    if (reselects_original or scenario == .rebind_original_relogin or
         scenario == .compact_rebind_original_relogin)
     {
         // Switching to a Responses model needs a new Session. Its restore
         // fails, so the rebind restores the original configuration, and the
-        // next login completes while that restore is still in progress.
+        // next login or renewal completes while that restore is in progress.
         const before = control.modelsView().providers[0];
         _ = try control.selectTaskModel(old_id, .{
             .expected_selection_revision = old.durable.model_intent.?.revision,
@@ -701,7 +717,10 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         } else return error.OriginalRestoreDidNotStart;
         try std.testing.expectEqual(.restoring_original, old.runtime.restore_job.?.rebind.?.phase);
         if (scenario == .rebind_original_account_switch) network.login_principal = switched_principal;
-        try relogin(&account_runtime);
+        if (scenario == .rebind_original_renewal) {
+            platform.now_unix_seconds = 150;
+            try commitRefresh(&account_runtime, &control);
+        } else try relogin(&account_runtime);
         network.expected_access = access_b;
         coordinator.authorizationChanged();
         try drainCatalog(&coordinator);
@@ -755,9 +774,8 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
             try std.testing.expectEqual(@as(usize, 1), runCalls());
             return;
         }
-        if (scenario == .rebind_original_account_switch) {
-            // Selecting the original model again admits the restored Session:
-            // its next admission renews the credential in place.
+        if (reselects_original) {
+            // Its next admission renews the credential in place.
             const current = control.modelsView().providers[0];
             _ = try control.selectTaskModel(old_id, .{
                 .expected_selection_revision = old.durable.model_intent.?.revision,
@@ -783,7 +801,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         fake_core.lock();
         const settled_restores = fake_core.checkpoint_restores;
         fake_core.unlock();
-        try std.testing.expectEqual(@as(usize, if (scenario == .rebind_original_account_switch) 2 else 3), settled_restores);
+        try std.testing.expectEqual(@as(usize, if (reselects_original) 2 else 3), settled_restores);
         return;
     }
     const restoring_candidate = scenario == .candidate_rotation or scenario == .candidate_relogin or scenario == .candidate_same_token_relogin;
@@ -1075,7 +1093,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         try std.testing.expectEqual(@as(usize, 2), network.catalog_calls.load(.acquire));
         try std.testing.expectEqual(scenario != .continuation_unchanged, old_source != control.modelsView().providers[0].source_generation);
         try std.testing.expectEqual(default_revision, control.modelsView().selection_revision);
-        if (scenario == .catalog_drift) {
+        if (scenario == .catalog_drift or rebuilds) {
             try std.testing.expectEqualStrings(model_id, control.modelsView().default_selection.?.model_id);
             try std.testing.expectEqual(old_revision, old.durable.model_intent.?.revision);
         }
@@ -1215,15 +1233,16 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     try runAndExpect(&wake_loop, &control, old_id, "expired-old-first", .completed);
     try runAndExpect(&wake_loop, &control, old_id, "expired-old-repeat", .completed);
     try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
-    try std.testing.expectEqual(old_epoch + @as(u64, if (scenario == .catalog_drift) 1 else 0), old.durable.binding_epoch);
-    if (scenario == .catalog_drift) try std.testing.expect(old_generation != old.durable.execution_generation) else try std.testing.expectEqual(old_generation, old.durable.execution_generation);
-    try std.testing.expectEqual(@as(usize, if (scenario == .catalog_drift) 2 else 1), fake_core.session_created);
-    try std.testing.expectEqual(@as(usize, if (scenario == .catalog_drift) 1 else 0), fake_core.session_destroyed);
+    // Three messages followed the change; only the first could rebuild.
+    try std.testing.expectEqual(old_epoch + @as(u64, if (rebuilds) 1 else 0), old.durable.binding_epoch);
+    if (rebuilds) try std.testing.expect(old_generation != old.durable.execution_generation) else try std.testing.expectEqual(old_generation, old.durable.execution_generation);
+    try std.testing.expectEqual(@as(usize, if (rebuilds) 2 else 1), fake_core.session_created);
+    try std.testing.expectEqual(@as(usize, if (rebuilds) 1 else 0), fake_core.session_destroyed);
     const new_id = try createTask(&control, workspace);
     try runAndExpect(&wake_loop, &control, new_id, "fresh-task-control", .completed);
     const new = control.testTask(new_id).?;
     try std.testing.expectEqualStrings(access_b, new.runtime.executionConst().?.secret);
-    try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[if (scenario == .catalog_drift) 2 else 1].credential_digest);
+    try std.testing.expectEqualDeep(fixture.credentialDigest(access_b), fake_core.sessions[if (rebuilds) 2 else 1].credential_digest);
     try std.testing.expectEqualStrings(old.durable.execution_model, new.durable.execution_model);
     try std.testing.expectEqual(old.durable.execution_protocol, new.durable.execution_protocol);
     try std.testing.expectEqual(old_revision, old.durable.model_intent.?.revision);

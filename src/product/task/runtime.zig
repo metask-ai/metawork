@@ -609,6 +609,8 @@ pub const RecoveryStartInput = struct {
     workspace_kind: recovery_job.WorkspaceKind,
     execution: models_contract.ConfigInput,
     source_generation: u64 = 0,
+    /// The Account generation this attempt's Metask credential was leased at.
+    credential_generation: u64 = 0,
     continuation_source_id: ?u64 = null,
     /// Pending approval transaction identity for synchronous recovery admission.
     approval_revision: ?u64 = null,
@@ -690,6 +692,7 @@ pub const CreateTaskInput = struct {
     model: []const u8,
     model_ref: ?models_contract.ModelRef = null,
     source_generation: u64 = 0,
+    credential_generation: u64 = 0,
     permission_profile: task_state.PermissionProfile,
     permission_review_delegated: bool = false,
     permission_interaction: task_state.PermissionInteraction,
@@ -2327,6 +2330,7 @@ pub const Runtime = struct {
             input.execution,
         );
         execution.source_generation = input.source_generation;
+        execution.credential_generation = input.credential_generation;
         execution.model_intent_revision = if (input.source_generation != 0)
             if (model_intent) |intent| intent.revision else 0
         else
@@ -4573,6 +4577,31 @@ pub const Runtime = struct {
 
     pub const CredentialRenewal = enum { unrelated, unchanged, updated, deferred };
 
+    /// Account's delivery skips a generation that already failed; an admission
+    /// is the user asking again.
+    pub const CredentialOrigin = enum { delivery, admission };
+
+    /// What Control observed for one plan. None of it is a credential.
+    pub const BindingFacts = struct {
+        authorized: bool = true,
+        /// Account's current generation; zero when no Account governs the use.
+        credential_generation: u64 = 0,
+        target: ?models_contract.TargetFacts = null,
+        /// The installed binding may go on without resolving its target.
+        installed_available: bool = false,
+    };
+
+    pub const BindingPlan = union(enum) {
+        keep,
+        renew,
+        set_model: struct { renew: bool },
+        /// The live Session cannot serve the intent.
+        rebind,
+        /// No Session is live.
+        restore,
+        blocked: enum { unknown_task, intent_unconfirmed, authorization, model_unavailable },
+    };
+
     pub const ModelFacts = struct {
         intent: ?struct { target: models_contract.ModelRef, revision: u64 },
         intent_pending: bool,
@@ -4591,48 +4620,33 @@ pub const Runtime = struct {
             .intent_pending = task.model_intent_prepared,
             .installed = if (task.runtime.executionConst()) |execution| .{
                 .target = execution.modelRef(),
-                .is_metask = std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id),
+                .is_metask = execution.isMetask(),
                 .source_generation = execution.source_generation,
                 .protocol = execution.protocol,
             } else null,
         };
     }
 
-    pub fn installedModelMatchesTarget(self: *const Runtime, task_id: u64, candidate: models_contract.SourceCandidateInput) bool {
-        const task = self.findConst(task_id) orelse return false;
-        const execution = task.runtime.executionConst() orelse return false;
-        return execution.matchesTarget(candidate);
-    }
-
-    pub fn installedIntentCurrent(self: *const Runtime, task_id: u64) bool {
-        const task = self.findConst(task_id) orelse return false;
-        const intent = task.durable.model_intent orelse return false;
-        const execution = task.runtime.executionConst() orelse return false;
-        return execution.matchesIntentRevision(intent.revision);
-    }
-
-    pub fn installedModelProviderMatches(self: *const Runtime, task_id: u64, target: models_contract.ModelRef, protocol: models_contract.Protocol) bool {
-        const task = self.findConst(task_id) orelse return false;
-        const execution = task.runtime.executionConst() orelse return false;
-        return execution.matchesProvider(target, protocol);
-    }
-
-    pub fn installedModelEndpointMatches(self: *const Runtime, task_id: u64, target: models_contract.Target) bool {
-        const task = self.findConst(task_id) orelse return false;
-        const execution = task.runtime.executionConst() orelse return false;
-        return execution.matchesEndpoint(target);
-    }
-
-    pub fn installedCredentialCurrent(self: *const Runtime, task_id: u64, source_generation: u64) bool {
-        const task = self.findConst(task_id) orelse return false;
-        const execution = task.runtime.executionConst() orelse return false;
-        return !task.runtime.credential_update_failed and execution.matchesSourceGeneration(source_generation);
-    }
-
-    pub fn installedModelSourceCurrent(self: *const Runtime, task_id: u64, source_generation: u64) bool {
-        const task = self.findConst(task_id) orelse return false;
-        const execution = task.runtime.executionConst() orelse return false;
-        return execution.matchesSourceGeneration(source_generation);
+    /// The one answer to what this Task's next model use asks of its Session.
+    /// Projection and admission both read it, so they cannot disagree.
+    pub fn bindingPlan(self: *const Runtime, task_id: u64, facts: BindingFacts) BindingPlan {
+        const task = self.findConst(task_id) orelse return .{ .blocked = .unknown_task };
+        if (task.model_intent_prepared) return .{ .blocked = .intent_unconfirmed };
+        if (!facts.authorized) return .{ .blocked = .authorization };
+        const intent = task.durable.model_intent orelse
+            return if (facts.installed_available) .keep else .{ .blocked = .model_unavailable };
+        const installed = task.runtime.executionConst();
+        const same_intent = if (installed) |execution| execution.matchesIntentRevision(intent.revision) else false;
+        const target = facts.target orelse
+            return if (same_intent and facts.installed_available) .keep else .{ .blocked = .model_unavailable };
+        const execution = installed orelse return .restore;
+        // A Custom Provider's edits wait for the user to choose it again.
+        if (same_intent and !execution.isMetask()) return .keep;
+        if (!execution.servesTarget(target)) return .rebind;
+        const renew = facts.credential_generation != 0 and
+            (task.runtime.credential_update_failed or execution.credential_generation != facts.credential_generation);
+        if (!same_intent) return .{ .set_model = .{ .renew = renew } };
+        return if (renew) .renew else .keep;
     }
 
     /// What the Task's live Session carries of the user's instructions, and
@@ -4644,39 +4658,30 @@ pub const Runtime = struct {
         return attached.instructions;
     }
 
-    pub fn installedModelNeedsSourceChange(self: *const Runtime, task_id: u64, candidate: models_contract.SourceCandidateInput) bool {
-        const task = self.findConst(task_id) orelse return false;
-        const execution = task.runtime.executionConst() orelse return false;
-        return !execution.matchesSource(candidate);
-    }
-
     fn renewsMetaskCredential(self: *const Runtime, task_id: u64) bool {
         const task = self.findConst(task_id) orelse return false;
         if (task.runtime.restore_job != null) return false;
         const execution = task.runtime.executionConst() orelse return false;
-        return std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id);
+        return execution.isMetask();
     }
 
     /// Account authority is checked by Product Control. This owner owns the
     /// Session/Host atomic handoff; any current login renews the installed
-    /// credential in place.
-    pub fn renewMetaskCredential(self: *Runtime, task_id: u64, generation: u64, value: []const u8, resolved_source_generation: ?u64) !CredentialRenewal {
+    /// credential in place. `value` and `generation` come from one lease.
+    pub fn renewMetaskCredential(self: *Runtime, task_id: u64, generation: u64, value: []const u8, origin: CredentialOrigin) !CredentialRenewal {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.restore_job != null) return .unrelated;
         const execution = task.runtime.execution() orelse return .unrelated;
         if (task.runtime.credential_update_failed and task.runtime.credential_failed_generation == generation and
-            resolved_source_generation == null) return .unrelated;
+            origin == .delivery) return .unrelated;
         task.runtime.credential_renewal_deferred = false;
-        if (!std.mem.eql(u8, execution.provider_id, models_contract.metask_source_id)) return .unrelated;
+        if (!execution.isMetask()) return .unrelated;
         if (task.durable.archived or task.deletion != .idle or task.runtime.close_requested or task.runtime.hasClosingSession()) return .unrelated;
         if (task.runtime.active_operation == .restore or task.runtime.active_operation == .compact) {
             task.runtime.credential_renewal_deferred = true;
             return .deferred;
         }
-        if (!task.runtime.credential_update_failed and execution.credential_generation == generation) {
-            if (resolved_source_generation) |source| execution.source_generation = source;
-            return .unchanged;
-        }
+        if (!task.runtime.credential_update_failed and execution.credential_generation == generation) return .unchanged;
         var access = try task.runtime.acquireAccess();
         defer access.deinit();
         switch (access.sessionState()) {
@@ -4692,7 +4697,6 @@ pub const Runtime = struct {
             execution.credential_generation = generation;
             if (execution.credential_source) |source| source.replace(value);
             task.runtime.credential_update_failed = false;
-            if (resolved_source_generation) |source| execution.source_generation = source;
             return .unchanged;
         }
         const replacement = try execution.prepareCredential(value);
@@ -4722,7 +4726,6 @@ pub const Runtime = struct {
             record.credential_views.appendAssumeCapacity(replacement);
         }
         task.runtime.credential_update_failed = false;
-        if (resolved_source_generation) |source| execution.source_generation = source;
         return .updated;
     }
 
@@ -4752,7 +4755,7 @@ pub const Runtime = struct {
                 changed = true;
                 continue;
             };
-            const outcome = self.renewMetaskCredential(id, generation, value, null) catch |err| {
+            const outcome = self.renewMetaskCredential(id, generation, value, .delivery) catch |err| {
                 self.failMetaskCredentialUpdate(id, generation, err, effects);
                 changed = true;
                 continue;
@@ -7339,12 +7342,6 @@ pub const Runtime = struct {
         return task.runtime.attachment == .detached;
     }
 
-    pub fn restoreCandidateNeedsRebind(self: *const Runtime, task_id: u64, candidate: models_contract.SourceCandidateInput) bool {
-        const task = self.findConst(task_id) orelse return false;
-        return task.runtime.attachment == .detached or
-            (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(candidate));
-    }
-
     pub fn recoveryReleaseRoute(self: *const Runtime, task_id: u64) ?u64 {
         const task = self.findConst(task_id) orelse return null;
         const attached = task.runtime.attachedConst() orelse return null;
@@ -7474,6 +7471,7 @@ pub const Runtime = struct {
             restored_execution,
         );
         execution.source_generation = input.source_generation;
+        execution.credential_generation = input.credential_generation;
         if (input.rebind) |rebind| execution.model_intent_revision = rebind.selection_revision;
         errdefer execution.deinit();
         const model = try self.allocator.dupe(u8, restored_execution.target.model);
@@ -7550,6 +7548,7 @@ pub const Runtime = struct {
                 const installed = task.runtime.executionConst().?;
                 original = try owned_task_execution.OwnedTaskExecution.clone(self.allocator, installed.input());
                 original.?.source_generation = installed.source_generation;
+                original.?.credential_generation = installed.credential_generation;
                 original.?.model_intent_revision = installed.model_intent_revision;
             }
             const original_model = if (attached_rebind) try self.allocator.dupe(u8, task.durable.execution_model) else null;
@@ -10803,7 +10802,7 @@ fn applyModelIntent(
     if (installed.model_intent_revision == intent.revision and effects.model_target == null) return;
     const target = effects.model_target orelse return error.ExecutionUnavailable;
     if (!std.mem.eql(u8, intent.model_id, target.target.model)) return error.ExecutionGenerationMismatch;
-    if (!installed.matchesSource(target))
+    if (!installed.servesTarget(target.facts()))
         return error.ExecutionGenerationMismatch;
     if (std.mem.eql(u8, intent.model_id, task.durable.execution_model)) {
         installed.model_intent_revision = intent.revision;
@@ -12026,6 +12025,95 @@ test "Task model intent transaction uses its own revision and rolls back without
     task.durable.model_intent.?.revision = std.math.maxInt(u64);
     try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntentOverlay(1, std.math.maxInt(u64), target));
     try std.testing.expectEqualStrings("provider-c", task.durable.model_intent.?.source_id);
+}
+
+test "Task model binding plan answers projection and admission from one table" {
+    const Facts = Runtime.BindingFacts;
+    const Declared = []const models_contract.ModelImageCapability;
+    const metask: models_contract.TargetFacts = .{ .source_id = "metask", .model_id = "m", .protocol = .anthropic_messages, .base_url = models_contract.metask_anthropic_messages_url, .image_input = true, .source_generation = 7 };
+    const custom: models_contract.TargetFacts = .{ .source_id = "slot", .model_id = "m", .protocol = .openai_responses, .base_url = "https://c.example/v1/responses", .image_input = true, .source_generation = 7 };
+    const change = struct {
+        fn with(base: models_contract.TargetFacts, comptime field: []const u8, value: @FieldType(models_contract.TargetFacts, field)) models_contract.TargetFacts {
+            var changed = base;
+            @field(changed, field) = value;
+            return changed;
+        }
+    }.with;
+    const Case = struct {
+        installed: enum { none, metask, custom } = .metask,
+        revision: u64 = 4,
+        failed: bool = false,
+        declared: Declared = &.{ .{ .model = "m", .supported = true }, .{ .model = "other", .supported = false } },
+        facts: Facts,
+        expected: Runtime.BindingPlan,
+    };
+    const cases = [_]Case{
+        // The same Metask intent: its own route and declaration, then its token.
+        .{ .facts = .{ .credential_generation = 9, .target = metask }, .expected = .keep },
+        .{ .facts = .{ .credential_generation = 10, .target = metask }, .expected = .renew },
+        .{ .failed = true, .facts = .{ .credential_generation = 9, .target = metask }, .expected = .renew },
+        .{ .facts = .{ .target = metask }, .expected = .keep },
+        .{ .facts = .{ .credential_generation = 9, .target = change(metask, "source_generation", 8) }, .expected = .keep },
+        .{ .facts = .{ .credential_generation = 10, .target = change(metask, "protocol", .openai_responses) }, .expected = .rebind },
+        .{ .facts = .{ .credential_generation = 9, .target = change(metask, "base_url", "https://moved.example/v1/messages") }, .expected = .rebind },
+        .{ .facts = .{ .credential_generation = 9, .target = change(metask, "image_input", false) }, .expected = .rebind },
+        .{ .facts = .{ .credential_generation = 9, .target = change(metask, "image_input", null) }, .expected = .rebind },
+        .{ .declared = &.{}, .facts = .{ .credential_generation = 9, .target = change(metask, "image_input", null) }, .expected = .keep },
+        .{ .declared = &.{ .{ .model = "m", .supported = true }, .{ .model = "other", .supported = true } }, .facts = .{ .credential_generation = 9, .target = metask }, .expected = .keep },
+        // A Custom Provider keeps what it installed until it is chosen again.
+        .{ .installed = .custom, .facts = .{ .target = change(change(custom, "protocol", .gemini_native), "source_generation", 8) }, .expected = .keep },
+        // Another chosen model.
+        .{ .revision = 3, .facts = .{ .credential_generation = 9, .target = metask }, .expected = .{ .set_model = .{ .renew = false } } },
+        .{ .revision = 3, .facts = .{ .credential_generation = 10, .target = change(metask, "source_generation", 8) }, .expected = .{ .set_model = .{ .renew = true } } },
+        .{ .revision = 3, .facts = .{ .credential_generation = 9, .target = change(change(metask, "model_id", "other"), "image_input", false) }, .expected = .{ .set_model = .{ .renew = false } } },
+        .{ .revision = 3, .facts = .{ .credential_generation = 9, .target = change(metask, "model_id", "added") }, .expected = .rebind },
+        .{ .revision = 3, .facts = .{ .credential_generation = 9, .target = change(change(metask, "model_id", "added"), "image_input", null) }, .expected = .{ .set_model = .{ .renew = false } } },
+        .{ .revision = 3, .installed = .custom, .facts = .{ .credential_generation = 9, .target = metask }, .expected = .rebind },
+        .{ .revision = 3, .installed = .custom, .facts = .{ .target = custom }, .expected = .{ .set_model = .{ .renew = false } } },
+        .{ .revision = 3, .installed = .custom, .facts = .{ .target = change(custom, "source_generation", 8) }, .expected = .rebind },
+        // Nothing installed, nothing resolvable, nothing admitted.
+        .{ .installed = .none, .facts = .{ .credential_generation = 9, .target = metask }, .expected = .restore },
+        .{ .facts = .{ .credential_generation = 9, .installed_available = true }, .expected = .keep },
+        .{ .facts = .{ .credential_generation = 9 }, .expected = .{ .blocked = .model_unavailable } },
+        .{ .revision = 3, .facts = .{ .credential_generation = 9, .installed_available = true }, .expected = .{ .blocked = .model_unavailable } },
+        .{ .facts = .{ .authorized = false, .target = metask }, .expected = .{ .blocked = .authorization } },
+    };
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task_fixture = testModelIntentTask();
+    runtime.tasks[0] = &task_fixture;
+    defer runtime.tasks[0] = null;
+    const task = runtime.find(1).?;
+    try std.testing.expectEqualDeep(Runtime.BindingPlan{ .blocked = .model_unavailable }, runtime.bindingPlan(1, .{}));
+    try std.testing.expectEqualDeep(Runtime.BindingPlan.keep, runtime.bindingPlan(1, .{ .installed_available = true }));
+    task.durable.model_intent = try task_state.ModelIntent.init(std.testing.allocator, .{ .source_id = "metask", .model_id = "m" }, 4);
+    defer task.durable.model_intent.?.deinit(std.testing.allocator);
+    for (cases, 0..) |case, index| {
+        errdefer std.debug.print("binding plan case {d}\n", .{index});
+        if (case.installed != .none) {
+            const base = if (case.installed == .metask) metask else custom;
+            var execution = try owned_task_execution.OwnedTaskExecution.cloneTarget(std.testing.allocator, .{
+                .image_capabilities = case.declared,
+                .provider_id = if (case.installed == .metask) "metask" else "custom_provider:slot",
+                .protocol = base.protocol,
+                .model = "m",
+                .base_url = base.base_url,
+            }, 1);
+            execution.source_generation = 7;
+            execution.credential_generation = 9;
+            execution.model_intent_revision = case.revision;
+            task.runtime.attachment = .{ .attached = .{ .binding = task_agent_session.Binding.testFixture(1), .execution = execution, .pinned_catalog = null } };
+        }
+        defer if (task.runtime.execution()) |execution| {
+            execution.deinit();
+            task.runtime.attachment = .{ .detached = .cold_start };
+        };
+        task.runtime.credential_update_failed = case.failed;
+        try std.testing.expectEqualDeep(case.expected, runtime.bindingPlan(1, case.facts));
+    }
+    task.model_intent_prepared = true;
+    try std.testing.expectEqualDeep(Runtime.BindingPlan{ .blocked = .intent_unconfirmed }, runtime.bindingPlan(1, .{ .target = metask }));
+    try std.testing.expectEqualDeep(Runtime.BindingPlan{ .blocked = .unknown_task }, runtime.bindingPlan(2, .{ .target = metask }));
 }
 
 test "approval recovery waits for the observed blocker before admitting one attempt" {

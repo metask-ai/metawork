@@ -91,43 +91,30 @@ pub const OwnedTaskExecution = struct {
     }
 
     pub fn modelRef(self: *const OwnedTaskExecution) ?models_contract.ModelRef {
-        const source = if (std.mem.eql(u8, self.provider_id, models_contract.metask_source_id))
-            models_contract.metask_source_id
-        else if (std.mem.startsWith(u8, self.provider_id, "custom_provider:"))
-            self.provider_id["custom_provider:".len..]
-        else
-            return null;
+        const source = models_contract.providerSourceId(self.provider_id) orelse return null;
         return .{ .source_id = source, .model_id = self.model };
     }
 
-    pub fn matchesSource(self: *const OwnedTaskExecution, target: models_contract.SourceCandidateInput) bool {
-        return self.matchesTarget(target) and self.source_generation != 0 and self.source_generation == target.source_generation and
-            std.mem.eql(u8, self.secret, target.api_key);
+    pub fn isMetask(self: *const OwnedTaskExecution) bool {
+        return std.mem.eql(u8, self.provider_id, models_contract.metask_source_id);
     }
 
     pub fn matchesIntentRevision(self: *const OwnedTaskExecution, revision: u64) bool {
         return self.model_intent_revision == revision;
     }
 
-    pub fn matchesSourceGeneration(self: *const OwnedTaskExecution, generation: u64) bool {
-        return self.source_generation == generation;
-    }
-
-    pub fn matchesProvider(self: *const OwnedTaskExecution, target: models_contract.ModelRef, protocol: models_contract.Protocol) bool {
+    /// Whether the Session as installed serves this target: the same route,
+    /// and the same statement about the target model's own image input. A
+    /// Metask account and its token renew in place, so they are no part of it;
+    /// a Custom Provider's credential is, through its source generation.
+    pub fn servesTarget(self: *const OwnedTaskExecution, target: models_contract.TargetFacts) bool {
         const installed = self.modelRef() orelse return false;
-        const is_metask = std.mem.eql(u8, self.provider_id, models_contract.metask_source_id);
-        return self.protocol == protocol and is_metask == std.mem.eql(u8, target.source_id, models_contract.metask_source_id) and
-            std.mem.eql(u8, installed.source_id, target.source_id);
-    }
-
-    pub fn matchesEndpoint(self: *const OwnedTaskExecution, target: models_contract.Target) bool {
-        return self.protocol == target.protocol and std.mem.eql(u8, self.base_url, target.base_url);
-    }
-
-    pub fn matchesTarget(self: *const OwnedTaskExecution, target: models_contract.SourceCandidateInput) bool {
-        return self.owned and models_contract.sameImageCapabilities(self.image_capabilities.entries, target.target.image_capabilities) and
-            self.protocol == target.target.protocol and std.mem.eql(u8, self.provider_id, target.target.provider_id) and
-            std.mem.eql(u8, self.base_url, target.target.base_url);
+        return self.owned and self.protocol == target.protocol and
+            self.isMetask() == std.mem.eql(u8, target.source_id, models_contract.metask_source_id) and
+            std.mem.eql(u8, installed.source_id, target.source_id) and
+            std.mem.eql(u8, self.base_url, target.base_url) and
+            (self.isMetask() or (self.source_generation != 0 and self.source_generation == target.source_generation)) and
+            models_contract.declaredImageInput(self.image_capabilities.entries, target.model_id) == target.image_input;
     }
 
     pub fn reader(self: *OwnedTaskExecution, io: std.Io) std.mem.Allocator.Error!*credential.Source {
