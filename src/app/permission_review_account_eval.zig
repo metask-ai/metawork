@@ -57,6 +57,8 @@ const Host = struct {
         value.assertValid();
     }
 
+    fn settle(_: *anyopaque) void {}
+
     fn start(context: *anyopaque, runtime: *native.Runtime) !void {
         const self: *Host = @ptrCast(@alignCast(context));
         try line(self.init, .{ .kind = "account_evaluation_stage", .stage = "runtime_started" });
@@ -85,7 +87,7 @@ const Host = struct {
             .effects_wake => self.coordinator.drain(),
             .timer => |timer| {
                 if (timer.id != poll_timer) {
-                    _ = self.coordinator.onTimer(timer.id);
+                    _ = self.coordinator.tick();
                     return;
                 }
                 self.coordinator.drain();
@@ -237,7 +239,7 @@ pub fn run(init: std.process.Init) !void {
     var host = Host{ .init = init, .account_runtime = &account_runtime, .coordinator = &coordinator, .http = &http, .model = model, .revision = revision, .repeats = repeats, .phase_start = std.Io.Clock.Timestamp.now(init.io, .awake) };
     account_runtime = account.Runtime.init(init.gpa, init.io, std.Thread.getCurrentId(), http.accountTransport(), loopback.endpoint(), .{ .context = &host, .notify_fn = Host.wake });
     defer account_runtime.deinit();
-    coordinator = Coordinator.init(&account_runtime, .{ .context = &host, .commit_fn = Host.commit }, std.Thread.getCurrentId());
+    coordinator = Coordinator.init(&account_runtime, .{ .context = &host, .commit_fn = Host.commit, .settle_fn = Host.settle }, std.Thread.getCurrentId());
     try runner.runWithOptions(.{ .context = &host, .name = "MetaWork approval evaluation", .start_fn = Host.start, .event_fn = Host.event, .stop_fn = Host.stop }, .{
         .app_name = "MetaWork approval evaluation",
         .window_title = "MetaWork approval evaluation",
