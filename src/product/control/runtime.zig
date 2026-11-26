@@ -5759,6 +5759,8 @@ pub const Runtime = struct {
             self.scheduleTaskEffects(),
         ) catch |err| switch (err) {
             error.PreviousTaskActive, error.ScheduleAdmissionWaiting => error.TaskBusy,
+            error.ScheduledTaskBindingWaiting => error.ExecutionUnavailable,
+            error.ScheduledTaskBindingGone => error.ExecutionGenerationMismatch,
             else => return @errorCast(err),
         };
     }

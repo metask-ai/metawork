@@ -36,6 +36,10 @@ pub const Error = state.Error || persistence.Error || error{
     ScheduledTaskPersistenceFailed,
     ScheduledTaskPersistenceOutcomeUnknown,
     PreviousTaskActive,
+    /// The binding waits or holds: nothing was started or recorded.
+    ScheduledTaskBindingWaiting,
+    /// The binding cannot run as it is; a stop it caused is already recorded.
+    ScheduledTaskBindingGone,
 };
 
 pub const Limits = struct {
@@ -1009,7 +1013,7 @@ pub const Runtime = struct {
                 .wait, .hold => {
                     if (source == .timer)
                         item.preflight_retry_at_unix_seconds = triggered_at_unix_seconds +| preflight_retry_seconds;
-                    return error.ExecutionUnavailable;
+                    return error.ScheduledTaskBindingWaiting;
                 },
                 .skip => {
                     // A skip may never end a plan: with no run after this
@@ -1022,7 +1026,7 @@ pub const Runtime = struct {
                         return self.stopGone(id, source, redaction);
                     // A manual run never moves the plan; the due point
                     // records its own skip.
-                    if (source == .manual) return error.ExecutionGenerationMismatch;
+                    if (source == .manual) return error.ScheduledTaskBindingGone;
                     return self.skipOccurrence(id, planned_at_unix_seconds, triggered_at_unix_seconds, 0, redaction);
                 },
                 .stop => return self.stopGone(id, source, redaction),
@@ -1126,7 +1130,7 @@ pub const Runtime = struct {
         });
         // A timer wake goes on for every other definition; a manual request
         // reports why nothing started.
-        return if (source == .timer) 0 else error.ExecutionGenerationMismatch;
+        return if (source == .timer) 0 else error.ScheduledTaskBindingGone;
     }
 
     /// Records a skipped due point and moves the plan on, which stays enabled:
@@ -2500,7 +2504,7 @@ test "waiting and held schedules record nothing and later run only their latest 
         effects.now = 200;
         runtime.onTimer(admission.binding(), redaction, tasks.effects());
         try std.testing.expectEqual(@as(?u64, if (waits) 260 else null), effects.armed_at);
-        try std.testing.expectError(error.ExecutionUnavailable, runtime.runNow(id, 1, admission.binding(), redaction, tasks.effects()));
+        try std.testing.expectError(error.ScheduledTaskBindingWaiting, runtime.runNow(id, 1, admission.binding(), redaction, tasks.effects()));
         try std.testing.expectEqual(commits, effects.commits);
         try std.testing.expectEqual(@as(usize, 0), effects.notifications);
         try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
@@ -2528,7 +2532,7 @@ test "a recurring schedule skips a gone model, stays enabled and says so once" {
     const id = try runtime.create(definition, admission.binding(), redaction);
     _ = runtime.setBackgroundAvailable(true, admission.binding(), redaction);
     // A manual run neither records nor moves the plan.
-    try std.testing.expectError(error.ExecutionGenerationMismatch, runtime.runNow(id, 1, admission.binding(), redaction, tasks.effects()));
+    try std.testing.expectError(error.ScheduledTaskBindingGone, runtime.runNow(id, 1, admission.binding(), redaction, tasks.effects()));
     try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
     for ([_]u64{ 200, 260 }) |now| {
         effects.now = now;
@@ -2572,7 +2576,7 @@ test "a schedule that cannot run as bound stops without spending its run" {
                 effects.now = 200;
                 runtime.onTimer(admission.binding(), redaction, tasks.effects());
             },
-            .manual => try std.testing.expectError(error.ExecutionGenerationMismatch, runtime.runNow(id, 1, admission.binding(), redaction, tasks.effects())),
+            .manual => try std.testing.expectError(error.ScheduledTaskBindingGone, runtime.runNow(id, 1, admission.binding(), redaction, tasks.effects())),
         }
         const item = runtime.store.find(id).?;
         try std.testing.expect(!item.enabled);
