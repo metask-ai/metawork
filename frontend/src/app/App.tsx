@@ -5731,7 +5731,8 @@ export default function App() {
       await refreshSnapshot();
       return result.outcome === "accepted";
     },
-    website: async () => (await client.openUpdateWebsite()).outcome === "opened",
+    website: async () =>
+      (await client.openUpdateWebsite()).outcome === "opened",
   };
   const shell = (
     <AppShell

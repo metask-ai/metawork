@@ -157,6 +157,15 @@ function renderIdentity(callbacks, accountView = account, locale = "en-US") {
   return render(identityElement(callbacks, accountView, locale));
 }
 
+function assertFocused(target) {
+  const active = document.activeElement;
+  // A pending focus change must not make assert format entire React DOM trees.
+  assert.ok(
+    active === target,
+    `Expected focus on ${target.tagName}, found ${active?.tagName ?? "none"}`,
+  );
+}
+
 function renderAboutSettings(props = {}, locale = "en-US") {
   return render(
     createElement(
@@ -398,7 +407,7 @@ test("checking for updates closes the menu and reports progress, retry and the r
   await screen.findByText("当前已是最新版本。");
   assert.equal(dialog.querySelectorAll("button").length, 1);
   await user.click(screen.getByRole("button", { name: "确定" }));
-  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await waitFor(() => assertFocused(trigger));
   await user.click(trigger);
   assert.equal(screen.queryByText("当前已是最新版本。"), null);
   await screen.findByRole("menuitem", { name: "设置" });
@@ -482,7 +491,7 @@ test("closing an update check ignores its late response and allows a fresh check
   }
   await check();
   await user.keyboard("{Escape}");
-  await waitFor(() => assert.equal(document.activeElement, trigger));
+  await waitFor(() => assertFocused(trigger));
   await check();
   assert.equal(requests.length, 2);
   await act(async () => requests[0](false));
@@ -526,12 +535,10 @@ test("About follows Archived tasks in settings and shows offline metadata in the
   const section = await screen.findByRole("region", { name: "关于 MetaWork" });
   assert.equal(trigger.getAttribute("aria-current"), "location");
   assert.equal(screen.getAllByRole("dialog").length, 1);
-  await waitFor(() =>
-    assert.equal(
-      document.activeElement,
-      within(section).getByRole("heading", { name: "关于 MetaWork" }),
-    ),
-  );
+  const heading = within(section).getByRole("heading", {
+    name: "关于 MetaWork",
+  });
+  await waitFor(() => assertFocused(heading));
   const rows = section.querySelectorAll(".settings-about-row");
   assert.equal(rows.length, 2);
   assert.ok(within(rows[0]).getByText("当前版本"));
@@ -606,7 +613,7 @@ test("account menu offers keyboard sign-in once a lost renewal or cancelled sign
     await user.keyboard("{Enter}");
     assert.equal(loginCalls, 1);
     await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
-    await waitFor(() => assert.equal(document.activeElement, trigger));
+    await waitFor(() => assertFocused(trigger));
     cleanup();
   }
 });
@@ -771,7 +778,7 @@ test("new version uses a separate corner button without a dropdown arrow or acci
   assert.ok(updateTrigger.querySelector("svg"));
   assert.equal(updateTrigger.textContent, "");
   await user.tab();
-  assert.equal(document.activeElement, updateTrigger);
+  assertFocused(updateTrigger);
   assert.equal(
     (await screen.findByText("Update available")).dataset.instant,
     "focus",
@@ -786,7 +793,7 @@ test("new version uses a separate corner button without a dropdown arrow or acci
   await user.click(screen.getByRole("button", { name: "Download update" }));
   await waitFor(() => assert.equal(download, "0.2.10"));
   await user.keyboard("{Escape}");
-  await waitFor(() => assert.ok(document.activeElement === updateTrigger));
+  await waitFor(() => assertFocused(updateTrigger));
 });
 
 test("invalid download offers an explicit website action without automatically opening it", async () => {
@@ -880,7 +887,7 @@ test("checking from Settings opens the compact dialog once and restores focus", 
   await waitFor(() => assert.equal(check.disabled, false));
   assert.doesNotMatch(screen.getByRole("status").textContent, /up to date/iu);
   await user.click(within(dialog).getByRole("button", { name: "OK" }));
-  await waitFor(() => assert.equal(document.activeElement, check));
+  await waitFor(() => assertFocused(check));
 });
 
 test("Visit website hands off only on click and allows retry after a browser error", async () => {
@@ -994,9 +1001,8 @@ test(
     );
     await user.keyboard("{Escape}");
     await waitFor(() =>
-      assert.ok(
-        document.activeElement ===
-          screen.getByRole("button", { name: "Account and application menu" }),
+      assertFocused(
+        screen.getByRole("button", { name: "Account and application menu" }),
       ),
     );
   },
