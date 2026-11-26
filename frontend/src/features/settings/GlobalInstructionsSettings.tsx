@@ -164,7 +164,7 @@ export function GlobalInstructionsSettings({
         <h3 className="settings-group-label">
           {t("settings.instructions.global")}
         </h3>
-        <div className="settings-field settings-instructions">
+        <div className="settings-instructions">
           <p>{t("settings.instructions.help")}</p>
           {view?.path ? (
             <code className="settings-instructions-path" title={view.path}>
