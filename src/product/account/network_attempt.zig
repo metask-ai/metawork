@@ -119,6 +119,9 @@ pub const NetworkAttempt = struct {
     deadline: std.Io.Clock.Timestamp = undefined,
     /// 1 once the worker has published its result and is returning.
     done: std.atomic.Value(u32) = .init(0),
+    /// The next one its owner gave up on; the owner links them, so giving
+    /// one up never allocates.
+    next_abandoned: ?*NetworkAttempt = null,
     thread: ?std.Thread = null,
     started: bool = false,
     joined: bool = false,

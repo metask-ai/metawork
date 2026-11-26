@@ -1346,6 +1346,53 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
     }
 }
 
+test "Account shutdown leaves a renewal that answers no cancel and returns within its close wait" {
+    const Stuck = struct {
+        started: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+
+        fn port(self: *@This()) account_api.Transport {
+            return .{ .context = self, .perform_fn = perform, .retire_fn = account_api.retireNothing };
+        }
+        fn perform(context: *anyopaque, request: account_api.TransportRequest, _: []u8) account_api.TransportError!account_api.TransportResponse {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (request.kind != .refresh_token) return error.ProtocolFailed;
+            // Like DNS: no cancel reaches it.
+            self.started.set(std.testing.io);
+            self.release.waitUncancelable(std.testing.io);
+            return error.NetworkFailed;
+        }
+    };
+    var transport: Stuck = .{};
+    var runtime = account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), account_api.TestSupport.loopbackEndpoint(), .{ .context = &testing_wake_context, .notify_fn = testingWake });
+    var platform: account_api.TestSupport.Platform = .{};
+    try platform.setStoredRefreshToken("old-refresh");
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        transport.release.set(std.testing.io);
+        runtime.deinit();
+    }
+    var auth = try account_api.TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask", "old-access", "old-refresh", 200);
+    defer auth.deinit();
+    runtime.commit(&auth);
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+    var refresh = account_api.TestSupport.prepareTokenRefresh(&runtime);
+    defer refresh.deinit();
+    try std.testing.expect(runtime.admitEffect(&refresh));
+    runtime.commit(&refresh);
+    runtime.dispatchCommitted();
+    try transport.started.wait(std.testing.io);
+    runtime.close_wait = .fromMilliseconds(50);
+    const begun: std.Io.Clock.Timestamp = .now(std.testing.io, .awake);
+    coordinator.shutdown();
+    const waited_ns = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds - begun.raw.nanoseconds;
+    try std.testing.expect(waited_ns < 2 * std.time.ns_per_s);
+    try std.testing.expect(runtime.detached() and runtime.platform == null);
+    // Left running, the renewal keeps its marker.
+    try std.testing.expect(platform.refresh_marker != null);
+}
+
 const ClosingTimer = struct {
     fn start(_: *anyopaque, _: u64, _: u64, _: bool) !void {}
 };
