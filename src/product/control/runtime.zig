@@ -12288,6 +12288,31 @@ fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: C
     };
 }
 
+/// A stand-in Account that counts its reads. Its states are built only here,
+/// so a change to `Authorization` is followed in one place.
+const TestAccount = struct {
+    value: account_contract.Authorization,
+    reads: usize = 0,
+
+    fn checking() account_contract.Authorization {
+        return .{ .checking = 1 };
+    }
+
+    fn available(generation: u64) account_contract.Authorization {
+        return .{ .available = .{ .account_id = "account-1", .generation = generation } };
+    }
+
+    fn query(self: *TestAccount) account_contract.AuthorizationQuery {
+        return .{ .context = self, .status_fn = status };
+    }
+
+    fn status(context: *anyopaque) account_contract.Authorization {
+        const self: *TestAccount = @ptrCast(@alignCast(context));
+        self.reads += 1;
+        return self.value;
+    }
+};
+
 const TestScheduleClock = struct {
     now: u64,
     armed_at: ?u64 = null,
@@ -14980,6 +15005,20 @@ const MetaskScheduleFixture = struct {
         return product_schedule.testing.item(&self.control.schedule, id).?;
     }
 
+    /// The Host publishes `expected` as this definition's admission.
+    fn expectProjected(self: *@This(), id: u64, expected: []const u8) !void {
+        var storage: [16 * 1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&storage);
+        const authority = self.control.scheduleAuthority();
+        try self.control.schedule.writeProjection(&writer, .{ .context = &self.control.liveViewText(), .write_json_fn = view_read.Text.writeCallback }, authority.binding());
+        const projected = writer.buffered();
+        var key: [48]u8 = undefined;
+        const item = std.mem.indexOf(u8, projected, try std.fmt.bufPrint(&key, "{{\"id\":\"{d}\",", .{id})) orelse return error.TestUnexpectedResult;
+        const field = "\"admission\":\"";
+        const start = (std.mem.indexOfPos(u8, projected, item, field) orelse return error.TestUnexpectedResult) + field.len;
+        try std.testing.expectEqualStrings(expected, projected[start .. std.mem.indexOfScalarPos(u8, projected, start, '"') orelse return error.TestUnexpectedResult]);
+    }
+
     /// The task still runs on its own binding, which names `generation`.
     fn expectRunnable(self: *@This(), id: u64, generation: u64) !void {
         const item = product_schedule.testing.item(&self.control.schedule, id).?;
@@ -15085,6 +15124,7 @@ test "a Metask catalog that drops the bound model disables nothing until a plan 
     try std.testing.expect(skipped.enabled);
     try std.testing.expectEqual(product_schedule.FailureReason.execution_changed, skipped.last_occurrence.?.reason.?);
     try std.testing.expectEqual(@as(?u64, 5_600), skipped.next_run_at_unix_seconds);
+    try fixture.expectProjected(hourly, "model_unavailable");
 }
 
 test "replacing a Custom Provider key stops its schedules at once and no others" {
@@ -15104,36 +15144,52 @@ test "replacing a Custom Provider key stops its schedules at once and no others"
     try std.testing.expectEqual(product_schedule.FailureReason.execution_changed, fixture.stored(custom).failure_reason.?);
     try std.testing.expectEqual(product_schedule.Health.ready, fixture.stored(metask).health);
     try std.testing.expectError(error.ScheduledTaskNeedsAttention, fixture.control.runScheduledTaskNow(custom, fixture.stored(custom).epoch));
+    try fixture.expectProjected(custom, "source_changed");
+    try fixture.expectProjected(metask, "runnable");
+}
+
+test "resetting the Models store stops the plans on the Custom Providers it removed" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const metask = try fixture.schedule();
+    const selection = try createReadyTestCustomProvider(&fixture.control);
+    try std.testing.expect(fixture.control.custom_providers.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }).accepted);
+    const custom = try fixture.schedule();
+    // An unreadable store is reset to empty, without the Custom Provider.
+    try fixture.models_tmp.dir.writeFile(std.testing.io, .{ .sub_path = "models.json", .data = "unreadable" });
+    fixture.control.custom_providers.store_healthy = false;
+    try std.testing.expect(fixture.control.resetModelsStore(fixture.control.currentRevision()).accepted);
+    try std.testing.expectEqual(product_schedule.Health.needs_attention, fixture.stored(custom).health);
+    try std.testing.expectEqual(product_schedule.Health.ready, fixture.stored(metask).health);
 }
 
 test "a due Metask schedule reads the Account once and waits while it is confirmed" {
-    const Account = struct {
-        value: account_contract.Authorization,
-        reads: usize = 0,
-
-        fn status(context: *anyopaque) account_contract.Authorization {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.reads += 1;
-            return self.value;
-        }
-    };
     var fixture: MetaskScheduleFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
     try fixture.loadCatalog("token-a");
     const id = try fixture.schedule();
-    var account: Account = .{ .value = .{ .checking = 1 } };
-    fixture.control.setAccountAuthorization(.{ .context = &account, .status_fn = Account.status });
+    var account: TestAccount = .{ .value = TestAccount.checking() };
+    fixture.control.setAccountAuthorization(account.query());
     const commits = fixture.persistence.commits;
     fixture.clock.now = 2_000;
     fixture.control.onScheduledTaskTimer();
     try std.testing.expectEqual(@as(usize, 1), account.reads);
     try std.testing.expect(fixture.stored(id).health == .ready and fixture.stored(id).last_occurrence == null);
     try std.testing.expectEqual(@as(?u64, 2_060), fixture.clock.armed_at);
-    try std.testing.expectEqual(commits, fixture.persistence.commits);
-    // Confirmed on the authorization its catalog was loaded with, it runs.
-    account.value = .{ .available = .{ .account_id = "account-1", .generation = 17 } };
+    // Confirmed, but the catalog is still the previous authorization's: its
+    // content is not judged, so the plan waits again.
+    account.value = TestAccount.available(18);
     fixture.clock.now = 2_060;
+    fixture.control.onScheduledTaskTimer();
+    try std.testing.expect(fixture.stored(id).last_occurrence == null);
+    try std.testing.expectEqual(@as(?u64, 2_120), fixture.clock.armed_at);
+    try std.testing.expectEqual(commits, fixture.persistence.commits);
+    // On the authorization its catalog was loaded with, it runs.
+    account.value = TestAccount.available(17);
+    fixture.clock.now = 2_120;
     fixture.control.onScheduledTaskTimer();
     try std.testing.expectEqual(@as(u64, 2_000), fixture.stored(id).last_occurrence.?.planned_at_unix_seconds);
 }
@@ -16693,18 +16749,13 @@ test "Task model installed intent does not borrow a catalog refresh as new execu
 }
 
 test "Task model projection reads its binding plan without resolving a credential" {
-    const Account = struct {
-        fn status(_: *anyopaque) account_contract.Authorization {
-            return .{ .available = .{ .account_id = "account-1", .generation = 17 } };
-        }
-    };
     var control = try testRuntime();
     defer control.deinit();
     const task = control.testTask(3).?;
     _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
-    var account: u8 = 0;
-    control.setAccountAuthorization(.{ .context = &account, .status_fn = Account.status });
+    var account: TestAccount = .{ .value = TestAccount.available(17) };
+    control.setAccountAuthorization(account.query());
     try std.testing.expectEqualDeep(task_runtime.Runtime.BindingPlan.renew, control.taskBindingPlan(3, control.metaskUse()));
     var failing = std.testing.FailingAllocator.init(control.allocator, .{ .fail_index = 0 });
     const original = control.custom_providers.metask_catalog.allocator;

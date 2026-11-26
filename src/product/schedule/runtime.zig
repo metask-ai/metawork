@@ -1906,6 +1906,7 @@ test "consecutive skips retain the active Task and pending completion beyond his
     var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{
         .timer = effects.timer(),
         .persistence = effects.persistence(),
+        .notifier = effects.notifier(),
     });
     defer runtime.deinit();
     const redaction = testRedaction(&effects);
@@ -1925,6 +1926,8 @@ test "consecutive skips retain the active Task and pending completion beyond his
     const item = runtime.store.find(id).?;
     try std.testing.expectEqual(state.max_occurrence_history, item.occurrence_count);
     try std.testing.expectEqual(@as(u64, 42), item.last_occurrence.?.task_id);
+    try std.testing.expectEqual(NotificationKind.skipped, effects.notification_kind.?);
+    try std.testing.expectEqual(@as(u64, 42), effects.notification_task_id);
     try std.testing.expect(runtime.hasPendingSubmittedOccurrence(42));
     // A previously valid empty skipped Task id must not erase the retained blocker.
     item.occurrence_history[item.occurrence_count - 1].task_id = 0;
