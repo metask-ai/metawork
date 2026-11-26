@@ -111,6 +111,9 @@ const { useNewTaskDrafts, useTaskDrafts } = await vite.ssrLoadModule(
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
+const { MediaLightbox } = await vite.ssrLoadModule(
+  "/src/features/media/MediaLightbox.tsx",
+);
 const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
 const { ModelSetupNotice } = await vite.ssrLoadModule(
   "/src/features/models/ModelSetup.tsx",
@@ -2255,6 +2258,7 @@ function renderComposer(overrides = {}, afterDraftCommit) {
   let setHistoryAvailableFromTest;
   let setSlashCommandsFromTest;
   let setStopStateFromTest;
+  let setSecurityEpochFromTest;
   function ComposerHarness() {
     const [localDraft, setDraft] = useState(initialDraft);
     const owner = overrides.taskDraftId
@@ -2273,6 +2277,8 @@ function renderComposer(overrides = {}, afterDraftCommit) {
       disabled: overrides.stopDisabled ?? false,
     });
     setStopStateFromTest = setStopState;
+    const [securityEpoch, setSecurityEpoch] = useState(overrides.securityEpoch);
+    setSecurityEpochFromTest = setSecurityEpoch;
     setHistoryAvailableFromTest = setHistoryAvailable;
     setScopeFromTest = setScope;
     setDraftFromTest = setDraft;
@@ -2338,6 +2344,7 @@ function renderComposer(overrides = {}, afterDraftCommit) {
       stopDisabled: stopState.disabled,
       draft,
       draftScope: scope,
+      securityEpoch,
       inputHistory:
         overrides.inputHistory && historyAvailable
           ? {
@@ -2386,9 +2393,95 @@ function renderComposer(overrides = {}, afterDraftCommit) {
     setStopState(value) {
       setStopStateFromTest(value);
     },
+    setSecurityEpoch(value) {
+      setSecurityEpochFromTest(value);
+    },
     currentDraft: () => latestDraft,
   };
 }
+
+/// A thumbnail or original loader that hands out a ready image each time and
+/// counts what was asked for and what was given back.
+function countingImageLoader() {
+  const calls = { loads: 0, releases: 0 };
+  const load = () => {
+    calls.loads += 1;
+    const image = {
+      id: `image-${calls.loads}`,
+      width: 192,
+      height: 128,
+      src: "data:image/png;base64,AA==",
+      valid: () => true,
+      current: () => true,
+      subscribe: () => () => {},
+      beginDecode: () => new Promise(() => {}),
+    };
+    return Promise.resolve({
+      state: "ready",
+      content: "",
+      truncated: false,
+      redacted: false,
+      image,
+      release: () => {
+        calls.releases += 1;
+      },
+    });
+  };
+  return { calls, load };
+}
+
+test("a staged image asks for its thumbnail again in place under a newer security epoch", async () => {
+  const { calls, load } = countingImageLoader();
+  const composer = renderComposer({
+    draft: {
+      kind: "multimodal",
+      text: "",
+      attachments: [
+        {
+          kind: "image",
+          format: "png",
+          token: "a".repeat(48),
+          displayName: "shot.png",
+          sizeBytes: "900",
+        },
+      ],
+    },
+    attachmentsEnabled: true,
+    loadAttachmentThumbnail: load,
+    securityEpoch: "1",
+  });
+  await waitFor(() => assert.equal(calls.loads, 1));
+  act(() => composer.setSecurityEpoch("2"));
+  // What the older epoch delivered goes back, and the chip asks once again
+  // instead of settling on its format label.
+  await waitFor(() => assert.equal(calls.loads, 2));
+  assert.equal(calls.releases, 1);
+});
+
+test("the open viewer reads the original again under a newer security epoch", async () => {
+  const { calls, load } = countingImageLoader();
+  const target = {
+    media: { kind: "draftAttachment", token: "b".repeat(48) },
+    name: "shot.png",
+  };
+  const viewer = (securityEpoch) =>
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(MediaLightbox, { target, load, securityEpoch, onClose() {} }),
+    );
+  const view = render(viewer("1"));
+  await waitFor(() => assert.equal(calls.loads, 1));
+  view.rerender(viewer("2"));
+  await waitFor(() => assert.equal(calls.loads, 2));
+  assert.equal(calls.releases, 1);
+});
 
 test("Composer browses a frozen multiline input history and restores the empty draft", async () => {
   const entries = ["A", "B\nsecond line", "C"];

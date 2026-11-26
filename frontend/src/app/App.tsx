@@ -5639,6 +5639,7 @@ export default function App() {
         }
         onRemoveAttachment={(token) => void removeAttachment(token)}
         loadAttachmentThumbnail={loadAttachmentThumbnail}
+        securityEpoch={snapshot.securityEpoch}
         onOpenAttachment={(attachment, opener) => {
           attachmentViewerOpener.current = opener;
           setAttachmentViewer({
@@ -7143,6 +7144,7 @@ export default function App() {
       <MediaLightbox
         target={attachmentViewer}
         load={loadAttachmentPreview}
+        securityEpoch={snapshot.securityEpoch}
         onClose={() => {
           setAttachmentViewer(null);
           const opener = attachmentViewerOpener.current;
