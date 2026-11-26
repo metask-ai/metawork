@@ -5968,6 +5968,8 @@ pub const Runtime = struct {
         };
         return switch (self.schedule.recoverPersistence(self.scheduleRedaction())) {
             .recovered => recovered: {
+                // A configured key Schedule could not scrub is tried again.
+                self.custom_providers.retryRefusedResidentCredentials();
                 self.publishAdmissionChangesNoFail();
                 break :recovered .recovered;
             },

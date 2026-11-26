@@ -202,6 +202,9 @@ const Resident = struct {
     /// A revision whose read failed. Not read again until the revision
     /// changes: some platform stores ask the person on every read.
     failed_revision: u64 = 0,
+    /// A revision whose key the sink would not take or let go. Not read
+    /// again until the revision changes or the sink says it can try again.
+    refused_revision: u64 = 0,
 
     fn deinit(self: *Resident, allocator: std.mem.Allocator) void {
         if (self.secret) |*secret| secret.deinit();
@@ -299,7 +302,9 @@ pub const Runtime = struct {
                 };
                 break :blk &self.resident.items[self.resident.items.len - 1];
             };
-            if (entry.revision == provider.provider_revision or entry.failed_revision == provider.provider_revision) continue;
+            if (entry.revision == provider.provider_revision or
+                entry.failed_revision == provider.provider_revision or
+                entry.refused_revision == provider.provider_revision) continue;
             self.readResident(entry, provider.provider_revision, sink);
         }
     }
@@ -321,7 +326,10 @@ pub const Runtime = struct {
             entry.revision = revision;
             return;
         };
-        if (!self.dropResident(entry, sink)) return;
+        if (!self.dropResident(entry, sink)) {
+            entry.refused_revision = revision;
+            return;
+        }
         if (value.len != 0) {
             const owned = self.allocator.dupe(u8, value) catch {
                 entry.failed_revision = revision;
@@ -330,12 +338,21 @@ pub const Runtime = struct {
             if (!sink.admit_fn(sink.context, owned)) {
                 std.crypto.secureZero(u8, owned);
                 self.allocator.free(owned);
+                entry.refused_revision = revision;
                 return;
             }
             entry.secret = .initOwned(self.allocator, owned);
         }
         entry.revision = revision;
         entry.failed_revision = 0;
+        entry.refused_revision = 0;
+    }
+
+    /// The sink can take or let go of keys again, as after its store
+    /// recovered: the next sync reads each refused revision once more.
+    pub fn retryRefusedResidentCredentials(self: *Runtime) void {
+        self.assertMainThread();
+        for (self.resident.items) |*entry| entry.refused_revision = 0;
     }
 
     /// Releases a held key after the sink has let it go. False: still held.
@@ -3390,4 +3407,63 @@ test "a held key is zeroed when it is dropped and when Models is destroyed" {
         runtime.deinit();
         try std.testing.expect(!watching.leaked);
     }
+}
+
+test "a key the sink refuses is not read again until its revision changes or the sink can try again" {
+    const Sink = struct {
+        refuse: bool = true,
+        admits: usize = 0,
+        retires: usize = 0,
+        fn admit(context: *anyopaque, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.admits += 1;
+            return !self.refuse;
+        }
+        fn retire(context: *anyopaque, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.retires += 1;
+            return !self.refuse;
+        }
+        fn port(self: *@This()) ResidentSink {
+            return .{ .context = self, .admit_fn = admit, .retire_fn = retire };
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory_storage[0..directory_len], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try std.testing.expect(runtime.createWithCredential("first-configured-key-0001", .{
+        .display_name = "Local",
+        .protocol = .openai_chat_completions,
+        .normalized_base_url = "http://127.0.0.1:11434/v1/chat/completions",
+    }).accepted);
+    var sink: Sink = .{};
+    // A key the sink cannot take now is asked about once per revision.
+    runtime.syncResidentCredentials(sink.port());
+    runtime.syncResidentCredentials(sink.port());
+    try std.testing.expectEqual(@as(usize, 1), sink.admits);
+    runtime.retryRefusedResidentCredentials();
+    sink.refuse = false;
+    runtime.syncResidentCredentials(sink.port());
+    try std.testing.expectEqual(@as(usize, 2), sink.admits);
+    // So is one it cannot let go of when the key is replaced.
+    sink.refuse = true;
+    const view = runtime.views()[0];
+    try std.testing.expect(runtime.replaceCredential("second-configured-key-02", .{ .source_id = view.id, .expected_provider_revision = view.provider_revision }).accepted);
+    runtime.syncResidentCredentials(sink.port());
+    runtime.syncResidentCredentials(sink.port());
+    try std.testing.expectEqual(@as(usize, 1), sink.retires);
+    try std.testing.expectEqual(@as(usize, 2), sink.admits);
+    runtime.retryRefusedResidentCredentials();
+    sink.refuse = false;
+    runtime.syncResidentCredentials(sink.port());
+    try std.testing.expectEqual(@as(usize, 2), sink.retires);
+    try std.testing.expectEqual(@as(usize, 3), sink.admits);
 }
