@@ -7288,6 +7288,7 @@ async function renderAppFixture(
   width = 1440,
   runOverrides = {},
   clientOverrides = {},
+  appProps = {},
 ) {
   Object.defineProperty(window, "innerWidth", {
     configurable: true,
@@ -7392,7 +7393,7 @@ async function renderAppFixture(
     ...clientOverrides,
   }))
     ctx.mock.method(BridgeClient.prototype, name, fn);
-  render(localizedView(createElement(App)));
+  render(localizedView(createElement(App, appProps)));
   return {
     snapshot,
     previews,
@@ -8796,8 +8797,14 @@ test("App groups tools in the Workbench sidebar and keeps the primary entry avai
   assert.equal(listToggle.getAttribute("aria-expanded"), "false");
 });
 
-test("App shows the disconnected inbox and keeps workbench navigation state", async (ctx) => {
+test("App leaves the message entry out unless it is offered", async (ctx) => {
   await renderAppFixture(ctx, 1440);
+  screen.getByRole("button", { name: "Workbench" });
+  assert.equal(screen.queryByRole("button", { name: /^Messages/ }), null);
+});
+
+test("App shows the disconnected inbox and keeps workbench navigation state", async (ctx) => {
+  await renderAppFixture(ctx, 1440, {}, {}, { messageEntry: true });
   await selectRecentTask(/First task/);
   fireEvent.click(screen.getByRole("button", { name: "Open side panel" }));
   fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
@@ -8841,7 +8848,7 @@ test("App shows the disconnected inbox and keeps workbench navigation state", as
 });
 
 test("App closes the narrow navigation drawer to show the disconnected inbox", async (ctx) => {
-  await renderAppFixture(ctx, 390);
+  await renderAppFixture(ctx, 390, {}, {}, { messageEntry: true });
   const toggle = screen.getByRole("button", {
     name: "Toggle navigation drawer",
   });

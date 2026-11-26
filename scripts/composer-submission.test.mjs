@@ -129,6 +129,7 @@ async function renderSubmissionApp(
     active = false,
     inputReady = true,
     workspace,
+    messageEntry = false,
   } = {},
 ) {
   window.sessionStorage.clear();
@@ -250,7 +251,7 @@ async function renderSubmissionApp(
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(App),
+      createElement(App, { messageEntry }),
     ),
   );
   await waitFor(() => assert.ok(revision));
@@ -3201,7 +3202,10 @@ for (const path of ["fresh", "lost", "not-created"]) {
   test(
     "Inbox handoff takes the verified task into the workbench: " + path,
     async (ctx) => {
-      const fixture = await renderSubmissionApp(ctx, { newTask: true });
+      const fixture = await renderSubmissionApp(ctx, {
+        newTask: true,
+        messageEntry: true,
+      });
       window.localStorage.clear();
       ctx.after(() => window.localStorage.clear());
       const { BridgeClient } = await vite.ssrLoadModule(
