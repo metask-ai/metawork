@@ -6308,7 +6308,9 @@ export default function App() {
                 }}
               />
             }
-            modelContext={`${bridgeGeneration}:${snapshot.securityEpoch}`}
+            // The model settings hold only what the person typed; a security
+            // epoch replaces the Host facts they are shown with, not the form.
+            modelContext={bridgeGeneration}
             archiveManagement={{
               tasks: snapshot.taskIndex,
               workspaces: snapshot.workspaces,
@@ -6454,7 +6456,7 @@ export default function App() {
                   snapshot.models,
                   async () => {
                     await refreshSnapshot();
-                    return latestSnapshotRef.current!.models;
+                    return latestSnapshotRef.current?.models ?? null;
                   },
                   input,
                 );
