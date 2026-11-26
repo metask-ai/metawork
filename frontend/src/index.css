@@ -816,6 +816,16 @@ summary::-webkit-details-marker {
   width: min(360px, calc(100vw - 32px));
 }
 
+.settings-about-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 52px;
+  padding: 8px 16px;
+  gap: 12px;
+  font-size: var(--text-body);
+}
+
 .settings-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

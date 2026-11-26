@@ -2,8 +2,10 @@ import type { RefObject } from "react";
 import type { UpdateView } from "../../bridge/contracts.ts";
 import { Button } from "../../components/ui/button.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
+import { DiagnosticDisclosure } from "../../components/ui/DiagnosticDisclosure.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import type { useUpdateActions } from "./update-actions.ts";
+import { updateDiagnosticText } from "./update-diagnostics.ts";
 
 export function CheckForUpdatesDialog({
   updates,
@@ -74,6 +76,15 @@ export function CheckForUpdatesDialog({
               <span className="mt-1 block">{t("updates.package_missing")}</span>
             )}
           </Dialog.Description>
+          {!checking &&
+            updates.checkState === "failed" &&
+            updates.checkDiagnostic && (
+              <DiagnosticDisclosure label={t("updates.diagnostics")}>
+                <pre className="feedback-notice-details">
+                  {updateDiagnosticText(updates.checkDiagnostic, t)}
+                </pre>
+              </DiagnosticDisclosure>
+            )}
           <div className="mt-2 flex flex-wrap justify-end gap-2">
             <Dialog.Close
               render={

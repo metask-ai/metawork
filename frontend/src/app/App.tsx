@@ -95,6 +95,8 @@ import { Dialog } from "../components/ui/dialog.tsx";
 import { Input } from "../components/ui/input.tsx";
 import { Tooltip } from "../components/ui/tooltip.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
+import { AboutSettingsContent } from "../features/account/AboutSettingsContent.tsx";
+import type { UpdateControls } from "../features/account/update-actions.ts";
 import { ConnectionFailureScreen } from "../features/connection/ConnectionFailureScreen.tsx";
 import { accountFeedback } from "../features/account/account-feedback.ts";
 import { persistenceRecoveryErrorMessageId } from "../i18n/persistence-recovery.ts";
@@ -5719,6 +5721,21 @@ export default function App() {
           : previewMatchesTarget && filePreviewViewState
             ? filePreviewViewState.selected.displayPath
             : t("file_preview.title");
+  const updateControls: UpdateControls = {
+    disabled: bridgeUnavailable,
+    generation: bridgeGeneration,
+    check: async () => {
+      const result = await client.checkUpdates();
+      await refreshSnapshot();
+      return result.outcome === "accepted";
+    },
+    download: async (version) => {
+      const result = await client.openUpdateDownload(version);
+      await refreshSnapshot();
+      return result.outcome === "accepted";
+    },
+    website: async () => (await client.openUpdateWebsite()).outcome === "opened",
+  };
   const shell = (
     <AppShell
       taskTitle={
@@ -5921,22 +5938,7 @@ export default function App() {
           <AccountIdentity
             account={snapshot.account}
             updates={snapshot.updates}
-            updateControls={{
-              disabled: bridgeUnavailable,
-              generation: bridgeGeneration,
-              check: async () => {
-                const result = await client.checkUpdates();
-                await refreshSnapshot();
-                return result.outcome === "accepted";
-              },
-              download: async (version) => {
-                const result = await client.openUpdateDownload(version);
-                await refreshSnapshot();
-                return result.outcome === "accepted";
-              },
-              website: async () =>
-                (await client.openUpdateWebsite()).outcome === "opened",
-            }}
+            updateControls={updateControls}
             active={settingsOpen}
             disabled={bridgeUnavailable || accountBusy}
             cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
@@ -6264,6 +6266,12 @@ export default function App() {
       overlay={
         settingsOpen ? (
           <SettingsPage
+            aboutContent={
+              <AboutSettingsContent
+                updates={snapshot.updates}
+                updateControls={updateControls}
+              />
+            }
             globalInstructions={globalInstructions}
             directoryManagement={
               <WorkingDirectoriesSettings

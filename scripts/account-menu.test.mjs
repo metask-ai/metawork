@@ -43,7 +43,7 @@ if (!HTMLElement.prototype.setPointerCapture)
 if (!HTMLElement.prototype.releasePointerCapture)
   HTMLElement.prototype.releasePointerCapture = () => undefined;
 
-const { act, cleanup, render, screen, waitFor } =
+const { act, cleanup, render, screen, waitFor, within } =
   await import("./renderer-testing-library.mjs");
 const { default: userEvent } = await import("@testing-library/user-event");
 
@@ -56,6 +56,15 @@ const vite = await createServer({
 const { AccountIdentity } = await vite.ssrLoadModule(
   "/src/features/account/AccountIdentity.tsx",
 );
+const { SettingsPage } = await vite.ssrLoadModule(
+  "/src/features/settings/SettingsPage.tsx",
+);
+const { AboutSettingsContent } = await vite.ssrLoadModule(
+  "/src/features/account/AboutSettingsContent.tsx",
+);
+const {
+  initialWorkbenchState: { snapshot },
+} = await vite.ssrLoadModule("/src/workbench/store.ts");
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -137,6 +146,37 @@ function identityElement(callbacks, accountView = account, locale = "en-US") {
 
 function renderIdentity(callbacks, accountView = account, locale = "en-US") {
   return render(identityElement(callbacks, accountView, locale));
+}
+
+function renderAboutSettings(props = {}, locale = "en-US") {
+  return render(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale,
+          setLocale() {},
+          t: (id, values) => translate(locale, id, values),
+        },
+      },
+      createElement(SettingsPage, {
+        account: snapshot.account,
+        models: snapshot.models,
+        automaticWorkspaceRoot: snapshot.automaticWorkspaceRoot,
+        customProviderCapabilities: {
+          management: false,
+          secretCapture: false,
+          modelTest: false,
+        },
+        focusTarget: "title",
+        aboutContent: createElement(AboutSettingsContent, {
+          updates: { ...snapshot.updates, checkState: "unchecked" },
+          updateControls,
+          ...props,
+        }),
+      }),
+    ),
+  );
 }
 
 test("authenticated account identity shows a compact avatar and describes the account", async () => {
@@ -306,10 +346,7 @@ test("checking for updates closes the menu and reports progress, retry and the r
     items[items.indexOf(item) - 1],
     screen.getByRole("menuitem", { name: "设置" }),
   );
-  assert.equal(
-    items[items.indexOf(item) + 1],
-    screen.getByRole("menuitem", { name: "关于" }),
-  );
+  assert.equal(screen.queryByRole("menuitem", { name: /关于/ }), null);
   await user.click(item);
   await screen.findByText("正在检查更新…");
   const dialog = screen.getByRole("dialog", { name: "检查更新" });
@@ -341,8 +378,7 @@ test("checking for updates closes the menu and reports progress, retry and the r
   await waitFor(() => assert.equal(document.activeElement, trigger));
   await user.click(trigger);
   assert.equal(screen.queryByText("当前已是最新版本。"), null);
-  await user.click(await screen.findByRole("menuitem", { name: "关于" }));
-  await screen.findByRole("dialog");
+  await screen.findByRole("menuitem", { name: "设置" });
   assert.equal(requests.length, 2);
 });
 
@@ -445,35 +481,49 @@ test("the menu disables update checks while the bridge is unavailable", async ()
     name: `Check for updates v${productVersion}`,
   });
   assert.equal(item.getAttribute("aria-disabled"), "true");
-  await user.click(screen.getByRole("menuitem", { name: "About" }));
-  await screen.findByRole("dialog", { name: "MetaWork" });
+  assert.ok(screen.getByRole("menuitem", { name: "Settings" }));
 });
 
-test("about MetaWork shows developer and version metadata and returns focus", async () => {
+test("About follows Archived tasks in settings and shows offline metadata in the content pane", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  const { container } = renderIdentity({});
-  const trigger = screen.getByRole("button", {
-    name: "Account and application menu",
-  });
+  renderAboutSettings(
+    { updateControls: { ...updateControls, disabled: true } },
+    "zh-CN",
+  );
+  const trigger = screen.getByRole("link", { name: "关于", exact: true });
+  assert.equal(
+    trigger.previousElementSibling,
+    screen.getByRole("link", { name: "已归档任务" }),
+  );
+  assert.equal(trigger.nextElementSibling, null);
+  assert.equal(screen.queryByRole("region", { name: "关于 MetaWork" }), null);
 
   await user.click(trigger);
-  await user.click(await screen.findByRole("menuitem", { name: "About" }));
 
-  const dialog = await screen.findByRole("dialog", {
-    name: "MetaWork",
-  });
-  assert.doesNotMatch(dialog.textContent, /native desktop workbench/iu);
-  assert.match(dialog.textContent, /DeveloperMetask/u);
-  assert.match(
-    dialog.textContent,
-    new RegExp(productVersion.replaceAll(".", "\\."), "u"),
+  const section = await screen.findByRole("region", { name: "关于 MetaWork" });
+  assert.equal(trigger.getAttribute("aria-current"), "location");
+  assert.equal(screen.getAllByRole("dialog").length, 1);
+  await waitFor(() =>
+    assert.equal(
+      document.activeElement,
+      within(section).getByRole("heading", { name: "关于 MetaWork" }),
+    ),
   );
-  assert.equal(dialog.querySelector(".about-dialog-mark img") !== null, true);
-
-  await user.keyboard("{Escape}");
-  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
-  await waitFor(() => assert.equal(dom.window.document.activeElement, trigger));
-  assert.equal(container.querySelector(".account-menu"), null);
+  const rows = section.querySelectorAll(".settings-about-row");
+  assert.equal(rows.length, 2);
+  assert.ok(within(rows[0]).getByText("当前版本"));
+  assert.ok(within(rows[0]).getByText(`v${productVersion}`));
+  assert.equal(
+    within(rows[0]).getByRole("button", { name: "检查更新" }).disabled,
+    true,
+  );
+  assert.ok(within(rows[1]).getByText("关于 MetaWork"));
+  assert.equal(
+    within(rows[1]).getByRole("button", { name: "前往官网" }).disabled,
+    true,
+  );
+  await user.click(screen.getByRole("link", { name: "通用" }));
+  assert.equal(screen.queryByRole("region", { name: "关于 MetaWork" }), null);
 });
 
 test("authorization without cancellation keeps app actions available without an empty group", async () => {
@@ -495,11 +545,8 @@ test("authorization without cancellation keeps app actions available without an 
   });
   assert.match(menu.textContent, /Finishing Metask sign-in/);
   assert.equal(screen.queryByRole("menuitem", { name: "Cancel" }), null);
-  await user.click(screen.getByRole("menuitem", { name: "About" }));
-  assert.notEqual(
-    await screen.findByRole("dialog", { name: "MetaWork" }),
-    null,
-  );
+  assert.ok(screen.getByRole("menuitem", { name: "Settings" }));
+  assert.ok(screen.getByRole("menuitem", { name: /Check for updates/ }));
 });
 
 test("account menu offers keyboard sign-in once a lost renewal or cancelled sign-in leaves the account signed out", async () => {
@@ -623,8 +670,12 @@ test("native drag exclusions cover mounted menu/dialog portals and their backdro
   assert.ok(
     menu.closest("[data-base-ui-portal][data-native-window-drag-exclude]"),
   );
-  await user.click(await screen.findByRole("menuitem", { name: "About" }));
-  const dialog = await screen.findByRole("dialog", { name: "MetaWork" });
+  await user.click(
+    await screen.findByRole("menuitem", { name: /Check for updates/ }),
+  );
+  const dialog = await screen.findByRole("dialog", {
+    name: "Check for updates",
+  });
   const portal = dialog.closest("[data-base-ui-portal]");
   assert.ok(portal.hasAttribute("data-native-window-drag-exclude"));
   assert.ok(
@@ -739,11 +790,11 @@ test("update statuses distinguish a missing package, last confirmed release and 
   }
 });
 
-test("manual check prevents duplicate clicks and waits for authoritative state", async () => {
+test("checking from Settings opens the compact dialog once and restores focus", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   let complete;
   let calls = 0;
-  renderIdentity({
+  renderAboutSettings({
     updateControls: {
       ...updateControls,
       check: () => {
@@ -754,27 +805,51 @@ test("manual check prevents duplicate clicks and waits for authoritative state",
       },
     },
   });
-  await user.click(
-    screen.getByRole("button", { name: "Account and application menu" }),
-  );
-  await user.click(await screen.findByRole("menuitem", { name: "About" }));
-  await user.dblClick(
-    screen.getByRole("button", { name: "Check for updates" }),
-  );
+  await user.click(screen.getByRole("link", { name: "About", exact: true }));
+  const check = screen.getByRole("button", { name: "Check for updates" });
+  assert.equal(calls, 0);
+  await user.dblClick(check);
   assert.equal(calls, 1);
-  assert.equal(
-    screen.getByRole("button", { name: "Check for updates" }).disabled,
-    true,
-  );
+  assert.equal(check.disabled, true);
+  const dialog = await screen.findByRole("dialog", {
+    name: "Check for updates",
+  });
   assert.match(screen.getByRole("status").textContent, /Checking for updates/u);
   complete(true);
-  await waitFor(() =>
-    assert.equal(
-      screen.getByRole("button", { name: "Check for updates" }).disabled,
-      false,
-    ),
-  );
+  await waitFor(() => assert.equal(check.disabled, false));
   assert.doesNotMatch(screen.getByRole("status").textContent, /up to date/iu);
+  await user.click(within(dialog).getByRole("button", { name: "OK" }));
+  await waitFor(() => assert.equal(document.activeElement, check));
+});
+
+test("Visit website hands off only on click and allows retry after a browser error", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const calls = [];
+  renderAboutSettings({
+    updateControls: {
+      ...updateControls,
+      website: async () => {
+        calls.push("website");
+        return calls.length === 2;
+      },
+      check: async () => {
+        calls.push("check");
+        return true;
+      },
+    },
+  });
+  await user.click(screen.getByRole("link", { name: "About", exact: true }));
+  const visit = screen.getByRole("button", { name: "Visit website" });
+  assert.deepEqual(calls, []);
+  await user.click(visit);
+  await screen.findByText(translate("en-US", "updates.browser_failed"));
+  await user.click(visit);
+  await waitFor(() => assert.equal(screen.queryByRole("alert"), null));
+  assert.deepEqual(calls, ["website", "website"]);
+  assert.equal(
+    screen.queryByRole("dialog", { name: "Check for updates" }),
+    null,
+  );
 });
 
 test(
@@ -843,12 +918,12 @@ test("update entry works signed out in Chinese and never depends on account comm
 
 test("a failed check keeps one sentence and hides the technical detail behind a disclosure", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  renderIdentity({ updates: updateFailed });
-  await user.click(
-    screen.getByRole("button", { name: "Account and application menu" }),
-  );
-  await user.click(await screen.findByRole("menuitem", { name: "About" }));
-  const dialog = await screen.findByRole("dialog", { name: "MetaWork" });
+  renderAboutSettings({ updates: updateFailed });
+  await user.click(screen.getByRole("link", { name: "About", exact: true }));
+  await user.click(screen.getByRole("button", { name: "Check for updates" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "Check for updates",
+  });
   assert.match(
     screen.getByRole("status").textContent,
     /^Couldn.t check for updates\. Try again later\.$/u,
@@ -871,12 +946,12 @@ test("a failed check keeps one sentence and hides the technical detail behind a 
 
 test("a check that did not fail shows no diagnostics entry at all", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  renderIdentity({ updates: updateAvailable });
-  await user.click(
-    screen.getByRole("button", { name: "Account and application menu" }),
-  );
-  await user.click(await screen.findByRole("menuitem", { name: "About" }));
-  const dialog = await screen.findByRole("dialog", { name: "MetaWork" });
+  renderAboutSettings({ updates: updateAvailable });
+  await user.click(screen.getByRole("link", { name: "About", exact: true }));
+  await user.click(screen.getByRole("button", { name: "Check for updates" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "Check for updates",
+  });
   assert.equal(dialog.querySelector("details.feedback-diagnostics"), null);
   assert.doesNotMatch(dialog.textContent, /Check details/u);
 });

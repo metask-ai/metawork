@@ -75,11 +75,6 @@ export function AccountIdentity({
     action();
   }
 
-  function openAboutFromMenu() {
-    aboutReturnFocus.current = trigger.current;
-    choose(() => setAboutOpen(true));
-  }
-
   return (
     <>
       <Menu.Root open={open} onOpenChange={setOpen}>
@@ -154,10 +149,6 @@ export function AccountIdentity({
                   <span className="ml-auto text-(--ui-content-muted)">
                     v{productVersion}
                   </span>
-                </Menu.Item>
-                <Menu.Item onClick={openAboutFromMenu}>
-                  <Icon name="info" />
-                  {t("about.menu_item")}
                 </Menu.Item>
                 {authenticated && (
                   <>
