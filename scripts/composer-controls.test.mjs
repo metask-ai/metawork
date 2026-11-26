@@ -2031,6 +2031,23 @@ test("Models adds a model independently without listing or reusing legacy provid
   assert.deepEqual(removals, [["provider-multi", "3", "7", "model-a"]]);
 });
 
+test("the sign-out confirmation says how many Tasks it stops, in the right number", async () => {
+  for (const [count, sentence] of [
+    [1, /1 task is using Metask models and will stop when you sign out./],
+    [2, /2 tasks are using Metask models and will stop when you sign out./],
+  ]) {
+    const user = userEvent.setup({ document: dom.window.document });
+    renderSettings(readySettingsAccount, {
+      initialSection: "account",
+      metaskStopTargets: count,
+    });
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Sign out" });
+    assert.match(dialog.textContent, sentence);
+    cleanup();
+  }
+});
+
 test("Settings signs out only after confirming in a modal", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   let logoutCalls = 0;
@@ -2049,13 +2066,19 @@ test("Settings signs out only after confirming in a modal", async () => {
   await waitFor(() => assert.ok(document.activeElement === heading));
   const trigger = screen.getByRole("button", { name: "Sign out" });
   assert.equal(screen.queryByRole("heading", { name: "Security" }), null);
-  assert.equal(screen.queryByText(/Sign in again to create new tasks/), null);
+  assert.equal(
+    screen.queryByText(/can't use Metask models until you sign in again/),
+    null,
+  );
   await user.click(trigger);
 
   const dialog = await screen.findByRole("alertdialog", { name: "Sign out" });
   const cancel = within(dialog).getByRole("button", { name: "Cancel" });
   await waitFor(() => assert.ok(document.activeElement === cancel));
-  assert.match(dialog.textContent, /Sign in again to create new tasks/);
+  assert.match(
+    dialog.textContent,
+    /After you sign out, you can't use Metask models until you sign in again\./,
+  );
   assert.equal(logoutCalls, 0);
 
   await user.keyboard("{Escape}");

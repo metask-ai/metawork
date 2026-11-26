@@ -520,8 +520,10 @@ export const enUS = {
   "account.clear_residue": "Clear sign-in again",
   "account.logout": "Sign out",
   "account.logout_confirm":
-    "Signing out removes your Metask sign-in credentials from this device. Sign in again to create new tasks using Metask models. Your custom models, local tasks and history, and workspace files will remain.",
-  "account.logout_stops_tasks":
+    "After you sign out, you can't use Metask models until you sign in again. Your custom models, local tasks and history, and workspace files will remain.",
+  "account.logout_stops_tasks.one":
+    "{count} task is using Metask models and will stop when you sign out.",
+  "account.logout_stops_tasks.other":
     "{count} tasks are using Metask models and will stop when you sign out.",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",

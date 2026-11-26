@@ -447,8 +447,10 @@ export const zhCN: Record<MessageId, string> = {
   "account.clear_residue": "再清一次",
   "account.logout": "退出登录",
   "account.logout_confirm":
-    "退出将清除这台设备上的 Metask 登录凭据。创建使用 Metask 模型的新任务前，需要重新登录。自定义模型、本地任务及历史记录、工作区文件都会保留。",
-  "account.logout_stops_tasks":
+    "退出后，重新登录前不能使用 Metask 模型。自定义模型、本地任务和历史记录、工作区文件都会保留。",
+  "account.logout_stops_tasks.one":
+    "有 {count} 个任务正在使用 Metask 模型，退出后会停止。",
+  "account.logout_stops_tasks.other":
     "有 {count} 个任务正在使用 Metask 模型，退出后会停止。",
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",

@@ -437,7 +437,7 @@ Task 菜单在归档之后提供“移入项目”或“更改项目”，打开
 - 下载按钮绑定显示的版本，只在用户点击后请求预检与系统浏览器交接。检查与命令在途防重复提交；交接成功只写“已交给浏览器，请在浏览器中查看下载”，保留角落提醒，不展示虚假的下载进度或完成。失效链接明确提示“下载链接暂不可用，请前往官网下载”，临时失败、缺包与版本漂移使用对应可操作原因；官网仅由用户点击打开。检查失败允许显示上次确认版本并标明本次未刷新，不报最新；
 - 更新状态由 Host 发布，局部 command busy/error 只属于当前 Dialog 和 connection generation；关闭、卸载或连接变化后的迟到回执不得恢复旧反馈。检查/下载结果原位呈现，普通后台失败不抢焦点；状态使用可访问的 live region，错误有可读文字。窄窗操作行可换行，沿用既有深浅主题与 Foundation 组件。领域与下载失败语义以[Product 架构](product-architecture.md#28-版本提醒与下载交接)为准；
 - About 不依赖 Account、Models 或登录状态，在主界面的账户与应用菜单中始终可用；菜单与触发器的无障碍名称必须表达“账户与应用”，不能继续声称只包含账号动作；
-- 账号菜单中的退出登录使用退出图标和与其他菜单项一致的中性颜色，不在尚未执行的导航层提前使用危险色；点击后在当前界面上直接打开危险操作确认框，不先导航到设置，最终确认按钮才使用危险样式。确认按钮只写“退出登录”；确认文案说明仅退出本机 Metask 账号、本地 Task 与历史记录会保留，不使用范围不明的“清除设备信息”。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
+- 账号菜单中的退出登录使用退出图标和与其他菜单项一致的中性颜色，不在尚未执行的导航层提前使用危险色；点击后在当前界面上直接打开危险操作确认框，不先导航到设置，最终确认按钮才使用危险样式。确认按钮只写“退出登录”；确认文案与账号设置的退出确认相同：“退出后，重新登录前不能使用 Metask 模型。自定义模型、本地任务和历史记录、工作区文件都会保留。”，不使用范围不明的“清除设备信息”。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
 - 账号菜单只负责身份和导航；Metask API/model目录与用户管理的服务都进入 Models设置，不成为 Account字段；
 - 未登录时保留本地 Task 历史，并把左栏账号入口切换成登录动作。
 
@@ -1129,8 +1129,8 @@ Archived tasks
 - authenticated 后用量分组直接展示 history，不读取或推断旧 `run_mode`。不得显示当前 OAuth 合同无法取得的余额、今日或累计摘要，也不得显示完整email、account id、标准费用、请求数、RPM/TPM、响应时间、API Key数量、订阅额度、模型分布、按模型趋势、最近请求、任意外部管理链接或其他装饰性图表；固定充值页是账户区唯一允许的外部动作；账户区之外只有 Product 识别为 Metask 余额/额度不足的 Run 失败提示可以复用同一充值命令（见 [当前状态、请求与结果](#75-当前状态请求与结果)），Renderer不得取得或拼接其URL；
 - 请求或配置错误、网络失败与刷新结果不确定不得被描述为“凭据过期”“后端撤销”或“已从设备移除”。Account 错误可以保留 authenticated identity；此时错误只在账户 feedback 中说明，账户信息和账号菜单不提供登录动作。登录动作在 `signed_out` 时提供，没能确认登录（`checking` 带错误）时以“重新登录”提供；不能安全重试的续期结果，由 Host 转为 `signed_out`。Renderer 不从错误码推断需要重新登录。刷新阻断由Host校验，不从错误文字反推权限、不自动重试旧token、不增加保存恢复页面或公开状态；
 - 已验证 identity 的续期节拍无法启动时继续显示 `authenticated`，在 Account 设置错误区说明自动刷新未安排，并在 Host 的 `actions.retry` 为真时提供唯一 `重试登录刷新`；该动作调用 Host `retryRefresh`，不得由 Renderer timer、reload 或普通 snapshot update 自动重放；hard expiry 后 Metask 新目录/解析由 Host fail closed。access token 到 hard expiry 时，由 Host 自动恢复连接，输入区按 Host 给出的原因显示“正在连接 Metask”，并说明连上后执行、这次没连上就标为未执行；启动后确认登录时显示同一句。期间发出的消息保持等待；所等的那次没有连上时，消息以“暂时无法连接 Metask，消息未执行”显示，并保留重发入口；
-- 重新登录或退出登录不得因 Models、Task、Session、Run、job、worker或 Task-owned credential的运行时引用而被阻止；退出登录停掉用 Metask 模型的 Task 正在跑的 Run 和整理，并在确认弹窗里事先说明，Run 记为“为退出登录而停止”，后面排队的消息保留内容待重新登录后重发；其余既有 Task按创建时取得的 ExecutionConfig继续收口；
-- 已登录时，账号设置在账户用量下方显示一个通栏的危险样式“退出登录”按钮。设置和账号菜单共用确认弹窗，打开时聚焦“取消”，点击确认才提交退出。弹窗说明本机 Metask 登录凭据会清理，创建使用 Metask 模型的新 Task 需要重新登录，自定义模型、本地 Task 及历史记录和 Workspace 文件会保留；此刻有使用 Metask 模型的 Task 正在运行时，再加一句“有 N 个任务正在使用 Metask 模型，退出后会停止。”
+- 重新登录或退出登录不得因 Models、Task、Session、Run、job、worker或 Task-owned credential的运行时引用而被阻止；退出登录停掉用 Metask 模型的 Task 正在跑的 Run 和整理，并在确认弹窗里事先说明，Run 与整理记为“为退出登录而停止”，后面排队的消息在推进时以“需要登录”失败，内容保留，重新登录后可以重发；其余既有 Task按创建时取得的 ExecutionConfig继续收口；
+- 已登录时，账号设置在账户用量下方显示一个通栏的危险样式“退出登录”按钮。设置和账号菜单共用确认弹窗，打开时聚焦“取消”，点击确认才提交退出。弹窗正文为“退出后，重新登录前不能使用 Metask 模型。自定义模型、本地任务和历史记录、工作区文件都会保留。”；此刻有使用 Metask 模型的 Task 正在运行时，再加一句“有 N 个任务正在使用 Metask 模型，退出后会停止。”
 
 `Models / 模型`规则：
 
