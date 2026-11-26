@@ -46,3 +46,27 @@ export function earlierHistoryGoal(
       page.runManifest[Math.max(0, end - snapshot.scope.runLimit)]!.id,
   };
 }
+/// What each Task's reading position still needs once a newer security epoch
+/// has replaced what was shown: the Run its anchor is in and nothing older,
+/// so the position comes back without fetching every page that was ever
+/// read. A Task following its latest Run, or with no anchor, needs none.
+export function narrowHistoryGoals(
+  goals: Readonly<Record<string, HistoryGoal>>,
+  reading: ReadonlyMap<
+    string,
+    { followingLatest: boolean; anchor?: { runId: string } }
+  >,
+): Record<string, HistoryGoal> {
+  const narrowed: Record<string, HistoryGoal> = {};
+  for (const [taskId, goal] of Object.entries(goals)) {
+    const saved = reading.get(taskId);
+    const runId = saved && !saved.followingLatest ? saved.anchor?.runId : null;
+    if (!runId) continue;
+    narrowed[taskId] = {
+      taskId,
+      oldestRunId:
+        BigInt(runId) > BigInt(goal.oldestRunId) ? runId : goal.oldestRunId,
+    };
+  }
+  return narrowed;
+}

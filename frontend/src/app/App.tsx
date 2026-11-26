@@ -23,6 +23,7 @@ import {
 import {
   historyProgress,
   earlierHistoryGoal,
+  narrowHistoryGoals,
   type HistoryGoal,
 } from "../workbench/history.ts";
 import { Message } from "../components/ai/Message.tsx";
@@ -1092,6 +1093,9 @@ export default function App() {
   const [taskReadingMemory] = useState(createTaskReadingMemory);
   const [inputHistoryReader] = useState(createTaskInputHistoryReader);
   useEffect(() => {
+    // A security epoch leaves no snapshot until the next read; reading
+    // positions are ids and offsets, kept for it, not reclaimed.
+    if (!snapshotLoaded) return;
     // Reclaim after TaskContent's unmount cleanup has saved its last position.
     taskReadingMemory.prune(
       new Set(snapshot.taskIndex.map((task) => task.id)),
@@ -1102,7 +1106,7 @@ export default function App() {
           }
         : undefined,
     );
-  }, [snapshot.taskIndex, snapshot.taskPage, taskReadingMemory]);
+  }, [snapshot.taskIndex, snapshot.taskPage, snapshotLoaded, taskReadingMemory]);
   function retainTaskHistory(taskId: string, runId: string) {
     setHistoryRequests((goals) => {
       const previous = goals[taskId];
@@ -2326,7 +2330,9 @@ export default function App() {
             latestSnapshotRef.current &&
             latestSnapshotRef.current.securityEpoch !== next.securityEpoch
           )
-            setHistoryRequests({});
+            setHistoryRequests((goals) =>
+              narrowHistoryGoals(goals, taskReadingMemory.reading),
+            );
           if (
             latestSnapshotRef.current &&
             (latestSnapshotRef.current.securityEpoch !== next.securityEpoch ||
@@ -2469,10 +2475,11 @@ export default function App() {
         inputHistoryReader.clear();
         invalidateFeedbackSecurity();
         latestSnapshotRef.current = null;
-        setHistoryRequests({});
-        taskReadingMemory.reading.clear();
-        taskReadingMemory.processDisclosure.clear();
-        taskReadingMemory.toolDisclosure.clear();
+        // Where each Task was read holds no Host content: keep it, and ask
+        // again only for the history it needs.
+        setHistoryRequests((goals) =>
+          narrowHistoryGoals(goals, taskReadingMemory.reading),
+        );
         filePreviewTabs.clear();
         clearFileChanges();
         dispatchWorkbench({
