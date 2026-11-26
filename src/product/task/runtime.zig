@@ -2345,7 +2345,7 @@ pub const Runtime = struct {
         const projected_workspace = try input.text.project(
             input.workspace_root,
             input.max_workspace_bytes,
-            &.{input.execution.api_key},
+            &.{input.execution.projectedKey()},
             0,
         );
         var workspace_live = true;
@@ -2588,7 +2588,7 @@ pub const Runtime = struct {
         const selection = if (input.skillReference() != null) try selectSkillInput(input, effects.input_catalog orelse (if (task.runtime.pinnedCatalogConst()) |pinned| pinned.view() else return error.CatalogUnavailable)) else null;
         var payload = try task_state.OwnedRunInput.cloneSelected(self.allocator, input, agent.max_submitted_input_bytes - self.pending_input_bytes, selection);
         errdefer payload.deinit(self.allocator);
-        const credential = if (task.runtime.executionConst()) |execution| execution.secret else &.{};
+        const credential = if (task.runtime.executionConst()) |execution| execution.projectedSecret() else &.{};
         var credentials: []const []const u8 = &.{credential};
         if (task.runtime.active_operation == .run) {
             if (task_state.findRun(task.durable.runs, task.runtime.active_operation.run)) |run|
@@ -3774,7 +3774,7 @@ pub const Runtime = struct {
             run_record,
             effects.limits.max_task_title_bytes,
             effects.text,
-            execution.api_key,
+            execution.projectedKey(),
         );
         run_record.execution.?.automatic_title.provisional_applied = provisional_title_applied;
         const previous_active_run_id = task.runtime.active_run_id;
@@ -3837,7 +3837,7 @@ pub const Runtime = struct {
             .id = operation_id,
             .after_run_id = after_run_id,
             .terminal_diagnostic = diagnostic,
-            .redaction_secret = execution.api_key,
+            .redaction_secret = execution.projectedKey(),
         };
         var record_owned = true;
         errdefer if (record_owned)
@@ -4476,7 +4476,7 @@ pub const Runtime = struct {
                 )) |run_record|
                     run_record.redactionSecrets()
                 else if (task.runtime.execution()) |execution|
-                    &.{execution.input().api_key}
+                    &.{execution.projectedSecret()}
                 else
                     &.{},
             )
@@ -5308,7 +5308,7 @@ pub const Runtime = struct {
         for (trimmed) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
 
         const sensitive = if (task.runtime.execution()) |execution|
-            execution.input().api_key
+            execution.projectedSecret()
         else
             &.{};
         const previous_title = task.durable.title;
@@ -7635,7 +7635,7 @@ pub const Runtime = struct {
             },
         };
         job.continuation_source_id = input.continuation_source_id;
-        job.credential = job.attempt.execution.secret;
+        job.credential = job.attempt.execution.projectedSecret();
         restore_lease_owned = false;
         job_initialized = true;
         checkpoint_live = false;
@@ -7658,7 +7658,7 @@ pub const Runtime = struct {
             errdefer if (original_model) |value| self.allocator.free(value);
             const source_id = try self.allocator.dupe(u8, rebind_input.source_id);
             errdefer self.allocator.free(source_id);
-            const projected = try rebind_input.text.project(model, models_contract.Limits.model_id_bytes, &.{input.execution.api_key}, 0);
+            const projected = try rebind_input.text.project(model, models_contract.Limits.model_id_bytes, &.{input.execution.projectedKey()}, 0);
             errdefer rebind_input.text.discardCandidate(projected.value);
             var access = if (attached_rebind) try task.runtime.acquireAccess() else null;
             errdefer if (access) |*value| value.deinit();
@@ -7681,7 +7681,7 @@ pub const Runtime = struct {
                 .store_health = input.checkpoint_store_health,
             };
             if (rebind_input.capabilities) |owner| owner.* = null;
-            if (job.rebind.?.original_execution) |value| job.rebind.?.original_credential = value.secret;
+            if (job.rebind.?.original_execution) |value| job.rebind.?.original_credential = value.projectedSecret();
             job.export_checkpoint_fn = exportRecoveryCheckpoint;
             if (capabilities) |value| {
                 job.attempt.permission_mode = value.original.permission_mode;
@@ -8103,7 +8103,7 @@ pub const Runtime = struct {
         std.debug.assert(task.runtime.hasClosingSession());
         if (completion == .closed) {
             const execution = task.runtime.executionConst().?;
-            if (!effects.prepareCredentialRelease(execution.input().api_key)) return result;
+            if (!effects.prepareCredentialRelease(execution.projectedSecret())) return result;
             for (execution.retired_credentials.items) |credential|
                 if (!effects.prepareCredentialRelease(credential)) return result;
         }
@@ -8292,7 +8292,7 @@ pub const Runtime = struct {
         job.credential = &.{};
         job.attempt.execution.deinit();
         job.attempt.execution = rebind.original_execution.?.take();
-        job.credential = job.attempt.execution.secret;
+        job.credential = job.attempt.execution.projectedSecret();
         self.allocator.free(job.attempt.task_model);
         job.attempt.task_model = rebind.original_model.?;
         rebind.original_model = null;
@@ -8734,7 +8734,7 @@ pub const Runtime = struct {
                     task.runtime.last_restore_failure = if (job.rebind) |rebind| if (rebind.phase == .restoring_original) rebind.failure else null else null;
                 } else {
                     std.debug.assert(task.runtime.attachment == .detached);
-                    release.redactAll(candidate.execution.input().api_key);
+                    release.redactAll(candidate.execution.projectedSecret());
                     job.credential = &.{};
                     if (job.rebind) |*rebind| if (rebind.original_credential.ptr == candidate.execution.secret.ptr) {
                         rebind.original_credential = &.{};
@@ -10067,7 +10067,7 @@ fn releaseExecutionValueNoFail(
     execution: anytype,
     effects: ReleaseEffects,
 ) void {
-    const credential = execution.input().api_key;
+    const credential = execution.projectedSecret();
     effects.redactAll(credential);
     for (execution.retired_credentials.items) |value| effects.redactAll(value);
     for (task.durable.runs) |*entry| {
@@ -10140,7 +10140,7 @@ fn deinitCreateCandidate(
             candidate.binding.abandonForRuntimeDeinit(),
         .released, .relinquished, .moved, .fixture, .abandoned => {},
     }
-    const credential = candidate.execution.input().api_key;
+    const credential = candidate.execution.projectedSecret();
     effects.redactAll(credential);
     candidate.execution.deinit();
     if (candidate.model_intent) |*intent| intent.deinit(self.allocator);
@@ -10695,7 +10695,7 @@ fn reserveRun(
     // Keep one no-allocation cancellation receipt beyond the next decision.
     try ensureUiHistory(self.allocator, task);
     const initial_credentials = [3][]const u8{
-        execution.api_key,
+        execution.projectedKey(),
         if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{},
         if (effects.video_execution) |owned| if (owned.*) |*video| video.candidate.input().bearer else &.{} else &.{},
     };
@@ -10927,7 +10927,7 @@ fn applyModelIntent(
     const owned_model = try self.allocator.dupe(u8, intent.model_id);
     errdefer self.allocator.free(owned_model);
     const previous = task.durable.execution_model;
-    const replacement = try effects.text.project(intent.model_id, effects.limits.max_model_id_bytes, &.{installed.secret}, previous.len);
+    const replacement = try effects.text.project(intent.model_id, effects.limits.max_model_id_bytes, &.{installed.projectedSecret()}, previous.len);
     errdefer {
         effects.text.discardCandidate(replacement.value);
         effects.text.restorePrevious(previous.len);
@@ -11052,7 +11052,7 @@ const RetainedCredentials = struct {
             const index = self.index;
             self.index += 1;
             if (index == 0) {
-                if (self.task.runtime.executionConst()) |execution| return execution.secret;
+                if (self.task.runtime.executionConst()) |execution| return execution.projectedSecret();
             } else if (index == 1) {
                 if (self.task.runtime.restore_job) |job| return job.credential;
             } else {
@@ -12033,6 +12033,44 @@ test "Task execution owns the service reference and protocol across clone and tr
     try std.testing.expectEqualStrings("custom_provider:service-a", resolved.target.provider_id);
     try std.testing.expectEqual(models_contract.Protocol.openai_chat_completions, resolved.target.protocol);
     try std.testing.expectEqual(@as(u64, 7), resolved.execution_generation);
+}
+
+test "a Task holding a Custom Provider placeholder key does not project it" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    for ([_]struct { key: []const u8, projected: bool }{
+        .{ .key = "ollama", .projected = false },
+        .{ .key = "local-service-key-0001", .projected = true },
+    }) |case| {
+        var task = testModelIntentTask();
+        runtime.tasks[0] = &task;
+        defer runtime.tasks[0] = null;
+        task.runtime.attachment = .{ .attached = .{
+            .binding = task_agent_session.Binding.testFixture(1),
+            .pinned_catalog = null,
+            .execution = try owned_task_execution.OwnedTaskExecution.clone(std.testing.allocator, .{
+                .execution_generation = 7,
+                .target = .{ .provider_id = "custom_provider:local", .protocol = .openai_chat_completions, .model = "installed-model", .base_url = "http://127.0.0.1:11434/v1/chat/completions" },
+                .api_key = case.key,
+            }),
+        } };
+        const execution = task.runtime.execution().?;
+        defer execution.deinit();
+        // The request still sends it.
+        try std.testing.expectEqualStrings(case.key, execution.input().api_key);
+        try std.testing.expectEqual(case.projected, runtime.retainsCredential(case.key));
+        var mentions: [64]u8 = undefined;
+        const text = try std.fmt.bufPrint(&mentions, "notes/{s}.md", .{case.key});
+        try std.testing.expectEqual(case.projected, runtime.containsExecutionCredential(text));
+        var seen: usize = 0;
+        try runtime.visitExecutionCredentials(&seen, struct {
+            fn visit(context: *anyopaque, _: []const u8) std.mem.Allocator.Error!void {
+                const count: *usize = @ptrCast(@alignCast(context));
+                count.* += 1;
+            }
+        }.visit);
+        try std.testing.expectEqual(@as(usize, @intFromBool(case.projected)), seen);
+    }
 }
 
 fn testModelIntentTask() task_state.Task {

@@ -4341,7 +4341,7 @@ pub const Runtime = struct {
         var execution = source.intoConfig(generation) catch return error.ExecutionUnavailable;
         defer execution.deinit();
         const execution_input = execution.input();
-        try self.prepareTaskCredential(execution_input.api_key);
+        try self.prepareTaskCredential(execution_input.projectedKey());
         const permission_profile: PermissionProfile = switch (permission) {
             .interactive => |mode| (mode orelse self.default_approval_mode).profile(),
             .noninteractive => |profile| profile,
@@ -4619,7 +4619,7 @@ pub const Runtime = struct {
         if (!facts.has_model_intent) return error.RecoveryUnavailable;
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
         try self.validateTaskMetaskAuthorization(task_id);
-        try self.prepareTaskCredential(target.input().api_key);
+        try self.prepareTaskCredential(target.input().projectedKey());
         var capabilities: ?task_runtime.RestoreCapabilities = null;
         defer if (capabilities) |*value| value.deinit() catch {};
         if (try self.task_runtime.captureModelRebindInputs(task_id)) |captured| {
@@ -8144,7 +8144,7 @@ pub const Runtime = struct {
         }) orelse return error.ExecutionUnavailable;
         errdefer candidate.deinit();
         const input = candidate.input();
-        try self.prepareTaskCredential(input.api_key);
+        try self.prepareTaskCredential(input.projectedKey());
         if (renew) {
             const renewal = self.task_runtime.renewMetaskCredential(task_id, input.credential_generation, input.api_key, .admission) catch |err| {
                 self.task_runtime.failMetaskCredentialUpdate(task_id, input.credential_generation, err, self.taskRuntimeOperationEffects());

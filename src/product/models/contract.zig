@@ -275,6 +275,11 @@ pub const ConfigInput = struct {
     target: Target,
     api_key: []const u8,
     execution_generation: u64,
+
+    /// The key as the projection knows it; see `projectedCredential`.
+    pub fn projectedKey(self: ConfigInput) []const u8 {
+        return projectedCredential(self.target.provider_id, self.api_key);
+    }
 };
 
 /// Credential-bearing input produced by a source owner before Product Control
@@ -288,6 +293,11 @@ pub const SourceCandidateInput = struct {
     /// The Account generation a Metask credential was leased at. Zero for a
     /// Custom Provider, whose credential is part of its source generation.
     credential_generation: u64 = 0,
+
+    /// The key as the projection knows it; see `projectedCredential`.
+    pub fn projectedKey(self: SourceCandidateInput) []const u8 {
+        return projectedCredential(self.target.provider_id, self.api_key);
+    }
 
     pub fn facts(self: SourceCandidateInput) TargetFacts {
         return .{
@@ -313,6 +323,23 @@ pub const TargetFacts = struct {
 };
 
 const custom_provider_prefix = @tagName(Source.custom_provider) ++ ":";
+
+/// The shortest Custom Provider key Product treats as a secret, in Unicode
+/// characters. A local service that ignores the key is commonly given a
+/// placeholder such as `ollama` or `EMPTY`; masking that would hide the word
+/// everywhere and refuse every path, model id and MCP setting containing it.
+/// Metask credentials are far longer, so the rule only ever spares
+/// placeholders.
+pub const min_custom_provider_secret_characters: usize = 16;
+
+/// What Product masks and refuses on for a source's credential: the value
+/// itself, or nothing for a Custom Provider placeholder. Requests still send
+/// the value; only the projection ignores it.
+pub fn projectedCredential(provider_id: []const u8, credential: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, provider_id, custom_provider_prefix)) return credential;
+    const characters = std.unicode.utf8CountCodepoints(credential) catch credential.len;
+    return if (characters < min_custom_provider_secret_characters) &.{} else credential;
+}
 
 /// The source a resolved provider identity names.
 pub fn providerSourceId(provider_id: []const u8) ?[]const u8 {
@@ -1515,4 +1542,27 @@ test "image capability ownership survives transfer and allocation failure" {
     try std.testing.expectError(error.InvalidMetadata, validateImageCapabilities(&duplicate));
     const excessive = [_]ModelImageCapability{.{ .model = "m", .supported = true }} ** (max_model_image_capabilities + 1);
     try std.testing.expectError(error.CollectionTooLarge, validateImageCapabilities(&excessive));
+}
+
+test "a Custom Provider placeholder key is not projected as a secret" {
+    const custom = custom_provider_prefix ++ "local";
+    // Requests still send these; the projection neither masks nor refuses on them.
+    try std.testing.expectEqualStrings("", projectedCredential(custom, "ollama"));
+    try std.testing.expectEqualStrings("", projectedCredential(custom, "EMPTY"));
+    try std.testing.expectEqualStrings("", projectedCredential(custom, "fifteen-chars-x"));
+    try std.testing.expectEqualStrings("sixteen-chars-xx", projectedCredential(custom, "sixteen-chars-xx"));
+    // Characters, not bytes: fifteen three-byte characters are still short.
+    try std.testing.expectEqualStrings("", projectedCredential(custom, "密" ** 15));
+    try std.testing.expectEqualStrings("密" ** 16, projectedCredential(custom, "密" ** 16));
+    // Bytes that are not UTF-8 count one each.
+    try std.testing.expectEqualStrings("\xff" ** 16, projectedCredential(custom, "\xff" ** 16));
+    // Only Custom Providers have placeholders.
+    try std.testing.expectEqualStrings("ollama", projectedCredential(metask_source_id, "ollama"));
+    const input: ConfigInput = .{
+        .target = .{ .provider_id = custom, .protocol = .openai_chat_completions, .model = "m", .base_url = "http://127.0.0.1:11434/v1/chat/completions" },
+        .api_key = "ollama",
+        .execution_generation = 1,
+    };
+    try std.testing.expectEqualStrings("", input.projectedKey());
+    try std.testing.expectEqualStrings("ollama", input.api_key);
 }

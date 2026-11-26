@@ -93,6 +93,12 @@ pub const OwnedTaskExecution = struct {
         };
     }
 
+    /// The secret as the projection knows it: empty for a Custom Provider
+    /// placeholder, which requests still send.
+    pub fn projectedSecret(self: *const OwnedTaskExecution) []const u8 {
+        return models_contract.projectedCredential(self.provider_id, self.secret);
+    }
+
     pub fn modelRef(self: *const OwnedTaskExecution) ?models_contract.ModelRef {
         const source = models_contract.providerSourceId(self.provider_id) orelse return null;
         return .{ .source_id = source, .model_id = self.model };
