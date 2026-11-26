@@ -3296,3 +3296,87 @@ test "Metask source follows its account through a switch, a return, a restart an
     try std.testing.expect(runtime.pendingMetaskAdoption() == null);
     try std.testing.expectEqual(seen[0], runtime.view().providers[0].source_generation);
 }
+
+/// Passes allocations through and remembers whether anything freed still held
+/// `secret`, which is how a key that was not zeroed would be left behind.
+const SecretWatchingAllocator = struct {
+    secret: []const u8,
+    leaked: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        return std.testing.allocator.rawAlloc(len, alignment, ra);
+    }
+    fn resize(_: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+        return std.testing.allocator.rawResize(bytes, alignment, len, ra);
+    }
+    fn remap(_: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        return std.testing.allocator.rawRemap(bytes, alignment, len, ra);
+    }
+    fn free(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (std.mem.indexOf(u8, bytes, self.secret) != null) self.leaked = true;
+        std.testing.allocator.rawFree(bytes, alignment, ra);
+    }
+};
+
+test "a held key is zeroed when it is dropped and when Models is destroyed" {
+    const secret = "held-configured-key-0001";
+    const Sink = struct {
+        admitted: usize = 0,
+        retired: usize = 0,
+        fn admit(context: *anyopaque, value: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(std.mem.eql(u8, value, secret));
+            self.admitted += 1;
+            return true;
+        }
+        fn retire(context: *anyopaque, value: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(std.mem.eql(u8, value, secret));
+            self.retired += 1;
+            return true;
+        }
+        fn port(self: *@This()) ResidentSink {
+            return .{ .context = self, .admit_fn = admit, .retire_fn = retire };
+        }
+        fn count(context: *anyopaque, _: []const u8) std.mem.Allocator.Error!void {
+            const held: *usize = @ptrCast(@alignCast(context));
+            held.* += 1;
+        }
+    };
+    // Dropped by a sync once Models stopped, or still held when it is destroyed.
+    for ([_]bool{ true, false }) |drop_before_deinit| {
+        var watching: SecretWatchingAllocator = .{ .secret = secret };
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+        var vault: TestVault = .{};
+        var runtime = Runtime.init(watching.allocator(), std.testing.io, std.Thread.getCurrentId());
+        try runtime.start(directory_storage[0..directory_len], vault.port());
+        try std.testing.expect(runtime.createWithCredential(secret, .{
+            .display_name = "Local",
+            .protocol = .openai_chat_completions,
+            .normalized_base_url = "http://127.0.0.1:11434/v1/chat/completions",
+        }).accepted);
+        var sink: Sink = .{};
+        runtime.syncResidentCredentials(sink.port());
+        var held: usize = 0;
+        try runtime.visitResidentCredentials(&held, Sink.count);
+        try std.testing.expectEqual(@as(usize, 1), sink.admitted);
+        try std.testing.expectEqual(@as(usize, 1), held);
+        runtime.stop();
+        if (drop_before_deinit) {
+            runtime.syncResidentCredentials(sink.port());
+            try std.testing.expectEqual(@as(usize, 1), sink.retired);
+            held = 0;
+            try runtime.visitResidentCredentials(&held, Sink.count);
+            try std.testing.expectEqual(@as(usize, 0), held);
+        }
+        runtime.deinit();
+        try std.testing.expect(!watching.leaked);
+    }
+}
