@@ -24,8 +24,15 @@ function snapshot(revision, tasks = []) {
     account: {
       state: "signed_out",
       catalogState: "unavailable",
-      canCancel: false,
-      canRetry: false,
+      actions: {
+        cancel: false,
+        retry: false,
+        login: false,
+        logout: false,
+        clear: false,
+      },
+      unreachable: false,
+      attempt: null,
       accountId: "",
       displayName: "",
       apiKeys: [],

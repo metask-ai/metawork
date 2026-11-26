@@ -66,37 +66,6 @@ pub const UsageEligibility = enum {
     enabled,
 };
 
-pub const WalletSummaryView = struct {
-    availability: SummaryAvailability = .unavailable,
-    balance_u: []const u8 = "",
-    synced_at_unix_ms: []const u8 = "",
-    error_code: ErrorCode = .none,
-    safe_diagnostic: []const u8 = "",
-};
-
-pub const UsageTodayView = struct {
-    input_tokens: []const u8,
-    output_tokens: []const u8,
-    cache_creation_tokens: []const u8,
-    cache_read_tokens: []const u8,
-    total_tokens: []const u8,
-    actual_cost_u: []const u8,
-};
-
-pub const UsageTotalView = struct {
-    total_tokens: []const u8,
-    actual_cost_u: []const u8,
-};
-
-pub const UsageSummaryView = struct {
-    availability: SummaryAvailability = .unavailable,
-    today: ?UsageTodayView = null,
-    total: ?UsageTotalView = null,
-    synced_at_unix_ms: []const u8 = "",
-    error_code: ErrorCode = .none,
-    safe_diagnostic: []const u8 = "",
-};
-
 pub const UsageHistoryDayView = struct {
     date: []const u8,
     input_tokens: []const u8,
@@ -120,8 +89,6 @@ pub const UsageHistoryView = struct {
 pub const AccountSummaryView = struct {
     operation: SummaryOperation = .idle,
     usage_eligibility: UsageEligibility = .unknown,
-    wallet: WalletSummaryView = .{},
-    usage: UsageSummaryView = .{},
     history: UsageHistoryView = .{},
 };
 
@@ -175,19 +142,17 @@ pub const OwnedAuthorizationLease = struct {
 };
 
 /// The one Metask authorization fact. Main-thread only: its slices borrow
-/// committed Account state for the call that receives them.
+/// committed Account state for the call that receives them. It follows the
+/// login alone; a sign-in underway does not change it.
 pub const Authorization = union(enum) {
-    /// A stored login is being confirmed. The epoch counts finished renewal
-    /// attempts, so a waiter waits for exactly one of them.
+    /// A login is held but not confirmed, or the store is not read yet. The
+    /// epoch counts finished confirmations, so a waiter waits for exactly one.
     checking: u64,
     signed_out,
-    authorizing,
     available: struct { account_id: []const u8, generation: u64 },
-    /// The access token expired and Account will renew it. The epoch is
+    /// The access token ended and Account will renew it. The epoch is
     /// waited out as above.
     recovering: u64,
-    /// A verified identity whose token no wall clock can judge.
-    stalled,
 
     /// What a consumer may do with it. Every consumer reads only this.
     pub const Use = union(enum) {
@@ -195,16 +160,41 @@ pub const Authorization = union(enum) {
         ready: u64,
         /// Wait until this epoch moves on.
         wait: u64,
-        stop: enum { sign_in, no_connection },
+        /// Signing in is the only way on.
+        stop,
     };
 
     pub fn use(self: Authorization) Use {
         return switch (self) {
             .available => |value| .{ .ready = value.generation },
             .checking, .recovering => |epoch| .{ .wait = epoch },
-            .stalled => .{ .stop = .no_connection },
-            .signed_out, .authorizing => .{ .stop = .sign_in },
+            .signed_out => .stop,
         };
+    }
+};
+
+/// What a Metask 401 on an Account token says, by the gateway's code.
+pub const Unauthorized = enum {
+    /// `token_expired` or `invalid_token`: the access token, not the login.
+    token,
+    /// Anything else: only asking Metask who this is can tell.
+    other,
+
+    pub fn fromCode(code: ?[]const u8) Unauthorized {
+        const value = code orelse return .other;
+        return if (std.mem.eql(u8, value, "token_expired") or std.mem.eql(u8, value, "invalid_token")) .token else .other;
+    }
+};
+
+/// Any thread: a Metask request made with the Account token of
+/// `generation` was answered 401. Account acts on it later, on its own
+/// thread; an older generation is ignored.
+pub const UnauthorizedReport = struct {
+    context: *anyopaque,
+    report_fn: *const fn (*anyopaque, u64, Unauthorized) void,
+
+    pub fn report(self: UnauthorizedReport, generation: u64, kind: Unauthorized) void {
+        self.report_fn(self.context, generation, kind);
     }
 };
 
@@ -232,18 +222,18 @@ pub const CredentialSource = struct {
 /// Stable Account error identity. Model catalog errors are defined by Models.
 pub const ErrorCode = enum {
     none,
-    invalid_command,
     invalid_state,
     operation_in_progress,
     oauth_bind_failed,
     oauth_browser_open_failed,
     oauth_callback_rejected,
-    oauth_state_mismatch,
     oauth_exchange_failed,
     user_cancelled,
     deadline_exceeded,
     token_refresh_failed,
     metask_unauthorized,
+    /// Metask refused the access token; a renewal may fix it.
+    metask_token_invalid,
     metask_rate_limited,
     metask_service_unavailable,
     metask_protocol_invalid,
@@ -260,34 +250,50 @@ pub const ErrorCode = enum {
 
 /// Borrowed, secret-free Account projection. Its slices are valid only for the
 /// synchronous call that receives it; Product Control copies them if needed.
+/// What the person may do now. The interface offers nothing else.
+pub const AccountActions = struct {
+    /// Withdraw a sign-in that waits, or stop one in the browser.
+    cancel: bool = false,
+    /// Try now: confirm a held login, renew a verified one whose renewal
+    /// failed or whose beat could not start, or read the store again.
+    retry: bool = false,
+    /// Begin a sign-in in the browser.
+    login: bool = false,
+    logout: bool = false,
+    /// Delete what a sign-out could not.
+    clear: bool = false,
+};
+
+/// The person's own latest command, under the receipt its acceptance gave,
+/// and once it settled what came of it. Nothing in the background touches it.
+pub const AccountAttempt = struct {
+    pub const Outcome = enum { succeeded, failed, cancelled };
+    id: u64,
+    action: AccountCommand,
+    /// Null while what it began is underway.
+    outcome: ?Outcome = null,
+    error_code: ErrorCode = .none,
+    safe_diagnostic: []const u8 = "",
+};
+
 pub const AccountView = struct {
     state: AccountState,
-    can_cancel: bool = false,
-    /// `retry_refresh` acts now; while a login could not be confirmed, so does
-    /// `begin_login`.
-    can_retry: bool = false,
+    actions: AccountActions = .{},
+    /// A held or verified login waits out a failure to reach Metask.
+    cannot_reach: bool = false,
+    attempt: ?AccountAttempt = null,
     account_id: []const u8 = "",
     display_name: []const u8 = "",
     email_hint: []const u8 = "",
     phone_hint: []const u8 = "",
-    concurrency_limit: ?u32 = null,
     error_code: ErrorCode = .none,
     safe_diagnostic: []const u8 = "",
     summary: AccountSummaryView = .{},
 };
 
-pub const AccountFactKind = enum {
-    restored,
-    session_changed,
-    operation_failed,
-    signed_out,
-    summary_changed,
-};
-
 /// Canonical secret-free identity fact prepared by Account and installed by
 /// Product Control without allocating or calling back into Account.
 pub const AccountFact = struct {
-    kind: AccountFactKind,
     view: AccountView,
 };
 
@@ -334,8 +340,6 @@ pub const ValidationError = error{
     InconsistentState,
 };
 
-pub fn validateCommand(_: AccountCommand) ValidationError!void {}
-
 pub fn validateView(view: AccountView) ValidationError!void {
     try validateOptional(view.account_id, Limits.account_id_bytes);
     try validateOptional(view.display_name, Limits.display_name_bytes);
@@ -344,19 +348,27 @@ pub fn validateView(view: AccountView) ValidationError!void {
     try validateOptional(view.safe_diagnostic, Limits.safe_diagnostic_bytes);
     if (view.error_code == .none and view.safe_diagnostic.len != 0)
         return error.InconsistentState;
-    if (view.can_cancel and view.state != .authorizing)
+    const actions = view.actions;
+    if (actions.cancel and view.state != .authorizing) return error.InconsistentState;
+    if (actions.retry and (view.state == .authorizing or view.error_code == .none)) return error.InconsistentState;
+    if (actions.login and !(view.state == .signed_out or view.state == .checking)) return error.InconsistentState;
+    if (actions.logout and !(view.state == .checking or view.state == .authenticated or view.state == .authorizing))
         return error.InconsistentState;
-    if (view.can_retry) switch (view.state) {
-        .checking, .authenticated => if (view.error_code == .none) return error.InconsistentState,
-        .signed_out, .authorizing => return error.InconsistentState,
-    };
+    if (actions.clear and view.state != .signed_out) return error.InconsistentState;
+    if (view.cannot_reach and !(view.state == .checking or view.state == .authenticated)) return error.InconsistentState;
+    if (view.attempt) |attempt| {
+        if (attempt.id == 0) return error.InvalidGeneration;
+        try validateOptional(attempt.safe_diagnostic, Limits.safe_diagnostic_bytes);
+        if (attempt.error_code == .none and attempt.safe_diagnostic.len != 0) return error.InconsistentState;
+        const failed = attempt.outcome == .failed;
+        if (failed != (attempt.error_code != .none and attempt.error_code != .user_cancelled) and attempt.outcome != .cancelled)
+            return error.InconsistentState;
+        if (attempt.outcome == null and attempt.error_code != .none) return error.InconsistentState;
+    }
     switch (view.state) {
         .checking, .signed_out, .authorizing => {
             if (view.account_id.len != 0 or view.display_name.len != 0 or
-                view.email_hint.len != 0 or view.phone_hint.len != 0 or
-                view.concurrency_limit != null)
-                return error.InconsistentState;
-            if (view.state != .authorizing and view.can_cancel)
+                view.email_hint.len != 0 or view.phone_hint.len != 0)
                 return error.InconsistentState;
             if (!isEmptySummary(view.summary)) return error.InconsistentState;
         },
@@ -368,55 +380,11 @@ pub fn validateView(view: AccountView) ValidationError!void {
 }
 
 fn validateSummary(summary: AccountSummaryView) ValidationError!void {
-    try validateWallet(summary.wallet);
-    try validateUsage(summary.usage);
     try validateHistory(summary.history);
     if (summary.usage_eligibility == .disabled and
-        (summary.usage.availability != .unavailable or
-            summary.usage.error_code != .none or
-            summary.history.availability != .unavailable or
+        (summary.history.availability != .unavailable or
             summary.history.error_code != .none))
         return error.InconsistentState;
-}
-
-fn validateWallet(wallet: WalletSummaryView) ValidationError!void {
-    try validateOptional(wallet.safe_diagnostic, Limits.safe_diagnostic_bytes);
-    try validateSummaryError(wallet.error_code, wallet.safe_diagnostic);
-    switch (wallet.availability) {
-        .unavailable, .loading => {
-            if (wallet.balance_u.len != 0 or wallet.synced_at_unix_ms.len != 0)
-                return error.InconsistentState;
-        },
-        .ready, .stale => {
-            try validateSignedDecimal(wallet.balance_u);
-            try validateUnsignedDecimal(wallet.synced_at_unix_ms);
-        },
-    }
-}
-
-fn validateUsage(usage: UsageSummaryView) ValidationError!void {
-    try validateOptional(usage.safe_diagnostic, Limits.safe_diagnostic_bytes);
-    try validateSummaryError(usage.error_code, usage.safe_diagnostic);
-    switch (usage.availability) {
-        .unavailable, .loading => {
-            if (usage.today != null or usage.total != null or
-                usage.synced_at_unix_ms.len != 0)
-                return error.InconsistentState;
-        },
-        .ready, .stale => {
-            const today = usage.today orelse return error.InconsistentState;
-            const total = usage.total orelse return error.InconsistentState;
-            try validateUnsignedDecimal(today.input_tokens);
-            try validateUnsignedDecimal(today.output_tokens);
-            try validateUnsignedDecimal(today.cache_creation_tokens);
-            try validateUnsignedDecimal(today.cache_read_tokens);
-            try validateUnsignedDecimal(today.total_tokens);
-            try validateUnsignedDecimal(today.actual_cost_u);
-            try validateUnsignedDecimal(total.total_tokens);
-            try validateUnsignedDecimal(total.actual_cost_u);
-            try validateUnsignedDecimal(usage.synced_at_unix_ms);
-        },
-    }
 }
 
 fn validateHistory(history: UsageHistoryView) ValidationError!void {
@@ -495,17 +463,6 @@ fn validateSummaryError(error_code: ErrorCode, diagnostic: []const u8) Validatio
 fn isEmptySummary(summary: AccountSummaryView) bool {
     return summary.operation == .idle and
         summary.usage_eligibility == .unknown and
-        summary.wallet.availability == .unavailable and
-        summary.wallet.balance_u.len == 0 and
-        summary.wallet.synced_at_unix_ms.len == 0 and
-        summary.wallet.error_code == .none and
-        summary.wallet.safe_diagnostic.len == 0 and
-        summary.usage.availability == .unavailable and
-        summary.usage.today == null and
-        summary.usage.total == null and
-        summary.usage.synced_at_unix_ms.len == 0 and
-        summary.usage.error_code == .none and
-        summary.usage.safe_diagnostic.len == 0 and
         summary.history.availability == .unavailable and
         summary.history.start_date.len == 0 and
         summary.history.end_date.len == 0 and
@@ -516,20 +473,8 @@ fn isEmptySummary(summary: AccountSummaryView) bool {
 }
 
 fn validateUnsignedDecimal(value: []const u8) ValidationError!void {
-    try validateDecimal(value, false);
-}
-
-fn validateSignedDecimal(value: []const u8) ValidationError!void {
-    try validateDecimal(value, true);
-}
-
-fn validateDecimal(value: []const u8, signed: bool) ValidationError!void {
     try validateRequired(value, Limits.decimal_bytes);
     var index: usize = 0;
-    if (signed and value[0] == '-') {
-        if (value.len == 1) return error.InconsistentState;
-        index = 1;
-    }
     const integer_start = index;
     while (index < value.len and value[index] != '.') : (index += 1) {
         if (!std.ascii.isDigit(value[index])) return error.InconsistentState;
@@ -545,8 +490,6 @@ fn validateDecimal(value: []const u8, signed: bool) ValidationError!void {
         }
         if (value[value.len - 1] == '0') return error.InconsistentState;
     }
-    if (value[0] == '-' and value.len == 2 and value[1] == '0')
-        return error.InconsistentState;
 }
 
 pub fn validateFact(fact: AccountFact) ValidationError!void {
@@ -605,27 +548,8 @@ test "Account view validates identity and nested summary independently" {
         .state = .authenticated,
         .account_id = "account-1",
         .display_name = "Metask User",
-        .concurrency_limit = 5,
         .summary = .{
             .usage_eligibility = .enabled,
-            .wallet = .{
-                .availability = .ready,
-                .balance_u = "-1.25",
-                .synced_at_unix_ms = "1000",
-            },
-            .usage = .{
-                .availability = .ready,
-                .today = .{
-                    .input_tokens = "1",
-                    .output_tokens = "2",
-                    .cache_creation_tokens = "3",
-                    .cache_read_tokens = "4",
-                    .total_tokens = "10",
-                    .actual_cost_u = "0.5",
-                },
-                .total = .{ .total_tokens = "20", .actual_cost_u = "1" },
-                .synced_at_unix_ms = "1000",
-            },
             .history = .{
                 .availability = .ready,
                 .start_date = "2025-09-15",
@@ -651,25 +575,11 @@ test "Account view validates identity and nested summary independently" {
         .state = .authenticated,
         .account_id = "account-1",
         .display_name = "Metask User",
-        .concurrency_limit = 5,
         .summary = .{
             .usage_eligibility = .disabled,
-            .usage = .{
+            .history = .{
                 .availability = .unavailable,
                 .error_code = .metask_service_unavailable,
-            },
-        },
-    }));
-    try std.testing.expectError(error.InconsistentState, validateView(.{
-        .state = .authenticated,
-        .account_id = "account-1",
-        .display_name = "Metask User",
-        .concurrency_limit = 5,
-        .summary = .{
-            .wallet = .{
-                .availability = .ready,
-                .balance_u = "01.25",
-                .synced_at_unix_ms = "1000",
             },
         },
     }));
@@ -678,7 +588,6 @@ test "Account view validates identity and nested summary independently" {
         .state = .authenticated,
         .account_id = "account-1",
         .display_name = "Metask User",
-        .concurrency_limit = 5,
         .summary = .{
             .usage_eligibility = .enabled,
             .history = .{

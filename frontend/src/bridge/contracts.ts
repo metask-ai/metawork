@@ -41,6 +41,7 @@ export type NotificationTextRegistration = {
   scheduleCompleted: string;
   scheduleFailed: string;
   scheduleSkipped: string;
+  scheduleModelUnavailable: string;
   scheduleNeedsAttention: string;
   runCompleted: string;
   runFailed: string;
@@ -61,18 +62,17 @@ export type NewTaskAdmissionReason =
 export type NewTaskMetaskAdmission = "none" | "recovering" | "unreachable";
 export type AccountErrorCode =
   | "none"
-  | "invalid_command"
   | "invalid_state"
   | "operation_in_progress"
   | "oauth_bind_failed"
   | "oauth_browser_open_failed"
   | "oauth_callback_rejected"
-  | "oauth_state_mismatch"
   | "oauth_exchange_failed"
   | "user_cancelled"
   | "deadline_exceeded"
   | "token_refresh_failed"
   | "metask_unauthorized"
+  | "metask_token_invalid"
   | "metask_rate_limited"
   | "metask_service_unavailable"
   | "metask_protocol_invalid"
@@ -198,45 +198,49 @@ export type ModelMetadata = {
     };
   };
 };
+export const accountAttemptActions = [
+  "begin_login",
+  "cancel_operation",
+  "retry_refresh",
+  "refresh_summary",
+  "logout",
+] as const;
+export const accountAttemptOutcomes = [
+  "succeeded",
+  "failed",
+  "cancelled",
+] as const;
+/** The person's own latest command, under the receipt its acceptance gave. */
+export type AccountAttempt = {
+  id: string;
+  action: (typeof accountAttemptActions)[number];
+  /** Null while what it began is underway. */
+  outcome: (typeof accountAttemptOutcomes)[number] | null;
+  errorCode: AccountErrorCode;
+  safeDiagnostic: string;
+};
 export type AccountView = {
   state: AccountState;
-  canCancel: boolean;
-  canRetry: boolean;
+  /** What the person may do now; the interface offers nothing else. */
+  actions: {
+    cancel: boolean;
+    retry: boolean;
+    login: boolean;
+    logout: boolean;
+    clear: boolean;
+  };
+  /** A held or verified login waits out a failure to reach Metask. */
+  unreachable: boolean;
+  attempt: AccountAttempt | null;
   accountId: string;
   displayName: string;
   emailHint: string;
   phoneHint: string;
-  concurrencyLimit: number | null;
   errorCode: AccountErrorCode;
   safeDiagnostic: string;
   summary: {
     operation: "idle" | "refreshing";
     usageEligibility: "unknown" | "disabled" | "enabled";
-    wallet: {
-      availability: "unavailable" | "loading" | "ready" | "stale";
-      balanceU: string | null;
-      syncedAt: string | null;
-      errorCode: AccountErrorCode;
-      safeDiagnostic: string;
-    };
-    usage: {
-      availability: "unavailable" | "loading" | "ready" | "stale";
-      today: {
-        inputTokens: string;
-        outputTokens: string;
-        cacheCreationTokens: string;
-        cacheReadTokens: string;
-        totalTokens: string;
-        actualCostU: string;
-      } | null;
-      total: {
-        totalTokens: string;
-        actualCostU: string;
-      } | null;
-      syncedAt: string | null;
-      errorCode: AccountErrorCode;
-      safeDiagnostic: string;
-    };
     history: {
       availability: "unavailable" | "loading" | "ready" | "stale";
       startDate: string | null;
@@ -751,6 +755,14 @@ export type ScheduledTaskBinding = {
 export type ScheduledTaskStoredBinding = {
   status: "bound";
 } & ScheduledTaskBinding;
+/** What the Host judges the binding allows now; published, never stored. */
+export type ScheduledTaskAdmission =
+  | "runnable"
+  | "waiting"
+  | "signed_out"
+  | "other_account"
+  | "model_unavailable"
+  | "source_changed";
 export type ScheduledTaskView = {
   id: string;
   epoch: string;
@@ -771,6 +783,7 @@ export type ScheduledTaskView = {
     | "host_interrupted"
     | "permission_required"
     | null;
+  admission: ScheduledTaskAdmission;
   binding: ScheduledTaskStoredBinding;
   input: {
     kind: "text";
@@ -859,6 +872,7 @@ export type RunInputSkillView = {
 export const runCauses = [
   "user_cancel",
   "approval_mode_change",
+  "account_logout",
   "edit_and_rerun",
   "timeout",
   "session_close",
@@ -917,7 +931,10 @@ export const runGuidances = [
   "review_image_input",
   "none",
 ] as const;
-export const runProviderReasons = ["metask_insufficient_balance"] as const;
+export const runProviderReasons = [
+  "metask_insufficient_balance",
+  "metask_account_suspended",
+] as const;
 export type RunFeedback = {
   guidance: (typeof runGuidances)[number];
   reason: (typeof runProviderReasons)[number] | null;
@@ -1135,6 +1152,7 @@ export const compactPhases = [
 export type CompactPhase = (typeof compactPhases)[number];
 export const compactCauses = [
   "user_cancel",
+  "account_logout",
   "session_close",
   "app_shutdown",
   "resource_limit",
@@ -1736,6 +1754,8 @@ export type WorkbenchSnapshot = {
   account: AccountView;
   models: ModelsView;
   newTaskAdmission: NewTaskAdmissionView;
+  /** Tasks whose Metask Run or compaction signing out would stop now. */
+  metaskStopTargets: number;
   skillCatalog: SkillCatalogView;
   skillManagement: SkillManagementView | null;
   mcp: McpManagementView | null;

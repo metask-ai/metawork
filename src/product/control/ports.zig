@@ -13,21 +13,19 @@ const workspace = @import("metawork_product_workspace");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
 
-/// One committed Account revision delivered to Product Control. Attempt
-/// identity remains explicit for Account command lifecycle observation; model
+/// One committed Account revision delivered to Product Control. Model
 /// availability is owned and delivered independently by Models.
 pub const AccountCommit = struct {
     fact: account.AccountFact,
-    attempt_id: ?u64,
-    attempt_terminal: bool,
     /// An access token was installed or ended. Product inspects what its
     /// visitor lends from now on; no token is handed over here.
     token_changed: bool = false,
+    /// The person signed out: what runs on their Metask login stops.
+    logged_out: bool = false,
 
     pub fn assertValid(self: AccountCommit) void {
         account.validateFact(self.fact) catch
             @panic("Account commit sink received an invalid Account fact");
-        std.debug.assert(!self.attempt_terminal or self.attempt_id != null);
     }
 };
 
@@ -128,6 +126,7 @@ pub const MetaskCredentialRenewal = struct {
     renew_fn: *const fn (*anyopaque, u64, []const u8) void,
     needs_fn: *const fn (*anyopaque, u64) bool,
     waits_fn: *const fn (*anyopaque, u64) bool,
+    holds_fn: *const fn (*anyopaque) bool,
     retire_fn: *const fn (*anyopaque, []const u8) void,
 
     pub fn renew(self: MetaskCredentialRenewal, generation: u64, credential: []const u8) void {
@@ -147,6 +146,12 @@ pub const MetaskCredentialRenewal = struct {
     /// A message waits for the attempt that ends this epoch.
     pub fn waits(self: MetaskCredentialRenewal, epoch: u64) bool {
         return self.waits_fn(self.context, epoch);
+    }
+
+    /// A Run uses a Metask credential now: its model, or an image or a video
+    /// it makes.
+    pub fn holds(self: MetaskCredentialRenewal) bool {
+        return self.holds_fn(self.context);
     }
 };
 

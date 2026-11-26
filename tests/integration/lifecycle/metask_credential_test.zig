@@ -215,7 +215,7 @@ test "Metask restart without a connection keeps the login and each message waits
     try characterizeCredentialExpiry(.restart_unreachable);
 }
 
-test "Metask login cancelled on a signed-in account refetches the same generation's catalog" {
+test "Metask sign-in over a signed-in account is refused and keeps its generation and catalog" {
     try characterizeCredentialExpiry(.login_cancelled);
 }
 
@@ -849,6 +849,12 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     if (login_during_run) {
         const logout = scenario == .logout_during_run;
         if (logout) {
+            // An Account commit that is no sign-out stops nothing.
+            control.commitAccountChangeNoFail(.{ .fact = .{ .view = accounts.runtime.view() } });
+            try std.testing.expectEqual(.none, old.durable.runs[1].?.pending_termination.load(.acquire));
+            // A message waits behind the Run that signing out stops.
+            const behind = try control.sendInput("behind-the-run", old_id, .{ .text = "Then reply once more." });
+            try std.testing.expectEqual(.accepted, behind.outcome);
             try signOut(&accounts);
         } else {
             if (scenario == .account_switch_during_run) network.login_principal = switched_principal;
@@ -858,7 +864,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         }
         // A new login renews the admitted Run's Session like a token refresh;
         // logout leaves the credential it already holds. Neither changes its
-        // binding or execution generation, or interrupts the Run.
+        // binding or execution generation; only a logout stops the Run.
         const held = if (logout) access_a else access_b;
         try std.testing.expectEqualStrings(held, old.runtime.executionConst().?.secret);
         try std.testing.expectEqualDeep(fixture.credentialDigest(held), fake_core.sessions[0].credential_digest);
@@ -872,12 +878,36 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
             if (old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         } else return error.RunDidNotSettle;
-        try std.testing.expectEqual(.completed, fixture.product_task.testing.state_module.productTerminalFacts(&old.durable.runs[1].?).?.outcome);
+        // The fake core remembers the stop until it is rearmed, unlike Core;
+        // the next Run then finishes as the held one would have.
+        fake_core.rearmControlled();
+        fake_core.releaseControlled();
+        const terminal = fixture.product_task.testing.state_module.productTerminalFacts(&old.durable.runs[1].?).?;
         try std.testing.expectEqual(@as(usize, 2), runCalls());
         try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+        // Signing out, also on the way to another login, stopped the Run on
+        // that login, for that reason.
+        try std.testing.expectEqual(@as(?@TypeOf(terminal.cause.?), .account_logout), terminal.cause);
         if (logout) {
-            try expectBlockedFor(&control, old_id, "after-logout-run", .metask_authorization_required);
+            // The stop did not fail it: it waited for a login and failed for
+            // want of one, keeping what it said.
+            const behind = control.task_runtime.retrySubmission(old_id, "behind-the-run") orelse
+                return error.MessageBehindTheRunDidNotFail;
+            try std.testing.expectEqual(.metask_authorization_required, behind.reason.?);
+            try std.testing.expect(behind.retry_payload != null);
             try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
+            // Signed in again, it is sent again.
+            network.expected_access = access_b;
+            try relogin(&accounts);
+            try drainCatalog(&coordinator);
+            const resent = try control.retryTaskInput(old_id, "behind-the-run", "behind-the-run-again");
+            try std.testing.expectEqual(.accepted, resent.outcome);
+            for (0..5000) |_| {
+                try wake_loop.drain(&control);
+                if (control.task_runtime.hasInputReceipt(old_id, "behind-the-run-again") and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.ResentMessageDidNotRun;
+            try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
             return;
         }
         try expectOldTaskAdoptsLogin(&wake_loop, &control, old_id, "after-login-run", 1);
@@ -1155,7 +1185,9 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
                     try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
                 } else return error.RestoreDidNotSettle;
                 const source = old.durable.runs[1].?;
-                try std.testing.expectEqual(if (scenario == .continuation_cancelled) fixture.product_task.RunOutcome.cancelled else .completed, fixture.product_task.testing.state_module.productTerminalFacts(&source).?.outcome);
+                // A relogin signs out first, which stops the Run.
+                const stopped = scenario == .continuation_cancelled or scenario == .continuation_stale_auth;
+                try std.testing.expectEqual(if (stopped) fixture.product_task.RunOutcome.cancelled else .completed, fixture.product_task.testing.state_module.productTerminalFacts(&source).?.outcome);
                 try std.testing.expect(source.input_continuation_failure != null);
                 try std.testing.expect(!source.input_continuation_pending);
                 try std.testing.expectEqual(.unadopted, source.additional_inputs[0].?.state);
@@ -1331,8 +1363,9 @@ fn characterizeRenewal(
             defer restored.deinit();
             try std.testing.expect(!restarted.takeRefreshAfterCommit(&restored));
             restarted.commit(&restored);
+            // What may have been spent was deleted, so nothing is left to try.
             try std.testing.expectEqual(.signed_out, restarted.view().state);
-            try std.testing.expectEqual(.token_refresh_failed, restarted.view().error_code);
+            try std.testing.expectEqual(.none, restarted.view().error_code);
             try std.testing.expectEqual(@as(usize, 1), network.refresh_attempts.load(.acquire));
         },
         else => unreachable,
@@ -1380,7 +1413,8 @@ fn characterizeRecovery(
     network.expected_access = access_b;
     platform.now_unix_seconds = 231;
     try std.testing.expect(accounts.tick());
-    try std.testing.expectEqual(.recovering, control.newTaskAdmissionView().metask);
+    // The retry keeps showing the failure until it has a result of its own.
+    try std.testing.expectEqual(.@"unreachable", control.newTaskAdmissionView().metask);
     try std.testing.expectEqual(.ready, control.modelsView().providers[0].catalog_state);
     account.TestSupport.joinNetwork(accounts.runtime);
     accounts.drain();
@@ -1492,33 +1526,36 @@ fn characterizeUnreachableRestart(
     try restartAccount(control, accounts, platform, coordinator, network);
     _ = try control.sendInput("while-checking", task_id, .{ .text = "Reply with a short text; do not call tools." });
     for ([_]i64{ 100, 130 }) |now| {
-        // A second attempt, not waited for by anyone, doubles the distance.
+        // Nothing reached the server: it is tried every thirty seconds.
         platform.now_unix_seconds = now;
         _ = accounts.tick();
         account.TestSupport.joinNetwork(accounts.runtime);
         accounts.drain();
     }
     try std.testing.expectEqual(.checking, control.accountView().state);
-    try std.testing.expect(control.accountView().can_retry);
+    try std.testing.expect(control.accountView().actions.retry);
     try std.testing.expectEqual(.@"unreachable", control.newTaskAdmissionView().metask);
     control.syncLifecycle();
     const unsent = control.task_runtime.retrySubmission(task_id, "while-checking") orelse
         return error.WaitingMessageDidNotFail;
     try std.testing.expectEqual(.metask_connection_unavailable, unsent.reason.?);
 
-    // The resend waits for the next attempt, and brings it forward.
+    // The resend waits for the next attempt.
     network.refresh_failure = null;
     network.expected_access = access_b;
-    platform.now_unix_seconds = 160;
+    platform.now_unix_seconds = 159;
     try std.testing.expect(!accounts.tick());
     const resent = try control.retryTaskInput(task_id, "while-checking", "resent-while-checking");
     try std.testing.expectEqual(.accepted, resent.outcome);
     try std.testing.expectEqual(.waiting, lastSubmission(control.testTask(task_id).?).state);
+    try wake_loop.drain(control);
+    try std.testing.expect(!accounts.tick());
+    platform.now_unix_seconds = 160;
     for (0..5000) |_| {
         try wake_loop.drain(control);
         if (accounts.tick()) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-    } else return error.ResendBroughtNothingForward;
+    } else return error.NextAttemptDidNotStart;
     try std.testing.expect(accounts.runtime.account.refreshInFlight());
     try confirmLogin(control, accounts);
     try std.testing.expectEqual(@as(usize, 3), network.refresh_attempts.load(.acquire));
@@ -1526,8 +1563,8 @@ fn characterizeUnreachableRestart(
     try expectWaitingInputRuns(wake_loop, control, task_id, "resent-while-checking");
 }
 
-/// Cancelling returns to the same credential generation, whose catalog the
-/// login had given up.
+/// A sign-in is refused over a verified login: its generation, its catalog
+/// and the next Run are untouched, and there is nothing to cancel.
 fn characterizeCancelledLogin(
     wake_loop: *fixture.LifecycleWakeLoop,
     control: *control_api.Runtime,
@@ -1536,14 +1573,12 @@ fn characterizeCancelledLogin(
     network: *Network,
     task_id: u64,
 ) !void {
+    _ = coordinator;
     const generation = accounts.runtime.authorization().use().ready;
-    try std.testing.expect(account_coordinator.TestSupport.commit(accounts, account.TestSupport.prepareBeginLoginWithoutEffect(accounts.runtime)).accepted);
-    try std.testing.expectEqual(.needs_authentication, control.modelsView().providers[0].catalog_state);
-    try expectBlockedFor(control, task_id, "while-authorizing", .metask_authorization_required);
-    try std.testing.expect(accounts.commandSink().submit(.cancel_operation).accepted);
+    try std.testing.expect(!accounts.commandSink().submit(.begin_login).accepted);
+    try std.testing.expect(!accounts.commandSink().submit(.cancel_operation).accepted);
     try std.testing.expectEqual(generation, accounts.runtime.authorization().use().ready);
-    try drainCatalog(coordinator);
-    try std.testing.expectEqual(@as(usize, 2), network.catalog_calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), network.catalog_calls.load(.acquire));
     try std.testing.expectEqual(.ready, control.modelsView().providers[0].catalog_state);
     try runAndExpect(wake_loop, control, task_id, "after-cancel", .completed);
 }
@@ -1602,10 +1637,13 @@ fn copyTestImage(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8
 }
 
 /// A new OAuth login. Its every commit goes through the Account coordinator,
-/// so Product, running executions and the catalog see each step.
+/// so Product, running executions and the catalog see each step. A verified
+/// login is never replaced by a sign-in, so it signs out first, as changing
+/// accounts does.
 fn relogin(accounts: *account_coordinator.Coordinator) !void {
     const runtime = accounts.runtime;
     const commit = account_coordinator.TestSupport.commit;
+    if (runtime.view().state == .authenticated) try signOut(accounts);
     try std.testing.expect(commit(accounts, account.TestSupport.prepareBeginLoginWithoutEffect(runtime)).accepted);
     var input = try account.TestSupport.exchangeInput(std.testing.allocator, "synthetic-authorization-code");
     defer input.deinit();

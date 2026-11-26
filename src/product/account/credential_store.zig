@@ -85,22 +85,28 @@ pub const RestoredAccount = struct {
 
 pub const RestoreResult = union(enum) {
     signed_out,
-    blocked,
+    /// The refresh token its marker blocks, to be revoked.
+    blocked: oauth.Secret,
     account: RestoredAccount,
 
     pub fn deinit(self: *RestoreResult) void {
         switch (self.*) {
             .account => |*account| account.deinit(),
-            .signed_out, .blocked => {},
+            .blocked => |*token| token.deinit(),
+            .signed_out => {},
         }
         self.* = .signed_out;
     }
 };
 
+/// The store holds a marker that is not one this version writes. Reading it
+/// again cannot change that; a new login replaces it.
+pub const RecordError = error{InvalidRecord};
+
 pub fn restore(
     allocator: std.mem.Allocator,
     backend: Backend,
-) (StoreError || std.mem.Allocator.Error || oauth.ProtocolError)!RestoreResult {
+) (StoreError || RecordError || std.mem.Allocator.Error || oauth.ProtocolError)!RestoreResult {
     var refresh_storage: [oauth.Limits.secret_bytes]u8 = undefined;
     defer std.crypto.secureZero(u8, &refresh_storage);
     const refresh_token = try backend.getRefreshToken(&refresh_storage);
@@ -108,13 +114,15 @@ pub fn restore(
     defer std.crypto.secureZero(u8, &marker_storage);
     const marker = try backend.get_refresh_marker_fn(backend.context, &marker_storage);
     if (marker) |value| {
-        if (!validMarker(value)) return error.ReadFailed;
+        if (!validMarker(value)) return error.InvalidRecord;
         if (refresh_token) |token| {
             var expected = refreshMarker(token);
             defer std.crypto.secureZero(u8, &expected);
-            if (std.crypto.timing_safe.eql([marker_bytes]u8, expected, value[0..marker_bytes].*)) return .blocked;
+            if (std.crypto.timing_safe.eql([marker_bytes]u8, expected, value[0..marker_bytes].*))
+                return .{ .blocked = try oauth.Secret.init(allocator, token) };
         } else {
-            try backend.clearRefreshMarker();
+            // A marker without its token blocks nothing it could match.
+            backend.clearRefreshMarker() catch {};
         }
     }
     if (refresh_token == null) return .signed_out;
@@ -132,9 +140,11 @@ pub fn commitRefresh(
 
 /// Logout revokes only Account-owned durable authorization. Models owns and
 /// preserves provider/default intent independently of the identity session.
+/// Once the token is gone its marker blocks nothing, so failing to delete it
+/// is no failure.
 pub fn commitSignedOut(backend: Backend) StoreError!void {
     try backend.deleteRefreshToken();
-    try backend.clearRefreshMarker();
+    backend.clearRefreshMarker() catch {};
 }
 
 const FakeBackend = struct {
@@ -270,12 +280,18 @@ test "restart blocks the consumed candidate and accepts a committed replacement"
 test "restart rejects unknown markers and cleans token-free residues" {
     var fake: FakeBackend = .{ .marker = refreshMarker("old-token") };
     fake.marker.?[0] = 'x';
-    try std.testing.expectError(error.ReadFailed, restore(std.testing.allocator, fake.backend()));
+    try std.testing.expectError(error.InvalidRecord, restore(std.testing.allocator, fake.backend()));
     fake.marker = refreshMarker("old-token");
     var empty = try restore(std.testing.allocator, fake.backend());
     defer empty.deinit();
     try std.testing.expect(empty == .signed_out);
     try std.testing.expect(fake.marker == null);
+    // One that cannot be cleaned is still no login and no failure.
+    fake.marker = refreshMarker("old-token");
+    fake.marker_delete_fails = true;
+    var kept = try restore(std.testing.allocator, fake.backend());
+    defer kept.deinit();
+    try std.testing.expect(kept == .signed_out);
 }
 
 test "logout never clears the blocking marker before token deletion succeeds" {
@@ -284,7 +300,8 @@ test "logout never clears the blocking marker before token deletion succeeds" {
     try std.testing.expect(fake.marker != null);
     fake.delete_fails = false;
     fake.marker_delete_fails = true;
-    try std.testing.expectError(error.DeleteFailed, commitSignedOut(fake.backend()));
+    // Only the marker left: the logout is done.
+    try commitSignedOut(fake.backend());
     try std.testing.expect(fake.refresh_token == null);
     try std.testing.expect(fake.marker != null);
 }

@@ -416,6 +416,8 @@ pub fn build(b: *std.Build) void {
             b.step("test-product-task-persistence", "Run Product Task history codec and restore tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_task_runtime)
             b.step("test-product-task-runtime", "Run Product Task runtime kernel tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_task_policy)
+            b.step("test-product-task-policy", "Run Product Task outcome and feedback policy tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_task_execution)
             b.step("test-product-task-execution", "Run Product Task executor and terminal publication tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_control_runtime)
@@ -501,6 +503,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"image Run"},
         })).step);
     }
+    b.step("test-models-coordinator", "Run Models coordinator catalog and media preparation tests")
+        .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.models_coordinator })).step);
     const model_metadata_step = b.step("test-model-metadata", "Run Models declarations, resolution and Host/Renderer contract tests");
     for ([_]*std.Build.Module{ test_modules.models_contract, test_modules.models_metask, test_modules.models_providers, test_modules.models_runtime }) |module| {
         model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
@@ -630,6 +634,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-state-focused", .root_module = test_modules.account_state },
         .{ .name = "metawork-account-runtime-focused", .root_module = test_modules.account_runtime },
         .{ .name = "metawork-account-focused", .root_module = test_modules.account },
+        .{ .name = "metawork-metask-http-transport-focused", .root_module = test_modules.metask_http_transport },
     };
     for (account_focused_modules) |spec| {
         const tests = b.addTest(.{
@@ -1093,6 +1098,7 @@ const WiredModules = struct {
     video_output: *std.Build.Module,
     output_file: *std.Build.Module,
     account_coordinator: *std.Build.Module,
+    metask_http_transport: *std.Build.Module,
     models_coordinator: *std.Build.Module,
     product_workspace_view: *std.Build.Module,
     product_schedule: *std.Build.Module,
@@ -2927,6 +2933,17 @@ fn wireAgentCore(
     account_coordinator.addImport("metawork_account", account);
     account_coordinator.addImport("metawork_account_contract", account_contract);
     account_coordinator.addImport("metawork_product_control_ports", product_control_ports);
+    // Compiled into the app; a module of its own so test-account runs its tests.
+    const metask_http_transport = b.createModule(.{
+        .root_source_file = b.path("src/app/metask_http_transport.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    metask_http_transport.addImport("metawork_http_transport", metawork_http_transport);
+    metask_http_transport.addImport("account_oauth", account_oauth);
+    metask_http_transport.addImport("metask_client", metask_client);
+    metask_http_transport.addImport("metask_transport", metask_transport);
+    metask_http_transport.addImport("product_models_metask", models_metask);
     const models_coordinator = b.createModule(.{
         .root_source_file = b.path("src/app/models_coordinator.zig"),
         .target = target,
@@ -3101,6 +3118,7 @@ fn wireAgentCore(
         .video_output = video_output,
         .output_file = output_file,
         .account_coordinator = account_coordinator,
+        .metask_http_transport = metask_http_transport,
         .models_coordinator = models_coordinator,
         .product_workspace_view = product_workspace_view,
         .product_schedule = product_schedule,

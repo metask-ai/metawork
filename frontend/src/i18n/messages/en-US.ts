@@ -78,6 +78,8 @@ export const enUS = {
     "The model service could not complete this request.",
   "run.model_error.reason.metask_insufficient_balance":
     "Your Metask balance and plan quota are insufficient.",
+  "run.model_error.reason.metask_account_suspended":
+    "Your Metask account is suspended. See the Metask website for details.",
   "run.guidance.review_context":
     "Shorten your next message or compact the conversation when available.",
   "run.guidance.revise_instruction":
@@ -509,9 +511,14 @@ export const enUS = {
   "account.retry_refresh": "Retry sign-in refresh",
   "account.retry_now": "Try again now",
   "account.login_again": "Sign in again",
+  "account.clear_residue": "Clear sign-in again",
   "account.logout": "Sign out",
   "account.logout_confirm":
-    "Signing out removes your Metask sign-in credentials from this device. Sign in again to create new tasks using Metask models. Your custom models, local tasks and history, and workspace files will remain.",
+    "After you sign out, you can't use Metask models until you sign in again. Your custom models, local tasks and history, and workspace files will remain.",
+  "account.logout_stops_tasks.one":
+    "{count} task is using Metask models and will stop when you sign out.",
+  "account.logout_stops_tasks.other":
+    "{count} tasks are using Metask models and will stop when you sign out.",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.command_failed":
@@ -1767,15 +1774,9 @@ export const enUS = {
   "settings.account_usage": "Account usage",
   "settings.account_usage_scope":
     "These figures cover your whole Metask account, not only activity in MetaWork.",
-  "settings.account_usage_balance": "Balance",
-  "settings.account_concurrency_limit": "Concurrency allowance {value}",
-  "settings.account_concurrency_unlimited": "Unlimited",
   "settings.account_recharge": "Recharge",
   "settings.account_recharge_browser_hint":
     "Open the Metask recharge page in your browser",
-  "settings.account_usage_total": "All time",
-  "settings.account_usage_tokens": "{value} Token",
-  "settings.account_usage_cost": "{value} U",
   "settings.account_usage_stale": "May be out of date",
   "settings.account_usage_syncing": "Syncing…",
   "settings.account_usage_unavailable": "Temporarily unavailable",
@@ -1978,6 +1979,7 @@ export const enUS = {
   "outcome.dependency_contract_failure": "Task runtime failed",
   "cause.user_cancel": "Stopped by you",
   "cause.approval_mode_change": "Stopped to change the approval mode",
+  "cause.account_logout": "Stopped to sign out",
   "cause.edit_and_rerun": "Stopped to rerun from an edited message",
   "cause.timeout": "Timed out",
   "cause.session_close": "Session released",
@@ -2345,12 +2347,20 @@ export const enUS = {
     "The app interrupted the previous start. Edit and confirm; it will not retry automatically.",
   "scheduled.reason.permission_required":
     "The task stopped because permission was required. Review the instruction and permissions, then edit and confirm.",
+  "scheduled.admission.waiting": "Runs once your account or model is ready.",
+  "scheduled.admission.signed_out": "Runs after you sign in to Metask.",
+  "scheduled.admission.other_account":
+    "Bound to another Metask account. Switch back to it, or edit it to use a model from this account.",
+  "scheduled.admission.model_unavailable":
+    "The selected model is no longer available, so it will not run. Edit it to choose another model.",
   "scheduled.notification_unavailable":
     "The task from this notification is unavailable. Refresh and check your tasks.",
   "notification.schedule.completed": "Scheduled task completed",
   "notification.schedule.failed": "Scheduled task failed",
   "notification.schedule.skipped":
     "A run was skipped because the previous run is still active",
+  "notification.schedule.model_unavailable":
+    "A run was skipped because its model is no longer available",
   "notification.schedule.needs_attention": "Scheduled task needs attention",
   "notification.run.completed": "Task finished",
   "notification.run.failed": "Task failed",

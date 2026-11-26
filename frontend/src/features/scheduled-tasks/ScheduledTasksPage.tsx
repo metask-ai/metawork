@@ -102,10 +102,15 @@ function draftFromTask(task: ScheduledTaskView): Draft {
   return {
     modelId: modelOptionId(task.binding.modelRef),
     // Confirming an invalidated connection must renew its model proof, even
-    // when the user keeps the same model. Ordinary edits retain the binding.
+    // when the user keeps the same model, and so must a binding the Host
+    // says cannot run as it is. Signed out there is nothing to choose, so
+    // that keeps the binding. Ordinary edits retain it too.
     modelChanged:
-      task.health === "needs_attention" &&
-      task.failureReason === "execution_changed",
+      (task.health === "needs_attention" &&
+        task.failureReason === "execution_changed") ||
+      task.admission === "model_unavailable" ||
+      task.admission === "source_changed" ||
+      task.admission === "other_account",
     title: task.title,
     text: task.input.text,
     permissionProfile: task.permissionProfile,
@@ -472,6 +477,19 @@ export function ScheduledTasksPage({
     return `${t("scheduled.every")} ${seconds / 60} ${t("scheduled.minutes")}`;
   }
 
+  // Why an enabled plan will not run as listed, as the Host judged it. A wait
+  // that has not reached its time yet says nothing.
+  function admissionNote(task: ScheduledTaskView) {
+    if (!task.enabled || task.admission === "runnable") return null;
+    if (task.admission === "waiting")
+      return Number(task.nextRunAtUnixSeconds) * 1000 <= now
+        ? t("scheduled.admission.waiting")
+        : null;
+    if (task.admission === "source_changed")
+      return t("scheduled.reason.execution_changed");
+    return t(`scheduled.admission.${task.admission}`);
+  }
+
   function nextRunLabel(unixSeconds: string) {
     const remainingMs = Number(unixSeconds) * 1000 - now;
     if (remainingMs <= 0) return t("scheduled.awaiting_run");
@@ -624,6 +642,10 @@ export function ScheduledTasksPage({
                     <ul className="scheduled-list" aria-label={group.label}>
                       {group.tasks.map((task) => {
                         const latestOccurrence = task.occurrences.at(-1);
+                        // The note replaces a next run that would not happen.
+                        const admissionText = admissionNote(task);
+                        const nextRun =
+                          !admissionText && task.nextRunAtUnixSeconds;
                         return (
                           <li key={task.id} data-health={task.health}>
                             <div className="scheduled-row-main">
@@ -637,7 +659,7 @@ export function ScheduledTasksPage({
                                   <span className="scheduled-row-frequency">
                                     {recurrenceLabel(task)}
                                   </span>
-                                  {task.nextRunAtUnixSeconds && (
+                                  {nextRun && (
                                     <time
                                       className="scheduled-row-next"
                                       dateTime={new Date(
@@ -653,7 +675,7 @@ export function ScheduledTasksPage({
                                       <span className="sr-only">
                                         {t("scheduled.next_run")}{" "}
                                       </span>
-                                      {nextRunLabel(task.nextRunAtUnixSeconds)}
+                                      {nextRunLabel(nextRun)}
                                     </time>
                                   )}
                                 </span>
@@ -692,6 +714,11 @@ export function ScheduledTasksPage({
                                     {t(
                                       `scheduled.reason.${task.failureReason}`,
                                     )}
+                                  </span>
+                                )}
+                                {admissionText && (
+                                  <span className="scheduled-row-reason">
+                                    {admissionText}
                                   </span>
                                 )}
                               </span>

@@ -450,7 +450,7 @@ pub fn cancelCompact(context: *anyopaque) void {
         job.projector,
         compact,
         .aborted,
-        policy.compactCauseForInterruption(interruption),
+        policy.productCompactCause(compact, policy.compactCauseForInterruption(interruption)),
         if (interruption == .user_cancel) .reusable else .closing,
         .{},
         0,
@@ -692,7 +692,7 @@ fn commitCompactTerminal(
         projector,
         compact,
         decision.phase,
-        decision.cause,
+        policy.productCompactCause(compact, decision.cause),
         result.session_disposition_at_completion,
         .{
             .input_tokens = result.input_tokens,

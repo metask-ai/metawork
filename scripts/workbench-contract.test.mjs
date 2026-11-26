@@ -310,21 +310,6 @@ test("review audit only describes once-only reviewer decisions and keeps legal o
 const emptyAccountSummary = {
   operation: "idle",
   usageEligibility: "unknown",
-  wallet: {
-    availability: "unavailable",
-    balanceU: null,
-    syncedAt: null,
-    errorCode: "none",
-    safeDiagnostic: "",
-  },
-  usage: {
-    availability: "unavailable",
-    today: null,
-    total: null,
-    syncedAt: null,
-    errorCode: "none",
-    safeDiagnostic: "",
-  },
   history: {
     availability: "unavailable",
     startDate: null,
@@ -1129,13 +1114,19 @@ test("durable Metask intent remains decodable when the current catalog is unavai
   catalogUnavailable.models = modelsUnavailableFixture;
   catalogUnavailable.account = {
     state: "signed_out",
-    canCancel: false,
-    canRetry: false,
+    actions: {
+      cancel: false,
+      retry: false,
+      login: false,
+      logout: false,
+      clear: false,
+    },
+    unreachable: false,
+    attempt: null,
     accountId: "",
     displayName: "",
     emailHint: "",
     phoneHint: "",
-    concurrencyLimit: null,
     errorCode: "none",
     safeDiagnostic: "",
     summary: emptyAccountSummary,
@@ -1152,14 +1143,16 @@ test("durable Metask intent remains decodable when the current catalog is unavai
   );
 });
 
-test("Account concurrency accepts the backend unlimited sentinel", () => {
-  const unlimited = clone(fixture);
-  unlimited.account.concurrencyLimit = 0;
-  assert.deepEqual(decodeWorkbenchSnapshot(unlimited), unlimited);
-
-  const invalid = clone(fixture);
-  invalid.account.concurrencyLimit = -1;
-  assert.throws(() => decodeWorkbenchSnapshot(invalid));
+test("Account publishes no concurrency allowance, wallet or usage totals", () => {
+  for (const mutate of [
+    (value) => (value.account.concurrencyLimit = null),
+    (value) => (value.account.summary.wallet = {}),
+    (value) => (value.account.summary.usage = {}),
+  ]) {
+    const invalid = clone(fixture);
+    mutate(invalid);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid), /expected keys/);
+  }
 });
 
 test("Models recovery-required health crosses the strict snapshot decoder", () => {
@@ -1811,6 +1804,7 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
       enabled: true,
       health: "ready",
       failureReason: null,
+      admission: "runnable",
       binding: {
         status: "bound",
         modelRef: { sourceId: "metask", modelId: "fixture-model" },
@@ -2557,13 +2551,19 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
   const snapshot = clone(fixture);
   snapshot.account = {
     state: "signed_out",
-    canCancel: false,
-    canRetry: false,
+    actions: {
+      cancel: false,
+      retry: false,
+      login: false,
+      logout: false,
+      clear: false,
+    },
+    unreachable: false,
+    attempt: null,
     accountId: "",
     displayName: "",
     emailHint: "",
     phoneHint: "",
-    concurrencyLimit: null,
     errorCode: "none",
     safeDiagnostic: "",
     summary: emptyAccountSummary,
@@ -3024,45 +3024,87 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   );
 
   const mismatchedCancellation = clone(fixture);
-  mismatchedCancellation.account.canCancel = true;
+  mismatchedCancellation.account.actions.cancel = true;
   assert.throws(
     () => decodeWorkbenchSnapshot(mismatchedCancellation),
     /cancellation requires active authorization/,
   );
 
-  for (const [state, errorCode, accepted] of [
-    ["checking", "metask_service_unavailable", true],
-    ["checking", "none", false],
-    ["signed_out", "token_refresh_failed", false],
-    ["authorizing", "metask_service_unavailable", false],
+  // One Account using all it may publish, then one breach of each rule.
+  const unreachableRetry = clone(fixture);
+  Object.assign(unreachableRetry.account, {
+    actions: { ...fixture.account.actions, retry: true, logout: true },
+    unreachable: true,
+    errorCode: "metask_service_unavailable",
+    attempt: {
+      id: "7",
+      action: "retry_refresh",
+      outcome: "failed",
+      errorCode: "metask_service_unavailable",
+      safeDiagnostic: "connect timed out",
+    },
+  });
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(unreachableRetry).account,
+    unreachableRetry.account,
+  );
+  const signedOutView = {
+    ...fixture.account,
+    state: "signed_out",
+    accountId: "",
+    displayName: "",
+    emailHint: "",
+    phoneHint: "",
+    summary: emptyAccountSummary,
+  };
+  const failed = unreachableRetry.account.attempt;
+  for (const [account, rule] of [
+    [
+      { actions: { ...fixture.account.actions, retry: true } },
+      /only a failure may be retried/,
+    ],
+    [
+      { actions: { ...fixture.account.actions, login: true } },
+      /only a login that is not verified may sign in again/,
+    ],
+    [
+      { actions: { ...fixture.account.actions, clear: true } },
+      /only a signed-out Account clears what was left/,
+    ],
+    [
+      { ...signedOutView, actions: { ...signedOutView.actions, logout: true } },
+      /a signed-out Account cannot sign out/,
+    ],
+    [
+      { ...signedOutView, unreachable: true },
+      /only a held or verified login waits to reach Metask/,
+    ],
+    [
+      { attempt: { ...failed, outcome: null } },
+      /an attempt underway has no result yet/,
+    ],
+    [
+      { attempt: { ...failed, errorCode: "none", safeDiagnostic: "" } },
+      /a failed attempt names its failure/,
+    ],
+    [
+      { attempt: { ...failed, outcome: "succeeded" } },
+      /a successful attempt has no error/,
+    ],
+    [
+      { attempt: { ...failed, outcome: "succeeded", errorCode: "none" } },
+      /safe diagnostic requires an Account error/,
+    ],
   ]) {
-    const retryable = clone(fixture);
-    Object.assign(retryable.account, {
-      state,
-      errorCode,
-      canRetry: true,
-      accountId: "",
-      displayName: "",
-      emailHint: "",
-      phoneHint: "",
-      concurrencyLimit: null,
-      safeDiagnostic: "",
-      summary: emptyAccountSummary,
-    });
-    if (accepted)
-      assert.equal(decodeWorkbenchSnapshot(retryable).account.canRetry, true);
-    else
-      assert.throws(
-        () => decodeWorkbenchSnapshot(retryable),
-        /only a failed check or renewal may be retried/,
-      );
+    const snapshot = clone(fixture);
+    Object.assign(snapshot.account, account);
+    assert.throws(() => decodeWorkbenchSnapshot(snapshot), rule);
   }
 
   const authenticatedWithoutDisplayName = clone(fixture);
   authenticatedWithoutDisplayName.account.displayName = "";
   authenticatedWithoutDisplayName.account.emailHint = "";
   authenticatedWithoutDisplayName.account.phoneHint = "138****8000";
-  authenticatedWithoutDisplayName.account.concurrencyLimit = null;
   assert.doesNotThrow(() =>
     decodeWorkbenchSnapshot(authenticatedWithoutDisplayName),
   );
@@ -3078,28 +3120,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   readySummary.account.summary = {
     operation: "idle",
     usageEligibility: "enabled",
-    wallet: {
-      availability: "ready",
-      balanceU: "-1.25",
-      syncedAt: "1720000000000",
-      errorCode: "none",
-      safeDiagnostic: "",
-    },
-    usage: {
-      availability: "ready",
-      today: {
-        inputTokens: "10",
-        outputTokens: "20",
-        cacheCreationTokens: "3",
-        cacheReadTokens: "4",
-        totalTokens: "37",
-        actualCostU: "0.125",
-      },
-      total: { totalTokens: "300", actualCostU: "2.5" },
-      syncedAt: "1720000000000",
-      errorCode: "none",
-      safeDiagnostic: "",
-    },
     history: {
       availability: "ready",
       startDate: "2025-09-15",
@@ -3131,11 +3151,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   };
   assert.deepEqual(decodeWorkbenchSnapshot(readySummary), readySummary);
   for (const mutate of [
-    (value) => (value.account.summary.wallet.balanceU = 1.25),
-    (value) => (value.account.summary.wallet.balanceU = "01.25"),
-    (value) => (value.account.summary.usage.today = null),
-    (value) => (value.account.summary.usage.total.actualCostU = "2.50"),
-    (value) => (value.account.summary.usage.extra = true),
     (value) => (value.account.summary.history.days[0].date = "2026-02-30"),
     (value) => (value.account.summary.history.days[1].date = "2026-09-14"),
     (value) => (value.account.summary.history.days[0].totalTokens = "010"),
@@ -3156,13 +3171,19 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const signedOut = clone(fixture);
   signedOut.account = {
     state: "signed_out",
-    canCancel: false,
-    canRetry: false,
+    actions: {
+      cancel: false,
+      retry: false,
+      login: false,
+      logout: false,
+      clear: false,
+    },
+    unreachable: false,
+    attempt: null,
     accountId: "",
     displayName: "",
     emailHint: "",
     phoneHint: "",
-    concurrencyLimit: null,
     errorCode: "none",
     safeDiagnostic: "",
     summary: emptyAccountSummary,

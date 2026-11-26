@@ -7,6 +7,7 @@ pub const authority = "https://www.metask-ai.com";
 pub const authorize_url = authority ++ "/oauth/authorize";
 pub const token_url = authority ++ "/api/oauth/token";
 pub const userinfo_url = authority ++ "/api/oauth/userinfo";
+pub const revoke_url = authority ++ "/api/oauth/revoke";
 pub const client_id = "metawork";
 pub const scope = "read model:invoke";
 pub const callback_path = "/auth/metask/callback";
@@ -68,14 +69,42 @@ pub fn buildAuthorizeUrl(
 
 pub const Callback = union(enum) {
     code: Secret,
-    rejected,
+    rejected: Refusal,
 
     pub fn deinit(self: *Callback) void {
         switch (self.*) {
             .code => |*value| value.deinit(),
             .rejected => {},
         }
-        self.* = .rejected;
+        self.* = .{ .rejected = .{} };
+    }
+};
+
+/// The authorization server's refusal (RFC 6749 section 4.1.2.1). Its
+/// `error` is kept only when it is an error code as the RFC writes them
+/// (lowercase letters and underscores); nothing else it said is kept.
+pub const Refusal = struct {
+    code_storage: [32]u8 = undefined,
+    code_len: usize = 0,
+
+    fn from(code_value: ?[]const u8) Refusal {
+        var result: Refusal = .{};
+        const value = code_value orelse return result;
+        if (value.len > result.code_storage.len) return result;
+        for (value) |byte| if (byte != '_' and (byte < 'a' or byte > 'z')) return result;
+        @memcpy(result.code_storage[0..value.len], value);
+        result.code_len = value.len;
+        return result;
+    }
+
+    pub fn code(self: *const Refusal) ?[]const u8 {
+        return if (self.code_len == 0) null else self.code_storage[0..self.code_len];
+    }
+
+    /// Only the person declining is a cancellation.
+    pub fn declined(self: *const Refusal) bool {
+        const value = self.code() orelse return false;
+        return std.mem.eql(u8, value, "access_denied");
     }
 };
 
@@ -132,7 +161,7 @@ pub fn parseCallbackTargetValidated(
     defer parsed.deinit();
     return switch (parsed) {
         .code => |code| .{ .code = try Secret.init(allocator, code.view()) },
-        .rejected => .rejected,
+        .rejected => |rejection| .{ .rejected = .from(rejection.errorCode()) },
     };
 }
 
@@ -226,7 +255,6 @@ pub const CurrentUser = struct {
     email_hint_len: usize = 0,
     phone_hint: [contract.Limits.phone_hint_bytes]u8 = undefined,
     phone_hint_len: usize = 0,
-    concurrency_limit: ?u32 = null,
 
     pub fn accountId(self: *const CurrentUser) []const u8 {
         return self.account_id[0..self.account_id_len];
@@ -253,8 +281,13 @@ const CurrentUserResponse = struct {
     // value must not make otherwise valid principal evidence fail login.
     name: std.json.Value = .null,
     email: std.json.Value = .null,
+    email_verified: std.json.Value = .null,
     phone_number: std.json.Value = .null,
 };
+
+/// Metask gives a person who signed up by phone an address of this domain
+/// that nobody verified; it is no address of theirs to show.
+const phone_placeholder_domain = "@phone.metask-ai.com";
 
 fn optionalText(output: []u8, value: std.json.Value) []const u8 {
     const text = switch (value) {
@@ -297,6 +330,20 @@ fn maskPhone(output: []u8, phone: []const u8) ProtocolError![]const u8 {
     const digits = if (phone[0] == '+') phone[1..] else phone;
     if (digits.len < 7 or digits.len > 20)
         return error.InvalidCurrentUserResponse;
+    // Metask sends the number already masked (`138****0000`): digits, one
+    // run of asterisks, digits. It is shown as it came.
+    if (std.mem.indexOfScalar(u8, digits, '*')) |first| {
+        const last = std.mem.lastIndexOfScalar(u8, digits, '*').?;
+        if (first == 0 or last + 1 == digits.len or phone.len > output.len)
+            return error.InvalidCurrentUserResponse;
+        for (digits, 0..) |byte, index| {
+            const masked = index >= first and index <= last;
+            if (if (masked) byte != '*' else (byte < '0' or byte > '9'))
+                return error.InvalidCurrentUserResponse;
+        }
+        @memcpy(output[0..phone.len], phone);
+        return output[0..phone.len];
+    }
     for (digits) |byte| {
         if (byte < '0' or byte > '9')
             return error.InvalidCurrentUserResponse;
@@ -342,8 +389,16 @@ pub fn parseCurrentUser(
     result.account_id_len = raw.sub.len;
     const username = optionalText(&result.username, raw.name);
     result.username_len = username.len;
+    const placeholder = switch (raw.email) {
+        .string => |email| raw.email_verified == .bool and !raw.email_verified.bool and
+            std.ascii.endsWithIgnoreCase(email, phone_placeholder_domain),
+        else => false,
+    };
     const email_hint = switch (raw.email) {
-        .string => |email| maskEmail(&result.email_hint, email) catch result.email_hint[0..0],
+        .string => |email| if (placeholder)
+            result.email_hint[0..0]
+        else
+            maskEmail(&result.email_hint, email) catch result.email_hint[0..0],
         else => result.email_hint[0..0],
     };
     result.email_hint_len = email_hint.len;
@@ -352,7 +407,6 @@ pub fn parseCurrentUser(
         else => result.phone_hint[0..0],
     };
     result.phone_hint_len = phone_hint.len;
-    result.concurrency_limit = null;
     return result;
 }
 
@@ -384,6 +438,21 @@ pub fn buildRefreshBody(
         .client_id = client_id,
         .refresh_token = refresh_token.view(),
     }) catch return error.BufferTooSmall;
+    return writer.buffered();
+}
+
+/// RFC 7009 revocation of a refresh token by this public client.
+pub fn buildRevokeBody(output: []u8, refresh_token: *const Secret) ProtocolError![]const u8 {
+    var writer = std.Io.Writer.fixed(output);
+    const pairs = [_]struct { []const u8, []const u8 }{
+        .{ "token", refresh_token.view() },
+        .{ "token_type_hint", "refresh_token" },
+        .{ "client_id", client_id },
+    };
+    for (pairs, 0..) |pair, index| {
+        if (index != 0) writer.writeByte('&') catch return error.BufferTooSmall;
+        mechanics.writeFormPair(&writer, pair[0], pair[1]) catch return error.BufferTooSmall;
+    }
     return writer.buffered();
 }
 
@@ -577,7 +646,6 @@ test "current user decoder binds the principal and projects optional profile fie
     try std.testing.expectEqualStrings("Meta User", info.usernameView());
     try std.testing.expectEqualStrings("u***@example.com", info.emailHintView());
     try std.testing.expectEqualStrings("138****8000", info.phoneHintView());
-    try std.testing.expectEqual(@as(?u32, null), info.concurrency_limit);
     try std.testing.expectError(
         error.InvalidCurrentUserResponse,
         parseCurrentUser(
@@ -590,7 +658,6 @@ test "current user decoder binds the principal and projects optional profile fie
     try std.testing.expectEqualStrings("", incomplete.usernameView());
     try std.testing.expectEqualStrings("", incomplete.emailHintView());
     try std.testing.expectEqualStrings("", incomplete.phoneHintView());
-    try std.testing.expectEqual(@as(?u32, null), incomplete.concurrency_limit);
     const malformed = try parseCurrentUser(
         \\{"sub":"user-42","name":7,"email":{"value":"user@example.com"},"phone_number":13800138000,"client_id":"metawork","authorization_id":"auth-1"}
     );
@@ -610,6 +677,19 @@ test "current user decoder ignores unusable optional profile values" {
     );
     try std.testing.expectEqualStrings("+861****8000", phone.phoneHintView());
 
+    // A person signed up by phone: Metask masks the number itself and gives
+    // an unverified placeholder address, which is not shown.
+    const phone_user = try parseCurrentUser(
+        \\{"sub":"user-42","email":"13800000000@phone.metask-ai.com","email_verified":false,"phone_number":"138****0000","client_id":"metawork","authorization_id":"auth-1"}
+    );
+    try std.testing.expectEqualStrings("", phone_user.emailHintView());
+    try std.testing.expectEqualStrings("138****0000", phone_user.phoneHintView());
+    // Verified, it is an address like any other.
+    const verified = try parseCurrentUser(
+        \\{"sub":"user-42","email":"13800000000@phone.metask-ai.com","email_verified":true,"client_id":"metawork","authorization_id":"auth-1"}
+    );
+    try std.testing.expectEqualStrings("1***@phone.metask-ai.com", verified.emailHintView());
+
     const absent = try parseCurrentUser(
         \\{"sub":"user-42","name":"Meta User","client_id":"metawork","authorization_id":"auth-1"}
     );
@@ -627,6 +707,8 @@ test "current user decoder ignores unusable optional profile values" {
         "{\"sub\":\"user-42\",\"phone_number\":\"12345\",\"client_id\":\"metawork\",\"authorization_id\":\"auth-1\"}",
         "{\"sub\":\"user-42\",\"phone_number\":\"138-0013-8000\",\"client_id\":\"metawork\",\"authorization_id\":\"auth-1\"}",
         "{\"sub\":\"user-42\",\"phone_number\":\"++8613800138000\",\"client_id\":\"metawork\",\"authorization_id\":\"auth-1\"}",
+        "{\"sub\":\"user-42\",\"phone_number\":\"****0000000\",\"client_id\":\"metawork\",\"authorization_id\":\"auth-1\"}",
+        "{\"sub\":\"user-42\",\"phone_number\":\"138**00*000\",\"client_id\":\"metawork\",\"authorization_id\":\"auth-1\"}",
     }) |payload| {
         const invalid = try parseCurrentUser(payload);
         try std.testing.expectEqualStrings("", invalid.phoneHintView());

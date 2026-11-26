@@ -102,6 +102,7 @@ pub const CompactPhase = enum(u8) {
 
 pub const CompactCause = enum {
     user_cancel,
+    account_logout,
     session_close,
     app_shutdown,
     resource_limit,
@@ -123,6 +124,8 @@ pub const ActiveOperation = task_attachment.ActiveOperation;
 pub const RunCause = enum {
     user_cancel,
     approval_mode_change,
+    /// The person signed out of the Metask login the Run used.
+    account_logout,
     edit_and_rerun,
     timeout,
     session_close,
@@ -398,6 +401,9 @@ pub const PendingInterruption = enum(u8) {
     /// A Run stopped because an approval change crossed the Core profile
     /// boundary. Core still observes a user cancellation.
     approval_mode_change,
+    /// A Run stopped because the person signed out of its Metask login.
+    /// Core still observes a user cancellation.
+    account_logout,
 };
 
 /// Owned safe observation, separate from the decision about the Run outcome.
@@ -971,6 +977,19 @@ pub const OwnedImageExecution = struct {
     }
 };
 
+pub const MediaCredentialGeneration = struct {
+    source: *execution_credentials.Source,
+
+    pub fn current(self: MediaCredentialGeneration) u64 {
+        return self.source.currentGeneration();
+    }
+
+    pub fn deinit(self: *MediaCredentialGeneration) void {
+        self.source.release();
+        self.* = undefined;
+    }
+};
+
 pub const MediaCredentials = struct {
     generation: u64 = 0,
     source: ?*execution_credentials.Source = null,
@@ -978,8 +997,17 @@ pub const MediaCredentials = struct {
 
     pub fn enable(self: *MediaCredentials, allocator: std.mem.Allocator, io: std.Io, bearer: []const u8, generation: u64) std.mem.Allocator.Error!void {
         std.debug.assert(self.source == null and generation != 0);
-        self.source = try execution_credentials.Source.create(allocator, io, bearer);
+        const source = try execution_credentials.Source.create(allocator, io, bearer);
+        source.generation = generation;
+        self.source = source;
         self.generation = generation;
+    }
+
+    /// Follows the generation of the credential the execution sends, which
+    /// a renewal replaces, for a transport that reports its refusal.
+    pub fn watchGeneration(self: *const MediaCredentials) ?MediaCredentialGeneration {
+        const source = self.source orelse return null;
+        return .{ .source = source.retain() };
     }
 
     fn reader(self: *const MediaCredentials) ?agent.ImageGenerationCredentialReader {
@@ -1668,6 +1696,7 @@ pub fn finalizedFileChangeObservation(run: *const RunRecord) FileChangeObservati
         .resource_limit => terminal.phase == .stopped,
         .user_cancel,
         .approval_mode_change,
+        .account_logout,
         .edit_and_rerun,
         .timeout,
         .session_close,

@@ -270,7 +270,6 @@ import {
   selectableTask,
 } from "../workbench/task-visibility.ts";
 import { PendingScopes } from "../workbench/pendingScopes.ts";
-import { accountUnconfirmed } from "../workbench/account-identity.ts";
 import {
   readyModelOptions,
   modelOptionId,
@@ -973,13 +972,27 @@ export default function App() {
     force = false,
   ) {
     if (accountFeedbackRequest.current.awaitingSync) return;
-    // A login keeps its failure while it is tried again; that failure is not
-    // the outcome of the attempt underway.
-    if (announce && accountUnconfirmed(account) && !account.canRetry) return;
-    const observation = JSON.stringify([
-      account.errorCode,
-      account.safeDiagnostic,
-    ]);
+    // The person's own command answers through the attempt its receipt
+    // names: nothing is its result until that attempt ends, and once it has
+    // ended its result is reported even when it is the failure shown before.
+    let shown = account;
+    const requested = accountFeedbackRequest.current.attemptId;
+    if (requested !== null) {
+      const attempt =
+        account.attempt?.id === requested ? account.attempt : null;
+      if (!attempt?.outcome) {
+        if (announce) return;
+      } else {
+        accountFeedbackRequest.current.attemptId = null;
+        shown = {
+          ...account,
+          errorCode: attempt.errorCode,
+          safeDiagnostic: attempt.safeDiagnostic,
+        };
+        force = true;
+      }
+    }
+    const observation = JSON.stringify([shown.errorCode, shown.safeDiagnostic]);
     const unknown = accountFeedbackRequest.current.unknown;
     if (unknown) {
       if (unknown.observation === null) {
@@ -997,7 +1010,7 @@ export default function App() {
     )
       return;
     accountFeedbackRequest.current.lastObservation = observation;
-    const result = accountFeedback(account);
+    const result = accountFeedback(shown);
     updateFeedbackState((current) =>
       observeFeedback(
         current,
@@ -2853,6 +2866,7 @@ export default function App() {
       epoch === feedbackRef.current.epoch;
     accountFeedbackRequest.current.awaitingSync = true;
     accountFeedbackRequest.current.unknown = null;
+    accountFeedbackRequest.current.attemptId = null;
     let token: FeedbackToken;
     function startCycle(id: ShellStatus["id"]) {
       const started = beginFeedback(
@@ -3162,7 +3176,7 @@ export default function App() {
       viewSyncFailed ||
       !bridgeReady ||
       accountCancelBusyRef.current ||
-      !snapshot.account.canCancel
+      !snapshot.account.actions.cancel
     )
       return;
     await runAccountCommand(() => client.cancelAccountOperation(), true);
@@ -5555,7 +5569,7 @@ export default function App() {
                   executionBusy ||
                   accountCancelBusy ||
                   (setupNotice.action === "confirm" &&
-                    !snapshot.account.canRetry)
+                    !snapshot.account.actions.retry)
                 }
                 onAction={runModelSetupAction}
                 onChooseSetup={
@@ -5920,6 +5934,7 @@ export default function App() {
           </nav>
           <AccountIdentity
             account={snapshot.account}
+            metaskStopTargets={snapshot.metaskStopTargets}
             updates={snapshot.updates}
             updateControls={updateControls}
             active={settingsOpen}
@@ -6298,6 +6313,7 @@ export default function App() {
               onDelete: requestTaskDeletion,
             }}
             account={snapshot.account}
+            metaskStopTargets={snapshot.metaskStopTargets}
             accountFeedback={accountFeedbackEntries.map((entry) => (
               <FeedbackNotice
                 key={`${statuses.epoch}:${entry.key}:${entry.cycle}`}

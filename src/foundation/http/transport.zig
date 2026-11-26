@@ -109,6 +109,10 @@ pub const Budget = union(enum) {
     /// The caller bounds the whole call by cancellation. This bounds only DNS,
     /// TCP and TLS, measured from admission.
     connect: Io.Duration,
+    /// DNS, TCP and TLS from admission, then the answer from the first byte
+    /// written. Both are measured on the awake clock (which counts sleep on
+    /// Windows, where it is the performance counter).
+    phased: struct { connect: Io.Duration, response: Io.Duration },
 };
 
 pub const Control = struct {
@@ -329,6 +333,7 @@ pub const Engine = struct {
         var operation: Operation = .{ .engine = self, .control = control, .started = started, .connect_end = switch (control.budget) {
             .deadline => |deadline| deadline,
             .connect => |duration| started.addDuration(.{ .raw = duration, .clock = .awake }),
+            .phased => |phases| started.addDuration(.{ .raw = phases.connect, .clock = .awake }),
         } };
         self.mutex.lockUncancelable(self.io);
         const id = self.next_id;
@@ -388,6 +393,7 @@ pub const Engine = struct {
             switch (control.budget) {
                 .deadline => selection.concurrent(.deadline, Operation.waitDeadline, .{&operation}) catch break :selected .{ .failed = error.ResourceLimit },
                 .connect => selection.concurrent(.connect_budget, Operation.waitConnectBudget, .{&operation}) catch break :selected .{ .failed = error.ResourceLimit },
+                .phased => |phases| selection.concurrent(.connect_budget, Operation.waitPhasedBudget, .{ &operation, phases.response }) catch break :selected .{ .failed = error.ResourceLimit },
             }
             if (control.cancellation != null) selection.concurrent(.cancelled, Operation.waitCancellation, .{&operation}) catch break :selected .{ .failed = error.ResourceLimit };
             selection.concurrent(.completed, function, .{&operation} ++ args) catch break :selected .{ .failed = error.ResourceLimit };
@@ -408,7 +414,8 @@ pub const Engine = struct {
                     .cancelled => .{ .failed = error.Cancelled },
                     .deadline => .{ .failed = error.DeadlineExceeded },
                     // Read after the join: the worker no longer writes phase.
-                    .connect_budget => .{ .failed = operation.connectExpiry() },
+                    // A phased budget ends after the send only on its answer.
+                    .connect_budget => .{ .failed = if (operation.sendFact() == .may_have_been_sent) error.DeadlineExceeded else operation.connectExpiry() },
                 },
             },
         };
@@ -422,7 +429,8 @@ pub const Engine = struct {
 
     /// An exact idle match (most recently used first), else a slot without an
     /// idle connection, else the least recently used idle slot, expired first.
-    fn lease(self: *Engine, criteria: Client.ConnectionPool.Criteria, isolation: Isolation) Lease {
+    /// A fresh request takes no idle connection, so it never needs a probe.
+    fn lease(self: *Engine, criteria: Client.ConnectionPool.Criteria, isolation: Isolation, fresh: bool) Lease {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const now: Io.Clock.Timestamp = .now(self.io, .awake);
@@ -436,7 +444,7 @@ pub const Engine = struct {
                 continue;
             };
             const stale = slot.expired(now);
-            if (!stale and isolation.eql(slot.isolation) and Slot.sameOrigin(connection, criteria.protocol, criteria.port, criteria.host)) {
+            if (!fresh and !stale and isolation.eql(slot.isolation) and Slot.sameOrigin(connection, criteria.protocol, criteria.port, criteria.host)) {
                 if (exact == null or slot.idle.raw.nanoseconds > exact.?.idle.raw.nanoseconds) exact = slot;
             }
             if (oldest) |current| {
@@ -561,7 +569,9 @@ pub const Operation = struct {
     /// End of DNS, TCP and TLS: the deadline, or admission plus the connect budget.
     connect_end: Io.Clock.Timestamp,
     /// 0 establishing, 1 established in time, 2 connect budget expired first.
-    connect_state: std.atomic.Value(u8) = .init(0),
+    connect_state: std.atomic.Value(u32) = .init(0),
+    /// 1 once the first HTTP write was admitted; a phased budget waits on it.
+    sent_signal: std.atomic.Value(u32) = .init(0),
     attempts: Attempts = .{},
 
     /// Written by connection lanes, read after they join.
@@ -615,6 +625,8 @@ pub const Operation = struct {
     fn admitSend(self: *Operation) Error!void {
         try self.check();
         if (self.gate.cmpxchgStrong(0, 1, .acq_rel, .acquire) != null) return self.fail(error.Cancelled);
+        self.sent_signal.store(1, .release);
+        self.io().futexWake(u32, &self.sent_signal.raw, std.math.maxInt(u32));
         // Conservative evidence if the source changed just after the CAS.
         try self.check();
         self.phase = .send;
@@ -638,6 +650,28 @@ pub const Operation = struct {
         parked.wait(self.io()) catch {};
     }
 
+    /// The connect budget as above until a connection is in hand; then,
+    /// once the first byte may be written, the answer has `response` of
+    /// awake time.
+    fn waitPhasedBudget(self: *Operation, response: Io.Duration) void {
+        while (true) {
+            const state = self.connect_state.load(.acquire);
+            if (state == 1) break;
+            if (self.connect_end.raw.nanoseconds <= self.connect_end.clock.now(self.io()).nanoseconds) {
+                if (self.connect_state.cmpxchgStrong(0, 2, .acq_rel, .acquire) == null) {
+                    self.stop();
+                    return;
+                }
+                continue;
+            }
+            self.io().futexWaitTimeout(u32, &self.connect_state.raw, 0, .{ .deadline = self.connect_end }) catch return;
+        }
+        while (self.sent_signal.load(.acquire) == 0)
+            self.io().futexWait(u32, &self.sent_signal.raw, 0) catch return;
+        Io.sleep(self.io(), response, .awake) catch return;
+        self.stop();
+    }
+
     /// The most specific connection failure: TLS over TCP over DNS.
     fn connectExpiry(self: *const Operation) Error {
         return switch (self.phase) {
@@ -649,7 +683,9 @@ pub const Operation = struct {
     /// Claims the connection for this call unless the connect budget already
     /// ended it; a late connection never authorizes an HTTP write.
     fn established(self: *Operation) bool {
-        return self.connect_state.cmpxchgStrong(0, 1, .acq_rel, .acquire) == null;
+        if (self.connect_state.cmpxchgStrong(0, 1, .acq_rel, .acquire) != null) return false;
+        self.io().futexWake(u32, &self.connect_state.raw, std.math.maxInt(u32));
+        return true;
     }
 
     fn waitCancellation(self: *Operation) void {
@@ -665,6 +701,9 @@ pub const Operation = struct {
         /// may resend this request; null means GET and HEAD only. POST is
         /// never replayable.
         replayable: ?bool = null,
+        /// Takes a new connection, never an idle one: a request whose send
+        /// must not be lost to a connection that died while idle.
+        fresh: bool = false,
     };
 
     pub fn open(self: *Operation, method: std.http.Method, uri: std.Uri, options: Options) Error!Request {
@@ -686,7 +725,7 @@ pub const Operation = struct {
         const criteria: Client.ConnectionPool.Criteria = .{ .host = host, .port = uri.port orelse @as(u16, if (protocol == .tls) 443 else 80), .protocol = protocol };
         self.stats.requests += 1;
         self.opened = .now(self.io(), .awake);
-        const lease = self.engine.lease(criteria, self.control.isolation);
+        const lease = self.engine.lease(criteria, self.control.isolation, options.fresh);
         for (lease.expired[0..lease.expired_count]) |stale| self.engine.evict(stale);
         self.stats.expired += lease.expired_count;
         const slot = lease.slot;

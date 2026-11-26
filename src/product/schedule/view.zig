@@ -25,10 +25,20 @@ pub const TextProjection = struct {
     }
 };
 
+/// What the Host judges a binding allows now, published so the Renderer
+/// never derives it. Recomputed for every projection, never stored.
+pub const Admission = enum { runnable, waiting, signed_out, other_account, model_unavailable, source_changed };
+
+pub const AdmissionProjection = struct {
+    context: ?*const anyopaque,
+    admission_fn: *const fn (?*const anyopaque, state.Binding) Admission,
+};
+
 pub fn writeProjection(
     writer: *std.Io.Writer,
     store: *const state.Store,
     text: TextProjection,
+    admission: AdmissionProjection,
 ) Error!void {
     writer.writeByte('[') catch return error.SnapshotTooLarge;
     var count: usize = 0;
@@ -37,7 +47,7 @@ pub fn writeProjection(
         if (count != 0) writer.writeByte(',') catch
             return error.SnapshotTooLarge;
         count += 1;
-        try writeItem(writer, item, text);
+        try writeItem(writer, item, text, admission.admission_fn(admission.context, item.bindingView()));
     }
     writer.writeByte(']') catch return error.SnapshotTooLarge;
 }
@@ -46,6 +56,7 @@ fn writeItem(
     writer: *std.Io.Writer,
     item: *const state.Item,
     text: TextProjection,
+    admission: Admission,
 ) Error!void {
     writer.print(
         "{{\"id\":\"{d}\",\"epoch\":\"{d}\",\"title\":",
@@ -61,6 +72,7 @@ fn writeItem(
             return error.SnapshotTooLarge
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.print(",\"admission\":\"{s}\"", .{@tagName(admission)}) catch return error.SnapshotTooLarge;
     writer.writeAll(",\"binding\":") catch return error.SnapshotTooLarge;
     const binding = item.bindingView();
     writer.writeAll("{\"status\":\"bound\",\"modelRef\":{\"sourceId\":") catch
@@ -155,7 +167,7 @@ test "Renderer projection includes calendar and legacy recurrence definitions" {
     for (0..5) |index| {
         _ = try store.create(.{
             .title = "Schedule",
-            .binding = .{ .model_ref = .{ .source_id = "metask", .model_id = "fixture-model" }, .source_generation = 1, .protocol = .openai_chat_completions },
+            .binding = .{ .model_ref = .{ .source_id = "metask", .model_id = "fixture-model" }, .source_generation = index + 1, .protocol = .openai_chat_completions },
             .permission_profile = .approval_required,
             .input = "Inspect",
             .recurrence = switch (index) {
@@ -174,11 +186,19 @@ test "Renderer projection includes calendar and legacy recurrence definitions" {
             std.json.Stringify.value(value, .{}, writer) catch return error.SnapshotTooLarge;
         }
     };
+    // Each definition answers differently, so the shared fixture carries the
+    // Renderer's whole vocabulary but `source_changed`.
+    const Judged = struct {
+        fn admission(_: ?*const anyopaque, binding: state.Binding) Admission {
+            return @enumFromInt(binding.source_generation - 1);
+        }
+    };
+    const admission: AdmissionProjection = .{ .context = null, .admission_fn = Judged.admission };
     var context: u8 = 0;
     const text: TextProjection = .{ .context = &context, .write_json_fn = Text.write };
     var buffer: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try writeProjection(&writer, &store, text);
+    try writeProjection(&writer, &store, text, admission);
     try std.testing.expectEqualStrings(std.mem.trimEnd(u8, @embedFile("renderer_projection.fixture"), "\r\n"), writer.buffered());
     for ([_]u64{ 1, 3, 5 }) |id| {
         try std.testing.expectEqual(state.TimeZone.@"Asia/Shanghai", store.find(id).?.recurrence.calendar.timezone);
@@ -187,6 +207,6 @@ test "Renderer projection includes calendar and legacy recurrence definitions" {
     try store.delete(2, 1);
     try store.delete(4, 1);
     writer = std.Io.Writer.fixed(&buffer);
-    try writeProjection(&writer, &store, text);
+    try writeProjection(&writer, &store, text, admission);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"kind\":\"calendar\"") != null);
 }
