@@ -1811,6 +1811,7 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
       enabled: true,
       health: "ready",
       failureReason: null,
+      admission: "runnable",
       binding: {
         status: "bound",
         modelRef: { sourceId: "metask", modelId: "fixture-model" },

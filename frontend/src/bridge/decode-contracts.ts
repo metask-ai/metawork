@@ -431,6 +431,14 @@ const scheduledTaskFailureReasons = [
   "host_interrupted",
   "permission_required",
 ] as const;
+const scheduledTaskAdmissions = [
+  "runnable",
+  "waiting",
+  "signed_out",
+  "other_account",
+  "model_unavailable",
+  "source_changed",
+] as const;
 const taskCreateReasons = [
   "handoff_changed",
   "history_unavailable",
@@ -4843,6 +4851,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     "enabled",
     "health",
     "failureReason",
+    "admission",
     "binding",
     "input",
     "recurrence",
@@ -5137,6 +5146,11 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     enabled,
     health,
     failureReason,
+    admission: enumValue(
+      item.admission,
+      `${path}.admission`,
+      scheduledTaskAdmissions,
+    ),
     binding,
     input,
     recurrence,

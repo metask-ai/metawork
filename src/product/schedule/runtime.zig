@@ -1345,12 +1345,29 @@ pub const Runtime = struct {
         return true;
     }
 
+    /// Publishes each definition with what `binding` says of it now, so the
+    /// Renderer shows the same judgment the timer acts on.
     pub fn writeProjection(
         self: *const Runtime,
         writer: *std.Io.Writer,
         text: TextProjection,
+        binding: ExecutionBinding,
     ) ViewError!void {
-        return view.writeProjection(writer, &self.store, text);
+        return view.writeProjection(writer, &self.store, text, .{ .context = &binding, .admission_fn = projectedAdmission });
+    }
+
+    fn projectedAdmission(context: ?*const anyopaque, bound: ModelBinding) view.Admission {
+        const binding: *const ExecutionBinding = @ptrCast(@alignCast(context.?));
+        return switch (binding.admit(bound)) {
+            .run => .runnable,
+            .wait => .waiting,
+            .hold => |reason| switch (reason) {
+                .signed_out => .signed_out,
+                .other_account => .other_account,
+            },
+            .skip => .model_unavailable,
+            .stop => .source_changed,
+        };
     }
 
     fn commitCandidate(

@@ -2036,6 +2036,12 @@ export const zhCN: Record<MessageId, string> = {
     "上次启动被应用中断，请编辑确认；不会自动重试。",
   "scheduled.reason.permission_required":
     "任务因权限不足停止，请核对内容和权限后编辑确认。",
+  "scheduled.admission.waiting": "等待账号或模型就绪后运行。",
+  "scheduled.admission.signed_out": "登录 Metask 后才会运行。",
+  "scheduled.admission.other_account":
+    "绑定的是另一个 Metask 账号；切回该账号，或编辑换成当前账号的模型。",
+  "scheduled.admission.model_unavailable":
+    "所选模型已不可用，到时不会运行；请编辑换一个模型。",
   "scheduled.notification_unavailable":
     "通知中的任务当前不可用，请刷新并查看任务列表。",
   "notification.schedule.completed": "定时任务已完成",

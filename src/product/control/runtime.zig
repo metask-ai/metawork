@@ -7357,7 +7357,10 @@ pub const Runtime = struct {
                     .none => writer.writeAll("null") catch return error.SnapshotTooLarge,
                     .skills => try self.writeSkillManagement(writer, text),
                     .mcp => try self.writeMcpProjection(writer, text),
-                    .schedules => self.schedule.writeProjection(writer, .{ .context = text, .write_json_fn = view_read.Text.writeCallback }) catch return error.SnapshotTooLarge,
+                    .schedules => {
+                        const authority = self.scheduleAuthority();
+                        self.schedule.writeProjection(writer, .{ .context = text, .write_json_fn = view_read.Text.writeCallback }, authority.binding()) catch return error.SnapshotTooLarge;
+                    },
                 }
                 writer.writeByte('}') catch return error.SnapshotTooLarge;
             },
@@ -10841,10 +10844,11 @@ pub const TestSupport = if (builtin.is_test) struct {
             Runtime.workspaceViewProvider(&context),
         ) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"scheduledTasks\":") catch return error.SnapshotTooLarge;
+        const authority = self.scheduleAuthority();
         self.schedule.writeProjection(&writer, .{
             .context = &text,
             .write_json_fn = view_read.Text.writeCallback,
-        }) catch return error.SnapshotTooLarge;
+        }, authority.binding()) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"tasks\":[") catch
             return error.SnapshotTooLarge;
         self.task_runtime.writeProjectionList(
@@ -13358,10 +13362,11 @@ test "Schedule blocker projection matches the shared Renderer fixture" {
     try control.schedule.store.markSkipped(item, 9200, 9201, 0);
     var storage: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
+    const authority = control.scheduleAuthority();
     try control.schedule.writeProjection(&writer, .{
         .context = &control.liveViewText(),
         .write_json_fn = view_read.Text.writeCallback,
-    });
+    }, authority.binding());
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
     defer parsed.deinit();
     const history = try std.json.Stringify.valueAlloc(std.testing.allocator, parsed.value.array.items[0].object.get("occurrences").?, .{});

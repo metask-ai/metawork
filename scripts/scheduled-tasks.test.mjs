@@ -154,6 +154,7 @@ function scheduleSnapshot(overrides = {}) {
       enabled: true,
       health: "ready",
       failureReason: null,
+      admission: "runnable",
       binding: {
         status: "bound",
         modelRef: { sourceId: "metask", modelId: "old-model" },
@@ -284,6 +285,54 @@ test("confirming a different attention cause retains the pinned model binding", 
   fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
   await waitFor(() => assert.ok(updated));
   assert.equal(updated[2].modelSelection, null);
+});
+
+test("a binding the Host says cannot run asks for a model, except while signed out", async () => {
+  for (const admission of [
+    "model_unavailable",
+    "source_changed",
+    "other_account",
+    "signed_out",
+  ]) {
+    let updated;
+    renderDom(
+      scheduledElement(scheduleSnapshot({ admission }), {
+        onUpdate: async (...args) => {
+          updated = args;
+        },
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
+    const confirm = screen.getByRole("button", { name: "Confirm" });
+    if (admission === "signed_out") {
+      fireEvent.click(confirm);
+      await waitFor(() => assert.ok(updated));
+      assert.equal(updated[2].modelSelection, null);
+    } else assert.equal(confirm.disabled, true, admission);
+    cleanup();
+  }
+});
+
+test("the list says why an enabled plan will not run as listed", () => {
+  for (const [admission, next, text] of [
+    ["signed_out", "1800000000", /Runs after you sign in to Metask\./],
+    ["other_account", "1800000000", /Bound to another Metask account\./],
+    ["model_unavailable", "1800000000", /no longer available, so it will/],
+    ["source_changed", "1800000000", /The model or connection changed\./],
+    ["waiting", "1000", /Runs once your account or model is ready\./],
+  ]) {
+    const html = render(
+      scheduleSnapshot({ admission, nextRunAtUnixSeconds: next }),
+    );
+    assert.match(html, text, admission);
+    assert.doesNotMatch(html, /Waiting to run|Runs in/, admission);
+  }
+  // A wait whose time is still ahead says nothing yet.
+  for (const admission of ["waiting", "runnable"]) {
+    const html = render(scheduleSnapshot({ admission }));
+    assert.match(html, /Runs in/, admission);
+    assert.doesNotMatch(html, /Runs once your account/, admission);
+  }
 });
 
 test("list actions run, pause, resume and open results without an overflow menu", async () => {
@@ -671,6 +720,7 @@ test("Scheduled tasks is a truthful independent management page", () => {
       enabled: true,
       health: "ready",
       failureReason: null,
+      admission: "runnable",
       binding: {
         status: "bound",
         modelRef: { sourceId: "metask", modelId: "fixture-model" },
