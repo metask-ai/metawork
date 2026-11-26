@@ -38,6 +38,7 @@ pub const Response = transport_api.Response;
 pub const TransportError = transport_api.TransportError;
 pub const Cancellation = transport_api.Cancellation;
 pub const RequestControl = transport_api.RequestControl;
+pub const SendGate = transport_api.SendGate;
 
 pub const Transport = struct {
     context: *anyopaque,

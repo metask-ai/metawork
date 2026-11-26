@@ -183,11 +183,9 @@ pub const Authorization = union(enum) {
     checking: u64,
     signed_out,
     available: struct { account_id: []const u8, generation: u64 },
-    /// The access token expired and Account will renew it. The epoch is
+    /// The access token ended and Account will renew it. The epoch is
     /// waited out as above.
     recovering: u64,
-    /// A verified identity whose token no wall clock can judge.
-    stalled,
 
     /// What a consumer may do with it. Every consumer reads only this.
     pub const Use = union(enum) {
@@ -195,15 +193,15 @@ pub const Authorization = union(enum) {
         ready: u64,
         /// Wait until this epoch moves on.
         wait: u64,
-        stop: enum { sign_in, no_connection },
+        /// Signing in is the only way on.
+        stop,
     };
 
     pub fn use(self: Authorization) Use {
         return switch (self) {
             .available => |value| .{ .ready = value.generation },
             .checking, .recovering => |epoch| .{ .wait = epoch },
-            .stalled => .{ .stop = .no_connection },
-            .signed_out => .{ .stop = .sign_in },
+            .signed_out => .stop,
         };
     }
 };

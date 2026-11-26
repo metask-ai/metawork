@@ -34,6 +34,8 @@ pub const Grant = struct {
     next: ?*Grant = null,
     /// Counts the access tokens installed in this process.
     generation: u64 = 0,
+    /// Set once either clock reached its end; never cleared.
+    ended: bool = false,
 
     pub fn create(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Grant {
         const self = try allocator.create(Grant);

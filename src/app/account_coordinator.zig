@@ -26,7 +26,7 @@ const Published = struct {
             .state = authorization,
             .generation = switch (authorization) {
                 .available => |value| value.generation,
-                .checking, .signed_out, .recovering, .stalled => 0,
+                .checking, .signed_out, .recovering => 0,
             },
         };
     }
@@ -150,10 +150,12 @@ pub const Coordinator = struct {
     pub fn tick(self: *Coordinator) bool {
         self.assertMainThread();
         if (self.stopping) return false;
-        // A message that began to wait is a reason to try now.
-        if (self.credential_renewal) |renewal| switch (self.runtime.authorization().use()) {
-            .wait => |epoch| if (renewal.waits(epoch)) self.runtime.expedite(),
-            .ready, .stop => {},
+        // A message that began to wait, or a Run whose token ended, is a
+        // reason to try now.
+        if (self.credential_renewal) |renewal| switch (self.runtime.authorization()) {
+            .checking => |epoch| if (renewal.waits(epoch)) self.runtime.expedite(),
+            .recovering => |epoch| if (renewal.waits(epoch) or renewal.holds()) self.runtime.expedite(),
+            .available, .signed_out => {},
         };
         var committed = false;
         while (self.runtime.prepareDue()) |prepared| {
@@ -180,6 +182,8 @@ pub const Coordinator = struct {
         if (self.stopping) return;
         // Workers given up on are joined once they have finished.
         self.runtime.reapAbandoned();
+        // A renewal that has its connection waits here to be let go.
+        self.runtime.serviceRelease();
         while (self.runtime.prepareNextCompletion()) |result| {
             switch (result) {
                 .prepared => |prepared| {
@@ -387,6 +391,8 @@ const CommitSteps = struct {
     const Step = enum { commit, renew, follow, settle, retire };
     items: [16]Step = undefined,
     count: usize = 0,
+    /// A Run holds a Metask credential.
+    holding: bool = false,
 
     fn add(self: *CommitSteps, step: Step) void {
         self.items[self.count] = step;
@@ -399,7 +405,7 @@ const CommitSteps = struct {
     }
 
     fn renewal(self: *CommitSteps) control_ports.MetaskCredentialRenewal {
-        return .{ .context = self, .renew_fn = renew, .needs_fn = needs, .waits_fn = waits, .retire_fn = retire };
+        return .{ .context = self, .renew_fn = renew, .needs_fn = needs, .waits_fn = waits, .holds_fn = holds, .retire_fn = retire };
     }
 
     fn renew(context: *anyopaque, generation: u64, credential: []const u8) void {
@@ -420,6 +426,11 @@ const CommitSteps = struct {
 
     fn waits(_: *anyopaque, _: u64) bool {
         return false;
+    }
+
+    fn holds(context: *anyopaque) bool {
+        const self: *CommitSteps = @ptrCast(@alignCast(context));
+        return self.holding;
     }
 
     fn follower(self: *CommitSteps) AuthorizationFollower {
@@ -501,6 +512,7 @@ const SummaryTransport = struct {
     ) account_api.TransportError!account_api.TransportResponse {
         const self: *SummaryTransport = @ptrCast(@alignCast(context));
         if (request.kind == .refresh_token) {
+            if (!account_api.TestSupport.passGate(request)) return error.CancelledNotSent;
             self.renewals += 1;
             const body = if (self.renewals % 2 == 1)
                 "{\"access_token\":\"access-odd\",\"refresh_token\":\"refresh-odd\",\"token_type\":\"Bearer\",\"expires_in\":3600}"
@@ -1177,11 +1189,11 @@ test "Account publishes an authorization that only time changed" {
     account_api.TestSupport.joinSummary(&runtime);
     coordinator.drain();
     _ = steps.take();
-    // Expired, then no clock to judge it by, then the clock again. What was
-    // delivered is not delivered again.
-    for ([_]?i64{ 149, 150, null, 150 }) |now| {
+    // Expired, then no wall clock, then the wall clock set back: it ended
+    // once, and nothing after that is a change.
+    for ([_]?i64{ 149, 150, null, 100 }) |now| {
         platform.now_unix_seconds = now;
-        const changed = now == null or now.? == 150;
+        const changed = now != null and now.? == 150;
         try std.testing.expectEqual(changed, coordinator.tick());
         try std.testing.expectEqualSlices(CommitSteps.Step, if (changed) &.{ .follow, .settle } else &.{}, steps.take());
         try std.testing.expect(!coordinator.tick());
@@ -1189,20 +1201,43 @@ test "Account publishes an authorization that only time changed" {
     // What a wait counts is no change of its own.
     try std.testing.expectEqual(Published.of(.{ .recovering = 1 }), Published.of(.{ .recovering = 2 }));
 
-    // A token installed while the wall clock had run ahead is already over by
-    // it, so only the clock coming back makes it usable.
+    // A renewed token is handed over once it is installed.
     _ = coordinator.commitPrepared(account_api.TestSupport.prepareTokenRefresh(&runtime));
     account_api.TestSupport.joinNetwork(&runtime);
-    platform.now_unix_seconds = 10_000;
     coordinator.drain();
     try std.testing.expectEqualStrings("new-access", runtime.accessToken().?);
-    try std.testing.expect(std.mem.indexOfScalar(CommitSteps.Step, steps.take(), .renew) == null);
-    const committed = sink.count;
-    platform.now_unix_seconds = 200;
-    try std.testing.expect(coordinator.tick());
-    try std.testing.expectEqualSlices(CommitSteps.Step, &.{ .renew, .follow, .settle }, steps.take());
+    try std.testing.expect(std.mem.indexOfScalar(CommitSteps.Step, steps.take(), .renew) != null);
     try std.testing.expect(!coordinator.tick());
-    try std.testing.expectEqual(committed, sink.count);
+}
+
+test "Account tries at once for a Run that holds an ended token" {
+    for ([_]bool{ false, true }) |holding| {
+        var runtime = try initRuntimeForTest();
+        var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
+        account_api.TestSupport.attachPlatform(&runtime, &platform);
+        defer {
+            account_api.TestSupport.detachPlatform(&runtime);
+            runtime.deinit();
+        }
+        var steps: CommitSteps = .{ .holding = holding };
+        var sink: RecordingSink = .{ .runtime = &runtime, .steps = &steps };
+        var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+        coordinator.setCredentialRenewal(steps.renewal());
+        _ = coordinator.commitPrepared(
+            try account_api.TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask User", "access-token", "refresh-token", 150),
+        );
+        // A failure is waited out, the last attempt ended at 145.
+        runtime.renew_at = .{ .wall = null, .boot = 1000 };
+        runtime.retrying = true;
+        runtime.confirm_ended_boot = 145;
+        platform.now_unix_seconds = 149;
+        _ = coordinator.tick();
+        try std.testing.expectEqual(@as(i64, 1000), runtime.renew_at.?.boot);
+        platform.now_unix_seconds = 150;
+        _ = coordinator.tick();
+        try std.testing.expectEqual(@as(i64, if (holding) 175 else 1000), runtime.renew_at.?.boot);
+        try std.testing.expect(runtime.account.activeAttempt() == null);
+    }
 }
 
 test "Account commit installs, renews, follows and settles in that order" {
@@ -1255,6 +1290,8 @@ const ClosingRefreshTransport = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.calls += 1;
         if (request.kind != .refresh_token) return error.ProtocolFailed;
+        // Held once sent: closing waits for an answer that may rotate.
+        if (!account_api.TestSupport.passGate(request)) return error.CancelledNotSent;
         if (self.gated) {
             self.started.set(std.testing.io);
             self.release.wait(std.testing.io) catch return error.NetworkFailed;
@@ -1292,7 +1329,12 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
         try std.testing.expect(runtime.admitEffect(&refresh));
         runtime.commit(&refresh);
         runtime.dispatchCommitted();
-        if (in_flight) try transport.started.wait(std.testing.io) else account_api.TestSupport.joinNetwork(&runtime);
+        if (in_flight) {
+            while (!transport.started.isSet()) {
+                runtime.serviceRelease();
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+        } else account_api.TestSupport.joinNetwork(&runtime);
         var follower: RecordingFollower = .{};
         coordinator.setFollower(follower.port());
         coordinator.shutdown();
@@ -1335,6 +1377,8 @@ test "Account shutdown failed rotation save preserves durable block without a se
     try std.testing.expect(runtime.admitEffect(&refresh));
     runtime.commit(&refresh);
     runtime.dispatchCommitted();
+    // Sent and answered; closing saves what came.
+    account_api.TestSupport.joinNetwork(&runtime);
     coordinator.shutdown();
     try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
     try std.testing.expectEqualStrings("old-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);

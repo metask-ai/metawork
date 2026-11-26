@@ -363,8 +363,8 @@ pub const Account = struct {
         var next = self.state;
         next.op = .{ .renew = .{ .attempt = attempt.current } };
         next.next_attempt_id = attempt.next;
-        // Trying again does not yet say anything else about a held login.
-        if (next.login == .verified) next.clearError();
+        // Trying again says nothing new: what went wrong stays shown until
+        // this attempt says otherwise.
         return transition(next, .session_changed, attempt.current, .refresh_token);
     }
 
@@ -449,10 +449,21 @@ pub const Account = struct {
     }
 
     /// A login is only begun where none is verified: changing accounts means
-    /// signing out first. A renewal underway may already be sent, so the
-    /// sign-in waits for it, and it is not needed if that renewal confirms the
-    /// login. An identity request is given up for it: it holds nothing.
+    /// signing out first. A renewal that may be sent is waited for, and the
+    /// sign-in is not needed if that renewal confirms the login. An identity
+    /// request is given up for it: it holds nothing.
     fn prepareBeginLogin(self: *const Account) PrepareResult {
+        return self.prepareLoginOver(false);
+    }
+
+    /// As a sign-in is begun, but over a renewal Runtime stopped before it
+    /// could send anything: that renewal is given up too.
+    pub fn prepareBeginLoginOverUnsentRenewal(self: *const Account) PrepareResult {
+        if (self.state.op != .renew) return .{ .rejected = .invalid_state };
+        return self.prepareLoginOver(true);
+    }
+
+    fn prepareLoginOver(self: *const Account, renewal_unsent: bool) PrepareResult {
         const accepted = switch (self.state.login) {
             .none => self.storeRead(),
             .held => true,
@@ -460,24 +471,22 @@ pub const Account = struct {
         };
         if (!accepted or self.state.intent != .none)
             return .{ .rejected = .invalid_state };
-        switch (self.state.op) {
-            .idle => {},
-            .renew => |value| {
+        const given_up: ?u64 = switch (self.state.op) {
+            .idle => null,
+            .renew => |value| if (renewal_unsent) value.attempt else {
                 var next = self.state;
                 next.intent = .login;
                 return transitionNoEffect(next, .session_changed, value.attempt);
             },
-            .identity => |value| {
-                var begun = self.prepareAuthorize();
-                switch (begun) {
-                    .transition => |*value_transition| value_transition.abandoned = value.attempt,
-                    else => {},
-                }
-                return begun;
-            },
+            .identity => |value| value.attempt,
             .authorize => return .{ .rejected = .invalid_state },
+        };
+        var begun = self.prepareAuthorize();
+        switch (begun) {
+            .transition => |*value| value.abandoned = given_up,
+            else => {},
         }
-        return self.prepareAuthorize();
+        return begun;
     }
 
     /// A sign-in that waited for the operation before it may begin now.

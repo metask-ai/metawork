@@ -45,7 +45,11 @@ const Network = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (request.kind == .refresh_token) {
             _ = self.refresh_attempts.fetchAdd(1, .monotonic);
-            if (self.refresh_failure) |failure| return failure;
+            // What fails unsent fails before its gate; anything else after.
+            const failure = self.refresh_failure;
+            if (failure != null and failure.? == error.NetworkNotSent) return error.NetworkNotSent;
+            if (!account.TestSupport.passGate(request)) return error.CancelledNotSent;
+            if (failure) |value| return value;
         }
         if (request.kind == .userinfo) {
             const body = std.fmt.bufPrint(buffer, "{{\"sub\":\"{s}\",\"name\":\"Synthetic user\",\"client_id\":\"metawork\",\"authorization_id\":\"synthetic-authorization\"}}", .{self.login_principal}) catch return error.ResponseTooLarge;
@@ -1380,7 +1384,8 @@ fn characterizeRecovery(
     network.expected_access = access_b;
     platform.now_unix_seconds = 231;
     try std.testing.expect(accounts.tick());
-    try std.testing.expectEqual(.recovering, control.newTaskAdmissionView().metask);
+    // The retry keeps showing the failure until it has a result of its own.
+    try std.testing.expectEqual(.@"unreachable", control.newTaskAdmissionView().metask);
     try std.testing.expectEqual(.ready, control.modelsView().providers[0].catalog_state);
     account.TestSupport.joinNetwork(accounts.runtime);
     accounts.drain();
@@ -1492,7 +1497,7 @@ fn characterizeUnreachableRestart(
     try restartAccount(control, accounts, platform, coordinator, network);
     _ = try control.sendInput("while-checking", task_id, .{ .text = "Reply with a short text; do not call tools." });
     for ([_]i64{ 100, 130 }) |now| {
-        // A second attempt, not waited for by anyone, doubles the distance.
+        // Nothing reached the server: it is tried every thirty seconds.
         platform.now_unix_seconds = now;
         _ = accounts.tick();
         account.TestSupport.joinNetwork(accounts.runtime);
@@ -1506,19 +1511,22 @@ fn characterizeUnreachableRestart(
         return error.WaitingMessageDidNotFail;
     try std.testing.expectEqual(.metask_connection_unavailable, unsent.reason.?);
 
-    // The resend waits for the next attempt, and brings it forward.
+    // The resend waits for the next attempt.
     network.refresh_failure = null;
     network.expected_access = access_b;
-    platform.now_unix_seconds = 160;
+    platform.now_unix_seconds = 159;
     try std.testing.expect(!accounts.tick());
     const resent = try control.retryTaskInput(task_id, "while-checking", "resent-while-checking");
     try std.testing.expectEqual(.accepted, resent.outcome);
     try std.testing.expectEqual(.waiting, lastSubmission(control.testTask(task_id).?).state);
+    try wake_loop.drain(control);
+    try std.testing.expect(!accounts.tick());
+    platform.now_unix_seconds = 160;
     for (0..5000) |_| {
         try wake_loop.drain(control);
         if (accounts.tick()) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-    } else return error.ResendBroughtNothingForward;
+    } else return error.NextAttemptDidNotStart;
     try std.testing.expect(accounts.runtime.account.refreshInFlight());
     try confirmLogin(control, accounts);
     try std.testing.expectEqual(@as(usize, 3), network.refresh_attempts.load(.acquire));

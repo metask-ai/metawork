@@ -4772,6 +4772,19 @@ pub const Runtime = struct {
         return false;
     }
 
+    /// A Run uses a Metask credential now: its model, or an image or a video
+    /// it makes.
+    pub fn holdsMetaskCredential(self: *const Runtime) bool {
+        for (self.tasks) |entry| if (entry) |task| {
+            if (task.runtime.active_operation == .run and self.renewsMetaskCredential(task.durable.id)) return true;
+            for (task.durable.runs) |*slot| if (slot.*) |*run| {
+                if (run.image_execution) |*image| if (image.authorization.source != null) return true;
+                if (run.video_execution) |*video| if (video.authorization.source != null) return true;
+            };
+        };
+        return false;
+    }
+
     pub fn renewMetaskExecutions(self: *Runtime, generation: u64, credential: []const u8, effects: OperationEffects) bool {
         var changed = false;
         for (self.tasks) |entry| if (entry) |task| {

@@ -16,6 +16,8 @@ pub const Adapter = struct {
         .raw = .fromSeconds(30),
         .clock = .boot,
     };
+    const gated_connect_timeout: std.Io.Duration = .fromSeconds(15);
+    const gated_response_timeout: std.Io.Duration = .fromSeconds(15);
 
     const FetchResult = http.Error!struct { status: u16, body_len: usize };
 
@@ -85,11 +87,18 @@ pub const Adapter = struct {
         response_buffer: []u8,
     ) metask_transport.TransportError!metask_transport.Response {
         const self: *Adapter = @ptrCast(@alignCast(context));
+        const gate = if (request.control) |control| control.send_gate else null;
         const result = self.http.run(.{
             .consumer = .metask,
             .isolation = isolation(request.principal),
-            .budget = .{ .deadline = if (request.control) |control| control.deadline else .fromNow(self.http.io, default_request_timeout) },
+            // A gated request may spend a credential: its connection is new,
+            // and once it is sent its answer, not its admission, sets its end.
+            .budget = if (gate != null)
+                .{ .phased = .{ .connect = gated_connect_timeout, .response = gated_response_timeout } }
+            else
+                .{ .deadline = if (request.control) |control| control.deadline else .fromNow(self.http.io, default_request_timeout) },
             .cancellation = if (request.control) |control| http.Cancellation.atomic(&control.cancellation.state) else null,
+            .send_gate = gate,
         }, fetch, .{ request, response_buffer });
         const send_started = result.send == .may_have_been_sent;
         return switch (result.outcome) {
@@ -193,6 +202,9 @@ pub const Adapter = struct {
             // Only token requests POST, and a rotation must be readable without
             // allocating. An absent header would accept any encoding.
             .standard_headers = if (method == .POST) .{ .accept_encoding = .{ .override = "identity" } } else .{},
+            // A renewal never sends over a connection that may have died
+            // while idle: the one write it gets could be lost to it.
+            .fresh = operation.control.send_gate != null,
         });
         defer request.deinit();
         try request.send(if (method == .POST) body else null);
