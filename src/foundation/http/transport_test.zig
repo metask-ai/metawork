@@ -1337,108 +1337,40 @@ test "HTTP saturated ordinary work leaves capacity for a held MCP continuation" 
     try std.testing.expect(continuation.diagnostic == null);
 }
 
-test "HTTP send gate lets a request leave only once released and honours a refusal or a withdrawal" {
-    const io = std.testing.io;
-    var refused: http.SendGate = .{};
-    try std.testing.expect(refused.refuse(io));
-    try std.testing.expect(!try refused.pass(io));
-
-    const Asker = struct {
-        fn run(gate: *http.SendGate, passed: *bool) void {
-            passed.* = gate.pass(std.testing.io) catch false;
-        }
-    };
-    for ([_]enum { release, withdraw, refuse }{ .release, .withdraw, .refuse }) |decision| {
-        var gate: http.SendGate = .{};
-        var passed = false;
-        const thread = try std.Thread.spawn(.{}, Asker.run, .{ &gate, &passed });
-        while (gate.load() == .idle) try Io.sleep(io, .fromMilliseconds(1), .awake);
-        switch (decision) {
-            .release => try std.testing.expect(gate.release(io)),
-            .withdraw => {
-                // Released and taken back at once: exactly one move wins.
-                try std.testing.expect(gate.release(io));
-                const withdrawn = gate.withdraw(io);
-                thread.join();
-                try std.testing.expectEqual(!withdrawn, passed);
-                continue;
-            },
-            .refuse => try std.testing.expect(gate.refuse(io)),
-        }
-        thread.join();
-        try std.testing.expectEqual(decision == .release, passed);
-        try std.testing.expect(!gate.withdraw(io));
-    }
-
-    // No decision in time: it gives up, and a late release finds nobody.
-    var late: http.SendGate = .{ .limit = .fromMilliseconds(10) };
-    try std.testing.expect(!try late.pass(io));
-    try std.testing.expectEqual(http.SendGate.State.refused, late.load());
-    try std.testing.expect(!late.release(io));
-}
-
-fn gatedPost(operation: *http.Operation, url: []const u8, output: []u8) http.Error!Reply {
+fn freshPost(operation: *http.Operation, url: []const u8, pause: Io.Duration, output: []u8) http.Error!Reply {
     var request = try operation.open(.POST, std.Uri.parse(url) catch return error.InvalidRequest, .{ .fresh = true });
     defer request.deinit();
+    // Between the connection and the first byte no budget runs.
+    Io.sleep(std.testing.io, pause, .awake) catch return error.Cancelled;
     try request.send("grant");
     var response = try request.receiveHead();
     const bytes = try request.readAll(&response, output);
     return .{ .status = @intFromEnum(response.head.status), .length = bytes.len };
 }
 
-const GatedCall = struct {
-    engine: *http.Engine,
-    url: []const u8,
-    gate: *http.SendGate,
-    response: Io.Duration = .fromSeconds(3),
-    result: ?http.Result(http.Error!Reply) = null,
-    output: [8]u8 = undefined,
+fn phasedPost(engine: *http.Engine, url: []const u8, response: Io.Duration, pause: Io.Duration, output: []u8) http.Result(http.Error!Reply) {
+    return engine.run(.{
+        .consumer = .metask,
+        .isolation = .public,
+        .budget = .{ .phased = .{ .connect = .fromSeconds(3), .response = response } },
+    }, freshPost, .{ url, pause, output });
+}
 
-    fn run(self: *GatedCall) void {
-        self.result = self.engine.run(.{
-            .consumer = .metask,
-            .isolation = .public,
-            .budget = .{ .phased = .{ .connect = .fromSeconds(3), .response = self.response } },
-            .send_gate = self.gate,
-        }, gatedPost, .{ self.url, &self.output });
-    }
-};
-
-test "HTTP gated request connects anew, writes nothing until released, and nothing if refused" {
-    const pool = try Pool.create(.{ .connections = 3 });
+test "HTTP fresh request connects anew beside an idle pooled connection" {
+    const pool = try Pool.create(.{ .connections = 2 });
     defer pool.destroy();
     var engine: http.Engine = undefined;
     engine.init(std.testing.allocator, std.testing.io);
     defer engine.deinit();
     var url_buffer: [64]u8 = undefined;
     const url = pool.url(&url_buffer);
-    // An idle pooled connection the gated request must not take.
-    var warm: [8]u8 = undefined;
-    const pooled = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .boot }) } }, plainGet, .{ url, &warm });
+    var output: [8]u8 = undefined;
+    const pooled = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .boot }) } }, plainGet, .{ url, &output });
     try std.testing.expectEqual(@as(u16, 200), (try pooled.outcome.completed).status);
-
-    for ([_]bool{ true, false }) |released| {
-        var gate: http.SendGate = .{};
-        var call: GatedCall = .{ .engine = &engine, .url = url, .gate = &gate };
-        const requests = pool.requests.load(.acquire);
-        const thread = try std.Thread.spawn(.{}, GatedCall.run, .{&call});
-        while (gate.load() == .idle) try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-        // Connected and waiting: not one byte has reached the server.
-        try std.testing.expectEqual(requests, pool.requests.load(.acquire));
-        if (released) try std.testing.expect(gate.release(std.testing.io)) else try std.testing.expect(gate.refuse(std.testing.io));
-        thread.join();
-        const result = call.result.?;
-        try std.testing.expect(!result.reused);
-        if (released) {
-            try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
-            try std.testing.expectEqual(contract.Send.may_have_been_sent, result.send);
-        } else {
-            try std.testing.expectError(error.Cancelled, result.outcome.completed);
-            try std.testing.expectEqual(contract.Send.not_sent, result.send);
-            try std.testing.expectEqual(requests, pool.requests.load(.acquire));
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 3), pool.accepted.load(.acquire));
+    const result = phasedPost(&engine, url, .fromSeconds(3), .fromMilliseconds(0), &output);
+    try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
+    try std.testing.expect(!result.reused);
+    try std.testing.expectEqual(@as(usize, 2), pool.accepted.load(.acquire));
 }
 
 fn silentAlways(_: usize, _: usize) Pool.Action {
@@ -1452,15 +1384,9 @@ test "HTTP phased budget bounds the answer from its send, not from admission" {
     engine.init(std.testing.allocator, std.testing.io);
     defer engine.deinit();
     var url_buffer: [64]u8 = undefined;
-    var gate: http.SendGate = .{};
-    var call: GatedCall = .{ .engine = &engine, .url = pool.url(&url_buffer), .gate = &gate, .response = .fromMilliseconds(200) };
-    const thread = try std.Thread.spawn(.{}, GatedCall.run, .{&call});
-    while (gate.load() == .idle) try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-    // The wait for the decision is not the answer's time.
-    try Io.sleep(std.testing.io, .fromMilliseconds(300), .awake);
-    try std.testing.expect(gate.release(std.testing.io));
-    thread.join();
-    const result = call.result.?;
+    var output: [8]u8 = undefined;
+    // The pause before the send is longer than the answer's whole budget.
+    const result = phasedPost(&engine, pool.url(&url_buffer), .fromMilliseconds(200), .fromMilliseconds(300), &output);
     try std.testing.expectEqual(error.DeadlineExceeded, result.outcome.failed);
     try std.testing.expectEqual(contract.Send.may_have_been_sent, result.send);
 }

@@ -71,15 +71,9 @@ pub const Cancellation = struct {
     }
 };
 
-pub const SendGate = @import("metawork_http_send_gate").SendGate;
-
 pub const RequestControl = struct {
     cancellation: *const Cancellation,
     deadline: std.Io.Clock.Timestamp,
-    /// A request that may spend a credential: it connects anew, waits for its
-    /// owner's decision before its first byte, and is bounded in phases (the
-    /// connection, then the answer once sent) instead of by `deadline`.
-    send_gate: ?*SendGate = null,
 };
 
 pub const Transport = struct {

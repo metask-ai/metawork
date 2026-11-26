@@ -150,9 +150,9 @@ Account durable authority 由系统安全存储中的 Metask refresh token 与�
 
 没能确认时也可以重新登录，而且可以换账号；登录期间授权仍是等。授权取消、回调失败、超时或换 token 失败时，保存的 refresh token 没有被替换，回到原来的确认，重试时间不变；换 token 成功后它已被替换，新登录按上一段从头退避再取 identity。已验证的登录不接受新的登录，换账号先退出。
 
-每个 worker 只持自己那份 credential 副本，不借用会话内存；令牌请求在发送前备好存放应答的内存，并要求不压缩的应答，发送之后到保存之前 Account 自己不再分配。备不出内存等于没有发送，也不写阻断记录。每次 refresh 走一条新连接，不复用、不探活；连上后在发送闸门前等主线程，主线程先成功写入绑定当前 token 的阻断记录，再放行唯一 HTTP，连接期间什么都不写。闸门等不到 5 秒就自己拒绝；连接按 15 秒、发出后的应答按 15 秒限时，都不算睡眠。记录写入失败就拒闸、不发 HTTP，并尽力删一次记录（报错不等于没写进去），错误记为 `credential_store_write_failed`；放行时 worker 已经不等了，删掉刚写的记录；调用 transport 前的明确本地失败、transport 证明未发送或服务端明确未消费结果只尝试一次清理记录，清理失败保持阻断。合法轮换必须返回不同的新 refresh token，主线程只尝试一次保存新 token；失败保留旧记录并阻断刷新，释放未提交新 token，不建立本地保存恢复流程。新 token 保存成功后清理旧记录，再随状态一起提交安装；清理失败不回滚成功轮换，因为记录与新 token 摘要不匹配，重启可恢复新 token，下一次 HTTP 前仍必须成功覆盖记录。
+每个 worker 只持自己那份 credential 副本，不借用会话内存；令牌请求在发送前备好存放应答的内存，并要求不压缩的应答，发送之后到保存之前 Account 自己不再分配。备不出内存等于没有发送，也不写阻断记录。每次 refresh 先成功写入绑定当前 token 的阻断记录，再发送唯一 HTTP。它走一条新连接，不复用空闲连接、不探活；连接按 15 秒、发出后的应答按 15 秒限时，都不算睡眠。记录写入失败不发 HTTP，并尽力删一次记录（报错不等于没写进去），按凭据库失败退避；调用 transport 前的明确本地失败、transport 证明未发送或服务端明确未消费结果只尝试一次清理记录，清理失败保持阻断。合法轮换必须返回不同的新 refresh token，主线程只尝试一次保存新 token；失败保留旧记录并阻断刷新，释放未提交新 token，不建立本地保存恢复流程。新 token 保存成功后清理旧记录，再随状态一起提交安装；清理失败不回滚成功轮换，因为记录与新 token 摘要不匹配，重启可恢复新 token，下一次 HTTP 前仍必须成功覆盖记录。
 
-已验证会话的 refresh 在两种情况下保留已验证 identity，并在 terminal commit 后按 boot 时钟固定 30 秒自动重试，次数不限：一是遇到明确未发送的 network、deadline 或取消故障，且阻断记录已成功清除；二是在写入阻断记录之前就失败（内存、记录写入或 worker 启动失败）。重试开始时不清原来的错误，成功才清。每次到点只发起一个新的 attempt；后续同类失败再延迟一次，不立即循环。保留原失败诊断；只有续期节拍无法启动才发布 `refresh_schedule_failed`，并提供显式 retry。服务端明确拒绝的请求或配置错误不重试，按下一段结束会话；signed_out restore 不增加隐式重试循环。
+已验证会话的 refresh 在两种情况下保留已验证 identity，并在 terminal commit 后按 boot 时钟固定 30 秒自动重试，次数不限：一是遇到明确未发送的 network、deadline 或取消故障，且阻断记录已成功清除；二是在写入阻断记录之前就失败（内存或 worker 启动失败）；记录写入失败按凭据库失败退避。重试开始时不清原来的错误，成功才清。每次到点只发起一个新的 attempt；后续同类失败再延迟一次，不立即循环。保留原失败诊断；只有续期节拍无法启动才发布 `refresh_schedule_failed`，并提供显式 retry。服务端明确拒绝的请求或配置错误不重试，按下一段结束会话；signed_out restore 不增加隐式重试循环。
 
 结果不确定时保持阻断；timer、`retry_refresh`、错误展示变化、登录取消或时间经过都不能解除。`retry_refresh` 只用于未被阻断的已验证会话和没能确认的冷启动登录，不增加 signed_out restore 或保存恢复入口。除上一段的可重试失败外，已验证会话的 refresh 失败一律在本进程内立即进入 `signed_out`，包括结果不确定、收到的响应不是轮换、服务端明确拒绝、新 token 保存失败：
 
@@ -168,7 +168,7 @@ Account durable authority 由系统安全存储中的 Metask refresh token 与�
 - 所有 Account state commit 与 projection 发生在主线程；worker 只通过有界 mailbox 交付 owned completion；
 - 每个 attempt 最多一个 terminal completion，stale completion 必须销毁 owned secret且不能改变 state；
 - 只有仍在等待 OAuth callback 的登录可以取消；callback 被主线程提交为 `authorize(exchanging)` 后取消命令即失效，credential persistence 一旦可能提交即跨过取消边界。等在续期后面、还没开始的登录请求可以撤回，续期照常；
-- 停下一个动作只有一种做法：放弃。回调等待一被告知就结束，当场 join；网络请求可能卡在取消不到的 DNS 上，只被告知取消、另放一边，结果来了只清零丢弃，结束后才 join，不占新动作的位置。登录请求在没确认的登录上遇到正在取身份时，放弃取身份，浏览器当场打开；遇到续期还在连接（没放行）时拒闸、放弃它，浏览器当场打开；已放行还没发出的撤回，它以没有发出结束后登录开始；已发出的等这一次，确认成功就不再需要登录；
+- 停下一个动作只有一种做法：放弃。回调等待一被告知就结束，当场 join；网络请求可能卡在取消不到的 DNS 上，只被告知取消、另放一边，结果来了只清零丢弃，结束后才 join，不占新动作的位置。登录请求在没确认的登录上遇到正在取身份时，放弃取身份，浏览器当场打开；遇到续期在途时等这一次，确认成功就不再需要登录；
 - 续期节拍、网络、loopback、deadline 与 cancellation 由 Account-owned policy和 Application byte/platform adapter协作收口；
 - 被阻断的 refresh 不得调度或发布可重试的 `refresh_schedule_failed` 来覆盖原失败；只有明确未消费且记录解除成功才能恢复刷新资格；
 - 已验证 identity 的授权状态只能是 `available` 或 `recovering`；不能安全重试的续期结果，在运行中与重启后给出同一公开状态 `signed_out`；

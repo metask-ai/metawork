@@ -4,7 +4,6 @@ const std = @import("std");
 const memory = @import("metawork_http_memory");
 const contract = @import("metawork_http_contract");
 const idle_probe = @import("idle_probe.zig");
-pub const SendGate = @import("metawork_http_send_gate").SendGate;
 const Io = std.Io;
 const Client = std.http.Client;
 
@@ -111,8 +110,8 @@ pub const Budget = union(enum) {
     /// TCP and TLS, measured from admission.
     connect: Io.Duration,
     /// DNS, TCP and TLS from admission, then the answer from the moment the
-    /// first byte may be written. A send gate's wait lies between the two and
-    /// bounds itself. Both are awake time: a machine asleep is not waiting.
+    /// first byte may be written; nothing runs between the two. Both are awake
+    /// time: a machine asleep is not waiting.
     phased: struct { connect: Io.Duration, response: Io.Duration },
 };
 
@@ -121,9 +120,6 @@ pub const Control = struct {
     isolation: Isolation,
     budget: Budget,
     cancellation: ?Cancellation = null,
-    /// Holds the request between its connection and its first byte until the
-    /// gate's owner lets it go.
-    send_gate: ?*SendGate = null,
     /// Only an HTTP response to a server request on an already-held MCP stream.
     continuation: bool = false,
 };
@@ -636,14 +632,6 @@ pub const Operation = struct {
         self.phase = .send;
     }
 
-    /// Waits for the owner's decision on a gated request. Nothing is written
-    /// unless it lets the request go and does not take that back first.
-    fn passGate(self: *Operation) Error!void {
-        const gate = self.control.send_gate orelse return;
-        const passed = gate.pass(self.io()) catch return self.fail(error.Cancelled);
-        if (!passed) return self.fail(error.Cancelled);
-    }
-
     fn waitDeadline(self: *Operation) void {
         self.control.budget.deadline.wait(self.io()) catch return;
         self.stop();
@@ -664,8 +652,8 @@ pub const Operation = struct {
 
     /// The connect budget as above until a connection is in hand; then,
     /// once the first byte may be written, the answer has `response` of
-    /// awake time. A gated request's wait for its decision is bounded by the
-    /// gate itself, so no budget runs between the two.
+    /// awake time. Between the two no budget runs: the caller decides when
+    /// to write.
     fn waitPhasedBudget(self: *Operation, response: Io.Duration) void {
         while (true) {
             const state = self.connect_state.load(.acquire);
@@ -1061,7 +1049,6 @@ pub const Request = struct {
     }
 
     pub fn send(self: *Request, body: ?[]const u8) Error!void {
-        try self.operation.passGate();
         try self.operation.admitSend();
         self.body = body;
         self.write() catch {

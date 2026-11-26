@@ -182,8 +182,6 @@ pub const Coordinator = struct {
         if (self.stopping) return;
         // Workers given up on are joined once they have finished.
         self.runtime.reapAbandoned();
-        // A renewal that has its connection waits here to be let go.
-        self.runtime.serviceRelease();
         while (self.runtime.prepareNextCompletion()) |result| {
             switch (result) {
                 .prepared => |prepared| {
@@ -512,7 +510,6 @@ const SummaryTransport = struct {
     ) account_api.TransportError!account_api.TransportResponse {
         const self: *SummaryTransport = @ptrCast(@alignCast(context));
         if (request.kind == .refresh_token) {
-            if (!account_api.TestSupport.passGate(request)) return error.CancelledNotSent;
             self.renewals += 1;
             const body = if (self.renewals % 2 == 1)
                 "{\"access_token\":\"access-odd\",\"refresh_token\":\"refresh-odd\",\"token_type\":\"Bearer\",\"expires_in\":3600}"
@@ -1290,8 +1287,6 @@ const ClosingRefreshTransport = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.calls += 1;
         if (request.kind != .refresh_token) return error.ProtocolFailed;
-        // Held once sent: closing waits for an answer that may rotate.
-        if (!account_api.TestSupport.passGate(request)) return error.CancelledNotSent;
         if (self.gated) {
             self.started.set(std.testing.io);
             self.release.wait(std.testing.io) catch return error.NetworkFailed;
@@ -1329,12 +1324,7 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
         try std.testing.expect(runtime.admitEffect(&refresh));
         runtime.commit(&refresh);
         runtime.dispatchCommitted();
-        if (in_flight) {
-            while (!transport.started.isSet()) {
-                runtime.serviceRelease();
-                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-            }
-        } else account_api.TestSupport.joinNetwork(&runtime);
+        if (in_flight) try transport.started.wait(std.testing.io) else account_api.TestSupport.joinNetwork(&runtime);
         var follower: RecordingFollower = .{};
         coordinator.setFollower(follower.port());
         coordinator.shutdown();
@@ -1377,8 +1367,6 @@ test "Account shutdown failed rotation save preserves durable block without a se
     try std.testing.expect(runtime.admitEffect(&refresh));
     runtime.commit(&refresh);
     runtime.dispatchCommitted();
-    // Sent and answered; closing saves what came.
-    account_api.TestSupport.joinNetwork(&runtime);
     coordinator.shutdown();
     try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
     try std.testing.expectEqualStrings("old-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);

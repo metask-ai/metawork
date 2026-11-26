@@ -1999,13 +1999,6 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    // The one decision a request waits for between its connection and its
-    // first byte. Its owner may hold one without importing the engine.
-    const metawork_http_send_gate = b.createModule(.{
-        .root_source_file = b.path("src/foundation/http/send_gate.zig"),
-        .target = target,
-        .optimize = root_module.optimize,
-    });
     const metawork_http_transport = b.createModule(.{
         .root_source_file = b.path("src/foundation/http/transport.zig"),
         .target = target,
@@ -2013,7 +2006,6 @@ fn wireAgentCore(
     });
     metawork_http_transport.addImport("metawork_http_memory", metawork_http_memory);
     metawork_http_transport.addImport("metawork_http_contract", metawork_http_contract);
-    metawork_http_transport.addImport("metawork_http_send_gate", metawork_http_send_gate);
     // Update publishes the engine's typed failure facts; the engine itself
     // stays Application-only.
     product_update.addImport("metawork_http_contract", metawork_http_contract);
@@ -2026,7 +2018,6 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    metask_transport.addImport("metawork_http_send_gate", metawork_http_send_gate);
     const account_summary = b.createModule(.{
         .root_source_file = b.path("src/product/account/summary.zig"),
         .target = target,

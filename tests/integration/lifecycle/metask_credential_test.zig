@@ -45,11 +45,7 @@ const Network = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (request.kind == .refresh_token) {
             _ = self.refresh_attempts.fetchAdd(1, .monotonic);
-            // What fails unsent fails before its gate; anything else after.
-            const failure = self.refresh_failure;
-            if (failure != null and failure.? == error.NetworkNotSent) return error.NetworkNotSent;
-            if (!account.TestSupport.passGate(request)) return error.CancelledNotSent;
-            if (failure) |value| return value;
+            if (self.refresh_failure) |failure| return failure;
         }
         if (request.kind == .userinfo) {
             const body = std.fmt.bufPrint(buffer, "{{\"sub\":\"{s}\",\"name\":\"Synthetic user\",\"client_id\":\"metawork\",\"authorization_id\":\"synthetic-authorization\"}}", .{self.login_principal}) catch return error.ResponseTooLarge;

@@ -117,26 +117,13 @@ pub const NetworkAttempt = struct {
     sink: ResultSink = undefined,
     cancellation: metask.Cancellation = undefined,
     deadline: std.Io.Clock.Timestamp = undefined,
-    /// A renewal spends its refresh token: once connected it waits here for
-    /// the main thread to store the marker and let it go.
-    gate: metask.SendGate = .{},
-    /// Set as the worker returns, after it published its result.
-    done: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     started: bool = false,
     joined: bool = false,
 
-    /// Nothing more is sent: a renewal held back, and the request cancelled.
     pub fn cancel(self: *NetworkAttempt) void {
         if (!self.started or self.joined) return;
-        self.holdBack();
         self.cancellation.cancel();
-    }
-
-    /// A renewal not let go yet, or let go and not left, never leaves now.
-    pub fn holdBack(self: *NetworkAttempt) void {
-        const gate = self.sendGate() orelse return;
-        if (!gate.refuse(self.io)) _ = gate.withdraw(self.io);
     }
 
     pub fn join(self: *NetworkAttempt) void {
@@ -162,11 +149,6 @@ pub const NetworkAttempt = struct {
         return self.started and self.attempt_id == attempt_id;
     }
 
-    /// The gate a renewal waits at; null for every other request.
-    pub fn sendGate(self: *NetworkAttempt) ?*metask.SendGate {
-        return if (self.started and !self.joined and self.work == .refresh) &self.gate else null;
-    }
-
     pub fn start(
         self: *NetworkAttempt,
         io: std.Io,
@@ -175,7 +157,6 @@ pub const NetworkAttempt = struct {
         work_value: Work,
         sink: ResultSink,
         now_unix_seconds: i64,
-        gate_wake: ?metask.SendGate.Wake,
     ) !void {
         var work = work_value;
         errdefer work.deinit();
@@ -195,7 +176,6 @@ pub const NetworkAttempt = struct {
                 .login_exchange => |*exchange| earlierDeadline(exchange.input.attempt_deadline, deadline_cap),
                 .refresh, .load_identity, .none => deadline_cap,
             },
-            .gate = .{ .wake = gate_wake },
             .started = true,
         };
         work = .none;
@@ -212,7 +192,6 @@ pub const NetworkAttempt = struct {
     }
 
     fn workerMain(self: *NetworkAttempt) void {
-        defer self.done.store(true, .release);
         const control: metask.RequestControl = .{
             .cancellation = &self.cancellation,
             .deadline = self.deadline,
@@ -240,15 +219,13 @@ pub const NetworkAttempt = struct {
             .refresh => |*refresh| {
                 const grant = refresh.grant.?;
                 var tracked: RefreshTransportEvidence = .{ .transport = self.transport };
-                var gated = control;
-                gated.send_gate = &self.gate;
                 var tokens = metask.refreshWithToken(
                     grant.secretAllocator(),
                     .{ .context = &tracked, .perform_fn = RefreshTransportEvidence.perform, .retire_fn = RefreshTransportEvidence.retire },
                     &refresh.token,
                     refresh.principal.view(),
                     self.now_unix_seconds,
-                    gated,
+                    control,
                 ) catch |err| {
                     self.publishCompletion(.{ .failed = .{
                         .error_code = metask.errorCode(err),
@@ -457,7 +434,6 @@ test "login exchange uses the remaining login deadline capped at thirty seconds"
         try testExchange(&input),
         capture.sink(),
         100,
-        null,
     );
     const remaining = attempt.deadline.durationFromNow(std.testing.io).raw.toNanoseconds();
     try std.testing.expect(remaining > 0);
@@ -485,7 +461,6 @@ test "login exchange uses the remaining login deadline capped at thirty seconds"
         try testExchange(&short_input),
         cancelled_capture.sink(),
         100,
-        null,
     );
     try std.testing.expectEqual(
         total_deadline.raw.toNanoseconds(),
@@ -531,7 +506,6 @@ test "a refresh attempt answers into its own grant and cancels cleanly" {
         try testRefresh("old-refresh"),
         capture.sink(),
         100,
-        null,
     );
     attempt.join();
     attempt.deinit();
@@ -550,7 +524,6 @@ test "a refresh attempt answers into its own grant and cancels cleanly" {
         try testRefresh("old-refresh"),
         capture.sink(),
         100,
-        null,
     ));
     try std.testing.expect(!attempt.started);
 
@@ -563,7 +536,6 @@ test "a refresh attempt answers into its own grant and cancels cleanly" {
         try testRefresh("old-refresh"),
         cancelled_capture.sink(),
         100,
-        null,
     );
     blocking.waitUntilStarted(std.testing.io);
     attempt.cancel();
@@ -578,41 +550,6 @@ test "a refresh attempt answers into its own grant and cancels cleanly" {
     );
 }
 
-test "a renewal is sent only once let go, and a refused one reports nothing sent" {
-    const Gated = struct {
-        sent: std.atomic.Value(bool) = .init(false),
-        fn perform(context: *anyopaque, request: metask.Request, output: []u8) metask.TransportError!metask.Response {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            // What the real transport does once connected.
-            if (!(request.control.?.send_gate.?.pass(std.testing.io) catch false)) return error.CancelledNotSent;
-            self.sent.store(true, .release);
-            const body = "{\"access_token\":\"fresh-access\",\"refresh_token\":\"fresh-refresh\",\"token_type\":\"Bearer\",\"expires_in\":3600}";
-            @memcpy(output[0..body.len], body);
-            return .{ .status = 200, .body = output[0..body.len] };
-        }
-    };
-    for ([_]bool{ true, false }) |let_go| {
-        var transport: Gated = .{};
-        var capture: CaptureSink = .{};
-        var attempt: NetworkAttempt = .{};
-        try attempt.start(std.testing.io, 11, .{ .context = &transport, .perform_fn = Gated.perform, .retire_fn = metask.retireNothing }, try testRefresh("old-refresh"), capture.sink(), 100, null);
-        const gate = attempt.sendGate().?;
-        while (gate.load() != .requested) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-        try std.testing.expect(!transport.sent.load(.acquire));
-        try std.testing.expect(if (let_go) gate.release(std.testing.io) else gate.refuse(std.testing.io));
-        attempt.join();
-        try std.testing.expect(attempt.sendGate() == null);
-        attempt.deinit();
-        var result = capture.result orelse return error.TestUnexpectedResult;
-        defer result.deinit();
-        try std.testing.expectEqual(let_go, transport.sent.load(.acquire));
-        if (let_go)
-            try std.testing.expectEqualStrings("fresh-access", result.refresh.accessToken().?)
-        else
-            try std.testing.expect(result.completion.payload.failed.refresh_not_consumed);
-    }
-}
-
 test "refresh-only restore accepts an identity with incomplete profile data" {
     var transport: RefreshTransport = .{ .incomplete_profile = true };
     var capture: CaptureSink = .{};
@@ -624,7 +561,6 @@ test "refresh-only restore accepts an identity with incomplete profile data" {
         try testRefresh("old-refresh"),
         capture.sink(),
         100,
-        null,
     );
     attempt.join();
     attempt.deinit();
@@ -640,7 +576,6 @@ test "refresh-only restore accepts an identity with incomplete profile data" {
         .{ .load_identity = try oauth.Secret.init(std.testing.allocator, refreshed.refresh.accessToken().?) },
         capture.sink(),
         0,
-        null,
     );
     attempt.join();
     attempt.deinit();

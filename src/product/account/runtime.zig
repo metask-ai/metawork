@@ -425,7 +425,6 @@ const Effects = struct {
             work,
             self.networkSink(),
             now_unix_seconds,
-            .{ .context = self, .notify_fn = notifyUnlessDetached },
         ) catch {
             self.allocator.destroy(attempt);
             return self.publishCompletion(.{
@@ -468,7 +467,6 @@ const Effects = struct {
         const attempt = self.network orelse return self.discardMailbox(attempt_id);
         if (attempt.attempt_id != attempt_id) return self.discardMailbox(attempt_id);
         self.network = null;
-        // A renewal not yet sent never will be.
         attempt.cancel();
         const entry = self.allocator.create(Abandoned) catch {
             // Without memory to set it aside, wait for it as closing does.
@@ -657,9 +655,9 @@ pub const Runtime = struct {
     /// The credential generation the summary was last fetched with.
     summary_generation: u64 = 0,
     /// The token request underway: the clocks when it was issued (no wall
-    /// clock before 1970), whether the marker of the refresh token it sends
-    /// is stored, and why it was refused, if this side refused it.
-    request: struct { wall: ?i64 = null, boot: i64 = 0, marked: bool = false, refusal: ?contract.ErrorCode = null } = .{},
+    /// clock before 1970), and whether the marker of the refresh token it
+    /// sends is stored.
+    request: struct { wall: ?i64 = null, boot: i64 = 0, marked: bool = false } = .{},
     /// When the next renewal is due. Null keeps every automatic one off.
     renew_at: ?Moment = null,
     /// `renew_at` waits out a failure, which an ended token does not cut short.
@@ -729,7 +727,6 @@ pub const Runtime = struct {
         self.assertMainThread();
         if (self.stopping) return .{ .rejected = .invalid_state };
         if (command == .retry_refresh) return self.prepareRetryRefresh();
-        if (command == .begin_login and self.account.refreshInFlight()) return self.prepareLoginOverRenewal();
         if (command == .logout) return self.prepareLogout();
         if (command == .refresh_summary) return .{ .rejected = .invalid_state };
         return wrapPrepareResult(self.account.prepareCommand(command));
@@ -778,60 +775,6 @@ pub const Runtime = struct {
         if (self.account.activeAttempt() != null) return;
         const renew_at = if (self.renew_at) |*value| value else return;
         renew_at.boot = @min(renew_at.boot, self.confirm_ended_boot +| confirm_delays_seconds[0]);
-    }
-
-    /// A sign-in asked for while a renewal is underway. One not yet let go is
-    /// refused: nothing of it was written or sent, so it is given up and the
-    /// browser opens at once. One let go but not left is taken back: it ends
-    /// unsent at once and its marker is deleted, and the sign-in begins when
-    /// it has. One that left is waited for. A sign-in not committed after all
-    /// leaves the renewal to end unsent and be retried.
-    fn prepareLoginOverRenewal(self: *Runtime) PrepareResult {
-        // Nothing is touched for a sign-in that is refused anyway.
-        const waiting = self.account.prepareCommand(.begin_login);
-        if (waiting != .transition) return wrapPrepareResult(waiting);
-        if (self.effects.network) |attempt| if (attempt.sendGate()) |gate| {
-            if (gate.refuse(self.io)) return wrapPrepareResult(self.account.prepareBeginLoginOverUnsentRenewal());
-            _ = gate.withdraw(self.io);
-        };
-        return wrapPrepareResult(waiting);
-    }
-
-    /// Lets a renewal that has its connection go once the marker of the
-    /// refresh token it sends is stored; refuses it when nothing may be sent.
-    /// Nothing is stored while it connects. Every drain may call it.
-    pub fn serviceRelease(self: *Runtime) void {
-        self.assertMainThread();
-        const attempt = self.effects.network orelse return;
-        const gate = attempt.sendGate() orelse return;
-        if (gate.load() != .requested) return;
-        const platform = self.platform orelse {
-            _ = gate.refuse(self.io);
-            return;
-        };
-        const token = self.credentials.refreshToken() orelse {
-            _ = gate.refuse(self.io);
-            return;
-        };
-        if (self.stopping or self.account.loginWaiting() or !self.account.refreshInFlight()) {
-            _ = gate.refuse(self.io);
-            return;
-        }
-        platform.credentials.beginRefresh(token) catch |err| {
-            // An error may still have stored it.
-            platform.credentials.clearRefreshMarker() catch {};
-            self.request.refusal = accountStoreError(err);
-            _ = gate.refuse(self.io);
-            return;
-        };
-        if (gate.release(self.io)) {
-            self.request.marked = true;
-            return;
-        }
-        // It stopped waiting meanwhile, so nothing was sent.
-        platform.credentials.clearRefreshMarker() catch {
-            self.request.marked = true;
-        };
     }
 
     fn prepareConfirmation(self: *Runtime, platform: ports_impl.Platform) state_impl.PrepareResult {
@@ -924,7 +867,6 @@ pub const Runtime = struct {
         // Refresh keeps its original network deadline. Join before taking the
         // mailbox so a complete rotation is saved once while ports are alive.
         if (self.effects.networkRefreshing()) {
-            self.effects.network.?.holdBack();
             self.effects.network.?.join();
             if (self.prepareNextCompletion()) |result| switch (result) {
                 .prepared => |value| {
@@ -1324,13 +1266,9 @@ pub const Runtime = struct {
                 .payload = .{ .failed = .fromCode(.account_operation_failed) },
             };
         }
-        // Refused here for what this side could not do: that is the failure,
-        // not the cancellation the transport saw.
-        if (completion.payload == .failed and refresh_attempt and completion.payload.failed.refresh_not_consumed)
-            if (self.request.refusal) |refusal| {
-                completion.payload.failed.error_code = refusal;
-            };
-        const store_failed = refresh_attempt and self.request.refusal != null;
+        // The marker could not be stored, so nothing was sent.
+        const store_failed = refresh_attempt and completion.payload == .failed and
+            completion.payload.failed.error_code == .credential_store_write_failed;
         var marked = self.request.marked;
         if (completion.payload == .failed and refresh_attempt and
             marked and completion.payload.failed.refresh_not_consumed)
@@ -1580,13 +1518,19 @@ pub const Runtime = struct {
                     return;
                 };
                 const now = platform.wall_clock.nowUnixSeconds();
-                // Nothing is stored before the request has its connection:
-                // the marker is written when it asks to be let go.
-                const work = self.refreshWork(refresh_token) catch {
+                // No marker means no HTTP: these failures are safely retryable.
+                var work = self.refreshWork(refresh_token) catch {
                     self.publishUnsentRefreshFailure(attempt_id, .local_resource_exhausted);
                     return;
                 };
-                self.request = .{ .wall = now, .boot = platform.boot_clock.nowSeconds() };
+                platform.credentials.beginRefresh(refresh_token) catch |err| {
+                    work.deinit();
+                    // An error may still have stored it.
+                    platform.credentials.clearRefreshMarker() catch {};
+                    self.publishUnsentRefreshFailure(attempt_id, accountStoreError(err));
+                    return;
+                };
+                self.request = .{ .wall = now, .boot = platform.boot_clock.nowSeconds(), .marked = true };
                 self.effects.startRequest(attempt_id, work, now orelse 0);
             },
             .load_identity => {
@@ -2113,22 +2057,8 @@ pub const TestSupport = if (builtin.is_test) struct {
         runtime.effects.loginSink().publish(attempt_id, &result);
     }
 
-    /// Joins the network worker, letting a renewal go as the event loop does.
     pub fn joinNetwork(runtime: *Runtime) void {
-        const attempt = runtime.effects.network orelse return;
-        while (!attempt.done.load(.acquire)) {
-            runtime.serviceRelease();
-            std.Io.sleep(runtime.io, .fromMilliseconds(1), .awake) catch {};
-        }
-        attempt.join();
-    }
-
-    /// What a real transport does once connected: a request behind a gate
-    /// waits for its owner. False when it may not be sent; nothing was.
-    pub fn passGate(request: metask_client.Request) bool {
-        const control = request.control orelse return true;
-        const gate = control.send_gate orelse return true;
-        return gate.pass(std.testing.io) catch false;
+        if (runtime.effects.network) |attempt| attempt.join();
     }
 
     pub fn occupyEffectQueue(runtime: *Runtime) void {
@@ -2237,12 +2167,10 @@ const RuntimeTestTransport = struct {
 
     fn perform(
         context: *anyopaque,
-        request: metask_client.Request,
+        _: metask_client.Request,
         _: []u8,
     ) metask_client.TransportError!metask_client.Response {
         const self: *RuntimeTestTransport = @ptrCast(@alignCast(context));
-        // Counts what was sent: a request refused at its gate was not.
-        if (!TestSupport.passGate(request)) return error.CancelledNotSent;
         self.calls += 1;
         return self.failure;
     }
@@ -2723,7 +2651,6 @@ test "retry refresh restarts the beat and renews a token that is due" {
 test "cold restore request error preserves the retained refresh credential" {
     const RequestErrorTransport = struct {
         fn perform(_: *anyopaque, request: metask_client.Request, output: []u8) metask_client.TransportError!metask_client.Response {
-            if (!TestSupport.passGate(request)) return error.CancelledNotSent;
             if (request.kind != .refresh_token or !std.mem.eql(
                 u8,
                 request.body,
@@ -2930,7 +2857,6 @@ const ResponseTestTransport = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (request.kind != .refresh_token) return error.ProtocolFailed;
         self.calls += 1;
-        if (!TestSupport.passGate(request)) return error.CancelledNotSent;
         @memcpy(output[0..self.body.len], self.body);
         return .{ .status = self.status, .body = output[0..self.body.len] };
     }
@@ -3395,7 +3321,6 @@ const RotationTestTransport = struct {
             self.unsent_failures_remaining -= 1;
             return error.NetworkNotSent;
         }
-        if (!TestSupport.passGate(request)) return error.CancelledNotSent;
         const body = if (request.kind == .refresh_token or request.kind == .exchange_code)
             "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"token_type\":\"Bearer\",\"expires_in\":3600}"
         else if (request.kind == .userinfo and self.identity_failure)
@@ -3422,9 +3347,11 @@ const ConfirmTransport = struct {
         const body = switch (request.kind) {
             .refresh_token, .exchange_code => blk: {
                 self.refreshes += 1;
-                if (self.refresh == .unsent) return error.NetworkNotSent;
-                if (!TestSupport.passGate(request)) return error.CancelledNotSent;
-                if (self.refresh == .lost) return error.NetworkFailed;
+                switch (self.refresh) {
+                    .unsent => return error.NetworkNotSent,
+                    .lost => return error.NetworkFailed,
+                    .answered => {},
+                }
                 // A rotation always brings another refresh token.
                 break :blk if (self.refreshes % 2 == 1)
                     "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"token_type\":\"Bearer\",\"expires_in\":3600}"
@@ -3640,17 +3567,15 @@ test "a login that cannot be confirmed can be retried or replaced and is kept ot
         platform.now_unix_seconds = 130;
         try startDueRenewal(&runtime);
         try std.testing.expect(runtime.prepareCommand(.retry_refresh) == .rejected);
-        // A sign-in is taken while the confirmation still connects, and gives
-        // it up: nothing was sent. Not taken, it leaves the confirmation to
-        // end unsent.
-        var replacing = switch (runtime.prepareCommand(.begin_login)) {
+        // A sign-in is taken while the confirmation is underway; it waits.
+        var waiting = switch (runtime.prepareCommand(.begin_login)) {
             .prepared => |prepared| prepared,
             else => return error.TestUnexpectedResult,
         };
-        try std.testing.expect(!replacing.transition.loginWaits());
-        try std.testing.expectEqual(AttemptDisposition.replaces, runtime.attemptDisposition(&replacing));
-        replacing.deinit();
+        try std.testing.expect(waiting.transition.loginWaits());
+        waiting.deinit();
         try settleAttempt(&runtime);
+        // Nothing was sent: the next try is thirty seconds on.
         try std.testing.expectEqual(@as(i64, 160), runtime.renew_at.?.boot);
         // At once, and patient from the start again.
         var retry = switch (runtime.prepareCommand(.retry_refresh)) {
@@ -3749,7 +3674,6 @@ test "a rotation answered when no memory is left is saved and installed" {
         fn perform(context: *anyopaque, request: metask_client.Request, output: []u8) metask_client.TransportError!metask_client.Response {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (request.kind != .refresh_token) return error.ProtocolFailed;
-            if (!TestSupport.passGate(request)) return error.CancelledNotSent;
             self.memory.fail_index = self.memory.alloc_index;
             const body = "{\"access_token\":\"" ++ longest_access ++ "\",\"refresh_token\":\"" ++ longest_refresh ++ "\",\"token_type\":\"Bearer\",\"expires_in\":3600}";
             @memcpy(output[0..body.len], body);
@@ -3813,8 +3737,7 @@ test "userinfo invalid token preserves the newly committed restore credential" {
 
 test "explicit nonconsumption restores permission only after marker deletion" {
     const RequestFailure = struct {
-        fn perform(_: *anyopaque, request: metask_client.Request, output: []u8) metask_client.TransportError!metask_client.Response {
-            if (!TestSupport.passGate(request)) return error.CancelledNotSent;
+        fn perform(_: *anyopaque, _: metask_client.Request, output: []u8) metask_client.TransportError!metask_client.Response {
             const body = "{\"error\":\"invalid_client\"}";
             @memcpy(output[0..body.len], body);
             return .{ .status = 401, .body = output[0..body.len] };
@@ -4031,13 +3954,10 @@ test "stopping suppresses a prepared unsent refresh retry" {
 
 /// Holds a request of the chosen kind until the test lets it go, then
 /// answers it: a token request with a rotation, Userinfo with an identity.
-/// It is held while it connects, or once it was sent.
 const HeldTransport = struct {
     hold_tokens: bool = false,
     hold_identity: bool = false,
-    hold_after_gate: bool = false,
     unsent: bool = false,
-    lost: bool = false,
     started: std.Io.Event = .unset,
     release: std.Io.Event = .unset,
 
@@ -4045,20 +3965,14 @@ const HeldTransport = struct {
         return Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = self, .perform_fn = perform, .retire_fn = metask_client.retireNothing }, TestSupport.loopbackEndpoint(), .{ .context = self, .notify_fn = runtimeTestWake });
     }
 
-    fn hold(self: *@This()) metask_client.TransportError!void {
-        self.started.set(std.testing.io);
-        self.release.wait(std.testing.io) catch return error.NetworkNotSent;
-    }
-
     fn perform(context: *anyopaque, request: metask_client.Request, output: []u8) metask_client.TransportError!metask_client.Response {
         const self: *@This() = @ptrCast(@alignCast(context));
         const tokens = request.kind == .refresh_token or request.kind == .exchange_code;
-        const held = (tokens and self.hold_tokens) or (request.kind == .userinfo and self.hold_identity);
-        if (held and !self.hold_after_gate) try self.hold();
+        if ((tokens and self.hold_tokens) or (request.kind == .userinfo and self.hold_identity)) {
+            self.started.set(std.testing.io);
+            self.release.wait(std.testing.io) catch return error.NetworkNotSent;
+        }
         if (self.unsent) return error.NetworkNotSent;
-        if (!TestSupport.passGate(request)) return error.CancelledNotSent;
-        if (held and self.hold_after_gate) try self.hold();
-        if (self.lost) return error.NetworkFailed;
         const body = if (tokens)
             "{\"access_token\":\"held-access\",\"refresh_token\":\"held-refresh\",\"token_type\":\"Bearer\",\"expires_in\":3600}"
         else if (request.kind == .userinfo)
@@ -4145,10 +4059,9 @@ test "a logout ends the login at once whatever Account is doing and discards wha
     }
 }
 
-test "a sign-in gives up a renewal still connecting and waits for one that was sent" {
-    const Case = enum { connecting, sent_confirms, sent_lost };
-    for (std.enums.values(Case)) |case| {
-        var transport: HeldTransport = .{ .hold_tokens = true, .hold_after_gate = case != .connecting, .lost = case == .sent_lost };
+test "a sign-in waits for a confirmation underway and is not needed if it confirms the login" {
+    for ([_]bool{ false, true }) |confirmed| {
+        var transport: HeldTransport = .{ .hold_tokens = true, .unsent = !confirmed };
         var runtime = transport.runtimeFor();
         var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
         defer {
@@ -4162,12 +4075,7 @@ test "a sign-in gives up a renewal still connecting and waits for one that was s
         try std.testing.expect(runtime.admitEffect(&refresh));
         runtime.commit(&refresh);
         runtime.dispatchCommitted();
-        // The event loop lets a connected renewal go once its marker is stored.
-        while (!transport.started.isSet()) {
-            runtime.serviceRelease();
-            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
-        }
-        try std.testing.expectEqual(case != .connecting, platform.refresh_marker != null);
+        try transport.started.wait(std.testing.io);
         const epoch = runtime.authorization().checking;
 
         var login = switch (runtime.prepareCommand(.begin_login)) {
@@ -4175,18 +4083,6 @@ test "a sign-in gives up a renewal still connecting and waits for one that was s
             else => return error.TestUnexpectedResult,
         };
         defer login.deinit();
-        if (case == .connecting) {
-            // Nothing was written or sent: the browser opens at once.
-            try std.testing.expectEqual(AttemptDisposition.replaces, runtime.attemptDisposition(&login));
-            try std.testing.expect(login.transition.takeEffect().? == .begin_oauth);
-            runtime.commit(&login);
-            try std.testing.expectEqual(contract.AccountState.authorizing, runtime.view().state);
-            try std.testing.expectEqual(epoch, runtime.authorization().checking);
-            try finishAbandoned(&runtime, &transport);
-            try std.testing.expect(platform.refresh_marker == null);
-            try std.testing.expectEqualStrings("stored-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
-            continue;
-        }
         try std.testing.expect(login.transition.takeEffect() == null);
         runtime.commit(&login);
         try std.testing.expectEqual(contract.AccountState.authorizing, runtime.view().state);
@@ -4196,21 +4092,21 @@ test "a sign-in gives up a renewal still connecting and waits for one that was s
 
         transport.release.set(std.testing.io);
         try commitNextResult(&runtime);
-        if (case == .sent_confirms) {
+        if (confirmed) {
             try settleAttempt(&runtime);
             try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
             try std.testing.expect(!runtime.account.loginWaiting());
             try std.testing.expect(runtime.prepareDue() == null);
             continue;
         }
-        // What was sent may have spent the token; the sign-in takes over and
-        // the record stays as it was left.
+        // The confirmation proved nothing; the sign-in takes over from it and
+        // the messages wait on through it.
+        try std.testing.expectEqual(epoch, runtime.authorization().checking);
         var begun = runtime.prepareDue() orelse return error.TestUnexpectedResult;
         defer begun.deinit();
         try std.testing.expect(begun.transition.takeEffect().? == .begin_oauth);
         runtime.commit(&begun);
         try std.testing.expectEqual(contract.AccountState.authorizing, runtime.view().state);
-        try std.testing.expect(platform.refresh_marker != null);
         try std.testing.expectEqualStrings("stored-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
     }
 }

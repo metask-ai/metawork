@@ -16,8 +16,8 @@ pub const Adapter = struct {
         .raw = .fromSeconds(30),
         .clock = .boot,
     };
-    const gated_connect_timeout: std.Io.Duration = .fromSeconds(15);
-    const gated_response_timeout: std.Io.Duration = .fromSeconds(15);
+    const renewal_connect_timeout: std.Io.Duration = .fromSeconds(15);
+    const renewal_response_timeout: std.Io.Duration = .fromSeconds(15);
 
     const FetchResult = http.Error!struct { status: u16, body_len: usize };
 
@@ -87,18 +87,16 @@ pub const Adapter = struct {
         response_buffer: []u8,
     ) metask_transport.TransportError!metask_transport.Response {
         const self: *Adapter = @ptrCast(@alignCast(context));
-        const gate = if (request.control) |control| control.send_gate else null;
         const result = self.http.run(.{
             .consumer = .metask,
             .isolation = isolation(request.principal),
-            // A gated request may spend a credential: its connection is new,
-            // and once it is sent its answer, not its admission, sets its end.
-            .budget = if (gate != null)
-                .{ .phased = .{ .connect = gated_connect_timeout, .response = gated_response_timeout } }
+            // A renewal spends its refresh token: its connection is new, and
+            // once it is sent its answer, not its admission, sets its end.
+            .budget = if (request.kind == .refresh_token)
+                .{ .phased = .{ .connect = renewal_connect_timeout, .response = renewal_response_timeout } }
             else
                 .{ .deadline = if (request.control) |control| control.deadline else .fromNow(self.http.io, default_request_timeout) },
             .cancellation = if (request.control) |control| http.Cancellation.atomic(&control.cancellation.state) else null,
-            .send_gate = gate,
         }, fetch, .{ request, response_buffer });
         const send_started = result.send == .may_have_been_sent;
         return switch (result.outcome) {
@@ -202,9 +200,9 @@ pub const Adapter = struct {
             // Only token requests POST, and a rotation must be readable without
             // allocating. An absent header would accept any encoding.
             .standard_headers = if (method == .POST) .{ .accept_encoding = .{ .override = "identity" } } else .{},
-            // A renewal never sends over a connection that may have died
-            // while idle: the one write it gets could be lost to it.
-            .fresh = operation.control.send_gate != null,
+            // A renewal (the one phased request) never sends over a connection
+            // that may have died while idle: its one write could be lost.
+            .fresh = operation.control.budget == .phased,
         });
         defer request.deinit();
         try request.send(if (method == .POST) body else null);
@@ -282,7 +280,9 @@ test "Account deadline and cancellation during connection prove refresh was not 
         .cancellation = &cancellation,
         .deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{ .raw = .fromMilliseconds(20), .clock = .boot }),
     };
-    try std.testing.expectError(error.DeadlineExceededNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .principal = null, .control = control }, &buffer));
+    // A renewal is bounded in phases of its own; every other request by the
+    // caller's deadline.
+    try std.testing.expectError(error.DeadlineExceededNotSent, adapter.accountTransport().perform(.{ .kind = .exchange_code, .principal = null, .control = control }, &buffer));
     cancellation.cancel();
     control.deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{ .raw = .fromSeconds(30), .clock = .boot });
     try std.testing.expectError(error.CancelledNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .principal = null, .control = control }, &buffer));
