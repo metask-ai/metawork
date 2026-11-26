@@ -3179,7 +3179,7 @@ pub const Runtime = struct {
     fn newTaskMetask(self: *Runtime, use: ?account_contract.Authorization.Use) execution_state.MetaskAdmission {
         return switch (use orelse return .none) {
             .ready => .none,
-            .wait => if (self.account_projection.view().error_code == .none) .recovering else .@"unreachable",
+            .wait => if (self.account_projection.view().cannot_reach) .@"unreachable" else .recovering,
             .stop => .none,
         };
     }
@@ -7472,14 +7472,24 @@ pub const Runtime = struct {
         text: *const view_read.Text,
     ) Error!void {
         const view = self.accountView();
+        const actions = view.actions;
         writer.print(
-            "{{\"state\":\"{s}\",\"canCancel\":{},\"canRetry\":{},\"accountId\":",
-            .{
-                @tagName(view.state),
-                view.can_cancel,
-                view.can_retry,
-            },
+            "{{\"state\":\"{s}\",\"actions\":{{\"cancel\":{},\"retry\":{},\"login\":{},\"logout\":{},\"clear\":{}}},\"unreachable\":{},\"attempt\":",
+            .{ @tagName(view.state), actions.cancel, actions.retry, actions.login, actions.logout, actions.clear, view.cannot_reach },
         ) catch return error.SnapshotTooLarge;
+        if (view.attempt) |attempt| {
+            writer.print("{{\"id\":\"{d}\",\"action\":\"{s}\",\"outcome\":", .{ attempt.id, @tagName(attempt.action) }) catch
+                return error.SnapshotTooLarge;
+            if (attempt.outcome) |outcome|
+                writer.print("\"{s}\"", .{@tagName(outcome)}) catch return error.SnapshotTooLarge
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(attempt.error_code)}) catch
+                return error.SnapshotTooLarge;
+            try text.writeJson(writer, attempt.safe_diagnostic);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"accountId\":") catch return error.SnapshotTooLarge;
         try text.writeJson(writer, view.account_id);
         writer.writeAll(",\"displayName\":") catch
             return error.SnapshotTooLarge;

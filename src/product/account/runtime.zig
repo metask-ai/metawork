@@ -722,11 +722,25 @@ pub const Runtime = struct {
     /// Summary jobs told to cancel and not waited for; each is joined once it
     /// has finished.
     retired_summaries: ?*SummaryJob = null,
-    /// The credential generation the summary was last fetched with.
-    summary_generation: u64 = 0,
     /// Revocations, newest first. Only the newest is still wanted; each is
     /// joined once it has finished.
     revokes: ?*RevokeJob = null,
+    /// The person's own latest command, and what came of it.
+    attempt: ?struct {
+        id: u64,
+        action: contract.AccountCommand,
+        outcome: ?contract.AccountAttempt.Outcome = null,
+        error_code: contract.ErrorCode = .none,
+        safe_diagnostic: [contract.Limits.safe_diagnostic_bytes]u8 = undefined,
+        safe_diagnostic_len: usize = 0,
+        /// The operation underway when the command came, which is not its.
+        before: ?u64 = null,
+        /// The operation its own commit started, once that commit is in.
+        started: ?u64 = null,
+        committed: bool = false,
+    } = null,
+    /// Receipts for the person's commands, Account's and the summary's alike.
+    next_receipt: u64 = 1,
     /// The token request underway: the clocks when it was issued (no wall
     /// clock before 1970), and whether the marker of the refresh token it
     /// sends is stored.
@@ -809,6 +823,60 @@ pub const Runtime = struct {
         self.assertMainThread();
         // No store to read again: only a sign-in, once one exists, can follow.
         return self.preparedSignedOutRestoreFailure(.credential_store_read_failed, false);
+    }
+
+    /// Opens the person's attempt for a command about to be committed and
+    /// returns its receipt; `attempt_before` puts back the one it replaced
+    /// if the commit is refused.
+    pub fn beginAttempt(self: *Runtime, action: contract.AccountCommand) u64 {
+        self.assertMainThread();
+        const id = self.next_receipt;
+        self.next_receipt +%= 1;
+        if (self.next_receipt == 0) self.next_receipt = 1;
+        self.attempt = .{ .id = id, .action = action, .before = self.account.activeAttempt() };
+        return id;
+    }
+
+    pub fn attemptBefore(self: *Runtime) @TypeOf(self.attempt) {
+        return self.attempt;
+    }
+
+    pub fn restoreAttempt(self: *Runtime, previous: @TypeOf(self.attempt)) void {
+        self.attempt = previous;
+    }
+
+    /// The person's attempt settles once what its own commit started has
+    /// ended (a sign-in, once nothing signs in): what Account shows then is
+    /// its result. An operation that was already underway is not its.
+    fn settleAttempt(self: *Runtime) void {
+        const attempt = if (self.attempt) |*value| value else return;
+        if (attempt.outcome != null or attempt.action == .refresh_summary) return;
+        const active = self.account.activeAttempt();
+        if (!attempt.committed) {
+            attempt.committed = true;
+            if (active != null and active != attempt.before) attempt.started = active;
+        }
+        // A sign-in that waited for the operation before it starts later.
+        if (attempt.action == .begin_login and attempt.started == null and self.account.signingIn())
+            attempt.started = active;
+        if (attempt.started != null and active == attempt.started) return;
+        if (attempt.action == .begin_login and self.account.loginWaiting()) return;
+        // Withdrawing a sign-in that waited leaves an older failure in view;
+        // it is not the cancellation's.
+        if (attempt.action == .cancel_operation) {
+            attempt.error_code = .user_cancelled;
+            attempt.outcome = .cancelled;
+            return;
+        }
+        const shown = self.account.view();
+        attempt.error_code = shown.error_code;
+        attempt.outcome = switch (shown.error_code) {
+            .none => .succeeded,
+            .user_cancelled => .cancelled,
+            else => .failed,
+        };
+        attempt.safe_diagnostic_len = @min(shown.safe_diagnostic.len, attempt.safe_diagnostic.len);
+        @memcpy(attempt.safe_diagnostic[0..attempt.safe_diagnostic_len], shown.safe_diagnostic[0..attempt.safe_diagnostic_len]);
     }
 
     pub fn prepareCommand(
@@ -1073,6 +1141,14 @@ pub const Runtime = struct {
         self.assertMainThread();
         var result = self.account.view();
         if (result.state == .authenticated) result.summary = self.summary.view();
+        result.cannot_reach = self.retrying and (result.state == .checking or result.state == .authenticated);
+        if (self.attempt) |*attempt| result.attempt = .{
+            .id = attempt.id,
+            .action = attempt.action,
+            .outcome = attempt.outcome,
+            .error_code = attempt.error_code,
+            .safe_diagnostic = attempt.safe_diagnostic[0..attempt.safe_diagnostic_len],
+        };
         contract.validateView(result) catch
             @panic("Account Runtime produced an invalid canonical AccountView");
         return result;
@@ -1117,9 +1193,10 @@ pub const Runtime = struct {
             .recovering => return false,
             .available => |value| value,
         };
-        if (self.summary.belongsTo(current.account_id)) {
-            if (self.summary_job != null or current.generation == self.summary_generation) return false;
-        } else _ = self.clearSummary();
+        // A summary is the account's: a renewal of the same account leaves
+        // it as it is, and only the person asks for it again.
+        if (self.summary.belongsTo(current.account_id)) return false;
+        _ = self.clearSummary();
         var lease = (self.credential() catch return false) orelse return false;
         defer lease.deinit();
         return self.startSummaryJob(&lease).changed;
@@ -1137,6 +1214,15 @@ pub const Runtime = struct {
             // Its 401 is Account's to judge, not the summary's alone.
             if (completion.history == .failed and completion.history.failed == .metask_unauthorized)
                 self.reportUnauthorized(job.generation, .other);
+            // A refresh the person asked for has its result.
+            if (self.attempt) |*attempt| if (attempt.action == .refresh_summary and attempt.outcome == null) {
+                const error_code: contract.ErrorCode = switch (completion.history) {
+                    .failed => |code| code,
+                    else => .none,
+                };
+                attempt.error_code = error_code;
+                attempt.outcome = if (error_code == .none) .succeeded else .failed;
+            };
             _ = self.summary.complete(completion);
         } else _ = self.summary.fail(job.attempt_id, .account_operation_failed);
         self.summary_job = null;
@@ -1146,7 +1232,6 @@ pub const Runtime = struct {
 
     fn clearSummary(self: *Runtime) bool {
         self.cancelSummaryJob();
-        self.summary_generation = 0;
         return self.summary.clear();
     }
 
@@ -1250,7 +1335,6 @@ pub const Runtime = struct {
             return .{ .result = .rejected(.account_operation_failed), .changed = false };
         const history_range = summary_impl.HistoryRange.fromUnixSeconds(now_seconds) catch null;
         // The job takes the lease.
-        const generation = lease.authorization_generation;
         const preparation = self.summary.begin(lease.principal_ref) catch return .{ .result = .rejected(.operation_in_progress), .changed = false };
         const job = SummaryJob.create(
             self.allocator,
@@ -1271,7 +1355,6 @@ pub const Runtime = struct {
             return .{ .result = .rejected(.local_resource_exhausted), .changed = true };
         };
         self.summary_job = job;
-        self.summary_generation = generation;
         return .{
             .result = .acceptedAttempt(preparation.attempt_id),
             .changed = true,
@@ -1458,6 +1541,7 @@ pub const Runtime = struct {
             prepared.revoke = null;
             self.startRevoke(token);
         }
+        self.settleAttempt();
     }
 
     pub fn takeRefreshAfterCommit(
@@ -1901,7 +1985,7 @@ pub const Runtime = struct {
             return .{ .prepared = self.prepareRestore() };
         }
         if (self.account.confirming()) {
-            if (!self.account.view().can_retry) return .{ .rejected = .invalid_state };
+            if (!self.account.view().actions.retry) return .{ .rejected = .invalid_state };
             const platform = self.platform orelse return .{ .rejected = .invalid_state };
             self.confirm_failures = 0;
             return wrapPrepareResult(self.prepareConfirmation(platform));
@@ -1911,7 +1995,8 @@ pub const Runtime = struct {
         const grant = self.credentials.current.?;
         const platform = self.platform orelse return .{ .rejected = .invalid_state };
         const times = grant.times orelse return .{ .rejected = .invalid_state };
-        if (reached(times.renews, platform) or self.tokenEnded(platform))
+        // A renewal that failed is tried again now, wherever its schedule is.
+        if (self.retrying or reached(times.renews, platform) or self.tokenEnded(platform))
             return wrapPrepareResult(self.account.prepareTokenRefresh());
         return wrapPrepareResult(if (self.keepBeat(platform))
             self.account.prepareRetryRefresh()
@@ -3707,7 +3792,7 @@ fn settleAttempt(runtime: *Runtime) !void {
 fn expectUnconfirmed(runtime: *Runtime, error_code: contract.ErrorCode) !void {
     try std.testing.expectEqual(contract.AccountState.checking, runtime.view().state);
     try std.testing.expectEqual(error_code, runtime.view().error_code);
-    try std.testing.expect(runtime.view().can_retry);
+    try std.testing.expect(runtime.view().actions.retry);
     try std.testing.expect(runtime.authorization() == .checking);
 }
 
@@ -3742,7 +3827,7 @@ test "a stored login confirmed by nothing sent is tried every thirty seconds, by
         platform.now_unix_seconds = now;
         try startDueRenewal(&runtime);
         try std.testing.expectEqual(contract.ErrorCode.metask_service_unavailable, runtime.view().error_code);
-        try std.testing.expect(!runtime.view().can_retry);
+        try std.testing.expect(!runtime.view().actions.retry);
         try settleAttempt(&runtime);
     }
     try std.testing.expectEqual(@as(usize, 4), transport.refreshes);
@@ -4132,7 +4217,7 @@ test "userinfo invalid token preserves the newly committed restore credential" {
     // is confirmed again later.
     try std.testing.expectEqualStrings("new-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
     try std.testing.expectEqual(contract.AccountState.checking, runtime.view().state);
-    try std.testing.expect(runtime.view().can_retry);
+    try std.testing.expect(runtime.view().actions.retry);
     try std.testing.expect(runtime.renew_at != null);
     try std.testing.expect(platform.refresh_marker == null);
     try std.testing.expectEqual(@as(usize, 2), transport.calls);
@@ -4487,17 +4572,23 @@ test "a sign-in waits for a confirmation underway and is not needed if it confir
         };
         defer login.deinit();
         try std.testing.expect(login.transition.takeEffect() == null);
+        const receipt = runtime.beginAttempt(.begin_login);
         runtime.commit(&login);
         try std.testing.expectEqual(contract.AccountState.authorizing, runtime.view().state);
-        try std.testing.expect(runtime.view().can_cancel);
+        try std.testing.expect(runtime.view().actions.cancel);
         // Messages keep waiting for the same confirmation.
         try std.testing.expectEqual(epoch, runtime.authorization().checking);
+        // The confirmation was underway before the sign-in: its end is not
+        // the sign-in's.
+        try std.testing.expectEqual(receipt, runtime.view().attempt.?.id);
+        try std.testing.expect(runtime.view().attempt.?.outcome == null);
 
         transport.release.set(std.testing.io);
         try commitNextResult(&runtime);
         if (confirmed) {
             try settleAttempt(&runtime);
             try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
+            try std.testing.expectEqual(contract.AccountAttempt.Outcome.succeeded, runtime.view().attempt.?.outcome.?);
             try std.testing.expect(!runtime.account.loginWaiting());
             try std.testing.expect(runtime.prepareDue() == null);
             continue;
@@ -4511,7 +4602,52 @@ test "a sign-in waits for a confirmation underway and is not needed if it confir
         runtime.commit(&begun);
         try std.testing.expectEqual(contract.AccountState.authorizing, runtime.view().state);
         try std.testing.expectEqualStrings("stored-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
+        try std.testing.expect(runtime.view().attempt.?.outcome == null);
+        // Withdrawn now, the sign-in ends as cancelled at once.
+        var cancel = switch (runtime.prepareCommand(.cancel_operation)) {
+            .prepared => |prepared| prepared,
+            else => return error.TestUnexpectedResult,
+        };
+        defer cancel.deinit();
+        const cancelled = runtime.beginAttempt(.cancel_operation);
+        try std.testing.expectEqual(receipt + 1, cancelled);
+        runtime.commit(&cancel);
+        try std.testing.expectEqual(cancelled, runtime.view().attempt.?.id);
+        try std.testing.expectEqual(contract.AccountAttempt.Outcome.cancelled, runtime.view().attempt.?.outcome.?);
     }
+}
+
+test "a sign-in withdrawn while a confirmation goes on is cancelled, not the confirmation's result" {
+    var transport: HeldTransport = .{ .hold_tokens = true, .unsent = true };
+    var runtime = transport.runtimeFor();
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    defer {
+        transport.release.set(std.testing.io);
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try holdStoredLogin(&runtime, &platform, "stored-refresh");
+    var refresh = runtime.prepareRestoredRefresh();
+    defer refresh.deinit();
+    try std.testing.expect(runtime.admitEffect(&refresh));
+    runtime.commit(&refresh);
+    runtime.dispatchCommitted();
+    try transport.started.wait(std.testing.io);
+    for ([_]contract.AccountCommand{ .begin_login, .cancel_operation }) |command| {
+        var prepared = switch (runtime.prepareCommand(command)) {
+            .prepared => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer prepared.deinit();
+        _ = runtime.beginAttempt(command);
+        runtime.commit(&prepared);
+    }
+    try std.testing.expect(runtime.account.refreshInFlight());
+    try std.testing.expectEqual(contract.AccountAttempt.Outcome.cancelled, runtime.view().attempt.?.outcome.?);
+    try std.testing.expectEqual(contract.ErrorCode.user_cancelled, runtime.view().attempt.?.error_code);
+    transport.release.set(std.testing.io);
+    try commitNextResult(&runtime);
+    try std.testing.expectEqual(contract.AccountAttempt.Outcome.cancelled, runtime.view().attempt.?.outcome.?);
 }
 
 test "a sign-in gives up an identity request and keeps the authorization waiting" {

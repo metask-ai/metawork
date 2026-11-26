@@ -583,7 +583,7 @@ export function SettingsPage({
                       onRecharge={onOpenRecharge}
                     />
                   ) : null}
-                  {account.canCancel ? (
+                  {account.actions.cancel ? (
                     <Button
                       className="settings-identity-action"
                       variant="secondary"
@@ -593,49 +593,49 @@ export function SettingsPage({
                     >
                       {t("common.cancel")}
                     </Button>
-                  ) : unconfirmed ? (
+                  ) : account.actions.retry ||
+                    account.actions.login ||
+                    account.actions.clear ? (
                     <div className="settings-identity-action settings-identity-actions">
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={
-                          disabled || accountDisabled || !account.canRetry
-                        }
-                        onClick={onRetryRefresh}
-                      >
-                        {t("account.retry_now")}
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={
-                          disabled || accountDisabled || !account.canRetry
-                        }
-                        onClick={onBeginLogin}
-                      >
-                        {t("account.login_again")}
-                      </Button>
+                      {account.actions.retry ? (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={disabled || accountDisabled}
+                          onClick={onRetryRefresh}
+                        >
+                          {t(
+                            authenticated
+                              ? "account.retry_refresh"
+                              : "account.retry_now",
+                          )}
+                        </Button>
+                      ) : null}
+                      {account.actions.login ? (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={disabled || accountDisabled}
+                          onClick={onBeginLogin}
+                        >
+                          {t(
+                            account.state === "signed_out"
+                              ? "account.login"
+                              : "account.login_again",
+                          )}
+                        </Button>
+                      ) : null}
+                      {account.actions.clear ? (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={disabled || accountDisabled}
+                          onClick={onLogout}
+                        >
+                          {t("account.clear_residue")}
+                        </Button>
+                      ) : null}
                     </div>
-                  ) : account.canRetry ? (
-                    <Button
-                      className="settings-identity-action"
-                      variant="secondary"
-                      size="sm"
-                      disabled={disabled || accountDisabled}
-                      onClick={onRetryRefresh}
-                    >
-                      {t("account.retry_refresh")}
-                    </Button>
-                  ) : account.state === "signed_out" ? (
-                    <Button
-                      className="settings-identity-action"
-                      variant="secondary"
-                      size="sm"
-                      disabled={disabled || accountDisabled}
-                      onClick={onBeginLogin}
-                    >
-                      {t("account.login")}
-                    </Button>
                   ) : null}
                 </div>
               </div>
@@ -651,7 +651,7 @@ export function SettingsPage({
                 />
               )}
 
-              {authenticated && (
+              {account.actions.logout && (
                 <div className="settings-group">
                   <AlertDialog.Root>
                     <AlertDialog.Trigger

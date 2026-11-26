@@ -285,12 +285,38 @@ pub const ErrorCode = enum {
 
 /// Borrowed, secret-free Account projection. Its slices are valid only for the
 /// synchronous call that receives it; Product Control copies them if needed.
+/// What the person may do now. The interface offers nothing else.
+pub const AccountActions = struct {
+    /// Withdraw a sign-in that waits, or stop one in the browser.
+    cancel: bool = false,
+    /// Try now: confirm a held login, renew a verified one whose renewal
+    /// failed or whose beat could not start, or read the store again.
+    retry: bool = false,
+    /// Begin a sign-in in the browser.
+    login: bool = false,
+    logout: bool = false,
+    /// Delete what a sign-out could not.
+    clear: bool = false,
+};
+
+/// The person's own latest command, under the receipt its acceptance gave,
+/// and once it settled what came of it. Nothing in the background touches it.
+pub const AccountAttempt = struct {
+    pub const Outcome = enum { succeeded, failed, cancelled };
+    id: u64,
+    action: AccountCommand,
+    /// Null while what it began is underway.
+    outcome: ?Outcome = null,
+    error_code: ErrorCode = .none,
+    safe_diagnostic: []const u8 = "",
+};
+
 pub const AccountView = struct {
     state: AccountState,
-    can_cancel: bool = false,
-    /// `retry_refresh` acts now; while a login could not be confirmed, so does
-    /// `begin_login`.
-    can_retry: bool = false,
+    actions: AccountActions = .{},
+    /// A held or verified login waits out a failure to reach Metask.
+    cannot_reach: bool = false,
+    attempt: ?AccountAttempt = null,
     account_id: []const u8 = "",
     display_name: []const u8 = "",
     email_hint: []const u8 = "",
@@ -369,19 +395,28 @@ pub fn validateView(view: AccountView) ValidationError!void {
     try validateOptional(view.safe_diagnostic, Limits.safe_diagnostic_bytes);
     if (view.error_code == .none and view.safe_diagnostic.len != 0)
         return error.InconsistentState;
-    if (view.can_cancel and view.state != .authorizing)
+    const actions = view.actions;
+    if (actions.cancel and view.state != .authorizing) return error.InconsistentState;
+    if (actions.retry and (view.state == .authorizing or view.error_code == .none)) return error.InconsistentState;
+    if (actions.login and !(view.state == .signed_out or view.state == .checking)) return error.InconsistentState;
+    if (actions.logout and !(view.state == .checking or view.state == .authenticated or view.state == .authorizing))
         return error.InconsistentState;
-    if (view.can_retry) switch (view.state) {
-        .checking, .authenticated => if (view.error_code == .none) return error.InconsistentState,
-        .signed_out, .authorizing => return error.InconsistentState,
-    };
+    if (actions.clear and view.state != .signed_out) return error.InconsistentState;
+    if (view.cannot_reach and !(view.state == .checking or view.state == .authenticated)) return error.InconsistentState;
+    if (view.attempt) |attempt| {
+        if (attempt.id == 0) return error.InvalidGeneration;
+        try validateOptional(attempt.safe_diagnostic, Limits.safe_diagnostic_bytes);
+        if (attempt.error_code == .none and attempt.safe_diagnostic.len != 0) return error.InconsistentState;
+        const failed = attempt.outcome == .failed;
+        if (failed != (attempt.error_code != .none and attempt.error_code != .user_cancelled) and attempt.outcome != .cancelled)
+            return error.InconsistentState;
+        if (attempt.outcome == null and attempt.error_code != .none) return error.InconsistentState;
+    }
     switch (view.state) {
         .checking, .signed_out, .authorizing => {
             if (view.account_id.len != 0 or view.display_name.len != 0 or
                 view.email_hint.len != 0 or view.phone_hint.len != 0 or
                 view.concurrency_limit != null)
-                return error.InconsistentState;
-            if (view.state != .authorizing and view.can_cancel)
                 return error.InconsistentState;
             if (!isEmptySummary(view.summary)) return error.InconsistentState;
         },

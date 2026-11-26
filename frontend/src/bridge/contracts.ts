@@ -199,10 +199,40 @@ export type ModelMetadata = {
     };
   };
 };
+export const accountAttemptActions = [
+  "begin_login",
+  "cancel_operation",
+  "retry_refresh",
+  "refresh_summary",
+  "logout",
+] as const;
+export const accountAttemptOutcomes = [
+  "succeeded",
+  "failed",
+  "cancelled",
+] as const;
+/** The person's own latest command, under the receipt its acceptance gave. */
+export type AccountAttempt = {
+  id: string;
+  action: (typeof accountAttemptActions)[number];
+  /** Null while what it began is underway. */
+  outcome: (typeof accountAttemptOutcomes)[number] | null;
+  errorCode: AccountErrorCode;
+  safeDiagnostic: string;
+};
 export type AccountView = {
   state: AccountState;
-  canCancel: boolean;
-  canRetry: boolean;
+  /** What the person may do now; the interface offers nothing else. */
+  actions: {
+    cancel: boolean;
+    retry: boolean;
+    login: boolean;
+    logout: boolean;
+    clear: boolean;
+  };
+  /** A held or verified login waits out a failure to reach Metask. */
+  unreachable: boolean;
+  attempt: AccountAttempt | null;
   accountId: string;
   displayName: string;
   emailHint: string;

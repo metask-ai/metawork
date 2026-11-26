@@ -127,8 +127,15 @@ export const initialWorkbenchState: WorkbenchState = {
     },
     account: {
       state: "checking",
-      canCancel: false,
-      canRetry: false,
+      actions: {
+        cancel: false,
+        retry: false,
+        login: false,
+        logout: false,
+        clear: false,
+      },
+      unreachable: false,
+      attempt: null,
       accountId: "",
       displayName: "",
       emailHint: "",

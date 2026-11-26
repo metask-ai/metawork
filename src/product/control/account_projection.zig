@@ -38,8 +38,15 @@ const HistoryDayProjection = struct {
 pub const Projection = struct {
     allocator: std.mem.Allocator,
     state: account.AccountState = .checking,
-    can_cancel: bool = false,
-    can_retry: bool = false,
+    actions: account.AccountActions = .{},
+    cannot_reach: bool = false,
+    attempt: ?struct {
+        id: u64,
+        action: account.AccountCommand,
+        outcome: ?account.AccountAttempt.Outcome,
+        error_code: account.ErrorCode,
+        safe_diagnostic: FixedText(account.Limits.safe_diagnostic_bytes) = .{},
+    } = null,
     account_id: FixedText(account.Limits.account_id_bytes) = .{},
     display_name: FixedText(account.Limits.display_name_bytes) = .{},
     email_hint: FixedText(account.Limits.email_hint_bytes) = .{},
@@ -92,8 +99,15 @@ pub const Projection = struct {
             @panic("Account published an invalid AccountFact");
         const source = fact.view;
         self.state = source.state;
-        self.can_cancel = source.can_cancel;
-        self.can_retry = source.can_retry;
+        self.actions = source.actions;
+        self.cannot_reach = source.cannot_reach;
+        self.attempt = if (source.attempt) |attempt| .{
+            .id = attempt.id,
+            .action = attempt.action,
+            .outcome = attempt.outcome,
+            .error_code = attempt.error_code,
+        } else null;
+        if (self.attempt) |*attempt| attempt.safe_diagnostic.setNoFail(source.attempt.?.safe_diagnostic);
         self.account_id.setNoFail(source.account_id);
         self.display_name.setNoFail(source.display_name);
         self.email_hint.setNoFail(source.email_hint);
@@ -166,8 +180,15 @@ pub const Projection = struct {
         }
         return .{
             .state = self.state,
-            .can_cancel = self.can_cancel,
-            .can_retry = self.can_retry,
+            .actions = self.actions,
+            .cannot_reach = self.cannot_reach,
+            .attempt = if (self.attempt) |*attempt| .{
+                .id = attempt.id,
+                .action = attempt.action,
+                .outcome = attempt.outcome,
+                .error_code = attempt.error_code,
+                .safe_diagnostic = attempt.safe_diagnostic.view(),
+            } else null,
             .account_id = self.account_id.view(),
             .display_name = self.display_name.view(),
             .email_hint = self.email_hint.view(),

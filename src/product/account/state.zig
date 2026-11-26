@@ -153,11 +153,21 @@ const CommittedState = struct {
     }
 
     fn canRetry(self: *const CommittedState) bool {
-        if (self.op != .idle) return false;
+        if (self.op != .idle or self.intent != .none or self.error_code == .none) return false;
         return switch (self.login) {
-            .held => self.error_code != .none,
-            .verified => self.error_code == .refresh_schedule_failed,
-            .none => false,
+            .held, .verified => true,
+            .none => |value| value.reason == .unreadable,
+        };
+    }
+
+    fn actions(self: *const CommittedState) contract.AccountActions {
+        const residue = self.login == .none and self.login.none.residue;
+        return .{
+            .cancel = self.canCancel(),
+            .retry = self.canRetry(),
+            .login = self.login != .verified and self.storeRead() and self.intent == .none and self.op != .authorize,
+            .logout = self.login != .none,
+            .clear = residue and self.op == .idle,
         };
     }
 
@@ -170,8 +180,7 @@ const CommittedState = struct {
         };
         var result: contract.AccountView = .{
             .state = state,
-            .can_cancel = self.canCancel(),
-            .can_retry = self.canRetry(),
+            .actions = self.actions(),
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
         };
@@ -798,6 +807,14 @@ pub const WorkerFailure = struct {
         return .{ .error_code = error_code };
     }
 
+    /// The authorization server refused the sign-in for a reason of its
+    /// own, named by its error code when it gave one.
+    pub fn authorizationRefused(code: ?[]const u8) WorkerFailure {
+        var failure: WorkerFailure = .fromCode(.oauth_callback_rejected);
+        if (code) |value| failure.safe_diagnostic.set(value) catch {};
+        return failure;
+    }
+
     /// A verified session's renewal is lost. It reads as the failure a
     /// restore from the same store reports; the cause stays diagnosable.
     pub fn renewalLost(cause: contract.ErrorCode) WorkerFailure {
@@ -882,7 +899,7 @@ test "public Account state exposes one cancellable authorization flow" {
     };
     commitPrepared(&account, &begin);
     try std.testing.expectEqual(contract.AccountState.authorizing, account.view().state);
-    try std.testing.expect(account.view().can_cancel);
+    try std.testing.expect(account.view().actions.cancel);
 
     var cancel = switch (account.prepareCommand(.cancel_operation)) {
         .transition => |value| value,
@@ -890,7 +907,7 @@ test "public Account state exposes one cancellable authorization flow" {
     };
     commitPrepared(&account, &cancel);
     try std.testing.expectEqual(contract.AccountState.signed_out, account.view().state);
-    try std.testing.expect(!account.view().can_cancel);
+    try std.testing.expect(!account.view().actions.cancel);
 }
 
 test "matching malformed completion fails the authorization attempt" {
@@ -923,7 +940,7 @@ test "explicit login persists tokens before publishing identity" {
     };
     commitPrepared(&account, &begin);
     try commitLoginExchange(&account);
-    try std.testing.expect(!account.view().can_cancel);
+    try std.testing.expect(!account.view().actions.cancel);
     try std.testing.expect(account.prepareCommand(.cancel_operation) == .rejected);
 
     var load_identity = switch (account.prepareTokensStored()) {
@@ -936,7 +953,7 @@ test "explicit login persists tokens before publishing identity" {
     // The exchanged tokens are the held login now; only its identity is asked.
     try std.testing.expectEqual(contract.AccountState.checking, account.view().state);
     try std.testing.expectEqualStrings("", account.view().account_id);
-    try std.testing.expect(!account.view().can_cancel and !account.view().can_retry);
+    try std.testing.expect(!account.view().actions.cancel and !account.view().actions.retry);
 
     var identity: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
@@ -1068,7 +1085,7 @@ test "a login that fails before or after its exchange keeps what is held" {
         commitPrepared(&account, &failed);
         try std.testing.expectEqual(std.meta.Tag(Login).held, account.login());
         try std.testing.expectEqual(contract.AccountState.checking, account.view().state);
-        try std.testing.expect(account.view().can_retry);
+        try std.testing.expect(account.view().actions.retry);
         try contract.validateView(account.view());
     }
 }
@@ -1135,7 +1152,7 @@ test "refresh failure distinguishes retryable and invalid credentials" {
     commitPrepared(&cold, &waiting);
     try std.testing.expectEqual(contract.AccountState.checking, cold.view().state);
     try std.testing.expectEqual(contract.ErrorCode.deadline_exceeded, cold.view().error_code);
-    try std.testing.expect(cold.view().can_retry);
+    try std.testing.expect(cold.view().actions.retry);
     var again = switch (cold.prepareRestoredTokenRefresh()) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
@@ -1143,7 +1160,7 @@ test "refresh failure distinguishes retryable and invalid credentials" {
     commitPrepared(&cold, &again);
     // Trying again neither shows another state nor offers its actions.
     try std.testing.expectEqual(contract.ErrorCode.deadline_exceeded, cold.view().error_code);
-    try std.testing.expect(!cold.view().can_retry);
+    try std.testing.expect(!cold.view().actions.retry);
     try contract.validateView(cold.view());
 
     var unavailable: WorkerCompletion = .{
@@ -1317,7 +1334,7 @@ test "a logout is taken from any login and from what one left, and a waiting sig
     };
     commitPrepared(&account, &waiting);
     try std.testing.expectEqual(contract.AccountState.authorizing, account.view().state);
-    try std.testing.expect(account.view().can_cancel);
+    try std.testing.expect(account.view().actions.cancel);
     var withdrawn = switch (account.prepareCommand(.cancel_operation)) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,

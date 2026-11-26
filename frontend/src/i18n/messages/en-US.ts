@@ -517,6 +517,7 @@ export const enUS = {
   "account.retry_refresh": "Retry sign-in refresh",
   "account.retry_now": "Try again now",
   "account.login_again": "Sign in again",
+  "account.clear_residue": "Clear sign-in again",
   "account.logout": "Sign out",
   "account.logout_confirm":
     "Signing out removes your Metask sign-in credentials from this device. Sign in again to create new tasks using Metask models. Your custom models, local tasks and history, and workspace files will remain.",

@@ -13,6 +13,8 @@ import {
   modelErrorCategories,
   runGuidances,
   runProviderReasons,
+  accountAttemptActions,
+  accountAttemptOutcomes,
   taskActionBlockers,
   taskNavigationSignals,
   type RunModelError,
@@ -1278,11 +1280,53 @@ function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
     },
   };
 }
+function decodeAccountAttempt(value: unknown, path: string) {
+  if (value === null) return null;
+  const item = object(value, path, [
+    "id",
+    "action",
+    "outcome",
+    "errorCode",
+    "safeDiagnostic",
+  ]);
+  const outcome =
+    item.outcome === null
+      ? null
+      : enumValue(item.outcome, `${path}.outcome`, accountAttemptOutcomes);
+  const errorCode = enumValue(
+    item.errorCode,
+    `${path}.errorCode`,
+    accountErrorCodes,
+  );
+  const safeDiagnostic = stringValue(
+    item.safeDiagnostic,
+    `${path}.safeDiagnostic`,
+  );
+  if (errorCode === "none" && safeDiagnostic.length !== 0)
+    fail(path, "safe diagnostic requires an Account error");
+  if (outcome === null && errorCode !== "none")
+    fail(path, "an attempt underway has no result yet");
+  if (
+    outcome === "failed" &&
+    (errorCode === "none" || errorCode === "user_cancelled")
+  )
+    fail(path, "a failed attempt names its failure");
+  if (outcome === "succeeded" && errorCode !== "none")
+    fail(path, "a successful attempt has no error");
+  return {
+    id: positiveU64WireId(item.id, `${path}.id`),
+    action: enumValue(item.action, `${path}.action`, accountAttemptActions),
+    outcome,
+    errorCode,
+    safeDiagnostic,
+  };
+}
 function decodeAccount(value: unknown, path: string): AccountView {
   const item = object(value, path, [
     "state",
-    "canCancel",
-    "canRetry",
+    "actions",
+    "unreachable",
+    "attempt",
     "accountId",
     "displayName",
     "emailHint",
@@ -1293,8 +1337,23 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "summary",
   ]);
   const state = enumValue(item.state, `${path}.state`, accountStates);
-  const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
-  const canRetry = booleanValue(item.canRetry, `${path}.canRetry`);
+  const actionsPath = `${path}.actions`;
+  const actionItem = object(item.actions, actionsPath, [
+    "cancel",
+    "retry",
+    "login",
+    "logout",
+    "clear",
+  ]);
+  const actions = {
+    cancel: booleanValue(actionItem.cancel, `${actionsPath}.cancel`),
+    retry: booleanValue(actionItem.retry, `${actionsPath}.retry`),
+    login: booleanValue(actionItem.login, `${actionsPath}.login`),
+    logout: booleanValue(actionItem.logout, `${actionsPath}.logout`),
+    clear: booleanValue(actionItem.clear, `${actionsPath}.clear`),
+  };
+  const unreachable = booleanValue(item.unreachable, `${path}.unreachable`);
+  const attempt = decodeAccountAttempt(item.attempt, `${path}.attempt`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
   const emailHint = stringValue(item.emailHint, `${path}.emailHint`);
@@ -1541,14 +1600,18 @@ function decodeAccount(value: unknown, path: string): AccountView {
     fail(path, "a non-authenticated Account must hide identity");
   if (state === "authenticated" && accountId.length === 0)
     fail(path, "an authenticated Account requires identity");
-  if (
-    canRetry &&
-    (errorCode === "none" ||
-      (state !== "checking" && state !== "authenticated"))
-  )
-    fail(path, "only a failed check or renewal may be retried");
-  if (canCancel && state !== "authorizing")
+  if (actions.retry && (errorCode === "none" || state === "authorizing"))
+    fail(path, "only a failure may be retried");
+  if (actions.cancel && state !== "authorizing")
     fail(path, "cancellation requires active authorization");
+  if (actions.login && state !== "signed_out" && state !== "checking")
+    fail(path, "only a login that is not verified may sign in again");
+  if (actions.logout && state === "signed_out")
+    fail(path, "a signed-out Account cannot sign out");
+  if (actions.clear && state !== "signed_out")
+    fail(path, "only a signed-out Account clears what was left");
+  if (unreachable && state !== "checking" && state !== "authenticated")
+    fail(path, "only a held or verified login waits to reach Metask");
   if (errorCode === "none" && safeDiagnostic.length !== 0)
     fail(path, "safe diagnostic requires an Account error");
   if (wallet.errorCode === "none" && wallet.safeDiagnostic.length !== 0)
@@ -1606,8 +1669,9 @@ function decodeAccount(value: unknown, path: string): AccountView {
     fail(summaryPath, "a non-authenticated Account must hide its summary");
   return {
     state,
-    canCancel,
-    canRetry,
+    actions,
+    unreachable,
+    attempt,
     accountId,
     displayName,
     emailHint,

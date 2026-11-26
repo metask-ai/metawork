@@ -444,6 +444,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.retry_refresh": "重试登录刷新",
   "account.retry_now": "立即重试",
   "account.login_again": "重新登录",
+  "account.clear_residue": "再清一次",
   "account.logout": "退出登录",
   "account.logout_confirm":
     "退出将清除这台设备上的 Metask 登录凭据。创建使用 Metask 模型的新任务前，需要重新登录。自定义模型、本地任务及历史记录、工作区文件都会保留。",

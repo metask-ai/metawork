@@ -66,10 +66,13 @@ export function AccountIdentity({
   const pending =
     account.state === "checking" || account.state === "authorizing";
   const initial = accountIdentityInitial(account);
+  const { actions } = account;
+  const recovery =
+    actions.retry || actions.login || actions.clear || actions.cancel;
 
   useEffect(() => {
-    if (!authenticated) setConfirmSignOut(false);
-  }, [authenticated]);
+    if (!actions.logout) setConfirmSignOut(false);
+  }, [actions.logout]);
 
   function choose(action: () => void) {
     setOpen(false);
@@ -96,34 +99,38 @@ export function AccountIdentity({
                     <Menu.Separator />
                   </>
                 )}
-                {account.state === "signed_out" && (
+                {actions.retry && (
+                  <Menu.Item
+                    disabled={disabled}
+                    onClick={() => choose(onRetryRefresh)}
+                  >
+                    <Icon name="refresh" />
+                    {t("account.retry_now")}
+                  </Menu.Item>
+                )}
+                {actions.login && (
                   <Menu.Item
                     disabled={disabled}
                     onClick={() => choose(onBeginLogin)}
                   >
                     <Icon name="account" />
-                    {t("account.login")}
+                    {t(
+                      account.state === "signed_out"
+                        ? "account.login"
+                        : "account.login_again",
+                    )}
                   </Menu.Item>
                 )}
-                {unconfirmed && (
-                  <>
-                    <Menu.Item
-                      disabled={disabled || !account.canRetry}
-                      onClick={() => choose(onRetryRefresh)}
-                    >
-                      <Icon name="refresh" />
-                      {t("account.retry_now")}
-                    </Menu.Item>
-                    <Menu.Item
-                      disabled={disabled || !account.canRetry}
-                      onClick={() => choose(onBeginLogin)}
-                    >
-                      <Icon name="account" />
-                      {t("account.login_again")}
-                    </Menu.Item>
-                  </>
+                {actions.clear && (
+                  <Menu.Item
+                    disabled={disabled}
+                    onClick={() => choose(onLogout)}
+                  >
+                    <Icon name="logout" />
+                    {t("account.clear_residue")}
+                  </Menu.Item>
                 )}
-                {account.state === "authorizing" && account.canCancel && (
+                {actions.cancel && (
                   <Menu.Item
                     disabled={cancelDisabled}
                     onClick={() => choose(onCancel)}
@@ -132,11 +139,7 @@ export function AccountIdentity({
                     {t("account.cancel")}
                   </Menu.Item>
                 )}
-                {(account.state === "signed_out" ||
-                  unconfirmed ||
-                  (account.state === "authorizing" && account.canCancel)) && (
-                  <Menu.Separator />
-                )}
+                {recovery && <Menu.Separator />}
                 <Menu.Item onClick={() => choose(onOpenSettings)}>
                   <Icon name="settings" />
                   {t("settings.title")}
@@ -152,7 +155,7 @@ export function AccountIdentity({
                   <Icon name="info" />
                   {t("about.menu_item")}
                 </Menu.Item>
-                {authenticated && (
+                {actions.logout && (
                   <>
                     <Menu.Separator />
                     <Menu.Item
@@ -234,7 +237,7 @@ export function AccountIdentity({
       />
 
       <AlertDialog.Root
-        open={authenticated && confirmSignOut}
+        open={actions.logout && confirmSignOut}
         onOpenChange={setConfirmSignOut}
       >
         <SignOutConfirmation

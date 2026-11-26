@@ -101,15 +101,28 @@ pub const Coordinator = struct {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
         if (self.stopping) return .rejected(.invalid_state);
-        if (command == .refresh_summary) {
-            const refreshed = self.runtime.refreshSummary();
-            if (refreshed.changed) self.commitSummaryNoFail();
-            return refreshed.result;
-        }
         if (command == .open_recharge)
             return self.runtime.openRechargePage();
+        const previous = self.runtime.attemptBefore();
+        if (command == .refresh_summary) {
+            const receipt = self.runtime.beginAttempt(command);
+            const refreshed = self.runtime.refreshSummary();
+            if (!refreshed.result.accepted) self.runtime.restoreAttempt(previous);
+            if (refreshed.changed) self.commitSummaryNoFail();
+            return if (refreshed.result.accepted) .acceptedAttempt(receipt) else refreshed.result;
+        }
         return switch (self.runtime.prepareCommand(command)) {
-            .prepared => |prepared| self.commitPrepared(prepared),
+            .prepared => |prepared| blk: {
+                // Opened before the commit, so a command that settles at once
+                // settles in it.
+                const receipt = self.runtime.beginAttempt(command);
+                const result = self.commitPrepared(prepared);
+                if (!result.accepted) {
+                    self.runtime.restoreAttempt(previous);
+                    break :blk result;
+                }
+                break :blk .acceptedAttempt(receipt);
+            },
             .rejected => |error_code| .rejected(error_code),
             .ignored_stale => unreachable,
         };
@@ -272,7 +285,9 @@ pub const Coordinator = struct {
         // fact and inspects the tokens before anyone uses the new one.
         self.runtime.commit(&prepared);
         self.control.commitNoFail(.{
-            .fact = fact,
+            // As committed: what waits to reach Metask and the person's
+            // attempt are settled only in the commit.
+            .fact = .{ .kind = fact.kind, .view = self.runtime.view() },
             .attempt_id = attempt_id,
             .attempt_terminal = attempt_terminal,
             .token_changed = prepared.token_changed,
@@ -619,18 +634,23 @@ test "Account summary auto-sync requests usage stats directly and preserves stal
     transport.fail_history = true;
     const refresh = coordinator.commandSink().submit(.refresh_summary);
     try std.testing.expect(refresh.accepted);
+    // The person's refresh is an attempt under its receipt; one refused
+    // leaves it in place.
+    try expectAttempt(&runtime, refresh.attempt_id.?, .refresh_summary, null, .none);
     const duplicate = coordinator.commandSink().submit(.refresh_summary);
     try std.testing.expect(!duplicate.accepted);
     try std.testing.expectEqual(account_contract.ErrorCode.operation_in_progress, duplicate.error_code);
+    try expectAttempt(&runtime, refresh.attempt_id.?, .refresh_summary, null, .none);
     account_api.TestSupport.joinSummary(&runtime);
     coordinator.drain();
+    try expectAttempt(&runtime, refresh.attempt_id.?, .refresh_summary, .failed, .metask_service_unavailable);
     const history_stale = runtime.view();
     try std.testing.expectEqual(account_contract.SummaryAvailability.stale, history_stale.summary.history.availability);
     try std.testing.expectEqual(account_contract.ErrorCode.metask_service_unavailable, history_stale.summary.history.error_code);
     try std.testing.expectEqualStrings("60", history_stale.summary.history.days[0].total_tokens);
 }
 
-test "Account summary stays across renewals and is fetched again behind them" {
+test "Account summary stays across renewals and is fetched again only when asked" {
     var transport: SummaryTransport = .{};
     var runtime = initRuntimeForSummaryTest(&transport);
     const start: i64 = 1_789_440_000;
@@ -648,49 +668,40 @@ test "Account summary stays across renewals and is fetched again behind them" {
     coordinator.drain();
     try expectHistory(&runtime, .ready, 1, &transport);
 
-    // Expiry and the renewal of the same account leave it as it is.
+    // Expiry and the renewal of the same account leave it as it is: it is
+    // not fetched again.
     platform.now_unix_seconds = start + 200;
     try std.testing.expect(coordinator.tick());
-    try expectHistory(&runtime, .ready, 1, &transport);
     transport.bearer = "access-odd";
     account_api.TestSupport.joinNetwork(&runtime);
     coordinator.drain();
-    try std.testing.expectEqual(account_contract.SummaryOperation.refreshing, runtime.view().summary.operation);
-    try std.testing.expectEqual(account_contract.SummaryAvailability.ready, runtime.view().summary.history.availability);
-    account_api.TestSupport.joinSummary(&runtime);
-    coordinator.drain();
-    try expectHistory(&runtime, .ready, 2, &transport);
+    try std.testing.expect(runtime.summary_job == null);
+    try expectHistory(&runtime, .ready, 1, &transport);
 
-    // Failing to read it again only marks what is shown.
+    // The person asks for it; failing to read it only marks what is shown.
     transport.fail_history = true;
-    transport.bearer = "access-even";
-    platform.now_unix_seconds = start + 4000;
-    try std.testing.expect(coordinator.tick());
-    account_api.TestSupport.joinNetwork(&runtime);
-    coordinator.drain();
+    try std.testing.expect(coordinator.commandSink().submit(.refresh_summary).accepted);
     account_api.TestSupport.joinSummary(&runtime);
     coordinator.drain();
-    try expectHistory(&runtime, .stale, 3, &transport);
+    try expectHistory(&runtime, .stale, 2, &transport);
 
     sink.count = 0;
-    // A renewal during a request does not repeat it; its end does, once.
+    // A renewal during a request does not repeat it.
     transport.fail_history = false;
     transport.held = true;
     try std.testing.expect(coordinator.commandSink().submit(.refresh_summary).accepted);
     try transport.started.wait(std.testing.io);
-    platform.now_unix_seconds = start + 8000;
+    platform.now_unix_seconds = start + 4000;
     try std.testing.expect(coordinator.tick());
     account_api.TestSupport.joinNetwork(&runtime);
     coordinator.drain();
-    try expectHistory(&runtime, .stale, 4, &transport);
+    try expectHistory(&runtime, .stale, 3, &transport);
     transport.held = false;
-    transport.bearer = "access-odd";
+    transport.bearer = "access-even";
     transport.release.set(std.testing.io);
     account_api.TestSupport.joinSummary(&runtime);
     coordinator.drain();
-    account_api.TestSupport.joinSummary(&runtime);
-    coordinator.drain();
-    try expectHistory(&runtime, .ready, 5, &transport);
+    try expectHistory(&runtime, .ready, 3, &transport);
     try std.testing.expect(runtime.summary_job == null);
 
     // Signing out, as changing accounts begins, takes it away, and does not
@@ -709,6 +720,20 @@ test "Account summary stays across renewals and is fetched again behind them" {
         if (runtime.retired_summaries == null) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     } else return error.CancelledSummaryNeverJoined;
+}
+
+fn expectAttempt(
+    runtime: *account_api.Runtime,
+    id: u64,
+    action: account_contract.AccountCommand,
+    outcome: ?account_contract.AccountAttempt.Outcome,
+    error_code: account_contract.ErrorCode,
+) !void {
+    const attempt = runtime.view().attempt orelse return error.TestExpectedAttempt;
+    try std.testing.expectEqual(id, attempt.id);
+    try std.testing.expectEqual(action, attempt.action);
+    try std.testing.expectEqual(outcome, attempt.outcome);
+    try std.testing.expectEqual(error_code, attempt.error_code);
 }
 
 fn expectHistory(runtime: *account_api.Runtime, availability: account_contract.SummaryAvailability, requests: usize, transport: *const SummaryTransport) !void {
@@ -808,6 +833,9 @@ test "Account logout reaches Product as one commit of no attempt" {
     try std.testing.expectEqual(account_contract.AccountState.signed_out, logout.state);
     try std.testing.expect(logout.attempt_id == null and !logout.attempt_terminal);
     try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
+    // Receipts count from one, and a logout ends in its own commit.
+    try std.testing.expectEqual(@as(?u64, 1), result.attempt_id);
+    try expectAttempt(&runtime, 1, .logout, .succeeded, .none);
 }
 
 test "Account test platform exposes deterministic clock timer and credential faults" {
@@ -936,6 +964,7 @@ test "Account cancel discards a late callback exchange secret" {
     const result = coordinator.commandSink().submit(.cancel_operation);
 
     try std.testing.expect(result.accepted);
+    try expectAttempt(&runtime, result.attempt_id.?, .cancel_operation, .cancelled, .user_cancelled);
     try std.testing.expectEqual(@as(usize, 1), sink.count);
     try std.testing.expect(sink.records[0].attempt_terminal);
     try std.testing.expect(std.mem.indexOf(
@@ -1113,6 +1142,7 @@ test "Account refresh scheduling failure is visible and explicitly retryable" {
     const retried = coordinator.commandSink().submit(.retry_refresh);
 
     try std.testing.expect(retried.accepted);
+    try expectAttempt(&runtime, retried.attempt_id.?, .retry_refresh, .succeeded, .none);
     try std.testing.expectEqual(@as(usize, 1), sink.count);
     try std.testing.expectEqual(account_contract.ErrorCode.none, runtime.view().error_code);
     try std.testing.expectEqual(@as(u64, 30 * std.time.ns_per_s), platform.last_timer_interval_ns);
@@ -1151,6 +1181,7 @@ test "Account explicit refresh schedule retry reports a beat that still cannot s
     sink.count = 0;
     const retried = coordinator.commandSink().submit(.retry_refresh);
     try std.testing.expect(retried.accepted);
+    try expectAttempt(&runtime, retried.attempt_id.?, .retry_refresh, .failed, .refresh_schedule_failed);
     try std.testing.expectEqual(@as(usize, 1), sink.count);
     try std.testing.expectEqual(
         account_contract.ErrorCode.refresh_schedule_failed,

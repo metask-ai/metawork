@@ -1129,8 +1129,15 @@ test("durable Metask intent remains decodable when the current catalog is unavai
   catalogUnavailable.models = modelsUnavailableFixture;
   catalogUnavailable.account = {
     state: "signed_out",
-    canCancel: false,
-    canRetry: false,
+    actions: {
+      cancel: false,
+      retry: false,
+      login: false,
+      logout: false,
+      clear: false,
+    },
+    unreachable: false,
+    attempt: null,
     accountId: "",
     displayName: "",
     emailHint: "",
@@ -2557,8 +2564,15 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
   const snapshot = clone(fixture);
   snapshot.account = {
     state: "signed_out",
-    canCancel: false,
-    canRetry: false,
+    actions: {
+      cancel: false,
+      retry: false,
+      login: false,
+      logout: false,
+      clear: false,
+    },
+    unreachable: false,
+    attempt: null,
     accountId: "",
     displayName: "",
     emailHint: "",
@@ -3024,38 +3038,82 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   );
 
   const mismatchedCancellation = clone(fixture);
-  mismatchedCancellation.account.canCancel = true;
+  mismatchedCancellation.account.actions.cancel = true;
   assert.throws(
     () => decodeWorkbenchSnapshot(mismatchedCancellation),
     /cancellation requires active authorization/,
   );
 
-  for (const [state, errorCode, accepted] of [
-    ["checking", "metask_service_unavailable", true],
-    ["checking", "none", false],
-    ["signed_out", "token_refresh_failed", false],
-    ["authorizing", "metask_service_unavailable", false],
+  // One Account using all it may publish, then one breach of each rule.
+  const unreachableRetry = clone(fixture);
+  Object.assign(unreachableRetry.account, {
+    actions: { ...fixture.account.actions, retry: true, logout: true },
+    unreachable: true,
+    errorCode: "metask_service_unavailable",
+    attempt: {
+      id: "7",
+      action: "retry_refresh",
+      outcome: "failed",
+      errorCode: "metask_service_unavailable",
+      safeDiagnostic: "connect timed out",
+    },
+  });
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(unreachableRetry).account,
+    unreachableRetry.account,
+  );
+  const signedOutView = {
+    ...fixture.account,
+    state: "signed_out",
+    accountId: "",
+    displayName: "",
+    emailHint: "",
+    phoneHint: "",
+    concurrencyLimit: null,
+    summary: emptyAccountSummary,
+  };
+  const failed = unreachableRetry.account.attempt;
+  for (const [account, rule] of [
+    [
+      { actions: { ...fixture.account.actions, retry: true } },
+      /only a failure may be retried/,
+    ],
+    [
+      { actions: { ...fixture.account.actions, login: true } },
+      /only a login that is not verified may sign in again/,
+    ],
+    [
+      { actions: { ...fixture.account.actions, clear: true } },
+      /only a signed-out Account clears what was left/,
+    ],
+    [
+      { ...signedOutView, actions: { ...signedOutView.actions, logout: true } },
+      /a signed-out Account cannot sign out/,
+    ],
+    [
+      { ...signedOutView, unreachable: true },
+      /only a held or verified login waits to reach Metask/,
+    ],
+    [
+      { attempt: { ...failed, outcome: null } },
+      /an attempt underway has no result yet/,
+    ],
+    [
+      { attempt: { ...failed, errorCode: "none", safeDiagnostic: "" } },
+      /a failed attempt names its failure/,
+    ],
+    [
+      { attempt: { ...failed, outcome: "succeeded" } },
+      /a successful attempt has no error/,
+    ],
+    [
+      { attempt: { ...failed, outcome: "succeeded", errorCode: "none" } },
+      /safe diagnostic requires an Account error/,
+    ],
   ]) {
-    const retryable = clone(fixture);
-    Object.assign(retryable.account, {
-      state,
-      errorCode,
-      canRetry: true,
-      accountId: "",
-      displayName: "",
-      emailHint: "",
-      phoneHint: "",
-      concurrencyLimit: null,
-      safeDiagnostic: "",
-      summary: emptyAccountSummary,
-    });
-    if (accepted)
-      assert.equal(decodeWorkbenchSnapshot(retryable).account.canRetry, true);
-    else
-      assert.throws(
-        () => decodeWorkbenchSnapshot(retryable),
-        /only a failed check or renewal may be retried/,
-      );
+    const snapshot = clone(fixture);
+    Object.assign(snapshot.account, account);
+    assert.throws(() => decodeWorkbenchSnapshot(snapshot), rule);
   }
 
   const authenticatedWithoutDisplayName = clone(fixture);
@@ -3156,8 +3214,15 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const signedOut = clone(fixture);
   signedOut.account = {
     state: "signed_out",
-    canCancel: false,
-    canRetry: false,
+    actions: {
+      cancel: false,
+      retry: false,
+      login: false,
+      logout: false,
+      clear: false,
+    },
+    unreachable: false,
+    attempt: null,
     accountId: "",
     displayName: "",
     emailHint: "",

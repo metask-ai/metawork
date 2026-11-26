@@ -413,8 +413,15 @@ test("SelectionMenu exposes a visible busy state without a false chevron", () =>
 
 const readySettingsAccount = {
   state: "authenticated",
-  canCancel: false,
-  canRetry: false,
+  actions: {
+    cancel: false,
+    retry: false,
+    login: false,
+    logout: true,
+    clear: false,
+  },
+  unreachable: false,
+  attempt: null,
   accountId: "account-1",
   displayName: "Metask User",
   emailHint: "m***@example.com",
@@ -2088,7 +2095,11 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
   const user = userEvent.setup({ document: dom.window.document });
   let cancellations = 0;
   renderSettings(
-    { ...readySettingsAccount, state: "authorizing", canCancel: true },
+    {
+      ...readySettingsAccount,
+      state: "authorizing",
+      actions: { ...readySettingsAccount.actions, cancel: true },
+    },
     {
       models: settingsModels(
         { catalogState: "loading", models: [] },

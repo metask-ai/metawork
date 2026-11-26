@@ -89,8 +89,15 @@ const emptyAccountSummary = {
 
 const signedOut = {
   state: "signed_out",
-  canCancel: false,
-  canRetry: false,
+  actions: {
+    cancel: false,
+    retry: false,
+    login: true,
+    logout: false,
+    clear: false,
+  },
+  unreachable: false,
+  attempt: null,
   accountId: "",
   displayName: "",
   emailHint: "",
@@ -130,6 +137,7 @@ const unavailableModels = {
 const readyAccount = {
   ...signedOut,
   state: "authenticated",
+  actions: { ...signedOut.actions, login: false, logout: true },
   accountId: "account-1",
   displayName: "Metask User",
   emailHint: "m***@example.com",
@@ -261,7 +269,11 @@ function renderConnectionFailure() {
 
 test("Account settings render each public session state with only its valid action", () => {
   const checkingMarkup = renderSettings(
-    { ...signedOut, state: "checking" },
+    {
+      ...signedOut,
+      state: "checking",
+      actions: { ...signedOut.actions, login: false },
+    },
     unavailableModels,
     { initialSection: "account" },
   );
@@ -271,33 +283,66 @@ test("Account settings render each public session state with only its valid acti
     />Sign in<|>Try again now<|>Sign in again</,
   );
 
-  // A login that could not be confirmed offers both ways out; trying again
-  // keeps them in place without accepting them.
-  for (const canRetry of [true, false]) {
+  // A login that could not be confirmed offers a new sign-in and, unless a
+  // check is already underway, trying again now.
+  for (const retry of [true, false]) {
     const markup = renderSettings(
       {
         ...signedOut,
         state: "checking",
         errorCode: "metask_service_unavailable",
-        canRetry,
+        actions: { ...signedOut.actions, retry, logout: true },
       },
       unavailableModels,
       { initialSection: "account" },
     );
     assert.match(markup, /Can&#x27;t confirm your sign-in yet/);
     assert.match(markup, /MetaWork keeps retrying/);
-    for (const label of ["Try again now", "Sign in again"]) {
+    for (const [label, offered] of [
+      ["Try again now", retry],
+      ["Sign in again", true],
+    ]) {
       const button = markup.match(
         new RegExp(`<button[^>]*>${label}</button>`),
       )?.[0];
-      assert.ok(button, label);
-      assert.equal(/ disabled=""/.test(button), !canRetry);
+      assert.equal(button !== undefined, offered, label);
+      if (button) assert.doesNotMatch(button, / disabled=""/);
     }
+    assert.match(markup, />Sign out</);
     assert.doesNotMatch(markup, /Checking sign-in/);
   }
 
+  // A store that could not be read is read again; what a sign-out could not
+  // delete is cleared again.
+  const unreadMarkup = renderSettings(
+    {
+      ...signedOut,
+      errorCode: "credential_store_read_failed",
+      actions: { ...signedOut.actions, retry: true },
+    },
+    unavailableModels,
+    { initialSection: "account" },
+  );
+  assert.match(unreadMarkup, />Try again now</);
+  assert.match(unreadMarkup, />Sign in with Metask</);
+  const residueMarkup = renderSettings(
+    {
+      ...signedOut,
+      errorCode: "credential_store_delete_failed",
+      actions: { ...signedOut.actions, clear: true },
+    },
+    unavailableModels,
+    { initialSection: "account" },
+  );
+  assert.match(residueMarkup, />Clear sign-in again</);
+  assert.doesNotMatch(residueMarkup, />Sign out</);
+
   const callbackMarkup = renderSettings(
-    { ...signedOut, state: "authorizing", canCancel: true },
+    {
+      ...signedOut,
+      state: "authorizing",
+      actions: { ...signedOut.actions, cancel: true, login: false },
+    },
     unavailableModels,
     { initialSection: "account" },
   );
@@ -306,7 +351,11 @@ test("Account settings render each public session state with only its valid acti
   assert.doesNotMatch(callbackMarkup, />Sign in</);
 
   const exchangeMarkup = renderSettings(
-    { ...signedOut, state: "authorizing", canCancel: false },
+    {
+      ...signedOut,
+      state: "authorizing",
+      actions: { ...signedOut.actions, login: false },
+    },
     unavailableModels,
     { initialSection: "account" },
   );
@@ -337,7 +386,7 @@ test("refresh scheduling failure exposes the explicit Account retry", () => {
     {
       ...readyAccount,
       errorCode: "refresh_schedule_failed",
-      canRetry: true,
+      actions: { ...readyAccount.actions, retry: true },
     },
     readyModels,
     { initialSection: "account" },
@@ -639,7 +688,11 @@ test("opening Account settings has no hidden catalog mutation", () => {
 
 test("authorization has one cancel path and no reopen or reauthenticate branch", () => {
   const markup = renderSettings(
-    { ...signedOut, state: "authorizing", canCancel: true },
+    {
+      ...signedOut,
+      state: "authorizing",
+      actions: { ...signedOut.actions, cancel: true, login: false },
+    },
     unavailableModels,
     { initialSection: "account" },
   );

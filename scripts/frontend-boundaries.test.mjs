@@ -186,14 +186,8 @@ test("Account states never replace or reinterpret the Workbench", async () => {
   assert.doesNotMatch(app, /accountSurfacePolicy|accountSetupRedirected/);
   assert.doesNotMatch(app, /newTaskSetup|task\.setup\./);
   assert.match(newTask, /\{composer\}/);
-  assert.match(
-    accountIdentity,
-    /account\.state === "signed_out"[\s\S]*?onBeginLogin/,
-  );
-  assert.match(
-    accountIdentity,
-    /account\.state === "authorizing" && account\.canCancel[\s\S]*?onCancel/,
-  );
+  assert.match(accountIdentity, /actions\.login &&[\s\S]*?onBeginLogin/);
+  assert.match(accountIdentity, /actions\.cancel &&[\s\S]*?onCancel/);
   assert.doesNotMatch(app, /workbenchEntered|setWorkbenchEntered/);
   // New object admission still uses its actual model/Workspace authority.
   // Once identity acquisition began, continuous delivery uses that same Task.

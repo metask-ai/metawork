@@ -1510,7 +1510,7 @@ fn characterizeUnreachableRestart(
         accounts.drain();
     }
     try std.testing.expectEqual(.checking, control.accountView().state);
-    try std.testing.expect(control.accountView().can_retry);
+    try std.testing.expect(control.accountView().actions.retry);
     try std.testing.expectEqual(.@"unreachable", control.newTaskAdmissionView().metask);
     control.syncLifecycle();
     const unsent = control.task_runtime.retrySubmission(task_id, "while-checking") orelse
