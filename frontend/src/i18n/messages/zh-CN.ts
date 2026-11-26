@@ -320,6 +320,7 @@ export const zhCN: Record<MessageId, string> = {
   "common.remove": "删除",
   "common.cancel": "取消",
   "common.close": "关闭",
+  "common.ok": "确定",
   "time.just_now": "刚刚",
   "copy.input": "复制输入",
   "copy.response": "复制回复",

@@ -372,6 +372,7 @@ export const enUS = {
   "common.remove": "Remove",
   "common.cancel": "Cancel",
   "common.close": "Close",
+  "common.ok": "OK",
   "time.just_now": "Just now",
   "copy.input": "Copy input",
   "copy.response": "Copy response",
