@@ -120,6 +120,7 @@ pub const State = struct {
                 .completed => .schedule_completed,
                 .failed => .schedule_failed,
                 .skipped => .schedule_skipped,
+                .model_unavailable => .schedule_model_unavailable,
                 .needs_attention => .schedule_needs_attention,
             },
             .title = notification.title,
@@ -635,6 +636,7 @@ fn testNotificationText() notification_text.Table {
         .scheduleCompleted = "定时任务已完成",
         .scheduleFailed = "定时任务失败",
         .scheduleSkipped = "本次运行已跳过",
+        .scheduleModelUnavailable = "所选模型已不可用",
         .scheduleNeedsAttention = "定时任务需要处理",
         .runCompleted = "任务已完成",
         .runFailed = "任务失败",
@@ -735,10 +737,11 @@ test "a registered table writes the whole banner in the Renderer's language" {
     try std.testing.expectEqual(@as(?u64, 42), NotificationSpy.seenActivationTaskId());
 
     // Every scheduled-task kind takes a slot of its own; no two share a string.
-    var seen: [4][]const u8 = undefined;
+    const kinds = comptime std.enums.values(control_ports.ScheduleNotificationKind);
+    var seen: [kinds.len][]const u8 = undefined;
     var filled: usize = 0;
     defer for (seen[0..filled]) |value| std.testing.allocator.free(value);
-    for ([_]control_ports.ScheduleNotificationKind{ .completed, .failed, .skipped, .needs_attention }) |kind| {
+    for (kinds) |kind| {
         try std.testing.expect(window.notifyScheduledTask(
             &harness.runtime,
             .{ .scheduled_task_id = 1, .task_id = 2, .title = "t", .kind = kind },
@@ -769,6 +772,7 @@ test "re-registering the table changes the next banner's language" {
         .scheduleCompleted = "Scheduled task completed",
         .scheduleFailed = "Scheduled task failed",
         .scheduleSkipped = "A run was skipped",
+        .scheduleModelUnavailable = "The model is no longer available",
         .scheduleNeedsAttention = "Scheduled task needs attention",
         .runCompleted = "Task finished",
         .runFailed = "Task failed",

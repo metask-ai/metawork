@@ -133,6 +133,7 @@ export async function runNotificationPresentationVertical({
     scheduleCompleted: "定时任务已完成",
     scheduleFailed: "定时任务失败",
     scheduleSkipped: "上一次运行仍在进行，本次运行已跳过",
+    scheduleModelUnavailable: "所选模型已不可用，本次运行已跳过",
     scheduleNeedsAttention: "定时任务需要处理",
     runCompleted: "任务已完成",
     runFailed: "任务失败",
@@ -143,6 +144,8 @@ export async function runNotificationPresentationVertical({
     scheduleFailed: "Scheduled task failed",
     scheduleSkipped:
       "A run was skipped because the previous run is still active",
+    scheduleModelUnavailable:
+      "A run was skipped because its model is no longer available",
     scheduleNeedsAttention: "Scheduled task needs attention",
     runCompleted: "Task finished",
     runFailed: "Task failed",

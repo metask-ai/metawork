@@ -1465,6 +1465,7 @@ test "notification activation follows SDK command routing into the real Task Bri
         .scheduleCompleted = "completed",
         .scheduleFailed = "failed",
         .scheduleSkipped = "skipped",
+        .scheduleModelUnavailable = "model unavailable",
         .scheduleNeedsAttention = "needs attention",
         .runCompleted = "run completed",
         .runFailed = "run failed",

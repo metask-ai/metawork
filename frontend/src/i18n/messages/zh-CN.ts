@@ -2041,6 +2041,7 @@ export const zhCN: Record<MessageId, string> = {
   "notification.schedule.completed": "定时任务已完成",
   "notification.schedule.failed": "定时任务失败",
   "notification.schedule.skipped": "上一次运行仍在进行，本次运行已跳过",
+  "notification.schedule.model_unavailable": "所选模型已不可用，本次运行已跳过",
   "notification.schedule.needs_attention": "定时任务需要处理",
   "notification.run.completed": "任务已完成",
   "notification.run.failed": "任务失败",

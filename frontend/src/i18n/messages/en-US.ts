@@ -2357,6 +2357,8 @@ export const enUS = {
   "notification.schedule.failed": "Scheduled task failed",
   "notification.schedule.skipped":
     "A run was skipped because the previous run is still active",
+  "notification.schedule.model_unavailable":
+    "A run was skipped because its model is no longer available",
   "notification.schedule.needs_attention": "Scheduled task needs attention",
   "notification.run.completed": "Task finished",
   "notification.run.failed": "Task failed",

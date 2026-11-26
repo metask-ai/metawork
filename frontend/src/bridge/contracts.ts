@@ -41,6 +41,7 @@ export type NotificationTextRegistration = {
   scheduleCompleted: string;
   scheduleFailed: string;
   scheduleSkipped: string;
+  scheduleModelUnavailable: string;
   scheduleNeedsAttention: string;
   runCompleted: string;
   runFailed: string;

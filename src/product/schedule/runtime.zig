@@ -145,7 +145,9 @@ fn noArm(_: ?*anyopaque, _: u64) bool {
 }
 fn noCancel(_: ?*anyopaque) void {}
 
-pub const NotificationKind = enum { completed, failed, skipped, needs_attention };
+/// `skipped`: the previous run is still active. `model_unavailable`: the
+/// bound model is gone, so this run was skipped and the plan stays enabled.
+pub const NotificationKind = enum { completed, failed, skipped, model_unavailable, needs_attention };
 pub const Notification = struct {
     scheduled_task_id: u64,
     task_id: u64 = 0,
