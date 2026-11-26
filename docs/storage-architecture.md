@@ -1,6 +1,6 @@
 # MetaWork Storage 架构
 
-> 状态：Storage SQL contract、直接 SQLite backend 与 conformance 的 source of truth；正式历史接线与业务合同见 [Product 架构](product-architecture.md#43-workbench-historystore)
+> 状态：Storage SQL contract、直接 SQLite backend 与 conformance 的 source of truth；正式历史接线与业务合同见 [Product 架构](product-architecture.md#43-workbench-历史存储)
 
 本文定义 Foundation 的 Storage 服务族：SQL 合同与直接 SQLite backend。它是能原样搬到另一个应用的基础服务，只提供无业务语义的 SQL、事务、迁移和数据库生命周期；依赖上不依赖任何业务 owner，数据库实例由 Application 创建、管理生命周期并以借用 capability 注入使用方。基础能力本身不批准迁移或接入任何 Product 数据，每个使用方都须显式完成 owner composition。
 
@@ -29,7 +29,7 @@ single direct SQLite connection
 6. 文件数据库使用 `WAL + synchronous=FULL`；在没有性能证据时优先承诺已返回 commit 的断电持久性。
 7. migration identity 由 Storage-owned metadata table 保存，不使用 `PRAGMA user_version` 作为身份或兼容路径。
 
-本文范围限于 SQL 合同、SQLite backend、SQLite build profile 与对应验证。Application composition、正式数据库路径、Product schema 与数据迁移由使用方的合同定义，当前产品历史见 [Product 架构](product-architecture.md#43-workbench-historystore)。
+本文范围限于 SQL 合同、SQLite backend、SQLite build profile 与对应验证。Application composition、正式数据库路径、Product schema 与数据迁移由使用方的合同定义，当前产品历史见 [Product 架构](product-architecture.md#43-workbench-历史存储)。
 
 ## 2. Owner 与依赖方向
 

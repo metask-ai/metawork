@@ -1,0 +1,42 @@
+[
+  {
+    "file": "text-notes-diagnostic.pptx",
+    "bytes": 14472,
+    "sha256": "ccb3eadf84f115f026f6bace07560d7db8de7803d940513ae61722f25b1675d5"
+  },
+  {
+    "file": "text-notes-metaskoffice-roundtrip.pptx",
+    "bytes": 14344,
+    "sha256": "bbeb0718c07cbcfdce5ab5f3ff7fb1be20e86f1814ff65f31f4437c782535170"
+  },
+  {
+    "file": "bar-multi-labels-diagnostic.pptx",
+    "bytes": 20440,
+    "sha256": "0d0f21a21254a137ab2b6686c6db6f3c420444250b2f9ae86db14554f4b8e5bb"
+  },
+  {
+    "file": "bar-multi-labels-metaskoffice-roundtrip.pptx",
+    "bytes": 33521,
+    "sha256": "2ba42941f05f62731819d10e275f0bdd82630f823638e76b11ba0807a5be0c2c"
+  },
+  {
+    "file": "line-multi-labels-diagnostic.pptx",
+    "bytes": 20418,
+    "sha256": "b8eea5ce3d2b3b5f618b5bdc883584181a0a5256d5ed0f3bce1edec9ad69d88c"
+  },
+  {
+    "file": "line-multi-labels-metaskoffice-roundtrip.pptx",
+    "bytes": 33503,
+    "sha256": "a5d3b552af8d26a73159407715c9a221162257ecaad312d278d7ccd273a490ef"
+  },
+  {
+    "file": "bar-horizontal-multi-labels-diagnostic.pptx",
+    "bytes": 20440,
+    "sha256": "784db216c68d30ff22c660c8f5dd7b647e913075e4b1141b9e13b814cbad0889"
+  },
+  {
+    "file": "bar-horizontal-multi-labels-metaskoffice-roundtrip.pptx",
+    "bytes": 33521,
+    "sha256": "95d45b44238c9eb64db9430ff90cfc6b52b76a0651b9ac5129b0deae45b6dda2"
+  }
+]

@@ -21,6 +21,7 @@
 | AgentCore target-specific exact artifact identity | `build_support/agentcore-bundle.*.lock.json` |
 | Agent-owned Completion、Provider codec、Transport 与取消 | [Completion 架构](docs/completion-architecture.md) |
 | Storage SQL contract、backend、limits、migration 与 lifecycle | [Storage 架构](docs/storage-architecture.md) |
+| 跨平台发布顺序、正式产物交付与更新清单发布 | [发布流程](docs/release.md) |
 | macOS 构建、签名、公证与分发合同 | [macOS 分发](docs/macos-distribution.md) |
 | Windows 安装器、Authenticode 与分发合同 | [Windows 分发](docs/windows-distribution.md) |
 | 测试归属、验证入口、长期证据与未闭合能力 | [验证规范](docs/validation.md) |
