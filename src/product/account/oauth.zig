@@ -255,7 +255,6 @@ pub const CurrentUser = struct {
     email_hint_len: usize = 0,
     phone_hint: [contract.Limits.phone_hint_bytes]u8 = undefined,
     phone_hint_len: usize = 0,
-    concurrency_limit: ?u32 = null,
 
     pub fn accountId(self: *const CurrentUser) []const u8 {
         return self.account_id[0..self.account_id_len];
@@ -408,7 +407,6 @@ pub fn parseCurrentUser(
         else => result.phone_hint[0..0],
     };
     result.phone_hint_len = phone_hint.len;
-    result.concurrency_limit = null;
     return result;
 }
 
@@ -648,7 +646,6 @@ test "current user decoder binds the principal and projects optional profile fie
     try std.testing.expectEqualStrings("Meta User", info.usernameView());
     try std.testing.expectEqualStrings("u***@example.com", info.emailHintView());
     try std.testing.expectEqualStrings("138****8000", info.phoneHintView());
-    try std.testing.expectEqual(@as(?u32, null), info.concurrency_limit);
     try std.testing.expectError(
         error.InvalidCurrentUserResponse,
         parseCurrentUser(
@@ -661,7 +658,6 @@ test "current user decoder binds the principal and projects optional profile fie
     try std.testing.expectEqualStrings("", incomplete.usernameView());
     try std.testing.expectEqualStrings("", incomplete.emailHintView());
     try std.testing.expectEqualStrings("", incomplete.phoneHintView());
-    try std.testing.expectEqual(@as(?u32, null), incomplete.concurrency_limit);
     const malformed = try parseCurrentUser(
         \\{"sub":"user-42","name":7,"email":{"value":"user@example.com"},"phone_number":13800138000,"client_id":"metawork","authorization_id":"auth-1"}
     );

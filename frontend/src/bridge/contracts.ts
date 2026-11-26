@@ -61,13 +61,11 @@ export type NewTaskAdmissionReason =
 export type NewTaskMetaskAdmission = "none" | "recovering" | "unreachable";
 export type AccountErrorCode =
   | "none"
-  | "invalid_command"
   | "invalid_state"
   | "operation_in_progress"
   | "oauth_bind_failed"
   | "oauth_browser_open_failed"
   | "oauth_callback_rejected"
-  | "oauth_state_mismatch"
   | "oauth_exchange_failed"
   | "user_cancelled"
   | "deadline_exceeded"
@@ -237,37 +235,11 @@ export type AccountView = {
   displayName: string;
   emailHint: string;
   phoneHint: string;
-  concurrencyLimit: number | null;
   errorCode: AccountErrorCode;
   safeDiagnostic: string;
   summary: {
     operation: "idle" | "refreshing";
     usageEligibility: "unknown" | "disabled" | "enabled";
-    wallet: {
-      availability: "unavailable" | "loading" | "ready" | "stale";
-      balanceU: string | null;
-      syncedAt: string | null;
-      errorCode: AccountErrorCode;
-      safeDiagnostic: string;
-    };
-    usage: {
-      availability: "unavailable" | "loading" | "ready" | "stale";
-      today: {
-        inputTokens: string;
-        outputTokens: string;
-        cacheCreationTokens: string;
-        cacheReadTokens: string;
-        totalTokens: string;
-        actualCostU: string;
-      } | null;
-      total: {
-        totalTokens: string;
-        actualCostU: string;
-      } | null;
-      syncedAt: string | null;
-      errorCode: AccountErrorCode;
-      safeDiagnostic: string;
-    };
     history: {
       availability: "unavailable" | "loading" | "ready" | "stale";
       startDate: string | null;

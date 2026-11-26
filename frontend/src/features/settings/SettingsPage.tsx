@@ -19,7 +19,10 @@ import {
   accountIdentityLabel,
   accountUnconfirmed,
 } from "../../workbench/account-identity.ts";
-import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
+import {
+  AccountRecharge,
+  AccountUsageSummary,
+} from "./AccountUsageSummary.tsx";
 import { ArchivedTasks, type ArchivedTasksProps } from "./ArchivedTasks.tsx";
 import {
   CustomModelsSettings,
@@ -562,14 +565,6 @@ export function SettingsPage({
                             {account.phoneHint}
                           </span>
                         ) : null}
-                        <span>
-                          {t("settings.account_concurrency_limit", {
-                            value:
-                              account.concurrencyLimit === 0
-                                ? t("settings.account_concurrency_unlimited")
-                                : (account.concurrencyLimit ?? "—"),
-                          })}
-                        </span>
                       </div>
                     ) : (
                       <span>{accountIdentityBody}</span>
@@ -577,8 +572,7 @@ export function SettingsPage({
                   </div>
                   {authenticated &&
                   account.summary.usageEligibility !== "disabled" ? (
-                    <AccountBalance
-                      wallet={account.summary.wallet}
+                    <AccountRecharge
                       disabled={disabled || accountDisabled}
                       onRecharge={onOpenRecharge}
                     />

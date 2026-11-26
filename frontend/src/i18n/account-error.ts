@@ -8,7 +8,6 @@ export function accountErrorMessageId(code: AccountErrorCode): MessageId {
     case "oauth_browser_open_failed":
       return "account.error.browser";
     case "oauth_callback_rejected":
-    case "oauth_state_mismatch":
     case "oauth_exchange_failed":
       return "account.error.authorization";
     case "token_refresh_failed":

@@ -664,10 +664,6 @@ pub const Prepared = struct {
     /// The person signed out, whatever the store answered.
     logged_out: bool = false,
 
-    pub fn factKind(self: *const Prepared) contract.AccountFactKind {
-        return self.transition.factKind();
-    }
-
     pub fn attemptId(self: *const Prepared) ?u64 {
         return self.transition.attempt_id;
     }
@@ -1156,7 +1152,7 @@ pub const Runtime = struct {
 
     pub fn summaryFact(self: *Runtime) contract.AccountFact {
         self.assertMainThread();
-        return .{ .kind = .summary_changed, .view = self.view() };
+        return .{ .view = self.view() };
     }
 
     pub fn refreshSummary(self: *Runtime) SummaryRefreshResult {
@@ -1297,22 +1293,6 @@ pub const Runtime = struct {
         if (self.availableAuthorizationIdentity() != null)
             return .{ .available = .{ .account_id = self.account.accountId(), .generation = self.credentials.current.?.generation } };
         return .{ .recovering = self.renewal_epoch };
-    }
-
-    pub fn preparedFact(
-        self: *Runtime,
-        prepared: *const Prepared,
-    ) contract.AccountFact {
-        self.assertMainThread();
-        var next_view = prepared.transition.view();
-        if (next_view.state == .authenticated) next_view.summary = self.summary.view();
-        const fact: contract.AccountFact = .{
-            .kind = prepared.factKind(),
-            .view = next_view,
-        };
-        contract.validateFact(fact) catch
-            @panic("Account Runtime prepared an invalid canonical AccountFact");
-        return fact;
     }
 
     fn startSummaryJob(
@@ -2313,7 +2293,6 @@ pub const TestSupport = if (builtin.is_test) struct {
                 display_name,
                 "u***@example.com",
                 "",
-                5,
             ),
         );
         return .{
@@ -2657,7 +2636,7 @@ test "incomplete profile identity still issues an authorization lease" {
         .grant = try TestSupport.issuedGrant(&runtime, "access-token", "refresh-token", 200),
         .transition = try state_impl.TestSupport.prepareAuthenticated(
             &runtime.account,
-            try state_impl.AccountIdentity.init("account-1", "", "", "", null),
+            try state_impl.AccountIdentity.init("account-1", "", "", ""),
         ),
     };
     defer authenticated.deinit();

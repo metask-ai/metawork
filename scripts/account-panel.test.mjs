@@ -61,21 +61,6 @@ test.after(async () => vite.close());
 const emptyAccountSummary = {
   operation: "idle",
   usageEligibility: "unknown",
-  wallet: {
-    availability: "unavailable",
-    balanceU: null,
-    syncedAt: null,
-    errorCode: "none",
-    safeDiagnostic: "",
-  },
-  usage: {
-    availability: "unavailable",
-    today: null,
-    total: null,
-    syncedAt: null,
-    errorCode: "none",
-    safeDiagnostic: "",
-  },
   history: {
     availability: "unavailable",
     startDate: null,
@@ -102,7 +87,6 @@ const signedOut = {
   displayName: "",
   emailHint: "",
   phoneHint: "",
-  concurrencyLimit: null,
   errorCode: "none",
   safeDiagnostic: "",
   summary: emptyAccountSummary,
@@ -142,7 +126,6 @@ const readyAccount = {
   displayName: "Metask User",
   emailHint: "m***@example.com",
   phoneHint: "",
-  concurrencyLimit: 5,
 };
 
 const readyModels = {
@@ -411,21 +394,6 @@ test("Account settings render gateway usage history without legacy summaries", (
       summary: {
         operation: "idle",
         usageEligibility: "enabled",
-        wallet: {
-          availability: "unavailable",
-          balanceU: null,
-          syncedAt: null,
-          errorCode: "none",
-          safeDiagnostic: "",
-        },
-        usage: {
-          availability: "unavailable",
-          today: null,
-          total: null,
-          syncedAt: null,
-          errorCode: "none",
-          safeDiagnostic: "",
-        },
         history: {
           availability: "ready",
           startDate: "2025-09-15",
@@ -454,7 +422,8 @@ test("Account settings render gateway usage history without legacy summaries", (
   assert.doesNotMatch(markup, /Metask connected/);
   assert.match(markup, /whole Metask account, not only activity in MetaWork/);
   assert.match(markup, /m\*\*\*@example\.com/);
-  assert.match(markup, /Concurrency allowance 5/);
+  // Nothing publishes a concurrency allowance; none is shown.
+  assert.doesNotMatch(markup, /Concurrency/);
   assert.match(markup, /title="Open the Metask recharge page in your browser"/);
   assert.match(markup, />Recharge</);
   assert.doesNotMatch(markup, /settings-identity-balance|>Balance</);
@@ -476,21 +445,6 @@ test("Account summary failure stays local and legacy disabled projection hides u
     summary: {
       operation: "idle",
       usageEligibility: "enabled",
-      wallet: {
-        availability: "ready",
-        balanceU: "12",
-        syncedAt: "1789344000000",
-        errorCode: "none",
-        safeDiagnostic: "",
-      },
-      usage: {
-        availability: "unavailable",
-        today: null,
-        total: null,
-        syncedAt: null,
-        errorCode: "metask_service_unavailable",
-        safeDiagnostic: "",
-      },
       history: {
         availability: "unavailable",
         startDate: null,
@@ -505,7 +459,6 @@ test("Account summary failure stays local and legacy disabled projection hides u
   const partialMarkup = renderSettings(partial, readyModels, {
     initialSection: "account",
   });
-  assert.match(partialMarkup, /12 U/);
   assert.match(partialMarkup, /Metask is temporarily unavailable/);
   assert.match(partialMarkup, /Metask User/);
 
@@ -527,21 +480,6 @@ test("Account summary failure stays local and legacy disabled projection hides u
   );
 
   const stale = structuredClone(partial);
-  stale.summary.usage = {
-    availability: "stale",
-    today: {
-      inputTokens: "1",
-      outputTokens: "2",
-      cacheCreationTokens: "3",
-      cacheReadTokens: "4",
-      totalTokens: "10",
-      actualCostU: "0.5",
-    },
-    total: { totalTokens: "20", actualCostU: "1" },
-    syncedAt: "1789343000000",
-    errorCode: "metask_service_unavailable",
-    safeDiagnostic: "",
-  };
   stale.summary.history = {
     availability: "stale",
     startDate: "2025-09-15",
@@ -614,14 +552,6 @@ test("pre-sync Account usage remains actionable without a legacy balance", () =>
   assert.match(markup, />Refresh account usage</);
   assert.doesNotMatch(markup, />Balance</);
   assert.match(markup, />Recharge</);
-});
-
-test("an unlimited Account concurrency value stays visible", () => {
-  const unlimited = { ...readyAccount, concurrencyLimit: 0 };
-  const markup = renderSettings(unlimited, readyModels, {
-    initialSection: "account",
-  });
-  assert.match(markup, /Concurrency allowance Unlimited/);
 });
 
 test("Account usage formatting preserves decimal precision without number coercion", () => {

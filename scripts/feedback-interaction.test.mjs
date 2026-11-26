@@ -128,7 +128,6 @@ async function setup(
     displayName: "",
     emailHint: "",
     phoneHint: "",
-    concurrencyLimit: null,
     errorCode,
     safeDiagnostic: "request-id: example-safe-id\n<plain text>",
     ...account,

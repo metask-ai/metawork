@@ -271,9 +271,7 @@ pub const Coordinator = struct {
         var prepared = prepared_value;
         defer prepared.deinit();
 
-        const fact = self.runtime.preparedFact(&prepared);
         const attempt_id = prepared.attemptId();
-        const attempt_terminal = prepared.finishesAttempt();
         const attempt_disposition = self.runtime.attemptDisposition(&prepared);
 
         const effect_admitted = self.runtime.admitEffect(&prepared);
@@ -287,9 +285,7 @@ pub const Coordinator = struct {
         self.control.commitNoFail(.{
             // As committed: what waits to reach Metask and the person's
             // attempt are settled only in the commit.
-            .fact = .{ .kind = fact.kind, .view = self.runtime.view() },
-            .attempt_id = attempt_id,
-            .attempt_terminal = attempt_terminal,
+            .fact = .{ .view = self.runtime.view() },
             .token_changed = prepared.token_changed,
             .logged_out = prepared.logged_out,
         });
@@ -351,8 +347,6 @@ pub const Coordinator = struct {
     fn commitSummaryNoFail(self: *Coordinator) void {
         self.control.commitNoFail(.{
             .fact = self.runtime.summaryFact(),
-            .attempt_id = null,
-            .attempt_terminal = false,
         });
         self.control.settleNoFail();
     }
@@ -370,10 +364,7 @@ pub const TestSupport = if (builtin.is_test) struct {
 } else struct {};
 
 const RecordedCommit = struct {
-    kind: account_contract.AccountFactKind,
     state: account_contract.AccountState,
-    attempt_id: ?u64,
-    attempt_terminal: bool,
 };
 
 const RecordingSink = struct {
@@ -411,12 +402,7 @@ const RecordingSink = struct {
             value.fact.view.account_id,
         ));
 
-        self.records[self.count] = .{
-            .kind = value.fact.kind,
-            .state = value.fact.view.state,
-            .attempt_id = value.attempt_id,
-            .attempt_terminal = value.attempt_terminal,
-        };
+        self.records[self.count] = .{ .state = value.fact.view.state };
         self.count += 1;
         std.debug.assert(!self.unsettled);
         self.unsettled = true;
@@ -624,8 +610,6 @@ test "Account summary auto-sync requests usage stats directly and preserves stal
     coordinator.drain();
     const ready = runtime.view();
     try std.testing.expectEqual(account_contract.UsageEligibility.enabled, ready.summary.usage_eligibility);
-    try std.testing.expectEqual(account_contract.SummaryAvailability.unavailable, ready.summary.wallet.availability);
-    try std.testing.expectEqual(account_contract.SummaryAvailability.unavailable, ready.summary.usage.availability);
     try std.testing.expectEqual(@as(usize, 1), transport.request_count);
     try std.testing.expectEqual(@as(usize, 1), transport.history_request_count);
     try std.testing.expectEqual(account_contract.SummaryAvailability.ready, ready.summary.history.availability);
@@ -768,7 +752,6 @@ test "Account summary does not depend on a legacy account mode" {
     try std.testing.expectEqual(@as(usize, 1), transport.request_count);
     try std.testing.expectEqual(@as(usize, 1), transport.history_request_count);
     try std.testing.expectEqual(account_contract.UsageEligibility.enabled, summary.usage_eligibility);
-    try std.testing.expectEqual(account_contract.SummaryAvailability.unavailable, summary.usage.availability);
     try std.testing.expectEqual(account_contract.SummaryAvailability.ready, summary.history.availability);
 }
 
@@ -794,13 +777,10 @@ test "Account coordinator commits identity before notifying Product" {
 
     try std.testing.expect(result.accepted);
     try std.testing.expectEqual(@as(usize, 1), sink.count);
-    try std.testing.expectEqual(account_contract.AccountFactKind.restored, sink.records[0].kind);
     try std.testing.expectEqual(account_contract.AccountState.authenticated, sink.records[0].state);
-    try std.testing.expectEqual(@as(?u64, null), sink.records[0].attempt_id);
-    try std.testing.expect(!sink.records[0].attempt_terminal);
 }
 
-test "Account logout reaches Product as one commit of no attempt" {
+test "Account logout reaches Product as one commit" {
     var runtime = try initRuntimeForTest();
     var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
     account_api.TestSupport.attachPlatform(&runtime, &platform);
@@ -829,9 +809,7 @@ test "Account logout reaches Product as one commit of no attempt" {
 
     try std.testing.expect(result.accepted);
     const logout = sink.records[sink.count - 1];
-    try std.testing.expectEqual(account_contract.AccountFactKind.signed_out, logout.kind);
     try std.testing.expectEqual(account_contract.AccountState.signed_out, logout.state);
-    try std.testing.expect(logout.attempt_id == null and !logout.attempt_terminal);
     try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
     // Receipts count from one, and a logout ends in its own commit.
     try std.testing.expectEqual(@as(?u64, 1), result.attempt_id);
@@ -922,8 +900,6 @@ test "Account coordinator closes a continuation effect collision with one termin
 
     try std.testing.expect(result.accepted);
     try std.testing.expectEqual(@as(usize, 2), sink.count);
-    try std.testing.expect(!sink.records[0].attempt_terminal);
-    try std.testing.expect(sink.records[1].attempt_terminal);
     try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
     try std.testing.expectEqual(
         account_contract.ErrorCode.local_resource_exhausted,
@@ -966,7 +942,6 @@ test "Account cancel discards a late callback exchange secret" {
     try std.testing.expect(result.accepted);
     try expectAttempt(&runtime, result.attempt_id.?, .cancel_operation, .cancelled, .user_cancelled);
     try std.testing.expectEqual(@as(usize, 1), sink.count);
-    try std.testing.expect(sink.records[0].attempt_terminal);
     try std.testing.expect(std.mem.indexOf(
         u8,
         &backing,
@@ -991,7 +966,6 @@ test "Account shutdown discards an uncommitted effect and closes the active atte
     coordinator.shutdown();
 
     try std.testing.expectEqual(@as(usize, 1), sink.count);
-    try std.testing.expect(sink.records[0].attempt_terminal);
     try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
 }
 
@@ -1024,7 +998,6 @@ test "Account mailbox collision becomes one typed terminal failure" {
     coordinator.drain();
 
     try std.testing.expectEqual(@as(usize, 1), sink.count);
-    try std.testing.expect(sink.records[0].attempt_terminal);
     try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
     try std.testing.expectEqual(
         account_contract.ErrorCode.account_operation_failed,
@@ -1090,7 +1063,6 @@ test "Account shutdown publishes one terminal fact for an active attempt" {
     coordinator.shutdown();
 
     try std.testing.expectEqual(@as(usize, 1), sink.count);
-    try std.testing.expect(sink.records[0].attempt_terminal);
     try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
 }
 
@@ -1423,7 +1395,6 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
         try std.testing.expectEqual(@as(usize, 0), follower.calls);
         try std.testing.expectEqual(@as(usize, if (in_flight) 0 else 1), platform.timer_start_count);
         try std.testing.expectEqual(@as(usize, 1), sink.count);
-        try std.testing.expect(sink.records[0].attempt_terminal);
         try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
         try std.testing.expect(coordinator.commandSink().submit(.begin_login).error_code == .invalid_state);
         try std.testing.expect(runtime.platform == null);

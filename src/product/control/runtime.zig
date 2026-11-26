@@ -7500,60 +7500,16 @@ pub const Runtime = struct {
         writer.writeAll(",\"phoneHint\":") catch
             return error.SnapshotTooLarge;
         try text.writeJson(writer, view.phone_hint);
-        writer.writeAll(",\"concurrencyLimit\":") catch
-            return error.SnapshotTooLarge;
-        if (view.concurrency_limit) |limit|
-            writer.print("{d}", .{limit}) catch return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
             @tagName(view.error_code),
         }) catch return error.SnapshotTooLarge;
         try text.writeJson(writer, view.safe_diagnostic);
         const summary = view.summary;
-        writer.print(",\"summary\":{{\"operation\":\"{s}\",\"usageEligibility\":\"{s}\",\"wallet\":{{\"availability\":\"{s}\",\"balanceU\":", .{
+        writer.print(",\"summary\":{{\"operation\":\"{s}\",\"usageEligibility\":\"{s}\",\"history\":{{\"availability\":\"{s}\",\"startDate\":", .{
             @tagName(summary.operation),
             @tagName(summary.usage_eligibility),
-            @tagName(summary.wallet.availability),
+            @tagName(summary.history.availability),
         }) catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(writer, summary.wallet.balance_u, text);
-        writer.writeAll(",\"syncedAt\":") catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(writer, summary.wallet.synced_at_unix_ms, text);
-        writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.wallet.error_code)}) catch
-            return error.SnapshotTooLarge;
-        try text.writeJson(writer, summary.wallet.safe_diagnostic);
-        writer.print("}},\"usage\":{{\"availability\":\"{s}\",\"today\":", .{@tagName(summary.usage.availability)}) catch
-            return error.SnapshotTooLarge;
-        if (summary.usage.today) |today| {
-            writer.writeAll("{\"inputTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.input_tokens);
-            writer.writeAll(",\"outputTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.output_tokens);
-            writer.writeAll(",\"cacheCreationTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.cache_creation_tokens);
-            writer.writeAll(",\"cacheReadTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.cache_read_tokens);
-            writer.writeAll(",\"totalTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.total_tokens);
-            writer.writeAll(",\"actualCostU\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.actual_cost_u);
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"total\":") catch return error.SnapshotTooLarge;
-        if (summary.usage.total) |total| {
-            writer.writeAll("{\"totalTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, total.total_tokens);
-            writer.writeAll(",\"actualCostU\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, total.actual_cost_u);
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"syncedAt\":") catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(writer, summary.usage.synced_at_unix_ms, text);
-        writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.usage.error_code)}) catch
-            return error.SnapshotTooLarge;
-        try text.writeJson(writer, summary.usage.safe_diagnostic);
-        writer.print("}},\"history\":{{\"availability\":\"{s}\",\"startDate\":", .{@tagName(summary.history.availability)}) catch
-            return error.SnapshotTooLarge;
         try writeNullableProjectedJsonValue(writer, summary.history.start_date, text);
         writer.writeAll(",\"endDate\":") catch return error.SnapshotTooLarge;
         try writeNullableProjectedJsonValue(writer, summary.history.end_date, text);
@@ -11018,14 +10974,12 @@ pub const TestSupport = if (builtin.is_test) struct {
             generation + 3,
         );
         control.commitAccountFactNoFail(.{
-            .kind = .session_changed,
             .view = .{
                 .state = .authenticated,
                 .account_id = "account-1",
                 .display_name = "Fixture User",
                 .email_hint = "f***@example.com",
                 .phone_hint = "138****8000",
-                .concurrency_limit = 5,
             },
         });
 
@@ -13454,34 +13408,14 @@ test "Product Control snapshot serializer preserves complete Account summary his
         .actual_cost_u = "0.25",
     }};
     control.commitAccountFactNoFail(.{
-        .kind = .summary_changed,
         .view = .{
             .state = .authenticated,
             .account_id = "account-1",
             .display_name = "Fixture User",
             .email_hint = "f***@example.com",
             .phone_hint = "138****8000",
-            .concurrency_limit = 5,
             .summary = .{
                 .usage_eligibility = .enabled,
-                .wallet = .{
-                    .availability = .ready,
-                    .balance_u = "-1.25",
-                    .synced_at_unix_ms = "1720000000000",
-                },
-                .usage = .{
-                    .availability = .ready,
-                    .today = .{
-                        .input_tokens = "10",
-                        .output_tokens = "20",
-                        .cache_creation_tokens = "3",
-                        .cache_read_tokens = "4",
-                        .total_tokens = "37",
-                        .actual_cost_u = "0.125",
-                    },
-                    .total = .{ .total_tokens = "300", .actual_cost_u = "2.5" },
-                    .synced_at_unix_ms = "1720000000000",
-                },
                 .history = .{
                     .availability = .ready,
                     .start_date = "2025-09-15",
@@ -13497,12 +13431,8 @@ test "Product Control snapshot serializer preserves complete Account summary his
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
     const summary = parsed.value.object.get("account").?.object.get("summary").?.object;
-    const wallet = summary.get("wallet").?.object;
-    const usage = summary.get("usage").?.object;
+    try std.testing.expect(summary.get("wallet") == null and summary.get("usage") == null);
     const history = summary.get("history").?.object;
-    try std.testing.expectEqualStrings("-1.25", wallet.get("balanceU").?.string);
-    try std.testing.expectEqualStrings("37", usage.get("today").?.object.get("totalTokens").?.string);
-    try std.testing.expectEqualStrings("2.5", usage.get("total").?.object.get("actualCostU").?.string);
     try std.testing.expectEqualStrings("2025-09-15", history.get("startDate").?.string);
     try std.testing.expectEqualStrings("10", history.get("days").?.array.items[0].object.get("totalTokens").?.string);
 }
@@ -14557,7 +14487,6 @@ test "Product Control snapshot serializer keeps durable Metask intent after auth
     const binding_epoch = try control.taskBindingEpoch(task_id);
 
     control.commitAccountFactNoFail(.{
-        .kind = .signed_out,
         .view = .{ .state = .signed_out },
     });
     control.publishAdmissionChangesNoFail();
@@ -16263,7 +16192,7 @@ test "identity replacement does not disturb live Task runtime references" {
     const task = control.testTaskSlots()[0].?;
     const route_id = task.runtime.routeId();
     const execution = task.runtime.executionConst().?;
-    control.commitAccountFactNoFail(.{ .kind = .signed_out, .view = .{ .state = .signed_out } });
+    control.commitAccountFactNoFail(.{ .view = .{ .state = .signed_out } });
     control.setMetaskAuthorizationUnavailable();
     try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
@@ -16281,7 +16210,7 @@ test "identity replacement does not disturb live Task runtime references" {
     run.event_stream_finalized = true;
     task.runtime.active_run_id = 0;
     var replacement_lease = try task.runtime.worker_leases.acquire();
-    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .checking } });
+    control.commitAccountFactNoFail(.{ .view = .{ .state = .checking } });
     try std.testing.expectEqual(@as(usize, 1), task.runtime.worker_leases.liveCount());
     try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
@@ -18720,7 +18649,7 @@ test "the sign-out confirmation counts the Tasks a sign-out would stop" {
     // The fixture Task runs on Metask.
     try std.testing.expectEqual(@as(usize, 1), control.metaskStopTargets());
     // A commit that is no sign-out stops nothing.
-    control.commitAccountChangeNoFail(.{ .fact = .{ .kind = .signed_out, .view = .{ .state = .signed_out } }, .attempt_id = null, .attempt_terminal = false });
+    control.commitAccountChangeNoFail(.{ .fact = .{ .view = .{ .state = .signed_out } } });
     try std.testing.expectEqual(@as(usize, 1), control.metaskStopTargets());
 }
 
@@ -18863,14 +18792,12 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
     const diagnostic: [account_contract.Limits.safe_diagnostic_bytes]u8 =
         @splat('x');
     control.commitAccountFactNoFail(.{
-        .kind = .session_changed,
         .view = .{
             .state = .authenticated,
             .account_id = &account_id,
             .display_name = &display_name,
             .email_hint = &email_hint,
             .phone_hint = &phone_hint,
-            .concurrency_limit = std.math.maxInt(u32),
             .error_code = .invalid_state,
             .safe_diagnostic = &diagnostic,
         },
@@ -24254,7 +24181,7 @@ test "Account token protects Task views and revokes reads only where it was show
     // A token from Account was in nothing shown before: a read goes on, whether
     // it continues another or, as after a login, none was held.
     const sink = control.accountCommitSink();
-    const changed: control_ports.AccountCommit = .{ .fact = .{ .kind = .session_changed, .view = .{ .state = .checking } }, .attempt_id = null, .attempt_terminal = false, .token_changed = true };
+    const changed: control_ports.AccountCommit = .{ .fact = .{ .view = .{ .state = .checking } }, .token_changed = true };
     account = .{ .token = "renewed-account-token", .replaced = "account-image-token" };
     sink.commitNoFail(changed);
     try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());

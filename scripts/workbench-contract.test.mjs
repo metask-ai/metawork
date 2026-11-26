@@ -310,21 +310,6 @@ test("review audit only describes once-only reviewer decisions and keeps legal o
 const emptyAccountSummary = {
   operation: "idle",
   usageEligibility: "unknown",
-  wallet: {
-    availability: "unavailable",
-    balanceU: null,
-    syncedAt: null,
-    errorCode: "none",
-    safeDiagnostic: "",
-  },
-  usage: {
-    availability: "unavailable",
-    today: null,
-    total: null,
-    syncedAt: null,
-    errorCode: "none",
-    safeDiagnostic: "",
-  },
   history: {
     availability: "unavailable",
     startDate: null,
@@ -1142,7 +1127,6 @@ test("durable Metask intent remains decodable when the current catalog is unavai
     displayName: "",
     emailHint: "",
     phoneHint: "",
-    concurrencyLimit: null,
     errorCode: "none",
     safeDiagnostic: "",
     summary: emptyAccountSummary,
@@ -1159,14 +1143,16 @@ test("durable Metask intent remains decodable when the current catalog is unavai
   );
 });
 
-test("Account concurrency accepts the backend unlimited sentinel", () => {
-  const unlimited = clone(fixture);
-  unlimited.account.concurrencyLimit = 0;
-  assert.deepEqual(decodeWorkbenchSnapshot(unlimited), unlimited);
-
-  const invalid = clone(fixture);
-  invalid.account.concurrencyLimit = -1;
-  assert.throws(() => decodeWorkbenchSnapshot(invalid));
+test("Account publishes no concurrency allowance, wallet or usage totals", () => {
+  for (const mutate of [
+    (value) => (value.account.concurrencyLimit = null),
+    (value) => (value.account.summary.wallet = {}),
+    (value) => (value.account.summary.usage = {}),
+  ]) {
+    const invalid = clone(fixture);
+    mutate(invalid);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid), /expected keys/);
+  }
 });
 
 test("Models recovery-required health crosses the strict snapshot decoder", () => {
@@ -2577,7 +2563,6 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
     displayName: "",
     emailHint: "",
     phoneHint: "",
-    concurrencyLimit: null,
     errorCode: "none",
     safeDiagnostic: "",
     summary: emptyAccountSummary,
@@ -3069,7 +3054,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     displayName: "",
     emailHint: "",
     phoneHint: "",
-    concurrencyLimit: null,
     summary: emptyAccountSummary,
   };
   const failed = unreachableRetry.account.attempt;
@@ -3120,7 +3104,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   authenticatedWithoutDisplayName.account.displayName = "";
   authenticatedWithoutDisplayName.account.emailHint = "";
   authenticatedWithoutDisplayName.account.phoneHint = "138****8000";
-  authenticatedWithoutDisplayName.account.concurrencyLimit = null;
   assert.doesNotThrow(() =>
     decodeWorkbenchSnapshot(authenticatedWithoutDisplayName),
   );
@@ -3136,28 +3119,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   readySummary.account.summary = {
     operation: "idle",
     usageEligibility: "enabled",
-    wallet: {
-      availability: "ready",
-      balanceU: "-1.25",
-      syncedAt: "1720000000000",
-      errorCode: "none",
-      safeDiagnostic: "",
-    },
-    usage: {
-      availability: "ready",
-      today: {
-        inputTokens: "10",
-        outputTokens: "20",
-        cacheCreationTokens: "3",
-        cacheReadTokens: "4",
-        totalTokens: "37",
-        actualCostU: "0.125",
-      },
-      total: { totalTokens: "300", actualCostU: "2.5" },
-      syncedAt: "1720000000000",
-      errorCode: "none",
-      safeDiagnostic: "",
-    },
     history: {
       availability: "ready",
       startDate: "2025-09-15",
@@ -3189,11 +3150,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   };
   assert.deepEqual(decodeWorkbenchSnapshot(readySummary), readySummary);
   for (const mutate of [
-    (value) => (value.account.summary.wallet.balanceU = 1.25),
-    (value) => (value.account.summary.wallet.balanceU = "01.25"),
-    (value) => (value.account.summary.usage.today = null),
-    (value) => (value.account.summary.usage.total.actualCostU = "2.50"),
-    (value) => (value.account.summary.usage.extra = true),
     (value) => (value.account.summary.history.days[0].date = "2026-02-30"),
     (value) => (value.account.summary.history.days[1].date = "2026-09-14"),
     (value) => (value.account.summary.history.days[0].totalTokens = "010"),
@@ -3227,7 +3183,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     displayName: "",
     emailHint: "",
     phoneHint: "",
-    concurrencyLimit: null,
     errorCode: "none",
     safeDiagnostic: "",
     summary: emptyAccountSummary,

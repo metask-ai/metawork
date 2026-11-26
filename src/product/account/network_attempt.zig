@@ -609,5 +609,4 @@ test "refresh-only restore accepts an identity with incomplete profile data" {
     try std.testing.expectEqualStrings("1", identity.accountId());
     try std.testing.expectEqualStrings("", identity.displayName());
     try std.testing.expectEqualStrings("", identity.emailHint());
-    try std.testing.expectEqual(@as(?u32, null), identity.concurrency_limit);
 }

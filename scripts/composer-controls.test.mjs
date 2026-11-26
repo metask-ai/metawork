@@ -426,27 +426,11 @@ const readySettingsAccount = {
   displayName: "Metask User",
   emailHint: "m***@example.com",
   phoneHint: "",
-  concurrencyLimit: 5,
   errorCode: "none",
   safeDiagnostic: "",
   summary: {
     operation: "idle",
     usageEligibility: "unknown",
-    wallet: {
-      availability: "unavailable",
-      balanceU: null,
-      syncedAt: null,
-      errorCode: "none",
-      safeDiagnostic: "",
-    },
-    usage: {
-      availability: "unavailable",
-      today: null,
-      total: null,
-      syncedAt: null,
-      errorCode: "none",
-      safeDiagnostic: "",
-    },
     history: {
       availability: "unavailable",
       startDate: null,

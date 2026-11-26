@@ -115,7 +115,6 @@ function signedOut() {
     displayName: "",
     emailHint: "",
     phoneHint: "",
-    concurrencyLimit: null,
   });
   Object.assign(snapshot.models, {
     availability: "needs_authentication",

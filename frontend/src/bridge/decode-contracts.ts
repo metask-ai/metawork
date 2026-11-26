@@ -303,13 +303,11 @@ const modelsCatalogStates = [
 ] as const;
 const accountErrorCodes = [
   "none",
-  "invalid_command",
   "invalid_state",
   "operation_in_progress",
   "oauth_bind_failed",
   "oauth_browser_open_failed",
   "oauth_callback_rejected",
-  "oauth_state_mismatch",
   "oauth_exchange_failed",
   "user_cancelled",
   "deadline_exceeded",
@@ -1331,7 +1329,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "displayName",
     "emailHint",
     "phoneHint",
-    "concurrencyLimit",
     "errorCode",
     "safeDiagnostic",
     "summary",
@@ -1358,10 +1355,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
   const displayName = stringValue(item.displayName, `${path}.displayName`);
   const emailHint = stringValue(item.emailHint, `${path}.emailHint`);
   const phoneHint = stringValue(item.phoneHint, `${path}.phoneHint`);
-  const concurrencyLimit =
-    item.concurrencyLimit === null
-      ? null
-      : nonNegativeNumber(item.concurrencyLimit, `${path}.concurrencyLimit`);
   const errorCode = enumValue(
     item.errorCode,
     `${path}.errorCode`,
@@ -1375,8 +1368,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
   const summaryItem = object(item.summary, summaryPath, [
     "operation",
     "usageEligibility",
-    "wallet",
-    "usage",
     "history",
   ]);
   const operation = enumValue(
@@ -1389,115 +1380,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
     `${summaryPath}.usageEligibility`,
     accountUsageEligibilities,
   );
-  const walletPath = `${summaryPath}.wallet`;
-  const walletItem = object(summaryItem.wallet, walletPath, [
-    "availability",
-    "balanceU",
-    "syncedAt",
-    "errorCode",
-    "safeDiagnostic",
-  ]);
-  const wallet = {
-    availability: enumValue(
-      walletItem.availability,
-      `${walletPath}.availability`,
-      accountSummaryAvailabilities,
-    ),
-    balanceU: nullableDecimalString(
-      walletItem.balanceU,
-      `${walletPath}.balanceU`,
-      true,
-    ),
-    syncedAt: nullableWireId(walletItem.syncedAt, `${walletPath}.syncedAt`),
-    errorCode: enumValue(
-      walletItem.errorCode,
-      `${walletPath}.errorCode`,
-      accountErrorCodes,
-    ),
-    safeDiagnostic: stringValue(
-      walletItem.safeDiagnostic,
-      `${walletPath}.safeDiagnostic`,
-    ),
-  };
-  const usagePath = `${summaryPath}.usage`;
-  const usageItem = object(summaryItem.usage, usagePath, [
-    "availability",
-    "today",
-    "total",
-    "syncedAt",
-    "errorCode",
-    "safeDiagnostic",
-  ]);
-  const todayPath = `${usagePath}.today`;
-  const today = nullableObject(usageItem.today, todayPath, (value) => {
-    const todayItem = object(value, todayPath, [
-      "inputTokens",
-      "outputTokens",
-      "cacheCreationTokens",
-      "cacheReadTokens",
-      "totalTokens",
-      "actualCostU",
-    ]);
-    return {
-      inputTokens: decimalString(
-        todayItem.inputTokens,
-        `${todayPath}.inputTokens`,
-      ),
-      outputTokens: decimalString(
-        todayItem.outputTokens,
-        `${todayPath}.outputTokens`,
-      ),
-      cacheCreationTokens: decimalString(
-        todayItem.cacheCreationTokens,
-        `${todayPath}.cacheCreationTokens`,
-      ),
-      cacheReadTokens: decimalString(
-        todayItem.cacheReadTokens,
-        `${todayPath}.cacheReadTokens`,
-      ),
-      totalTokens: decimalString(
-        todayItem.totalTokens,
-        `${todayPath}.totalTokens`,
-      ),
-      actualCostU: decimalString(
-        todayItem.actualCostU,
-        `${todayPath}.actualCostU`,
-      ),
-    };
-  });
-  const totalPath = `${usagePath}.total`;
-  const total = nullableObject(usageItem.total, totalPath, (value) => {
-    const totalItem = object(value, totalPath, ["totalTokens", "actualCostU"]);
-    return {
-      totalTokens: decimalString(
-        totalItem.totalTokens,
-        `${totalPath}.totalTokens`,
-      ),
-      actualCostU: decimalString(
-        totalItem.actualCostU,
-        `${totalPath}.actualCostU`,
-      ),
-    };
-  });
-  const usage = {
-    availability: enumValue(
-      usageItem.availability,
-      `${usagePath}.availability`,
-      accountSummaryAvailabilities,
-    ),
-    today,
-    total,
-    syncedAt: nullableWireId(usageItem.syncedAt, `${usagePath}.syncedAt`),
-    errorCode: enumValue(
-      usageItem.errorCode,
-      `${usagePath}.errorCode`,
-      accountErrorCodes,
-    ),
-    safeDiagnostic: stringValue(
-      usageItem.safeDiagnostic,
-      `${usagePath}.safeDiagnostic`,
-    ),
-  };
   const historyPath = `${summaryPath}.history`;
   const historyItem = object(summaryItem.history, historyPath, [
     "availability",
@@ -1594,8 +1476,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
     (accountId.length !== 0 ||
       displayName.length !== 0 ||
       emailHint.length !== 0 ||
-      phoneHint.length !== 0 ||
-      concurrencyLimit !== null)
+      phoneHint.length !== 0)
   )
     fail(path, "a non-authenticated Account must hide identity");
   if (state === "authenticated" && accountId.length === 0)
@@ -1614,22 +1495,8 @@ function decodeAccount(value: unknown, path: string): AccountView {
     fail(path, "only a held or verified login waits to reach Metask");
   if (errorCode === "none" && safeDiagnostic.length !== 0)
     fail(path, "safe diagnostic requires an Account error");
-  if (wallet.errorCode === "none" && wallet.safeDiagnostic.length !== 0)
-    fail(walletPath, "safe diagnostic requires an Account error");
-  if (usage.errorCode === "none" && usage.safeDiagnostic.length !== 0)
-    fail(usagePath, "safe diagnostic requires an Account error");
   if (history.errorCode === "none" && history.safeDiagnostic.length !== 0)
     fail(historyPath, "safe diagnostic requires an Account error");
-  if (
-    (wallet.availability === "ready" || wallet.availability === "stale") !==
-    (wallet.balanceU !== null && wallet.syncedAt !== null)
-  )
-    fail(walletPath, "summary data must match availability");
-  if (
-    (usage.availability === "ready" || usage.availability === "stale") !==
-    (usage.today !== null && usage.total !== null && usage.syncedAt !== null)
-  )
-    fail(usagePath, "summary data must match availability");
   const historyCarriesData =
     history.availability === "ready" || history.availability === "stale";
   if (historyCarriesData) {
@@ -1649,20 +1516,13 @@ function decodeAccount(value: unknown, path: string): AccountView {
   }
   if (
     usageEligibility === "disabled" &&
-    (usage.availability !== "unavailable" ||
-      usage.errorCode !== "none" ||
-      history.availability !== "unavailable" ||
-      history.errorCode !== "none")
+    (history.availability !== "unavailable" || history.errorCode !== "none")
   )
-    fail(usagePath, "disabled usage must remain unavailable");
+    fail(historyPath, "disabled usage must remain unavailable");
   if (
     state !== "authenticated" &&
     (operation !== "idle" ||
       usageEligibility !== "unknown" ||
-      wallet.availability !== "unavailable" ||
-      wallet.errorCode !== "none" ||
-      usage.availability !== "unavailable" ||
-      usage.errorCode !== "none" ||
       history.availability !== "unavailable" ||
       history.errorCode !== "none")
   )
@@ -1676,10 +1536,9 @@ function decodeAccount(value: unknown, path: string): AccountView {
     displayName,
     emailHint,
     phoneHint,
-    concurrencyLimit,
     errorCode,
     safeDiagnostic,
-    summary: { operation, usageEligibility, wallet, usage, history },
+    summary: { operation, usageEligibility, history },
   };
 }
 function decodeModelRef(value: unknown, path: string) {

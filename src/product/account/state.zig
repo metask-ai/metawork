@@ -190,7 +190,6 @@ const CommittedState = struct {
             result.display_name = identity.display_name.view();
             result.email_hint = identity.email_hint.view();
             result.phone_hint = identity.phone_hint.view();
-            result.concurrency_limit = identity.concurrency_limit;
         }
         return result;
     }
@@ -317,8 +316,6 @@ pub const Account = struct {
         self: *const Account,
         command: contract.AccountCommand,
     ) PrepareResult {
-        contract.validateCommand(command) catch
-            return .{ .rejected = .invalid_command };
         return switch (command) {
             .begin_login => self.prepareBeginLogin(),
             .cancel_operation => self.prepareCancel(),
@@ -348,7 +345,7 @@ pub const Account = struct {
             .signed_out => .{ .none = .{} },
             .refresh_only => .held,
         };
-        return transitionNoAttempt(next, .restored);
+        return transitionNoAttempt(next);
     }
 
     /// Reading the store found no login it can use. `unreadable` when reading
@@ -363,7 +360,7 @@ pub const Account = struct {
         var next = self.state;
         next.login = .{ .none = .{ .reason = if (unreadable) .unreadable else .absent, .residue = failure.residue } };
         next.setFailure(if (failure.error_code == .none) .fromCode(.credential_store_read_failed) else failure);
-        return transitionNoAttempt(next, .operation_failed);
+        return transitionNoAttempt(next);
     }
 
     pub fn prepareTokenRefresh(self: *const Account) PrepareResult {
@@ -386,7 +383,7 @@ pub const Account = struct {
         next.next_attempt_id = attempt.next;
         // Trying again says nothing new: what went wrong stays shown until
         // this attempt says otherwise.
-        return transition(next, .session_changed, attempt.current, .refresh_token);
+        return transition(next, attempt.current, .refresh_token);
     }
 
     /// Reads the identity of a held login whose token is already exchanged.
@@ -397,7 +394,7 @@ pub const Account = struct {
         var next = self.state;
         next.op = .{ .identity = .{ .attempt = attempt.current } };
         next.next_attempt_id = attempt.next;
-        return transition(next, .session_changed, attempt.current, .load_identity);
+        return transition(next, attempt.current, .load_identity);
     }
 
     /// Asks Metask who a verified login is, after a 401 that did not say why.
@@ -409,7 +406,7 @@ pub const Account = struct {
         var next = self.state;
         next.op = .{ .identity = .{ .attempt = attempt.current, .verifying = true } };
         next.next_attempt_id = attempt.next;
-        return transition(next, .session_changed, attempt.current, .load_identity);
+        return transition(next, attempt.current, .load_identity);
     }
 
     pub fn prepareLoginExchange(
@@ -425,7 +422,7 @@ pub const Account = struct {
         var next = self.state;
         next.op = .{ .authorize = .{ .attempt = attempt_id, .exchanging = true } };
         next.clearError();
-        return transition(next, .session_changed, attempt_id, .exchange_login);
+        return transition(next, attempt_id, .exchange_login);
     }
 
     pub fn prepareCompletion(
@@ -458,7 +455,6 @@ pub const Account = struct {
         const active_attempt = self.state.activeAttempt();
         return .{
             .next = next,
-            .fact_kind = .session_changed,
             .attempt_id = active_attempt,
             .effect = .{ .shutdown = active_attempt },
         };
@@ -470,7 +466,7 @@ pub const Account = struct {
         var next = self.state;
         next.error_code = .refresh_schedule_failed;
         next.safe_diagnostic.clear();
-        return transitionNoAttempt(next, .operation_failed);
+        return transitionNoAttempt(next);
     }
 
     pub fn prepareRetryRefresh(self: *const Account) PrepareResult {
@@ -478,7 +474,7 @@ pub const Account = struct {
             return .{ .rejected = .invalid_state };
         var next = self.state;
         next.clearError();
-        return transitionNoAttempt(next, .session_changed);
+        return transitionNoAttempt(next);
     }
 
     /// A login is only begun where none is verified: changing accounts means
@@ -498,7 +494,7 @@ pub const Account = struct {
             .renew => |value| {
                 var next = self.state;
                 next.intent = .login;
-                return transitionNoEffect(next, .session_changed, value.attempt);
+                return transitionNoEffect(next, value.attempt);
             },
             .identity => |value| {
                 var begun = self.prepareAuthorize();
@@ -528,7 +524,7 @@ pub const Account = struct {
         next.intent = .none;
         next.next_attempt_id = attempt.next;
         next.clearError();
-        return transition(next, .session_changed, attempt.current, .begin_oauth);
+        return transition(next, attempt.current, .begin_oauth);
     }
 
     /// Withdraws a sign-in still waiting, or gives up one waiting for its
@@ -539,12 +535,12 @@ pub const Account = struct {
         var next = self.state;
         if (self.state.intent == .login) {
             next.intent = .none;
-            return transitionNoEffect(next, .session_changed, attempt_id);
+            return transitionNoEffect(next, attempt_id);
         }
         next.op = .idle;
         next.error_code = .user_cancelled;
         next.safe_diagnostic.clear();
-        var result = transitionNoEffect(next, .operation_failed, attempt_id);
+        var result = transitionNoEffect(next, attempt_id);
         result.transition.abandoned = attempt_id;
         return result;
     }
@@ -561,9 +557,9 @@ pub const Account = struct {
         if (failure) |value| next.setFailure(value) else next.clearError();
         const attempt_id = self.state.activeAttempt();
         var result = if (attempt_id) |id|
-            transitionNoEffect(next, .signed_out, id)
+            transitionNoEffect(next, id)
         else
-            transitionNoAttempt(next, .signed_out);
+            transitionNoAttempt(next);
         result.transition.abandoned = attempt_id;
         return result;
     }
@@ -574,9 +570,9 @@ pub const Account = struct {
         var next = self.state;
         next.setFailure(failure);
         return if (self.state.activeAttempt()) |id|
-            transitionNoEffect(next, .operation_failed, id)
+            transitionNoEffect(next, id)
         else
-            transitionNoAttempt(next, .operation_failed);
+            transitionNoAttempt(next);
     }
 
     /// The token exchange underway was answered and its refresh token is
@@ -591,17 +587,17 @@ pub const Account = struct {
                 next.login = .held;
                 next.op = .{ .identity = .{ .attempt = value.attempt } };
                 next.clearError();
-                return transition(next, .session_changed, value.attempt, .load_identity);
+                return transition(next, value.attempt, .load_identity);
             },
             .renew => |value| switch (self.state.login) {
                 .held => {
                     next.op = .{ .identity = .{ .attempt = value.attempt } };
-                    return transition(next, .session_changed, value.attempt, .load_identity);
+                    return transition(next, value.attempt, .load_identity);
                 },
                 .verified => {
                     next.op = .idle;
                     next.clearError();
-                    return transitionNoEffect(next, .session_changed, value.attempt);
+                    return transitionNoEffect(next, value.attempt);
                 },
                 .none => unreachable,
             },
@@ -621,11 +617,11 @@ pub const Account = struct {
         next.login = .{ .verified = identity };
         next.op = .idle;
         // A verification that found the same account changes nothing shown.
-        if (loading.verifying) return transitionNoEffect(next, .session_changed, loading.attempt);
+        if (loading.verifying) return transitionNoEffect(next, loading.attempt);
         // A sign-in that waited for this confirmation is not needed any more.
         next.intent = .none;
         next.clearError();
-        return transitionNoEffect(next, .session_changed, loading.attempt);
+        return transitionNoEffect(next, loading.attempt);
     }
 
     /// A failure returns the operation to idle. Only what proves the login
@@ -649,11 +645,11 @@ pub const Account = struct {
         // A verification that found nothing out is not shown.
         if (failure.retryable and self.state.op == .identity and self.state.op.identity.verifying) {
             next.op = .idle;
-            return transitionNoEffect(next, .session_changed, attempt_id);
+            return transitionNoEffect(next, attempt_id);
         }
         next.op = .idle;
         next.setFailure(failure);
-        return transitionNoEffect(next, .operation_failed, attempt_id);
+        return transitionNoEffect(next, attempt_id);
     }
 };
 
@@ -664,19 +660,19 @@ fn nextAttempt(current: u64) ?AttemptAdvance {
     return .{ .current = current, .next = current + 1 };
 }
 
-fn transition(next: CommittedState, fact_kind: contract.AccountFactKind, attempt_id: u64, effect: Effect) PrepareResult {
+fn transition(next: CommittedState, attempt_id: u64, effect: Effect) PrepareResult {
     std.debug.assert(stateIsValid(&next));
-    return .{ .transition = .{ .next = next, .fact_kind = fact_kind, .attempt_id = attempt_id, .effect = effect } };
+    return .{ .transition = .{ .next = next, .attempt_id = attempt_id, .effect = effect } };
 }
 
-fn transitionNoEffect(next: CommittedState, fact_kind: contract.AccountFactKind, attempt_id: u64) PrepareResult {
+fn transitionNoEffect(next: CommittedState, attempt_id: u64) PrepareResult {
     std.debug.assert(stateIsValid(&next));
-    return .{ .transition = .{ .next = next, .fact_kind = fact_kind, .attempt_id = attempt_id } };
+    return .{ .transition = .{ .next = next, .attempt_id = attempt_id } };
 }
 
-fn transitionNoAttempt(next: CommittedState, fact_kind: contract.AccountFactKind) PrepareResult {
+fn transitionNoAttempt(next: CommittedState) PrepareResult {
     std.debug.assert(stateIsValid(&next));
-    return .{ .transition = .{ .next = next, .fact_kind = fact_kind, .attempt_id = null } };
+    return .{ .transition = .{ .next = next, .attempt_id = null } };
 }
 
 fn stateIsValid(state: *const CommittedState) bool {
@@ -698,7 +694,6 @@ pub const PrepareResult = union(enum) {
 
 pub const PreparedTransition = struct {
     next: CommittedState,
-    fact_kind: contract.AccountFactKind,
     attempt_id: ?u64,
     effect: ?Effect = null,
     /// The attempt whose worker this commit gives up: told to cancel, never
@@ -713,10 +708,6 @@ pub const PreparedTransition = struct {
 
     pub fn view(self: *const PreparedTransition) contract.AccountView {
         return self.next.view();
-    }
-
-    pub fn factKind(self: *const PreparedTransition) contract.AccountFactKind {
-        return self.fact_kind;
     }
 
     pub fn finishesAttempt(self: *const PreparedTransition) bool {
@@ -755,14 +746,12 @@ pub const AccountIdentity = struct {
     display_name: DisplayName,
     email_hint: EmailHint,
     phone_hint: PhoneHint,
-    concurrency_limit: ?u32,
 
     pub fn init(
         account_id: []const u8,
         display_name: []const u8,
         email_hint: []const u8,
         phone_hint: []const u8,
-        concurrency_limit: ?u32,
     ) contract.ValidationError!AccountIdentity {
         if (account_id.len == 0) return error.FieldEmpty;
         return .{
@@ -770,7 +759,6 @@ pub const AccountIdentity = struct {
             .display_name = try .init(display_name),
             .email_hint = try .init(email_hint),
             .phone_hint = try .init(phone_hint),
-            .concurrency_limit = concurrency_limit,
         };
     }
 
@@ -854,7 +842,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         var next = account.state;
         next.login = .{ .verified = identity };
         next.clearError();
-        return .{ .next = next, .fact_kind = .restored, .attempt_id = null };
+        return .{ .next = next, .attempt_id = null };
     }
 } else struct {};
 
@@ -920,7 +908,7 @@ test "matching malformed completion fails the authorization attempt" {
 
     var malformed: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .identity_loaded = try .init("account-1", "User", "u***@example.com", "", 5) },
+        .payload = .{ .identity_loaded = try .init("account-1", "User", "u***@example.com", "") },
     };
     var failed = switch (account.prepareCompletion(&malformed)) {
         .transition => |value| value,
@@ -957,7 +945,7 @@ test "explicit login persists tokens before publishing identity" {
 
     var identity: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .identity_loaded = try .init("account-1", "User", "u***@example.com", "", 5) },
+        .payload = .{ .identity_loaded = try .init("account-1", "User", "u***@example.com", "") },
     };
     var authenticated = switch (account.prepareCompletion(&identity)) {
         .transition => |value| value,
@@ -968,7 +956,6 @@ test "explicit login persists tokens before publishing identity" {
     try std.testing.expectEqualStrings("account-1", account.view().account_id);
     try std.testing.expectEqualStrings("u***@example.com", account.view().email_hint);
     try std.testing.expectEqualStrings("", account.view().phone_hint);
-    try std.testing.expectEqual(@as(?u32, 5), account.view().concurrency_limit);
 }
 
 test "optional profile omissions do not block authenticated identity" {
@@ -988,7 +975,7 @@ test "optional profile omissions do not block authenticated identity" {
 
     var identity: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .identity_loaded = try .init("account-1", "", "", "", null) },
+        .payload = .{ .identity_loaded = try .init("account-1", "", "", "") },
     };
     var authenticated = switch (account.prepareCompletion(&identity)) {
         .transition => |value| value,
@@ -1001,7 +988,6 @@ test "optional profile omissions do not block authenticated identity" {
     try std.testing.expectEqualStrings("", account.view().display_name);
     try std.testing.expectEqualStrings("", account.view().email_hint);
     try std.testing.expectEqualStrings("", account.view().phone_hint);
-    try std.testing.expectEqual(@as(?u32, null), account.view().concurrency_limit);
     try contract.validateView(account.view());
 }
 
@@ -1009,7 +995,7 @@ test "a login is refused over a verified one and replaces a held one" {
     var verified = Account.initRestoring();
     var verified_restore = try TestSupport.prepareAuthenticated(
         &verified,
-        try AccountIdentity.init("account-1", "Old User", "o***@example.com", "", 5),
+        try AccountIdentity.init("account-1", "Old User", "o***@example.com", ""),
     );
     commitPrepared(&verified, &verified_restore);
     // Changing accounts means signing out first.
@@ -1036,7 +1022,7 @@ test "a login is refused over a verified one and replaces a held one" {
 
     var identity: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .identity_loaded = try .init("account-2", "New User", "n***@example.com", "", 0) },
+        .payload = .{ .identity_loaded = try .init("account-2", "New User", "n***@example.com", "") },
     };
     var authenticated = switch (account.prepareCompletion(&identity)) {
         .transition => |value| value,
@@ -1046,7 +1032,6 @@ test "a login is refused over a verified one and replaces a held one" {
     try std.testing.expectEqualStrings("account-2", account.view().account_id);
     try std.testing.expectEqualStrings("New User", account.view().display_name);
     try std.testing.expectEqualStrings("n***@example.com", account.view().email_hint);
-    try std.testing.expectEqual(@as(?u32, 0), account.view().concurrency_limit);
 }
 
 test "a login that fails before or after its exchange keeps what is held" {
@@ -1112,7 +1097,7 @@ test "cold refresh publishes identity only after verification" {
 
     var identified: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .identity_loaded = try .init("22", "朱健", "z***@example.com", "+861****8000", 6) },
+        .payload = .{ .identity_loaded = try .init("22", "朱健", "z***@example.com", "+861****8000") },
     };
     var completed = switch (account.prepareCompletion(&identified)) {
         .transition => |value| value,
@@ -1185,7 +1170,7 @@ test "refresh failure distinguishes retryable and invalid credentials" {
     var active = Account.initRestoring();
     var active_restore = try TestSupport.prepareAuthenticated(
         &active,
-        try AccountIdentity.init("account-1", "Metask User", "m***@example.com", "", 5),
+        try AccountIdentity.init("account-1", "Metask User", "m***@example.com", ""),
     );
     commitPrepared(&active, &active_restore);
 
@@ -1231,7 +1216,7 @@ test "refresh failure distinguishes retryable and invalid credentials" {
     var replaced = Account.initRestoring();
     var replaced_restore = try TestSupport.prepareAuthenticated(
         &replaced,
-        try AccountIdentity.init("account-1", "Metask User", "m***@example.com", "", 5),
+        try AccountIdentity.init("account-1", "Metask User", "m***@example.com", ""),
     );
     commitPrepared(&replaced, &replaced_restore);
     var replaced_refresh = switch (replaced.prepareTokenRefresh()) {
@@ -1294,7 +1279,7 @@ test "refresh schedule failure is restricted to authenticated idle state" {
     var account = Account.initRestoring();
     var restored = try TestSupport.prepareAuthenticated(
         &account,
-        try AccountIdentity.init("account-1", "Metask User", "m***@example.com", "", 5),
+        try AccountIdentity.init("account-1", "Metask User", "m***@example.com", ""),
     );
     commitPrepared(&account, &restored);
     var failed = switch (account.prepareRefreshScheduleFailure()) {

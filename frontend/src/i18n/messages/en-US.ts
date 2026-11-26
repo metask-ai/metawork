@@ -1778,15 +1778,9 @@ export const enUS = {
   "settings.account_usage": "Account usage",
   "settings.account_usage_scope":
     "These figures cover your whole Metask account, not only activity in MetaWork.",
-  "settings.account_usage_balance": "Balance",
-  "settings.account_concurrency_limit": "Concurrency allowance {value}",
-  "settings.account_concurrency_unlimited": "Unlimited",
   "settings.account_recharge": "Recharge",
   "settings.account_recharge_browser_hint":
     "Open the Metask recharge page in your browser",
-  "settings.account_usage_total": "All time",
-  "settings.account_usage_tokens": "{value} Token",
-  "settings.account_usage_cost": "{value} U",
   "settings.account_usage_stale": "May be out of date",
   "settings.account_usage_syncing": "Syncing…",
   "settings.account_usage_unavailable": "Temporarily unavailable",

@@ -66,37 +66,6 @@ pub const UsageEligibility = enum {
     enabled,
 };
 
-pub const WalletSummaryView = struct {
-    availability: SummaryAvailability = .unavailable,
-    balance_u: []const u8 = "",
-    synced_at_unix_ms: []const u8 = "",
-    error_code: ErrorCode = .none,
-    safe_diagnostic: []const u8 = "",
-};
-
-pub const UsageTodayView = struct {
-    input_tokens: []const u8,
-    output_tokens: []const u8,
-    cache_creation_tokens: []const u8,
-    cache_read_tokens: []const u8,
-    total_tokens: []const u8,
-    actual_cost_u: []const u8,
-};
-
-pub const UsageTotalView = struct {
-    total_tokens: []const u8,
-    actual_cost_u: []const u8,
-};
-
-pub const UsageSummaryView = struct {
-    availability: SummaryAvailability = .unavailable,
-    today: ?UsageTodayView = null,
-    total: ?UsageTotalView = null,
-    synced_at_unix_ms: []const u8 = "",
-    error_code: ErrorCode = .none,
-    safe_diagnostic: []const u8 = "",
-};
-
 pub const UsageHistoryDayView = struct {
     date: []const u8,
     input_tokens: []const u8,
@@ -120,8 +89,6 @@ pub const UsageHistoryView = struct {
 pub const AccountSummaryView = struct {
     operation: SummaryOperation = .idle,
     usage_eligibility: UsageEligibility = .unknown,
-    wallet: WalletSummaryView = .{},
-    usage: UsageSummaryView = .{},
     history: UsageHistoryView = .{},
 };
 
@@ -255,13 +222,11 @@ pub const CredentialSource = struct {
 /// Stable Account error identity. Model catalog errors are defined by Models.
 pub const ErrorCode = enum {
     none,
-    invalid_command,
     invalid_state,
     operation_in_progress,
     oauth_bind_failed,
     oauth_browser_open_failed,
     oauth_callback_rejected,
-    oauth_state_mismatch,
     oauth_exchange_failed,
     user_cancelled,
     deadline_exceeded,
@@ -321,24 +286,14 @@ pub const AccountView = struct {
     display_name: []const u8 = "",
     email_hint: []const u8 = "",
     phone_hint: []const u8 = "",
-    concurrency_limit: ?u32 = null,
     error_code: ErrorCode = .none,
     safe_diagnostic: []const u8 = "",
     summary: AccountSummaryView = .{},
 };
 
-pub const AccountFactKind = enum {
-    restored,
-    session_changed,
-    operation_failed,
-    signed_out,
-    summary_changed,
-};
-
 /// Canonical secret-free identity fact prepared by Account and installed by
 /// Product Control without allocating or calling back into Account.
 pub const AccountFact = struct {
-    kind: AccountFactKind,
     view: AccountView,
 };
 
@@ -385,8 +340,6 @@ pub const ValidationError = error{
     InconsistentState,
 };
 
-pub fn validateCommand(_: AccountCommand) ValidationError!void {}
-
 pub fn validateView(view: AccountView) ValidationError!void {
     try validateOptional(view.account_id, Limits.account_id_bytes);
     try validateOptional(view.display_name, Limits.display_name_bytes);
@@ -415,8 +368,7 @@ pub fn validateView(view: AccountView) ValidationError!void {
     switch (view.state) {
         .checking, .signed_out, .authorizing => {
             if (view.account_id.len != 0 or view.display_name.len != 0 or
-                view.email_hint.len != 0 or view.phone_hint.len != 0 or
-                view.concurrency_limit != null)
+                view.email_hint.len != 0 or view.phone_hint.len != 0)
                 return error.InconsistentState;
             if (!isEmptySummary(view.summary)) return error.InconsistentState;
         },
@@ -428,55 +380,11 @@ pub fn validateView(view: AccountView) ValidationError!void {
 }
 
 fn validateSummary(summary: AccountSummaryView) ValidationError!void {
-    try validateWallet(summary.wallet);
-    try validateUsage(summary.usage);
     try validateHistory(summary.history);
     if (summary.usage_eligibility == .disabled and
-        (summary.usage.availability != .unavailable or
-            summary.usage.error_code != .none or
-            summary.history.availability != .unavailable or
+        (summary.history.availability != .unavailable or
             summary.history.error_code != .none))
         return error.InconsistentState;
-}
-
-fn validateWallet(wallet: WalletSummaryView) ValidationError!void {
-    try validateOptional(wallet.safe_diagnostic, Limits.safe_diagnostic_bytes);
-    try validateSummaryError(wallet.error_code, wallet.safe_diagnostic);
-    switch (wallet.availability) {
-        .unavailable, .loading => {
-            if (wallet.balance_u.len != 0 or wallet.synced_at_unix_ms.len != 0)
-                return error.InconsistentState;
-        },
-        .ready, .stale => {
-            try validateSignedDecimal(wallet.balance_u);
-            try validateUnsignedDecimal(wallet.synced_at_unix_ms);
-        },
-    }
-}
-
-fn validateUsage(usage: UsageSummaryView) ValidationError!void {
-    try validateOptional(usage.safe_diagnostic, Limits.safe_diagnostic_bytes);
-    try validateSummaryError(usage.error_code, usage.safe_diagnostic);
-    switch (usage.availability) {
-        .unavailable, .loading => {
-            if (usage.today != null or usage.total != null or
-                usage.synced_at_unix_ms.len != 0)
-                return error.InconsistentState;
-        },
-        .ready, .stale => {
-            const today = usage.today orelse return error.InconsistentState;
-            const total = usage.total orelse return error.InconsistentState;
-            try validateUnsignedDecimal(today.input_tokens);
-            try validateUnsignedDecimal(today.output_tokens);
-            try validateUnsignedDecimal(today.cache_creation_tokens);
-            try validateUnsignedDecimal(today.cache_read_tokens);
-            try validateUnsignedDecimal(today.total_tokens);
-            try validateUnsignedDecimal(today.actual_cost_u);
-            try validateUnsignedDecimal(total.total_tokens);
-            try validateUnsignedDecimal(total.actual_cost_u);
-            try validateUnsignedDecimal(usage.synced_at_unix_ms);
-        },
-    }
 }
 
 fn validateHistory(history: UsageHistoryView) ValidationError!void {
@@ -555,17 +463,6 @@ fn validateSummaryError(error_code: ErrorCode, diagnostic: []const u8) Validatio
 fn isEmptySummary(summary: AccountSummaryView) bool {
     return summary.operation == .idle and
         summary.usage_eligibility == .unknown and
-        summary.wallet.availability == .unavailable and
-        summary.wallet.balance_u.len == 0 and
-        summary.wallet.synced_at_unix_ms.len == 0 and
-        summary.wallet.error_code == .none and
-        summary.wallet.safe_diagnostic.len == 0 and
-        summary.usage.availability == .unavailable and
-        summary.usage.today == null and
-        summary.usage.total == null and
-        summary.usage.synced_at_unix_ms.len == 0 and
-        summary.usage.error_code == .none and
-        summary.usage.safe_diagnostic.len == 0 and
         summary.history.availability == .unavailable and
         summary.history.start_date.len == 0 and
         summary.history.end_date.len == 0 and
@@ -576,20 +473,8 @@ fn isEmptySummary(summary: AccountSummaryView) bool {
 }
 
 fn validateUnsignedDecimal(value: []const u8) ValidationError!void {
-    try validateDecimal(value, false);
-}
-
-fn validateSignedDecimal(value: []const u8) ValidationError!void {
-    try validateDecimal(value, true);
-}
-
-fn validateDecimal(value: []const u8, signed: bool) ValidationError!void {
     try validateRequired(value, Limits.decimal_bytes);
     var index: usize = 0;
-    if (signed and value[0] == '-') {
-        if (value.len == 1) return error.InconsistentState;
-        index = 1;
-    }
     const integer_start = index;
     while (index < value.len and value[index] != '.') : (index += 1) {
         if (!std.ascii.isDigit(value[index])) return error.InconsistentState;
@@ -605,8 +490,6 @@ fn validateDecimal(value: []const u8, signed: bool) ValidationError!void {
         }
         if (value[value.len - 1] == '0') return error.InconsistentState;
     }
-    if (value[0] == '-' and value.len == 2 and value[1] == '0')
-        return error.InconsistentState;
 }
 
 pub fn validateFact(fact: AccountFact) ValidationError!void {
@@ -665,27 +548,8 @@ test "Account view validates identity and nested summary independently" {
         .state = .authenticated,
         .account_id = "account-1",
         .display_name = "Metask User",
-        .concurrency_limit = 5,
         .summary = .{
             .usage_eligibility = .enabled,
-            .wallet = .{
-                .availability = .ready,
-                .balance_u = "-1.25",
-                .synced_at_unix_ms = "1000",
-            },
-            .usage = .{
-                .availability = .ready,
-                .today = .{
-                    .input_tokens = "1",
-                    .output_tokens = "2",
-                    .cache_creation_tokens = "3",
-                    .cache_read_tokens = "4",
-                    .total_tokens = "10",
-                    .actual_cost_u = "0.5",
-                },
-                .total = .{ .total_tokens = "20", .actual_cost_u = "1" },
-                .synced_at_unix_ms = "1000",
-            },
             .history = .{
                 .availability = .ready,
                 .start_date = "2025-09-15",
@@ -711,25 +575,11 @@ test "Account view validates identity and nested summary independently" {
         .state = .authenticated,
         .account_id = "account-1",
         .display_name = "Metask User",
-        .concurrency_limit = 5,
         .summary = .{
             .usage_eligibility = .disabled,
-            .usage = .{
+            .history = .{
                 .availability = .unavailable,
                 .error_code = .metask_service_unavailable,
-            },
-        },
-    }));
-    try std.testing.expectError(error.InconsistentState, validateView(.{
-        .state = .authenticated,
-        .account_id = "account-1",
-        .display_name = "Metask User",
-        .concurrency_limit = 5,
-        .summary = .{
-            .wallet = .{
-                .availability = .ready,
-                .balance_u = "01.25",
-                .synced_at_unix_ms = "1000",
             },
         },
     }));
@@ -738,7 +588,6 @@ test "Account view validates identity and nested summary independently" {
         .state = .authenticated,
         .account_id = "account-1",
         .display_name = "Metask User",
-        .concurrency_limit = 5,
         .summary = .{
             .usage_eligibility = .enabled,
             .history = .{

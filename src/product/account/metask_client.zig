@@ -207,7 +207,6 @@ pub fn fetchIdentity(
         userinfo.usernameView(),
         userinfo.emailHintView(),
         userinfo.phoneHintView(),
-        userinfo.concurrency_limit,
     ) catch return error.ProtocolInvalid;
 }
 
@@ -387,7 +386,6 @@ test "login exchanges tokens before resolving a strict identity" {
         identity.emailHint(),
     );
     try std.testing.expectEqualStrings("138****8000", identity.phoneHint());
-    try std.testing.expectEqual(@as(?u32, null), identity.concurrency_limit);
     try std.testing.expectEqual(@as(usize, 2), fake.step);
 }
 
