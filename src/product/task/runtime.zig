@@ -4880,7 +4880,7 @@ pub const Runtime = struct {
             if (run.credential_views.items.len == 0) run.credential_views.appendSliceAssumeCapacity(run.initialCredentialViews());
             run.credential_views.appendAssumeCapacity(owned);
         }
-        source.replace(value);
+        source.replaceAt(value, authorization.generation);
     }
 
     /// Returns one retired value only after every operation and worker that

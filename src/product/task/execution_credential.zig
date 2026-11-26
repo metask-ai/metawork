@@ -24,6 +24,9 @@ pub const Source = struct {
     current: [max_bytes]u8 = @splat(0),
     length: usize,
     available: bool = true,
+    /// The authorization generation the current credential belongs to, for
+    /// whoever reports a refusal of it; 0 when nobody said.
+    generation: u64 = 0,
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, credential: []const u8) std.mem.Allocator.Error!*Source {
         std.debug.assert(credential.len > 0 and credential.len <= max_bytes);
@@ -56,6 +59,24 @@ pub const Source = struct {
         @memcpy(self.current[0..credential.len], credential);
         self.length = credential.len;
         self.available = true;
+    }
+
+    /// As `replace`, with the generation the credential belongs to.
+    pub fn replaceAt(self: *Source, credential: []const u8, generation: u64) void {
+        std.debug.assert(credential.len > 0 and credential.len <= max_bytes);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        std.crypto.secureZero(u8, &self.current);
+        @memcpy(self.current[0..credential.len], credential);
+        self.length = credential.len;
+        self.available = true;
+        self.generation = generation;
+    }
+
+    pub fn currentGeneration(self: *Source) u64 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.generation;
     }
 
     pub fn invalidate(self: *Source) void {

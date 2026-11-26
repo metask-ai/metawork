@@ -976,6 +976,19 @@ pub const OwnedImageExecution = struct {
     }
 };
 
+pub const MediaCredentialGeneration = struct {
+    source: *execution_credentials.Source,
+
+    pub fn current(self: MediaCredentialGeneration) u64 {
+        return self.source.currentGeneration();
+    }
+
+    pub fn deinit(self: *MediaCredentialGeneration) void {
+        self.source.release();
+        self.* = undefined;
+    }
+};
+
 pub const MediaCredentials = struct {
     generation: u64 = 0,
     source: ?*execution_credentials.Source = null,
@@ -983,8 +996,17 @@ pub const MediaCredentials = struct {
 
     pub fn enable(self: *MediaCredentials, allocator: std.mem.Allocator, io: std.Io, bearer: []const u8, generation: u64) std.mem.Allocator.Error!void {
         std.debug.assert(self.source == null and generation != 0);
-        self.source = try execution_credentials.Source.create(allocator, io, bearer);
+        const source = try execution_credentials.Source.create(allocator, io, bearer);
+        source.generation = generation;
+        self.source = source;
         self.generation = generation;
+    }
+
+    /// Follows the generation of the credential the execution sends, which
+    /// a renewal replaces, for a transport that reports its refusal.
+    pub fn watchGeneration(self: *const MediaCredentials) ?MediaCredentialGeneration {
+        const source = self.source orelse return null;
+        return .{ .source = source.retain() };
     }
 
     fn reader(self: *const MediaCredentials) ?agent.ImageGenerationCredentialReader {

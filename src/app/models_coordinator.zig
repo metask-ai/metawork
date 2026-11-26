@@ -327,17 +327,18 @@ pub const Coordinator = struct {
     }
 
     /// A media execution's output and the transport it sends through, which
-    /// tells Account of a 401 on the token it was prepared with.
+    /// tells Account of a 401 on the token it sends now: a renewal of the
+    /// Run replaces it, and its generation with it.
     fn MediaOwner(comptime Output: type) type {
         return struct {
             output: Output,
             inner: agent.CompletionTransport,
             unauthorized: ?account_contract.UnauthorizedReport,
-            generation: u64,
+            generation: ?product_task.MediaCredentialGeneration = null,
 
             const Owner = @This();
 
-            fn create(coordinator: *Coordinator, workspace: product_workspace.TaskAuthority, inner: agent.CompletionTransport, generation: u64) ?*Owner {
+            fn create(coordinator: *Coordinator, workspace: product_workspace.TaskAuthority, inner: agent.CompletionTransport) ?*Owner {
                 const allocator = std.heap.c_allocator;
                 const owner = allocator.create(Owner) catch return null;
                 owner.* = .{
@@ -347,9 +348,12 @@ pub const Coordinator = struct {
                     },
                     .inner = inner,
                     .unauthorized = coordinator.unauthorized,
-                    .generation = generation,
                 };
                 return owner;
+            }
+
+            fn follow(self: *Owner, credentials: *const product_task.MediaCredentials) void {
+                self.generation = credentials.watchGeneration();
             }
 
             fn transport(self: *Owner) agent.CompletionTransport {
@@ -363,7 +367,8 @@ pub const Coordinator = struct {
             fn perform(context: ?*anyopaque, request: agent.CompletionHttpRequest, cancellation: *const agent.CompletionCancellation, buffer: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
                 const self: *Owner = @ptrCast(@alignCast(context.?));
                 const response = try self.inner.perform(request, cancellation, buffer);
-                if (response.status == 401) if (self.unauthorized) |report| report.report(self.generation, .other);
+                if (response.status == 401) if (self.unauthorized) |report| if (self.generation) |generation|
+                    report.report(generation.current(), .other);
                 return response;
             }
 
@@ -374,6 +379,7 @@ pub const Coordinator = struct {
 
             fn release(context: *anyopaque) void {
                 const self: *Owner = @ptrCast(@alignCast(context));
+                if (self.generation) |*generation| generation.deinit();
                 self.output.deinit();
                 std.heap.c_allocator.destroy(self);
             }
@@ -395,7 +401,7 @@ pub const Coordinator = struct {
         var prepared = self.prepareMedia(.image) orelse return null;
         defer prepared.candidate.deinit();
         const allocator = std.heap.c_allocator;
-        const owner = ImageOwner.create(self, workspace, transport, prepared.generation) orelse return null;
+        const owner = ImageOwner.create(self, workspace, transport) orelse return null;
         var result: product_task.OwnedImageExecution = .{
             .candidate = prepared.candidate.take(),
             .transport = owner.transport(),
@@ -407,6 +413,7 @@ pub const Coordinator = struct {
             result.deinit();
             return null;
         };
+        owner.follow(&result.authorization);
         return result;
     }
 
@@ -416,7 +423,7 @@ pub const Coordinator = struct {
         var prepared = self.prepareMedia(.video) orelse return null;
         defer prepared.candidate.deinit();
         const allocator = std.heap.c_allocator;
-        const owner = VideoOwner.create(self, workspace, transport, prepared.generation) orelse return null;
+        const owner = VideoOwner.create(self, workspace, transport) orelse return null;
         var result: product_task.OwnedVideoExecution = .{
             .candidate = prepared.candidate.take(),
             .transport = owner.transport(),
@@ -427,6 +434,7 @@ pub const Coordinator = struct {
             result.deinit();
             return null;
         };
+        owner.follow(&result.authorization);
         return result;
     }
 
@@ -769,7 +777,7 @@ test "a catalog refused for its token is tried again, one refused for the accoun
     }
 }
 
-test "a media request refused for its token tells Account the generation it was prepared with" {
+test "a media request refused for its token tells Account the generation it sends" {
     const Fixture = struct {
         status: u16 = 401,
         reported: ?u64 = null,
@@ -802,8 +810,12 @@ test "a media request refused for its token tells Account the generation it was 
     coordinator.setUnauthorizedReport(.{ .context = &fixture, .report_fn = Fixture.report });
     const Owner = Coordinator.MediaOwner(Fixture.Stub);
     const authority: product_workspace.TaskAuthority = .{ .id = 5, .epoch = 2, .kind = .manual, .canonical_root = "", .trust = .explicitly_trusted };
-    const owner = Owner.create(&coordinator, authority, .{ .context = &fixture, .perform_fn = Fixture.media }, 7).?;
+    const owner = Owner.create(&coordinator, authority, .{ .context = &fixture, .perform_fn = Fixture.media }).?;
     defer Owner.release(owner);
+    var credentials: product_task.MediaCredentials = .{};
+    try credentials.enable(std.testing.allocator, std.testing.io, "token-a", 7);
+    defer credentials.source.?.release();
+    owner.follow(&credentials);
     var cancellation: agent.CompletionCancellation = .{};
     var buffer: [8]u8 = undefined;
     for ([_]u16{ 200, 401 }) |status| {
@@ -813,6 +825,11 @@ test "a media request refused for its token tells Account the generation it was 
         try std.testing.expectEqual(status, response.status);
         try std.testing.expectEqual(@as(?u64, if (status == 401) 7 else null), fixture.reported);
     }
+    // Renewed, the Run sends the next generation's token, and that is the
+    // generation refused.
+    credentials.source.?.replaceAt("token-b", 8);
+    _ = try owner.transport().perform(.{ .url = "https://www.metask-ai.com/v1/images/generations", .headers = &.{}, .body = "", .connect_timeout_ms = 1000, .source = "metask" }, &cancellation, &buffer);
+    try std.testing.expectEqual(@as(?u64, 8), fixture.reported);
 }
 
 test "image Run preparation takes one whole credential and freezes owned output authority" {
