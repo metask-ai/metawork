@@ -30,22 +30,14 @@ import {
   GlobalInstructionsSettings,
   type GlobalInstructionsActions,
 } from "./GlobalInstructionsSettings.tsx";
-export type SettingsFocusTarget =
-  "title" | "account" | "models" | "archived" | "directories";
+export type SettingsFocusTarget = "title" | "account" | "models" | "archived";
 
 type SettingsSection =
-  | "general"
-  | "account"
-  | "models"
-  | "instructions"
-  | "archived"
-  | "about"
-  | "directories";
+  "general" | "account" | "models" | "instructions" | "archived" | "about";
 type AutomaticWorkspaceRootAction = "choose" | "reset" | "retry";
 type AutomaticWorkspaceRootMutationOutcome = "applied" | "cancelled" | false;
 export function SettingsPage({
   archiveManagement,
-  directoryManagement,
   globalInstructions,
   aboutContent,
   account,
@@ -79,7 +71,6 @@ export function SettingsPage({
   onLogout,
 }: {
   archiveManagement?: ArchivedTasksProps;
-  directoryManagement?: ReactNode;
   globalInstructions?: GlobalInstructionsActions;
   aboutContent: ReactNode;
   account: AccountView;
@@ -168,9 +159,7 @@ export function SettingsPage({
     [t],
   );
   useEffect(() => {
-    if (focusTarget === "directories") {
-      setActiveSection("directories");
-    } else if (focusTarget === "archived") {
+    if (focusTarget === "archived") {
       setActiveSection("archived");
     } else if (focusTarget === "models") {
       setActiveSection("models");
@@ -353,22 +342,6 @@ export function SettingsPage({
           )}
           <a
             className="focus-ring"
-            href="#settings-directories"
-            aria-current={
-              activeSection === "directories" ? "location" : undefined
-            }
-            onClick={(event) => {
-              event.preventDefault();
-              setActiveSection("directories");
-            }}
-          >
-            <span className="settings-nav-icon" aria-hidden="true">
-              <Icon name="workspace" />
-            </span>
-            <span>{t("settings.working_directories")}</span>
-          </a>
-          <a
-            className="focus-ring"
             href="#settings-archived"
             aria-current={activeSection === "archived" ? "location" : undefined}
             onClick={(event) => {
@@ -413,7 +386,6 @@ export function SettingsPage({
           >
             {t("settings.title")}
           </h1>
-          {activeSection === "directories" && directoryManagement}
           {activeSection === "instructions" && globalInstructions && (
             <GlobalInstructionsSettings
               actions={globalInstructions}

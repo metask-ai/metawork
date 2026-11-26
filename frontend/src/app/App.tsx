@@ -168,7 +168,6 @@ import {
   MediaLightbox,
   type MediaViewerTarget,
 } from "../features/media/MediaLightbox.tsx";
-import { WorkingDirectoriesSettings } from "../features/settings/WorkingDirectoriesSettings.tsx";
 import { ProjectSelector } from "../features/tasks/ProjectSelector.tsx";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { TaskWorkspace } from "../features/tasks/NewTaskView.tsx";
@@ -3263,26 +3262,16 @@ export default function App() {
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }
-  async function registerWorkingDirectory(addProject: boolean) {
-    if (workbenchMutationDisabled || workspaceBusyRef.current) return;
-    workspaceBusyRef.current = true;
-    setWorkspaceBusy(true);
-    try {
-      await (addProject ? client.addProject() : client.chooseWorkspace());
-    } finally {
-      await refreshSnapshot().catch(() => undefined);
-      workspaceBusyRef.current = false;
-      setWorkspaceBusy(false);
-    }
-  }
   async function addProject() {
     if (workbenchMutationDisabled || workspaceBusyRef.current) return;
     const token = beginOperationFeedback("workspace:add-project", {
       scope: "workspace",
       workspaceId: null,
     });
+    workspaceBusyRef.current = true;
+    setWorkspaceBusy(true);
     try {
-      await registerWorkingDirectory(true);
+      await client.addProject();
       settleOperationFeedback(token, null);
     } catch (error) {
       settleOperationFeedback(
@@ -3296,6 +3285,10 @@ export default function App() {
           { scope: "workspace", workspaceId: null },
         ),
       );
+    } finally {
+      await refreshSnapshot().catch(() => undefined);
+      workspaceBusyRef.current = false;
+      setWorkspaceBusy(false);
     }
   }
   async function changeTaskProject(
@@ -5454,16 +5447,6 @@ export default function App() {
                   workspaceSelectionFeedback.values,
                 )}
               </p>
-              {workspaceSelectionFeedback.id ===
-                "workspace.directory_capacity" && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => openSettings("directories")}
-                >
-                  {t("settings.working_directories")}
-                </Button>
-              )}
               {workspaceSelectionFeedback.id !==
                 "workspace.selection_capacity" &&
                 workspaceSelectionFeedback.id !==
@@ -6062,21 +6045,9 @@ export default function App() {
                 onAddProject={() => void addProject()}
                 addProjectNotice={
                   addProjectFeedback?.tone === "attention" ? (
-                    <div className="task-list-empty">
-                      <p role="status">
-                        {t(addProjectFeedback.id, addProjectFeedback.values)}
-                      </p>
-                      {addProjectFeedback.id ===
-                        "workspace.directory_capacity" && (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => openSettings("directories")}
-                        >
-                          {t("settings.working_directories")}
-                        </Button>
-                      )}
-                    </div>
+                    <p className="task-list-empty" role="status">
+                      {t(addProjectFeedback.id, addProjectFeedback.values)}
+                    </p>
                   ) : undefined
                 }
                 renderWorkspaceHeading={(workspace, heading) => (
@@ -6274,26 +6245,6 @@ export default function App() {
               />
             }
             globalInstructions={globalInstructions}
-            directoryManagement={
-              <WorkingDirectoriesSettings
-                workspaces={snapshot.workspaces}
-                tasks={snapshot.taskIndex}
-                disabled={workbenchMutationDisabled}
-                onChoose={() => registerWorkingDirectory(false)}
-                onRevoke={async (workspace) => {
-                  try {
-                    return (
-                      await client.removeWorkspace(
-                        workspace.id,
-                        workspace.epoch,
-                      )
-                    ).accepted;
-                  } finally {
-                    await refreshSnapshot();
-                  }
-                }}
-              />
-            }
             modelContext={`${bridgeGeneration}:${snapshot.securityEpoch}`}
             archiveManagement={{
               tasks: snapshot.taskIndex,

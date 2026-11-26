@@ -12,19 +12,8 @@ export const zhCN: Record<MessageId, string> = {
   "task.change_project": "更改项目",
   "task.project_change_failed": "未能更改所属项目，请刷新后重试。",
   "task.draft_preserved": "原项目的草稿已保留，当前显示目标项目的草稿。",
-  "settings.working_directories": "工作目录",
   "workspace.directory_capacity":
-    "已达到工作目录数量上限。请在设置的“工作目录”中撤销不再需要的目录授权。",
-  "workspace.directory_management_body":
-    "管理已授权的本地工作目录。选择目录只登记授权；侧栏项目由“添加项目”创建。",
-  "workspace.choose_directory": "选择工作目录",
-  "workspace.revoke_directory": "撤销目录授权",
-  "workspace.no_directories": "尚未登记工作目录。",
-  "workspace.directory_action_failed": "未能完成目录操作，请刷新后重试。",
-  "workspace.revoke_directory_body":
-    "撤销“{title}”的目录授权，将收口实际在此目录工作的任务。该目录关联 {count} 条会话，历史和本地文件会保留。",
-  "workspace.revoke_project_body":
-    "“{title}”的项目入口将一并移除。在其他目录中的 {count} 条会话仍可从“最近”访问，归档会话保留在归档列表；重新添加此项目后恢复分组。",
+    "已达到工作目录数量上限。请选择已登记的目录。",
   "run.input_history_loading": "正在读取输入历史…",
   "run.input_history_failed": "未能读取输入历史，按 ↑ 重试。",
   "model_setup.preference_not_saved":

@@ -15,20 +15,8 @@ export const enUS = {
     "Could not change the project. Refresh and try again.",
   "task.draft_preserved":
     "Your original draft was kept. You are viewing the destination project’s draft.",
-  "settings.working_directories": "Working directories",
   "workspace.directory_capacity":
-    "The working directory limit is reached. Revoke an unused directory in Settings → Working directories.",
-  "workspace.directory_management_body":
-    "Manage authorized local working directories. Choosing a directory registers access; Add project creates its sidebar entry.",
-  "workspace.choose_directory": "Choose working directory",
-  "workspace.revoke_directory": "Revoke directory access",
-  "workspace.no_directories": "No working directories registered.",
-  "workspace.directory_action_failed":
-    "Could not complete the directory action. Refresh and try again.",
-  "workspace.revoke_directory_body":
-    "Revoke access to “{title}” and close tasks actually working in it. Associated chats: {count}. History and local files are kept.",
-  "workspace.revoke_project_body":
-    "The “{title}” project entry will also be removed. Chats working in other directories: {count}. They remain in Recent; archived chats stay in the archive. Adding the project again restores its group.",
+    "The working directory limit is reached. Choose a previously registered directory.",
   "model_setup.preference_not_saved":
     "Your model preference could not be saved. Confirmed task choices are unchanged.",
   "mutation.reason.schedule_persistence_unavailable":
