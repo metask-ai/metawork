@@ -859,9 +859,14 @@ test("a sent image chip reserves the same box and keeps the rest static", () => 
       onOpenSentAttachment() {},
     },
   );
-  assert.equal(markup.match(/attachment-thumbnail/g)?.length, 2);
-  // The viewer entry appears only once a thumbnail has actually decoded.
-  assert.doesNotMatch(markup, /attachment-thumbnail-open/);
+  assert.equal(markup.match(/class="attachment-thumbnail"/g)?.length, 2);
+  // The viewer entry follows the original, not its thumbnail: the chip
+  // within the viewer ceiling opens before, or without, a decoded thumbnail.
+  assert.equal(markup.match(/attachment-thumbnail-open/g)?.length, 1);
+  assert.match(
+    markup,
+    /attachment-thumbnail-open[^>]*aria-label="[^"]*diagram\.png"/,
+  );
   assert.match(markup, /diagram\.png/);
   assert.match(markup, /legacy\.png/);
   assert.match(markup, /lucide-file-text/);
@@ -1093,13 +1098,17 @@ test("image chips reserve a thumbnail box and only offer a viewer within the Hos
     onOpenAttachment: () => {},
   });
   // Both images reserve the box; a plain file keeps the generic icon.
-  assert.equal(markup.match(/attachment-thumbnail/g)?.length, 2);
+  assert.equal(markup.match(/class="attachment-thumbnail"/g)?.length, 2);
   assert.match(markup, /small\.png/);
   assert.match(markup, /huge\.jpg/);
   assert.match(markup, /lucide-file-text/);
-  // No viewer entry exists until a thumbnail has actually decoded, and the
-  // oversized original never gets one.
-  assert.doesNotMatch(markup, /attachment-thumbnail-open/);
+  // The viewer entry depends on the original alone: present before any
+  // thumbnail decoded, and never for the oversized original.
+  assert.equal(markup.match(/attachment-thumbnail-open/g)?.length, 1);
+  assert.match(
+    markup,
+    /attachment-thumbnail-open[^>]*aria-label="[^"]*small\.png"/,
+  );
   // Chips still carry no path, hash or upload progress.
   assert.doesNotMatch(markup, /file:\/\/|\/Users\/|sha256|progress/);
 });

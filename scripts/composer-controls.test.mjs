@@ -2458,6 +2458,37 @@ test("a staged image asks for its thumbnail again in place under a newer securit
   assert.equal(calls.releases, 1);
 });
 
+test("a staged image whose thumbnail failed still opens the viewer", async () => {
+  let opened = 0;
+  let loads = 0;
+  renderComposer({
+    draft: {
+      kind: "multimodal",
+      text: "",
+      attachments: [
+        {
+          kind: "image",
+          format: "png",
+          token: "c".repeat(48),
+          displayName: "shot.png",
+          sizeBytes: "900",
+        },
+      ],
+    },
+    attachmentsEnabled: true,
+    loadAttachmentThumbnail: () => {
+      loads += 1;
+      return Promise.resolve({ state: "error" });
+    },
+    onOpenAttachment() {
+      opened += 1;
+    },
+  });
+  await waitFor(() => assert.equal(loads, 1));
+  fireEvent.click(screen.getByRole("button", { name: "Preview shot.png" }));
+  assert.equal(opened, 1);
+});
+
 test("the open viewer reads the original again under a newer security epoch", async () => {
   const { calls, load } = countingImageLoader();
   const target = {

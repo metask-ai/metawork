@@ -126,7 +126,9 @@ export function AttachmentThumbnail<Target>({
   );
   return (
     <span ref={root} className="attachment-thumbnail">
-      {image && onOpen ? (
+      {/* The entry is the original's, not the thumbnail's: a thumbnail that
+          failed or has not arrived still opens the viewer, which says why. */}
+      {onOpen ? (
         <button
           type="button"
           className="attachment-thumbnail-open focus-ring"
