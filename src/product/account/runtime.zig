@@ -4279,6 +4279,27 @@ test "closing waits for a renewal underway only its own close wait and gives up 
     }
 }
 
+test "once closing left a worker running, nothing it does wakes anyone" {
+    const Wakes = struct {
+        fn count(context: *anyopaque) void {
+            const wakes: *std.atomic.Value(usize) = @ptrCast(@alignCast(context));
+            _ = wakes.fetchAdd(1, .acq_rel);
+        }
+    };
+    var wakes: std.atomic.Value(usize) = .init(0);
+    var transport: RuntimeTestTransport = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &wakes, .notify_fn = Wakes.count });
+    defer runtime.deinit();
+    const wake = runtime.effects.workerWake();
+    wake.notify();
+    try std.testing.expectEqual(@as(usize, 1), wakes.load(.acquire));
+    runtime.effects.detach();
+    wake.notify();
+    runtime.effects.publishCompletion(.{ .attempt_id = 1, .payload = .{ .failed = .fromCode(.account_operation_failed) } });
+    try std.testing.expectEqual(@as(usize, 1), wakes.load(.acquire));
+    try std.testing.expect(runtime.prepareNextCompletion() == null);
+}
+
 test "a store that cannot be read is read again, and one that holds no valid record asks for a sign-in" {
     var transport: RuntimeTestTransport = .{};
     var runtime = try initRuntimeForUnitTest(&transport);

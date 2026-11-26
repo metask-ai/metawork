@@ -109,9 +109,9 @@ pub const Budget = union(enum) {
     /// The caller bounds the whole call by cancellation. This bounds only DNS,
     /// TCP and TLS, measured from admission.
     connect: Io.Duration,
-    /// DNS, TCP and TLS from admission, then the answer from the moment the
-    /// first byte may be written; nothing runs between the two. Both are awake
-    /// time: a machine asleep is not waiting.
+    /// DNS, TCP and TLS from admission, then the answer from the first byte
+    /// written. Both are measured on the awake clock (which counts sleep on
+    /// Windows, where it is the performance counter).
     phased: struct { connect: Io.Duration, response: Io.Duration },
 };
 
@@ -652,8 +652,7 @@ pub const Operation = struct {
 
     /// The connect budget as above until a connection is in hand; then,
     /// once the first byte may be written, the answer has `response` of
-    /// awake time. Between the two no budget runs: the caller decides when
-    /// to write.
+    /// awake time.
     fn waitPhasedBudget(self: *Operation, response: Io.Duration) void {
         while (true) {
             const state = self.connect_state.load(.acquire);

@@ -112,7 +112,7 @@ Userinfo 仅将完整有界 JSON 的 `401 + authorization_revoked / user_not_fou
 Account 把两件事分开：登录本身，和正在做的那一个动作。
 
 ```text
-登录  none(unread | absent) | held | verified(identity)
+登录  none(reason: unread | absent | unreadable | logged_out, residue) | held | verified(identity)
 动作  idle | authorize(attempt, exchanging) | renew(attempt) | identity(attempt)
 ```
 
@@ -150,7 +150,7 @@ Account durable authority 由系统安全存储中的 Metask refresh token 与�
 
 没能确认时也可以重新登录，而且可以换账号；登录期间授权仍是等。授权取消、回调失败、超时或换 token 失败时，保存的 refresh token 没有被替换，回到原来的确认，重试时间不变；换 token 成功后它已被替换，新登录按上一段从头退避再取 identity。已验证的登录不接受新的登录，换账号先退出。
 
-每个 worker 只持自己那份 credential 副本，不借用会话内存；令牌请求在发送前备好存放应答的内存，并要求不压缩的应答，发送之后到保存之前 Account 自己不再分配。备不出内存等于没有发送，也不写阻断记录。每次 refresh 先成功写入绑定当前 token 的阻断记录，再发送唯一 HTTP。它走一条新连接，不复用空闲连接、不探活；连接按 15 秒、发出后的应答按 15 秒限时，都不算睡眠。记录写入失败不发 HTTP，并尽力删一次记录（报错不等于没写进去），按凭据库失败退避；调用 transport 前的明确本地失败、transport 证明未发送或服务端明确未消费结果只尝试一次清理记录，清理失败保持阻断。合法轮换必须返回不同的新 refresh token，主线程只尝试一次保存新 token；失败保留旧记录并阻断刷新，释放未提交新 token，不建立本地保存恢复流程。新 token 保存成功后清理旧记录，再随状态一起提交安装；清理失败不回滚成功轮换，因为记录与新 token 摘要不匹配，重启可恢复新 token，下一次 HTTP 前仍必须成功覆盖记录。
+每个 worker 只持自己那份 credential 副本，不借用会话内存；令牌请求在发送前备好存放应答的内存，并要求不压缩的应答，发送之后到保存之前 Account 自己不再分配。备不出内存等于没有发送，也不写阻断记录。每次 refresh 先成功写入绑定当前 token 的阻断记录，再发送唯一 HTTP。它走一条新连接，不复用空闲连接、不探活；连接按 15 秒、发出后的应答按 15 秒限时，都按 awake 时钟计（Windows 上它含睡眠时间，睡过头的续期按没发出重试）。记录写入失败不发 HTTP，并尽力删一次记录（报错不等于没写进去），按凭据库失败退避；调用 transport 前的明确本地失败、transport 证明未发送或服务端明确未消费结果只尝试一次清理记录，清理失败保持阻断。合法轮换必须返回不同的新 refresh token，主线程只尝试一次保存新 token；失败保留旧记录并阻断刷新，释放未提交新 token，不建立本地保存恢复流程。新 token 保存成功后清理旧记录，再随状态一起提交安装；清理失败不回滚成功轮换，因为记录与新 token 摘要不匹配，重启可恢复新 token，下一次 HTTP 前仍必须成功覆盖记录。
 
 已验证会话的 refresh 在两种情况下保留已验证 identity，并在 terminal commit 后按 boot 时钟固定 30 秒自动重试，次数不限：一是遇到明确未发送的 network、deadline 或取消故障，且阻断记录已成功清除；二是在写入阻断记录之前就失败（内存或 worker 启动失败）；记录写入失败按凭据库失败退避。重试开始时不清原来的错误，成功才清。每次到点只发起一个新的 attempt；后续同类失败再延迟一次，不立即循环。保留原失败诊断；只有续期节拍无法启动才发布 `refresh_schedule_failed`，并提供显式 retry。服务端明确拒绝的请求或配置错误不重试，按下一段结束会话；signed_out restore 不增加隐式重试循环。
 
