@@ -1168,7 +1168,7 @@ About
 - 管理页的添加、编辑、测试和删除分别消费 Host typed command 与 canonical Snapshot；页面不通过本地选中态或默认模型 mutation 准备任务。任务模型选择的接纳和绑定以对应 Task 合同为准；
 - 常规桌面宽度下左侧分区导航切换独立的设置分区页面，右侧一次只渲染当前分区；页面标题和左侧分区导航保持稳定，当前分区内容列可独立滚动。窄窗口改为顶部横向分区导航，标签保持单行，必要时仅导航自身横向滚动，仍不让导航与内容共享滚动层；
 - 浮层只在打开时使用克制的透明度与位置过渡；loading 指示只出现在真实运行的配置项，`prefers-reduced-motion` 下移除非必要动画；
-- 当前分区导航必须有持续可见的选中态和 `aria-current`，不能只在 hover 时出现；focus ring、菜单选中勾选、状态色和文字共同表达状态。
+- 「返回主界面」与设置分区共用图标列和文字起点，沿用主界面左栏的常规字重与中性悬停底色。当前分区通过常驻底色和 `aria-current` 标识，键盘焦点另有清晰轮廓。菜单选中勾选、状态色和文字共同表达相应状态。
 - 桌面壳注册标准 `primary + ,` 设置快捷键，直接打开正式设置 route；快捷键只负责页面导航，不建立绕过 Account/Bridge gate 的第二命令面。
 
 Account与 Models状态在设置中分别投影：Account按 `checking | signed_out | authorizing | authenticated`显示 identity action，并在authenticated时直接消费Host发布的summary子投影；Models独立按 `needs_authentication | loading | choosing | ready | failed | unavailable`显示provider配置。Account authenticated不能被summary或Models失败伪装成未登录，Account signed_out也不能隐藏Custom Provider。Renderer不从任一公开状态恢复内部operation，也不区分或展示credential persistence子步骤。

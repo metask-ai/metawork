@@ -343,6 +343,7 @@ summary::-webkit-details-marker {
 }
 
 .sidebar-action,
+.settings-back,
 .task-project-heading,
 .task-list-item {
   display: grid;
@@ -352,6 +353,7 @@ summary::-webkit-details-marker {
 
 @media (pointer: coarse) {
   .sidebar-action,
+  .settings-back,
   .task-project-heading,
   .task-list-item {
     min-height: 44px;
@@ -359,14 +361,27 @@ summary::-webkit-details-marker {
 }
 
 .sidebar-action,
+.settings-back,
 .task-project-heading {
   grid-template-columns: 22px minmax(0, 1fr);
+}
+
+.sidebar-action,
+.settings-back,
+.settings-nav a,
+.task-project-heading {
   padding-inline: 8px 10px;
   gap: 7px;
 }
 
-.sidebar-action {
+.sidebar-action,
+.settings-back {
   width: 100%;
+}
+
+.settings-back,
+.settings-nav a,
+.sidebar-action {
   padding-block: 0;
   border: 0;
   color: var(--ui-content-muted);
@@ -376,7 +391,9 @@ summary::-webkit-details-marker {
   text-align: left;
 }
 
-.sidebar-action svg {
+.sidebar-action svg,
+.settings-back svg,
+.settings-nav-icon {
   font-size: var(--text-lead);
   justify-self: center;
 }
@@ -675,27 +692,6 @@ summary::-webkit-details-marker {
   background: var(--ui-surface-panel-2);
 }
 
-.settings-back {
-  display: inline-flex;
-  min-height: 32px;
-  width: fit-content;
-  margin: 0;
-  padding: 0 9px 0 5px;
-  align-items: center;
-  gap: 6px;
-  border: 0;
-  border-radius: 8px;
-  color: var(--settings-muted);
-  background: transparent;
-  font-size: var(--text-control);
-  font-weight: 620;
-}
-
-.settings-back:hover {
-  color: var(--settings-brand-strong);
-  background: var(--settings-brand-mist);
-}
-
 .settings-layout {
   display: grid;
   grid-template-columns: var(--settings-navigation-track) minmax(0, 1fr);
@@ -706,67 +702,31 @@ summary::-webkit-details-marker {
 .settings-nav {
   display: grid;
   min-height: 0;
-  padding: 26px 14px 72px;
+  padding: 4px 14px 14px;
   align-content: start;
   gap: 1px;
+  overflow: hidden auto;
   border-right: 1px solid var(--settings-line);
   background: var(--ui-surface-panel-2);
 }
 
 .settings-nav a {
-  position: relative;
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr);
   min-height: 36px;
-  padding: 0 10px 0 8px;
   align-items: center;
-  gap: 7px;
-  border-radius: 7px;
-  color: var(--settings-muted);
-  font-size: var(--text-control);
-  font-weight: 650;
   text-decoration: none;
-  transition:
-    color 120ms ease,
-    background-color 120ms ease;
 }
 
-.settings-nav a:hover,
-.settings-nav a:focus-visible {
-  color: var(--settings-ink);
-  background: color-mix(
-    in srgb,
-    var(--ui-action-primary-hover) 6%,
-    transparent
-  );
-}
-
-.settings-nav a[aria-current="location"] {
-  color: var(--settings-brand-strong);
-  background: var(--settings-brand-mist);
-}
-
-.settings-nav a[aria-current="location"]::before {
-  position: absolute;
-  top: 8px;
-  bottom: 8px;
-  left: -4px;
-  width: 2px;
-  border-radius: 2px;
-  background: var(--settings-brand);
-  content: "";
+@media (pointer: coarse) {
+  .settings-nav a {
+    min-height: 44px;
+  }
 }
 
 .settings-nav-icon {
   display: grid;
-  width: 20px;
-  height: 20px;
   place-items: center;
-  color: currentColor;
-}
-
-.settings-nav-icon svg {
-  font-size: var(--text-lead);
 }
 
 .settings-content {
@@ -2616,7 +2576,6 @@ summary::-webkit-details-marker {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .settings-nav a,
   .selection-trigger-chevron,
   .selection-menu-content {
     animation: none;
@@ -3362,9 +3321,9 @@ button.run-process-tool:hover {
   .settings-nav {
     display: flex;
     min-width: 0;
-    overflow-x: auto;
+    overflow: auto hidden;
     min-height: auto;
-    padding: 14px 12px 10px;
+    padding: 4px 14px 8px;
     gap: 4px;
     border-right: 0;
     border-bottom: 1px solid var(--settings-line);
@@ -3379,16 +3338,6 @@ button.run-process-tool:hover {
 
   .settings-content {
     padding: 14px 20px 72px;
-  }
-
-  .settings-nav a[aria-current="location"]::before {
-    top: auto;
-    right: 10px;
-    bottom: 0;
-    left: 10px;
-    width: auto;
-    height: 2px;
-    border-radius: 2px 2px 0 0;
   }
 
   .settings-field {
@@ -3430,10 +3379,6 @@ button.run-process-tool:hover {
     padding: 10px 14px 0;
     border-right: 0;
     background: var(--settings-frost);
-  }
-
-  .settings-back {
-    margin-top: 0;
   }
 
   .settings-row {
@@ -6581,6 +6526,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .sidebar-action,
+.settings-back,
+.settings-nav a,
 .task-project-context,
 .task-project-heading,
 .task-list-item {
@@ -6598,6 +6545,9 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .sidebar-action:hover:where(:not(:disabled)),
 .sidebar-action[data-active="true"],
 .sidebar-action[aria-current="page"],
+.settings-back:hover,
+.settings-nav a:hover,
+.settings-nav a[aria-current="location"],
 .task-project-context:hover,
 .task-project-context:has(.task-list-action:focus-visible),
 .task-project-context[data-menu-open="true"],
