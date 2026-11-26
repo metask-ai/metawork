@@ -1007,7 +1007,8 @@ pub const Runtime = struct {
         var catalog_generation: u64 = 0;
         if (blocking_task_id == 0) {
             const binding = item.bindingView();
-            switch (authority.admit(binding)) {
+            const admission = authority.admit(binding);
+            switch (admission) {
                 .run => |generation| catalog_generation = generation,
                 // Nothing is recorded, so the due point stays where it is.
                 .wait, .hold => {
@@ -1015,21 +1016,21 @@ pub const Runtime = struct {
                         item.preflight_retry_at_unix_seconds = triggered_at_unix_seconds +| preflight_retry_seconds;
                     return error.ScheduledTaskBindingWaiting;
                 },
-                .skip => {
+                .skip, .stop => {
+                    // A paused or finished plan has no timer of its own to
+                    // stop: run by hand it is only reported.
+                    if (source == .manual and (!item.enabled or item.health != .ready))
+                        return error.ScheduledTaskBindingGone;
                     // A skip may never end a plan: with no run after this
                     // one it stops instead, without spending that run.
-                    const point = if (source == .timer)
-                        triggered_at_unix_seconds
-                    else
-                        item.next_run_at_unix_seconds orelse triggered_at_unix_seconds;
-                    if ((try item.recurrence.firstStrictlyAfter(point)) == null)
+                    const point = if (source == .timer) triggered_at_unix_seconds else item.next_run_at_unix_seconds.?;
+                    if (admission == .stop or (try item.recurrence.firstStrictlyAfter(point)) == null)
                         return self.stopGone(id, source, redaction);
                     // A manual run never moves the plan; the due point
                     // records its own skip.
                     if (source == .manual) return error.ScheduledTaskBindingGone;
                     return self.skipOccurrence(id, planned_at_unix_seconds, triggered_at_unix_seconds, 0, redaction);
                 },
-                .stop => return self.stopGone(id, source, redaction),
             }
             // Control resolves the complete source authority before the
             // durable claim. No credential or live capability enters Schedule.
@@ -2597,6 +2598,26 @@ test "a schedule that cannot run as bound stops without spending its run" {
         try std.testing.expectEqual(@as(u64, 300), runtime.store.find(id).?.last_occurrence.?.planned_at_unix_seconds);
         try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
     };
+}
+
+test "running a paused plan by hand reports a binding that cannot run and changes nothing" {
+    for ([_]Admission{ .skip, .stop }) |gone| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence(), .notifier = effects.notifier() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        var admission: TestAdmission = .{};
+        const id = try runtime.create(testDefinition("paused", "inspect"), admission.binding(), redaction);
+        try std.testing.expect(!try runtime.setEnabled(id, 1, false, admission.binding(), redaction));
+        admission.value = gone;
+        effects.now = 300;
+        const commits = effects.commits;
+        try std.testing.expectError(error.ScheduledTaskBindingGone, runtime.runNow(id, 2, admission.binding(), redaction, tasks.effects()));
+        try std.testing.expectEqual(Health.paused, runtime.store.find(id).?.health);
+        try std.testing.expectEqual(commits, effects.commits);
+        try std.testing.expectEqual(@as(usize, 0), effects.notifications);
+    }
 }
 
 test "only a command's own definitions stop, and only when their source is gone" {
