@@ -858,8 +858,13 @@ summary::-webkit-details-marker {
 
 .settings-instructions {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
+  margin-top: 8px;
   gap: 10px;
+  color: var(--settings-muted);
+  font-size: var(--text-control);
+  line-height: 1.5;
 }
 
 .settings-instructions-path {
@@ -867,7 +872,6 @@ summary::-webkit-details-marker {
   min-width: 0;
   width: fit-content;
   max-width: 100%;
-  overflow: hidden;
   padding: 5px 8px;
   border: 1px solid var(--settings-line);
   border-radius: 6px;
@@ -875,8 +879,7 @@ summary::-webkit-details-marker {
   background: var(--ui-surface-panel-2);
   font-family: var(--font-mono);
   font-size: var(--text-label);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .settings-instructions-editor {
@@ -918,8 +921,7 @@ summary::-webkit-details-marker {
   justify-content: space-between;
 }
 
-.settings-field p.settings-instructions-error,
-.settings-instructions-meta .settings-instructions-error {
+.settings-instructions-error {
   color: var(--ui-content-error);
 }
 
