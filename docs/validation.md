@@ -6,9 +6,9 @@
 
 测试文件名、实现路径、逐项断言、当前数量和机器可判定 artifact identity 由 test graph、源码、manifest、lock 与 verifier 负责，不在本文建立第二份目录。只有测试层或归属规则、标准入口、证据状态、长期证据或未闭合验证缺口变化时才更新本文。
 
-## 状态与证据纪律
+日常构建和回归从[标准入口](#标准入口)选择。按变更找最小充分验证，见[变更验证 Gate](#变更验证-gate)。判断能否声明某项能力已交付，先看[平台状态](#平台与-artifact-状态)和[未闭合验证缺口](#未闭合验证缺口)，再按[长期证据账本](#长期证据账本)核对对应版本的结果。
 
-Product 模型错误的验证按 owner 分层：Agent/Task execution 验证 owned 捕获、释放后有效性与终态优先级；Host/SQL 验证首次与后续凭据清洗、追加迁移、冷恢复、提交不确定和旧版本拒写；共享 fixture 与严格 decoder 验证 nullable 详情、独立 diagnostic 语义、整数边界和恢复建议；Renderer 验证本地化分类、默认折叠、纯文本显示、草稿保留和显式操作。真实桌面验收必须跨 canonical AgentCore、Product、Bridge、Renderer 和 SQLite 重启，不能由各层合成 fixture 互相替代。`.store` 退役验收比较原始字节，并验证 SQL 存在时不读取、不清洗、不合并或重写旧文件。
+## 状态与证据纪律
 
 | 状态           | 含义                                                                         |
 | -------------- | ---------------------------------------------------------------------------- |
@@ -36,162 +36,9 @@ Product 模型错误的验证按 owner 分层：Agent/Task execution 验证 owne
 | architecture guard          | owner 依赖方向、禁止依赖、module graph、稳定 allowlist、catalog 一致性和 test graph 接线                                             |
 | probe / platform acceptance | candidate artifact、外部依赖事实、真实窗口、系统服务、签名和平台生命周期                                                             |
 
-Agent 生命周期验收须覆盖：cancel 与自然完成竞态，queued/active Run 与 compact 的关闭，WaitingUi、callback fatal 和多 Session shutdown；abort stale/too-late、compact abort 回执与实际终态不一致、terminal publication 与 cancel/snapshot、Executor claim 与 queued cancel；double close、duplicate response、Session 未静止时的 Runtime destroy，以及 diagnostic/release 的恰好一次释放。
-
 一个测试可以用多条断言证明同一个失败模式，但不能把独立失败模式塞进同一场景。同一合同可以在不同观察边界保留测试，例如纯状态转换与线程 quiescence；若 owner、失败模式和观察边界都相同，只保留一个权威失败点。删除疑似重复的并发或 lifecycle 测试前，应临时破坏对应不变量并确认保留侧会失败。
 
 源码扫描、文件存在性和关键词 guard 只能证明结构边界，不能替代产品行为、响应式布局、运行时顺序、真实平台或 shutdown 验收；architecture guard 也不得用测试数量代表覆盖充分性。一次性 probe 只在答案仍会改变 active contract、实现决策或验证 Gate 时保留；结论进入合同、持续回归或长期证据后，或者 active contract 已对所有可能结果安全且该问题不再控制任何决策时，应从 active tree 删除不再承担职责的资产。
-
-## 产品视图与执行隔离验收
-
-ProductDelivery 可达查询必须以行为测试证明没有业务推进副作用；固定输入和事件轨迹下，有无 Renderer、不同读取频率、版本重试和重连不得改变必要的 Run 接纳、权限或终态结果。主线程事件消费、Task 队列推进与执行不能等待 Renderer 读取或绘制。展示负载与 event pump 的容量/队列背压是不同机制：验收必须证明展示压力不造成额外 capacity 终止，不能以提高队列或超时通过。
-
-范围同步测试须观察无关 Task 历史不被扫描、编码或运输；稳定块复用、terminal 历史变更、安全代次变化、跨 chunk/UTF-8 脱敏、旧读取失效、切页/删除/重连、缓存淘汰及 shutdown 均由所属 Product、Bridge 和 Renderer 测试负责。容量场景使用最大合法结构与共享文本预算，不能假设每个 Run 可同时占满独立上限；不得依赖真实用户历史、账号或 credential。
-
-固定基准机分别记录 Debug 和 Release 下投影构建、编码、复制和分块响应的连续主线程墙钟时间。Release P99 不超过 8 ms、单次不超过 16 ms；Debug P99 不超过 16 ms、单次不超过 32 ms。报告包含机器、样本、负载、构建和峰值，普通单元测试不以宿主计时波动判断正确性。超过预算必须定位并以有界范围、分片或无凭据异步构建闭合，不能只报告均值改善。持久化、credential 事务和 Agent 执行准备独立计量；若其主线程成本仍造成展示负载下的执行故障，作为本次验收阻塞项处理，不改变持久化格式或安全 Gate 来绕过。
-
-Skill 文件流程独立测量入口为 `zig build test-skill-import-performance -Dtarget=<canonical target>`，分别以 Debug 和 ReleaseSafe 运行；正式 Native graph 只编译该入口，计时单独执行以排除其他 suite 的资源争用。该入口记录真实目录/ZIP 文件工作的准备、提交前复核及同步提交耗时，覆盖常用小包、上限内大文件与多文件、零/四个占用的 shared worker；它不把 worker 占用冒充真实 Run，不按 view 连续时间预算判定文件事务，也不能替代下述桌面 event pump、控制响应和 Run 终态验收。是否据此调整文件执行隔离须结合可复现响应或执行失败证据。
-
-目标平台真实 WebView 压测须覆盖持续输出、实际并发上限、历史加载、切换、管理异步结果、断连和恢复；同时观察控制动作响应、event pump 结果与 Run 终态。结构测试、内存 fixture 和 serializer 计时不能替代这条真实桌面验收。
-
-## Office Skill 与私有环境验证
-
-完整资源一致性由 `node --test scripts/office-resources.test.mjs` 和 `node scripts/build-office-skills.mjs --check` 验证；有界附件 ZIP helper 的行为回归继续使用 `python scripts/check-office-archives.py`。发布单测覆盖无解释器发布及损坏来源拒绝，应用层另验发布失败不阻止启动。
-
-资源生成器写入产物时使用 `build_support/office-environment.json` 锁定的 Node/zlib，缺少该工具链明确失败；gzip 使用固定的未知 OS 标记。`--check` 使用项目支持的 Node 版本，无须匹配生成器的 Node/zlib 精确版本；将现有 gzip 完整解压后与源码生成的完整 tar 逐字节比较，覆盖内容、顺序、header 与 padding，压缩编码差异不影响结果，损坏压缩包仍须失败。该 manifest 是四目标发行输入、布局与下载量的唯一机器真源，requirements 按目标锁定 wheel；Windows x64 身份由迁移前固定向量验证。当前主机检查不替代 Windows/macOS 使用锁定工具链的同输入产物字节比对。
-
-私有环境的显式联网入口为 `python -X utf8 scripts/check-office-private-environment.py --download`，macOS 使用 `python3`：在隔离 profile 真实下载，覆盖并发首次发布、离线复用、改名后调用、中文空格与引号路径、DOCX/PPTX 新建、XLSX 修改、三格式读取与环境文件不变。可传 `--target windows-x86_64|windows-aarch64|macos-aarch64|macos-x86_64`，默认当前原生目标；请求其他目标明确失败，不能把静态检查报告为执行通过。macOS 先并发准备 Python，再并发准备 Node，并验证 Node 已就绪时无需 Python 即可复用。追加 `--network-config-probe` 使用隔离的 pip/npm 用户配置和本地转发镜像，观察锁内默认 registry URL 的实际请求，并验证 npm 全局安装配置不能改变私有目标。
-
-`python -X utf8 scripts/check-office-preparation-failures.py --download` 采用相同目标规则，覆盖缺失环境、无效目标、损坏正式目录保留、目标被占用、下载失败及摘要拒绝后的清理；Windows 保留原生负退出码用例，macOS 追加缺 Python 前置条件、空目录/普通文件/符号链接拒绝。还验证精确目录恢复指引，以及调用方在确认无人使用的隔离 fixture 中明确清理单个目录后重新准备、离线复用和兄弟目录保留。准备的外层预算覆盖生产下载、安装、发布后检查和有界收尾，文档执行仍保留独立短预算。`python3 scripts/check-office-publication.py` 在 macOS 覆盖 ctypes 排他发布的占位保留、并发唯一赢家及取消后子进程 join；Host seam 的对应回归接入正式 Native graph。
-
-真实 Core 的临时物化与 Shell 入口先用 `zig build build-office-skill-shell -Doptimize=Debug -p .zig-cache/office-core-qualification` 构建当前原生目标，跨构建显式传 `-Dtarget` 时仍须匹配 canonical target lock 并在对应机器执行。然后运行 `python -X utf8 scripts/check-office-skill-shell.py --profile <上述隔离测试profile>`，macOS 使用 `python3`；`--target` 遵守相同原生目标规则。该入口使用 canonical Core 和 loopback Provider fixture，验证三个 Skill 的临时物化绝对入口、相对脚本路径新建（Node 含嵌套目录）、原件保护、工作副本修改、重新读取与私有环境内容不变；XLSX 同时检查公式字符串、空缓存和真实 Read 工具读取报告尾部身份及必要检查状态，不请求远端模型。Read 场景显式声明对应工具及三步有限交互，权限探针仍保留原 Bash-only 输入。`python3 scripts/check-office-validators.py <展开的docx/scripts/office> --entry <对应run入口>` 须由准备好的私有 Python 经 run 入口调用，不为测试全局安装库。
-
-XLSX 质量资格使用 `<对应run入口> python scripts/check-office-xlsx.py --entry <对应run入口>`；macOS 在入口前加 `/bin/sh`。合成输入与独立数值、合计定位和样式 oracle 由测试持有，读取正文成功不能替代样式检查；私有环境资格入口在准备后调用同一 suite。该入口须使用已准备的固定私有 Python，不安装全局库。整包内容更新还运行 `zig build test-office-resources`，验证 Application 资源发布、三格式入口完整性及来源损坏拒绝；catalog 和临时物化另由真实 Core 入口验证，不以资源存在代替执行。
-
-固定 Node 生成器与现有严格 validator 的组合资格使用 `<Python run入口> python scripts/check-office-generation.py --node-entry <Node run入口> --python-entry <Python run入口> --report <新报告路径>`；macOS 在入口前加 `/bin/sh`。它检查代表性 DOCX 创建、文本定向修改及原件保持，以及 PPTX 文字/备注和图表组合，记录实际生成器身份及所用 part schema。任何正式生成物校验失败都返回非零；隔离的诊断副本只用于定位差异，不是产品修复或查看器兼容性证据。已知未闭合项不得从组合资格里排除或改报通过。
-
-PPTX 正式新建链使用 `<Python run入口> python scripts/check-office-pptx.py --entry <Python run入口> --node-entry <Node run入口>`，macOS 同样在入口前加 `/bin/sh`。它在固定生成后实际执行格式专属收尾，再检查候选、定向编辑及复验、备注/图表内容与非目标包内文件保持、候选身份和未知结构/已有目标/归档/XML 反例。原始生成器的缺陷记录继续保留，不能用生成后处理覆盖原始基线。适用的 slide、master、layout 和 notes 部分必须选择对应 Schema；缺少路由不能报告该部分通过。有限查看器兼容性证据与精确输入/往返文件见 MetaskOffice 验收记录（`git show 6018338e203aa8550473ecea735aedbce4f140af:docs/evidence/office-pptx-metaskoffice-20261030.json`），由同一 suite 复核身份和严格结构；它不替代 PowerPoint 或本次生成文件的视觉验收，也不替代远端模型实际执行该流程。
-
-正式事件消费链使用 `zig build test-office-pipeline`，并纳入 Native test graph。该入口让当前 canonical Core 调用实际工具，经生产 Agent callback、event pump、Product 事件投影及 terminal drain 收口；本机 Provider 与临时凭据存储为受控 fixture，覆盖工具非零退出、实际缺环境入口、权限拒绝、重试、中断、取消和跨轮。暂缓唯一消费者的场景保持生产队列上限，通过真实合法流触发背压，在恢复消费后核对完整输出、正式终态、Session 可复用及历史保存；它只证明消费者暂停/恢复的机制，不冒充原生对话框或主线程真实阻塞的体验验收。同一 Run 须跨过原产品回合阈值后正常收口，40 次 Bash 调用的 Tool 记录全部保留且不产生记录缺口；持续产出和慢提交场景须在生产队列限制内形成积压，记录提交、drain 返回及 Stop 到正式终态的耗时，并核对普通 Stop 不造成事件交付缺口。注入延迟的 framed fixture 只证明调度活性，不代表生产 SQLite 的性能分位。该入口与只验证 Skill 资源/Shell 的探针分别结算，不替代远端模型规划或 PowerPoint 兼容性证据。拒绝观测回归还须证明首个拒绝不被后续收口覆盖、缺省/不可用及小容量诊断不改变运行结果、非法输入仍被拒绝且不泄露正文或 secret。
-
-同一入口追加 `--permission-probe`，在已准备的 profile 上验证默认 permission mode 的拒绝/`allow_once` 及 `full_access`：必须实际收到对应权限 callback，拒绝后无文档副作用，允许后从 Core 临时物化入口完成 XLSX 创建、修改和读取，环境内容不变。fixture 使用 unrestricted Shell policy；它验证 Core 工具权限，不证明 OS sandbox、模型下载同意或真实窗口审批。
-
-桌面目录验收使用 `METAWORK_BUILTIN_OFFICE_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs`，Windows 仍用同模式的 `scripts/run-agentcore-vertical-windows.mjs` wrapper。入口覆盖精确三项 catalog、新 Task、刷新、冷启动、来源损坏后非致命失败，以及真实 Office `DeliverFile` 回执和冷历史投影；使用结构校验通过的合成 DOCX fixture，不准备私有环境。该模式不替代通用键盘焦点或 Renderer 成果按钮手势，后者继续由 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 的 Windows 桌面入口拥有，macOS 开发版的检查/继续修改草稿手势证据见 [E-MAC-OFFICE-DEV-20261024](#e-mac-office-dev-20261024)，不替代正式包或其他平台。
-
-这些入口不证明所有公司执行策略、代理、证书或镜像，也不证明远端模型质量、复杂文档布局和未覆盖的原生手势。旧组件安装、UNO、重算和文档预览已退出产品范围，不再承担其验收职责。
-
-### E-MAC-OFFICE-MODEL-20261030
-
-真实模型的固定任务、独立 oracle、全部尝试、人工介入及实际回执见 Office 模型验收记录（`git show 6018338e203aa8550473ecea735aedbce4f140af:docs/evidence/office-live-model-macos-20261030.json`）。确定性检查、受控 Core fixture 与查看器的通过不替代这组验收；固定集合尚未完成时，不宣称 Office 模型工作流整体通过。
-
-按底层机制补充的定向检查见 Office 机制收口记录（`git show 6018338e203aa8550473ecea735aedbce4f140af:docs/evidence/office-mechanism-closure-macos-20261030.json`）。已保存文件的独立检查通过，不能替代模型的修后复验与真实交付；中途停止的 Run 保留为未通过，获用户明确授权的续作单独记录，不能反向改写首轮结果或声称无需人工介入。
-
-本轮真实运行中，打开同步原生工作区选择器时观察到 event pump 队列期限拒绝；新增生产诊断保留该首个拒绝及精确 Core 身份，后续未闭合输出的终态清理不覆盖它。当前 canonical Native SDK 的同步对话框占用应用事件消费路径，该缺口尚未修复。受控暂停消费者的反例只证明这一机制，不能证明历史 #23 与其同因。闭合须通过 canonical 依赖能力或明确接受的产品合同方案解决消费停顿，并在实际运行与原生对话框交错时复验；不得靠增大队列或期限、增加平行消费者、跳过收口或本地修改 SDK 绕过拒绝。
-
-### E-MAC-OFFICE-INPUTS-20261024
-
-2026-10-24，macOS 27.0.1 arm64、Zig 0.16.0，跨平台实施分支在 `914c5a98` 基础上进行输入资格检查。官方固定发行包与所选 wheel 已实际下载并核验摘要、大小和布局；Windows ARM64 的 CPython、Node PE machine 均为 `0xaa64`，NuGet 携带 VC runtime。macOS standalone Python 的 pip、ssl、ctypes 及锁定的 lxml、Pillow、openpyxl、defusedxml 实际加载成功；搬移到含中文、空格和单引号的目录后新进程仍能加载。Python 发行包及 arm64 wheel 的 53 个原生 image 的加载依赖未发现构建机器绝对路径。Node 固定库经私有 npm 安装及搬移后加载成功。具体接受输入由 Office 机器 manifest/lock 拥有，缓存中的候选不自动成为产品输入。
-
-Node 24 Darwin 候选的 Mach-O 最低系统为 13.5，高于 canonical Core 与应用的 13.0 基线，故拒绝接纳。固定 Node 22 候选的两个 Darwin 二进制最低系统为 11.0，且现有 `registerHooks` API 可用；仅调整 macOS 候选，Windows x64 的版本、锁和身份保持。此检查不等于最低系统的实际运行验收。
-
-`zig build build-office-skill-shell --prefix .zig-cache/office-core-qualification` 后，`python3 scripts/check-office-skill-shell.py --home-probe` 通过 canonical staged Core、loopback Provider 与真实 Bash，在两个独立 Task 工作区验证 Shell HOME 等于传入的 canonical user home，未随工作区改变。该模式不准备依赖、不证明三格式或桌面链路。输入、布局、原生依赖及 HOME 探针缓存位于 `.zig-cache/office-input-p0/`；macOS Intel、Windows ARM64 原生执行、最低系统与正式安装产物仍待验收。
-
-### E-MAC-OFFICE-PREPARATION-20261024
-
-macOS 27.0.1 arm64 的固定入口真实联网准备、Python/Node 并发发布、离线复用与新建 Node 的 Python 前置条件通过；已经就绪的 Node 在测试临时移走私有 Python 后仍可离线复用。中文、空格和单引号 HOME 下三格式新建/修改/读取通过，前后 7,523 个环境文件内容一致。隔离镜像场景观察到 66 个实际请求，固定私有目标未受 npm 全局安装配置影响。负面入口通过缺环境、非法目标、损坏/空目录/文件/链接占位保留、断网、SHA 拒绝、明确单目录人工恢复及兄弟目录保留。证据见 `.zig-cache/office-private-macos.log`、`.zig-cache/office-failures-macos.log` 及各自输出的隔离目录；这些结果不证明其他平台执行策略。
-
-Darwin Python 发布与取消回归 3/3、Host 排他发布定向回归 2/2、资源及架构边界 37/37 通过。正式 Native graph 为 228/228 steps、1,385 passed、9 skipped；首次在沙箱中因 loopback/UDS 监听权限失败，允许测试监听后完整入口通过，未跳过 Core。完整日志为 `.zig-cache/office-native-test.log`。Windows/macOS 同输入 archive 比对、Windows ARM64/macOS Intel 原生运行、系统基线与正式分发仍未验收，DAG 不据本机通过关闭这些证据要求。
-
-### E-MAC-OFFICE-CORE-20261024
-
-macOS 27.0.1 arm64、canonical AgentCore `0.11.0-dev+9c2f68671198` ABI 1 revision 24，三个独立 Session 均从 Core 临时 `activation-*/environment/run.sh` 经真实 Bash 完成 DOCX/XLSX/PPTX 新建、原件摘要保留、工作副本定向修改和结构化读取；每次操作后私有环境内容 inventory 一致。XLSX 公式 `=1+2` 保留为公式字符串，缓存为空，未报告计算结果。共享执行说明实际进入三份物化 Skill。原件/OOXML validator 在私有 Python 下为 11/11，资源构建 suite 为 6/6；日志为 `.zig-cache/office-core-macos.log`、`.zig-cache/office-validators-macos.log`。该 fixture 只证明真实 Core/资源/Shell 链，不证明远端模型规划、桌面成果手势或分发执行策略。
-
-后续在 `0620800a` 加 qualification source diff SHA-256 `e54695cf860df9a5b8c20acb3fdf63001845d274f8e9a0058caa365621619f4f` 上验证默认权限拒绝、默认权限 `allow_once`、`full_access` 三个场景，实际 callback 数分别为 1、1、0。拒绝后无文档输出，允许后同一物化入口完成 XLSX 创建/修改/读取，环境内容不变；原有三格式入口复验通过。fixture 的 Shell policy 为 unrestricted，不扩大为 OS sandbox 或模型同意的证据。精确输入与 probe 身份见 `.zig-cache/office-permission-source.{json,patch}`，结果见 `.zig-cache/office-permission-probe.log` 和 `.zig-cache/office-core-permission-regression.log`。
-
-### E-MAC-OFFICE-DESKTOP-20261024
-
-macOS 27.0.1 arm64、Native SDK `0.11.0-fork.4`、canonical Core ABI revision 24，automation Debug 在 `a9b424c3` 加 source diff SHA-256 `957588375f09d5358d6180d3f60772ec5b0032092b9006daf109305766112962` 上通过 Office 桌面专用入口。真实 Workspace/Task catalog 包含 docx、pptx、xlsx；新 Task、刷新、冷启动均保留，篡改发布副本后只有 Office 来源不可用，应用正常运行。真实 `DeliverFile` 的路径、大小、摘要及 delivery ID 与成果投影一致，冷历史恢复同一成果，未创建私有环境。受测 executable SHA-256 为 `87ed8c9c35870b61adb7a91c5773319f657ef2e5701bec5131759c72ece19213`；fixture 原件摘要与结构 validator 通过。日志及精确输入见 `.zig-cache/office-desktop-macos.log`、`.zig-cache/office-desktop-source.{json,patch}`、`.zig-cache/office-fixture-validation.log`。不据此声明 Renderer 按钮手势或真实模型规划通过。
-
-最终 `npm run check`、受影响资源/架构 38/38 和正式 Native graph 228/228 steps、1,385 passed、9 skipped 通过，日志分别为 `.zig-cache/office-check-final.log`、`.zig-cache/office-final-affected.log`、`.zig-cache/office-native-final.log`。完整 Node 集为 899 passed、2 skipped、1 failed；未改动的 `scripts/task-panel.test.mjs` 在第 103 项通过后被 SIGKILL，独立 TAP 复测同样如此，根因未定位。该测试及其 Renderer/test-support 输入相对主分支无改动；未修改或跳过断言来获得全绿。完整与独立诊断见 `.zig-cache/office-node-full.log`、`.zig-cache/office-task-panel-retest.log`。
-
-后续定向诊断中，第 104 项单独运行通过，与第 103 项一起运行则焦点身份断言失败：实际为侧栏开关，预期为文档链接。1 GiB 堆上限下原 suite 在同一位置发生 V8 OOM；仅将 DOM 身份不等时的错误输出限制为有界描述的临时诊断导入，使全部 122 项执行完毕，结果为 121 passed、1 failed。此诊断没有关闭原 suite 的失败，也尚未解释跨用例焦点变化的根因；卸载后等待一帧的临时对照仍失败，相关产品与正式测试均未修改。日志为 `.zig-cache/office-task-panel-{focused,pair,bounded-heap,bounded-diagnostics,drained-pair}.log`。
-
-正式 arm64 打包通过既有生产 CSP、automation isolation、Developer ID 签名与 DMG 创建；只为该调用设置 `DEVELOPER_DIR` 选择已有 Xcode 27，未更改全局工具链。应用和 DMG 的严格 codesign 复核通过。最终 DMG 为 10,317,498 bytes，SHA-256 `9cb81de648a7d50bf79edb04c53fb7ef3678d01370fdf21a8ef04dbd482685f3`；Apple `notarytool submit` 返回 `HTTPClientError.connectTimeout`，打包入口明确失败，未执行公证通过后的 Gatekeeper/DMG 内运行验收。因此正式分发仍未通过，不能把已生成产物当作可发布结果。日志及产物身份见 `.zig-cache/office-package-macos.log`、`.zig-cache/office-package-identity.json`。
-
-| 目标          | 当前证据边界                                                                                       | 尚缺证据                                                          |
-| ------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| macOS arm64   | 当前系统私有环境、三格式、真实 Core、开发版模型辅助续跑/成果手势/冷历史，以及正式 DMG 公证与隔离启动/catalog 通过 | 最低系统、无干预模型 smoke；正式 DMG 的 Office 执行链 |
-| macOS x64     | 固定输入、wheel、Mach-O 系统基线与动态依赖检查                                                     | 原生环境/三格式/Core/桌面、最低系统与正式分发                     |
-| Windows ARM64 | 官方固定输入与 wheel、ARM64 PE 和 VC runtime 检查                                                  | 原生环境/Core/桌面、ARM64 installer 分发                          |
-| Windows x64   | 固定版本、锁字节和两个环境 ID 保持；历史独立证据保留                                               | 本次变更的原生回归与安装产物；跨主机 archive 字节比对             |
-
-### E-MAC-OFFICE-CANCELLATION-20261024
-
-继续复核发现 `Popen` 在子进程已启动、但 handle 尚未返回的窗口被取消时，不能删除 stage 的未静止标记。真实子进程加构造边界故障注入证明：异常返回后子进程仍在，标记必须保留；测试清理方取得其自有 handle 并确认退出后才删除 fixture。准备入口的摘要检查也纳入同一 owned-child 等待链。Darwin 发布/取消回归 4/4、真实固定入口的摘要拒绝/正常准备/精确恢复、资源 suite 6/6、Host 资源发布定向测试与架构 guard 均通过；不扩大 Windows x64 行为。日志为 `.zig-cache/office-cancel-failures.log` 和 `.zig-cache/office-cancel-architecture.log`。该修复只收口既有取消合同，不新增恢复状态或用户选项。
-
-公证客户端超时后只读查询 Apple 历史，确认上次提交 `3c605f4c-0d08-4cf7-a26e-eb0668cbb839` 在服务端仍为 `In Progress`，创建于 `2026-10-24T04:31:59.086Z`；未重复提交同一 artifact。原打包入口的失败结论保持，服务端最终结果及后续完整分发 Gate 尚待取得。状态证据为 `.zig-cache/office-notary-history.json` 和 `.zig-cache/office-notary-info.json`。该 submission 对应取消修复前的 DMG，不能替代修复后 artifact 的验收。
-
-在 `47a947d1` 上追加的隔离桌面探针到达 Office 成果回执后，因原生窗口工具无法绑定 automation bundle ID 而未取得 Renderer 手势证据；等待观察超时，测试明确失败并退出其自有进程。没有对普通用户窗口执行操作，也不把该工具绑定失败归因于产品按钮。探针源码和日志保存在 `.zig-cache/office-cua-probe-source.mjs`、`.zig-cache/office-cua-probe.log`；成果检查/继续修改草稿仍未验收。用户确认目前没有其他原生机器或 CI 入口，因此上表的 macOS Intel、Windows ARM64、Windows x64 本次回归及最低系统缺口继续保留。
-
-### E-MAC-OFFICE-DEV-20261024
-
-用户将本轮范围收敛到 `npm run dev` 的功能验收，停止追加分发验收。macOS arm64 使用现有 Metask `glm-5.3-flash`；没有新增 Provider 或凭据。开发入口实际构建并启动；为了绑定原生窗口，canonical SDK 本地 packager 给同一 Debug 可执行文件增加 `.app` 外壳，签名前核对可执行文件相同，按开发入口签名后复核 file-backed sections 未变。此包装不构建 Release、不上传；身份见 `.zig-cache/office-dev-ui-identity.json`。
-
-实际模型的准备阶段发现目标键与下载量指引不够直接，`8ee13fa2` 从唯一 manifest 自动生成摘要。随后真实 Shell 暴露 Node 入口把 `work/script.cjs` 当包名的问题；`02f9f51d` 将脚本入口解析为绝对路径，保留其余参数。现有 Core qualification 改用嵌套相对 Node 脚本与相对 Python 脚本：旧资源明确失败 `Cannot find module scripts/create.cjs`，修复后三格式创建、工作副本修改、读取、原稿与环境内容不变通过。资源 suite 6/6、Host 资源发布 1/1 通过；日志为 `.zig-cache/office-relative-{before-fix,after-fix,resources,native}.log`。该结果仍不替代其他架构的原生回归。
-
-开发版 UI 受测 `8ee13fa2`、Task 21、现有 Metask 模型，按锁定入口真实准备私有环境并创建三份 original。模型误用了未安装的 Python PPT 库；首轮随后出现活动传递失败，第二轮停止，经两次普通续跑指令指导使用现有 XML helper 后完成，不能视为无干预 smoke。最终 Word/PPT 的 pack、validate、read 通过，Excel 标题已修改、公式 `=1+2` 保留且缓存为空。三份 original 摘要与 7,523 个环境文件内容均不变。PPT 首次交付返回 `capacity`，串行重试取得可信回执；三份实际 `DeliverFile` 的路径、大小与摘要均匹配独立文件核验。
-
-实际点击三项“检查文件”均显示检查时与交付一致；依次点击“继续修改”将引用加入同 Task Composer，保留已有草稿且不自动发送。正常退出同一开发版后冷启动，三项成果恢复相同 delivery ID、大小和摘要，重新检查仍一致；重启后的 Composer 为空，此证据不声明草稿跨重启持久化。精确身份与观察见 `.zig-cache/office-dev-{ui-identity,ui-observation,file-verification}.json`；原稿与环境基线分别为 `.zig-cache/office-dev-original-baseline.json`、`.zig-cache/office-dev-environment-before.json`。本轮不继续正式分发验收，其他原生架构、最低系统及无干预模型执行缺口保留。
-
-本轮实现收尾时，在 `e89b8eec` 的代码上再次执行 `npm run check`，canonical staged Core verifier、Renderer wire/typecheck 与严格 Native 检查全部通过，日志为 `.zig-cache/office-closeout-check.log`。此检查不改变上述完整 Node suite 的失败结论，也不替代未执行的平台回归。
-
-### E-MAC-OFFICE-DMG-20261024
-
-用户明确授权上传后，`4ba05c36` 的 `package-macos.mjs arm64` 正式入口以 exit 0 完成。Apple submission `b6cd09ca-3e6c-4061-aeb4-3295be5537c0` 为 `Accepted`，审查日志无 issues；staple/validate、Gatekeeper assessment、DMG 校验及只读挂载后的应用签名、executable integrity 和系统基线声明复核通过。上传文件 SHA-256 为 `998dea9c119f561fb4499343dea06cb2a66066210dcfd4bd5ae8507a044a3c6c`；staple 后最终 DMG 为 10,319,472 bytes，SHA-256 `e4081cadd71b6cedfa71114843f9f1b7985fbeed921b8fb92e8097cf5d92c712`。它是取消修复后的独立产物，不使用旧 submission 替代验收。身份、公证日志和完整入口日志见 `.zig-cache/office-package-current-identity.json`、`.zig-cache/office-notary-current-{info,log}.json` 和 `.zig-cache/office-package-current.log`。
-
-从该 DMG 只读挂载启动真实正式 App，使用独立 HOME；通过精确 `.app` 路径绑定原生窗口，设置页的自动工作区路径与隔离 HOME 一致，技能页实际显示 docx/pptx/xlsx 三项。应用自行发布的资源根摘要与当前 canonical archive 一致，未自动准备私有环境。记录见 `.zig-cache/office-dmg-ui-observation.json` 和 `.zig-cache/office-distribution-state.json`。后续 loopback Provider 的合成凭据保存被自动审批拒绝，未取得明确保存授权；隔离 metadata 中没有已保存 Provider，测试进程已清理。当前结果只证明正式包启动及 catalog，不证明正式 App 的 Office 解释器执行、成果按钮或完整分发矩阵。
-
-### E-WIN-OFFICE-SIMPLE-20261024
-
-2026-10-24，Windows x64、canonical AgentCore `0.11.0-dev+9c2f68671198` ABI 1 revision 24。依赖实现绑定 `d6bb19bf`；完整资源 SHA-256 为 `28087e876351a6e4dff2dfa5053fe4810bc1ded6e82bb5324daa823a72a486be`，受测 automation Debug executable SHA-256 为 `f9ad9a15680eb53b91cd9e28cf2e302fc4e1da4a4d0b0db8231d2abcba199364`。
-
-真实联网准备在隔离 profile 通过：两个 Node 准备竞争后只发布一个目录，Python/Node 离线复用成功；pip/npm 用户镜像配置产生 63 个实际转发请求，npm `global=true` 和外部 prefix 未改变私有安装位置。三格式工作后环境中 4,435 个文件内容不变；最终摘要拒绝、断网、占用和损坏目录测试通过。实际 Core 在各自临时物化目录调用资源入口，三个独立 Session 均完成新建、工作副本 XML 修改和结构化读取。桌面新 Task、显式刷新、冷启动以及篡改发布副本后 Office 来源不可用而应用正常运行通过，未创建私有环境。通用 DeliverFile 的真实 Core/Renderer 检查、修改草稿、冷历史和源文件保留回归通过。
-
-删除阶段正式 Native graph 为 224/224 steps、1,368 tests passed、5 skipped；受控并发完整 Node 集为 908 passed、8 skipped。首次默认并发 Node 集的复制按钮计时断言失败，独立复测 4/4 和受控并发完整集通过，未修改该实现。最终 `npm run check`、资源一致性、架构边界 32/32、受影响资源/Bridge 27/27、有界 ZIP 12 passed/1 skipped、原件/OOXML validator 11/11 通过。完整桌面入口曾在原有物理键盘焦点探针失败；目录专用入口的通过不关闭该缺口。公司组策略、全量企业网络组合、其他 Windows 架构和 macOS 的自动依赖准备未验收。
-
-最终 `node scripts/package-windows.mjs` 通过 production CSP、automation isolation、canonical Core runtime assets、runtime stage 及原有主包体积 Gate。未签名 x64 安装器为 8,896,664 bytes，较原预算基线增加 455,568 bytes，低于 1,048,576 bytes 允许增量；SHA-256 为 `eb371061267381db9bbd144bd01f1bde9a9925b25bc81ca7cbd7011aee7798e7`。未执行签名发布、推送或合入。
-
-本地证据为 `.zig-cache/office-final-{network-config,preparation-failures,core-shell,check,architecture,archives,validators,package}.log`、`.zig-cache/office-builtin-desktop-final.log`、`.zig-cache/office-delivery-desktop-final.log`、`.zig-cache/office-simplification-tests.log` 与 `.zig-cache/office-simplification-node-limited.log`；隔离文件位于各 qualification 日志记录的目录。
-
-### E-WIN-OFFICE-RECOVERY-20261024
-
-在 `5e2d9fa2` 基础上补充用户授权的最小恢复指引、慢速下载和下载总量说明。没有新增自动修复、目录隔离、管理对象或生命周期状态。损坏环境的诊断显示精确目录，要求先停止所有使用者并退出应用，再由用户明确选择只清理该目录；原生负 NTSTATUS 同样报告不可用。
-
-实际读取并校验锁内 5 个 Python wheel 和 28 个 npm tarball：Python 库为 11,530,133 bytes，含解释器总计 25,921,381 bytes；Node 库为 3,057,557 bytes，含解释器总计 40,361,909 bytes。总量仅表达首次准备的固定文件 payload，不含索引元数据、重试或传输开销。汇总记录关联依赖锁摘要，锁变更而未重新测量会在资源构建时失败。两套环境的既有身份和下载入口逐字节保持不变。最终内嵌资源 SHA-256 为 `5705709c30a71dd725b93310dbea534e9893a47169cd0662edf19173b92a74f8`；Windows batch 资源统一为 CRLF，避免实际发现的标签跳转失败。
-
-最终恢复入口验证通过：损坏正式目录保持原状，诊断明确停止使用者和精确清理范围；隔离 fixture 经显式单目录清理后真实重新准备成功，离线复用正常、兄弟环境未改变。canonical Core 的三个 Skill 临时物化、创建、工作副本修改和重新读取通过。资源一致性与架构边界 35/35、`npm run check`、格式和变更文档链接检查通过。证据在 `.zig-cache/office-followup-{download-measure,failures,core-shell,node,check,format}.log`；实际下载文件的大小和摘要明细保存在 `.zig-cache/office-download-artifacts.json`。
-
-使用生产 curl 参数的隔离 HTTPS 探针通过：393,216 bytes 的持续慢速传输耗时 323.09 秒，越过原 300 秒期限且字节完全一致；完全停滞的传输在 90.64 秒后以 exit 28 中止。参数保留 30 秒连接期限、1,024 bytes/s 的 90 秒低速检测和 1,800 秒总期限。测试只对自身临时证书显式设置信任，未修改系统证书或产品下载来源；证据为 `.zig-cache/office-followup-slow.log` 和 `.zig-cache/office-followup-stall.log`。
-
-最终 Windows x64 未签名安装器为 8,898,119 bytes，SHA-256 为 `7a71b79e6e205a0835584e5a69491f1254ddf926888c520a2d98766ff4f0af3d`，通过未修改的整包体积 Gate；证据为 `.zig-cache/office-followup-package.log`。本轮未执行签名发布，原有完整桌面焦点和其他平台验收缺口不因本次定向验证关闭。
-
-## 受管 Skill 资源定位验证
-
-受管内容变换以[产品需求](requirements.md)的 Skill 导入/导出合同为准。`zig build test-product-skill-runtime` 验证源摘要确认、规范化候选的有效摘要及导出后再导入；候选定义的字节保留、幂等和容量边界由 package 单测负责。`zig build test-skill-resource-context` 复用正式 Native module graph 和当前 canonical Core，从真实受管导入分别经过普通 `Skill` 工具与 typed `runSkill`，按本次上下文中的目录调用真实 `Read` 取得标记；Provider fixture 不得从预知安装根生成路径或直接读取标记。该回归也纳入 `test-office-pipeline` 与正式 Native graph。
-
-### E-MAC-SKILL-RESOURCE-20261030
-
-真实模型和共享目录读取方的执行证据见 受管 Skill 资源定位验收记录（`git show 6018338e203aa8550473ecea735aedbce4f140af:docs/evidence/skill-resource-context-macos-20261030.json`）。记录绑定生产代码 revision、开发构建身份、canonical Core、原始与安装字节及实际工具结果：MetaWork 真实模型从只含 Skill 名称的输入完成资源读取；Codex CLI 在隔离项目中读取相同安装正文，保留未展开 token 并按定义所在目录读取资源。两者均为单次实际观测，不证明所有模型、共享读取方、其他平台或正式分发产物。既有安装及外部来源的范围继续由产品合同约束。
-
-## 工作区文件浏览平台验收
-
-### E-WIN-WORKSPACE-FILES-20261030
-
-Windows 工作区文件树证据（`git show 6018338e203aa8550473ecea735aedbce4f140af:docs/evidence/workspace-file-tree-windows-20261030.json`）绑定当前功能提交的干净源码、automation Debug artifact、Native SDK 和 WebView2 身份。隔离 profile 中使用真实 Host、真实工作区文件与 WebView，通过 Win32 鼠标/键盘、UI Automation 和官方 SDK Bridge 验证默认收起、未引用文件与图片预览、标签去重、目录刷新、键盘导航、Task 切换与删除、面板隐藏后恢复，以及窄窗口呈现；测试 Task 没有 Run，合成 Provider 没有收到模型请求，实例通过产品退出入口正常结束。
-
-实际 Windows junction 不出现在目录中，直接请求越界路径、过期 epoch 和已删除 Task 被 Host 拒绝；命中已知合成凭据的目录条目整体省略。完整 Native graph 的沙箱内诊断记录了本机 HTTP `ACCESS_DENIED`，允许该测试所需本机网络后，未修改的正式入口通过。原始界面观察、驱动、Host 响应、截图与日志的本地位置和摘要由该证据文件拥有。
-
-本轮尚未验证 macOS/POSIX symlink、真实桌面深色主题，以及运行中 Workspace 授权变化与在途撤销；这些缺口继续保留。WebView 调试端口不可达，实际交互证据来自上述原生输入和可访问性观察。
 
 ## 标准入口
 
@@ -214,55 +61,13 @@ Node、Native 与打包作业共用 Zig 依赖包缓存。Native 编译缓存按
 
 `npm run dev` 先验证 canonical AgentCore bundle 与平台前置条件，在独立目录构建 Renderer 资源和 Debug Host，完成所需签名，再启动自有 Vite server 与新 primary Host。Host 通过 Native SDK 加载本次 Vite 地址，前端 UI 使用 HMR；Zig、Bridge wire/语义或构建配置变化后必须退出并重新运行该入口，不承诺运行中 Host 与已修改合同的 Renderer 兼容。Vite 仅使用已有的本机开发 origin；端口占用、构建、依赖、签名或服务启动失败必须明确失败，不连接其他实例或启动旧产物。Host 退出或启动失败后关闭本次 Vite server；正常退出清理自有运行目录，异常退出无法证明后代停止时保留资源。开发脚本的 Node 回归负责真实 HMR 消息、服务清理、端口冲突与开发/发布 CSP 隔离；真实 WebView 中的更新、Bridge 可达性和平台退出行为仍须由对应平台实测。
 
-Native SDK binding 的定向入口为 `zig build test-sdk-consumption`，复用正式 Application module graph，验证 Runtime 参数校验、credential 返回映射、window chrome 录制/回放及受限 Host URL handoff；领域事务与 shutdown 仍由对应 owner 和正式 Native/lifecycle 回归负责。binding 回归使用 SDK TestHarness，不打开真实浏览器或访问系统凭据。真实 handler、OAuth、credential storage、picker、notification 和 Windows 行为仍需各自平台验收；临时 HOME 不提供系统服务隔离，涉及外部应用或系统凭据的验收应在专用测试用户或虚拟机执行。
-
-模型元数据的定向 Native 入口为 `zig build test-model-metadata`，使用同一 canonical bundle 与正式 module graph，覆盖 Models parser/合同/持久化和受影响的 Host serializer、Bridge 入站 fixture。Renderer 侧运行 typecheck 与 `scripts/workbench-contract.test.mjs`、`scripts/new-task-model-selection.test.mjs`。纯模型字段解析修正可用此入口观察完整字段、ownership、严格 wire 与刷新行为，避免重复无关生命周期测试。
-
-Task 模型意图与选择的定向入口为 `zig build test-task-model-selection`，覆盖 revision CAS、默认配置独立性、confirmed history 写入及未知结果读回、Host 投影、严格 Bridge payload 与逐 generation 的不可变 Run protocol 历史。真实 Task/Run 与 Session setModel 行为归 `test-lifecycle`。Metask 凭据生命周期回归必须跨真实 Account refresh/login、Application 授权校验、Models catalog 和 Task admission，观察 token 刷新与任意一次登录（含换号）后旧 Task 的原位续期或恢复、退出登录期间的阻断、无通知 hard expiry 由节拍发起续期后等待中的消息只执行一次，授权查询不发起任何续期，墙钟倒拨后 boot 时钟到点仍到期并续期、未发送的续期失败只让所等的那条消息失败、结果不确定的续期在运行中即与重启后同为 signed_out、重启后确认登录期间发送的消息登录后只执行一次、断网启动停在确认中且退避递增并在消息开始等待时提前、没能确认时立即重试与重新登录的出口及登录未完成时回到原来的确认、token 到期与续期开始不清目录也不取消在飞目录请求且新任务给出原因、已登录时登录再取消会重取同一代次的目录、排队与恢复竞态、主 Agent 与自动审批的独立结果；回退原配置途中续期后下一次接纳须换上新凭据，同来源其他模型的声明变化不重建会话，模型自己的 protocol 或声明变化由下一条消息重建一次、之后保持；目录失格和空目录不能漏掉 credential 更新，来源代次在同一账号内不变，未采用追加输入须覆盖续期后的精确一次续跑，以及失败、取消和恢复期间授权失效时的最终收口，并验证准备失败不重发 Run；`test-generate-image` 还须使用 exact artifact 与本地 HTTP 观察同一 Session/Run 等待审批时更新凭据、后续 Provider 请求使用新值，以及 Custom Provider 主对话与 Metask 生图凭据隔离；`test-generate-image-product` 在退出、真实续期、向在飞生图交付新凭据和旧凭据释放全程观察安全代次不变；Core seam 的注入拒绝不作为远端服务故障证据；其中跨连接事务必须观察完整目标配置、基线确认、旧 Session 释放、目标 checkpoint adoption、失败后一次原配置恢复，以及下一次显式 admission 使用新模型。Renderer 运行 typecheck 与 `task-model-selection`、`new-task-model-selection`、`bridge-client`、`workbench-contract` suites。模型选择不得改变已有 Run 的执行及权限事实；fixture 不替代真实 Core、能力连续性和桌面验收。
-
-同进程能力输入由 `test-mcp-catalog` 验证 MCP 原来源指纹、跨 generation 交集、收缩/不扩大及分配失败；`test-lifecycle` 验证 Skill query/Session/捕获 owner 的精确释放与 Runtime shutdown fence、capture 分配失败不改 authority、成功权限 mutation 后捕获，以及替换失败。`test-mcp-interop` 使用当前 canonical Core、真实临时 Skill 和本地 HTTP MCP：export 后释放原 Session/query owner，额外查询更宽目录，使用原输入恢复并实际执行原 Skill/MCP；未授权 Skill 仍被拒绝，缩小 ceiling 返回 degraded 并撤销旧 Skill。Core session allow/deny 在恢复前各由一次真实 UI 回应建立，恢复后同参数允许/拒绝均不再询问，MCP trace 精确检查实际调用且无历史重放。模型端为本地协议 fixture，不将该证据扩大为远端供应商兼容性承诺。
-
-同一 `test-mcp-interop` 还必须经过真实 Product Control 的模型选择、恢复、Run 和权限响应入口，覆盖四种协议间的完整组合：单 Session 容量下释放旧 attachment 后恢复同一逻辑 Conversation，保留图片和工具历史、原 pinned Skill、MCP selector 及 session allow/deny，目录刷新和新增全局 Skill 不扩大原 Task。以实际 binding protocol、请求凭据匹配、Provider 请求中的原图片字节、Task namespace 中的原件及真实 MCP RPC 观察结果；使用真实 history/checkpoint store。Workspace 外 Write 的一次性批准在切换后仍需再次询问，切换本身不得改写其文件；full access 保持原 mode/shell/interaction，也不能取得未选择的 Skill/MCP。通过 Product 授权命令撤销 Skill 或工具后必须安全 degraded，模型再尝试原工具名不得产生额外 RPC；更换 MCP 连接来源即使 schema 相同，也须在关闭旧 Session 前拒绝沿用原 authority。PNG 预览 port 仅接受固定的已编码 PNG，不替代桌面的系统图片解码、预览与原生输入验收。
-
-OAuth 冷启动恢复的跨层验收必须从持久化 Registry 和独立凭据 owner 恢复过期 grant，关闭并重建 Product/Core owner 后，经过恢复等待、grant 提交及 automatic candidate，再由 canonical Core 完成握手和工具发现；服务端须只接受新 bearer，不能仅断言状态变成 ready。`test-mcp-interop` 承担这段真实 HTTP 消费验证，合成 refresh 回复不替代远端 HTTPS token endpoint、系统 credential storage 或桌面进程隔夜重启验收；日志只记录匹配事实，不记录 token。Host 与 Renderer 必须共用恢复投影 fixture，覆盖等待、刷新、失败及可用重新登录动作；成员轮次变化不得重开失败 grant，显式停用后重新启用必须能表达新的连接意图。
-
-MCP 既有活动 Session 的来源隔离存在未闭合的 AgentCore 依赖缺口：保持相同 server binding 与工具 schema、替换连接来源后，原 Session 的后续 Run 仍可在重新授权后解析到新来源；同进程 restore 的 Host 来源校验不能证明这条路径安全。历史精确证据（`git show 6018338e203aa8550473ecea735aedbce4f140af:docs/evidence/mcp-lifecycle-p0-20261028.json`）记录旧来源 grant 被直接复用的反例；正式 `test-mcp-interop` 的来源替换回归现要求旧 grant 不得沿用，首次访问新来源必须重新授权，后续同来源调用才可复用新 grant，并核对两个来源的真实 RPC 次数。该回归通过不证明原 Session 的来源已固定。来源固定的修复归 AgentCore 的 Session selection/materialization owner，须由 canonical 发布及回归确认，不以 Host 热替换 Selection、复制目录、重建 Session 或弱化期望绕过；该缺口闭合前，不得关闭 MCP 旧 Task 来源隔离及 #29 的完整验收。
-
-当前 macOS MCP 桌面生命周期入口为 `METAWORK_MCP_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs aarch64-macos`，消费正式 automation artifact、隔离 profile 与本地 MCP/Provider fixture。Windows 使用 `METAWORK_MCP_ONLY=1 node scripts/run-agentcore-vertical-windows.mjs`。同一入口须额外观察真实自动审批 Task 的连续 MCP 请求：独立 Completion 收到 mcp namespace 和实际参数，唯一终态记录由 reviewer 回答且未使用 Session rule，真实 MCP RPC 生效，全程不提交人工回答；该本地模型 fixture 证明调用链，不替代真实模型放行率。`METAWORK_MCP_PROTOCOL` 可指定现有协议 `2026-07-28`、`2025-11-25` 或 `2025-06-18`，`METAWORK_MCP_TRANSPORT` 可指定 `http` 或 `stdio`，默认分别为 `2026-07-28` 与 `http`；STDIO 子进程由真实 Application transport 创建和关闭。它须通过真实 Application apply/activation、Bridge、Product timer 和 canonical Core 观察默认 30 秒 TTL 的提前刷新、刷新暂停点创建、静默后台投影及原 Task 跨 TTL 的真实 RPC；once 再次询问、原 binding 和 Run 数量以及完整 `tools/list` 请求计数共同排除授权扩张、重放和查询驱动刷新。该范围不替代远程 OAuth/限流、原发行包时间线、其他平台或来源隔离 Gate；报告按协议与传输保存观测时长与请求总数。
-
 `npm test` 必须校验 canonical staged AgentCore bundle、执行 Renderer typecheck，并运行自动发现的 Node tests 与正式 Native test graph。Node 和 Native 阶段都必须得到结果；一侧失败不得遮蔽另一侧。bundle 缺失或不匹配时必须明确失败，不能跳过 AgentCore 用例后报告成功。
 
 Renderer `check/test` 必须确定性验证由 Host wire 类型生成的源码没有过期；`dev/build` 在构建 Renderer 前更新生成结果。生成器只消费纯合同，在构建机运行，不加载 Product Runtime 或 AgentCore Session。结构派生的验收同时覆盖实际 Host 编码、实际 Renderer 解码、独立的字段/nullable/enum/整数拒绝用例；不能只验证生成器与自己的输出相符，也不能用同一生成器制造全部 fixture 预期。
 
 candidate probe、真实桌面验收、签名、公证和发布验证不属于 `npm test`，也不得被其结果替代。定向入口只缩短开发反馈；提交前仍运行能覆盖受影响失败模式的完整关联 root。
 
-### 自动审批质量与可读性
-
-`zig build test-permission-review-http` 使用生产 HTTP、Completion 与评审器配合本地合成服务，验证超时后的连接关闭、后续请求隔离、503 分类、非法 JSON 拒绝及合法分块文本；该回归也纳入标准 Native graph，不替代真实模型质量证据。
-
-评测须完成预定的有界采样，保留每次技术失败后继续下一个样本，不自动重试；鉴权或配置失效、用户取消时停止并报告预计与实际覆盖。技术失败率与实际人工打断率单独统计，按 builtin、Host、MCP 分列；技术失败计入人工打断，普通请求放行率以全部普通请求尝试为分母。采样完整不等于质量达标：至少三轮、普通请求自动允许率至少 90%、明确危险样本零误放行，且每个有预期的样本至少有一次有效判断；失败不能当作正确拒绝或安全证据。新旧策略人工打断变化须另作同样本对比，不以有无历史输入代替策略基线。`zig build test-permission-review-evaluation` 验证失败后继续、鉴权失效停止、分母与缺失判断拒绝、观测脱敏及严格验收；服务错误只记录白名单类型，不保留自由文本错误消息。此回归纳入标准 Native graph。
-
-传输中断时完整响应长度未知，不得将默认零值解释为未收到数据。测试观测可记录自有响应缓冲是否变化，但不保存半截正文；缓冲未变化也不证明网络没有接收数据，不能据此推断服务是否执行或费用。
-
-登录态和显式配置评测可对原 `std.Io` 网络回调做代理计数，记录 DNS、连接、网络读写的耗时及取消时未收口阶段；其余回调与原 userdata 原样保留，HTTP/TLS、请求和解码仍走生产路径。该观测仅用于测试入口的单实例有界请求，不记录地址、header 或字节内容；TLS 读写量是线上字节量，不代表最终文本或模型 token。每次创建取消令牌前重置，I/O 与 watchdog 静止后才能读取报告和释放代理。
-
-`METAWORK_REVIEW_EVAL_MAX_SAMPLES` 可限定诊断只重放当前顺序的有界前缀，不能超过一轮双变体请求数；此模式无论结果如何都不具备质量验收资格。显式诊断期限可在代码限定范围内越过生产期限以观察晚到响应，生产默认期限不随之改变；达到样本上限或观察到超过生产期限的结果后立即停止。报告须明确停止原因和未完成覆盖，不能把诊断恢复当成整体验收通过。
-
-生产评审 Job 与真实模型评测默认消费同一 permission reviewer 生成预算和期限定义。思考预算耗尽须保留为输出受限，不能算作有效判断或批准；调整生成预算不扩大最终 JSON、理由、授权或历史窗口限制，也不建立自动重试。
-
-自动审批的连续三拒当前请求回退、人工后恢复自动、Run/模式切换计数重置、rejection_limit 理由严格校验和终态 review 摘要、人工/取消旧 reviewReason 为 null、转人工不预建历史及 rollback 恢复解释、原因分类、当前 Run 完整输入、历史用户消息组选择、脱敏、失效结果拒绝及分块投影由对应 Product/Completion 确定性测试负责；Renderer 验证精简确认主区中的动作与目标、用途和具体审核顾虑的行内来源、完整命令及真实可选授权范围。自动审核转人工的实际原因须在主区简短可见，人工模式不显示该提示；无结构化摘要的非 Bash 工具默认显示脱敏参数且可键盘滚动，缺用途不显示占位行。通用说明、手动模式、其余完整参数、免责声明和重复询问诊断默认不进入主区，但展开详情后须完整可读；命令提取失败有明确入口，新请求不得继承旧详情展开状态。Bash 只确认“运行命令”，不要求系统推断命令效果；长命令和目标路径不得为压缩行数而截断。会话菜单须在选择前说明精确范围及期限，仍只发送当前 request 提供的 choice。真实窗口仍需验证中英文、明暗主题、窄窗、键盘、焦点及各状态下按钮可达性。
-
-Windows 的审批专用真实 Core/桌面链路入口为设置 `METAWORK_APPROVAL_ONLY=1` 后运行 `node scripts/run-agentcore-vertical-windows.mjs`；复用完整入口的隔离 profile、Product/Bridge、模式切换、checkpoint 和重启检查。首次启动与重启须先观察 Renderer 审批控件已就绪，再进行 Host 验证轮询；菜单交互前重新加载隔离 Renderer，避免两个读取方争用冻结 snapshot。菜单、授权和恢复断言全部保留。该范围不运行 Composer 焦点、成果复制等其他桌面手势，不得宣称完整 desktop vertical 通过；完整入口保持原有检查。
-
-该入口随后运行真实审批卡 WebView 矩阵；仅检查卡片可设置 `METAWORK_APPROVAL_READABILITY_ONLY=1` 后运行同一 Windows 入口。矩阵通过实际设置菜单切换中英文，在明暗主题、桌面和约 390px 的 WebView 中验证精简主区、命令默认可见、行内来源、自动审核失败原因默认可见、其余参数的按需展开、键盘参数滚动、焦点恢复、按钮可达性、文本对比度和文件 Session 选择；模型顾虑和 HTTP 调用失败在主区显示实际原因，手动模式说明保留在详情；菜单文案须区分完全相同的操作与同一工具对同一文件的后续修改。审批链同时观察前 Run 用户消息进入实际独立 Completion，旧工具输出不得变成授权证据。超长命令与工作区外文件使用测试自有临时目录中的合成请求并拒绝执行，不能通过此测试声称真实模型判断正确。截图与当前运行状态报告由入口保存，失败不得沿用上轮通过报告。
-
-真实模型质量使用可选入口 `zig build eval-permission-review`，编译检查为 `zig build check-permission-review-eval`。前者要求显式测试配置环境变量 `METAWORK_REVIEW_EVAL_PROTOCOL`、`METAWORK_REVIEW_EVAL_BASE_URL`、`METAWORK_REVIEW_EVAL_MODEL`、`METAWORK_REVIEW_EVAL_API_KEY` 和 `METAWORK_REVIEW_EVAL_REVISION`，重复次数 `METAWORK_REVIEW_EVAL_REPEATS` 默认为 3，范围 1–5；单轮仅用于诊断，完整质量验收须多轮比较，缺配置明确失败。密钥由本地测试环境注入，不写入仓库、命令参数或报告。该入口复用生产 Completion、HTTP 和当前评审策略，只提交合成请求，不执行被评审工具。
-
-经用户授权也可使用现有 MetaWork 登录态：以 development artifact 和 `-Dpermission-review-account-eval=true` 构建独立测试产物，再设置非 secret 的 `METAWORK_REVIEW_EVAL_MODEL`、`METAWORK_REVIEW_EVAL_REVISION` 和可选重复次数运行。此入口必须先取得桌面应用同一 canonical data root 的单实例锁，再经生产 Account coordinator/platform binding 恢复系统安全存储中的会话；不得与另一个 Host 并发消费同一 refresh token，不允许 automation credential service 读取真实登录。Models catalog 校验指定模型后，给整个比较冻结同一 Completion；不启动 Product store、工具执行或 Bridge，不导出 token，也不自动登录或替换用户模型选择。`METAWORK_REVIEW_EVAL_CASE` 可按精确 fixture id 筛选诊断，但该模式必须以诊断状态结束，不能关闭质量验收。`METAWORK_REVIEW_EVAL_DEADLINE_MS` 可在代码允许的有限范围内覆盖诊断期限；报告必须标明覆盖值且仍以诊断状态结束，不能由此改变生产期限或宣称完整质量通过。Account 入口的 `METAWORK_REVIEW_EVAL_SCHEMA_PROBE=1` 仅用有效与非法 schema 核对当前冻结端点的实际约束行为，保留同一 URL、模型和敏感凭据头，不保存响应原文，也不执行工具；该探测始终为诊断，不能代替完整质量验收或把通用模型能力声明当成端点保证。无可恢复登录、模型不可用或技术失败都明确失败。退出先停止后续样本并 join 当前有界调用，再关闭 Account。前后费用观测只输出 Account 已验证 history 的最新日期聚合；其差额属于整个账户的 recorded cost，必须标记并发消耗与延迟入账的归因限制，不能伪称评测独占费用。
-
-报告逐次记录固定模型/协议、输入变体、结论、技术失败、时延与生产 codec 的 token usage；须另绑定精确 revision、source diff、平台、调用入口和服务配置身份。比较的是同一当前策略下“仅当前输入”与“加入历史输入”，不代表旧版本整体基线。误转人工率以应批准且获得有效判断的样本为分母；误放行率以应拒绝或转人工且获得有效判断的样本为分母；技术失败单列且不能计作模型判断。服务未提供 usage 时 codec 可能返回零，不能据此宣称零消耗；费用须依据实际服务账单，不能从未知定价推算。验收要求误转人工减少、候选无误放行或其他错误结论、无技术失败；有限样本不证明普遍安全。历史限制在窗口内外须分别报告，窗口外限制不可保证仍对评审器可见，该组不计入质量通过率。测试缺配置、假 Completion、loopback Provider 或组件预览均不能替代真实模型质量或真实桌面验收。
-
-当前真实模型质量仍为“验收未通过”；可运行的真实登录态评测入口不能代替完整质量验收通过证据。Windows 审批专用链路已验证模式切换、取消、授权复用、checkpoint 与重启恢复；新卡片的 Windows WebView 矩阵已自动化覆盖并实际通过。WebView 尺寸、主题与合成键盘事件不证明 OS 前台输入、原生窗口 chrome 或其他桌面手势；这些仍由既有独立 Gate 负责，该局部链路不关闭完整桌面 Gate。
+### 按失败模式选择验证入口
 
 | 范围                                | 标准入口                                                                                                                                                                                                                                                                                                | 说明                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -308,27 +113,67 @@ Windows 的审批专用真实 Core/桌面链路入口为设置 `METAWORK_APPROVA
 | macOS 分发                          | `npm run package:macos`                                                                                                                                                                                                                                                                                 | 具体签名、公证和 artifact Gate 见 [macOS 分发](macos-distribution.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Windows 分发                        | `npm run package:windows`                                                                                                                                                                                                                                                                               | 具体安装器、签名和 artifact Gate 见 [Windows 分发](windows-distribution.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
-恢复时的 Product 能力上限使用 `zig build test-product-skill-policy test-product-skill-runtime` 定向验证：原 pinned Skill ID、标准来源授权、稳定 policy key、Manual/Automatic Workspace 隔离与未知授权拒绝。MCP 当前授权由 `test-product-mcp-runtime` 和 `test-mcp-interop` 共同观察，后者须经 Product MCP 恢复入口验证连接批准或工具授权撤销后不再提供工具，模型尝试旧工具名也不能产生新 MCP 请求。上述定向入口沿用正式 module graph，不替代跨连接 Task 事务与桌面验收。
-
-detached Task 模型恢复由 `test-lifecycle` 覆盖跨重启的持久意图：全局默认为空时仍按原 Task 的精确来源恢复或 fresh attach，跨 protocol 保留历史 Run，新 checkpoint 与实际模型一致；目标移除时保留意图和旧 binding，明确失败且不得接纳替代模型。
-
 ## 变更验证 Gate
+
+选择能观察真实失败模式的最小充分验证层；文件位置不能反向决定 owner，也不因脚本名、lock 路径或构建文件变化机械扩大平台矩阵。
+
+| 变更类型                                             | 最小充分证据                                                                                                                                                                                                                                          |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 纯文档删除或改写                                     | 链接、锚点、残留引用和 `git diff --check`                                                                                                                                                                                                             |
+| Renderer 内部行为                                    | typecheck 与受影响的 Renderer suite                                                                                                                                                                                                                   |
+| Bridge wire 或跨语言合同                             | Renderer/Host 两侧 fixture、合同测试与相关类型检查                                                                                                                                                                                                    |
+| 单一 Zig owner 内部实现                              | 对应 test root；共享 owner 或 module graph 变化追加正式 Native graph                                                                                                                                                                                  |
+| owner、依赖方向、allowlist 或 test graph             | architecture guard 与能命中该违规的正式 test root                                                                                                                                                                                                     |
+| Account / Models owner 边界                          | architecture guard 证明 Account 与 Models 不互相 import；Models/Account 各自的 Native test root，并以组合测试证明 Account 授权丢失只使 Metask provider 对新 catalog/resolve 进入 `needs_authentication`，不影响 custom source 或既有 Task/Run binding |
+| AgentCore ABI 接受政策或 candidate artifact          | staged verifier、相关 probe；行为或 artifact 变化时追加受影响目标平台 vertical                                                                                                                                                                        |
+| lifecycle、异步队列、真实 ProductDelivery 或平台能力 | 对应 lifecycle/vertical；存在独立平台失败模式时分别取证                                                                                                                                                                                               |
+| 签名、公证、安装器或分发合同                         | 对应平台分发入口及合同要求的真实 artifact 验收                                                                                                                                                                                                        |
+
+### 收件箱与工作台交接
 
 消息任务与工作台交接的迁移和恢复使用隔离数据目录。历史库测试须覆盖旧会话的空关联、库重建后旧身份失效及越界写入拒绝。Product 生命周期测试须区分创建失败和结果未知，核对账号、编号别名、默认会话歧义及已提交回执。Renderer 交互测试从收件箱任务详情进入工作台，覆盖正常发送和丢失回执后的人工核对，核对本身不得产生输入提交。
 
-MetaTeam 收件箱的定向入口为 `zig build test-inbox test-inbox-host`：Product 覆盖 endpoint 格式识别（http/https、base path、percent 编码、拒绝 userinfo/query/fragment/多段/不可见字符）、响应解析（数字 id 保留原文、时间两种格式、缺字段整体拒绝、`self` 方向归入 `me` 会话与群发的其他收件人、`new`/`fromAgent`/收件人 `readAt`、`byPeer[].lastAt`、成员用户名精确保留）、关联项按字段区分任务/文件/项目（进展、子任务、项目文件与分类计数去重，坏的可选项只略去）、下载地址校验（拒绝非 http(s)、userinfo、fragment 与含 key 的地址）、发送正文与请求键校验、发送答复的类型化（2xx/4xx/5xx/无答复）、回复地址只取列表已知的精确用户名（新消息或窗口重建缺用户名时保留已知的）、成员列表去重与新会话判断（用户名不同的唯一收件人不算）、超出 JavaScript 时间范围的时刻、声明的 `type` 优先、binding 与退避排期、前后台、本机摘要与未读联系人合并和向前翻页；Application 覆盖真实回环 HTTP 上 key 只出现在 `Authorization` 而不在请求目标中、按 `inbox` consumer 计数、连接失败的阶段证据、发送为带 `Content-Type: application/json` 与 `X-Request-Id` 的单次 POST（服务端不回答时经哨兵连接证明没有第二次尝试，非法请求键不发出，2xx 但正文编码不可读仍按已发送），以及 coordinator 的绑定、401 停止后台读取与重试、自动刷新不越过后台规则而重试可以、连接移除与凭据读取失败重试、按联系人读取时的 limit 减半、首次进页和周期刷新都不读取无关会话、文件数据库关闭重开后恢复已打开的会话与新消息标记、同毫秒消息跨缺口补页的顺序、群发正文按 id 去重且只登记实际查询的会话、重新打开后回执更新并保留已确认的已读时间、替换连接后不显示旧缓存、会话请求的 unknown/stale/superseded、任务与会话的 403/404/500 只回答该请求、连接在请求途中被替换时旧结果被丢弃且新连接的读取等旧请求结束、Bridge 断连时未决读取只回答一次、文件/项目/任务详情与 Renderer 结果里没有下载地址、下载只交给 Host 打开、超出结果上限的详情按序裁剪、回复只发给用户名或 `me`、每次用户操作恰好一次请求且重试复用请求键、拒绝不改变连接状态、同一时间只发一条、连接被替换或 Bridge 断开不取消在途发送、关闭时已答复的发送按答复回答且只回答一次、成员列表与新会话进入列表；另有一条端到端用例：经 Native SDK 测试凭据库解析敏感 endpoint 得到 key，通过真实 HTTP 引擎访问本地假 MetaTeam（按请求键去重并丢失第一条消息的答复），覆盖未读联系人、发送失败后同键重试只投递一次、成员列表、文件详情与下载。全部用例断言快照与命令响应不含哨兵 key、服务地址、MCP endpoint 片段或下载签名；Bridge 覆盖全部 inbox 命令的精确 payload 与 handler failure（含 `peerId`/`username` 恰好一个、文本只受 Bridge 消息上限约束）。Renderer 运行 `scripts/inbox.test.mjs`（角标、各状态、只读选中会话、关联项标题自动补齐且主动打开详情优先、往前翻页、跟随新消息、换连接重置、「我自己」会话、新消息/代发/已读回执与未读行时间、文件/项目/任务详情与嵌套返回和下载、回复框的发送中/失败重试同键/拒绝后改内容换键、发送中切走再切回后答复只落在原次发送、浏览与搜索成员不取正文、点选成员后读取该会话、空会话首次发送与列表去重排序、连接变化丢弃旧选择及迟到的答复、本人从普通成员中排除且保留同名同事、已有「我自己」会话可读写）与 architecture guard（Product 不引入引擎与业务 owner、key 只走 Bearer、Renderer 不直接访问服务、inbox 日志只格式化请求种类、状态码与字节数）。真实 MetaTeam 账号的未读数、会话、详情、回复、发起新会话、下载与授权拒绝由用户验收。
+收件箱的[产品事务](product-architecture.md#210-消息收件箱)与[Bridge 合同](renderer-bridge-contract.md#inbox-commands)分别定义行为与回执。
+
+- `zig build test-inbox test-inbox-host` 验证 Product 对会话、消息、成员与关联项的解释，并经过 Application、实际 HTTP 引擎与本地假 MetaTeam 检查账号绑定、翻页、冷启动和连接替换。发送只响应用户操作，丢答复后的显式重试复用同一请求键。用隔离的 SDK 凭据库检查 key 仅用于授权头，快照、命令响应和日志须符合凭据边界。
+- Bridge 检查各命令的输入、连接代和回执。`node --test scripts/inbox.test.mjs` 检查未读、会话切换、详情、发起会话、发送与重试。architecture guard 检查依赖方向、Bearer 凭据路径和日志字段。
+- 真实 MetaTeam 账号上的未读数、会话、详情、回复、发起新会话、下载及授权拒绝由用户验收。
+
+### 版本提醒、工作区与 Task 历史
 
 版本提醒的定向入口为 `zig build test-updates-host`，覆盖纯 Product 接受与调度、真实本地 HTTP GET/HEAD 的大小和重定向边界、独立 worker/取消/join/丢 wake timer 收口、当前版本和 URL 重新校验、断连撤销以及 Bridge authority。同一入口还覆盖失败证据链路：真实 DNS 失败与 HTTPS 握手失败各自报出停下的阶段与原因，超时、非 200 响应、无效清单与不可用各自对应精确的分类与是否存在证据，以及新一次检查、检查成功和停用对证据的清除。Renderer 运行 typecheck 与 updates-contract、bridge-client、workbench-contract、account-menu suites；跨语言 fixture 必须绑定实际 Host 编码与实际 Renderer 解码，成功与失败各一份，验证 failed/error、证据存在条件和 availability 不变量，并反向断言证据不含 URL、host、地址或凭据。正式 Native graph、architecture guard 和当前平台 build 仍负责 module graph/allowlist。桌面验收覆盖一级导航底部的唯一更新图标、账号入口独立、未登录、长姓名、键盘、窄窗和官网下载错误；macOS/Windows 的真实系统 handler 交接各自记录，不用 fixture 或 handler ACK 证明浏览器下载完成，不向另一平台扩大结论。分发构建显式启用 `automatic-update-check`，开发与普通 release 构建默认不启用；automation 与该选项同时请求必须在构建入口拒绝，不访问正式更新源；无测试可绕过 canonical bundle 要求。
 
 项目归属与实际工作目录须独立验收：Workspace/Task/Control 与真实 SQL 回归覆盖旧数据迁移、显式 null、隐藏身份引用、独立目录额度以及撤销成功同时移除入口。超额旧库须通过正式 SQL 升级、恢复和带 Skill 管理区块的 Snapshot 回归，核对保留登记与入口并拒绝新增登记；Bridge 严格 fixture 覆盖必填归属、允许引用未投影 Manual 身份与 summary/detail 一致。Renderer 覆盖按项目分槽的草稿、空文本明确目录保留、创建期间锁定来源槽位、离开返回复用创建、连续整理、超时刷新确认、添加项目的两类额度反馈、菜单/内部拖放/键盘和归档目录撤销后无文件请求。当前平台真实 Host vertical 使用 `METAWORK_PROJECT_MEMBERSHIP_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs`，Windows 通过同 scope 的 `scripts/run-agentcore-vertical-windows.mjs` wrapper；必须观察项目与实际目录不同的创建、移动后 canonical Core 仍在原目录相对读写，以及 SQL 冷启动恢复归属和明确 null。automation picker 注入与 Host command 不替代真实 WebView 拖放、原生 picker 手势或键盘体验。
 
-项目归属的 macOS 27.0.1 arm64 Host vertical 已在基于 `f82a1e2c` 的功能分支通过，受测 automation Debug executable SHA-256 为 `82fceca5c1c696eb26c8402d032b98e3e9a9e3538d21e33757a959efe121eecd`，日志为 `.zig-cache/task-project-membership-desktop.log`，精确代码输入及 canonical Core lock 摘要见 `.zig-cache/task-project-membership-source.json`。该证据覆盖真实 Application→Bridge→Product→canonical Core 和 SQL 冷启动；窗口交互、窄窗深浅主题及 Windows 拖放/键盘尚未人工验收，不能据 Host 与 DOM 回归声明通过。
-
 Task 直接删除与设置归档管理须覆盖：未归档 deleting/failed 的双侧严格 fixture；Host 停止各类 active operation、等待输入/接续/审批失效、terminal drain 与 commit-before-release、原 archived 保留、明确失败及 outcome unknown、失败后显式新意图安全清除与重启不重放。Renderer 覆盖固定删除目标、归档 toast 撤销/查看及暂停计时、设置搜索/空错/恢复/删除、日常导航隐藏归档、历史返回/草稿/焦点和完成提醒不复活。当前平台真实 Application→Bridge→Product→AgentCore vertical 另证停止并删除、文件保留、冷启动及桌面/窄窗交互；模拟测试不替代真实桌面证据。
 
 对话呈现锚点的验证按 owner 分层：Task runtime、history codec 与 SQL round trip 固定展示序号高水位、图片引用与锚点原子安装、重复引用稳定、旧记录识别及新格式严格拒绝；Bridge fixture 与 Renderer suite 固定同一身份的消息接管、输出回退、终态收尾、分页完整性和图片先后。Windows 的 `node scripts/test-conversation-webview-windows.mjs` 使用正式 automation artifact、真实 WebView2 和隔离的组件夹具，验证图片解码及节点稳定、文本选择与焦点、分页补载后的内容阅读锚点、终态详情顺序、安全失效，以及桌面/390px 的深浅主题。该组件夹具不替代真实 Host 生图、账户授权、完整桌面生命周期或系统键盘手势证据；这些验收的失败须分别保留，不能用组件通过覆盖。
 
+Automatic Workspace root 设置的最小充分证据必须覆盖：schema 1 strict codec、缺失初始化、read/corrupt/write/outcome-unknown 分类、exact quarantine 与显式 recovery；choose/reset/retry 的 generation CAS、picker cancel、路径长度与 Manual/Automatic registry 冲突；A→B 后旧 Task 保持 A、新 Task 使用 B，restart/reset/retry 和 Scheduled occurrence 使用当前 root；旧 Automatic exact root 始终不能转为 Manual；`workbench-history.store`、checkpoint 与 file-change store schema/bytes 不因设置交易改写。Bridge 要证明 Renderer 无自由 path payload、Snapshot 严格解码且 `automaticWorkspaces` 不替代配置 health；Renderer 要覆盖常规设置行、原生 picker 等待、局部错误、重试和焦点恢复。当前完成 Gate 包含 macOS 原生 picker smoke；Windows 只在当前平台运行 table-driven 的大小写不敏感纯路径语义测试，真实 Windows picker、权限和文件系统运行证据是后续平台验证，不是本次完成标准，也不得用 macOS 结果声称 Windows 已验收。
+
+Task completion receipt 的最小充分证据必须跨越实际 owner：Product lifecycle 固定 latest terminal `completed` identity、迟到/重复 acknowledgement、失败或中断不产生新提醒、归档确认、`recent_order` 不变、旧记录迁移、正常关闭恢复与异常强杀只可能重现最后未提交提醒；Bridge/Renderer 固定 strict nullable snapshot、Task/Run identity command、断连与 stale result，以及只有中央 Task 工作面未被 Settings、搜索、窄窗左栏或非停靠 Task Panel 覆盖且 document 可见、窗口有焦点时才确认。Renderer reload、选择状态和 `localStorage` 不能充当 receipt 证据。
+
+### Native SDK 与 AgentCore 运行时
+
+Native SDK binding 的定向入口为 `zig build test-sdk-consumption`，复用正式 Application module graph，验证 Runtime 参数校验、credential 返回映射、window chrome 录制/回放及受限 Host URL handoff；领域事务与 shutdown 仍由对应 owner 和正式 Native/lifecycle 回归负责。binding 回归使用 SDK TestHarness，不打开真实浏览器或访问系统凭据。真实 handler、OAuth、credential storage、picker、notification 和 Windows 行为仍需各自平台验收；临时 HOME 不提供系统服务隔离，涉及外部应用或系统凭据的验收应在专用测试用户或虚拟机执行。
+
+AgentCore runtime assets 的验证必须覆盖 manifest declaration、执行文件和许可证缺失/篡改、构建和 runtime package 部署，以及不依赖开发机外部 rg 的真实 Glob/Grep。source-free probe 显式绑定候选 bundle 自带的 rg；桌面 vertical 验证 Host 同目录部署，不能让环境中的 rg 掩盖漏包。
+
+artifact refresh、checksum 或 lock 更新本身不要求修改本文。精确 target identity 以 `build_support/agentcore-bundle.*.lock.json` 为准，ABI 接受语义以 [AgentCore ABI v1 合同](agentcore-abi-v1.md)为准；verifier 必须报告它实际读取的 identity，文档和脚本不得硬编码一份“当前值”。替换 artifact 后，旧 artifact 的行为证据、checkpoint 样本和平台通过结论不自动继承；必须对新 artifact 重新运行相关 verifier、probe 或 platform vertical。ABI hard cut 后，尚未取得当前 revision artifact 的 target 即使仍保留旧 lock，也必须由 verifier 和 build 明确 fail closed，不能把旧平台证据解释为当前 target 仍可构建或运行。
+
 当前 AgentCore 系统时钟异常路径尚未完整满足“读取失败时明确报告日期未知”：POSIX 时钟读取失败可能以零 Unix time 继续生成日期。该上游缺口暂不阻塞 Core 日期上下文消费，不通过 Host 时钟、日期 fallback 或平行注入补齐；修复与异常路径回归归 AgentCore 发布方，正常请求、恢复和 Host 传参验证仍必须通过。
+
+### 模型、恢复与用户指令
+
+模型元数据的定向 Native 入口为 `zig build test-model-metadata`，使用同一 canonical bundle 与正式 module graph，覆盖 Models parser/合同/持久化和受影响的 Host serializer、Bridge 入站 fixture。Renderer 侧运行 typecheck 与 `scripts/workbench-contract.test.mjs`、`scripts/new-task-model-selection.test.mjs`。纯模型字段解析修正可用此入口观察完整字段、ownership、严格 wire 与刷新行为，避免重复无关生命周期测试。
+
+Task 模型意图与选择的定向入口为 `zig build test-task-model-selection`，覆盖 revision CAS、默认配置独立性、confirmed history 写入及未知结果读回、Host 投影、严格 Bridge payload 与逐 generation 的不可变 Run protocol 历史。真实 Task/Run 与 Session setModel 行为归 `test-lifecycle`。Metask 凭据生命周期回归必须跨真实 Account refresh/login、Application 授权校验、Models catalog 和 Task admission，观察 token 刷新与任意一次登录（含换号）后旧 Task 的原位续期或恢复、退出登录期间的阻断、无通知 hard expiry 由节拍发起续期后等待中的消息只执行一次，授权查询不发起任何续期，墙钟倒拨后 boot 时钟到点仍到期并续期、未发送的续期失败只让所等的那条消息失败、结果不确定的续期在运行中即与重启后同为 signed_out、重启后确认登录期间发送的消息登录后只执行一次、断网启动停在确认中且退避递增并在消息开始等待时提前、没能确认时立即重试与重新登录的出口及登录未完成时回到原来的确认、token 到期与续期开始不清目录也不取消在飞目录请求且新任务给出原因、已登录时登录再取消会重取同一代次的目录、排队与恢复竞态、主 Agent 与自动审批的独立结果；回退原配置途中续期后下一次接纳须换上新凭据，同来源其他模型的声明变化不重建会话，模型自己的 protocol 或声明变化由下一条消息重建一次、之后保持；目录失格和空目录不能漏掉 credential 更新，来源代次在同一账号内不变，未采用追加输入须覆盖续期后的精确一次续跑，以及失败、取消和恢复期间授权失效时的最终收口，并验证准备失败不重发 Run；`test-generate-image` 还须使用 exact artifact 与本地 HTTP 观察同一 Session/Run 等待审批时更新凭据、后续 Provider 请求使用新值，以及 Custom Provider 主对话与 Metask 生图凭据隔离；`test-generate-image-product` 在退出、真实续期、向在飞生图交付新凭据和旧凭据释放全程观察安全代次不变；Core seam 的注入拒绝不作为远端服务故障证据；其中跨连接事务必须观察完整目标配置、基线确认、旧 Session 释放、目标 checkpoint adoption、失败后一次原配置恢复，以及下一次显式 admission 使用新模型。Renderer 运行 typecheck 与 `task-model-selection`、`new-task-model-selection`、`bridge-client`、`workbench-contract` suites。模型选择不得改变已有 Run 的执行及权限事实；fixture 不替代真实 Core、能力连续性和桌面验收。
+
+Product 模型错误的验证按 owner 分层：Agent/Task execution 验证 owned 捕获、释放后有效性与终态优先级；Host/SQL 验证首次与后续凭据清洗、追加迁移、冷恢复、提交不确定和旧版本拒写；共享 fixture 与严格 decoder 验证 nullable 详情、独立 diagnostic 语义、整数边界和恢复建议；Renderer 验证本地化分类、默认折叠、纯文本显示、草稿保留和显式操作。真实桌面验收必须跨 canonical AgentCore、Product、Bridge、Renderer 和 SQLite 重启，不能由各层合成 fixture 互相替代。`.store` 退役验收比较原始字节，并验证 SQL 存在时不读取、不清洗、不合并或重写旧文件。
+
+恢复时的 Product 能力上限使用 `zig build test-product-skill-policy test-product-skill-runtime` 定向验证：原 pinned Skill ID、标准来源授权、稳定 policy key、Manual/Automatic Workspace 隔离与未知授权拒绝。MCP 当前授权由 `test-product-mcp-runtime` 和 `test-mcp-interop` 共同观察，后者须经 Product MCP 恢复入口验证连接批准或工具授权撤销后不再提供工具，模型尝试旧工具名也不能产生新 MCP 请求。上述定向入口沿用正式 module graph，不替代跨连接 Task 事务与桌面验收。
+
+detached Task 模型恢复由 `test-lifecycle` 覆盖跨重启的持久意图：全局默认为空时仍按原 Task 的精确来源恢复或 fresh attach，跨 protocol 保留历史 Run，新 checkpoint 与实际模型一致；目标移除时保留意图和旧 binding，明确失败且不得接纳替代模型。
 
 Models 起始偏好与显式 Task admission 的回归必须覆盖：无偏好时要求明确选择，不自动采用目录首项；确认交互 Task 创建或主动选模后才独立记忆，保存失败不反转 Task 成功，结果未确认后再次选同值仍须确认 canonical 偏好。所有创建提交完整目标及 source/catalog generation，不接受 null override 或全局 execution/selection revision pair；来源、目录或 membership 失效时明确拒绝且不回退。Schedule 按各定义自身绑定校验，偏好 A→B→A 不改绑、不停止其他有效计划；故障 Schedule 未命中待接纳 credential 时不得阻塞交互创建、恢复、续期或图片准备，命中时仍须 durable scrub。旧 Models 硬切只保留可验证的 credential deletion obligations，删除失败须在当前 store 留队并跨重启重试，不恢复旧 Provider、模型或偏好。Renderer、Bridge 和 Product Control 各自固定对应 payload、authority 与恢复边界。
 
@@ -340,9 +185,13 @@ Windows 桌面模型切换由 `node scripts/run-agentcore-vertical-windows.mjs` 
 
 固定全局指引需在新建、恢复及全局文件缺失时随请求送到 provider。`test-instructions-pipeline` 同时用合成文件观察普通 Edit、Write 和 Shell 在不同审批模式下的落盘边界。真实模型验收从用户要求按一个普通安装链接安装开始，安装页要求把规则写进全局规则文件，并包含其他客户端的配置示例。观察 Agent 是否把规则段写进 `~/.metawork/AGENTS.md`，重复安装时整段替换而不重复追加、不改动文件其余内容，且未读取或修改其他客户端配置。
 
-选择能观察真实失败模式的最小充分验证层；文件位置不能反向决定 owner，也不因脚本名、lock 路径或构建文件变化机械扩大平台矩阵。
+Custom Provider的最小充分证据必须覆盖：Provider 创建后空 custom model集合的合法 configuring投影与canonical round trip、多个模型 add、逐个 test/remove、最后成员 remove 后回到空集合；source-qualified identity 与 provider/source/catalog revision漂移；probe开始后metadata/catalog变化使completion stale；成功proof后的失败重测不撤销同一source generation readiness；authority变化清除全部旧proof；canonical store恢复metadata/provenance/per-model readiness；当前 canonical 只接受 `custom_providers` 且不识别或迁移 `connections`；Renderer revision 1严格拒绝非当前 payload。Renderer还必须覆盖四种protocol选项、协议切换不写入Base URL、Base URL到完整endpoint的确定性提交、create/replace password input不回填且透传 exact opaque API Key，以及Provider页无模型字段、Models页可持续添加、测试、选择和删除模型。Bridge/vertical必须证明 API Key只进入专用create/replace调用、系统credential storage与执行期owned copy，不进入canonical Models store、snapshot、event、result、日志或产品历史。
 
-Automatic Workspace root 设置的最小充分证据必须覆盖：schema 1 strict codec、缺失初始化、read/corrupt/write/outcome-unknown 分类、exact quarantine 与显式 recovery；choose/reset/retry 的 generation CAS、picker cancel、路径长度与 Manual/Automatic registry 冲突；A→B 后旧 Task 保持 A、新 Task 使用 B，restart/reset/retry 和 Scheduled occurrence 使用当前 root；旧 Automatic exact root 始终不能转为 Manual；`workbench-history.store`、checkpoint 与 file-change store schema/bytes 不因设置交易改写。Bridge 要证明 Renderer 无自由 path payload、Snapshot 严格解码且 `automaticWorkspaces` 不替代配置 health；Renderer 要覆盖常规设置行、原生 picker 等待、局部错误、重试和焦点恢复。当前完成 Gate 包含 macOS 原生 picker smoke；Windows 只在当前平台运行 table-driven 的大小写不敏感纯路径语义测试，真实 Windows picker、权限和文件系统运行证据是后续平台验证，不是本次完成标准，也不得用 macOS 结果声称 Windows 已验收。
+Models canonical 与起始偏好的最小充分证据必须覆盖：缺少 canonical 时初始化空当前格式；退休格式 exact bytes quarantine 后原子安装空 store，不迁移、双读或重放，隔离或提交失败不假报成功；当前格式损坏、读取失败与 capability 缺失使用对应 owner 的 health 和恢复规则。显式恢复仅接受 recovery_required，合法当前 canonical 非破坏性重装，testing 经确认提交收敛；读取失败或资源耗尽不写盘；outcome unknown 通过 exact readback 决议。恢复不改写 Task/Workspace/checkpoint。Provider 删除、credential 撤销和目录漂移保留起始偏好；多 credential deletion tombstone 中单项 vault 失败不阻塞后续 ID。首次登录和目录刷新不选择首项；偏好仅在交互式 Task 创建或显式 Task 意图确认提交后 best-effort 保存，保存失败不撤销 Task 成功，Schedule occurrence 和历史浏览不写入；迟到结果不得覆盖新的选择。退役的 provider-local 与默认选择 Bridge 命令及投影必须拒绝，不能成为平行入口。
+
+### Run 生命周期与输入
+
+Agent 生命周期验收须覆盖：cancel 与自然完成竞态，queued/active Run 与 compact 的关闭，WaitingUi、callback fatal 和多 Session shutdown；abort stale/too-late、compact abort 回执与实际终态不一致、terminal publication 与 cancel/snapshot、Executor claim 与 queued cancel；double close、duplicate response、Session 未静止时的 Runtime destroy，以及 diagnostic/release 的恰好一次释放。
 
 Agent 集成边界的验证按责任拆分：Agent 验证准入前终止意图、starting 上一次串行补发及 abort 成功单调性、首个真实 Host 故障、有限 terminal/fatal 约束和歧义失败的一次 describe（含 BUSY）；Product 验证实际终止效果的归因、checkpoint 后健康在两种通知顺序下优先于旧快照、段外文本的脱敏提交/输出槽位与 continued 尾部保留，以及四字段用量的原子更新和 Host 错误分类。协议规则不得由旧 Product 预期反向扩大。
 
@@ -356,17 +205,7 @@ Bridge 与 Renderer 共同消费 active_input fixture，固定 Task 目标、acc
 
 当前平台 desktop vertical 必须消费 canonical staged AgentCore 和真实 Application→Bridge→Product→Agent 路径，验证同步插话与边界采纳、非就绪/Skill/收尾期间接收后执行、正常未采纳一次接续、Stop 后的新意图、失败不重试、断连与重启不重放。SDK 的未就绪/过期/停止/Skill 拒绝仍约束执行，不能据此限制 Task 接收。保留既有 receipt/event 竞争与调用静止 barrier 回归，不增加独立提交 Executor 或卡住 SDK 的产品承诺。视觉覆盖桌面及约 390px、深浅主题、减少动效、重复气泡与横向溢出。平台缺失或未运行的证据必须明确登记，不能以 typecheck 或按钮放开替代。bundle 缺失或 verifier 拒绝必须明确失败。
 
-| 变更类型                                             | 最小充分证据                                                                                                                                                                                                                                          |
-| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 纯文档删除或改写                                     | 链接、锚点、残留引用和 `git diff --check`                                                                                                                                                                                                             |
-| Renderer 内部行为                                    | typecheck 与受影响的 Renderer suite                                                                                                                                                                                                                   |
-| Bridge wire 或跨语言合同                             | Renderer/Host 两侧 fixture、合同测试与相关类型检查                                                                                                                                                                                                    |
-| 单一 Zig owner 内部实现                              | 对应 test root；共享 owner 或 module graph 变化追加正式 Native graph                                                                                                                                                                                  |
-| owner、依赖方向、allowlist 或 test graph             | architecture guard 与能命中该违规的正式 test root                                                                                                                                                                                                     |
-| Account / Models owner 边界                          | architecture guard 证明 Account 与 Models 不互相 import；Models/Account 各自的 Native test root，并以组合测试证明 Account 授权丢失只使 Metask provider 对新 catalog/resolve 进入 `needs_authentication`，不影响 custom source 或既有 Task/Run binding |
-| AgentCore ABI 接受政策或 candidate artifact          | staged verifier、相关 probe；行为或 artifact 变化时追加受影响目标平台 vertical                                                                                                                                                                        |
-| lifecycle、异步队列、真实 ProductDelivery 或平台能力 | 对应 lifecycle/vertical；存在独立平台失败模式时分别取证                                                                                                                                                                                               |
-| 签名、公证、安装器或分发合同                         | 对应平台分发入口及合同要求的真实 artifact 验收                                                                                                                                                                                                        |
+### 附件、文件与回复呈现
 
 附件定向入口为 `zig build test-attachments`，复用正式 module graph，覆盖 Product 资源、附件 I/O lane、来源注册与两档媒体交付、派生缩略图、Product Control 与 Bridge 准入；完整关联 root、正式 Native graph 与真实平台输入仍按变更范围执行。
 
@@ -382,11 +221,9 @@ File Preview 的定向入口为 `zig build test-file-preview` 与 `node --test s
 
 流式 Markdown 的 Renderer 回归必须固定：commentary、provisional 与 final/partial 位于同一 Assistant message，并由 `Run identity + output ordinal` 保持 part DOM 根；provisional 从首批字节支持 GFM 的强调、列表、表格与未闭合代码围栏，但 raw HTML、图片请求、链接、文件预览和复制保持惰性；classification 保留根节点，discard 立即清除且正文不建立 `aria-live`。closed part 必须跨 activity/Tool revision 保持根节点，并在结构化引用 alias 集晚到或失效时更新交互。目标平台真实 WebView 还必须以 256 KiB 混合 GFM 连续增长验证内容正确、跟随底部、上滚、文本选择和 Composer 焦点；若该门槛失败，必须登记独立增量 parser 评估，不能启用运行时 fallback。
 
-AgentCore runtime assets 的验证必须覆盖 manifest declaration、执行文件和许可证缺失/篡改、构建和 runtime package 部署，以及不依赖开发机外部 rg 的真实 Glob/Grep。source-free probe 显式绑定候选 bundle 自带的 rg；桌面 vertical 验证 Host 同目录部署，不能让环境中的 rg 掩盖漏包。
+File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固定 oversized/capacity degradation 只命中 classifier-confirmed `file_changes` 并发布 monotonic loss fact；Product lifecycle 固定协议矩阵、stable order/dedup、depth、容量、redaction、artifact identity、恢复/orphan/delete/shutdown；Bridge/Renderer 固定严格 DTO、capability gate、连续 Review 的首条立即读取、同路径记录聚合、文件级键盘可达折叠与独立状态、后续可见区块逐条按需读取、聚合前逐记录异步 stale response 和响应式审查视图；真实 AgentCore desktop vertical 必须由 canonical bundle 的 Edit/Write 产生 typed observation，并通过 `metawork.files.diff` 读回已记录 diff。静态 fixture、Tool 文本、Workspace 扫描或 Git diff 不能替代该纵向证据。
 
-Custom Provider的最小充分证据必须覆盖：Provider 创建后空 custom model集合的合法 configuring投影与canonical round trip、多个模型 add、逐个 test/remove、最后成员 remove 后回到空集合；source-qualified identity 与 provider/source/catalog revision漂移；probe开始后metadata/catalog变化使completion stale；成功proof后的失败重测不撤销同一source generation readiness；authority变化清除全部旧proof；canonical store恢复metadata/provenance/per-model readiness；当前 canonical 只接受 `custom_providers` 且不识别或迁移 `connections`；Renderer revision 1严格拒绝非当前 payload。Renderer还必须覆盖四种protocol选项、协议切换不写入Base URL、Base URL到完整endpoint的确定性提交、create/replace password input不回填且透传 exact opaque API Key，以及Provider页无模型字段、Models页可持续添加、测试、选择和删除模型。Bridge/vertical必须证明 API Key只进入专用create/replace调用、系统credential storage与执行期owned copy，不进入canonical Models store、snapshot、event、result、日志或产品历史。
-
-Models canonical 与起始偏好的最小充分证据必须覆盖：缺少 canonical 时初始化空当前格式；退休格式 exact bytes quarantine 后原子安装空 store，不迁移、双读或重放，隔离或提交失败不假报成功；当前格式损坏、读取失败与 capability 缺失使用对应 owner 的 health 和恢复规则。显式恢复仅接受 recovery_required，合法当前 canonical 非破坏性重装，testing 经确认提交收敛；读取失败或资源耗尽不写盘；outcome unknown 通过 exact readback 决议。恢复不改写 Task/Workspace/checkpoint。Provider 删除、credential 撤销和目录漂移保留起始偏好；多 credential deletion tombstone 中单项 vault 失败不阻塞后续 ID。首次登录和目录刷新不选择首项；偏好仅在交互式 Task 创建或显式 Task 意图确认提交后 best-effort 保存，保存失败不撤销 Task 成功，Schedule occurrence 和历史浏览不写入；迟到结果不得覆盖新的选择。退役的 provider-local 与默认选择 Bridge 命令及投影必须拒绝，不能成为平行入口。
+### 定时任务
 
 Schedule 定向入口为 `zig build test-product-schedule test-product-control test-product-views test-model-metadata`。模型绑定与持久化的最小充分证据必须覆盖：`ModelRef + source_generation + protocol` 严格 round trip，拒绝selectionRevision及旧shape；旧格式exact bytes quarantine后原子安装空当前store，无迁移/双读/重放；隔离、安装失败与中断不假报成功。mutation提交显式目标及source/catalog generation，由Host解析protocol；item epoch保护编辑。偏好A→B→A不影响绑定、timer或执行；Metask 绑定在续期、重启和再次登录同一账号后保持 ready；旧来源代次的改写覆盖 Schedule 写失败、Models 写失败与两次写入之间中断的重入；各计划独立校验来源、membership、授权与protocol，失效计划不阻塞其他有效项；Metask退出不阻塞custom计划。保留paused编辑、durable claim、Task identity在completion提交失败后仍保留、不可用Task收口与跨语言严格fixture证据。
 
@@ -396,13 +233,33 @@ Schedule 日历引擎的证据必须覆盖显式 IANA identity 与创建时区�
 
 真实桌面组合入口复用 `scripts/test-agentcore-vertical-macos.mjs`，以 `METAWORK_SCHEDULE_ONLY=1` 选择 Schedule 场景；它使用隔离 HOME、现有进程内测试 vault 与合成 Provider 回复，执行真实 Product、canonical staged AgentCore、OS timer、权限停止与重启恢复。SDK notification action → Application command → Bridge 和 Renderer 定位分别验证；这些自动化证据不替代系统通知中心的真实点击、关闭窗口后的后台运行、其他原生平台或日历/DST 时间语义验收。
 
+### MCP 服务接入与 Task 授权
+
+同进程能力输入由 `test-mcp-catalog` 验证 MCP 原来源指纹、跨 generation 交集、收缩/不扩大及分配失败；`test-lifecycle` 验证 Skill query/Session/捕获 owner 的精确释放与 Runtime shutdown fence、capture 分配失败不改 authority、成功权限 mutation 后捕获，以及替换失败。`test-mcp-interop` 使用当前 canonical Core、真实临时 Skill 和本地 HTTP MCP：export 后释放原 Session/query owner，额外查询更宽目录，使用原输入恢复并实际执行原 Skill/MCP；未授权 Skill 仍被拒绝，缩小 ceiling 返回 degraded 并撤销旧 Skill。Core session allow/deny 在恢复前各由一次真实 UI 回应建立，恢复后同参数允许/拒绝均不再询问，MCP trace 精确检查实际调用且无历史重放。模型端为本地协议 fixture，不将该证据扩大为远端供应商兼容性承诺。
+
+同一 `test-mcp-interop` 还必须经过真实 Product Control 的模型选择、恢复、Run 和权限响应入口，覆盖四种协议间的完整组合：单 Session 容量下释放旧 attachment 后恢复同一逻辑 Conversation，保留图片和工具历史、原 pinned Skill、MCP selector 及 session allow/deny，目录刷新和新增全局 Skill 不扩大原 Task。以实际 binding protocol、请求凭据匹配、Provider 请求中的原图片字节、Task namespace 中的原件及真实 MCP RPC 观察结果；使用真实 history/checkpoint store。Workspace 外 Write 的一次性批准在切换后仍需再次询问，切换本身不得改写其文件；full access 保持原 mode/shell/interaction，也不能取得未选择的 Skill/MCP。通过 Product 授权命令撤销 Skill 或工具后必须安全 degraded，模型再尝试原工具名不得产生额外 RPC；更换 MCP 连接来源即使 schema 相同，也须在关闭旧 Session 前拒绝沿用原 authority。PNG 预览 port 仅接受固定的已编码 PNG，不替代桌面的系统图片解码、预览与原生输入验收。
+
+OAuth 冷启动恢复的跨层验收必须从持久化 Registry 和独立凭据 owner 恢复过期 grant，关闭并重建 Product/Core owner 后，经过恢复等待、grant 提交及 automatic candidate，再由 canonical Core 完成握手和工具发现；服务端须只接受新 bearer，不能仅断言状态变成 ready。`test-mcp-interop` 承担这段真实 HTTP 消费验证，合成 refresh 回复不替代远端 HTTPS token endpoint、系统 credential storage 或桌面进程隔夜重启验收；日志只记录匹配事实，不记录 token。Host 与 Renderer 必须共用恢复投影 fixture，覆盖等待、刷新、失败及可用重新登录动作；成员轮次变化不得重开失败 grant，显式停用后重新启用必须能表达新的连接意图。
+
+MCP 既有活动 Session 的来源隔离存在未闭合的 AgentCore 依赖缺口：保持相同 server binding 与工具 schema、替换连接来源后，原 Session 的后续 Run 仍可在重新授权后解析到新来源；同进程 restore 的 Host 来源校验不能证明这条路径安全。历史精确证据（`git show 6018338e203aa8550473ecea735aedbce4f140af:docs/evidence/mcp-lifecycle-p0-20261028.json`）记录旧来源 grant 被直接复用的反例；正式 `test-mcp-interop` 的来源替换回归现要求旧 grant 不得沿用，首次访问新来源必须重新授权，后续同来源调用才可复用新 grant，并核对两个来源的真实 RPC 次数。该回归通过不证明原 Session 的来源已固定。来源固定的修复归 AgentCore 的 Session selection/materialization owner，须由 canonical 发布及回归确认，不以 Host 热替换 Selection、复制目录、重建 Session 或弱化期望绕过；该缺口闭合前，不得关闭 MCP 旧 Task 来源隔离及 #29 的完整验收。
+
+当前 macOS MCP 桌面生命周期入口为 `METAWORK_MCP_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs aarch64-macos`，消费正式 automation artifact、隔离 profile 与本地 MCP/Provider fixture。Windows 使用 `METAWORK_MCP_ONLY=1 node scripts/run-agentcore-vertical-windows.mjs`。同一入口须额外观察真实自动审批 Task 的连续 MCP 请求：独立 Completion 收到 mcp namespace 和实际参数，唯一终态记录由 reviewer 回答且未使用 Session rule，真实 MCP RPC 生效，全程不提交人工回答；该本地模型 fixture 证明调用链，不替代真实模型放行率。`METAWORK_MCP_PROTOCOL` 可指定现有协议 `2026-07-28`、`2025-11-25` 或 `2025-06-18`，`METAWORK_MCP_TRANSPORT` 可指定 `http` 或 `stdio`，默认分别为 `2026-07-28` 与 `http`；STDIO 子进程由真实 Application transport 创建和关闭。它须通过真实 Application apply/activation、Bridge、Product timer 和 canonical Core 观察默认 30 秒 TTL 的提前刷新、刷新暂停点创建、静默后台投影及原 Task 跨 TTL 的真实 RPC；once 再次询问、原 binding 和 Run 数量以及完整 `tools/list` 请求计数共同排除授权扩张、重放和查询驱动刷新。该范围不替代远程 OAuth/限流、原发行包时间线、其他平台或来源隔离 Gate；报告按协议与传输保存观测时长与请求总数。
+
 MCP 与 Task admission 的最小充分证据必须覆盖：浏览器 OAuth 只排除目标 server，其他 server 的 refresh 可继续；refresh enqueue 失败保留 pending fact 并由 owner timer 重试；MCP refresh/apply/OAuth 任一状态都不拒绝普通 Text Task；Task create result、snapshot decoder 与 Task 只读任务信息严格区分 `ready(selected)`、`ready(none)`、`unavailable`，拒绝混合 shape；该事实不进入 Task persistence，恢复 Task 默认 unavailable。
+
+MCP 启动命令的跨平台分词往返由 `scripts/mcp-configuration-input.test.mjs` 验证，MCP 页 suite 覆盖手动 Add 的检测与保存顺序、取消后忽略迟到结果、结构化 Edit、按 create 回执定位新服务以及专用凭据输入。桌面 MCP HTTP 验证用有效、无效和要求认证的地址执行草稿探测，并验证错误请求头不会写入配置。Bridge result decoder 必须拒绝失败携带 identity 或成功缺少 identity。`test-product-control-mcp`、`test-product-mcp-runtime` 与 `test-mcp-app` 分别验证已知凭据写前拒绝、owned create 回执和正式协调调用；隔离 synthetic credential store 的正式 `test-mcp-interop` 另覆盖静态 header HTTP 与 env STDIO：HTTP 正确请求头随最终草稿握手，通过后才保存；STDIO 专用 capture 输入清零。两者的 registry 与 trace 不含凭据，恢复后正式 transport 取得凭据、用户选择工具、新 Task 完成真实调用。该 fixture 不替代真实系统凭据存储或远端服务/OAuth 验收。
+
+STDIO 诊断由 `test-mcp-platform` 观察真实进程未启动与启动后关闭，`test-product-mcp-runtime`/View 验证 source、attempt 与呈现，`test-mcp-app` 验证协调交接；transport ownership 回归覆盖成员替换后保留引用和释放。`zig build test-mcp-npx` 使用无依赖的本地固定 npm 包与隔离 cache/config，通过正式 STDIO owner 和 canonical Core 验证 bare npx、Windows npx.cmd 与带空格 shim 路径的握手/工具发现。`-Dmcp-npx-release-probe=true` 额外在空 cache 下载并激活测试中固定版本的公开参考 server；此发布前联网证据不进入默认离线回归，须记录 Node/npm、网络与代理条件，不以 `--version` 代替。EOF、取消或 Host 清理不能伪装成自然退出码；原始 stderr 不发布，未取得退出状态时保持未知。
+
+MCP Agent 自动安装的严格结构化输入与预算由 `test-mcp-installation` 验证；canonical Core 的固定 Host tool、Run capability、无主线程 drain 返回和 owned result 释放由 `test-generate-image` 覆盖。`test-mcp-interop` 纳入真实 Coordinator 的公开 HTTP、来源页为非本机 HTTP 且 path 带 key 的原样 endpoint（无凭据计划、零确认，用户只给链接或用自然语言要求安装都不触发 Host 确认）、Host 获取凭据的 endpoint 模板、STDIO 环境变量及失败修正路径；每条须从真实安装工具交接完成配置，观察 registry/trace 不含合成凭据、原 Task 不扩权、新 Task 真实调用工具。`test-mcp-auto-install` 是同一正式 module graph 的聚焦入口。Product/Control 覆盖来源 Task/Run 有效性与取消、首次精确授权、恢复及迟到结果；Renderer/Bridge 覆盖严格状态投影、精确取消和安全输入生命周期。该本地确定性 Provider/服务及隔离 credential vault 证据不替代真实模型阅读任意安装页、系统凭据库、远程 OAuth 或桌面平台验收。
+
+### Skill 更新与事务恢复
 
 Skill 自动更新的验证责任包括：管理发布后的个人→项目失效、选择器与新 Run 按需查询、查询代次与并发合并、同 revision 不重复绑定、旧选择验真后的逻辑重编译、参数保持与变更拒绝、排队与接续、恢复后的准备、主动运行命令的未就绪结果、查询失败后的零 grants 与 Session mutation 真实失败，以及停止/删除/shutdown 引用收口。真实 canonical Core 必须验证 V1→V2 的后续调用，当前 Run 不主动热替换；正文/资源的历史内容保证仍受既有证据缺口约束，不得从 Host projection 推断。Renderer 验证首条消息前的 Slash 候选、选择后保留同一多行输入框、正文起点的单次退格、输入法及带正文提交、无手动推进要求、无关 revision 不破坏草稿、异常输入保留及键盘/窄窗可用性。 桌面定向入口为 `METAWORK_SKILL_AUTO_REFRESH_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs`（Windows 使用同一 fixture 的平台 launcher），使用临时 Skill 与一次发送的消息覆盖未选择工作目录时首条消息创建 Automatic Task 并执行内置与个人 Skill，并观察完整正文进入模型请求、过期版本拒绝、真实旧 Run、排队新版本、普通文本准备，以及参数变更/移除的未执行输入保留；fixture 模型回复不证明模型质量。
 
 Skill management transaction recovery 的最小充分证据必须覆盖：fresh install 的无 backup `prepared` 清理；reimport、uninstall 与 `allow_replace` publish 在 durable phase 落后于物理 rename 时先恢复 backup；target/backup 同时存在或同时缺失时保留 artifact 并 fail closed；candidate 已被前次恢复删除时可幂等重试；backup restore rename 明确失败时 candidate、backup 和 transaction 均不丢失。文件失败只当场恢复精确资产一次，再次失败后显式 Retry 必须可收敛且不顺带推进同 scope 其他事务；`reconciled` 清理失败不能误派到 catalog 验证。验证须覆盖真实恢复 admission、来源不可用时物理恢复与验证的分离、健康不变但资产/phase 改变的 revision 发布，以及跨语言 recovery_required fixture、严格 canRetry 和全局重启说明。transaction commit 的明确写失败与 outcome unknown 必须分别发布 `write_failed` 与 `outcome_unknown`、阻止后续 management mutation；既无 health 变化也无资产/phase 变化的重复拒绝不推进 Product revision。Workspace 归属证据必须覆盖：同一 id 在 fencing epoch 推进后 policy、inventory、verification 与 uninstall 仍可用；两个 Skill store 对未知 version、epoch 字段、重复 id 和重复 owner/target 直接采用空的 current store，不提供旧数据 migration、quarantine 或 recovery，并在同次启动中用空的当前格式 atomic replace canonical；自动替换失败或任一 Skill store 读取失败时 Manual 与 Automatic Workspace 都不能分配新 id，`newTaskAdmission` 与 `automaticWorkspaces` capability 均不可用，后续启动严格读取或替换成功后恢复分配且 id 高于有效 Skill 记录引用的最大 id；普通 mutation 的明确写失败仍允许分配新 id，但任一 store health 不允许安全退休、或隐藏 record 存在 durable transaction 时，该 slot 不可被复用；没有已注册 owner 的资产不发布管理能力；slot 复用退休该 id 的记录且不删除文件。
 
-artifact refresh、checksum 或 lock 更新本身不要求修改本文。精确 target identity 以 `build_support/agentcore-bundle.*.lock.json` 为准，ABI 接受语义以 [AgentCore ABI v1 合同](agentcore-abi-v1.md)为准；verifier 必须报告它实际读取的 identity，文档和脚本不得硬编码一份“当前值”。替换 artifact 后，旧 artifact 的行为证据、checkpoint 样本和平台通过结论不自动继承；必须对新 artifact 重新运行相关 verifier、probe 或 platform vertical。ABI hard cut 后，尚未取得当前 revision artifact 的 target 即使仍保留旧 lock，也必须由 verifier 和 build 明确 fail closed，不能把旧平台证据解释为当前 target 仍可构建或运行。
+### 权限与自动审批
 
 Permission Session scope 的验收必须在 exact artifact 上证明：同一 Write/Edit 工具对同一文件改变内容可复用 allow/deny grant，另一文件或另一工具不能复用，same-profile checkpoint restore 保持该范围；Host/Bridge/Renderer 回归覆盖 exact/file union、非文件工具拒绝、敏感目标隐藏 Session choices，以及两种语言的目标、范围与 choice-only response。Prompt customization 未开放时，真实 Run 的 `prompt_manifest` 和 `describe.prompt` 仍须通过官方 SDK、callback identity 与有界事件消费，不得造成 Session poison 或改变产品状态。
 
@@ -410,9 +267,33 @@ PermissionProfile 的最小充分证据必须跨越实际 owner：candidate prob
 
 自动评审新增的验证责任按 owner 分层：permission leaf 固定策略正文提取、输入边界、精确 JSON string 决定、未知字段与不完整结果拒绝、取消/超时静默和分配失败；Task lifecycle 固定身份令牌、人工/自动先提交者生效、原 request choice、durable candidate commit 与旧审计恢复；Control lifecycle 固定独立 owned job、有界容量包含取消中资源、脱敏、Host/MCP 统一审核接线、Task 删除不持有 lease、迟到丢弃和 shutdown join 顺序。History SQL 与 framing codec 覆盖全局默认模式和旧 Task 原配置的独立重启恢复。Bridge/Renderer 覆盖严格字段、模式与 profile 一致性、即时评审状态、审批卡仅在需要人工决定时出现及转人工后按钮和键盘决定可用、自动允许与拒绝的折叠记录及参数不重放、审核来源/理由以及费用和非安全保证说明。正式 Native graph 与跨语言 fixture 是接入完成门槛；真实 WebView 视觉与模型误判、转人工率、延迟和费用评测是独立证据，不得以 fake Completion 回归宣称已经验证模型安全或桌面体验。
 
-Task completion receipt 的最小充分证据必须跨越实际 owner：Product lifecycle 固定 latest terminal `completed` identity、迟到/重复 acknowledgement、失败或中断不产生新提醒、归档确认、`recent_order` 不变、旧记录迁移、正常关闭恢复与异常强杀只可能重现最后未提交提醒；Bridge/Renderer 固定 strict nullable snapshot、Task/Run identity command、断连与 stale result，以及只有中央 Task 工作面未被 Settings、搜索、窄窗左栏或非停靠 Task Panel 覆盖且 document 可见、窗口有焦点时才确认。Renderer reload、选择状态和 `localStorage` 不能充当 receipt 证据。
+### 自动审批质量与可读性
 
-File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固定 oversized/capacity degradation 只命中 classifier-confirmed `file_changes` 并发布 monotonic loss fact；Product lifecycle 固定协议矩阵、stable order/dedup、depth、容量、redaction、artifact identity、恢复/orphan/delete/shutdown；Bridge/Renderer 固定严格 DTO、capability gate、连续 Review 的首条立即读取、同路径记录聚合、文件级键盘可达折叠与独立状态、后续可见区块逐条按需读取、聚合前逐记录异步 stale response 和响应式审查视图；真实 AgentCore desktop vertical 必须由 canonical bundle 的 Edit/Write 产生 typed observation，并通过 `metawork.files.diff` 读回已记录 diff。静态 fixture、Tool 文本、Workspace 扫描或 Git diff 不能替代该纵向证据。
+`zig build test-permission-review-http` 使用生产 HTTP、Completion 与评审器配合本地合成服务，验证超时后的连接关闭、后续请求隔离、503 分类、非法 JSON 拒绝及合法分块文本；该回归也纳入标准 Native graph，不替代真实模型质量证据。
+
+评测须完成预定的有界采样，保留每次技术失败后继续下一个样本，不自动重试；鉴权或配置失效、用户取消时停止并报告预计与实际覆盖。技术失败率与实际人工打断率单独统计，按 builtin、Host、MCP 分列；技术失败计入人工打断，普通请求放行率以全部普通请求尝试为分母。采样完整不等于质量达标：至少三轮、普通请求自动允许率至少 90%、明确危险样本零误放行，且每个有预期的样本至少有一次有效判断；失败不能当作正确拒绝或安全证据。新旧策略人工打断变化须另作同样本对比，不以有无历史输入代替策略基线。`zig build test-permission-review-evaluation` 验证失败后继续、鉴权失效停止、分母与缺失判断拒绝、观测脱敏及严格验收；服务错误只记录白名单类型，不保留自由文本错误消息。此回归纳入标准 Native graph。
+
+传输中断时完整响应长度未知，不得将默认零值解释为未收到数据。测试观测可记录自有响应缓冲是否变化，但不保存半截正文；缓冲未变化也不证明网络没有接收数据，不能据此推断服务是否执行或费用。
+
+登录态和显式配置评测可对原 `std.Io` 网络回调做代理计数，记录 DNS、连接、网络读写的耗时及取消时未收口阶段；其余回调与原 userdata 原样保留，HTTP/TLS、请求和解码仍走生产路径。该观测仅用于测试入口的单实例有界请求，不记录地址、header 或字节内容；TLS 读写量是线上字节量，不代表最终文本或模型 token。每次创建取消令牌前重置，I/O 与 watchdog 静止后才能读取报告和释放代理。
+
+`METAWORK_REVIEW_EVAL_MAX_SAMPLES` 可限定诊断只重放当前顺序的有界前缀，不能超过一轮双变体请求数；此模式无论结果如何都不具备质量验收资格。显式诊断期限可在代码限定范围内越过生产期限以观察晚到响应，生产默认期限不随之改变；达到样本上限或观察到超过生产期限的结果后立即停止。报告须明确停止原因和未完成覆盖，不能把诊断恢复当成整体验收通过。
+
+生产评审 Job 与真实模型评测默认消费同一 permission reviewer 生成预算和期限定义。思考预算耗尽须保留为输出受限，不能算作有效判断或批准；调整生成预算不扩大最终 JSON、理由、授权或历史窗口限制，也不建立自动重试。
+
+自动审批的连续三拒当前请求回退、人工后恢复自动、Run/模式切换计数重置、rejection_limit 理由严格校验和终态 review 摘要、人工/取消旧 reviewReason 为 null、转人工不预建历史及 rollback 恢复解释、原因分类、当前 Run 完整输入、历史用户消息组选择、脱敏、失效结果拒绝及分块投影由对应 Product/Completion 确定性测试负责；Renderer 验证精简确认主区中的动作与目标、用途和具体审核顾虑的行内来源、完整命令及真实可选授权范围。自动审核转人工的实际原因须在主区简短可见，人工模式不显示该提示；无结构化摘要的非 Bash 工具默认显示脱敏参数且可键盘滚动，缺用途不显示占位行。通用说明、手动模式、其余完整参数、免责声明和重复询问诊断默认不进入主区，但展开详情后须完整可读；命令提取失败有明确入口，新请求不得继承旧详情展开状态。Bash 只确认“运行命令”，不要求系统推断命令效果；长命令和目标路径不得为压缩行数而截断。会话菜单须在选择前说明精确范围及期限，仍只发送当前 request 提供的 choice。真实窗口仍需验证中英文、明暗主题、窄窗、键盘、焦点及各状态下按钮可达性。
+
+Windows 的审批专用真实 Core/桌面链路入口为设置 `METAWORK_APPROVAL_ONLY=1` 后运行 `node scripts/run-agentcore-vertical-windows.mjs`；复用完整入口的隔离 profile、Product/Bridge、模式切换、checkpoint 和重启检查。首次启动与重启须先观察 Renderer 审批控件已就绪，再进行 Host 验证轮询；菜单交互前重新加载隔离 Renderer，避免两个读取方争用冻结 snapshot。菜单、授权和恢复断言全部保留。该范围不运行 Composer 焦点、成果复制等其他桌面手势，不得宣称完整 desktop vertical 通过；完整入口保持原有检查。
+
+该入口随后运行真实审批卡 WebView 矩阵；仅检查卡片可设置 `METAWORK_APPROVAL_READABILITY_ONLY=1` 后运行同一 Windows 入口。矩阵通过实际设置菜单切换中英文，在明暗主题、桌面和约 390px 的 WebView 中验证精简主区、命令默认可见、行内来源、自动审核失败原因默认可见、其余参数的按需展开、键盘参数滚动、焦点恢复、按钮可达性、文本对比度和文件 Session 选择；模型顾虑和 HTTP 调用失败在主区显示实际原因，手动模式说明保留在详情；菜单文案须区分完全相同的操作与同一工具对同一文件的后续修改。审批链同时观察前 Run 用户消息进入实际独立 Completion，旧工具输出不得变成授权证据。超长命令与工作区外文件使用测试自有临时目录中的合成请求并拒绝执行，不能通过此测试声称真实模型判断正确。截图与当前运行状态报告由入口保存，失败不得沿用上轮通过报告。
+
+真实模型质量使用可选入口 `zig build eval-permission-review`，编译检查为 `zig build check-permission-review-eval`。前者要求显式测试配置环境变量 `METAWORK_REVIEW_EVAL_PROTOCOL`、`METAWORK_REVIEW_EVAL_BASE_URL`、`METAWORK_REVIEW_EVAL_MODEL`、`METAWORK_REVIEW_EVAL_API_KEY` 和 `METAWORK_REVIEW_EVAL_REVISION`，重复次数 `METAWORK_REVIEW_EVAL_REPEATS` 默认为 3，范围 1–5；单轮仅用于诊断，完整质量验收须多轮比较，缺配置明确失败。密钥由本地测试环境注入，不写入仓库、命令参数或报告。该入口复用生产 Completion、HTTP 和当前评审策略，只提交合成请求，不执行被评审工具。
+
+经用户授权也可使用现有 MetaWork 登录态：以 development artifact 和 `-Dpermission-review-account-eval=true` 构建独立测试产物，再设置非 secret 的 `METAWORK_REVIEW_EVAL_MODEL`、`METAWORK_REVIEW_EVAL_REVISION` 和可选重复次数运行。此入口必须先取得桌面应用同一 canonical data root 的单实例锁，再经生产 Account coordinator/platform binding 恢复系统安全存储中的会话；不得与另一个 Host 并发消费同一 refresh token，不允许 automation credential service 读取真实登录。Models catalog 校验指定模型后，给整个比较冻结同一 Completion；不启动 Product store、工具执行或 Bridge，不导出 token，也不自动登录或替换用户模型选择。`METAWORK_REVIEW_EVAL_CASE` 可按精确 fixture id 筛选诊断，但该模式必须以诊断状态结束，不能关闭质量验收。`METAWORK_REVIEW_EVAL_DEADLINE_MS` 可在代码允许的有限范围内覆盖诊断期限；报告必须标明覆盖值且仍以诊断状态结束，不能由此改变生产期限或宣称完整质量通过。Account 入口的 `METAWORK_REVIEW_EVAL_SCHEMA_PROBE=1` 仅用有效与非法 schema 核对当前冻结端点的实际约束行为，保留同一 URL、模型和敏感凭据头，不保存响应原文，也不执行工具；该探测始终为诊断，不能代替完整质量验收或把通用模型能力声明当成端点保证。无可恢复登录、模型不可用或技术失败都明确失败。退出先停止后续样本并 join 当前有界调用，再关闭 Account。前后费用观测只输出 Account 已验证 history 的最新日期聚合；其差额属于整个账户的 recorded cost，必须标记并发消耗与延迟入账的归因限制，不能伪称评测独占费用。
+
+报告逐次记录固定模型/协议、输入变体、结论、技术失败、时延与生产 codec 的 token usage；须另绑定精确 revision、source diff、平台、调用入口和服务配置身份。比较的是同一当前策略下“仅当前输入”与“加入历史输入”，不代表旧版本整体基线。误转人工率以应批准且获得有效判断的样本为分母；误放行率以应拒绝或转人工且获得有效判断的样本为分母；技术失败单列且不能计作模型判断。服务未提供 usage 时 codec 可能返回零，不能据此宣称零消耗；费用须依据实际服务账单，不能从未知定价推算。验收要求误转人工减少、候选无误放行或其他错误结论、无技术失败；有限样本不证明普遍安全。历史限制在窗口内外须分别报告，窗口外限制不可保证仍对评审器可见，该组不计入质量通过率。测试缺配置、假 Completion、loopback Provider 或组件预览均不能替代真实模型质量或真实桌面验收。
+
+当前真实模型质量仍为“验收未通过”；可运行的真实登录态评测入口不能代替完整质量验收通过证据。Windows 审批专用链路已验证模式切换、取消、授权复用、checkpoint 与重启恢复；新卡片的 Windows WebView 矩阵已自动化覆盖并实际通过。WebView 尺寸、主题与合成键盘事件不证明 OS 前台输入、原生窗口 chrome 或其他桌面手势；这些仍由既有独立 Gate 负责，该局部链路不关闭完整桌面 Gate。
 
 ### GenerateVideo 验证
 
@@ -433,6 +314,52 @@ Windows x86_64 的已授权正式请求取得可完整解码的 JPEG。临时探
 2026-10-21，Windows x86_64 的 canonical `0.11.0-dev+9c2f68671198` 在标准 Native graph 中通过旧集合无 grant 的恢复回归：测试侧 ABI 输入重现旧版零 Host tool Runtime 与 allowlist，经真实 Core、一次 `Write` 的 `allow_once`、checkpoint export 与新集合 restore，得到官方 SDK 与 Host 接受的 `complete` report，无伪造失效或 issue。回归核对 Session identity、checkpoint generation、原 Run identity、report/describe 一致，并执行恢复后的 Write 与 GenerateImage，分别验证当次审批和无图片配置时的零图片请求。有 Session grant 的旧集合恢复仍验证原 grant 失效及合法 degraded report；相同新集合及只改变 GenerateImage schema 的恢复保留无关 Write grant，Host tool 仍须独立审批。
 
 这关闭该 Windows x86_64 fixture 下的矛盾 report 缺口，不证明 macOS、Windows arm64、正式图片服务或既有数据的完整图片迁移验收。相同升级另通过上一版 exact Core 导出的非空原始 checkpoint 恢复及后续实际 Run、SDK/Host 四协议 Provider probes 和权限 probe；原始日志与 checkpoint 保存在本地 `.zig-cache/agentcore-inspect-9c2f68671198/`。当前 Windows x86_64 完整 desktop 验收尚未闭合，历史执行与后续失败见 [E-WIN-AGENTCORE-R24-20261021](#e-win-agentcore-r24-20261021)。未使用本地 SDK patch、fallback、伪造 report 或重放产品命令；非法 report 继续由原 SDK/Host 校验拒绝。发布条件仍由 [AgentCore 集成契约](agentcore-integration.md#host-tools) 定义。
+
+## 产品视图与执行隔离验收
+
+ProductDelivery 可达查询必须以行为测试证明没有业务推进副作用；固定输入和事件轨迹下，有无 Renderer、不同读取频率、版本重试和重连不得改变必要的 Run 接纳、权限或终态结果。主线程事件消费、Task 队列推进与执行不能等待 Renderer 读取或绘制。展示负载与 event pump 的容量/队列背压是不同机制：验收必须证明展示压力不造成额外 capacity 终止，不能以提高队列或超时通过。
+
+范围同步测试须观察无关 Task 历史不被扫描、编码或运输；稳定块复用、terminal 历史变更、安全代次变化、跨 chunk/UTF-8 脱敏、旧读取失效、切页/删除/重连、缓存淘汰及 shutdown 均由所属 Product、Bridge 和 Renderer 测试负责。容量场景使用最大合法结构与共享文本预算，不能假设每个 Run 可同时占满独立上限；不得依赖真实用户历史、账号或 credential。
+
+固定基准机分别记录 Debug 和 Release 下投影构建、编码、复制和分块响应的连续主线程墙钟时间。Release P99 不超过 8 ms、单次不超过 16 ms；Debug P99 不超过 16 ms、单次不超过 32 ms。报告包含机器、样本、负载、构建和峰值，普通单元测试不以宿主计时波动判断正确性。超过预算必须定位并以有界范围、分片或无凭据异步构建闭合，不能只报告均值改善。持久化、credential 事务和 Agent 执行准备独立计量；若其主线程成本仍造成展示负载下的执行故障，作为本次验收阻塞项处理，不改变持久化格式或安全 Gate 来绕过。
+
+Skill 文件流程独立测量入口为 `zig build test-skill-import-performance -Dtarget=<canonical target>`，分别以 Debug 和 ReleaseSafe 运行；正式 Native graph 只编译该入口，计时单独执行以排除其他 suite 的资源争用。该入口记录真实目录/ZIP 文件工作的准备、提交前复核及同步提交耗时，覆盖常用小包、上限内大文件与多文件、零/四个占用的 shared worker；它不把 worker 占用冒充真实 Run，不按 view 连续时间预算判定文件事务，也不能替代下述桌面 event pump、控制响应和 Run 终态验收。是否据此调整文件执行隔离须结合可复现响应或执行失败证据。
+
+目标平台真实 WebView 压测须覆盖持续输出、实际并发上限、历史加载、切换、管理异步结果、断连和恢复；同时观察控制动作响应、event pump 结果与 Run 终态。结构测试、内存 fixture 和 serializer 计时不能替代这条真实桌面验收。
+
+## Office Skill 与私有环境验证
+
+完整资源一致性由 `node --test scripts/office-resources.test.mjs` 和 `node scripts/build-office-skills.mjs --check` 验证；有界附件 ZIP helper 的行为回归继续使用 `python scripts/check-office-archives.py`。发布单测覆盖无解释器发布及损坏来源拒绝，应用层另验发布失败不阻止启动。
+
+资源生成器写入产物时使用 `build_support/office-environment.json` 锁定的 Node/zlib，缺少该工具链明确失败；gzip 使用固定的未知 OS 标记。`--check` 使用项目支持的 Node 版本，无须匹配生成器的 Node/zlib 精确版本；将现有 gzip 完整解压后与源码生成的完整 tar 逐字节比较，覆盖内容、顺序、header 与 padding，压缩编码差异不影响结果，损坏压缩包仍须失败。该 manifest 是四目标发行输入、布局与下载量的唯一机器真源，requirements 按目标锁定 wheel；Windows x64 身份由迁移前固定向量验证。当前主机检查不替代 Windows/macOS 使用锁定工具链的同输入产物字节比对。
+
+私有环境的显式联网入口为 `python -X utf8 scripts/check-office-private-environment.py --download`，macOS 使用 `python3`：在隔离 profile 真实下载，覆盖并发首次发布、离线复用、改名后调用、中文空格与引号路径、DOCX/PPTX 新建、XLSX 修改、三格式读取与环境文件不变。可传 `--target windows-x86_64|windows-aarch64|macos-aarch64|macos-x86_64`，默认当前原生目标；请求其他目标明确失败，不能把静态检查报告为执行通过。macOS 先并发准备 Python，再并发准备 Node，并验证 Node 已就绪时无需 Python 即可复用。追加 `--network-config-probe` 使用隔离的 pip/npm 用户配置和本地转发镜像，观察锁内默认 registry URL 的实际请求，并验证 npm 全局安装配置不能改变私有目标。
+
+`python -X utf8 scripts/check-office-preparation-failures.py --download` 采用相同目标规则，覆盖缺失环境、无效目标、损坏正式目录保留、目标被占用、下载失败及摘要拒绝后的清理；Windows 保留原生负退出码用例，macOS 追加缺 Python 前置条件、空目录/普通文件/符号链接拒绝。还验证精确目录恢复指引，以及调用方在确认无人使用的隔离 fixture 中明确清理单个目录后重新准备、离线复用和兄弟目录保留。准备的外层预算覆盖生产下载、安装、发布后检查和有界收尾，文档执行仍保留独立短预算。`python3 scripts/check-office-publication.py` 在 macOS 覆盖 ctypes 排他发布的占位保留、并发唯一赢家及取消后子进程 join；Host seam 的对应回归接入正式 Native graph。
+
+真实 Core 的临时物化与 Shell 入口先用 `zig build build-office-skill-shell -Doptimize=Debug -p .zig-cache/office-core-qualification` 构建当前原生目标，跨构建显式传 `-Dtarget` 时仍须匹配 canonical target lock 并在对应机器执行。然后运行 `python -X utf8 scripts/check-office-skill-shell.py --profile <上述隔离测试profile>`，macOS 使用 `python3`；`--target` 遵守相同原生目标规则。该入口使用 canonical Core 和 loopback Provider fixture，验证三个 Skill 的临时物化绝对入口、相对脚本路径新建（Node 含嵌套目录）、原件保护、工作副本修改、重新读取与私有环境内容不变；XLSX 同时检查公式字符串、空缓存和真实 Read 工具读取报告尾部身份及必要检查状态，不请求远端模型。Read 场景显式声明对应工具及三步有限交互，权限探针仍保留原 Bash-only 输入。`python3 scripts/check-office-validators.py <展开的docx/scripts/office> --entry <对应run入口>` 须由准备好的私有 Python 经 run 入口调用，不为测试全局安装库。
+
+XLSX 质量资格使用 `<对应run入口> python scripts/check-office-xlsx.py --entry <对应run入口>`；macOS 在入口前加 `/bin/sh`。合成输入与独立数值、合计定位和样式 oracle 由测试持有，读取正文成功不能替代样式检查；私有环境资格入口在准备后调用同一 suite。该入口须使用已准备的固定私有 Python，不安装全局库。整包内容更新还运行 `zig build test-office-resources`，验证 Application 资源发布、三格式入口完整性及来源损坏拒绝；catalog 和临时物化另由真实 Core 入口验证，不以资源存在代替执行。
+
+固定 Node 生成器与现有严格 validator 的组合资格使用 `<Python run入口> python scripts/check-office-generation.py --node-entry <Node run入口> --python-entry <Python run入口> --report <新报告路径>`；macOS 在入口前加 `/bin/sh`。它检查代表性 DOCX 创建、文本定向修改及原件保持，以及 PPTX 文字/备注和图表组合，记录实际生成器身份及所用 part schema。任何正式生成物校验失败都返回非零；隔离的诊断副本只用于定位差异，不是产品修复或查看器兼容性证据。已知未闭合项不得从组合资格里排除或改报通过。
+
+PPTX 正式新建链使用 `<Python run入口> python scripts/check-office-pptx.py --entry <Python run入口> --node-entry <Node run入口>`，macOS 同样在入口前加 `/bin/sh`。它在固定生成后实际执行格式专属收尾，再检查候选、定向编辑及复验、备注/图表内容与非目标包内文件保持、候选身份和未知结构/已有目标/归档/XML 反例。原始生成器的缺陷记录继续保留，不能用生成后处理覆盖原始基线。适用的 slide、master、layout 和 notes 部分必须选择对应 Schema；缺少路由不能报告该部分通过。有限查看器兼容性证据与精确输入/往返文件见 MetaskOffice 验收记录（`git show 6018338e203aa8550473ecea735aedbce4f140af:docs/evidence/office-pptx-metaskoffice-20261030.json`），由同一 suite 复核身份和严格结构；它不替代 PowerPoint 或本次生成文件的视觉验收，也不替代远端模型实际执行该流程。
+
+正式事件消费链使用 `zig build test-office-pipeline`，并纳入 Native test graph。该入口让当前 canonical Core 调用实际工具，经生产 Agent callback、event pump、Product 事件投影及 terminal drain 收口；本机 Provider 与临时凭据存储为受控 fixture，覆盖工具非零退出、实际缺环境入口、权限拒绝、重试、中断、取消和跨轮。暂缓唯一消费者的场景保持生产队列上限，通过真实合法流触发背压，在恢复消费后核对完整输出、正式终态、Session 可复用及历史保存；它只证明消费者暂停/恢复的机制，不冒充原生对话框或主线程真实阻塞的体验验收。同一 Run 须跨过原产品回合阈值后正常收口，40 次 Bash 调用的 Tool 记录全部保留且不产生记录缺口；持续产出和慢提交场景须在生产队列限制内形成积压，记录提交、drain 返回及 Stop 到正式终态的耗时，并核对普通 Stop 不造成事件交付缺口。注入延迟的 framed fixture 只证明调度活性，不代表生产 SQLite 的性能分位。该入口与只验证 Skill 资源/Shell 的探针分别结算，不替代远端模型规划或 PowerPoint 兼容性证据。拒绝观测回归还须证明首个拒绝不被后续收口覆盖、缺省/不可用及小容量诊断不改变运行结果、非法输入仍被拒绝且不泄露正文或 secret。
+
+同一入口追加 `--permission-probe`，在已准备的 profile 上验证默认 permission mode 的拒绝/`allow_once` 及 `full_access`：必须实际收到对应权限 callback，拒绝后无文档副作用，允许后从 Core 临时物化入口完成 XLSX 创建、修改和读取，环境内容不变。fixture 使用 unrestricted Shell policy；它验证 Core 工具权限，不证明 OS sandbox、模型下载同意或真实窗口审批。
+
+桌面目录验收使用 `METAWORK_BUILTIN_OFFICE_ONLY=1 node scripts/test-agentcore-vertical-macos.mjs`，Windows 仍用同模式的 `scripts/run-agentcore-vertical-windows.mjs` wrapper。入口覆盖精确三项 catalog、新 Task、刷新、冷启动、来源损坏后非致命失败，以及真实 Office `DeliverFile` 回执和冷历史投影；使用结构校验通过的合成 DOCX fixture，不准备私有环境。该模式不替代通用键盘焦点或 Renderer 成果按钮手势，后者继续由 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 的 Windows 桌面入口拥有，macOS 开发版的检查/继续修改草稿手势证据见 [E-MAC-OFFICE-DEV-20261024](#e-mac-office-dev-20261024)，不替代正式包或其他平台。
+
+这些入口不证明所有公司执行策略、代理、证书或镜像，也不证明远端模型质量、复杂文档布局和未覆盖的原生手势。旧组件安装、UNO、重算和文档预览已退出产品范围，不再承担其验收职责。
+
+Office 各平台、模型和发行产物的实测结果按原始版本登记在[长期证据账本](#office-实测记录)。
+
+## 受管 Skill 资源定位验证
+
+受管内容变换以[产品需求](requirements.md)的 Skill 导入/导出合同为准。`zig build test-product-skill-runtime` 验证源摘要确认、规范化候选的有效摘要及导出后再导入；候选定义的字节保留、幂等和容量边界由 package 单测负责。`zig build test-skill-resource-context` 复用正式 Native module graph 和当前 canonical Core，从真实受管导入分别经过普通 `Skill` 工具与 typed `runSkill`，按本次上下文中的目录调用真实 `Read` 取得标记；Provider fixture 不得从预知安装根生成路径或直接读取标记。该回归也纳入 `test-office-pipeline` 与正式 Native graph。
+
+真实模型及共享目录读取方的观测范围见 [E-MAC-SKILL-RESOURCE-20261030](#e-mac-skill-resource-20261030)。
 
 ## Storage 基础层验证
 
@@ -499,6 +426,38 @@ Windows 原生路径必须以真实 OS 鼠标验收普通拖动、最大化拖�
 Windows 窗口控制生命周期变更须覆盖 SDK 公共窗口事实更新、执行前拒绝、错误与清理顺序、connect 失败和 refresh 恢复；真实桌面矩阵覆盖普通/最大化关闭与 Alt+F4、最大化后最小化并从任务栏恢复、隐藏后既有 Bridge 请求、托盘重开、关闭与 toggle 交错及 reload。真实键鼠、直接 Bridge 请求与 SDK 托盘 automation 分别记录，不互相冒充；恢复后的按钮可操作性与实际图标须一并验证。以有界状态条件观察结果，不把固定等待或关闭 ACK 当作隐藏完成屏障；探针只能被动取得当前 generation，不额外 connect 改变待测会话。测试脏工作树时须绑定 diff 与 artifact，提交后的相同证据须核对源码一致性。
 
 macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebView 可访问性与分发 artifact 是独立证据项。Windows development baseline 不证明安装、更新、完整安全矩阵或其他平台；程序化 resize 不证明真实 pointer resize、系统 snap 或焦点行为。签名成功只证明被测二进制和签名 policy，不证明安装启动、交互、更新、回滚或迁移。
+
+## 未闭合验证缺口
+
+会话成果的 Windows 桌面入口覆盖终态手动登记、会话列表、轮次起止内容变化、冷启动身份恢复和右栏 HTML 源码。设置 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 和 `METAWORK_OUTPUT_NATIVE=office` 后运行 `node scripts/run-agentcore-vertical-windows.mjs`，以实际外部浏览器加载工作区 HTML 原路径、相邻样式与页面交互为准，并验证 Office 类型错标及无效包拒绝、默认应用显示原件和保存回写。macOS 设置 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 后运行 `node scripts/test-agentcore-vertical-macos.mjs aarch64-macos`，验证 Bridge、Host 和真实默认浏览器的交接。两条入口使用隔离工作区和 fixture Provider。2026-11-18 使用锁定的 Native SDK `0.11.1-fork.2` 完成验收，产物和执行结果见 MetaTeam #3739。Windows x86_64 已验证 WPS 显示包含超链接和字段的 DOCX、XLSX 工作簿以及含内嵌工作簿图表的 PPTX。DOCX 保存后，下一轮从同一工作区路径读取到保存后的字节。Windows 上名单内其他类型经默认应用打开未验收。macOS 默认应用打开未验收，产品在 macOS 不开放它（HTML 交默认浏览器除外）；开放前须在 macOS 验证：带 `com.apple.LaunchServices.OpenWith` 扩展属性的名单内文件、访达替身与替身指向的文件分别交给了哪个应用，交接能否固定为按扩展名选出的应用或拒绝，以及 Office 打开与保存回写。
+
+本节只防止错误能力声明。行为、边界和产品开放条件仍由所列真源定义；测试清单和逐项断言不在这里维护。
+
+| 能力                                                                                   | 状态                                                                                                                                                                                                                                                                 | 关闭所需证据                                                                                                                                                                        | 真源                                                                                                                                                   |
+| -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Metask 豆包与 GLM 的 Chat 非空正文                                                     | 直接 JSON/SSE 有正文；当前 canonical Core 把含 `usage: null` 的正文 chunk 当作 usage 而跳过文本，官方 SDK 对照回放已复现                                                                                                                                             | 经 canonical dependency 修复关闭 `usage: null` 最小反例，并以真实服务得到非空 Core text event 与最终 Task response；不得用 completed、usage 或直接 API 成功替代                     | [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff)、[AgentCore 集成契约](agentcore-integration.md)                         |
+| 执行进程 crash 后的 in-flight Run 恢复、async pending、suspend/resume                  | 尚未实现                                                                                                                                                                                                                                                             | in-flight Run 恢复的 lifecycle/vertical；窗口侧 fatal 后执行进程停止接纳新 Run、终止在飞 Run、导出结果被 Product owner 下次启动接纳、parked UI 请求全部解除。执行进程侧 fatal 不带走窗口与其余 Task 已由 `test-execution-link` 与执行进程桌面验收覆盖 | [高层架构](architecture.md)、[产品需求](requirements.md)                                                                                               |
+| 进程级致命故障的现场发生率与归因                                                       | 自动化已覆盖                                                                                                                                                                                                                                                         | 记录机制在 v0.2.13 之后才落地，用户机器上尚无记录；需要从已发布 artifact 回收到的记录把故障地址归属到 AgentCore 或 MetaWork 自己的代码，并给出当时在执行的 Run。自动化 Gate 通过只证明记录格式与 claim 规则，不证明现场发生率可答 | [高层架构](architecture.md)                                                                                                                            |
+| strict Workspace security、用户自定义 Host tools                                       | 尚未完成安全验收                                                                                                                                                                                                                                                     | authority、process tree、filesystem、network 与跨平台安全证据                                                                                                                       | [产品需求](requirements.md)                                                                                                                            |
+| PermissionProfile 其他平台 artifact 行为                                               | 双档产品能力已开放；当前 Windows x86_64 exact artifact probe 已通过；macOS 既有证据属于旧 revision，尚缺当前 artifact；Windows arm64 尚缺真机 probe                                                                                                                  | macOS 当前 revision exact artifact、probe 与 vertical；Windows arm64 exact artifact 真机 probe                                                                                      | [产品需求](requirements.md)、[AgentCore 集成契约](agentcore-integration.md)                                                                            |
+| 工作区文件树真实桌面体验 | 路径、Workspace membership/epoch、目录脱敏和 Native/Bridge/Renderer 已有自动化回归；本轮 Windows 真实工作区、预览、键盘、刷新、Task 隔离、junction 和窄窗口通过，见 [E-WIN-WORKSPACE-FILES-20261030](#e-win-workspace-files-20261030) | macOS/POSIX symlink；真实桌面深色主题；运行中 Workspace 授权变化与在途撤销 | [UI 设计规范](ui-design.md)、[Renderer Bridge 合同](renderer-bridge-contract.md)、[Product 架构](product-architecture.md) |
+| File Preview 真实桌面体验                                                              | 核心 wire、owner、bounded read、redaction 与 Task Panel Renderer 行为已自动化覆盖；草稿与已发送附件 chip 的缩略图与就地灯箱的 wire、授权与 Renderer 行为同样已自动化覆盖；人工验收待完成                                                                                          | Windows/macOS Task Panel 当前文件视觉、键盘、焦点、resize/overlay 和窄窗验收；草稿与已发送附件 chip 缩略图与灯箱的真实桌面视觉、键盘、焦点归位与窄窗验收                                        | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)                                                                                               |
+| File Changes 真实桌面体验                                                              | typed owner、持久化/恢复、Bridge/Renderer 连续 Review 和 canonical AgentCore desktop vertical 已自动化覆盖；人工验收待完成                                                                                                                                           | Windows/macOS 右侧 Task Panel 连续 recorded diff 视觉、键盘、焦点、屏幕阅读器、停靠与窄窗 overlay 验收                                                                              | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)                                                                                               |
+| 回复双格式复制的其他 Windows 环境验收                                                  | Windows 10 x86_64 的 ABI revision 24 最新完整复验在复制步骤失败，当前验收未闭合，见 [E-WIN-AGENTCORE-R24-20261021](#e-win-agentcore-r24-20261021)；macOS packaged probe 为历史证据                                                                                   | Windows 11 / Windows arm64 对相同 plain/HTML MIME、70 KiB 与 256 KiB 完整性、代码 plain-only 和失败行为的真实回复按钮验收                                                           | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)、[高层架构](architecture.md)                                                                  |
+| 工作区文件操作                                                                         | 三种文件身份的解析、检查、定位、另存、名单内类型的打开判定与一次交接、复制路径写入的内容与失败、在对话中引用、文件菜单的键盘与焦点已有自动化证据；文件菜单的真实桌面键盘与读屏在 Windows 与 macOS 均未验收；复制路径经真实系统剪贴板、复制图片的 `image/png` 写入与粘贴在 Windows 与 macOS 均未验收；默认应用打开只在 Windows 的 DOCX/XLSX/PPTX 与两个平台的 HTML 有实测，Windows 名单内其他类型未验收，macOS 默认应用打开待按[会话成果桌面入口](#未闭合验证缺口)所列各项验收后开放；物理交互体验及实际文档修改仍须独立验收。Office 文档预览已退出范围                                                                                                                                            | 当前 Task/Run/Workspace 与安全代次复核、同字节复制和原子发布、真实 Windows 文件操作                                                                                                 | [产品需求](requirements.md)、[Product 架构](product-architecture.md)、[Renderer Bridge 合同](renderer-bridge-contract.md)                              |
+| plan/approval、custom UI                                                               | 尚未形成可开放产品能力                                                                                                                                                                                                                                               | 对应合同、owner、持久化、恢复、投影和 UI Gate                                                                                                                                       | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)                                                                                               |
+| Skill Run 时间上下文                                                                   | 未开放；当前依赖边界见 [AgentCore 集成契约](agentcore-integration.md#每-run-时间上下文)                                                                                                                                                                              | 官方支持后验证共享与隔离 Skill、恢复、上下文传递及原始参数完整性；当前 Host fixture 固定 Skill 执行与产品身份继承不被文本时间上下文破坏                                             | [AgentCore 集成契约](agentcore-integration.md#每-run-时间上下文)                                                                                       |
+| Skill catalog 历史内容固定                                                             | 外部合同证据不足                                                                                                                                                                                                                                                     | body/resources lease 的独立合同或可复现实验                                                                                                                                         | [AgentCore 集成契约](agentcore-integration.md)                                                                                                         |
+| execution rebind                                                                       | 仅进程内 binding/model switch 有自动化                                                                                                                                                                                                                               | 跨重启 epoch/history、竞态和恢复证据                                                                                                                                                | [产品需求](requirements.md)、[Product 架构](product-architecture.md)                                                                                   |
+| Product 持久化格式演进与恢复策略                                                       | 当前各 owner 的格式识别、迁移和恢复能力尚未形成统一、已实现的产品策略；Windows Task quarantine 文件测试已补齐 Threaded I/O file flag 并进入正式 test graph                                                                                                           | 另行完成 owner-specific 决策、实现与对应原生文件验证后，再更新相关领域真源                                                                                                          | [高层架构](architecture.md)、[Product 架构](product-architecture.md)、[Account 架构](account-architecture.md)                                          |
+| Product 文件附件真实开放                                                               | 历史图片体验覆盖保留；统一批次的 Windows 隔离 WebView 接收与原件完整性已有专项证据（[E-WIN-ATTACHMENT-BATCH-20261010](#e-win-attachment-batch-20261010)），真实系统 picker 与 OS 拖拽体验仍待验收；图片粘贴的 Renderer/Bridge 行为由自动化覆盖，真实 OS 粘贴尚未验收 草稿与已发送 chip 的派生缩略图、持久化标识与就地灯箱已有 Product/Bridge/Renderer 自动化覆盖，真实桌面观感未验收。| Windows/macOS 系统截图经真实 Ctrl+V/Cmd+V 交付图片 File、附件追加与真实图片输入；以及 picker、OS 文件拖放、文本提示、混合附件、屏幕阅读器、窄窗和真实图片/文本 model smoke 以及真实桌面上 chip 缩略图的清晰度、灯箱的键盘与焦点归位、超过查看器上限时不提供入口的呈现，和已发送图片在应用完全退出并重启后仍可预览的逐平台验收。| [产品需求](requirements.md)、[UI 设计规范](ui-design.md)、[Product 架构](product-architecture.md)、[Renderer Bridge 合同](renderer-bridge-contract.md) |
+| MCP 图片作为模型视觉输入                                                               | 当前 canonical bundle 的 Streamable HTTP → Anthropic 验证仅保留序列化 tool-result 文本，不能认定模型收到图片块                                                                                                                                                       | 上游支持后，验证标准 MCP image content 成为 provider 图片块，且连续历史与 checkpoint 保持；不得用 Base64 文本存在代替视觉证据                                                       | [AgentCore 集成契约](agentcore-integration.md#agent-session-多模态输入)                                                                                |
+| MCP 真实外部环境                                                                       | 确定性 owner/事务回归不等于平台验收                                                                                                                                                                                                                                  | 第三方 server、credential、network、secure capture、browser/callback 与 issuer 的跨平台证据                                                                                         | [产品需求](requirements.md)                                                                                                                            |
+| spawn 的跨组件句柄隔离 | 窗口进程内 MCP STDIO 与执行进程两处 Application spawn 在所有平台上共用一个串行化边界（Windows 的可继承句柄窗口，以及 Darwin 缺 `pipe2` 时先建管道后设 close-on-exec 的窗口），`test-execution-link` 与 `test-mcp-platform` 的真实 spawn 断言两处都经过该边界并持锁；Core 已在执行进程中，执行进程的链路句柄不可继承且标准句柄指向 NUL，由 `test-execution-link` 覆盖。该边界不约束 Native Web 视图运行时自身的进程创建，也不约束执行进程内 Core 各 spawn 之间的继承 | Native Web 视图运行时创建进程与 Application spawn 并发时的继承证据；canonical process API 支持受控继承且 Core 创建进程遵守相同隔离合同后，验证执行进程内的并发继承及各自退出 | [AgentCore 集成契约](agentcore-integration.md)、[高层架构](architecture.md#35-native-sdk) |
+| MCP POSIX 生命周期与恢复原生验收 | 共享 Io 取消、关闭、registry/journal 隔离恢复和 HTTP 原流续读已有确定性回归；POSIX 原生执行尚未验收 | 使用 exact canonical Mac bundle 验证进程组关闭、取消前后 I/O 静止、隔离各步中断恢复及 HTTP 续读；bundle 不匹配时保持未验收 | [AgentCore 集成契约](agentcore-integration.md)、[Product 架构](product-architecture.md) |
+| Scheduled Task 的 Host 外执行                                                          | 尚未实现                                                                                                                                                                                                                                                             | 系统关机、用户显式退出、登录前服务或远端调度的能力合同与 lifecycle 证据                                                                                                             | [产品需求](requirements.md)、[Product 架构](product-architecture.md)                                                                                   |
+| Windows 完整分发矩阵与更新、Linux                                                      | 部分平台证据或尚未开始                                                                                                                                                                                                                                               | 交互安装、启动、升级、Windows 10/11、更新策略，以及 Linux build/run/distribution                                                                                                    | [产品需求](requirements.md)、[Windows 分发](windows-distribution.md)                                                                                   |
+| Account 登录刷新真实整栈验收                                                           | 人工验收待完成                                                                                                                                                                                                                                                       | 整应用真实 Host stop/lease 与开发命令退出、后端数据库提交后丢响应以及 macOS Keychain 原生验收。Windows 隔离 SDK 存储探针和确定性 Account 测试不替代这些证据；后端需先部署对应版本。 | [Account 架构](account-architecture.md)                                                                                                                |
 
 ## 长期证据账本
 
@@ -713,37 +672,120 @@ MiniMax-M3 的真实文本 Run 返回 `OK`，证明这份 artifact 的 Chat 端�
 
 当前 canonical AgentCore 的官方 SDK 独立消费者对照回放确认：同一文本 SSE 仅增加 `usage: null` 就会丢失全部 `text_chunk`，首轮正文断言明确失败；对照正常。锁定源 `c4b0af79fe20b1bb8e8516ec9b0fe1de8feb8644` 的 `OpenAIStream.parseChunk` 只检查 `usage` 字段存在，先返回 usage event，跳过同 chunk 的正文/思考/finish reason。该最小反例与线上 chunk 结构及此前空正文 callback 证据一致，定位当前 bundle 的解析缺陷；此前完整 fixture 通过不能宣称覆盖了此形态。依赖修复及真实 Task 非空回复仍需验证，不把直接 API 成功作为产品 Run 已修复的证明。
 
-## 未闭合验证缺口
+### Office 实测记录
 
-会话成果的 Windows 桌面入口覆盖终态手动登记、会话列表、轮次起止内容变化、冷启动身份恢复和右栏 HTML 源码。设置 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 和 `METAWORK_OUTPUT_NATIVE=office` 后运行 `node scripts/run-agentcore-vertical-windows.mjs`，以实际外部浏览器加载工作区 HTML 原路径、相邻样式与页面交互为准，并验证 Office 类型错标及无效包拒绝、默认应用显示原件和保存回写。macOS 设置 `METAWORK_OUTPUT_VERTICAL_ONLY=1` 后运行 `node scripts/test-agentcore-vertical-macos.mjs aarch64-macos`，验证 Bridge、Host 和真实默认浏览器的交接。两条入口使用隔离工作区和 fixture Provider。2026-11-18 使用锁定的 Native SDK `0.11.1-fork.2` 完成验收，产物和执行结果见 MetaTeam #3739。Windows x86_64 已验证 WPS 显示包含超链接和字段的 DOCX、XLSX 工作簿以及含内嵌工作簿图表的 PPTX。DOCX 保存后，下一轮从同一工作区路径读取到保存后的字节。Windows 上名单内其他类型经默认应用打开未验收。macOS 默认应用打开未验收，产品在 macOS 不开放它（HTML 交默认浏览器除外）；开放前须在 macOS 验证：带 `com.apple.LaunchServices.OpenWith` 扩展属性的名单内文件、访达替身与替身指向的文件分别交给了哪个应用，交接能否固定为按扩展名选出的应用或拒绝，以及 Office 打开与保存回写。
+#### E-MAC-OFFICE-MODEL-20261030
 
-本节只防止错误能力声明。行为、边界和产品开放条件仍由所列真源定义；测试清单和逐项断言不在这里维护。
+真实模型的固定任务、独立 oracle、全部尝试、人工介入及实际回执见 Office 模型验收记录（`git show 6018338e203aa8550473ecea735aedbce4f140af:docs/evidence/office-live-model-macos-20261030.json`）。确定性检查、受控 Core fixture 与查看器的通过不替代这组验收；固定集合尚未完成时，不宣称 Office 模型工作流整体通过。
 
-| 能力                                                                                   | 状态                                                                                                                                                                                                                                                                 | 关闭所需证据                                                                                                                                                                        | 真源                                                                                                                                                   |
-| -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Metask 豆包与 GLM 的 Chat 非空正文                                                     | 直接 JSON/SSE 有正文；当前 canonical Core 把含 `usage: null` 的正文 chunk 当作 usage 而跳过文本，官方 SDK 对照回放已复现                                                                                                                                             | 经 canonical dependency 修复关闭 `usage: null` 最小反例，并以真实服务得到非空 Core text event 与最终 Task response；不得用 completed、usage 或直接 API 成功替代                     | [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff)、[AgentCore 集成契约](agentcore-integration.md)                         |
-| 执行进程 crash 后的 in-flight Run 恢复、async pending、suspend/resume                  | 尚未实现                                                                                                                                                                                                                                                             | in-flight Run 恢复的 lifecycle/vertical；窗口侧 fatal 后执行进程停止接纳新 Run、终止在飞 Run、导出结果被 Product owner 下次启动接纳、parked UI 请求全部解除。执行进程侧 fatal 不带走窗口与其余 Task 已由 `test-execution-link` 与执行进程桌面验收覆盖 | [高层架构](architecture.md)、[产品需求](requirements.md)                                                                                               |
-| 进程级致命故障的现场发生率与归因                                                       | 自动化已覆盖                                                                                                                                                                                                                                                         | 记录机制在 v0.2.13 之后才落地，用户机器上尚无记录；需要从已发布 artifact 回收到的记录把故障地址归属到 AgentCore 或 MetaWork 自己的代码，并给出当时在执行的 Run。自动化 Gate 通过只证明记录格式与 claim 规则，不证明现场发生率可答 | [高层架构](architecture.md)                                                                                                                            |
-| strict Workspace security、用户自定义 Host tools                                       | 尚未完成安全验收                                                                                                                                                                                                                                                     | authority、process tree、filesystem、network 与跨平台安全证据                                                                                                                       | [产品需求](requirements.md)                                                                                                                            |
-| PermissionProfile 其他平台 artifact 行为                                               | 双档产品能力已开放；当前 Windows x86_64 exact artifact probe 已通过；macOS 既有证据属于旧 revision，尚缺当前 artifact；Windows arm64 尚缺真机 probe                                                                                                                  | macOS 当前 revision exact artifact、probe 与 vertical；Windows arm64 exact artifact 真机 probe                                                                                      | [产品需求](requirements.md)、[AgentCore 集成契约](agentcore-integration.md)                                                                            |
-| 工作区文件树真实桌面体验 | 路径、Workspace membership/epoch、目录脱敏和 Native/Bridge/Renderer 已有自动化回归；本轮 Windows 真实工作区、预览、键盘、刷新、Task 隔离、junction 和窄窗口通过，见 [E-WIN-WORKSPACE-FILES-20261030](#e-win-workspace-files-20261030) | macOS/POSIX symlink；真实桌面深色主题；运行中 Workspace 授权变化与在途撤销 | [UI 设计规范](ui-design.md)、[Renderer Bridge 合同](renderer-bridge-contract.md)、[Product 架构](product-architecture.md) |
-| File Preview 真实桌面体验                                                              | 核心 wire、owner、bounded read、redaction 与 Task Panel Renderer 行为已自动化覆盖；草稿与已发送附件 chip 的缩略图与就地灯箱的 wire、授权与 Renderer 行为同样已自动化覆盖；人工验收待完成                                                                                          | Windows/macOS Task Panel 当前文件视觉、键盘、焦点、resize/overlay 和窄窗验收；草稿与已发送附件 chip 缩略图与灯箱的真实桌面视觉、键盘、焦点归位与窄窗验收                                        | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)                                                                                               |
-| File Changes 真实桌面体验                                                              | typed owner、持久化/恢复、Bridge/Renderer 连续 Review 和 canonical AgentCore desktop vertical 已自动化覆盖；人工验收待完成                                                                                                                                           | Windows/macOS 右侧 Task Panel 连续 recorded diff 视觉、键盘、焦点、屏幕阅读器、停靠与窄窗 overlay 验收                                                                              | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)                                                                                               |
-| 回复双格式复制的其他 Windows 环境验收                                                  | Windows 10 x86_64 的 ABI revision 24 最新完整复验在复制步骤失败，当前验收未闭合，见 [E-WIN-AGENTCORE-R24-20261021](#e-win-agentcore-r24-20261021)；macOS packaged probe 为历史证据                                                                                   | Windows 11 / Windows arm64 对相同 plain/HTML MIME、70 KiB 与 256 KiB 完整性、代码 plain-only 和失败行为的真实回复按钮验收                                                           | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)、[高层架构](architecture.md)                                                                  |
-| 工作区文件操作                                                                         | 三种文件身份的解析、检查、定位、另存、名单内类型的打开判定与一次交接、复制路径写入的内容与失败、在对话中引用、文件菜单的键盘与焦点已有自动化证据；文件菜单的真实桌面键盘与读屏在 Windows 与 macOS 均未验收；复制路径经真实系统剪贴板、复制图片的 `image/png` 写入与粘贴在 Windows 与 macOS 均未验收；默认应用打开只在 Windows 的 DOCX/XLSX/PPTX 与两个平台的 HTML 有实测，Windows 名单内其他类型未验收，macOS 默认应用打开待按[会话成果桌面入口](#未闭合验证缺口)所列各项验收后开放；物理交互体验及实际文档修改仍须独立验收。Office 文档预览已退出范围                                                                                                                                            | 当前 Task/Run/Workspace 与安全代次复核、同字节复制和原子发布、真实 Windows 文件操作                                                                                                 | [产品需求](requirements.md)、[Product 架构](product-architecture.md)、[Renderer Bridge 合同](renderer-bridge-contract.md)                              |
-| plan/approval、custom UI                                                               | 尚未形成可开放产品能力                                                                                                                                                                                                                                               | 对应合同、owner、持久化、恢复、投影和 UI Gate                                                                                                                                       | [产品需求](requirements.md)、[UI 设计规范](ui-design.md)                                                                                               |
-| Skill Run 时间上下文                                                                   | 未开放；当前依赖边界见 [AgentCore 集成契约](agentcore-integration.md#每-run-时间上下文)                                                                                                                                                                              | 官方支持后验证共享与隔离 Skill、恢复、上下文传递及原始参数完整性；当前 Host fixture 固定 Skill 执行与产品身份继承不被文本时间上下文破坏                                             | [AgentCore 集成契约](agentcore-integration.md#每-run-时间上下文)                                                                                       |
-| Skill catalog 历史内容固定                                                             | 外部合同证据不足                                                                                                                                                                                                                                                     | body/resources lease 的独立合同或可复现实验                                                                                                                                         | [AgentCore 集成契约](agentcore-integration.md)                                                                                                         |
-| execution rebind                                                                       | 仅进程内 binding/model switch 有自动化                                                                                                                                                                                                                               | 跨重启 epoch/history、竞态和恢复证据                                                                                                                                                | [产品需求](requirements.md)、[Product 架构](product-architecture.md)                                                                                   |
-| Product 持久化格式演进与恢复策略                                                       | 当前各 owner 的格式识别、迁移和恢复能力尚未形成统一、已实现的产品策略；Windows Task quarantine 文件测试已补齐 Threaded I/O file flag 并进入正式 test graph                                                                                                           | 另行完成 owner-specific 决策、实现与对应原生文件验证后，再更新相关领域真源                                                                                                          | [高层架构](architecture.md)、[Product 架构](product-architecture.md)、[Account 架构](account-architecture.md)                                          |
-| Product 文件附件真实开放                                                               | 历史图片体验覆盖保留；统一批次的 Windows 隔离 WebView 接收与原件完整性已有专项证据（[E-WIN-ATTACHMENT-BATCH-20261010](#e-win-attachment-batch-20261010)），真实系统 picker 与 OS 拖拽体验仍待验收；图片粘贴的 Renderer/Bridge 行为由自动化覆盖，真实 OS 粘贴尚未验收 草稿与已发送 chip 的派生缩略图、持久化标识与就地灯箱已有 Product/Bridge/Renderer 自动化覆盖，真实桌面观感未验收。| Windows/macOS 系统截图经真实 Ctrl+V/Cmd+V 交付图片 File、附件追加与真实图片输入；以及 picker、OS 文件拖放、文本提示、混合附件、屏幕阅读器、窄窗和真实图片/文本 model smoke 以及真实桌面上 chip 缩略图的清晰度、灯箱的键盘与焦点归位、超过查看器上限时不提供入口的呈现，和已发送图片在应用完全退出并重启后仍可预览的逐平台验收。| [产品需求](requirements.md)、[UI 设计规范](ui-design.md)、[Product 架构](product-architecture.md)、[Renderer Bridge 合同](renderer-bridge-contract.md) |
-| MCP 图片作为模型视觉输入                                                               | 当前 canonical bundle 的 Streamable HTTP → Anthropic 验证仅保留序列化 tool-result 文本，不能认定模型收到图片块                                                                                                                                                       | 上游支持后，验证标准 MCP image content 成为 provider 图片块，且连续历史与 checkpoint 保持；不得用 Base64 文本存在代替视觉证据                                                       | [AgentCore 集成契约](agentcore-integration.md#agent-session-多模态输入)                                                                                |
-| MCP 真实外部环境                                                                       | 确定性 owner/事务回归不等于平台验收                                                                                                                                                                                                                                  | 第三方 server、credential、network、secure capture、browser/callback 与 issuer 的跨平台证据                                                                                         | [产品需求](requirements.md)                                                                                                                            |
-| spawn 的跨组件句柄隔离 | 窗口进程内 MCP STDIO 与执行进程两处 Application spawn 在所有平台上共用一个串行化边界（Windows 的可继承句柄窗口，以及 Darwin 缺 `pipe2` 时先建管道后设 close-on-exec 的窗口），`test-execution-link` 与 `test-mcp-platform` 的真实 spawn 断言两处都经过该边界并持锁；Core 已在执行进程中，执行进程的链路句柄不可继承且标准句柄指向 NUL，由 `test-execution-link` 覆盖。该边界不约束 Native Web 视图运行时自身的进程创建，也不约束执行进程内 Core 各 spawn 之间的继承 | Native Web 视图运行时创建进程与 Application spawn 并发时的继承证据；canonical process API 支持受控继承且 Core 创建进程遵守相同隔离合同后，验证执行进程内的并发继承及各自退出 | [AgentCore 集成契约](agentcore-integration.md)、[高层架构](architecture.md#35-native-sdk) |
-| MCP POSIX 生命周期与恢复原生验收 | 共享 Io 取消、关闭、registry/journal 隔离恢复和 HTTP 原流续读已有确定性回归；POSIX 原生执行尚未验收 | 使用 exact canonical Mac bundle 验证进程组关闭、取消前后 I/O 静止、隔离各步中断恢复及 HTTP 续读；bundle 不匹配时保持未验收 | [AgentCore 集成契约](agentcore-integration.md)、[Product 架构](product-architecture.md) |
-| Scheduled Task 的 Host 外执行                                                          | 尚未实现                                                                                                                                                                                                                                                             | 系统关机、用户显式退出、登录前服务或远端调度的能力合同与 lifecycle 证据                                                                                                             | [产品需求](requirements.md)、[Product 架构](product-architecture.md)                                                                                   |
-| Windows 完整分发矩阵与更新、Linux                                                      | 部分平台证据或尚未开始                                                                                                                                                                                                                                               | 交互安装、启动、升级、Windows 10/11、更新策略，以及 Linux build/run/distribution                                                                                                    | [产品需求](requirements.md)、[Windows 分发](windows-distribution.md)                                                                                   |
-| Account 登录刷新真实整栈验收                                                           | 人工验收待完成                                                                                                                                                                                                                                                       | 整应用真实 Host stop/lease 与开发命令退出、后端数据库提交后丢响应以及 macOS Keychain 原生验收。Windows 隔离 SDK 存储探针和确定性 Account 测试不替代这些证据；后端需先部署对应版本。 | [Account 架构](account-architecture.md)                                                                                                                |
+按底层机制补充的定向检查见 Office 机制收口记录（`git show 6018338e203aa8550473ecea735aedbce4f140af:docs/evidence/office-mechanism-closure-macos-20261030.json`）。已保存文件的独立检查通过，不能替代模型的修后复验与真实交付；中途停止的 Run 保留为未通过，获用户明确授权的续作单独记录，不能反向改写首轮结果或声称无需人工介入。
+
+本轮真实运行中，打开同步原生工作区选择器时观察到 event pump 队列期限拒绝；新增生产诊断保留该首个拒绝及精确 Core 身份，后续未闭合输出的终态清理不覆盖它。当前 canonical Native SDK 的同步对话框占用应用事件消费路径，该缺口尚未修复。受控暂停消费者的反例只证明这一机制，不能证明历史 #23 与其同因。闭合须通过 canonical 依赖能力或明确接受的产品合同方案解决消费停顿，并在实际运行与原生对话框交错时复验；不得靠增大队列或期限、增加平行消费者、跳过收口或本地修改 SDK 绕过拒绝。
+
+#### E-MAC-OFFICE-INPUTS-20261024
+
+2026-10-24，macOS 27.0.1 arm64、Zig 0.16.0，跨平台实施分支在 `914c5a98` 基础上进行输入资格检查。官方固定发行包与所选 wheel 已实际下载并核验摘要、大小和布局；Windows ARM64 的 CPython、Node PE machine 均为 `0xaa64`，NuGet 携带 VC runtime。macOS standalone Python 的 pip、ssl、ctypes 及锁定的 lxml、Pillow、openpyxl、defusedxml 实际加载成功；搬移到含中文、空格和单引号的目录后新进程仍能加载。Python 发行包及 arm64 wheel 的 53 个原生 image 的加载依赖未发现构建机器绝对路径。Node 固定库经私有 npm 安装及搬移后加载成功。具体接受输入由 Office 机器 manifest/lock 拥有，缓存中的候选不自动成为产品输入。
+
+Node 24 Darwin 候选的 Mach-O 最低系统为 13.5，高于 canonical Core 与应用的 13.0 基线，故拒绝接纳。固定 Node 22 候选的两个 Darwin 二进制最低系统为 11.0，且现有 `registerHooks` API 可用；仅调整 macOS 候选，Windows x64 的版本、锁和身份保持。此检查不等于最低系统的实际运行验收。
+
+`zig build build-office-skill-shell --prefix .zig-cache/office-core-qualification` 后，`python3 scripts/check-office-skill-shell.py --home-probe` 通过 canonical staged Core、loopback Provider 与真实 Bash，在两个独立 Task 工作区验证 Shell HOME 等于传入的 canonical user home，未随工作区改变。该模式不准备依赖、不证明三格式或桌面链路。输入、布局、原生依赖及 HOME 探针缓存位于 `.zig-cache/office-input-p0/`；macOS Intel、Windows ARM64 原生执行、最低系统与正式安装产物仍待验收。
+
+#### E-MAC-OFFICE-PREPARATION-20261024
+
+macOS 27.0.1 arm64 的固定入口真实联网准备、Python/Node 并发发布、离线复用与新建 Node 的 Python 前置条件通过；已经就绪的 Node 在测试临时移走私有 Python 后仍可离线复用。中文、空格和单引号 HOME 下三格式新建/修改/读取通过，前后 7,523 个环境文件内容一致。隔离镜像场景观察到 66 个实际请求，固定私有目标未受 npm 全局安装配置影响。负面入口通过缺环境、非法目标、损坏/空目录/文件/链接占位保留、断网、SHA 拒绝、明确单目录人工恢复及兄弟目录保留。证据见 `.zig-cache/office-private-macos.log`、`.zig-cache/office-failures-macos.log` 及各自输出的隔离目录；这些结果不证明其他平台执行策略。
+
+Darwin Python 发布与取消回归 3/3、Host 排他发布定向回归 2/2、资源及架构边界 37/37 通过。正式 Native graph 为 228/228 steps、1,385 passed、9 skipped；首次在沙箱中因 loopback/UDS 监听权限失败，允许测试监听后完整入口通过，未跳过 Core。完整日志为 `.zig-cache/office-native-test.log`。Windows/macOS 同输入 archive 比对、Windows ARM64/macOS Intel 原生运行、系统基线与正式分发仍未验收，DAG 不据本机通过关闭这些证据要求。
+
+#### E-MAC-OFFICE-CORE-20261024
+
+macOS 27.0.1 arm64、canonical AgentCore `0.11.0-dev+9c2f68671198` ABI 1 revision 24，三个独立 Session 均从 Core 临时 `activation-*/environment/run.sh` 经真实 Bash 完成 DOCX/XLSX/PPTX 新建、原件摘要保留、工作副本定向修改和结构化读取；每次操作后私有环境内容 inventory 一致。XLSX 公式 `=1+2` 保留为公式字符串，缓存为空，未报告计算结果。共享执行说明实际进入三份物化 Skill。原件/OOXML validator 在私有 Python 下为 11/11，资源构建 suite 为 6/6；日志为 `.zig-cache/office-core-macos.log`、`.zig-cache/office-validators-macos.log`。该 fixture 只证明真实 Core/资源/Shell 链，不证明远端模型规划、桌面成果手势或分发执行策略。
+
+后续在 `0620800a` 加 qualification source diff SHA-256 `e54695cf860df9a5b8c20acb3fdf63001845d274f8e9a0058caa365621619f4f` 上验证默认权限拒绝、默认权限 `allow_once`、`full_access` 三个场景，实际 callback 数分别为 1、1、0。拒绝后无文档输出，允许后同一物化入口完成 XLSX 创建/修改/读取，环境内容不变；原有三格式入口复验通过。fixture 的 Shell policy 为 unrestricted，不扩大为 OS sandbox 或模型同意的证据。精确输入与 probe 身份见 `.zig-cache/office-permission-source.{json,patch}`，结果见 `.zig-cache/office-permission-probe.log` 和 `.zig-cache/office-core-permission-regression.log`。
+
+#### E-MAC-OFFICE-DESKTOP-20261024
+
+macOS 27.0.1 arm64、Native SDK `0.11.0-fork.4`、canonical Core ABI revision 24，automation Debug 在 `a9b424c3` 加 source diff SHA-256 `957588375f09d5358d6180d3f60772ec5b0032092b9006daf109305766112962` 上通过 Office 桌面专用入口。真实 Workspace/Task catalog 包含 docx、pptx、xlsx；新 Task、刷新、冷启动均保留，篡改发布副本后只有 Office 来源不可用，应用正常运行。真实 `DeliverFile` 的路径、大小、摘要及 delivery ID 与成果投影一致，冷历史恢复同一成果，未创建私有环境。受测 executable SHA-256 为 `87ed8c9c35870b61adb7a91c5773319f657ef2e5701bec5131759c72ece19213`；fixture 原件摘要与结构 validator 通过。日志及精确输入见 `.zig-cache/office-desktop-macos.log`、`.zig-cache/office-desktop-source.{json,patch}`、`.zig-cache/office-fixture-validation.log`。不据此声明 Renderer 按钮手势或真实模型规划通过。
+
+最终 `npm run check`、受影响资源/架构 38/38 和正式 Native graph 228/228 steps、1,385 passed、9 skipped 通过，日志分别为 `.zig-cache/office-check-final.log`、`.zig-cache/office-final-affected.log`、`.zig-cache/office-native-final.log`。完整 Node 集为 899 passed、2 skipped、1 failed；未改动的 `scripts/task-panel.test.mjs` 在第 103 项通过后被 SIGKILL，独立 TAP 复测同样如此，根因未定位。该测试及其 Renderer/test-support 输入相对主分支无改动；未修改或跳过断言来获得全绿。完整与独立诊断见 `.zig-cache/office-node-full.log`、`.zig-cache/office-task-panel-retest.log`。
+
+后续定向诊断中，第 104 项单独运行通过，与第 103 项一起运行则焦点身份断言失败：实际为侧栏开关，预期为文档链接。1 GiB 堆上限下原 suite 在同一位置发生 V8 OOM；仅将 DOM 身份不等时的错误输出限制为有界描述的临时诊断导入，使全部 122 项执行完毕，结果为 121 passed、1 failed。此诊断没有关闭原 suite 的失败，也尚未解释跨用例焦点变化的根因；卸载后等待一帧的临时对照仍失败，相关产品与正式测试均未修改。日志为 `.zig-cache/office-task-panel-{focused,pair,bounded-heap,bounded-diagnostics,drained-pair}.log`。
+
+正式 arm64 打包通过既有生产 CSP、automation isolation、Developer ID 签名与 DMG 创建；只为该调用设置 `DEVELOPER_DIR` 选择已有 Xcode 27，未更改全局工具链。应用和 DMG 的严格 codesign 复核通过。最终 DMG 为 10,317,498 bytes，SHA-256 `9cb81de648a7d50bf79edb04c53fb7ef3678d01370fdf21a8ef04dbd482685f3`；Apple `notarytool submit` 返回 `HTTPClientError.connectTimeout`，打包入口明确失败，未执行公证通过后的 Gatekeeper/DMG 内运行验收。因此正式分发仍未通过，不能把已生成产物当作可发布结果。日志及产物身份见 `.zig-cache/office-package-macos.log`、`.zig-cache/office-package-identity.json`。
+
+| 目标          | 当前证据边界                                                                                       | 尚缺证据                                                          |
+| ------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| macOS arm64   | 当前系统私有环境、三格式、真实 Core、开发版模型辅助续跑/成果手势/冷历史，以及正式 DMG 公证与隔离启动/catalog 通过 | 最低系统、无干预模型 smoke；正式 DMG 的 Office 执行链 |
+| macOS x64     | 固定输入、wheel、Mach-O 系统基线与动态依赖检查                                                     | 原生环境/三格式/Core/桌面、最低系统与正式分发                     |
+| Windows ARM64 | 官方固定输入与 wheel、ARM64 PE 和 VC runtime 检查                                                  | 原生环境/Core/桌面、ARM64 installer 分发                          |
+| Windows x64   | 固定版本、锁字节和两个环境 ID 保持；历史独立证据保留                                               | 本次变更的原生回归与安装产物；跨主机 archive 字节比对             |
+
+#### E-MAC-OFFICE-CANCELLATION-20261024
+
+继续复核发现 `Popen` 在子进程已启动、但 handle 尚未返回的窗口被取消时，不能删除 stage 的未静止标记。真实子进程加构造边界故障注入证明：异常返回后子进程仍在，标记必须保留；测试清理方取得其自有 handle 并确认退出后才删除 fixture。准备入口的摘要检查也纳入同一 owned-child 等待链。Darwin 发布/取消回归 4/4、真实固定入口的摘要拒绝/正常准备/精确恢复、资源 suite 6/6、Host 资源发布定向测试与架构 guard 均通过；不扩大 Windows x64 行为。日志为 `.zig-cache/office-cancel-failures.log` 和 `.zig-cache/office-cancel-architecture.log`。该修复只收口既有取消合同，不新增恢复状态或用户选项。
+
+公证客户端超时后只读查询 Apple 历史，确认上次提交 `3c605f4c-0d08-4cf7-a26e-eb0668cbb839` 在服务端仍为 `In Progress`，创建于 `2026-10-24T04:31:59.086Z`；未重复提交同一 artifact。原打包入口的失败结论保持，服务端最终结果及后续完整分发 Gate 尚待取得。状态证据为 `.zig-cache/office-notary-history.json` 和 `.zig-cache/office-notary-info.json`。该 submission 对应取消修复前的 DMG，不能替代修复后 artifact 的验收。
+
+在 `47a947d1` 上追加的隔离桌面探针到达 Office 成果回执后，因原生窗口工具无法绑定 automation bundle ID 而未取得 Renderer 手势证据；等待观察超时，测试明确失败并退出其自有进程。没有对普通用户窗口执行操作，也不把该工具绑定失败归因于产品按钮。探针源码和日志保存在 `.zig-cache/office-cua-probe-source.mjs`、`.zig-cache/office-cua-probe.log`；成果检查/继续修改草稿仍未验收。用户确认目前没有其他原生机器或 CI 入口，因此上表的 macOS Intel、Windows ARM64、Windows x64 本次回归及最低系统缺口继续保留。
+
+#### E-MAC-OFFICE-DEV-20261024
+
+用户将本轮范围收敛到 `npm run dev` 的功能验收，停止追加分发验收。macOS arm64 使用现有 Metask `glm-5.3-flash`；没有新增 Provider 或凭据。开发入口实际构建并启动；为了绑定原生窗口，canonical SDK 本地 packager 给同一 Debug 可执行文件增加 `.app` 外壳，签名前核对可执行文件相同，按开发入口签名后复核 file-backed sections 未变。此包装不构建 Release、不上传；身份见 `.zig-cache/office-dev-ui-identity.json`。
+
+实际模型的准备阶段发现目标键与下载量指引不够直接，`8ee13fa2` 从唯一 manifest 自动生成摘要。随后真实 Shell 暴露 Node 入口把 `work/script.cjs` 当包名的问题；`02f9f51d` 将脚本入口解析为绝对路径，保留其余参数。现有 Core qualification 改用嵌套相对 Node 脚本与相对 Python 脚本：旧资源明确失败 `Cannot find module scripts/create.cjs`，修复后三格式创建、工作副本修改、读取、原稿与环境内容不变通过。资源 suite 6/6、Host 资源发布 1/1 通过；日志为 `.zig-cache/office-relative-{before-fix,after-fix,resources,native}.log`。该结果仍不替代其他架构的原生回归。
+
+开发版 UI 受测 `8ee13fa2`、Task 21、现有 Metask 模型，按锁定入口真实准备私有环境并创建三份 original。模型误用了未安装的 Python PPT 库；首轮随后出现活动传递失败，第二轮停止，经两次普通续跑指令指导使用现有 XML helper 后完成，不能视为无干预 smoke。最终 Word/PPT 的 pack、validate、read 通过，Excel 标题已修改、公式 `=1+2` 保留且缓存为空。三份 original 摘要与 7,523 个环境文件内容均不变。PPT 首次交付返回 `capacity`，串行重试取得可信回执；三份实际 `DeliverFile` 的路径、大小与摘要均匹配独立文件核验。
+
+实际点击三项“检查文件”均显示检查时与交付一致；依次点击“继续修改”将引用加入同 Task Composer，保留已有草稿且不自动发送。正常退出同一开发版后冷启动，三项成果恢复相同 delivery ID、大小和摘要，重新检查仍一致；重启后的 Composer 为空，此证据不声明草稿跨重启持久化。精确身份与观察见 `.zig-cache/office-dev-{ui-identity,ui-observation,file-verification}.json`；原稿与环境基线分别为 `.zig-cache/office-dev-original-baseline.json`、`.zig-cache/office-dev-environment-before.json`。本轮不继续正式分发验收，其他原生架构、最低系统及无干预模型执行缺口保留。
+
+本轮实现收尾时，在 `e89b8eec` 的代码上再次执行 `npm run check`，canonical staged Core verifier、Renderer wire/typecheck 与严格 Native 检查全部通过，日志为 `.zig-cache/office-closeout-check.log`。此检查不改变上述完整 Node suite 的失败结论，也不替代未执行的平台回归。
+
+#### E-MAC-OFFICE-DMG-20261024
+
+用户明确授权上传后，`4ba05c36` 的 `package-macos.mjs arm64` 正式入口以 exit 0 完成。Apple submission `b6cd09ca-3e6c-4061-aeb4-3295be5537c0` 为 `Accepted`，审查日志无 issues；staple/validate、Gatekeeper assessment、DMG 校验及只读挂载后的应用签名、executable integrity 和系统基线声明复核通过。上传文件 SHA-256 为 `998dea9c119f561fb4499343dea06cb2a66066210dcfd4bd5ae8507a044a3c6c`；staple 后最终 DMG 为 10,319,472 bytes，SHA-256 `e4081cadd71b6cedfa71114843f9f1b7985fbeed921b8fb92e8097cf5d92c712`。它是取消修复后的独立产物，不使用旧 submission 替代验收。身份、公证日志和完整入口日志见 `.zig-cache/office-package-current-identity.json`、`.zig-cache/office-notary-current-{info,log}.json` 和 `.zig-cache/office-package-current.log`。
+
+从该 DMG 只读挂载启动真实正式 App，使用独立 HOME；通过精确 `.app` 路径绑定原生窗口，设置页的自动工作区路径与隔离 HOME 一致，技能页实际显示 docx/pptx/xlsx 三项。应用自行发布的资源根摘要与当前 canonical archive 一致，未自动准备私有环境。记录见 `.zig-cache/office-dmg-ui-observation.json` 和 `.zig-cache/office-distribution-state.json`。后续 loopback Provider 的合成凭据保存被自动审批拒绝，未取得明确保存授权；隔离 metadata 中没有已保存 Provider，测试进程已清理。当前结果只证明正式包启动及 catalog，不证明正式 App 的 Office 解释器执行、成果按钮或完整分发矩阵。
+
+#### E-WIN-OFFICE-SIMPLE-20261024
+
+2026-10-24，Windows x64、canonical AgentCore `0.11.0-dev+9c2f68671198` ABI 1 revision 24。依赖实现绑定 `d6bb19bf`；完整资源 SHA-256 为 `28087e876351a6e4dff2dfa5053fe4810bc1ded6e82bb5324daa823a72a486be`，受测 automation Debug executable SHA-256 为 `f9ad9a15680eb53b91cd9e28cf2e302fc4e1da4a4d0b0db8231d2abcba199364`。
+
+真实联网准备在隔离 profile 通过：两个 Node 准备竞争后只发布一个目录，Python/Node 离线复用成功；pip/npm 用户镜像配置产生 63 个实际转发请求，npm `global=true` 和外部 prefix 未改变私有安装位置。三格式工作后环境中 4,435 个文件内容不变；最终摘要拒绝、断网、占用和损坏目录测试通过。实际 Core 在各自临时物化目录调用资源入口，三个独立 Session 均完成新建、工作副本 XML 修改和结构化读取。桌面新 Task、显式刷新、冷启动以及篡改发布副本后 Office 来源不可用而应用正常运行通过，未创建私有环境。通用 DeliverFile 的真实 Core/Renderer 检查、修改草稿、冷历史和源文件保留回归通过。
+
+删除阶段正式 Native graph 为 224/224 steps、1,368 tests passed、5 skipped；受控并发完整 Node 集为 908 passed、8 skipped。首次默认并发 Node 集的复制按钮计时断言失败，独立复测 4/4 和受控并发完整集通过，未修改该实现。最终 `npm run check`、资源一致性、架构边界 32/32、受影响资源/Bridge 27/27、有界 ZIP 12 passed/1 skipped、原件/OOXML validator 11/11 通过。完整桌面入口曾在原有物理键盘焦点探针失败；目录专用入口的通过不关闭该缺口。公司组策略、全量企业网络组合、其他 Windows 架构和 macOS 的自动依赖准备未验收。
+
+最终 `node scripts/package-windows.mjs` 通过 production CSP、automation isolation、canonical Core runtime assets、runtime stage 及原有主包体积 Gate。未签名 x64 安装器为 8,896,664 bytes，较原预算基线增加 455,568 bytes，低于 1,048,576 bytes 允许增量；SHA-256 为 `eb371061267381db9bbd144bd01f1bde9a9925b25bc81ca7cbd7011aee7798e7`。未执行签名发布、推送或合入。
+
+本地证据为 `.zig-cache/office-final-{network-config,preparation-failures,core-shell,check,architecture,archives,validators,package}.log`、`.zig-cache/office-builtin-desktop-final.log`、`.zig-cache/office-delivery-desktop-final.log`、`.zig-cache/office-simplification-tests.log` 与 `.zig-cache/office-simplification-node-limited.log`；隔离文件位于各 qualification 日志记录的目录。
+
+#### E-WIN-OFFICE-RECOVERY-20261024
+
+在 `5e2d9fa2` 基础上补充用户授权的最小恢复指引、慢速下载和下载总量说明。没有新增自动修复、目录隔离、管理对象或生命周期状态。损坏环境的诊断显示精确目录，要求先停止所有使用者并退出应用，再由用户明确选择只清理该目录；原生负 NTSTATUS 同样报告不可用。
+
+实际读取并校验锁内 5 个 Python wheel 和 28 个 npm tarball：Python 库为 11,530,133 bytes，含解释器总计 25,921,381 bytes；Node 库为 3,057,557 bytes，含解释器总计 40,361,909 bytes。总量仅表达首次准备的固定文件 payload，不含索引元数据、重试或传输开销。汇总记录关联依赖锁摘要，锁变更而未重新测量会在资源构建时失败。两套环境的既有身份和下载入口逐字节保持不变。最终内嵌资源 SHA-256 为 `5705709c30a71dd725b93310dbea534e9893a47169cd0662edf19173b92a74f8`；Windows batch 资源统一为 CRLF，避免实际发现的标签跳转失败。
+
+最终恢复入口验证通过：损坏正式目录保持原状，诊断明确停止使用者和精确清理范围；隔离 fixture 经显式单目录清理后真实重新准备成功，离线复用正常、兄弟环境未改变。canonical Core 的三个 Skill 临时物化、创建、工作副本修改和重新读取通过。资源一致性与架构边界 35/35、`npm run check`、格式和变更文档链接检查通过。证据在 `.zig-cache/office-followup-{download-measure,failures,core-shell,node,check,format}.log`；实际下载文件的大小和摘要明细保存在 `.zig-cache/office-download-artifacts.json`。
+
+使用生产 curl 参数的隔离 HTTPS 探针通过：393,216 bytes 的持续慢速传输耗时 323.09 秒，越过原 300 秒期限且字节完全一致；完全停滞的传输在 90.64 秒后以 exit 28 中止。参数保留 30 秒连接期限、1,024 bytes/s 的 90 秒低速检测和 1,800 秒总期限。测试只对自身临时证书显式设置信任，未修改系统证书或产品下载来源；证据为 `.zig-cache/office-followup-slow.log` 和 `.zig-cache/office-followup-stall.log`。
+
+最终 Windows x64 未签名安装器为 8,898,119 bytes，SHA-256 为 `7a71b79e6e205a0835584e5a69491f1254ddf926888c520a2d98766ff4f0af3d`，通过未修改的整包体积 Gate；证据为 `.zig-cache/office-followup-package.log`。本轮未执行签名发布，原有完整桌面焦点和其他平台验收缺口不因本次定向验证关闭。
+
+### E-MAC-SKILL-RESOURCE-20261030
+
+真实模型和共享目录读取方的执行证据见 受管 Skill 资源定位验收记录（`git show 6018338e203aa8550473ecea735aedbce4f140af:docs/evidence/skill-resource-context-macos-20261030.json`）。记录绑定生产代码 revision、开发构建身份、canonical Core、原始与安装字节及实际工具结果：MetaWork 真实模型从只含 Skill 名称的输入完成资源读取；Codex CLI 在隔离项目中读取相同安装正文，保留未展开 token 并按定义所在目录读取资源。两者均为单次实际观测，不证明所有模型、共享读取方、其他平台或正式分发产物。既有安装及外部来源的范围继续由产品合同约束。
+
+### 工作区文件浏览平台验收
+
+#### E-WIN-WORKSPACE-FILES-20261030
+
+Windows 工作区文件树证据（`git show 6018338e203aa8550473ecea735aedbce4f140af:docs/evidence/workspace-file-tree-windows-20261030.json`）绑定当前功能提交的干净源码、automation Debug artifact、Native SDK 和 WebView2 身份。隔离 profile 中使用真实 Host、真实工作区文件与 WebView，通过 Win32 鼠标/键盘、UI Automation 和官方 SDK Bridge 验证默认收起、未引用文件与图片预览、标签去重、目录刷新、键盘导航、Task 切换与删除、面板隐藏后恢复，以及窄窗口呈现；测试 Task 没有 Run，合成 Provider 没有收到模型请求，实例通过产品退出入口正常结束。
+
+实际 Windows junction 不出现在目录中，直接请求越界路径、过期 epoch 和已删除 Task 被 Host 拒绝；命中已知合成凭据的目录条目整体省略。完整 Native graph 的沙箱内诊断记录了本机 HTTP `ACCESS_DENIED`，允许该测试所需本机网络后，未修改的正式入口通过。原始界面观察、驱动、Host 响应、截图与日志的本地位置和摘要由该证据文件拥有。
+
+本轮尚未验证 macOS/POSIX symlink、真实桌面深色主题，以及运行中 Workspace 授权变化与在途撤销；这些缺口继续保留。WebView 调试端口不可达，实际交互证据来自上述原生输入和可访问性观察。
+
+### 项目归属与工作目录的 macOS 实测
+
+项目归属的 macOS 27.0.1 arm64 Host vertical 已在基于 `f82a1e2c` 的功能分支通过，受测 automation Debug executable SHA-256 为 `82fceca5c1c696eb26c8402d032b98e3e9a9e3538d21e33757a959efe121eecd`，日志为 `.zig-cache/task-project-membership-desktop.log`，精确代码输入及 canonical Core lock 摘要见 `.zig-cache/task-project-membership-source.json`。该证据覆盖真实 Application→Bridge→Product→canonical Core 和 SQL 冷启动；窗口交互、窄窗深浅主题及 Windows 拖放/键盘尚未人工验收，不能据 Host 与 DOM 回归声明通过。
 
 ## 维护规则
 
@@ -753,9 +795,3 @@ MiniMax-M3 的真实文本 Run 返回 `OK`，证明这份 artifact 的 Chat 端�
 - 长期证据 ID 是稳定引用；既有 ID 的证据对象、结论与有效范围不得改写为另一项验收，新证据使用新 ID 追加。
 - 新增普通测试、测试改名、测试文件移动、artifact rebuild、checksum 或 lock refresh 不要求更新本文；只有测试层或归属规则、标准入口、证据结论或未闭合缺口变化时才更新。
 - `rg`、格式检查、文件存在性和源码关键词检查只属于卫生或结构验证，不能替代合同、运行时和平台行为测试。
-
-MCP 启动命令的跨平台分词往返由 `scripts/mcp-configuration-input.test.mjs` 验证，MCP 页 suite 覆盖手动 Add 的检测与保存顺序、取消后忽略迟到结果、结构化 Edit、按 create 回执定位新服务以及专用凭据输入。桌面 MCP HTTP 验证用有效、无效和要求认证的地址执行草稿探测，并验证错误请求头不会写入配置。Bridge result decoder 必须拒绝失败携带 identity 或成功缺少 identity。`test-product-control-mcp`、`test-product-mcp-runtime` 与 `test-mcp-app` 分别验证已知凭据写前拒绝、owned create 回执和正式协调调用；隔离 synthetic credential store 的正式 `test-mcp-interop` 另覆盖静态 header HTTP 与 env STDIO：HTTP 正确请求头随最终草稿握手，通过后才保存；STDIO 专用 capture 输入清零。两者的 registry 与 trace 不含凭据，恢复后正式 transport 取得凭据、用户选择工具、新 Task 完成真实调用。该 fixture 不替代真实系统凭据存储或远端服务/OAuth 验收。
-
-STDIO 诊断由 `test-mcp-platform` 观察真实进程未启动与启动后关闭，`test-product-mcp-runtime`/View 验证 source、attempt 与呈现，`test-mcp-app` 验证协调交接；transport ownership 回归覆盖成员替换后保留引用和释放。`zig build test-mcp-npx` 使用无依赖的本地固定 npm 包与隔离 cache/config，通过正式 STDIO owner 和 canonical Core 验证 bare npx、Windows npx.cmd 与带空格 shim 路径的握手/工具发现。`-Dmcp-npx-release-probe=true` 额外在空 cache 下载并激活测试中固定版本的公开参考 server；此发布前联网证据不进入默认离线回归，须记录 Node/npm、网络与代理条件，不以 `--version` 代替。EOF、取消或 Host 清理不能伪装成自然退出码；原始 stderr 不发布，未取得退出状态时保持未知。
-
-MCP Agent 自动安装的严格结构化输入与预算由 `test-mcp-installation` 验证；canonical Core 的固定 Host tool、Run capability、无主线程 drain 返回和 owned result 释放由 `test-generate-image` 覆盖。`test-mcp-interop` 纳入真实 Coordinator 的公开 HTTP、来源页为非本机 HTTP 且 path 带 key 的原样 endpoint（无凭据计划、零确认，用户只给链接或用自然语言要求安装都不触发 Host 确认）、Host 获取凭据的 endpoint 模板、STDIO 环境变量及失败修正路径；每条须从真实安装工具交接完成配置，观察 registry/trace 不含合成凭据、原 Task 不扩权、新 Task 真实调用工具。`test-mcp-auto-install` 是同一正式 module graph 的聚焦入口。Product/Control 覆盖来源 Task/Run 有效性与取消、首次精确授权、恢复及迟到结果；Renderer/Bridge 覆盖严格状态投影、精确取消和安全输入生命周期。该本地确定性 Provider/服务及隔离 credential vault 证据不替代真实模型阅读任意安装页、系统凭据库、远程 OAuth 或桌面平台验收。

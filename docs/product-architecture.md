@@ -294,19 +294,45 @@ macOS 首次新建 Node 需要已准备的固定私有 Python，通过其标准�
 
 ### 2.5 MCP authority
 
-Product MCP 拥有容量一的进程内安装提议信箱与主线程待处理提议；Run admission 冻结窄 capability，Task owner 校验来源 Task/Run 有效性。Agent 在锁外解码有界公开草稿，callback 只 try-lock 转移 owner 并保留名额，解锁后 RequiredWake，不等待主线程。主线程取走仍占名额；已知凭据检查在接管及每次投影前执行，拒绝时释放并发布安全提示。用户 Add 在同一主线程事务内先核对可选 proposal id，确定保存后原子消费并返回 server id；失败不复活或自动重放。完成 Run 可保留建议，取消、删除和关闭清理；关闭先关 ingress，再取消/join Executor 和 Session，callback 静止后释放 owner，锁不跨唤醒或 join。提议不持久化，不依赖 Tool 展示槽，snapshot 容量独立预留其公开上限及结构开销。
-
 Product Control 拥有 MCP Desired Registry、connection approval、OAuth consent、credential locator、Runtime Manifest、Admission Authority、mutation/recovery 与 Task admission。Agent 拥有 connector/backend 生命周期、AgentCore descriptor、declarative Runtime apply、Activation、catalog 与 Selection。Application 只执行 child、network、系统 credential、OAuth、HTTP auth snapshot 与跨 owner coordination，不拥有 MCP JSON-RPC、产品状态或 admission policy。Account 与 MCP 不共享 ownership、credential service 或 persistence。
+
+#### 安装请求与首次工具授权
+
+Product MCP 拥有容量一的进程内安装提议信箱与主线程待处理提议；Run admission 冻结窄 capability，Task owner 校验来源 Task/Run 有效性。Agent 在锁外解码有界安装请求，callback 只 try-lock 转移 owner 并保留名额，解锁后 RequiredWake，不等待主线程。主线程取走仍占名额；已知凭据检查在接管及每次投影前执行，拒绝时释放并发布安全提示。协调器按请求 ID 领取安装请求，等待占用事务的目录刷新结束，匹配唯一可修正的目标，再启动持久安装。主线程发布有界状态与回执，原始请求不进入快照。关闭先关 ingress，再取消/join Executor 和 Session，callback 静止后释放 owner，锁不跨唤醒或 join。信箱条目不持久化，不依赖 Tool 展示槽，snapshot 容量独立预留其公开上限及结构开销。
+
+自动安装的 durable operation 绑定精确 server、来源 Task/Run 与其输入消息引用；原始请求只按系统凭据容量分块保存，metadata 保留 origin、引用、revision 和阶段。先提交 disabled 目标，再取得凭据、认证并连接。首次工具集合与一次性授权标记在同一凭据事务中保存，先准备 Admission 再提交，恢复只复用已经保存的精确集合。ready 的首次发布还必须证明当前正式成员、目录和新 Task Admission 有效；完成后保留安装历史，当前可用性独立取正常 Admission，不因停用或过期把完成历史改成连接中。Stop 的取消 marker 可在 Core apply 未结束时独立提交，不等待 worker；它立刻否决新加载和新准入，后续再对账停用配置。marker 不改变 descriptor 或 credential 引用、不推进 desired generation；正常 target 变更仍推进 generation，取消与完成都按 operation revision 拒绝迟到结果。
+
+安装授权取自该 Task 的 `InstallMcpServer` 工具调用；Host 校验来源 Task/Run 仍有效。仅凭据计划的跨来源传递需要额外的安装确认，服务的 OAuth 同意单独处理。唯一失败目标按同 Task 与完整来源匹配，修复保留 server identity，不能按显示名或域名猜测。首次发现为空且允许列表仍为空的 `no_tools` 目标，在用户显式重试安装时可重新完成首次工具授权；重试时仍非空的允许列表保持原边界，目录刷新不得自动扩权。目录刷新占用 mutation 边界时保留已接纳的安装请求，由刷新完成事件继续推进；阶段提交后需继续结算的安装必须主动唤醒主线程，不能依赖来源 Run 或其他无关事件。OAuth 授权取消或未授权结束将本次安装结算为取消或失败，不自动重新打开浏览器；网络阶段消耗执行预算，人工确认和浏览器等待不消耗。
+
+#### 连接配置、凭据与持久化
+
+STDIO 配置只接受可执行文件、argv、可选 cwd、environment name 与对应 secret slot；不提供 shell string、命令替换、credential argv 或整个进程环境继承。Host 只从启动环境复制非敏感 executable search path，并在绝对 command 前置其所在目录，以支持 `/usr/bin/env` shebang 和 bare executable lookup；该 `PATH` 与 Windows `SystemRoot` 是不可由用户 environment slot 覆盖的受控基线，其他变量一律不继承。Streamable HTTP 配置只接受 endpoint、auth mode 和有界 header name；endpoint 只允许原始 authority 被完整、无歧义解析的 HTTP 或 HTTPS 地址，任何主机均可使用 HTTP，允许原样保留 query，禁止 userinfo、fragment、authority percent encoding、空白、控制字符和反斜杠。
+
+Renderer 可以提交公开配置，并通过普通 password input 临时采集用户显式填写的 static secret 与 OAuth client secret，经专用 typed command 交给 Host 写入独立系统 credential service；输入生命周期与提交边界遵守 [Renderer Bridge 合同](renderer-bridge-contract.md#mcp-服务与安装)。
 
 敏感 HTTP endpoint 的有序地址片段只进入系统 credential storage；Desired 保存 origin、稳定 identity 和片段引用，公开投影只有 origin。OAuth 的授权 resource 与 endpoint 分开绑定：Host 在确认前暂存私有 resource 引用，授权事务将其转为 consent 的私有绑定，DCR 与恢复使用同一事务；公开 resource 行为保持不变。连接、授权、code exchange 和 refresh 只在 Host 中解析完整地址，临时 owned copy 在释放前清零；指纹只消费公开绑定与引用，不包含秘密或秘密 hash。
 
-自动安装的 durable operation 绑定精确 server、来源 Task/Run 与真实用户消息引用；原始请求只按系统凭据容量分块保存，metadata 保留 origin、引用、revision 和阶段。先提交 disabled 目标，再取得凭据、认证并连接。首次工具集合与一次性授权标记在同一凭据事务中保存，先准备 Admission 再提交，恢复只复用已经保存的精确集合。ready 的首次发布还必须证明当前正式成员、目录和新 Task Admission 有效；完成后保留安装历史，当前可用性独立取正常 Admission，不因停用或过期把完成历史改成连接中。Stop 的取消 marker 可在 Core apply 未结束时独立提交，不等待 worker；它立刻否决新加载和新准入，后续再对账停用配置。marker 不改变 descriptor 或 credential 引用、不推进 desired generation；正常 target 变更仍推进 generation，取消与完成都按 operation revision 拒绝迟到结果。
+未知 URL path/query 凭据没有可靠通用识别，不建立站点或名称猜测规则来决定哪些部分是凭据。
 
-安装来源只从同一 Task 的真实用户消息取证，支持跨 Run 的明确同意；后续撤销使旧请求失效，多个候选或不明确意图必须经 Host 确认。唯一失败目标按同 Task 与完整来源匹配，修复保留 server identity，不能按显示名或域名猜测。首次发现为空且允许列表仍为空的 `no_tools` 目标，在用户显式重试安装时可重新完成首次工具授权；重试时仍非空的允许列表保持原边界，目录刷新不得自动扩权。目录刷新占用 mutation 边界时保留已接纳的安装请求，由刷新完成事件继续推进；阶段提交后需继续结算的安装必须主动唤醒主线程，不能依赖来源 Run 或其他无关事件。OAuth 授权取消或未授权结束将本次安装结算为取消或失败，不自动重新打开浏览器；网络阶段消耗执行预算，人工确认和浏览器等待不消耗。
+Host 从 `<MetaWork data dir>/mcp/registry.json` schema 3 恢复稳定 identity/namespace、transport、auth mode、connection approval、OAuth consent/registration/grant 的非 secret 事实、credential locator、启停、timeout、协商策略、显式 tool allowlist，以及 nullable 顶层 `oauth_operation` marker；marker kind 只允许 `dynamic_registration | code_exchange | refresh`。
+
+Host 分别生成外部稳定 server identity 与 AgentCore namespace：identity 使用 `mcp-<20 位小写 hex>`，namespace 使用 `mcp_<20 位小写 hex>`，namespace 必须以 ASCII 字母开头且其余字符只允许 ASCII 字母、数字或 `_`，不能把 identity 直接复用为 namespace。
+
+旧 registry 中结构可恢复但不满足运行时语法的 namespace 只使对应 server 进入 `invalid_catalog`，不得污染整个 registry 或进入 Agent Runtime；用户删除后重新创建服务即可获得新 namespace。schema 1 只迁移既有 identity/config/allowlist/locator，并统一落为 disabled + unapproved；schema 2 单向迁移保留既有批准、工具选择和凭据引用，不因升级自动扩权。
+
+Registry 保持单一全局 desired generation、单一 credential transaction journal 和全 registry locator 引用差分，不保存 secret、token、authorization code 或 PKCE verifier。写入/清除 operation marker 是同一 registry 文件上的 operation-state commit，不推进 desired generation；只有 server target 变化才推进 generation。
+
+连接 timeout 表达单次请求等待时限；连接和目录管理按 Host 公布的有效上限执行，工具调用保留用户配置的 timeout。较大的历史保存值保留，界面说明上限只适用于管理操作。
+
+每次配置修改绑定 `expectedDesiredGeneration`。工具授权变更先准备新的 Selection，按 journal、凭据、registry 的既有顺序提交。明确成功后安装新配置与 Selection；明确失败沿用旧配置与授权。`saved_recovery_required` 安装已知目标后冻结后续修改，`outcome_unknown` 停止发布未经确认的 generation，并阻止新 Task 取得 MCP 授权。
+
+Static credential locator 只在接收目标未改变时按同名 slot 沿用：STDIO 目标由 command、ordered argv 与 cwd 共同确定，HTTP 目标由 endpoint 确定；目标、auth mode 或 slot 变化使不再引用的 locator 经同一事务退休，display name、timeout 与协议策略变化不移动 credential。OAuth 编辑在 endpoint 与 registration plan 不变时保留 consent epoch、client identity、有效 grant、token revision 和 credential 引用；派生 fingerprint 按当前配置重算，目标或注册计划变化才重新授权。
 
 Product Control 在 MCP 全部创建和替换连接入口复用 Host 已知凭据 predicate，在持久化与 effect 前拒绝敏感公开字段；不以名称、熵值或全部 env 值扩展凭据集合，也不改写既有记录。创建回执在 preparation 释放前持有确认 target 的稳定 identity，只有确定保存结果可以返回它；后续凭据捕获仍由当前 generation、server、auth mode 与 slot 校验，不通过 snapshot 猜测 identity。
 
 STDIO 启动诊断由 Application 的具体 transport owner 发布有界安全事实，绑定公开 server id、连接来源指纹与本次正式 apply attempt；引用计数保护其跨 worker/transport 生命周期，callback 只写原子事实并非阻塞唤醒，不持有或修改 Product。主线程通过窄 MCP port 接纳，与当前 Desired source 和已开始的 attempt 不符的晚到事实拒绝，隔离测试不进入正式诊断。Product 按成员保留事实，配置变化使旧事实失效；不把原始 stderr、系统错误文本或未确认退出码写入 snapshot、历史或 registry。EOF 仅证明 STDIO 关闭，不为取得诊断等待仍运行的 child；既有 Core failure ABI 与进程关闭协议不变。
+
+#### 配置应用、工具目录与新 Task 准入
 
 Desired Registry、Runtime Manifest 和 Admission Authority 是三个不同事实：
 
@@ -326,6 +352,13 @@ Task 在 Session 创建前取得进程内 MCP 引用，引用保存原工具 cap
 
 Disable/Delete 排除该来源的新 Task authority；有 Task 引用时保留实际成员，最后引用释放后自动收敛移除。disabled Edit 只更新 Desired，已有引用继续使用已应用版本，重新启用后才尝试替换。恢复按该 Task 原 cap、checkpoint、当前显式撤权、可信来源和仍有效的 catalog 取交集；不以其他来源的 pending/删除状态作全局拒绝。Delete 保留删除前最后提交的工具授权上限，不能复活先前撤销项；enabled 来源变化仍须在关闭原 Session 前拒绝旧来源恢复。原本 null/空 authority 保持 null，进程引用不写入持久化格式，也不在冷启动重建已删除来源。OAuth grant 恢复必须证明 Desired 仍存在、连接获批且当前授权绑定有效；enabled 来源不以 Runtime 已加载为前提，disabled 来源仍须与实际版本一致且有 Task 引用。未加载目标使用当前授权连接失败后停止该绑定的自动 grant 恢复；该失败跨其他成员移除/替换触发的收敛轮次保持有效，不能在重新准备候选时丢失；相关配置或显式用户重试才能重开，无关成员变更、目录刷新、唤醒或再次到期不得重开。已知 expiry 只阻止新增或替换候选在授权恢复前执行，不改变成员资格、指纹或移除规则；等待授权是已处理的等待结果，由授权 completion、退避 timer 或显式用户操作重新推进。只有该 id 不存在实际已加载成员时，无法刷新且已过期的 grant 才因本地 expiry 进入重新授权；同 id 旧成员仍在线时，不因该时钟事实退休 grant 或调度移除。若待替换目标使用此类 grant，则记为可重试且可重新登录的失败，不宣称存在自动恢复。Delete 不续期，按现有事务立即退休凭据，已有执行副本只使用现存 access token 到自然到期。refresh 开始时固定未加载、当前 descriptor 匹配或同 id 旧 descriptor 仍在线的进程内 Product 证明，持久 marker 与 apply 串行化边界保证其交接。未加载目标可以独立提交新 grant；当前 descriptor 匹配时必须预备 HTTP snapshot rotation，slot 缺失或版本不匹配必须 recover。仅有同 id 旧 descriptor 时仍尝试轮换兼容 slot；slot 缺失或 consent epoch 不同则保留旧成员并独立提交新 grant，不能让旧成员的认证方式或旧 consent 退休当前授权；token revision 冲突仍必须 recover。主循环先结算已完成的目录工作再调度 MCP；已加载连接的到期维护优先，未加载授权恢复与普通候选交替，timer 只唤醒同一调度入口。浏览器交互授权期间保留全局 apply 限制，由页面明确说明等待状态。目录不可用不应与 OAuth 续期互相等待：可先持久提交 blocked/reduced Admission 后开始操作；不能证明已收缩授权、准备失败或接管结果未知时不产生外部 effect。
 
+成功接管零个服务时提交零 entry 的 Runtime Manifest。配置应用结果 `configurationApply = idle | applying | failed` 与目录可用性分别发布。`runtimeAlignment = restart_required` 表示已保存的目标与已接管的连接仍有差异。界面根据实际进度显示正在连接或可重试的应用失败，用户可以在当前进程内完成恢复。同一 OAuth consent epoch 内的 token revision 仍通过 CAS 原子替换 ref-counted HTTP auth snapshot。tool-only mutation 可以直接更新后续新 Task authority，不重建 transport。
+
+故障独立于普通 Task。首次手动 HTTP 添加可由用户发起无凭据的草稿探测，探测不会建立正式成员。已保存服务的隔离连接测试只发布进程内结果、工具数与问题数。正式加载、工具授权和 Task 准入分别由相应事务提交。
+
+#### Registry 与凭据恢复
+
+MCP 启动遇到可读取但无法按已支持格式解码的配置时，保留原始字节并隔离，在安全完成关联事务隔离后安装当前空配置继续运行；合法旧格式沿现有迁移政策处理，未知格式保留原位并报告不可用。读取、资源耗尽或隔离失败保留真实诊断，不显示为正常空配置。隔离内容及可能遗留的系统凭据保留供人工排查和恢复，不据此自动使用或删除凭据；诊断不展示 locator，也不推断或报告遗留凭据的精确数量。
 
 credential journal 的恢复资格必须同时来自可信 canonical registry 和 journal：generation 必须对应 base 或 target，candidate 与 retired locator 的当前引用关系也必须分别符合该阶段。任何 credential 删除前先完成整组关联检查；不从无法解码、未知格式或读取失败的 registry 推导删除资格，OOM 也不得被重分类为损坏。
 
@@ -333,7 +366,31 @@ credential journal 的恢复资格必须同时来自可信 canonical registry �
 
 Application 启动时只创建一次 canonical empty Agent Runtime；恢复出的 Desired 必须在 Product Control 与 coordinator 就绪后沿与后续 mutation 相同的 apply 路径安装。empty create 后 apply 是正常启动协议，不是失败 fallback 或第二条 Runtime path。Agent Runtime create 失败终止启动；外部 MCP child、network、handshake 或 catalog failure 只能使相关 MCP authority unavailable，不能关闭普通 Text Task admission。
 
+#### OAuth 发现、同意与事务恢复
+
+本版 registration plan 明确为用户提供 client id 与 `none | client_secret_basic | client_secret_post` token endpoint auth method 的 `pre_registered`，或 authorization server metadata 明确提供 endpoint 时的 `dynamic_registration`，前者需要的 client secret 由专用 password 表单提交。DCR confidential result 只有在 `client_secret_expires_at` 缺失或为 `0` 时才能进入现有 client-credential revision；非零 expiry 在没有 secret renewal owner 的本期必须按已可能产生远端 client 的 outcome unknown 收口。
+
+OAuth discovery 以发现性和鲁棒性为准：只校验格式的偏差予以容忍，保护安全的检查不放宽。protected resource metadata 依次尝试 challenge 的 `resource_metadata`、RFC 9728 path-specific 与根 well-known 文档，某个失败只转向下一个；GET 未取得 challenge 时再以不带凭据的 `initialize` POST 探测一次，无法解析的 challenge 只丢失其提示。metadata 不要求 JSON Content-Type，接受可选成员的显式 null，重复参数取第一个，不可用或重复的 `authorization_servers` 与 scope 被跳过，缺省 `response_types_supported` 视为 `code`，不可用的 `registration_endpoint` 视为不存在；列出多个 authorization server 时按序取第一个可用者。
+
+声明的 `resource` 只要与端点同 scheme、host 与 port，且去掉末尾 `/` 后按路径段边界是端点路径的前缀（根路径覆盖全部，`/mc` 不覆盖 `/mcp`，带 query 的只覆盖其自身）即视为覆盖该端点；authorization 与 token 请求、consent 均使用声明的 resource，与端点不同时 consent 同时显示 MCP server 地址，未声明时使用端点。issuer 身份只容忍末尾 `/` 差异；HTTPS、PKCE S256、state、redirect identity、callback `iss` 与 DCR 结果中的 redirect URI 保持严格。DCR 结果改用 authorization server 支持的其他 token endpoint auth method 时按结果接受；同时省略 method 与 secret 且服务器支持 `none` 时视为 public client。仍被拒绝的情况按授权失败事实报告原因。
+
+requested scopes 按 MCP scope selection 顺序取得：Bearer challenge 的 `scope`，否则 protected resource metadata 的全部 `scopes_supported`，两者都没有时授权请求不带 scope；重新登录仍取既有 requested scopes 与新 challenge scopes 的 union。refresh 只要求 challenge 明确要求的 scope 被既有 consent 覆盖，资源新增声明的 supported scope 不使已有 grant 失效。DCR 请求的 `grant_types` 固定为 `authorization_code` 与 `refresh_token`；服务端登记的 grant 少于请求时只要求含 `authorization_code`。OAuth Consent 绑定 connection approval、canonical resource、exact issuer、requested scopes、redirect identity、registration kind、client identity 与 client-credential revision；callback 必须校验 state、PKCE S256、redirect identity，并按 2026-07-28 规则对出现的 `iss` 做 exact comparison。
+
+授权操作以失败结束时，Host 向 Product 交付失败步骤、分类、HTTP 状态与远端 OAuth error/error_description，Product 只作为进程内事实保存并投影，不写入 Registry；用户取消不产生失败事实。
+
+`oauth_operation` 活跃时拒绝同 server 的编辑/删除/授权 mutation；其他 server mutation 可以提交，但必须原样保留 marker。外部结果返回后不要求起始 global generation 仍相同，而是先按 operation id 和 server-bound fingerprints 校验当前 canonical registry，再从当前 generation 构建 target，确保无关 server 变更不会丢失或把已成功的远端 effect 误判为 stale。
+
+DCR、authorization-code exchange 与 refresh 都是不可回滚外部操作，统一使用持久 `oauth_operation`。操作开始前若目标 server 当前进入 Admission Authority，Product MCP 必须先基于 current catalog 预构建排除该 server 的 owned selection；marker 落盘后 no-fail 安装 reduced authority，再允许发送请求，无法构建时不得产生外部 effect。
+
+每次 marker 绑定 kind、server、connection approval、consent draft/epoch 和适用 token revision；DCR success 构造 issued client identity 和可选 fresh client-secret locator，token success 构造 fresh token locators、当前 registry target、HTTP auth snapshot 与恢复目标 server 的 Admission candidate，再经既有事务提交并 no-fail 安装。
+
+明确收到未创建 client 的 DCR rejection 可以清除 marker 并进入 `client_registration_required`；`invalid_grant`、响应丢失、成功后落盘失败、结果不确定或启动发现遗留 marker 都进入 `reauth_required` 并保持 reduced authority，不得重放、回滚到旧 active token 或猜测成功。DCR outcome unknown 可能遗留一个远端 registration，UI 必须说明再次尝试可能新建 client，本期不声称远端 revoke。
+
+能够可靠证明 non-idempotent request 尚未发送时，可以按当前 operation 清除 marker 并保留原授权事实，由 Product 决定后续重试；取消、超时和网络错误本身不构成未发送证明。用户 Cancel 在请求可能已发送后只能停止本地等待并提交 `reauth_required`，不能把 socket cancel 当作远端未执行。已经选中的完整响应不因清理阶段的取消失去已知结果，其采纳仍须通过当前绑定校验。
+
 MCP apply、catalog refresh、durable OAuth mutation 与运行时 reauthorization 共享 Product Control 的串行化边界；浏览器授权等待不占用该边界，只携带 server-bound operation identity。浏览器等待期间，其他 server 的 OAuth refresh 和 reduced-authority catalog refresh 仍可运行；进入单一 durable `oauth_operation` 后才按事务串行。所有 completion 必须按 operation、server/connection fingerprint、consent epoch 与当前 generation 重新授权，stale 结果只清理自身资源。目标 server 进入 OAuth 或 reauthorization 时必须先提交排除它的 reduced authority，不能无关地冻结其他 server。
+
+#### Task 恢复、目录刷新与关闭
 
 普通 Text Task admission 不属于 MCP 边界：MCP 未就绪、refresh/apply/OAuth 在途或 freshness failure 都不得拒绝 Task 创建。创建时只复制当刻安全可用的 Selection；不可用时以 null Selection 创建，并在 Task 的进程期 immutable authority fact 中区分 `ready(selected)`、`ready(none)` 与 `unavailable`。该事实进入 Snapshot 和 create result，不进入 Task persistence，冷启动恢复的历史 Task 为 `unavailable`，Renderer 不得据此热附加 MCP。freshness failure 必须使旧 MCP Admission fail closed 并触发现有异步 refresh；原 restore 或 mutation 不自动重放。边界忙时必须保留 runtime authorization failure 与 refresh pending 事实；refresh enqueue 失败必须由 owner timer 有界重试。关闭时先停止 MCP management、OAuth/refresh timer 与新 MCP admission，再 settle/join worker，释放 Admission 与 Activation，最后由 Agent owner 释放 transport 与 Runtime。
 
@@ -555,7 +612,7 @@ Run 接纳执行时可以保留 runtime-only 单调起点；Product 在完整 te
 
 Task 删除是跨持久化、checkpoint、event、Session 和 worker reference 的独立 Product 生命周期用例，不占用 active-operation 槽；其 `idle | deleting | failed` 状态只存在于当前 Runtime，不进入 durable Task record。删除无需归档，受理不改变原 archived；受理时取消等待输入与接续并失效待决审批，Product Control 通过既有 operation owner 请求停止，禁止新 admission。删除意图可以先进入 `deleting`，但只有相关 active operation、checkpoint、terminal event、Session access 和 worker reference 全部收口且 durable history commit 成功后才能物理移除 record。明确失败或结果不确定只使本次删除进入可诊断失败；用户可以重试删除。Task 已回到 open 且安全时，恢复归档或未归档 Task 的显式新消息、归档在接纳同一 mutation 中清除 failed，拒绝不清除；仍 closing 或结果未知不得借此绕过原事务 gate。删除意图不持久化，重启不自动继续；Task 的其他可用操作与整个应用 不得因此冻结。
 
-### 4.3 `workbench-history.store`
+### 4.3 Workbench 历史存储
 
 可信成果元数据和可省略的展示详情分开保留。交付回执与 Host 生图引用受既有每 Run 数量、路径及字段长度、历史存储和 Bridge 块边界约束，复制仍经过同一 Host 全量凭据清洗；它们不消耗可淘汰的普通文本详情额度，也不建立新的全局预留或准入机制。生图引用归属于不可淘汰的最小 Tool 记录，占用自己的记录位置，不省略或挤占普通 Tool 记录；一轮的 Tool 记录没有条数上限，只受单字段上限与全局历史额度约束；Tool 名称和产品身份的运行时计费标记不进入持久化格式，冷恢复由可信生图引用重建同一所有权。allocator failure 仍是 Host 失败，不伪装成普通容量缺口。
 
