@@ -128,7 +128,7 @@ Account summary 归账号，使用独立于 identity transaction 的有界单飞
 
 节拍无法启动时保持已验证 identity，发布一次 `refresh_schedule_failed`，由事件循环的检查继续驱动，节拍启动后收回这个错误。用户可以用显式 `retry_refresh` 立即续期或重新启动节拍；不得依赖 Renderer timer、每次任意 commit 自动重试或继续发放过期 token。
 
-logout 是一次提交，没有 attempt：先写绑定当前 refresh token 的阻断记录，再删除 Account-owned refresh credential 和这条记录，然后提交 `signed_out` 并结束内存中的 credential：refresh token 当场清零，access token 只留给投影检查。随后由 Application 通知 Models 授权不可用；它不读取 Models 或 consumer 状态。记录写入失败时什么都没有改变，只发布 Account error。删除明确失败时保留原 committed identity并发布 Account error，此后这份 refresh token 不能再续期：access token 在有效期内照常可用，到续期点结束会话，进入 `signed_out`，公开状态与重启后一致；重新登录换成另一份后照常续期。
+logout 是一次提交，持有登录或上次退出留下残留时都接受，不管在做什么：先写绑定当前 refresh token 的阻断记录（续期在途时这份记录已经写过，残留时它本来就在），再删除 Account-owned refresh credential 和这条记录，然后提交 `signed_out` 并结束内存中的 credential：refresh token 当场清零，access token 只留给投影检查。在途的动作被放弃：它的 worker 只被告知取消、不被等待，之后给出的任何结果（包括服务端已经轮换出的新 refresh token）都清零丢弃；worker 用的是自己的副本，所以本机删除不必等它。随后由 Application 通知 Models 授权不可用；它不读取 Models 或 consumer 状态。记录写入报错时什么都没有改变，只发布 Account error，并尽力删一次那条记录（报错不等于没写进去）。refresh token 删除失败时登录照样结束，进入带残留的 `signed_out` 并发布 Account error：那份 token 被记录挡住，永远不会再发；再次 logout 只需删除它。token 删除之后只是记录删不掉，不算失败：记录没有可匹配的 token，什么也挡不住。
 
 Account credential port 的返回合同要求：正常返回成功表示该次保存或删除已提交，正常返回错误表示该次变更未提交。SDK 维护方负责公开凭据 API 的返回合同与行为验证，Application binding 负责保持该语义并映射为 Account port 的结果，不在成功提交后追加可能失败的步骤。进程终止或调用没有返回结果不视为明确失败；若接入的 SDK 不能提供该合同，必须先增加 `outcome_unknown`、readback 或 restart reconciliation，再允许后续状态迁移。
 
@@ -144,7 +144,7 @@ Account durable authority 由系统安全存储中的 Metask refresh token 与�
 - production 与 automation 的 credential service 隔离，不得相互恢复。
 - Account Runtime 和平台 binding 不拥有数据目录、路径创建或文件权限；Models 等其他 owner 的持久化路径不得作为 Account 初始化前置条件。
 
-冷启动是唯一可以消费 retained refresh token 的入口。没有 token 时进入 `signed_out`，合法残留记录仅尝试清理；有 token 且记录缺失时尝试 restore；记录合法且摘要匹配当前 token 时，禁止刷新并以普通登录入口要求重新登录；记录合法但摘要不匹配时，本地 token 已被替换，可以 restore 当前 token。任何读取失败、未知版本、损坏或超长记录都 fail closed，不发 refresh HTTP，发布 Account 存储错误。每次 restore 必须先 refresh并 durable commit，再以 Userinfo 建立 identity；后续显式登录总是新 OAuth，`signed_out` 之后没有任何自动 restore。
+冷启动是唯一可以消费 retained refresh token 的入口。没有 token 时进入 `signed_out`，合法残留记录仅尝试清理，清不掉也不算失败；有 token 且记录缺失时尝试 restore；记录合法且摘要匹配当前 token 时，禁止刷新并以普通登录入口要求重新登录；记录合法但摘要不匹配时，本地 token 已被替换，可以 restore 当前 token。读取 fail closed，不发 refresh HTTP，发布 Account 存储错误，并严格分两类：存储没有应答或没有内存容纳应答时，`signed_out` 记为读不到，`retry_refresh` 重读一次，不写任何东西，原来的 token 原样保留；未知版本、损坏或超长的记录或 token 重读也不会变，只给登录入口，登录保存新 token 时一并清掉旧记录。两类都不阻止应用启动。每次 restore 必须先 refresh并 durable commit，再以 Userinfo 建立 identity；后续显式登录总是新 OAuth，`signed_out` 之后没有任何自动 restore。
 
 没有证明任何事的 restore 停在 `checking` 并保留错误，不算未登录：一是 refresh 能证明没有发出且记录已清除（与已验证会话的重试是同一个判断）；二是 token 已换并已保存，只是没取到 identity：除 Userinfo 明说授权没了（`authorization_revoked`、`user_not_found`）以外的任何失败，包括网络、deadline、429、5xx、协议错误或 worker 启动失败。它按 boot 时钟隔 30 秒、1 分钟、2 分钟、之后每 5 分钟再确认一次，再试时不清错误；已换好的 token 到自己的续期点之前只重取 identity，不再换。窗口激活或有消息开始等待时，间隔回到起点，下一次提前到上次结束后 30 秒；`retry_refresh` 当场发起。试到成功、被证明无效、结果不确定、用户重新登录或退出为止；结果不确定、服务端明确拒绝、保存失败与 identity 明确失效仍按各自规则进入 `signed_out`。节拍无法启动时不另换错误，由事件循环的检查驱动；读不到墙钟时的尝试以没有发出结束，等待它的消息因此有结果。
 
@@ -167,7 +167,8 @@ Account durable authority 由系统安全存储中的 Metask refresh token 与�
 
 - 所有 Account state commit 与 projection 发生在主线程；worker 只通过有界 mailbox 交付 owned completion；
 - 每个 attempt 最多一个 terminal completion，stale completion 必须销毁 owned secret且不能改变 state；
-- 只有仍在等待 OAuth callback 的登录可以取消；callback 被主线程提交为 `token_exchange(login)` 后取消命令即失效，credential persistence 一旦可能提交即跨过取消边界；
+- 只有仍在等待 OAuth callback 的登录可以取消；callback 被主线程提交为 `authorize(exchanging)` 后取消命令即失效，credential persistence 一旦可能提交即跨过取消边界。等在续期后面、还没开始的登录请求可以撤回，续期照常；
+- 停下一个动作只有一种做法：放弃。回调等待一被告知就结束，当场 join；网络请求可能卡在取消不到的 DNS 上，只被告知取消、另放一边，结果来了只清零丢弃，结束后才 join，不占新动作的位置。登录请求在没确认的登录上遇到正在取身份时，放弃取身份，浏览器当场打开；遇到续期在途时等这一次，确认成功就不再需要登录；
 - 续期节拍、网络、loopback、deadline 与 cancellation 由 Account-owned policy和 Application byte/platform adapter协作收口；
 - 被阻断的 refresh 不得调度或发布可重试的 `refresh_schedule_failed` 来覆盖原失败；只有明确未消费且记录解除成功才能恢复刷新资格；
 - 已验证 identity 的授权状态只能是 `available`、`recovering` 或 `stalled`；不能安全重试的续期结果，在运行中与重启后给出同一公开状态 `signed_out`；

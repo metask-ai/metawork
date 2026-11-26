@@ -34,9 +34,6 @@ pub const Grant = struct {
     next: ?*Grant = null,
     /// Counts the access tokens installed in this process.
     generation: u64 = 0,
-    /// False once a logout could not delete the stored refresh token: its
-    /// marker is stored beside it, so nothing may send it any more.
-    renewable: bool = true,
 
     pub fn create(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Grant {
         const self = try allocator.create(Grant);

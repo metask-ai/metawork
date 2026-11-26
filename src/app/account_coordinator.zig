@@ -178,6 +178,8 @@ pub const Coordinator = struct {
     pub fn drain(self: *Coordinator) void {
         self.assertMainThread();
         if (self.stopping) return;
+        // Workers given up on are joined once they have finished.
+        self.runtime.reapAbandoned();
         while (self.runtime.prepareNextCompletion()) |result| {
             switch (result) {
                 .prepared => |prepared| {
@@ -658,9 +660,22 @@ test "Account summary stays across renewals and is fetched again behind them" {
     try expectHistory(&runtime, .ready, 5, &transport);
     try std.testing.expect(runtime.summary_job == null);
 
-    // Signing out, as changing accounts begins, takes it away.
+    // Signing out, as changing accounts begins, takes it away, and does not
+    // wait for a request of it still underway.
+    transport.started = .unset;
+    transport.release = .unset;
+    transport.held = true;
+    try std.testing.expect(coordinator.commandSink().submit(.refresh_summary).accepted);
+    try transport.started.wait(std.testing.io);
     try std.testing.expect(coordinator.commandSink().submit(.logout).accepted);
     try std.testing.expectEqual(account_contract.SummaryAvailability.unavailable, runtime.summary.view().history.availability);
+    try std.testing.expect(runtime.summary_job == null and runtime.retired_summaries != null);
+    transport.release.set(std.testing.io);
+    for (0..5000) |_| {
+        coordinator.drain();
+        if (runtime.retired_summaries == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.CancelledSummaryNeverJoined;
 }
 
 fn expectHistory(runtime: *account_api.Runtime, availability: account_contract.SummaryAvailability, requests: usize, transport: *const SummaryTransport) !void {
@@ -858,33 +873,6 @@ test "Account coordinator closes a continuation effect collision with one termin
         &exchange_backing,
         "authorization-code",
     ) == null);
-}
-
-test "Account cancel admission collision rejects without committing or panicking" {
-    var runtime = try initRuntimeForTest();
-    defer runtime.deinit();
-    var sink: RecordingSink = .{ .runtime = &runtime };
-    var coordinator = Coordinator.init(
-        &runtime,
-        sink.port(),
-        std.Thread.getCurrentId(),
-    );
-    coordinator.startAutomation();
-    sink.count = 0;
-    _ = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
-    account_api.TestSupport.occupyEffectQueue(&runtime);
-    defer account_api.TestSupport.clearEffectQueue(&runtime);
-
-    const result = coordinator.commandSink().submit(.cancel_operation);
-
-    try std.testing.expect(!result.accepted);
-    try std.testing.expectEqual(
-        account_contract.ErrorCode.local_resource_exhausted,
-        result.error_code,
-    );
-    try std.testing.expectEqual(account_contract.AccountState.authorizing, runtime.view().state);
-    try std.testing.expect(runtime.view().can_cancel);
-    try std.testing.expectEqual(@as(usize, 0), sink.count);
 }
 
 test "Account cancel discards a late callback exchange secret" {

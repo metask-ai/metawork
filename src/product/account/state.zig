@@ -52,7 +52,12 @@ fn BoundedString(comptime capacity: usize) type {
 /// What this device holds of the Metask login.
 pub const Login = union(enum) {
     /// No login is held.
-    none: struct { reason: NoneReason = .absent },
+    none: struct {
+        reason: NoneReason = .absent,
+        /// A refresh token could not be deleted. Its marker keeps it from
+        /// ever being sent; logging out again deletes it.
+        residue: bool = false,
+    },
     /// A refresh token is held, and perhaps an access token, but nothing has
     /// confirmed whose they are.
     held,
@@ -63,7 +68,16 @@ pub const NoneReason = enum {
     /// The credential store has not been read yet.
     unread,
     absent,
+    /// The credential store could not be read; reading it again may find a
+    /// login. Nothing was written over it.
+    unreadable,
+    /// The person signed out.
+    logged_out,
 };
+
+/// What waits for the operation underway. Logging out never waits, and
+/// closing is the Runtime's own stop.
+pub const Intent = enum { none, login };
 
 /// The one operation underway. Each owns a nonzero attempt identity.
 pub const Op = union(enum) {
@@ -85,7 +99,6 @@ pub const Effect = union(enum) {
     exchange_login,
     refresh_token,
     load_identity,
-    cancel_attempt: u64,
     shutdown: ?u64,
 };
 
@@ -101,6 +114,7 @@ pub const EffectSink = struct {
 const CommittedState = struct {
     login: Login = .{ .none = .{ .reason = .unread } },
     op: Op = .idle,
+    intent: Intent = .none,
     error_code: contract.ErrorCode = .none,
     safe_diagnostic: SafeDiagnostic = .{},
     next_attempt_id: u64 = 1,
@@ -119,10 +133,20 @@ const CommittedState = struct {
         self.safe_diagnostic = failure.safe_diagnostic;
     }
 
+    /// A sign-in waiting for the operation underway can be withdrawn, and so
+    /// can one waiting for its browser callback.
     fn canCancel(self: *const CommittedState) bool {
+        if (self.intent == .login) return true;
         return switch (self.op) {
             .authorize => |value| !value.exchanging,
             .idle, .renew, .identity => false,
+        };
+    }
+
+    fn storeRead(self: *const CommittedState) bool {
+        return switch (self.login) {
+            .none => |value| value.reason != .unread,
+            .held, .verified => true,
         };
     }
 
@@ -136,7 +160,8 @@ const CommittedState = struct {
     }
 
     fn view(self: *const CommittedState) contract.AccountView {
-        const state: contract.AccountState = if (self.op == .authorize) .authorizing else switch (self.login) {
+        const signing_in = self.op == .authorize or self.intent == .login;
+        const state: contract.AccountState = if (signing_in) .authorizing else switch (self.login) {
             .none => |value| if (value.reason == .unread) .checking else .signed_out,
             .held => .checking,
             .verified => .authenticated,
@@ -181,10 +206,34 @@ pub const Account = struct {
 
     /// The store was read; until then nothing is known of a login.
     pub fn storeRead(self: *const Account) bool {
-        return switch (self.state.login) {
-            .none => |value| value.reason != .unread,
-            .held, .verified => true,
+        return self.state.storeRead();
+    }
+
+    /// The store could not be read, and nothing is underway: reading it
+    /// again is what a retry does.
+    pub fn readsStoreAgain(self: *const Account) bool {
+        return self.state.op == .idle and switch (self.state.login) {
+            .none => |value| value.reason == .unreadable,
+            .held, .verified => false,
         };
+    }
+
+    /// A refresh token is stored that a logout could not delete.
+    pub fn residue(self: *const Account) bool {
+        return switch (self.state.login) {
+            .none => |value| value.residue,
+            .held, .verified => false,
+        };
+    }
+
+    /// Something is stored to delete: a login, or what a logout left.
+    pub fn acceptsLogout(self: *const Account) bool {
+        return self.state.login != .none or self.residue();
+    }
+
+    /// A sign-in waits for the operation underway to end.
+    pub fn loginWaiting(self: *const Account) bool {
+        return self.state.intent == .login;
     }
 
     pub fn activeAttempt(self: *const Account) ?u64 {
@@ -262,11 +311,13 @@ pub const Account = struct {
         };
     }
 
+    /// What reading the store found: at start, or again after it could not
+    /// be read.
     pub fn prepareRestore(
         self: *const Account,
         restore: *RestoreResult,
     ) PrepareResult {
-        if (self.storeRead() or self.state.op != .idle) {
+        if ((self.storeRead() and !self.readsStoreAgain()) or self.state.op != .idle) {
             restore.deinit();
             return .{ .rejected = .invalid_state };
         }
@@ -279,14 +330,17 @@ pub const Account = struct {
         return transitionNoAttempt(next, .restored);
     }
 
+    /// Reading the store found no login it can use. `unreadable` when reading
+    /// it again may: nothing was written over what it holds.
     pub fn prepareSignedOutRestoreFailure(
         self: *const Account,
         failure: WorkerFailure,
+        unreadable: bool,
     ) PrepareResult {
-        if (self.storeRead() or self.state.op != .idle)
+        if ((self.storeRead() and !self.readsStoreAgain()) or self.state.op != .idle)
             return .{ .rejected = .invalid_state };
         var next = self.state;
-        next.login = .{ .none = .{} };
+        next.login = .{ .none = .{ .reason = if (unreadable) .unreadable else .absent } };
         next.setFailure(if (failure.error_code == .none) .fromCode(.credential_store_read_failed) else failure);
         return transitionNoAttempt(next, .operation_failed);
     }
@@ -366,6 +420,7 @@ pub const Account = struct {
         var next = self.state;
         next.login = .{ .none = .{} };
         next.op = .idle;
+        next.intent = .none;
         next.clearError();
         const active_attempt = self.state.activeAttempt();
         return .{
@@ -385,16 +440,6 @@ pub const Account = struct {
         return transitionNoAttempt(next, .operation_failed);
     }
 
-    /// Ends a verified session between attempts, as a failed renewal does.
-    pub fn prepareSessionLost(self: *const Account, failure: WorkerFailure) PrepareResult {
-        if (self.state.login != .verified or self.state.op != .idle)
-            return .{ .rejected = .invalid_state };
-        var next = self.state;
-        next.login = .{ .none = .{} };
-        next.setFailure(failure);
-        return transitionNoAttempt(next, .operation_failed);
-    }
-
     pub fn prepareRetryRefresh(self: *const Account) PrepareResult {
         if (self.state.login != .verified or self.state.op != .idle)
             return .{ .rejected = .invalid_state };
@@ -404,56 +449,101 @@ pub const Account = struct {
     }
 
     /// A login is only begun where none is verified: changing accounts means
-    /// signing out first.
+    /// signing out first. A renewal underway may already be sent, so the
+    /// sign-in waits for it, and it is not needed if that renewal confirms the
+    /// login. An identity request is given up for it: it holds nothing.
     fn prepareBeginLogin(self: *const Account) PrepareResult {
         const accepted = switch (self.state.login) {
             .none => self.storeRead(),
             .held => true,
             .verified => false,
         };
-        if (!accepted or self.state.op != .idle)
+        if (!accepted or self.state.intent != .none)
             return .{ .rejected = .invalid_state };
+        switch (self.state.op) {
+            .idle => {},
+            .renew => |value| {
+                var next = self.state;
+                next.intent = .login;
+                return transitionNoEffect(next, .session_changed, value.attempt);
+            },
+            .identity => |value| {
+                var begun = self.prepareAuthorize();
+                switch (begun) {
+                    .transition => |*value_transition| value_transition.abandoned = value.attempt,
+                    else => {},
+                }
+                return begun;
+            },
+            .authorize => return .{ .rejected = .invalid_state },
+        }
+        return self.prepareAuthorize();
+    }
+
+    /// A sign-in that waited for the operation before it may begin now.
+    pub fn prepareWaitingLogin(self: *const Account) PrepareResult {
+        if (self.state.intent != .login or self.state.op != .idle)
+            return .{ .rejected = .invalid_state };
+        return self.prepareAuthorize();
+    }
+
+    fn prepareAuthorize(self: *const Account) PrepareResult {
         const attempt = nextAttempt(self.state.next_attempt_id) orelse
             return .{ .rejected = .generation_mismatch };
         var next = self.state;
         next.op = .{ .authorize = .{ .attempt = attempt.current } };
+        next.intent = .none;
         next.next_attempt_id = attempt.next;
         next.clearError();
         return transition(next, .session_changed, attempt.current, .begin_oauth);
     }
 
+    /// Withdraws a sign-in still waiting, or gives up one waiting for its
+    /// browser callback.
     fn prepareCancel(self: *const Account) PrepareResult {
         if (!self.state.canCancel()) return .{ .rejected = .invalid_state };
         const attempt_id = self.state.activeAttempt().?;
         var next = self.state;
+        if (self.state.intent == .login) {
+            next.intent = .none;
+            return transitionNoEffect(next, .session_changed, attempt_id);
+        }
         next.op = .idle;
         next.error_code = .user_cancelled;
         next.safe_diagnostic.clear();
-        return transition(
-            next,
-            .operation_failed,
-            attempt_id,
-            .{ .cancel_attempt = attempt_id },
-        );
+        var result = transitionNoEffect(next, .operation_failed, attempt_id);
+        result.transition.abandoned = attempt_id;
+        return result;
     }
 
-    /// Nothing of the login is stored any more. It ends between attempts.
-    pub fn prepareSignedOut(self: *const Account) PrepareResult {
-        if (self.state.login != .verified or self.state.op != .idle)
-            return .{ .rejected = .invalid_state };
+    /// The login's stored refresh token is deleted, or could not be
+    /// (`residue`). Either way no login is held from here, and whatever
+    /// operation was underway is given up: its result is no longer wanted.
+    pub fn prepareSignedOut(self: *const Account, residue_left: bool, failure: ?WorkerFailure) PrepareResult {
+        if (!self.acceptsLogout()) return .{ .rejected = .invalid_state };
         var next = self.state;
-        next.login = .{ .none = .{} };
-        next.clearError();
-        return transitionNoAttempt(next, .signed_out);
+        next.login = .{ .none = .{ .reason = .logged_out, .residue = residue_left } };
+        next.op = .idle;
+        next.intent = .none;
+        if (failure) |value| next.setFailure(value) else next.clearError();
+        const attempt_id = self.state.activeAttempt();
+        var result = if (attempt_id) |id|
+            transitionNoEffect(next, .signed_out, id)
+        else
+            transitionNoAttempt(next, .signed_out);
+        result.transition.abandoned = attempt_id;
+        return result;
     }
 
-    /// What is stored could not be deleted, so the login goes on.
+    /// Nothing could be deleted, so nothing changed but the error shown.
     pub fn prepareLogoutFailure(self: *const Account, failure: WorkerFailure) PrepareResult {
-        if (self.state.login != .verified or self.state.op != .idle)
-            return .{ .rejected = .invalid_state };
+        if (!self.acceptsLogout()) return .{ .rejected = .invalid_state };
         var next = self.state;
         next.setFailure(failure);
-        return transitionNoAttempt(next, .operation_failed);
+        return if (self.state.activeAttempt()) |id|
+            transitionNoEffect(next, .operation_failed, id)
+        else
+            transitionNoAttempt(next, .operation_failed);
     }
 
     /// The token exchange underway was answered and its refresh token is
@@ -497,6 +587,8 @@ pub const Account = struct {
         var next = self.state;
         next.login = .{ .verified = identity };
         next.op = .idle;
+        // A sign-in that waited for this confirmation is not needed any more.
+        next.intent = .none;
         next.clearError();
         return transitionNoEffect(next, .session_changed, loading.attempt);
     }
@@ -515,7 +607,7 @@ pub const Account = struct {
         switch (self.state.op) {
             .authorize => {},
             .renew, .identity => if (!failure.retryable) {
-                next.login = .{ .none = .{} };
+                next.login = .{ .none = .{ .residue = failure.residue } };
             },
             .idle => unreachable,
         }
@@ -548,10 +640,11 @@ fn transitionNoAttempt(next: CommittedState, fact_kind: contract.AccountFactKind
 }
 
 fn stateIsValid(state: *const CommittedState) bool {
+    const may_sign_in = state.login != .verified and state.storeRead();
+    if (state.intent == .login and (!may_sign_in or state.op == .authorize)) return false;
     return switch (state.op) {
         .idle => true,
-        .authorize => state.login != .verified and
-            !(state.login == .none and state.login.none.reason == .unread),
+        .authorize => may_sign_in,
         .renew => state.login != .none,
         .identity => state.login == .held,
     };
@@ -568,7 +661,15 @@ pub const PreparedTransition = struct {
     fact_kind: contract.AccountFactKind,
     attempt_id: ?u64,
     effect: ?Effect = null,
+    /// The attempt whose worker this commit gives up: told to cancel, never
+    /// waited for, and its result discarded.
+    abandoned: ?u64 = null,
     committed: bool = false,
+
+    /// A sign-in waits once this commits.
+    pub fn loginWaits(self: *const PreparedTransition) bool {
+        return self.next.intent == .login;
+    }
 
     pub fn view(self: *const PreparedTransition) contract.AccountView {
         return self.next.view();
@@ -658,6 +759,8 @@ pub const WorkerFailure = struct {
     /// Account Runtime proved this failure leaves the login usable and will
     /// try again. Any other renewal or identity failure ends the login.
     retryable: bool = false,
+    /// Ending the login, Runtime could not delete its refresh token.
+    residue: bool = false,
 
     pub fn fromCode(error_code: contract.ErrorCode) WorkerFailure {
         std.debug.assert(error_code != .none);
@@ -1121,6 +1224,7 @@ test "restore failure returns to sign-in without restart semantics" {
     var account = Account.initRestoring();
     var failed = switch (account.prepareSignedOutRestoreFailure(
         .fromCode(.credential_store_read_failed),
+        true,
     )) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
@@ -1158,4 +1262,56 @@ test "refresh schedule failure is restricted to authenticated idle state" {
         contract.ErrorCode.refresh_schedule_failed,
         account.view().error_code,
     );
+}
+
+test "a logout is taken from any login and from what one left, and a waiting sign-in can be withdrawn" {
+    var account = Account.initRestoring();
+    var restore: RestoreResult = .{ .refresh_only = {} };
+    var restored = switch (account.prepareRestore(&restore)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &restored);
+    var renewal = switch (account.prepareRestoredTokenRefresh()) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &renewal);
+    const attempt_id = account.activeAttempt().?;
+
+    // A sign-in waits for the renewal; withdrawing it leaves the renewal.
+    var waiting = switch (account.prepareCommand(.begin_login)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &waiting);
+    try std.testing.expectEqual(contract.AccountState.authorizing, account.view().state);
+    try std.testing.expect(account.view().can_cancel);
+    var withdrawn = switch (account.prepareCommand(.cancel_operation)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(withdrawn.abandoned == null);
+    commitPrepared(&account, &withdrawn);
+    try std.testing.expectEqual(contract.AccountState.checking, account.view().state);
+    try std.testing.expectEqual(@as(?u64, attempt_id), account.activeAttempt());
+
+    // A logout during it gives the renewal up; a token it could not delete
+    // leaves a residue that a second logout clears.
+    var residue = switch (account.prepareSignedOut(true, .fromCode(.credential_store_delete_failed))) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(?u64, attempt_id), residue.abandoned);
+    commitPrepared(&account, &residue);
+    try std.testing.expectEqual(contract.AccountState.signed_out, account.view().state);
+    try std.testing.expect(account.residue() and account.activeAttempt() == null);
+    try contract.validateView(account.view());
+    var cleared = switch (account.prepareSignedOut(false, null)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &cleared);
+    try std.testing.expect(!account.residue() and !account.acceptsLogout());
+    try std.testing.expect(account.prepareSignedOut(false, null) == .rejected);
 }
