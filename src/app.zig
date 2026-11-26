@@ -895,11 +895,18 @@ pub fn run(init: std.process.Init) !void {
     // runner has a window, and this one must never have one.
     if (execution_host.requested(init.minimal.args, init.gpa)) runExecutionHalf(init);
     // Closing may leave an Account request running that no cancel reaches.
-    // What it uses is then left to the process exit.
+    // What it uses lives on the heap and is not freed then, and once every
+    // other part of closing has run the process ends here: returning would
+    // wait for that thread, which may still touch what this frame held.
     var account_detached = false;
-    var http_engine: @import("metawork_http_transport").Engine = undefined;
+    defer if (account_detached) std.process.exit(0);
+    errdefer if (account_detached) std.process.exit(1);
+    const http_engine = try std.heap.c_allocator.create(@import("metawork_http_transport").Engine);
     http_engine.init(std.heap.c_allocator, init.io);
-    defer if (!account_detached) http_engine.deinit();
+    defer if (!account_detached) {
+        http_engine.deinit();
+        std.heap.c_allocator.destroy(http_engine);
+    };
     var app = App{
         .env_map = init.environ_map,
         .io = init.io,
@@ -908,7 +915,7 @@ pub fn run(init: std.process.Init) !void {
         .automation = app_automation.Adapter.init(init.environ_map),
         .platform = app_platform.Adapter.init(init.io, std.Thread.getCurrentId()),
         .completion_transport = .{
-            .http = &http_engine,
+            .http = http_engine,
         },
     };
     app.platform.setProductDeliveryTrace(app.automation.productDeliveryTraceEnabled());
@@ -1167,10 +1174,13 @@ pub fn run(init: std.process.Init) !void {
         }
     }
 
-    var account_http = metask_http_transport.Adapter{ .http = &http_engine };
+    const account_http = try std.heap.c_allocator.create(metask_http_transport.Adapter);
+    account_http.* = .{ .http = http_engine };
+    defer if (!account_detached) std.heap.c_allocator.destroy(account_http);
     var account_loopback = oauth_loopback_transport.Adapter.init(init.io);
     defer account_loopback.deinit();
-    var account_runtime = account_api.Runtime.init(
+    const account_runtime = try std.heap.c_allocator.create(account_api.Runtime);
+    account_runtime.* = account_api.Runtime.init(
         std.heap.c_allocator,
         init.io,
         app.main_thread_id,
@@ -1182,7 +1192,7 @@ pub fn run(init: std.process.Init) !void {
         },
     );
     var account_coordinator_state = account_coordinator.Coordinator.init(
-        &account_runtime,
+        account_runtime,
         control.accountCommitSink(),
         app.main_thread_id,
     );
@@ -1220,7 +1230,10 @@ pub fn run(init: std.process.Init) !void {
         app.account_coordinator = null;
         if (app.control_initialized) control.clearAccountProjectionCredentials();
         account_detached = account_runtime.detached();
-        if (!account_detached) account_runtime.deinit();
+        if (!account_detached) {
+            account_runtime.deinit();
+            std.heap.c_allocator.destroy(account_runtime);
+        }
     }
 
     var dispatcher = try bridge_api.Dispatcher.init(

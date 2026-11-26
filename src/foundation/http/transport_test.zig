@@ -1340,7 +1340,7 @@ test "HTTP saturated ordinary work leaves capacity for a held MCP continuation" 
 fn freshPost(operation: *http.Operation, url: []const u8, pause: Io.Duration, output: []u8) http.Error!Reply {
     var request = try operation.open(.POST, std.Uri.parse(url) catch return error.InvalidRequest, .{ .fresh = true });
     defer request.deinit();
-    // Between the connection and the first byte no budget runs.
+    // A pause before the send is no part of the answer's budget.
     Io.sleep(std.testing.io, pause, .awake) catch return error.Cancelled;
     try request.send("grant");
     var response = try request.receiveHead();

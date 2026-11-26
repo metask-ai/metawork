@@ -229,15 +229,6 @@ const Effects = struct {
         }
     };
 
-    /// A network worker given up on: told to cancel and never waited for.
-    /// Its result is discarded when it comes, and it is joined once it has.
-    const Abandoned = struct {
-        attempt: *network_attempt.NetworkAttempt,
-        /// Written under the mailbox lock.
-        finished: bool = false,
-        next: ?*Abandoned = null,
-    };
-
     allocator: std.mem.Allocator,
     io: std.Io,
     wake: WakeSink,
@@ -251,7 +242,11 @@ const Effects = struct {
     /// The network worker whose result is awaited. Heap owned, so one given
     /// up on can outlive the next one started.
     network: ?*network_attempt.NetworkAttempt = null,
-    abandoned: ?*Abandoned = null,
+    /// Network workers given up on: told to cancel and never waited for.
+    /// Each result is discarded when it comes, and each is joined once its
+    /// thread is done. Linked through the attempts; changed under the
+    /// mailbox lock.
+    abandoned: ?*network_attempt.NetworkAttempt = null,
     mailbox_collision: bool = false,
     /// Set under the mailbox lock once nothing may be woken any more: every
     /// result published after it is only destroyed.
@@ -326,8 +321,7 @@ const Effects = struct {
         if (self.detached) return false;
         // A worker given up on only says it is done, so it can be joined.
         var next = self.abandoned;
-        while (next) |entry| : (next = entry.next) if (entry.attempt.attempt_id == attempt_id) {
-            entry.finished = true;
+        while (next) |entry| : (next = entry.next_abandoned) if (entry.attempt_id == attempt_id) {
             self.wake.notify();
             return false;
         };
@@ -473,21 +467,13 @@ const Effects = struct {
         if (attempt.attempt_id != attempt_id) return self.discardMailbox(attempt_id);
         self.network = null;
         attempt.cancel();
-        const entry = self.allocator.create(Abandoned) catch {
-            // Without memory to set it aside, wait for it as closing does.
-            attempt.join();
-            self.destroyNetwork(attempt);
-            return self.discardMailbox(attempt_id);
-        };
         self.lockMailbox();
         defer self.unlockMailbox();
-        entry.* = .{ .attempt = attempt, .next = self.abandoned };
-        self.abandoned = entry;
-        // Published already: it is done and only waits to be joined.
+        attempt.next_abandoned = self.abandoned;
+        self.abandoned = attempt;
         if (self.mailbox) |*published| if (published.attemptId() == attempt_id) {
             published.deinit();
             self.mailbox = null;
-            entry.finished = true;
         };
         self.mailbox_collision = false;
     }
@@ -502,26 +488,46 @@ const Effects = struct {
         self.mailbox_collision = false;
     }
 
-    /// Joins every worker given up on that has finished. True when one was.
+    /// Joins every worker given up on whose thread is done, whether or not
+    /// it published. True when one was.
     fn reapAbandoned(self: *Effects) bool {
         var reaped = false;
         while (true) {
             self.lockMailbox();
             var link = &self.abandoned;
-            const finished = while (link.*) |entry| {
-                if (entry.finished) {
-                    link.* = entry.next;
+            const done = while (link.*) |entry| {
+                if (entry.done.load(.acquire) != 0) {
+                    link.* = entry.next_abandoned;
                     break entry;
                 }
-                link = &entry.next;
+                link = &entry.next_abandoned;
             } else null;
             self.unlockMailbox();
-            const entry = finished orelse return reaped;
-            entry.attempt.join();
-            self.destroyNetwork(entry.attempt);
-            self.allocator.destroy(entry);
+            const attempt = done orelse return reaped;
+            attempt.join();
+            self.destroyNetwork(attempt);
             reaped = true;
         }
+    }
+
+    /// Closing: what ends when told to is joined; a request still underway
+    /// is given up like any other and left to finish, and what is done by
+    /// now is joined. Nothing here waits on DNS.
+    fn endForClosing(self: *Effects) void {
+        self.endLogin();
+        if (self.network) |attempt| {
+            if (attempt.done.load(.acquire) != 0) {
+                attempt.join();
+                self.destroyNetwork(attempt);
+                self.network = null;
+            } else self.abandon(attempt.attempt_id);
+        }
+        _ = self.reapAbandoned();
+        if (self.takeMailbox()) |value| {
+            var discarded = value;
+            discarded.deinit();
+        }
+        _ = self.takeCollision();
     }
 
     fn destroyNetwork(self: *Effects, attempt: *network_attempt.NetworkAttempt) void {
@@ -574,12 +580,11 @@ const Effects = struct {
             self.destroyNetwork(attempt);
             self.network = null;
         }
-        while (self.abandoned) |entry| {
-            self.abandoned = entry.next;
-            entry.attempt.cancel();
-            entry.attempt.join();
-            self.destroyNetwork(entry.attempt);
-            self.allocator.destroy(entry);
+        while (self.abandoned) |attempt| {
+            self.abandoned = attempt.next_abandoned;
+            attempt.cancel();
+            attempt.join();
+            self.destroyNetwork(attempt);
         }
         if (self.takeMailbox()) |value| {
             var discarded = value;
@@ -859,7 +864,9 @@ pub const Runtime = struct {
         self.assertMainThread();
         if (!self.account.renewable()) return;
         self.confirm_failures = 0;
-        if (self.account.activeAttempt() != null) return;
+        // Only a wait after a failure is cut short: a token that is fine
+        // keeps its renewal point.
+        if (!self.retrying or self.account.activeAttempt() != null) return;
         const renew_at = if (self.renew_at) |*value| value else return;
         renew_at.boot = @min(renew_at.boot, self.confirm_ended_boot +| confirm_delays_seconds[0]);
     }
@@ -986,6 +993,9 @@ pub const Runtime = struct {
         self.stopping = true;
         self.clearRenewal();
         _ = self.clearSummary();
+        // Nothing but a renewal is worth waiting for when closing; told to
+        // stop now, the rest has usually finished by the time Account closes.
+        if (self.effects.network) |attempt| if (!attempt.refreshing()) self.effects.abandon(attempt.attempt_id);
     }
 
     pub fn prepareShutdown(self: *Runtime) Prepared {
@@ -1011,10 +1021,6 @@ pub const Runtime = struct {
             } else self.effects.abandon(attempt.attempt_id);
         }
         self.reapAbandoned();
-        // What still runs (a request in DNS no cancel reaches) is never
-        // joined: what it publishes is only destroyed and wakes no one, and
-        // a renewal left so keeps its marker.
-        if (self.effects.abandoned != null or self.retired_summaries != null or self.revokes != null) self.effects.detach();
         return .{ .transition = self.account.prepareShutdown() };
     }
 
@@ -1383,6 +1389,7 @@ pub const Runtime = struct {
         const renewal_finished = terminal and abandoned == null and
             self.account.confirmationInFlight() and !prepared.transition.loginWaits();
         const ended = prepared.transition.endsLogin();
+        const was_signing_in = self.account.signingIn();
         // Pooled connections of the account end with its credential.
         if (ended and self.credentials.available() and self.account.accountId().len != 0)
             self.effects.transport.retire(self.account.accountId());
@@ -1433,6 +1440,13 @@ pub const Runtime = struct {
                 self.retrying = true;
             },
         }
+        // A sign-in that gave up a held login's confirmation and then ended
+        // without replacing it leaves nothing scheduled: one is due now.
+        if (was_signing_in and terminal and self.account.confirming() and !self.account.loginWaiting() and self.renew_at == null)
+            if (self.platform) |platform| {
+                self.renew_at = .{ .wall = null, .boot = platform.boot_clock.nowSeconds() };
+                self.retrying = false;
+            };
         if (!self.account.renewable()) {
             self.confirm_failures = 0;
             self.clearRenewal();
@@ -1808,7 +1822,13 @@ pub const Runtime = struct {
                 self.effects.startRequest(attempt_id, .{ .load_identity = copy }, 0);
             },
             .shutdown => {
-                self.effects.cancelJoinAndDiscard();
+                self.effects.endForClosing();
+                // Summaries and revocations that finished meanwhile too.
+                self.reapAbandoned();
+                // What still runs (a request in DNS no cancel reaches) is
+                // never joined: what it publishes is only destroyed and wakes
+                // no one, and a renewal left so keeps its marker.
+                if (self.effects.abandoned != null or self.retired_summaries != null or self.revokes != null) self.effects.detach();
                 self.platform = null;
             },
         }
@@ -3746,6 +3766,24 @@ test "a stored login confirmed by nothing sent is tried every thirty seconds, by
     try std.testing.expectEqual(@as(usize, 0), runtime.confirm_failures);
 }
 
+test "a reason to try now renews nothing that is fine" {
+    var transport: ConfirmTransport = .{ .refresh = .answered };
+    var runtime = transport.runtimeFor();
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try startStoredLogin(&runtime, &platform);
+    try std.testing.expect(runtime.authorization() == .available);
+    const renews_at = runtime.renew_at.?;
+    platform.now_unix_seconds = 1000;
+    runtime.expedite();
+    try std.testing.expect(runtime.prepareDue() == null);
+    try std.testing.expect(std.meta.eql(renews_at, runtime.renew_at.?));
+    try std.testing.expectEqual(@as(usize, 1), transport.refreshes);
+}
+
 test "a reason to try now that comes while a confirmation is underway still counts" {
     for ([_]bool{ false, true }) |expedited| {
         var transport: ConfirmTransport = .{ .refresh = .answered, .identity = .unavailable };
@@ -4365,7 +4403,7 @@ fn commitNextResult(runtime: *Runtime) !void {
 /// Lets the worker given up on finish, and joins it.
 fn finishAbandoned(runtime: *Runtime, transport: *HeldTransport) !void {
     transport.release.set(std.testing.io);
-    runtime.effects.abandoned.?.attempt.join();
+    runtime.effects.abandoned.?.join();
     runtime.reapAbandoned();
     try std.testing.expect(runtime.effects.abandoned == null);
     try std.testing.expect(runtime.prepareNextCompletion() == null);
@@ -4509,6 +4547,18 @@ test "a sign-in gives up an identity request and keeps the authorization waiting
     try std.testing.expectEqual(epoch, runtime.authorization().checking);
     try finishAbandoned(&runtime, &transport);
     try std.testing.expectEqual(contract.AccountState.authorizing, runtime.view().state);
+    // Given up, the sign-in leaves the held login to be confirmed at once.
+    var cancel = switch (runtime.prepareCommand(.cancel_operation)) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer cancel.deinit();
+    _ = cancel.transition.takeEffect();
+    runtime.commit(&cancel);
+    try std.testing.expectEqual(contract.AccountState.checking, runtime.view().state);
+    var confirmation = runtime.prepareDue() orelse return error.TestUnexpectedResult;
+    defer confirmation.deinit();
+    try std.testing.expect(confirmation.transition.takeEffect().? == .load_identity);
 }
 
 test "closing waits for a renewal underway only its own close wait and gives up any other request" {
@@ -4535,8 +4585,11 @@ test "closing waits for a renewal underway only its own close wait and gives up 
         const begun: std.Io.Clock.Timestamp = .now(std.testing.io, .awake);
         var closing = runtime.prepareShutdown();
         defer closing.deinit();
-        _ = closing.transition.takeEffect();
+        // The closing effect runs too: nothing in it waits for a request.
+        try std.testing.expect(runtime.admitEffect(&closing));
         runtime.commit(&closing);
+        runtime.dispatchCommitted();
+        try std.testing.expect(runtime.platform == null);
         const waited_ns = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds - begun.raw.nanoseconds;
         switch (case) {
             // Back unsent in time: its marker is deleted and nothing is left.
@@ -4547,7 +4600,7 @@ test "closing waits for a renewal underway only its own close wait and gives up 
             // No answer in its time: left running, its marker kept, so the
             // next start asks for a sign-in.
             .renewal_silent => {
-                try std.testing.expect(waited_ns >= 50 * std.time.ns_per_ms);
+                try std.testing.expect(waited_ns >= 50 * std.time.ns_per_ms and waited_ns < 5 * std.time.ns_per_s);
                 try std.testing.expect(runtime.detached() and platform.refresh_marker != null);
             },
             // Not waited for at all.
@@ -4629,6 +4682,27 @@ test "a token its marker blocks at start is deleted and revoked" {
     try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, runtime.view().error_code);
     try std.testing.expect(platform.refresh_token_len == null and platform.refresh_marker == null);
     try transport.expectRevoked(&runtime, 1);
+}
+
+test "once closing left a worker running, nothing it does wakes anyone" {
+    const Wakes = struct {
+        fn count(context: *anyopaque) void {
+            const wakes: *std.atomic.Value(usize) = @ptrCast(@alignCast(context));
+            _ = wakes.fetchAdd(1, .acq_rel);
+        }
+    };
+    var wakes: std.atomic.Value(usize) = .init(0);
+    var transport: RuntimeTestTransport = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &wakes, .notify_fn = Wakes.count });
+    defer runtime.deinit();
+    const wake = runtime.effects.workerWake();
+    wake.notify();
+    try std.testing.expectEqual(@as(usize, 1), wakes.load(.acquire));
+    runtime.effects.detach();
+    wake.notify();
+    runtime.effects.publishCompletion(.{ .attempt_id = 1, .payload = .{ .failed = .fromCode(.account_operation_failed) } });
+    try std.testing.expectEqual(@as(usize, 1), wakes.load(.acquire));
+    try std.testing.expect(runtime.prepareNextCompletion() == null);
 }
 
 test "a store that cannot be read is read again, and one that holds no valid record asks for a sign-in" {

@@ -91,12 +91,7 @@ pub const Adapter = struct {
         const result = self.http.run(.{
             .consumer = .metask,
             .isolation = isolation(request.principal),
-            // A renewal spends its refresh token: its connection is new, and
-            // once it is sent its answer, not its admission, sets its end.
-            .budget = if (request.kind == .refresh_token)
-                .{ .phased = .{ .connect = renewal_connect_timeout, .response = renewal_response_timeout } }
-            else
-                .{ .deadline = if (request.control) |control| control.deadline else .fromNow(self.http.io, default_request_timeout) },
+            .budget = budgetFor(self.http.io, request),
             .cancellation = if (request.control) |control| http.Cancellation.atomic(&control.cancellation.state) else null,
         }, fetch, .{ request, response_buffer });
         const send_started = result.send == .may_have_been_sent;
@@ -104,6 +99,14 @@ pub const Adapter = struct {
             .completed => |response| selectedFetch(request, response, response_buffer, send_started),
             .failed => |err| mapError(err, send_started),
         };
+    }
+
+    /// A renewal spends its refresh token: its connection is new, and once
+    /// it is sent its answer, not its admission, sets its end.
+    fn budgetFor(io: std.Io, request: metask_transport.Request) http.Budget {
+        if (request.kind == .refresh_token)
+            return .{ .phased = .{ .connect = renewal_connect_timeout, .response = renewal_response_timeout } };
+        return .{ .deadline = if (request.control) |control| control.deadline else .fromNow(io, default_request_timeout) };
     }
 
     fn mapError(err: http.Error, send_started: bool) metask_transport.TransportError {
@@ -397,6 +400,54 @@ test "Account HTTP send boundary preserves lost-response blocking and bounded re
             },
         }
     }
+}
+
+test "Account renewal goes out over a connection of its own, bounded in phases" {
+    const KeepAlive = struct {
+        listener: *std.Io.net.Server,
+        accepted: std.atomic.Value(usize) = .init(0),
+        fn run(self: *@This()) void {
+            var connection = self.listener.accept(std.testing.io) catch return;
+            defer connection.close(std.testing.io);
+            _ = self.accepted.fetchAdd(1, .acq_rel);
+            var reads: [4096]u8 = undefined;
+            var writes: [4096]u8 = undefined;
+            var reader = connection.reader(std.testing.io, &reads);
+            var writer = connection.writer(std.testing.io, &writes);
+            var server: std.http.Server = .init(&reader.interface, &writer.interface);
+            var request = server.receiveHead() catch return;
+            request.respond("{}", .{ .keep_alive = true }) catch return;
+            _ = server.receiveHead() catch {};
+        }
+    };
+    // Only a renewal is bounded in phases.
+    for ([_]metask_transport.RequestKind{ .exchange_code, .userinfo, .usage_stats, .models }) |kind|
+        try std.testing.expect(Adapter.budgetFor(std.testing.io, .{ .kind = kind, .principal = null }) == .deadline);
+    const budget = Adapter.budgetFor(std.testing.io, .{ .kind = .refresh_token, .principal = null });
+    try std.testing.expect(budget == .phased);
+
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(std.testing.io, .{});
+    var server: KeepAlive = .{ .listener = &listener };
+    var threads: [2]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, KeepAlive.run, .{&server});
+    defer {
+        listener.deinit(std.testing.io);
+        for (threads) |thread| thread.join();
+    }
+    const endpoint = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/token", .{listener.socket.address.getPort()});
+    defer std.testing.allocator.free(endpoint);
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var buffer: [8]u8 = undefined;
+    // A connection left idle in the pool, which a renewal must not take.
+    const pooled = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, Adapter.fetchHttp, .{ endpoint, std.http.Method.GET, &.{}, "", &buffer });
+    try std.testing.expectEqual(@as(u16, 200), (try pooled.outcome.completed).status);
+    const renewal = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = budget }, Adapter.fetchHttp, .{ endpoint, std.http.Method.POST, &.{}, "grant", &buffer });
+    try std.testing.expectEqual(@as(u16, 200), (try renewal.outcome.completed).status);
+    try std.testing.expect(!renewal.reused);
+    try std.testing.expectEqual(@as(usize, 2), server.accepted.load(.acquire));
 }
 
 test "Account retire closes the principal's pooled connection only" {
