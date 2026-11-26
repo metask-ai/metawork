@@ -3122,6 +3122,10 @@ pub const Runtime = struct {
     /// nothing: no observation stops or records a definition.
     fn publishAdmissionChangesNoFail(self: *Runtime) void {
         const authority = self.scheduleAuthority();
+        self.publishAdmission(&authority);
+    }
+
+    fn publishAdmission(self: *Runtime, authority: *const ScheduleAuthority) void {
         _ = self.schedule.refreshAdmissionNoFail(authority.binding(), self.scheduleRedaction());
         _ = self.schedule.rearmNoFail(authority.binding(), self.scheduleRedaction());
         _ = self.schedule.takeChanged();
@@ -3130,11 +3134,12 @@ pub const Runtime = struct {
 
     /// A user's Models command may have replaced or removed a source identity
     /// (`source_id`), or reset the store (null). Definitions on it that can
-    /// never run again stop now, before the change is published.
+    /// never run again stop now, before the change is published, on the same
+    /// Account sample.
     fn finishModelsCommandNoFail(self: *Runtime, source_id: ?[]const u8) void {
         const authority = self.scheduleAuthority();
         _ = self.schedule.stopGoneSourceNoFail(source_id, authority.binding(), self.scheduleRedaction());
-        self.publishAdmissionChangesNoFail();
+        self.publishAdmission(&authority);
     }
 
     pub fn accountView(self: *Runtime) account_contract.AccountView {
