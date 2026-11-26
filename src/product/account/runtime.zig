@@ -1573,11 +1573,15 @@ pub const Runtime = struct {
             }
         }
         const verifying = self.account.verifying();
+        var revoke: ?oauth.Secret = null;
+        errdefer if (revoke) |*token| token.deinit();
         // A verification that found another account ended the login it
-        // asked about.
+        // asked about: its token is deleted, and revoked so it stops working
+        // on Metask's side too.
         if (verifying and completion.payload == .identity_loaded and
             !std.mem.eql(u8, completion.payload.identity_loaded.accountId(), self.account.accountId()))
         {
+            if (self.credentials.refreshToken()) |token| revoke = oauth.Secret.init(self.allocator, token.view()) catch null;
             completion.deinit();
             completion.* = .{
                 .attempt_id = completion.attempt_id,
@@ -1613,8 +1617,6 @@ pub const Runtime = struct {
         // A verification that found nothing out leaves the schedule alone.
         const retry_identity = keeps_identity and !verifying;
         const token_refused = retry_identity and completion.payload.failed.error_code == .metask_token_invalid;
-        var revoke: ?oauth.Secret = null;
-        errdefer if (revoke) |*token| token.deinit();
         if (completion.payload == .failed) {
             if (retry_unsent_refresh or keeps_identity) {
                 completion.payload.failed.retryable = true;
@@ -1627,7 +1629,10 @@ pub const Runtime = struct {
                     .metask_unauthorized, .credential_store_delete_failed => true,
                     else => false,
                 };
-                if (marked and !deleted) revoke = self.discardLostLogin(&completion.payload.failed);
+                if (marked and !deleted) {
+                    std.debug.assert(revoke == null);
+                    revoke = self.discardLostLogin(&completion.payload.failed);
+                }
             }
         }
         const loaded_identity = completion.payload == .identity_loaded;
@@ -1746,11 +1751,21 @@ pub const Runtime = struct {
             .transition => |transition| transition,
             .rejected, .ignored_stale => return self.prepareFailure(attempt_id, .account_operation_failed),
         };
-        self.storeGrant(grant.*.?) catch |err| return self.prepareFailure(attempt_id, accountStoreError(err));
+        // The held login the new one replaces stops working on Metask's side
+        // too once its token is overwritten.
+        var replaced: ?oauth.Secret = if (self.credentials.refreshToken()) |token|
+            oauth.Secret.init(self.allocator, token.view()) catch null
+        else
+            null;
+        self.storeGrant(grant.*.?) catch |err| {
+            if (replaced) |*token| token.deinit();
+            return self.prepareFailure(attempt_id, accountStoreError(err));
+        };
         return .{ .prepared = .{
             .transition = transition,
             .grant = credentials_impl.Grant.take(grant),
             .renewal = .reset,
+            .revoke = replaced,
         } };
     }
 
@@ -3480,6 +3495,9 @@ test "a login's exchanged token replaces the held one and is kept while its iden
     transport.identity = .unavailable;
     try loginAgain(&runtime);
     try expectUnconfirmed(&runtime, .metask_service_unavailable);
+    // The held login's token, overwritten, is revoked.
+    try joinRevokes(&runtime);
+    try std.testing.expectEqual(@as(usize, 1), transport.revokes.load(.acquire));
     // The unsent confirmation counted once; the login's exchange answered second.
     try std.testing.expectEqualStrings("next-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
     try std.testing.expectEqualStrings("next-access", runtime.credentials.accessToken().?);
@@ -3702,6 +3720,7 @@ const ConfirmTransport = struct {
     identity: enum { unavailable, revoked, malformed, answered, other_account, token_refused } = .answered,
     refreshes: usize = 0,
     identities: usize = 0,
+    revokes: std.atomic.Value(usize) = .init(0),
 
     fn runtimeFor(self: *@This()) Runtime {
         return Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = self, .perform_fn = perform, .retire_fn = metask_client.retireNothing }, TestSupport.loopbackEndpoint(), .{ .context = self, .notify_fn = runtimeTestWake });
@@ -3734,6 +3753,10 @@ const ConfirmTransport = struct {
                     .token_refused => "{\"error\":\"invalid_token\"}",
                 };
             },
+            .revoke => {
+                _ = self.revokes.fetchAdd(1, .acq_rel);
+                return .{ .status = 200, .body = output[0..0] };
+            },
             else => return error.ProtocolFailed,
         };
         @memcpy(output[0..body.len], body);
@@ -3741,6 +3764,13 @@ const ConfirmTransport = struct {
         return .{ .status = if (refused) 401 else 200, .body = output[0..body.len] };
     }
 };
+
+fn joinRevokes(runtime: *Runtime) !void {
+    while (runtime.revokes) |job| {
+        while (!job.finished.load(.acquire)) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        runtime.reapAbandoned();
+    }
+}
 
 /// Starts over a stored login and lets its first confirmation end.
 fn startStoredLogin(runtime: *Runtime, platform: *TestSupport.Platform) !void {
@@ -3904,6 +3934,10 @@ test "a 401 that does not say why asks who the login is, and only Metask's answe
             .other_account, .revoked => {
                 try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
                 try std.testing.expect(platform.refresh_token_len == null);
+                // Another account's token is revoked as it is deleted; one
+                // Metask already revoked is not asked about again.
+                try joinRevokes(&runtime);
+                try std.testing.expectEqual(@as(usize, if (case == .other_account) 1 else 0), transport.revokes.load(.acquire));
             },
             // The access token itself: renewed once the minute is over.
             .token_refused => {
