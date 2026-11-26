@@ -317,7 +317,7 @@ test "model error history survives restart and credential sanitization with exac
     var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits, digest_key);
     defer repository.deinit();
     try repository.seed(state, .{});
-    try repository.sanitize("late-credential", @splat(3));
+    try repository.sanitize(&.{"late-credential"}, @splat(3));
     const loaded = try history.load(a, database.capability());
     try std.testing.expect(!try history.wire.security.contains(a, loaded, "late-credential"));
     const detail = loaded.tasks[0].runs[0].model_error.?;
@@ -376,7 +376,7 @@ test "history SQL preserves manual and cancelled review summaries without review
         var repository = schema.repository.Repository.init(std.testing.allocator, database.capability(), history.limits, digest_key);
         defer repository.deinit();
         try repository.seed(state, .{});
-        try repository.sanitize("late-credential", @splat(3));
+        try repository.sanitize(&.{"late-credential"}, @splat(3));
         const restored = try history.load(allocator, database.capability());
         const actual = restored.tasks[0].ui_history[0];
         try std.testing.expectEqualStrings(record.answered_by orelse "", actual.answered_by orelse "");
