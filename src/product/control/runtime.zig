@@ -2878,9 +2878,10 @@ pub const Runtime = struct {
         self: *Runtime,
         available: bool,
     ) void {
+        const authority = self.scheduleAuthority();
         _ = self.schedule.setBackgroundAvailable(
             available,
-            self.scheduleExecutionBinding(),
+            authority.binding(),
             self.scheduleRedaction(),
         );
         self.publishScheduleChangesNoFail();
@@ -3117,12 +3118,23 @@ pub const Runtime = struct {
         self.commitAccountFactNoFail(commit.fact);
     }
 
-    /// Reconcile independent Schedule sources after Models or Account facts change.
+    /// Models or Account facts changed. Schedule rearms on them and judges
+    /// nothing: no observation stops or records a definition.
     fn publishAdmissionChangesNoFail(self: *Runtime) void {
-        _ = self.schedule.refreshBindingNoFail(self.scheduleExecutionBinding(), self.scheduleRedaction());
-        _ = self.schedule.rearmNoFail(self.scheduleExecutionBinding(), self.scheduleRedaction());
+        const authority = self.scheduleAuthority();
+        _ = self.schedule.refreshAdmissionNoFail(authority.binding(), self.scheduleRedaction());
+        _ = self.schedule.rearmNoFail(authority.binding(), self.scheduleRedaction());
         _ = self.schedule.takeChanged();
         self.bumpRevision();
+    }
+
+    /// A user's Models command may have replaced or removed a source identity
+    /// (`source_id`), or reset the store (null). Definitions on it that can
+    /// never run again stop now, before the change is published.
+    fn finishModelsCommandNoFail(self: *Runtime, source_id: ?[]const u8) void {
+        const authority = self.scheduleAuthority();
+        _ = self.schedule.stopGoneSourceNoFail(source_id, authority.binding(), self.scheduleRedaction());
+        self.publishAdmissionChangesNoFail();
     }
 
     pub fn accountView(self: *Runtime) account_contract.AccountView {
@@ -3199,7 +3211,7 @@ pub const Runtime = struct {
         if (!result.accepted) return result;
 
         self.adoptMetaskSourceNoFail();
-        self.finishModelsCommitNoFail();
+        self.finishModelsCommandNoFail(null);
         return result;
     }
 
@@ -3210,9 +3222,12 @@ pub const Runtime = struct {
         if (command == .test_model)
             return .rejected(.test_unavailable);
         const result = self.custom_providers.submitCommand(command);
-        if (result.accepted) {
-            self.finishModelsCommitNoFail();
-        }
+        if (result.accepted) switch (command) {
+            // Only these can change a source's identity.
+            .update => |value| self.finishModelsCommandNoFail(value.selection.source_id),
+            .remove => |value| self.finishModelsCommandNoFail(value.source_id),
+            else => self.finishModelsCommitNoFail(),
+        };
         return result;
     }
 
@@ -3338,7 +3353,7 @@ pub const Runtime = struct {
     ) models_contract.CommandResult {
         const result = self.custom_providers.updateBuiltinBaseUrl(selection, base_url);
         if (result.accepted) {
-            self.finishModelsCommitNoFail();
+            self.finishModelsCommandNoFail(selection.source_id);
         }
         return result;
     }
@@ -3350,9 +3365,9 @@ pub const Runtime = struct {
     ) models_contract.CommandResult {
         const result = self.custom_providers.replaceCredential(secret, selection);
         // The fail-closed first phase may revoke stale readiness even when the
-        // subsequent credential write or final commit fails.
-
-        self.finishModelsCommitNoFail();
+        // subsequent credential write or final commit fails. Only a new key's
+        // generation stops anything; a revoked one still waits.
+        self.finishModelsCommandNoFail(selection.source_id);
         return result;
     }
 
@@ -4429,7 +4444,9 @@ pub const Runtime = struct {
         var automatic_live = true;
         errdefer if (automatic_live) automatic.rollback(self);
         const workspace = automatic.facts(self);
-        const selection = try self.scheduledSelection(.{ .model_ref = input.model_ref, .source_generation = input.source_generation, .protocol = input.protocol });
+        // The catalog generation the due-time judgment admitted, under the
+        // Task's own admission.
+        const selection: NewTaskModelSelectionInput = .{ .target = input.model_ref, .expected_source_generation = input.source_generation, .expected_catalog_generation = input.catalog_generation };
         var task = try self.prepareTaskInWorkspaceInternal(workspace.id, workspace.epoch, selection, null, null, .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) }, true);
         var task_live = true;
         errdefer if (task_live) task.rollback(self);
@@ -5654,9 +5671,10 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         const definition = try self.scheduledTaskDefinition(input, null, null);
+        const authority = self.scheduleAuthority();
         const id = try self.schedule.create(
             definition,
-            self.scheduleExecutionBinding(),
+            authority.binding(),
             self.scheduleRedaction(),
         );
         return id;
@@ -5672,11 +5690,12 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         const definition = try self.scheduledTaskDefinition(input, try self.schedule.bindingAt(id, expected_epoch), id);
+        const authority = self.scheduleAuthority();
         try self.schedule.update(
             id,
             expected_epoch,
             definition,
-            self.scheduleExecutionBinding(),
+            authority.binding(),
             self.scheduleRedaction(),
         );
     }
@@ -5690,11 +5709,12 @@ pub const Runtime = struct {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        const authority = self.scheduleAuthority();
         return self.schedule.setEnabled(
             id,
             expected_epoch,
             enabled,
-            self.scheduleExecutionBinding(),
+            authority.binding(),
             self.scheduleRedaction(),
         );
     }
@@ -5706,10 +5726,11 @@ pub const Runtime = struct {
     ) Error!void {
         defer self.publishScheduleChangesNoFail();
         self.syncLifecycle();
+        const authority = self.scheduleAuthority();
         try self.schedule.delete(
             id,
             expected_epoch,
-            self.scheduleExecutionBinding(),
+            authority.binding(),
             self.scheduleRedaction(),
         );
     }
@@ -5729,9 +5750,11 @@ pub const Runtime = struct {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        const authority = self.scheduleAuthority();
         return self.schedule.runNow(
             id,
             expected_epoch,
+            authority.binding(),
             self.scheduleRedaction(),
             self.scheduleTaskEffects(),
         ) catch |err| switch (err) {
@@ -6128,8 +6151,10 @@ pub const Runtime = struct {
             durable_changed = true;
         }
         self.task_runtime.gateScheduledContinuations(&self.schedule, scheduleHasPendingContinuation);
+        // One Account sample serves this settle's reconcile and timer alike.
+        const schedule_authority = self.scheduleAuthority();
         if (self.schedule.reconcileNoFail(
-            self.scheduleExecutionBinding(),
+            schedule_authority.binding(),
             self.scheduleRedaction(),
             self.scheduleTaskEffects(),
         )) changed = true;
@@ -6143,7 +6168,7 @@ pub const Runtime = struct {
             !self.requiredHistoryBlocked() and self.schedule.releaseTaskHistoryWaits();
         if (!self.shutting_down and (timer_elapsed or schedule_was_waiting)) {
             self.schedule.onTimer(
-                self.scheduleExecutionBinding(),
+                schedule_authority.binding(),
                 self.scheduleRedaction(),
                 self.scheduleTaskEffects(),
             );
@@ -8219,40 +8244,70 @@ pub const Runtime = struct {
             return error.ExecutionUnavailable;
     }
 
-    fn scheduleExecutionBinding(self: *Runtime) product_schedule.ExecutionBinding {
-        return .{
-            .available = !self.shutting_down and self.skill.identitySourceTrusted(),
-            .automatic_workspace_available = self.automaticWorkspacesAvailable(),
-            .context = self,
-            .validate_fn = scheduleBindingAvailability,
+    /// One Account sample for one Schedule call: every definition it judges,
+    /// the timer it arms and the projection it writes see the same
+    /// authorization. A run then meets the Task's own admission, which reads
+    /// the Account again.
+    const ScheduleAuthority = struct {
+        control: *Runtime,
+        use: ?account_contract.Authorization.Use,
+
+        fn binding(self: *const ScheduleAuthority) product_schedule.ExecutionBinding {
+            return .{
+                .available = !self.control.shutting_down and self.control.skill.identitySourceTrusted(),
+                .automatic_workspace_available = self.control.automaticWorkspacesAvailable(),
+                .context = self,
+                .admit_fn = admit,
+            };
+        }
+
+        fn admit(context: ?*const anyopaque, binding_value: product_schedule.ModelBinding) product_schedule.Admission {
+            const self: *const ScheduleAuthority = @ptrCast(@alignCast(context.?));
+            return self.control.scheduleAdmission(self.use, binding_value);
+        }
+    };
+
+    fn scheduleAuthority(self: *Runtime) ScheduleAuthority {
+        return .{ .control = self, .use = self.metaskUse() };
+    }
+
+    /// What one Scheduled Task binding allows now. Reads only `Use`, so the
+    /// Account states behind it are mapped in one place, `Authorization.use`.
+    fn scheduleAdmission(self: *Runtime, use: ?account_contract.Authorization.Use, binding: product_schedule.ModelBinding) product_schedule.Admission {
+        const metask = std.mem.eql(u8, binding.model_ref.source_id, models_contract.metask_source_id);
+        if (metask) {
+            switch (use orelse account_contract.Authorization.Use{ .ready = 0 }) {
+                .stop => return .{ .hold = .signed_out },
+                .wait => return .wait,
+                .ready => {},
+            }
+            // The catalog must be this authorization's before its content
+            // means anything: right after a renewal and before the refresh
+            // starts it is still the previous one's.
+            _ = self.admittedMetaskGeneration(use) orelse return .wait;
+        }
+        return switch (self.custom_providers.boundModel(binding.model_ref, binding.source_generation)) {
+            .unavailable => .wait,
+            // A Metask source is one account: another account's catalog is
+            // current. A Custom Provider's new key or endpoint never returns.
+            .source_changed => if (metask) .{ .hold = .other_account } else .stop,
+            .missing => .skip,
+            .present => |model| if (model.protocol != binding.protocol)
+                .skip
+            else
+                .{ .run = model.catalog_generation },
         };
     }
 
-    fn scheduledModelBinding(self: *Runtime, binding: product_schedule.ModelBinding) models_aggregate.Runtime.BoundModelAvailability {
-        const availability = self.custom_providers.boundModelAvailability(binding.model_ref, binding.source_generation, binding.protocol);
-        if (availability == .ready) self.checkMetaskAuthorization(binding.model_ref.source_id) catch return .unavailable;
-        return availability;
-    }
-
-    fn scheduleBindingAvailability(context: ?*anyopaque, binding: product_schedule.ModelBinding) product_schedule.BindingAvailability {
-        const self: *Runtime = @ptrCast(@alignCast(context.?));
-        return switch (self.scheduledModelBinding(binding)) {
-            .ready => .ready,
-            .unavailable => .unavailable,
-            .invalid => .invalid,
-        };
-    }
-
-    fn scheduledSelection(self: *Runtime, binding: ScheduledTaskBindingInput) Error!NewTaskModelSelectionInput {
-        if (self.shutting_down or !self.skill.identitySourceTrusted()) return error.ExecutionUnavailable;
-        return switch (self.scheduledModelBinding(binding)) {
-            .ready => |catalog_generation| .{
-                .target = binding.model_ref,
-                .expected_source_generation = binding.source_generation,
-                .expected_catalog_generation = catalog_generation,
-            },
-            .invalid, .unavailable => error.ExecutionGenerationMismatch,
-        };
+    /// The launch resolves what the due-time judgment admitted, without
+    /// judging again.
+    fn validateScheduledLaunch(self: *Runtime, input: product_schedule.TaskLaunch) Error!void {
+        var candidate = (self.custom_providers.resolveModel(input.model_ref, input.source_generation, input.catalog_generation) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.ExecutionUnavailable,
+        }) orelse return error.ExecutionUnavailable;
+        defer candidate.deinit();
+        if (candidate.input().target.protocol != input.protocol) return error.ExecutionGenerationMismatch;
     }
 
     fn scheduleTaskEffects(self: *Runtime) product_schedule.TaskEffects {
@@ -8273,11 +8328,8 @@ pub const Runtime = struct {
     fn scheduleTaskPreflight(context: *anyopaque, input: product_schedule.TaskLaunch) product_schedule.TaskPreflight {
         const self: *Runtime = @ptrCast(@alignCast(context));
         if (self.requiredHistoryBlocked()) return .wait;
-        self.validateScheduledBinding(.{
-            .model_ref = input.model_ref,
-            .source_generation = input.source_generation,
-            .protocol = input.protocol,
-        }) catch |err| return switch (err) {
+        if (self.shutting_down or !self.skill.identitySourceTrusted()) return .{ .retry = error.ExecutionUnavailable };
+        self.validateScheduledLaunch(input) catch |err| return switch (err) {
             error.ExecutionUnavailable, error.ExecutionInUse, error.ExecutionGenerationMismatch => .{ .retry = err },
             else => .{ .rejected = err },
         };
@@ -8419,16 +8471,6 @@ pub const Runtime = struct {
         try recurrence.validate();
         const instruction = try product_schedule.Definition.normalizedInstruction(input.input, self.limits.max_user_message_bytes);
         return .{ .title = title, .binding = binding, .permission_profile = scheduledPermissionProfile(input.permission_profile), .input = instruction, .recurrence = recurrence, .timezone = input.timezone };
-    }
-
-    fn validateScheduledBinding(self: *Runtime, expected: ScheduledTaskBindingInput) Error!void {
-        const selection = try self.scheduledSelection(expected);
-        var candidate = (self.custom_providers.resolveModel(selection.target, selection.expected_source_generation, selection.expected_catalog_generation) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.ExecutionUnavailable,
-        }) orelse return error.ExecutionUnavailable;
-        defer candidate.deinit();
-        if (candidate.input().target.protocol != expected.protocol) return error.ExecutionGenerationMismatch;
     }
 
     fn taskPersistenceLimits(self: *const Runtime) task_persistence.Limits {
@@ -10840,6 +10882,18 @@ pub const TestSupport = if (builtin.is_test) struct {
         const execution = fixtureExecution(control);
         const owned = try execution.prepareCredential(value);
         execution.installCredential(owned, execution.credential_generation + 1);
+    }
+
+    /// The selection a user would submit for this binding today.
+    pub fn scheduledSelection(control: *Runtime, binding: ScheduledTaskBindingInput) !NewTaskModelSelectionInput {
+        return switch (control.scheduleAdmission(null, binding)) {
+            .run => |catalog_generation| .{
+                .target = binding.model_ref,
+                .expected_source_generation = binding.source_generation,
+                .expected_catalog_generation = catalog_generation,
+            },
+            else => error.ExecutionGenerationMismatch,
+        };
     }
 
     pub fn fixtureModelSelection(owner: anytype) !NewTaskModelSelectionInput {
@@ -14546,19 +14600,22 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
 
     const binding = TestSupport.scheduledBinding(&control);
     try std.testing.expectEqual(models_contract.Protocol.openai_responses, binding.protocol);
-    try control.validateScheduledBinding(binding);
+    try std.testing.expect(control.scheduleAdmission(null, binding) == .run);
+    // A source that no longer exists, or answers under another identity,
+    // never returns; a model it stopped listing, or lists under another
+    // protocol, might.
     var stale = binding;
     stale.model_ref.source_id = "another-provider";
-    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    try std.testing.expect(control.scheduleAdmission(null, stale) == .stop);
     stale = binding;
     stale.model_ref.model_id = "another-model";
-    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    try std.testing.expect(control.scheduleAdmission(null, stale) == .skip);
     stale = binding;
     stale.source_generation += 1;
-    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    try std.testing.expect(control.scheduleAdmission(null, stale) == .stop);
     stale = binding;
     stale.protocol = .anthropic_messages;
-    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    try std.testing.expect(control.scheduleAdmission(null, stale) == .skip);
 
     var automatic_root = try product_workspace.AutomaticRoot.open(std.testing.io, std.testing.allocator, directory_storage[0..directory_len]);
     defer automatic_root.deinit();
@@ -14571,7 +14628,7 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     defer product_schedule.testing.configure(&control.schedule, .{}, .{}, .unavailable);
     const id = try control.createScheduledTask(.{
         .title = "Replacement",
-        .model_selection = try control.scheduledSelection(binding),
+        .model_selection = try TestSupport.scheduledSelection(&control, binding),
         .permission_profile = .approval_required,
         .input = "Inspect",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2000 } },
@@ -14603,7 +14660,7 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     control.task_persistence_health = .ready;
     const readback_id = try control.createScheduledTask(.{
         .title = "Wait for history readback",
-        .model_selection = try control.scheduledSelection(binding),
+        .model_selection = try TestSupport.scheduledSelection(&control, binding),
         .permission_profile = .approval_required,
         .input = "Inspect",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2500 } },
@@ -14637,7 +14694,7 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     control.task_persistence_health = .ready;
     const waiting_id = try control.createScheduledTask(.{
         .title = "Wait for history",
-        .model_selection = try control.scheduledSelection(binding),
+        .model_selection = try TestSupport.scheduledSelection(&control, binding),
         .permission_profile = .approval_required,
         .input = "Inspect",
         .recurrence = .{ .once = .{ .at_unix_seconds = 3000 } },
@@ -14712,7 +14769,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         error.WorkspaceUnavailable,
         control.createScheduledTask(.{
             .title = "Independent review",
-            .model_selection = try control.scheduledSelection(TestSupport.scheduledBinding(&control)),
+            .model_selection = try TestSupport.scheduledSelection(&control, TestSupport.scheduledBinding(&control)),
             .permission_profile = .approval_required,
             .input = "Review current work",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -14725,7 +14782,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     );
     const id = try control.createScheduledTask(.{
         .title = "Review SECRET-KEY",
-        .model_selection = try control.scheduledSelection(TestSupport.scheduledBinding(&control)),
+        .model_selection = try TestSupport.scheduledSelection(&control, TestSupport.scheduledBinding(&control)),
         .permission_profile = .full_access,
         .input = "Inspect SECRET-KEY usage",
         .recurrence = .{ .interval = .{
@@ -14825,7 +14882,7 @@ test "Scheduled Task ignores Product binding generation drift for stable source 
     control.setScheduleBackgroundAvailableNoFail(true);
     const id = try control.createScheduledTask(.{
         .title = "Review current work",
-        .model_selection = try control.scheduledSelection(TestSupport.scheduledBinding(&control)),
+        .model_selection = try TestSupport.scheduledSelection(&control, TestSupport.scheduledBinding(&control)),
         .permission_profile = .approval_required,
         .input = "Review current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -14833,8 +14890,9 @@ test "Scheduled Task ignores Product binding generation drift for stable source 
     try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
 
     control.execution_generations.last = 2;
-    try std.testing.expect(!control.schedule.refreshBindingNoFail(
-        control.scheduleExecutionBinding(),
+    const authority = control.scheduleAuthority();
+    try std.testing.expect(!control.schedule.refreshAdmissionNoFail(
+        authority.binding(),
         control.scheduleRedaction(),
     ));
 
@@ -14883,19 +14941,31 @@ const MetaskScheduleFixture = struct {
     }
 
     fn loadCatalog(self: *@This(), credential: []const u8) !void {
-        const models = [_]models_contract.ModelView{.{ .id = "fixture-model", .display_name = "Fixture model" }};
-        try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogWithCredential(&self.control.custom_providers, "account-1", credential, &models));
+        try self.loadAccountCatalog("account-1", credential, "fixture-model");
+    }
+
+    fn loadAccountCatalog(self: *@This(), account: []const u8, credential: []const u8, model: []const u8) !void {
+        const models = [_]models_contract.ModelView{.{ .id = model, .display_name = "Fixture model" }};
+        try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogWithCredential(&self.control.custom_providers, account, credential, &models));
         self.control.finishModelsCommitNoFail();
     }
 
     fn schedule(self: *@This()) !u64 {
+        return self.scheduleAt(.{ .once = .{ .at_unix_seconds = 2_000 } });
+    }
+
+    fn scheduleAt(self: *@This(), recurrence: product_schedule.Recurrence) !u64 {
         return self.control.createScheduledTask(.{
             .title = "Review current work",
             .model_selection = try TestSupport.fixtureModelSelection(&self.control),
             .permission_profile = .approval_required,
             .input = "Review current work",
-            .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+            .recurrence = recurrence,
         });
+    }
+
+    fn stored(self: *@This(), id: u64) product_schedule.testing.Item {
+        return product_schedule.testing.item(&self.control.schedule, id).?;
     }
 
     /// The task still runs on its own binding, which names `generation`.
@@ -14904,7 +14974,7 @@ const MetaskScheduleFixture = struct {
         try std.testing.expect(item.enabled and item.health == .ready);
         try std.testing.expectEqual(generation, item.binding.source_generation);
         try std.testing.expectEqual(generation, self.control.modelsView().providers[0].source_generation);
-        try std.testing.expect(self.control.scheduledModelBinding(item.binding) == .ready);
+        try std.testing.expect(self.control.scheduleAdmission(null, item.binding) == .run);
     }
 };
 
@@ -14959,6 +15029,101 @@ test "Scheduled Task follows its account's generation out of an older version's 
         try fixture.loadCatalog("token-c");
         try fixture.expectRunnable(id, derived);
     }
+}
+
+test "Scheduled Task holds while another account's catalog is current and runs once it is back" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const id = try fixture.schedule();
+    const commits = fixture.persistence.commits;
+    try fixture.loadAccountCatalog("account-2", "token-b", "fixture-model");
+    try std.testing.expectEqual(@as(?u64, null), fixture.clock.armed_at);
+    fixture.clock.now = 2_100;
+    fixture.control.onScheduledTaskTimer();
+    try std.testing.expect(fixture.stored(id).enabled and fixture.stored(id).health == .ready);
+    try std.testing.expect(fixture.stored(id).last_occurrence == null);
+    try std.testing.expectEqual(commits, fixture.persistence.commits);
+    // Back on its own account it is due at once, for the point it missed.
+    try fixture.loadCatalog("token-c");
+    try std.testing.expectEqual(@as(?u64, 2_000), fixture.clock.armed_at);
+    fixture.control.onScheduledTaskTimer();
+    try std.testing.expectEqual(@as(u64, 2_000), fixture.stored(id).last_occurrence.?.planned_at_unix_seconds);
+}
+
+test "a Metask catalog that drops the bound model disables nothing until a plan is due" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const once = try fixture.schedule();
+    const hourly = try fixture.scheduleAt(.{ .interval = .{ .start_at_unix_seconds = 2_000, .every_seconds = 3_600 } });
+    const commits = fixture.persistence.commits;
+    try fixture.loadAccountCatalog("account-1", "token-b", "another-model");
+    try std.testing.expect(fixture.stored(once).enabled and fixture.stored(hourly).enabled);
+    try std.testing.expectEqual(commits, fixture.persistence.commits);
+    fixture.clock.now = 2_000;
+    fixture.control.onScheduledTaskTimer();
+    fixture.control.onScheduledTaskTimer();
+    // The one-time plan stops unspent; the hourly one skips and goes on.
+    try std.testing.expectEqual(product_schedule.Health.needs_attention, fixture.stored(once).health);
+    try std.testing.expect(fixture.stored(once).last_occurrence == null);
+    const skipped = fixture.stored(hourly);
+    try std.testing.expect(skipped.enabled);
+    try std.testing.expectEqual(product_schedule.FailureReason.execution_changed, skipped.last_occurrence.?.reason.?);
+    try std.testing.expectEqual(@as(?u64, 5_600), skipped.next_run_at_unix_seconds);
+}
+
+test "replacing a Custom Provider key stops its schedules at once and no others" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const metask = try fixture.schedule();
+    const selection = try createReadyTestCustomProvider(&fixture.control);
+    try std.testing.expect(fixture.control.custom_providers.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }).accepted);
+    const custom = try fixture.schedule();
+    try std.testing.expect(fixture.control.replaceCustomProviderCredential("replacement-secret", .{
+        .source_id = selection.source_id,
+        .expected_provider_revision = fixture.control.custom_providers.views()[0].provider_revision,
+    }).accepted);
+    try std.testing.expectEqual(product_schedule.Health.needs_attention, fixture.stored(custom).health);
+    try std.testing.expectEqual(product_schedule.FailureReason.execution_changed, fixture.stored(custom).failure_reason.?);
+    try std.testing.expectEqual(product_schedule.Health.ready, fixture.stored(metask).health);
+    try std.testing.expectError(error.ScheduledTaskNeedsAttention, fixture.control.runScheduledTaskNow(custom, fixture.stored(custom).epoch));
+}
+
+test "a due Metask schedule reads the Account once and waits while it is confirmed" {
+    const Account = struct {
+        value: account_contract.Authorization,
+        reads: usize = 0,
+
+        fn status(context: *anyopaque) account_contract.Authorization {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.reads += 1;
+            return self.value;
+        }
+    };
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const id = try fixture.schedule();
+    var account: Account = .{ .value = .{ .checking = 1 } };
+    fixture.control.setAccountAuthorization(.{ .context = &account, .status_fn = Account.status });
+    const commits = fixture.persistence.commits;
+    fixture.clock.now = 2_000;
+    fixture.control.onScheduledTaskTimer();
+    try std.testing.expectEqual(@as(usize, 1), account.reads);
+    try std.testing.expect(fixture.stored(id).health == .ready and fixture.stored(id).last_occurrence == null);
+    try std.testing.expectEqual(@as(?u64, 2_060), fixture.clock.armed_at);
+    try std.testing.expectEqual(commits, fixture.persistence.commits);
+    // Confirmed on the authorization its catalog was loaded with, it runs.
+    account.value = .{ .available = .{ .account_id = "account-1", .generation = 17 } };
+    fixture.clock.now = 2_060;
+    fixture.control.onScheduledTaskTimer();
+    try std.testing.expectEqual(@as(u64, 2_000), fixture.stored(id).last_occurrence.?.planned_at_unix_seconds);
 }
 
 test "Skill catalog snapshot reports redaction without exposing credential bytes" {
@@ -23690,7 +23855,8 @@ test "empty catalog rejects its explicit model without closing generic admission
     try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogWithCredential(&control.custom_providers, "account-1", "SECRET-KEY", &.{}));
     control.finishModelsCommitNoFail();
     try std.testing.expect(control.newTaskAdmissionView().available);
-    try std.testing.expect(control.scheduleExecutionBinding().available);
+    const schedule_authority = control.scheduleAuthority();
+    try std.testing.expect(schedule_authority.binding().available);
     try std.testing.expectError(error.ModelSelectionChanged, control.createTask(.{
         .workspace_root = "/must-not-be-opened",
         .trust = .explicitly_trusted,

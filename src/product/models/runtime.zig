@@ -341,34 +341,43 @@ pub const Runtime = struct {
         return if (loading) .catalog_loading else .catalog_unavailable;
     }
 
-    pub const BoundModelAvailability = union(enum) {
-        ready: u64, // Exact catalog generation for the ready binding.
+    /// What the current catalog says about one bound model. It reports Models
+    /// facts only; what each answer means is the consumer's to decide.
+    pub const BoundModel = union(enum) {
+        /// Nothing to answer from now: the store, the catalog or the source's
+        /// credential is not ready.
         unavailable,
-        invalid,
+        /// The binding names another identity of this source, or a source
+        /// that no longer exists.
+        source_changed,
+        /// The bound source does not list this model.
+        missing,
+        present: struct { catalog_generation: u64, protocol: contract.Protocol },
     };
 
-    pub fn boundModelAvailability(self: *Runtime, target: contract.ModelRef, source_generation: u64, protocol: contract.Protocol) BoundModelAvailability {
+    pub fn boundModel(self: *Runtime, target: contract.ModelRef, source_generation: u64) BoundModel {
         const models = self.view();
         if (models.availability != .ready) return .unavailable;
         for (models.providers) |provider| {
             if (!std.mem.eql(u8, provider.id, target.source_id)) continue;
             if (provider.catalog_state != .ready) return .unavailable;
-            if (provider.source_generation != source_generation) return .invalid;
-            return if (self.sourceModelProtocol(target, source_generation, provider.catalog_generation) == protocol)
-                .{ .ready = provider.catalog_generation }
-            else
-                .invalid;
+            if (provider.source_generation != source_generation) return .source_changed;
+            return self.presentModel(target, source_generation, provider.catalog_generation);
         }
         for (models.custom_providers) |provider| {
             if (!std.mem.eql(u8, provider.id, target.source_id)) continue;
-            if (!provider.enabled or provider.source_generation != source_generation or provider.protocol != protocol) return .invalid;
+            if (!provider.enabled or provider.source_generation != source_generation) return .source_changed;
+            // A missing credential keeps its generation until a new key brings
+            // a new one, so it is not yet an answer about this binding.
             if (provider.credential_status != .ready) return .unavailable;
-            return if (self.sourceModelProtocol(target, source_generation, provider.catalog_generation) != null)
-                .{ .ready = provider.catalog_generation }
-            else
-                .invalid;
+            return self.presentModel(target, source_generation, provider.catalog_generation);
         }
-        return .invalid;
+        return .source_changed;
+    }
+
+    fn presentModel(self: *Runtime, target: contract.ModelRef, source_generation: u64, catalog_generation: u64) BoundModel {
+        const protocol = self.sourceModelProtocol(target, source_generation, catalog_generation) orelse return .missing;
+        return .{ .present = .{ .catalog_generation = catalog_generation, .protocol = protocol } };
     }
 
     pub fn installedModelAvailable(self: *Runtime, target: contract.ModelRef, source_generation: u64, protocol: contract.Protocol) bool {

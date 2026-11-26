@@ -208,23 +208,40 @@ pub const Redaction = struct {
 };
 
 pub const ModelBinding = state.Binding;
-pub const BindingAvailability = enum { ready, unavailable, invalid };
+
+/// What one definition's binding allows now. Product Control decides it from
+/// one Account sample and the current catalog; Schedule only acts on it, and
+/// only when a definition is due or a user command names it.
+pub const Admission = union(enum) {
+    /// Run on this exact catalog generation.
+    run: u64,
+    /// The Account or the catalog is on its way: retry on the preflight
+    /// interval without recording anything.
+    wait,
+    /// Nothing changes until the Account does: no login, or the current
+    /// catalog belongs to another account. Never armed, never recorded.
+    hold: Hold,
+    /// The bound source no longer lists this model, or lists it under
+    /// another protocol. It may come back, so a plan with later runs goes on.
+    skip,
+    /// The bound source identity is gone for good.
+    stop,
+
+    pub const Hold = enum { signed_out, other_account };
+};
 
 /// Callback-scoped per-definition authority; never a global model binding.
+/// It has no default: whoever builds one says what a binding allows.
 pub const ExecutionBinding = struct {
     available: bool,
     automatic_workspace_available: bool,
-    context: ?*anyopaque = null,
-    validate_fn: *const fn (?*anyopaque, ModelBinding) BindingAvailability = unavailableBinding,
+    context: ?*const anyopaque,
+    admit_fn: *const fn (?*const anyopaque, ModelBinding) Admission,
 
-    fn status(self: ExecutionBinding, binding: ModelBinding) BindingAvailability {
-        return self.validate_fn(self.context, binding);
+    pub fn admit(self: ExecutionBinding, binding: ModelBinding) Admission {
+        return self.admit_fn(self.context, binding);
     }
 };
-
-fn unavailableBinding(_: ?*anyopaque, _: ModelBinding) BindingAvailability {
-    return .unavailable;
-}
 
 const Due = struct {
     id: u64,
@@ -242,6 +259,7 @@ const Claim = struct {
     source_id: []u8,
     model_id: []u8,
     source_generation: u64,
+    catalog_generation: u64,
     protocol: Protocol,
     permission_profile: PermissionProfile,
     completion: ?state.Store,
@@ -282,6 +300,9 @@ pub const TaskLaunch = struct {
     input: []const u8,
     model_ref: models_contract.ModelRef,
     source_generation: u64,
+    /// The catalog generation the due-time judgment admitted; the launch
+    /// resolves against it rather than judging again.
+    catalog_generation: u64,
     protocol: Protocol,
     permission_profile: PermissionProfile,
 };
@@ -501,7 +522,9 @@ pub const Runtime = struct {
         var owned = true;
         defer if (owned) candidate.deinit();
         try candidate.update(id, expected_epoch, definition, current);
-        _ = reconcileBindingsInStore(&candidate, binding);
+        // Only the edited definition is judged; others wait for their own due time.
+        _ = stopGoneBinding(&candidate, candidate.find(id).?, binding);
+        _ = reconcileWorkspaceInStore(&candidate, binding);
         try self.commitCandidate(&candidate, redaction);
         self.replace(&candidate);
         owned = false;
@@ -527,7 +550,8 @@ pub const Runtime = struct {
         var owned = true;
         defer if (owned) candidate.deinit();
         try candidate.setEnabled(id, expected_epoch, enabled, current);
-        _ = reconcileBindingsInStore(&candidate, binding);
+        _ = stopGoneBinding(&candidate, candidate.find(id).?, binding);
+        _ = reconcileWorkspaceInStore(&candidate, binding);
         try self.commitCandidate(&candidate, redaction);
         self.replace(&candidate);
         owned = false;
@@ -556,6 +580,7 @@ pub const Runtime = struct {
         self: *Runtime,
         id: u64,
         expected_epoch: u64,
+        binding: ExecutionBinding,
         redaction: Redaction,
         tasks: TaskEffects,
     ) anyerror!u64 {
@@ -566,6 +591,7 @@ pub const Runtime = struct {
             current,
             current,
             .manual,
+            binding,
             tasks,
             redaction,
         ) catch |err| {
@@ -587,6 +613,7 @@ pub const Runtime = struct {
             due.planned_at_unix_seconds,
             due.triggered_at_unix_seconds,
             .timer,
+            binding,
             tasks,
             redaction,
         ) catch |err| {
@@ -640,12 +667,15 @@ pub const Runtime = struct {
         tasks: TaskEffects,
     ) bool {
         self.completion_confirmation_failed_task = null;
-        var changed = self.reconcileBindingsNoFail(binding, redaction);
+        var changed = self.reconcileWorkspaceNoFail(binding, redaction);
         changed = self.reconcileCompletionNoFail(tasks, redaction) or changed;
         return changed;
     }
 
-    pub fn refreshBindingNoFail(
+    /// An Account or Models fact changed. Nothing is judged or written for
+    /// it: waits retry now and the timer is rearmed, so a held definition
+    /// that can run again becomes due at once.
+    pub fn refreshAdmissionNoFail(
         self: *Runtime,
         binding: ExecutionBinding,
         redaction: Redaction,
@@ -653,7 +683,35 @@ pub const Runtime = struct {
         for (self.store.items) |*entry| {
             if (entry.*) |*item| item.preflight_retry_at_unix_seconds = null;
         }
-        return self.reconcileBindingsNoFail(binding, redaction);
+        return self.reconcileWorkspaceNoFail(binding, redaction);
+    }
+
+    /// A user's Models command replaced or removed a source identity, or
+    /// reset the store (`source_id` null). The enabled definitions on it that
+    /// can never run again stop now, while the user is looking, instead of
+    /// losing their next due point; nothing else is judged.
+    pub fn stopGoneSourceNoFail(
+        self: *Runtime,
+        source_id: ?[]const u8,
+        binding: ExecutionBinding,
+        redaction: Redaction,
+    ) bool {
+        if (self.persistence_health != .ready or !binding.available) return false;
+        var candidate = self.store.clone(self.allocator) catch return false;
+        var owned = true;
+        defer if (owned) candidate.deinit();
+        var changed = false;
+        for (candidate.items) |*entry| {
+            const item = &(entry.* orelse continue);
+            if (source_id) |id| if (!std.mem.eql(u8, item.binding.source_id, id)) continue;
+            changed = stopGoneBinding(&candidate, item, binding) or changed;
+        }
+        if (!changed) return false;
+        self.commitCandidate(&candidate, redaction) catch return false;
+        self.replace(&candidate);
+        owned = false;
+        _ = self.rearmNoFail(binding, redaction);
+        return true;
     }
 
     /// True once no definition names `previous`. A store that cannot be written
@@ -730,6 +788,7 @@ pub const Runtime = struct {
         triggered_at: u64,
         source: OccurrenceSource,
         blocking_task_id: u64,
+        catalog_generation: u64,
         redaction: Redaction,
     ) Error!BeginOutcome {
         _ = self.store.find(id) orelse return error.UnknownScheduledTask;
@@ -793,6 +852,7 @@ pub const Runtime = struct {
             .source_id = source_id,
             .model_id = model_id,
             .source_generation = current_binding.source_generation,
+            .catalog_generation = catalog_generation,
             .protocol = current_binding.protocol,
             .permission_profile = candidate_item.permission_profile,
             .completion = completion,
@@ -962,13 +1022,39 @@ pub const Runtime = struct {
         planned_at_unix_seconds: u64,
         triggered_at_unix_seconds: u64,
         source: OccurrenceSource,
+        authority: ExecutionBinding,
         tasks: TaskEffects,
         redaction: Redaction,
     ) anyerror!u64 {
         const blocking_task_id = try self.activeTaskId(id, tasks);
         const item = self.store.find(id) orelse return error.UnknownScheduledTask;
+        var catalog_generation: u64 = 0;
         if (blocking_task_id == 0) {
             const binding = item.bindingView();
+            switch (authority.admit(binding)) {
+                .run => |generation| catalog_generation = generation,
+                // Nothing is recorded, so the due point stays where it is.
+                .wait, .hold => {
+                    if (source == .timer)
+                        item.preflight_retry_at_unix_seconds = triggered_at_unix_seconds +| preflight_retry_seconds;
+                    return error.ExecutionUnavailable;
+                },
+                .skip => {
+                    // A skip may never end a plan: with no run after this
+                    // one it stops instead, without spending that run.
+                    const point = if (source == .timer)
+                        triggered_at_unix_seconds
+                    else
+                        item.next_run_at_unix_seconds orelse triggered_at_unix_seconds;
+                    if ((try item.recurrence.firstStrictlyAfter(point)) == null)
+                        return self.stopGone(id, source, redaction);
+                    // A manual run never moves the plan; the due point
+                    // records its own skip.
+                    if (source == .manual) return error.ExecutionGenerationMismatch;
+                    return self.skipGoneModel(id, planned_at_unix_seconds, triggered_at_unix_seconds, redaction);
+                },
+                .stop => return self.stopGone(id, source, redaction),
+            }
             // Control resolves the complete source authority before the
             // durable claim. No credential or live capability enters Schedule.
             switch (tasks.preflight_fn(tasks.context, .{
@@ -976,6 +1062,7 @@ pub const Runtime = struct {
                 .input = item.input.borrowed(),
                 .model_ref = binding.model_ref,
                 .source_generation = binding.source_generation,
+                .catalog_generation = catalog_generation,
                 .protocol = binding.protocol,
                 .permission_profile = item.permission_profile,
             })) {
@@ -998,6 +1085,7 @@ pub const Runtime = struct {
             triggered_at_unix_seconds,
             source,
             blocking_task_id,
+            catalog_generation,
             redaction,
         );
         var claim = switch (begin) {
@@ -1014,6 +1102,7 @@ pub const Runtime = struct {
                 .model_id = claim.model_id,
             },
             .source_generation = claim.source_generation,
+            .catalog_generation = claim.catalog_generation,
             .protocol = claim.protocol,
             .permission_profile = claim.permission_profile,
         });
@@ -1050,6 +1139,55 @@ pub const Runtime = struct {
         }
     }
 
+    /// The definition can never run as bound: it stops for the user to edit,
+    /// and the due point it was judged at stays unspent.
+    fn stopGone(self: *Runtime, id: u64, source: OccurrenceSource, redaction: Redaction) anyerror!u64 {
+        var candidate = try self.store.clone(self.allocator);
+        var owned = true;
+        defer if (owned) candidate.deinit();
+        candidate.markNeedsAttention(candidate.find(id).?, .execution_changed);
+        try self.commitCandidate(&candidate, redaction);
+        self.replace(&candidate);
+        owned = false;
+        _ = self.notifier.notify(.{
+            .scheduled_task_id = id,
+            .title = self.store.find(id).?.title,
+            .kind = .needs_attention,
+        });
+        // A timer wake goes on for every other definition; a manual request
+        // reports why nothing started.
+        return if (source == .timer) 0 else error.ExecutionGenerationMismatch;
+    }
+
+    /// Records that the bound model was gone at this due point and moves on;
+    /// the plan stays enabled. Only the first of consecutive such skips is
+    /// announced, so the latest occurrence is read before this one replaces it.
+    fn skipGoneModel(
+        self: *Runtime,
+        id: u64,
+        planned_at_unix_seconds: u64,
+        triggered_at_unix_seconds: u64,
+        redaction: Redaction,
+    ) anyerror!u64 {
+        const repeated = if (self.store.find(id).?.last_occurrence) |last|
+            last.result == .skipped and last.reason == .execution_changed
+        else
+            false;
+        var candidate = try self.store.clone(self.allocator);
+        var owned = true;
+        defer if (owned) candidate.deinit();
+        try candidate.markModelSkipped(candidate.find(id).?, planned_at_unix_seconds, triggered_at_unix_seconds);
+        try self.commitCandidate(&candidate, redaction);
+        self.replace(&candidate);
+        owned = false;
+        if (!repeated) _ = self.notifier.notify(.{
+            .scheduled_task_id = id,
+            .title = self.store.find(id).?.title,
+            .kind = .model_unavailable,
+        });
+        return 0;
+    }
+
     fn reconcileCompletionNoFail(
         self: *Runtime,
         tasks: TaskEffects,
@@ -1066,7 +1204,7 @@ pub const Runtime = struct {
         return changed;
     }
 
-    fn reconcileBindingsNoFail(
+    fn reconcileWorkspaceNoFail(
         self: *Runtime,
         binding: ExecutionBinding,
         redaction: Redaction,
@@ -1077,7 +1215,7 @@ pub const Runtime = struct {
         var candidate = self.store.clone(self.allocator) catch return false;
         var owned = true;
         defer if (owned) candidate.deinit();
-        if (!reconcileBindingsInStore(&candidate, binding)) return false;
+        if (!reconcileWorkspaceInStore(&candidate, binding)) return false;
         self.commitCandidate(&candidate, redaction) catch return false;
         self.replace(&candidate);
         owned = false;
@@ -1173,13 +1311,15 @@ pub const Runtime = struct {
         return @max(item.next_run_at_unix_seconds.?, item.preflight_retry_at_unix_seconds orelse 0);
     }
 
+    /// Everything due is judged when it is due, except what holds: that
+    /// changes only with the Account, whose commits rearm.
     fn earliestReady(self: *Runtime, authority: ExecutionBinding) ?*state.Item {
         var earliest: ?*state.Item = null;
         for (self.store.items) |*entry| {
             const item = if (entry.*) |*value| value else continue;
             if (!item.enabled or item.health != .ready or item.next_run_at_unix_seconds == null or
                 item.waiting_for_task_history or
-                authority.status(item.bindingView()) != .ready) continue;
+                authority.admit(item.bindingView()) == .hold) continue;
             if (earliest == null or timerDueAt(item) < timerDueAt(earliest.?)) earliest = item;
         }
         return earliest;
@@ -1323,28 +1463,33 @@ fn redactStore(
     return changed;
 }
 
-fn reconcileBindingsInStore(
+/// Stops one enabled definition whose bound source identity can never come
+/// back. Models and Account observations never reach here; only a due time,
+/// a manual run or a user's command that names it does.
+fn stopGoneBinding(
+    store: *state.Store,
+    item: *state.Item,
+    binding: ExecutionBinding,
+) bool {
+    // A temporarily unavailable execution authority is an admission fact,
+    // not a durable change to this schedule's captured binding.
+    if (!binding.available or !item.enabled or item.health != .ready) return false;
+    if (binding.admit(item.bindingView()) != .stop) return false;
+    store.markNeedsAttention(item, .execution_changed);
+    return true;
+}
+
+fn reconcileWorkspaceInStore(
     store: *state.Store,
     binding: ExecutionBinding,
 ) bool {
+    if (!binding.available or binding.automatic_workspace_available) return false;
     var changed = false;
     for (store.items) |*entry| {
         const item = &(entry.* orelse continue);
         if (!item.enabled or item.health != .ready) continue;
-        // A temporarily unavailable execution catalog is an admission fact,
-        // not a durable change to this schedule's captured binding.
-        if (!binding.available) continue;
-        const availability = binding.status(item.bindingView());
-        const reason: ?FailureReason = if (availability == .invalid)
-            .execution_changed
-        else if (!binding.automatic_workspace_available)
-            .workspace_unavailable
-        else
-            null;
-        if (reason) |failure| {
-            store.markNeedsAttention(item, failure);
-            changed = true;
-        }
+        store.markNeedsAttention(item, .workspace_unavailable);
+        changed = true;
     }
     return changed;
 }
@@ -1515,17 +1660,33 @@ fn testRedaction(context: *anyopaque) Redaction {
     };
 }
 
-fn validTestBinding(_: ?*anyopaque, binding: ModelBinding) BindingAvailability {
-    return if (binding.source_generation == 1 and binding.protocol == .anthropic_messages) .ready else .invalid;
+fn validTestBinding(_: ?*const anyopaque, binding: ModelBinding) Admission {
+    return if (binding.source_generation == 1 and binding.protocol == .anthropic_messages) .{ .run = 1 } else .stop;
 }
 
-fn invalidTestBinding(_: ?*anyopaque, _: ModelBinding) BindingAvailability {
-    return .invalid;
+fn invalidTestBinding(_: ?*const anyopaque, _: ModelBinding) Admission {
+    return .stop;
 }
 
 fn testBinding() ExecutionBinding {
-    return .{ .available = true, .automatic_workspace_available = true, .validate_fn = validTestBinding };
+    return .{ .available = true, .automatic_workspace_available = true, .context = null, .admit_fn = validTestBinding };
 }
+
+/// One answer for every definition, or `.stop` for one named source.
+const TestAdmission = struct {
+    value: Admission = .{ .run = 1 },
+    gone_source: ?[]const u8 = null,
+
+    fn admit(context: ?*const anyopaque, bound: ModelBinding) Admission {
+        const self: *const TestAdmission = @ptrCast(@alignCast(context.?));
+        if (self.gone_source) |source| if (std.mem.eql(u8, bound.model_ref.source_id, source)) return .stop;
+        return self.value;
+    }
+
+    fn binding(self: *const TestAdmission) ExecutionBinding {
+        return .{ .available = true, .automatic_workspace_available = true, .context = self, .admit_fn = admit };
+    }
+};
 
 fn testDefinition(title: []const u8, input: []const u8) Definition {
     return .{
@@ -1714,6 +1875,7 @@ test "occurrence claim owns launch facts across later store replacement" {
         200,
         .manual,
         0,
+        1,
         redaction,
     )) {
         .claimed => |value| value,
@@ -1749,7 +1911,7 @@ test "consecutive skips retain the active Task and pending completion beyond his
         effects.now = 200 + @as(u64, @intCast(n)) * 60;
         runtime.onTimer(testBinding(), redaction, tasks.effects());
         try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
-        try std.testing.expectError(error.PreviousTaskActive, runtime.runNow(id, 1, redaction, tasks.effects()));
+        try std.testing.expectError(error.PreviousTaskActive, runtime.runNow(id, 1, testBinding(), redaction, tasks.effects()));
     }
     const item = runtime.store.find(id).?;
     try std.testing.expectEqual(state.max_occurrence_history, item.occurrence_count);
@@ -1758,12 +1920,12 @@ test "consecutive skips retain the active Task and pending completion beyond his
     // A previously valid empty skipped Task id must not erase the retained blocker.
     item.occurrence_history[item.occurrence_count - 1].task_id = 0;
     item.last_occurrence.?.task_id = 0;
-    try std.testing.expectError(error.PreviousTaskActive, runtime.runNow(id, 1, redaction, tasks.effects()));
+    try std.testing.expectError(error.PreviousTaskActive, runtime.runNow(id, 1, testBinding(), redaction, tasks.effects()));
     tasks.active_task_id = 0;
     tasks.terminal = .{ .outcome = .completed };
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
     try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(42));
-    try std.testing.expectEqual(@as(u64, 43), try runtime.runNow(id, 1, redaction, tasks.effects()));
+    try std.testing.expectEqual(@as(u64, 43), try runtime.runNow(id, 1, testBinding(), redaction, tasks.effects()));
 }
 
 test "full protected history stops without eviction or an overdue timer retry" {
@@ -1850,7 +2012,7 @@ test "transient preflight failure retries without a claim and runs only the late
     try std.testing.expectEqual(commits, effects.commits);
     try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
     try std.testing.expectEqual(Health.ready, runtime.store.find(id).?.health);
-    try std.testing.expectError(error.ExecutionUnavailable, runtime.runNow(id, 1, redaction, tasks.effects()));
+    try std.testing.expectError(error.ExecutionUnavailable, runtime.runNow(id, 1, testBinding(), redaction, tasks.effects()));
     try std.testing.expectEqual(commits, effects.commits);
     tasks.preflight_error = null;
     effects.now = 382;
@@ -1877,7 +2039,7 @@ test "unavailable binding cancels an armed timer without invalidating a due defi
     const commits = effects.commits;
     var unavailable = testBinding();
     unavailable.available = false;
-    _ = runtime.refreshBindingNoFail(unavailable, redaction);
+    _ = runtime.refreshAdmissionNoFail(unavailable, redaction);
     try std.testing.expectEqual(@as(?u64, null), effects.armed_at);
     effects.now = 200;
     runtime.onTimer(unavailable, redaction, tasks.effects());
@@ -1922,12 +2084,12 @@ test "attention requires editing while enable acknowledgements describe reconcil
     const id = try runtime.create(testDefinition("attention", "inspect"), testBinding(), redaction);
     try std.testing.expect(!try runtime.setEnabled(id, 1, false, testBinding(), redaction));
     var changed = testBinding();
-    changed.validate_fn = invalidTestBinding;
+    changed.admit_fn = invalidTestBinding;
     try std.testing.expect(!try runtime.setEnabled(id, 2, true, changed, redaction));
     const epoch = try runtime.epoch(id);
     try std.testing.expectError(error.ScheduledTaskNeedsAttention, runtime.setEnabled(id, epoch, false, changed, redaction));
     try std.testing.expectError(error.ScheduledTaskNeedsAttention, runtime.setEnabled(id, epoch, true, changed, redaction));
-    try std.testing.expectError(error.ScheduledTaskNeedsAttention, runtime.runNow(id, epoch, redaction, tasks.effects()));
+    try std.testing.expectError(error.ScheduledTaskNeedsAttention, runtime.runNow(id, epoch, testBinding(), redaction, tasks.effects()));
     try std.testing.expectEqual(@as(u64, 42), tasks.next_task_id);
     try runtime.update(id, epoch, testDefinition("confirmed", "inspect"), testBinding(), redaction);
     try std.testing.expectEqual(Health.ready, runtime.store.find(id).?.health);
@@ -1939,7 +2101,7 @@ test "environment refresh preserves each fixed binding without a global selectio
     defer runtime.deinit();
     const redaction = testRedaction(&effects);
     const id = try runtime.create(testDefinition("stable", "inspect"), testBinding(), redaction);
-    try std.testing.expect(!runtime.refreshBindingNoFail(testBinding(), redaction));
+    try std.testing.expect(!runtime.refreshAdmissionNoFail(testBinding(), redaction));
     const item = testing.item(&runtime, id).?;
     try std.testing.expect(item.enabled);
     try std.testing.expectEqual(Health.ready, item.health);
@@ -1963,12 +2125,10 @@ test "temporary execution unavailability does not durably invalidate schedules" 
         redaction,
     );
     const commits_before = effects.commits;
-    const unavailable: ExecutionBinding = .{
-        .available = false,
-        .automatic_workspace_available = true,
-    };
+    var unavailable = testBinding();
+    unavailable.available = false;
 
-    try std.testing.expect(!runtime.refreshBindingNoFail(unavailable, redaction));
+    try std.testing.expect(!runtime.refreshAdmissionNoFail(unavailable, redaction));
     try std.testing.expectEqual(commits_before, effects.commits);
     const item = testing.item(&runtime, id).?;
     try std.testing.expect(item.enabled);
@@ -2064,7 +2224,7 @@ test "submitted Task identity remains in memory when Schedule commit fails" {
 
     try std.testing.expectEqual(
         @as(u64, 42),
-        try runtime.runNow(id, 1, redaction, tasks.effects()),
+        try runtime.runNow(id, 1, testBinding(), redaction, tasks.effects()),
     );
     try std.testing.expectEqual(PersistenceHealth.write_failed, runtime.persistenceHealth());
     const occurrence = testing.item(&runtime, id).?.last_occurrence.?;
@@ -2108,11 +2268,11 @@ test "unavailable Task does not block later Schedule completion reconciliation" 
     );
     try std.testing.expectEqual(
         @as(u64, 41),
-        try runtime.runNow(first, 1, redaction, tasks.effects()),
+        try runtime.runNow(first, 1, testBinding(), redaction, tasks.effects()),
     );
     try std.testing.expectEqual(
         @as(u64, 42),
-        try runtime.runNow(second, 1, redaction, tasks.effects()),
+        try runtime.runNow(second, 1, testBinding(), redaction, tasks.effects()),
     );
     tasks.unavailable_task_id = 41;
     tasks.terminal_task_id = 42;
@@ -2160,7 +2320,7 @@ test "permission-required scheduled occurrence stops without waiting for UI" {
 
     try std.testing.expectEqual(
         @as(u64, 42),
-        try runtime.runNow(id, 1, redaction, tasks.effects()),
+        try runtime.runNow(id, 1, testBinding(), redaction, tasks.effects()),
     );
     try std.testing.expectEqual(
         PermissionProfile.full_access,
@@ -2199,7 +2359,7 @@ test "permission failure still needs attention after an unrelated edit, pause an
         const redaction = testRedaction(&effects);
         var definition = testDefinition("scheduled", "inspect");
         const id = try runtime.create(definition, testBinding(), redaction);
-        const original_task = try runtime.runNow(id, 1, redaction, tasks.effects());
+        const original_task = try runtime.runNow(id, 1, testBinding(), redaction, tasks.effects());
         switch (change) {
             .title_edit => {
                 definition.title = "renamed";
@@ -2235,7 +2395,7 @@ test "permission failure from a different profile stays in history without disab
     const redaction = testRedaction(&effects);
     var definition = testDefinition("scheduled", "inspect");
     const id = try runtime.create(definition, testBinding(), redaction);
-    const original_task = try runtime.runNow(id, 1, redaction, tasks.effects());
+    const original_task = try runtime.runNow(id, 1, testBinding(), redaction, tasks.effects());
     definition.permission_profile = .full_access;
     try runtime.update(id, 1, definition, testBinding(), redaction);
     tasks.terminal = .{ .outcome = .stopped, .permission_failure_profile = .approval_required };
@@ -2258,8 +2418,8 @@ test "input continuation gate includes submitted occurrences skipped after earli
     const redaction = testRedaction(&effects);
     const first = try runtime.create(testDefinition("first", "first"), testBinding(), redaction);
     const second = try runtime.create(testDefinition("second", "second"), testBinding(), redaction);
-    _ = try runtime.runNow(first, 1, redaction, tasks.effects());
-    _ = try runtime.runNow(second, 1, redaction, tasks.effects());
+    _ = try runtime.runNow(first, 1, testBinding(), redaction, tasks.effects());
+    _ = try runtime.runNow(second, 1, testBinding(), redaction, tasks.effects());
     tasks.terminal = .{ .outcome = .completed };
     effects.fail_commit_at = effects.commits + 1;
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
@@ -2284,7 +2444,7 @@ test "input continuation observes completion allocation failure even when persis
         defer runtime.deinit();
         const redaction = testRedaction(&effects);
         const id = try runtime.create(testDefinition("source", "source"), testBinding(), redaction);
-        _ = try runtime.runNow(id, 1, redaction, tasks.effects());
+        _ = try runtime.runNow(id, 1, testBinding(), redaction, tasks.effects());
         tasks.terminal = .{ .outcome = .completed };
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = failure_index });
         runtime.allocator = failing.allocator();
@@ -2315,14 +2475,164 @@ test "an invalid plan cannot block a valid plan timer" {
     const invalid_id = try runtime.create(invalid, testBinding(), redaction);
     const valid_id = try runtime.create(testDefinition("valid", "inspect"), testBinding(), redaction);
     _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
-    try std.testing.expect(runtime.refreshBindingNoFail(testBinding(), redaction));
+    // Observing the change stops nothing; the due time does.
+    try std.testing.expect(!runtime.refreshAdmissionNoFail(testBinding(), redaction));
+    try std.testing.expectEqual(Health.ready, runtime.store.find(invalid_id).?.health);
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
     try std.testing.expectEqual(Health.needs_attention, runtime.store.find(invalid_id).?.health);
     try std.testing.expectEqual(@as(?u64, 200), effects.armed_at);
-    effects.now = 200;
     runtime.onTimer(testBinding(), redaction, tasks.effects());
     try std.testing.expectEqual(@as(usize, 0), runtime.store.find(invalid_id).?.occurrence_count);
     try std.testing.expectEqual(@as(usize, 1), runtime.store.find(valid_id).?.occurrence_count);
     try std.testing.expectEqual(@as(u64, 42), runtime.store.find(valid_id).?.last_occurrence.?.task_id);
+}
+
+test "waiting and held schedules record nothing and later run only their latest point" {
+    for ([_]Admission{ .wait, .{ .hold = .signed_out }, .{ .hold = .other_account } }) |blocked| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence(), .notifier = effects.notifier() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        var admission: TestAdmission = .{ .value = blocked };
+        var definition = testDefinition("blocked", "inspect");
+        definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+        const id = try runtime.create(definition, admission.binding(), redaction);
+        _ = runtime.setBackgroundAvailable(true, admission.binding(), redaction);
+        const waits = blocked == .wait;
+        // A wait is armed and retried; a hold is never armed.
+        try std.testing.expectEqual(@as(?u64, if (waits) 200 else null), effects.armed_at);
+        const commits = effects.commits;
+        effects.now = 200;
+        runtime.onTimer(admission.binding(), redaction, tasks.effects());
+        try std.testing.expectEqual(@as(?u64, if (waits) 260 else null), effects.armed_at);
+        try std.testing.expectError(error.ExecutionUnavailable, runtime.runNow(id, 1, admission.binding(), redaction, tasks.effects()));
+        try std.testing.expectEqual(commits, effects.commits);
+        try std.testing.expectEqual(@as(usize, 0), effects.notifications);
+        try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
+        try std.testing.expectEqual(Health.ready, runtime.store.find(id).?.health);
+        // Admitted again after several due points: one run, of the latest.
+        admission.value = .{ .run = 1 };
+        effects.now = 399;
+        _ = runtime.refreshAdmissionNoFail(admission.binding(), redaction);
+        runtime.onTimer(admission.binding(), redaction, tasks.effects());
+        try std.testing.expectEqual(@as(usize, 1), runtime.store.find(id).?.occurrence_count);
+        try std.testing.expectEqual(@as(u64, 380), runtime.store.find(id).?.last_occurrence.?.planned_at_unix_seconds);
+        try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+    }
+}
+
+test "a recurring schedule skips a gone model, stays enabled and says so once" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence(), .notifier = effects.notifier() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var admission: TestAdmission = .{ .value = .skip };
+    var definition = testDefinition("gone", "inspect");
+    definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+    const id = try runtime.create(definition, admission.binding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, admission.binding(), redaction);
+    // A manual run neither records nor moves the plan.
+    try std.testing.expectError(error.ExecutionGenerationMismatch, runtime.runNow(id, 1, admission.binding(), redaction, tasks.effects()));
+    try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
+    for ([_]u64{ 200, 260 }) |now| {
+        effects.now = now;
+        runtime.onTimer(admission.binding(), redaction, tasks.effects());
+        const item = runtime.store.find(id).?;
+        try std.testing.expect(item.enabled and item.health == .ready);
+        try std.testing.expectEqual(Occurrence{ .planned_at_unix_seconds = now, .triggered_at_unix_seconds = now, .source = .timer, .result = .skipped, .reason = .execution_changed }, item.last_occurrence.?);
+        // The skip keeps the timer going rather than stopping it.
+        try std.testing.expectEqual(@as(?u64, now + 60), effects.armed_at);
+        try std.testing.expectEqual(@as(usize, 1), effects.notifications);
+        try std.testing.expectEqual(NotificationKind.model_unavailable, effects.notification_kind.?);
+    }
+    admission.value = .{ .run = 1 };
+    effects.now = 320;
+    runtime.onTimer(admission.binding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+    admission.value = .skip;
+    effects.now = 380;
+    runtime.onTimer(admission.binding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(usize, 2), effects.notifications);
+    try std.testing.expectEqual(NotificationKind.model_unavailable, effects.notification_kind.?);
+}
+
+test "a schedule that cannot run as bound stops without spending its run" {
+    for ([_]Admission{ .skip, .stop }) |gone| for ([_]OccurrenceSource{ .timer, .manual }) |source| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence(), .notifier = effects.notifier() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        var admission: TestAdmission = .{};
+        // Skipping the last point of a one-time plan would end it; a source
+        // that is gone stops any plan.
+        var definition = testDefinition("cannot run", "inspect");
+        if (gone == .stop) definition.recurrence = .{ .interval = .{ .start_at_unix_seconds = 200, .every_seconds = 60 } };
+        const id = try runtime.create(definition, admission.binding(), redaction);
+        _ = runtime.setBackgroundAvailable(true, admission.binding(), redaction);
+        admission.value = gone;
+        switch (source) {
+            .timer => {
+                effects.now = 200;
+                runtime.onTimer(admission.binding(), redaction, tasks.effects());
+            },
+            .manual => try std.testing.expectError(error.ExecutionGenerationMismatch, runtime.runNow(id, 1, admission.binding(), redaction, tasks.effects())),
+        }
+        const item = runtime.store.find(id).?;
+        try std.testing.expect(!item.enabled);
+        try std.testing.expectEqual(Health.needs_attention, item.health);
+        try std.testing.expectEqual(FailureReason.execution_changed, item.failure_reason.?);
+        try std.testing.expectEqual(@as(usize, 0), item.occurrence_count);
+        try std.testing.expectEqual(@as(?u64, null), item.last_timer_planned_at_unix_seconds);
+        try std.testing.expectEqual(NotificationKind.needs_attention, effects.notification_kind.?);
+        try std.testing.expectEqual(@as(u64, 42), tasks.next_task_id);
+        if (gone == .stop) continue;
+        // Edited onto a model that runs, at a new time, it runs then.
+        admission.value = .{ .run = 1 };
+        var edited = testDefinition("cannot run", "inspect");
+        edited.recurrence = .{ .once = .{ .at_unix_seconds = 300 } };
+        try runtime.update(id, item.epoch, edited, admission.binding(), redaction);
+        effects.now = 300;
+        runtime.onTimer(admission.binding(), redaction, tasks.effects());
+        try std.testing.expectEqual(@as(u64, 300), runtime.store.find(id).?.last_occurrence.?.planned_at_unix_seconds);
+        try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
+    };
+}
+
+test "only a command's own definitions stop, and only when their source is gone" {
+    var effects: TestEffects = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 3, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence(), .notifier = effects.notifier() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var admission: TestAdmission = .{};
+    var ids: [3]u64 = undefined;
+    for ([_][]const u8{ "slot-a", "slot-b", "slot-a" }, &ids) |source, *id| {
+        var definition = testDefinition("plan", "inspect");
+        definition.binding.model_ref.source_id = source;
+        id.* = try runtime.create(definition, admission.binding(), redaction);
+    }
+    try std.testing.expect(!try runtime.setEnabled(ids[2], 1, false, admission.binding(), redaction));
+    admission.gone_source = "slot-a";
+    // Seeing the change, or editing another definition, judges none of them.
+    try std.testing.expect(!runtime.refreshAdmissionNoFail(admission.binding(), redaction));
+    var edited = testDefinition("edited", "inspect");
+    edited.binding.model_ref.source_id = "slot-b";
+    try runtime.update(ids[1], 1, edited, admission.binding(), redaction);
+    try std.testing.expect(!runtime.stopGoneSourceNoFail("slot-b", admission.binding(), redaction));
+    try std.testing.expectEqual(Health.ready, runtime.store.find(ids[0]).?.health);
+    // The command on their own source stops what is enabled there, quietly:
+    // the user is looking at the change they just made.
+    try std.testing.expect(runtime.stopGoneSourceNoFail("slot-a", admission.binding(), redaction));
+    try std.testing.expectEqual(Health.needs_attention, runtime.store.find(ids[0]).?.health);
+    try std.testing.expectEqual(Health.ready, runtime.store.find(ids[1]).?.health);
+    try std.testing.expectEqual(Health.paused, runtime.store.find(ids[2]).?.health);
+    try std.testing.expectEqual(@as(usize, 0), effects.notifications);
+    // Resuming the paused one judges it alone.
+    try std.testing.expect(!try runtime.setEnabled(ids[2], 2, true, admission.binding(), redaction));
+    try std.testing.expectEqual(Health.needs_attention, runtime.store.find(ids[2]).?.health);
 }
 
 test "old Schedule canonical is quarantined before bootstrap installs the empty current store" {
@@ -2401,7 +2711,7 @@ test "allocation failure before launch never strands a committed claim" {
         const id = try runtime.create(testDefinition("allocation", "inspect"), testBinding(), redaction);
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = index });
         runtime.allocator = failing.allocator();
-        const result = runtime.runNow(id, 1, redaction, tasks.effects());
+        const result = runtime.runNow(id, 1, testBinding(), redaction, tasks.effects());
         runtime.allocator = std.testing.allocator;
         if (result) |_| {} else |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
@@ -2412,7 +2722,7 @@ test "allocation failure before launch never strands a committed claim" {
         if (tasks.next_task_id == 42) {
             try std.testing.expectEqual(@as(usize, 0), runtime.store.find(id).?.occurrence_count);
             try std.testing.expectEqual(PersistenceHealth.ready, runtime.persistenceHealth());
-            _ = try runtime.runNow(id, 1, redaction, tasks.effects());
+            _ = try runtime.runNow(id, 1, testBinding(), redaction, tasks.effects());
         } else {
             try std.testing.expectEqual(@as(u64, 42), runtime.store.find(id).?.occurrences()[0].task_id);
         }
@@ -2454,7 +2764,7 @@ test "rejected launch notification follows a confirmed Schedule commit" {
         defer runtime.deinit();
         const redaction = testRedaction(&effects);
         const id = try runtime.create(testDefinition("rejected", "inspect"), testBinding(), redaction);
-        try std.testing.expectError(error.QueueFull, runtime.runNow(id, 1, redaction, tasks.effects()));
+        try std.testing.expectError(error.QueueFull, runtime.runNow(id, 1, testBinding(), redaction, tasks.effects()));
         try std.testing.expectEqual(@as(usize, if (commit == .committed) 1 else 0), effects.notifications);
         if (commit == .committed) try std.testing.expectEqual(@as(u64, 42), effects.notification_task_id);
         try std.testing.expectEqual(@as(u64, 42), runtime.store.find(id).?.occurrences()[0].task_id);
@@ -2468,8 +2778,8 @@ test "same-second manual occurrences reconcile by their actual Task identity" {
     defer runtime.deinit();
     const redaction = testRedaction(&effects);
     const id = try runtime.create(testDefinition("manual", "inspect"), testBinding(), redaction);
-    const first = try runtime.runNow(id, 1, redaction, tasks.effects());
-    const second = try runtime.runNow(id, 1, redaction, tasks.effects());
+    const first = try runtime.runNow(id, 1, testBinding(), redaction, tasks.effects());
+    const second = try runtime.runNow(id, 1, testBinding(), redaction, tasks.effects());
     tasks.terminal = .{ .outcome = .completed };
     tasks.terminal_task_id = first;
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
