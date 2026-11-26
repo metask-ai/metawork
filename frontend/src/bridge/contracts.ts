@@ -41,6 +41,7 @@ export type NotificationTextRegistration = {
   scheduleCompleted: string;
   scheduleFailed: string;
   scheduleSkipped: string;
+  scheduleModelUnavailable: string;
   scheduleNeedsAttention: string;
   runCompleted: string;
   runFailed: string;
@@ -751,6 +752,14 @@ export type ScheduledTaskBinding = {
 export type ScheduledTaskStoredBinding = {
   status: "bound";
 } & ScheduledTaskBinding;
+/** What the Host judges the binding allows now; published, never stored. */
+export type ScheduledTaskAdmission =
+  | "runnable"
+  | "waiting"
+  | "signed_out"
+  | "other_account"
+  | "model_unavailable"
+  | "source_changed";
 export type ScheduledTaskView = {
   id: string;
   epoch: string;
@@ -771,6 +780,7 @@ export type ScheduledTaskView = {
     | "host_interrupted"
     | "permission_required"
     | null;
+  admission: ScheduledTaskAdmission;
   binding: ScheduledTaskStoredBinding;
   input: {
     kind: "text";

@@ -14,6 +14,7 @@ const slots: Record<keyof NotificationTextRegistration, MessageId> = {
   scheduleCompleted: "notification.schedule.completed",
   scheduleFailed: "notification.schedule.failed",
   scheduleSkipped: "notification.schedule.skipped",
+  scheduleModelUnavailable: "notification.schedule.model_unavailable",
   scheduleNeedsAttention: "notification.schedule.needs_attention",
   runCompleted: "notification.run.completed",
   runFailed: "notification.run.failed",

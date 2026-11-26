@@ -2351,12 +2351,20 @@ export const enUS = {
     "The app interrupted the previous start. Edit and confirm; it will not retry automatically.",
   "scheduled.reason.permission_required":
     "The task stopped because permission was required. Review the instruction and permissions, then edit and confirm.",
+  "scheduled.admission.waiting": "Runs once your account or model is ready.",
+  "scheduled.admission.signed_out": "Runs after you sign in to Metask.",
+  "scheduled.admission.other_account":
+    "Bound to another Metask account. Switch back to it, or edit it to use a model from this account.",
+  "scheduled.admission.model_unavailable":
+    "The selected model is no longer available, so it will not run. Edit it to choose another model.",
   "scheduled.notification_unavailable":
     "The task from this notification is unavailable. Refresh and check your tasks.",
   "notification.schedule.completed": "Scheduled task completed",
   "notification.schedule.failed": "Scheduled task failed",
   "notification.schedule.skipped":
     "A run was skipped because the previous run is still active",
+  "notification.schedule.model_unavailable":
+    "A run was skipped because its model is no longer available",
   "notification.schedule.needs_attention": "Scheduled task needs attention",
   "notification.run.completed": "Task finished",
   "notification.run.failed": "Task failed",

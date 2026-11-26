@@ -687,13 +687,35 @@ pub const Store = struct {
         triggered_at_unix_seconds: u64,
         blocking_task_id: u64,
     ) error{ InvalidSchedule, ScheduledOccurrenceCapacity }!void {
+        try self.recordSkip(item, planned_at_unix_seconds, triggered_at_unix_seconds, .previous_task_running, blocking_task_id);
+    }
+
+    /// The bound model was gone at this due point. The plan moves on and stays
+    /// enabled; a caller stops a plan instead when this would be its last point.
+    pub fn markModelSkipped(
+        self: *Store,
+        item: *Item,
+        planned_at_unix_seconds: u64,
+        triggered_at_unix_seconds: u64,
+    ) error{ InvalidSchedule, ScheduledOccurrenceCapacity }!void {
+        try self.recordSkip(item, planned_at_unix_seconds, triggered_at_unix_seconds, .execution_changed, 0);
+    }
+
+    fn recordSkip(
+        self: *Store,
+        item: *Item,
+        planned_at_unix_seconds: u64,
+        triggered_at_unix_seconds: u64,
+        reason: FailureReason,
+        task_id: u64,
+    ) error{ InvalidSchedule, ScheduledOccurrenceCapacity }!void {
         try self.recordOccurrence(item, .{
             .planned_at_unix_seconds = planned_at_unix_seconds,
             .triggered_at_unix_seconds = triggered_at_unix_seconds,
             .source = .timer,
             .result = .skipped,
-            .task_id = blocking_task_id,
-            .reason = .previous_task_running,
+            .task_id = task_id,
+            .reason = reason,
         });
         try advanceAfterTimer(item, triggered_at_unix_seconds);
     }

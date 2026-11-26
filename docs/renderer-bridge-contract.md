@@ -519,7 +519,9 @@ Scheduled Task recurrence 接受绝对定义 `once: { kind, atUnixSeconds }`、`
 
 Scheduled Task setEnabled response 的 `enabled` 表示本次提交并完成 timer reconciliation 后的实际状态；恢复时发现 binding 已变化或 timer 不可用，可以返回 false。Renderer 必须刷新 canonical snapshot 解释当前状态，不能把请求值当作恢复成功的证据。
 
-Scheduled Task 的 skipped occurrence 可携带 `taskId`，仅当 reason 为 `previous_task_running` 时表示阻塞它的真实 Task，不代表新建 Task；此前没有记录 blocker 的 null 值仍有效。
+Scheduled Task 的 skipped occurrence 可携带 `taskId`，仅当 reason 为 `previous_task_running` 时表示阻塞它的真实 Task，不代表新建 Task；此前没有记录 blocker 的 null 值仍有效。reason 为 `execution_changed` 的 skipped occurrence 表示到点时绑定的模型不在或协议变了，`taskId` 为 null。
+
+Scheduled Task projection 每项另带 `admission`，精确取 `runnable | waiting | signed_out | other_account | model_unavailable | source_changed`，是 Host 按本次投影的一次 Account 采样和当前目录对该绑定的判断，不落盘、不进入 mutation。Renderer 只用它说明已启用计划为什么照现在不会运行，以及在 `model_unavailable`、`source_changed`、`other_account` 时要求编辑重新选择模型；不得自行由 Account 或 Models 状态推导。
 
 `metawork.tasks.delete` 只接受 `{ taskId }`，已归档和未归档 Task 均可提交。成功返回 `{ taskId, deleting: true }`，表示 Product Control 已受理唯一删除意图；它不声称 Task 已经物理删除。Task snapshot 以 `deletionStatus = idle | deleting | failed` 发布该 runtime-only 产品用例：`deleting` 时 Renderer 等待后续 snapshot 移除 Task，`failed` 时保留 Task 及原归档状态，显式重试资格由 `deleteBlocker` 发布。Product Control 自行收口 Attachment、等待 worker/checkpoint quiescence、提交 Task store；Renderer 不重复提交正常推进、不编排 Session teardown，也不解析 checkpoint、close failure 或 worker reference。
 
