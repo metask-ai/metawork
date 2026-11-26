@@ -1216,6 +1216,7 @@ pub const Runtime = struct {
         const renewal_finished = terminal and abandoned == null and
             self.account.confirmationInFlight() and !prepared.transition.loginWaits();
         const ended = prepared.transition.endsLogin();
+        const was_signing_in = self.account.signingIn();
         // Pooled connections of the account end with its credential.
         if (ended and self.credentials.available() and self.account.accountId().len != 0)
             self.effects.transport.retire(self.account.accountId());
@@ -1264,6 +1265,13 @@ pub const Runtime = struct {
                 self.retrying = true;
             },
         }
+        // A sign-in that gave up a held login's confirmation and then ended
+        // without replacing it leaves nothing scheduled: one is due now.
+        if (was_signing_in and terminal and self.account.confirming() and !self.account.loginWaiting() and self.renew_at == null)
+            if (self.platform) |platform| {
+                self.renew_at = .{ .wall = null, .boot = platform.boot_clock.nowSeconds() };
+                self.retrying = false;
+            };
         if (!self.account.renewable()) {
             self.confirm_failures = 0;
             self.clearRenewal();
@@ -4205,6 +4213,18 @@ test "a sign-in gives up an identity request and keeps the authorization waiting
     try std.testing.expectEqual(epoch, runtime.authorization().checking);
     try finishAbandoned(&runtime, &transport);
     try std.testing.expectEqual(contract.AccountState.authorizing, runtime.view().state);
+    // Given up, the sign-in leaves the held login to be confirmed at once.
+    var cancel = switch (runtime.prepareCommand(.cancel_operation)) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer cancel.deinit();
+    _ = cancel.transition.takeEffect();
+    runtime.commit(&cancel);
+    try std.testing.expectEqual(contract.AccountState.checking, runtime.view().state);
+    var confirmation = runtime.prepareDue() orelse return error.TestUnexpectedResult;
+    defer confirmation.deinit();
+    try std.testing.expect(confirmation.transition.takeEffect().? == .load_identity);
 }
 
 test "closing waits for a renewal underway only its own close wait and gives up any other request" {

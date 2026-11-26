@@ -261,6 +261,11 @@ pub const Account = struct {
         return self.state.login != .none;
     }
 
+    /// A browser sign-in is underway.
+    pub fn signingIn(self: *const Account) bool {
+        return self.state.op == .authorize;
+    }
+
     /// A held login waits for its next confirmation.
     pub fn confirming(self: *const Account) bool {
         return self.state.login == .held and self.state.op == .idle;
