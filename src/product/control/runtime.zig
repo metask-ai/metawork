@@ -2599,7 +2599,7 @@ pub const Runtime = struct {
             }
         };
         var value: Max = .{};
-        if (self.account_credentials) |source| try source.visit(&value, Max.visit);
+        try self.visitOwnerCredentials(&value, Max.visit);
         try self.task_runtime.visitExecutionCredentials(&value, Max.visit);
         if (value.length > projection_step_bytes) return error.CredentialCapacity;
         return value.length -| 1;
@@ -2867,7 +2867,7 @@ pub const Runtime = struct {
     ) bool {
         const codepoint_len = credential_match.codepointLen(value, codepoint_start);
         for (0..codepoint_len) |offset| {
-            if (self.accountCredentialQuery(.{ .value = value[codepoint_start + offset ..], .kind = .continuation }).matched != 0) return true;
+            if (self.ownerCredentialQuery(.{ .value = value[codepoint_start + offset ..], .kind = .continuation }).matched != 0) return true;
             if (self.task_runtime.executionCredentialMayContinue(
                 value[codepoint_start + offset ..],
             )) return true;
@@ -7329,7 +7329,7 @@ pub const Runtime = struct {
         const storage = self.snapshotStorage();
         const request = try self.snapshot.begin(self.allocator, request_input, self.projection_security_epoch);
         const credentials = self.snapshot.credentialCollector();
-        if (self.account_credentials) |source| try source.visit(credentials, ProjectionCredentials.visit);
+        try self.visitOwnerCredentials(credentials, ProjectionCredentials.visit);
         try self.task_runtime.visitExecutionCredentials(credentials, ProjectionCredentials.visit);
         const text = self.snapshot.rootText(storage);
         if (builtin.is_test) self.assembling_snapshot = true;
@@ -9473,7 +9473,18 @@ pub const Runtime = struct {
         return scrub.rewrote;
     }
 
-    const AccountCredentialQuery = struct {
+    /// The credentials Host owners hold, which the projection masks and
+    /// refuses on; a Task reports its own through the Task runtime. Each value
+    /// is borrowed for the duration of its callback only.
+    fn visitOwnerCredentials(
+        self: *const Runtime,
+        context: *anyopaque,
+        visit_fn: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void,
+    ) std.mem.Allocator.Error!void {
+        if (self.account_credentials) |source| try source.visit(context, visit_fn);
+    }
+
+    const OwnerCredentialQuery = struct {
         value: []const u8,
         kind: enum { retained, contains, prefix, continuation },
         matched: usize = 0,
@@ -9491,13 +9502,13 @@ pub const Runtime = struct {
         }
     };
 
-    fn accountCredentialQuery(self: *const Runtime, query: AccountCredentialQuery) AccountCredentialQuery {
+    fn ownerCredentialQuery(self: *const Runtime, query: OwnerCredentialQuery) OwnerCredentialQuery {
         var result = query;
-        if (self.account_credentials) |source| source.visit(&result, AccountCredentialQuery.visit) catch unreachable;
+        self.visitOwnerCredentials(&result, OwnerCredentialQuery.visit) catch unreachable;
         return result;
     }
 
-    const AccountCredentialRedaction = struct {
+    const OwnerCredentialRedaction = struct {
         value: []u8,
         changed: bool = false,
 
@@ -9509,7 +9520,7 @@ pub const Runtime = struct {
 
     fn retainsProjectionCredential(self: *const Runtime, credential: []const u8) bool {
         if (credential.len == 0) return false;
-        if (self.accountCredentialQuery(.{ .value = credential, .kind = .retained }).matched != 0) return true;
+        if (self.ownerCredentialQuery(.{ .value = credential, .kind = .retained }).matched != 0) return true;
         return self.task_runtime.retainsCredential(credential);
     }
 
@@ -9551,7 +9562,7 @@ pub const Runtime = struct {
         if (extra) |value| Collection.visit(&collected, value) catch {
             complete = false;
         };
-        if (self.account_credentials) |source| source.visit(&collected, Collection.visit) catch {
+        self.visitOwnerCredentials(&collected, Collection.visit) catch {
             complete = false;
         };
         self.task_runtime.visitExecutionCredentials(&collected, Collection.visit) catch {
@@ -9851,7 +9862,7 @@ pub const Runtime = struct {
         var known: Collection = .{ .allocator = self.allocator };
         defer known.values.deinit(self.allocator);
         for (credentials) |secret| try Collection.visit(&known, secret);
-        if (self.account_credentials) |source| try source.visit(&known, Collection.visit);
+        try self.visitOwnerCredentials(&known, Collection.visit);
         try self.task_runtime.visitExecutionCredentials(&known, Collection.visit);
         const capacity = @min(value.len, max);
         const scratch = try self.allocator.alloc(u8, capacity);
@@ -9961,7 +9972,7 @@ pub const Runtime = struct {
 
     fn containsKnownCredential(self: *const Runtime, value: []const u8) bool {
         if (builtin.is_test and self.assembling_snapshot) @panic("snapshot assembly used live text projection");
-        if (self.accountCredentialQuery(.{ .value = value, .kind = .contains }).matched != 0) return true;
+        if (self.ownerCredentialQuery(.{ .value = value, .kind = .contains }).matched != 0) return true;
         return self.task_runtime.containsExecutionCredential(value);
     }
 
@@ -9974,7 +9985,7 @@ pub const Runtime = struct {
     fn containsKnownHistoryCredential(self: *Runtime, state: task_persistence.StateWire, preserved: task_persistence.PreservedFrames) bool {
         var credentials: ProjectionCredentials = .{ .allocator = self.allocator };
         defer credentials.deinit();
-        if (self.account_credentials) |source| source.visit(&credentials, ProjectionCredentials.visit) catch return true;
+        self.visitOwnerCredentials(&credentials, ProjectionCredentials.visit) catch return true;
         self.task_runtime.visitExecutionCredentials(&credentials, ProjectionCredentials.visit) catch return true;
         for (credentials.values.items) |secret| {
             if ((task_persistence.security.contains(self.allocator, state, secret) catch true) or
@@ -9991,9 +10002,9 @@ pub const Runtime = struct {
             value,
             redactFixedWidthNoFail,
         );
-        var account_redaction: AccountCredentialRedaction = .{ .value = value };
-        if (self.account_credentials) |source| source.visit(&account_redaction, AccountCredentialRedaction.visit) catch unreachable;
-        return account_redaction.changed or changed;
+        var owner_redaction: OwnerCredentialRedaction = .{ .value = value };
+        self.visitOwnerCredentials(&owner_redaction, OwnerCredentialRedaction.visit) catch unreachable;
+        return owner_redaction.changed or changed;
     }
 
     fn matchedKnownCredentialLen(
@@ -10002,7 +10013,7 @@ pub const Runtime = struct {
     ) usize {
         var longest: usize = 0;
         if (builtin.is_test and self.assembling_snapshot) @panic("snapshot assembly used live text projection");
-        longest = @max(longest, self.accountCredentialQuery(.{ .value = value, .kind = .prefix }).matched);
+        longest = @max(longest, self.ownerCredentialQuery(.{ .value = value, .kind = .prefix }).matched);
         longest = @max(longest, self.task_runtime.matchedExecutionCredentialPrefix(value));
         return longest;
     }
@@ -10648,7 +10659,7 @@ pub const Runtime = struct {
         // The same credential set a snapshot read collects at begin.
         var credentials: ProjectionCredentials = .{ .allocator = self.allocator };
         defer credentials.deinit();
-        if (self.account_credentials) |source| try source.visit(&credentials, ProjectionCredentials.visit);
+        try self.visitOwnerCredentials(&credentials, ProjectionCredentials.visit);
         try self.task_runtime.visitExecutionCredentials(&credentials, ProjectionCredentials.visit);
         const text = credentials.text(self.allocator);
         return self.task_runtime.writeToolPage(self.allocator, output, text.task(), task_id, run_id, after_order, tool_page_source_bytes) catch |err| return @errorCast(err);
