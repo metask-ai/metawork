@@ -23,6 +23,7 @@ import {
 import {
   historyProgress,
   earlierHistoryGoal,
+  narrowHistoryGoals,
   type HistoryGoal,
 } from "../workbench/history.ts";
 import { Message } from "../components/ai/Message.tsx";
@@ -1093,6 +1094,9 @@ export default function App() {
   const [taskReadingMemory] = useState(createTaskReadingMemory);
   const [inputHistoryReader] = useState(createTaskInputHistoryReader);
   useEffect(() => {
+    // A security epoch leaves no snapshot until the next read; reading
+    // positions are ids and offsets, kept for it, not reclaimed.
+    if (!snapshotLoaded) return;
     // Reclaim after TaskContent's unmount cleanup has saved its last position.
     taskReadingMemory.prune(
       new Set(snapshot.taskIndex.map((task) => task.id)),
@@ -1103,7 +1107,12 @@ export default function App() {
           }
         : undefined,
     );
-  }, [snapshot.taskIndex, snapshot.taskPage, taskReadingMemory]);
+  }, [
+    snapshot.taskIndex,
+    snapshot.taskPage,
+    snapshotLoaded,
+    taskReadingMemory,
+  ]);
   function retainTaskHistory(taskId: string, runId: string) {
     setHistoryRequests((goals) => {
       const previous = goals[taskId];
@@ -2327,7 +2336,9 @@ export default function App() {
             latestSnapshotRef.current &&
             latestSnapshotRef.current.securityEpoch !== next.securityEpoch
           )
-            setHistoryRequests({});
+            setHistoryRequests((goals) =>
+              narrowHistoryGoals(goals, taskReadingMemory.reading),
+            );
           if (
             latestSnapshotRef.current &&
             (latestSnapshotRef.current.securityEpoch !== next.securityEpoch ||
@@ -2470,10 +2481,11 @@ export default function App() {
         inputHistoryReader.clear();
         invalidateFeedbackSecurity();
         latestSnapshotRef.current = null;
-        setHistoryRequests({});
-        taskReadingMemory.reading.clear();
-        taskReadingMemory.processDisclosure.clear();
-        taskReadingMemory.toolDisclosure.clear();
+        // Where each Task was read holds no Host content: keep it, and ask
+        // again only for the history it needs.
+        setHistoryRequests((goals) =>
+          narrowHistoryGoals(goals, taskReadingMemory.reading),
+        );
         filePreviewTabs.clear();
         clearFileChanges();
         dispatchWorkbench({
@@ -5624,6 +5636,7 @@ export default function App() {
         }
         onRemoveAttachment={(token) => void removeAttachment(token)}
         loadAttachmentThumbnail={loadAttachmentThumbnail}
+        securityEpoch={snapshot.securityEpoch}
         onOpenAttachment={(attachment, opener) => {
           attachmentViewerOpener.current = opener;
           setAttachmentViewer({
@@ -6261,7 +6274,9 @@ export default function App() {
               />
             }
             globalInstructions={globalInstructions}
-            modelContext={`${bridgeGeneration}:${snapshot.securityEpoch}`}
+            // The model settings hold only what the person typed; a security
+            // epoch replaces the Host facts they are shown with, not the form.
+            modelContext={bridgeGeneration}
             archiveManagement={{
               tasks: snapshot.taskIndex,
               workspaces: snapshot.workspaces,
@@ -6407,7 +6422,7 @@ export default function App() {
                   snapshot.models,
                   async () => {
                     await refreshSnapshot();
-                    return latestSnapshotRef.current!.models;
+                    return latestSnapshotRef.current?.models ?? null;
                   },
                   input,
                 );
@@ -7104,6 +7119,7 @@ export default function App() {
       <MediaLightbox
         target={attachmentViewer}
         load={loadAttachmentPreview}
+        securityEpoch={snapshot.securityEpoch}
         onClose={() => {
           setAttachmentViewer(null);
           const opener = attachmentViewerOpener.current;

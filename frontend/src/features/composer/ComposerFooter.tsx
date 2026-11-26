@@ -130,6 +130,7 @@ export function ComposerFooter({
   attachmentError,
   attachmentModelWarning,
   loadAttachmentThumbnail,
+  securityEpoch,
   onOpenAttachment,
   skillCatalog,
   slashCommands,
@@ -229,6 +230,9 @@ export function ComposerFooter({
   onCancelAttachments?: () => void;
   onRemoveAttachment: (token: string) => void;
   loadAttachmentThumbnail?: AttachmentThumbnailLoader<MediaTarget>;
+  /// The security epoch the staged thumbnails were checked under. A newer one
+  /// revokes them, so each chip asks for its thumbnail again.
+  securityEpoch?: string;
   /// Absent for an attachment whose original the viewer tier cannot read, so
   /// no chip offers an entry that is certain to fail.
   onOpenAttachment?: (
@@ -694,6 +698,7 @@ export function ComposerFooter({
                 >
                   {attachment.kind === "image" ? (
                     <AttachmentThumbnail
+                      securityEpoch={securityEpoch}
                       target={{
                         kind: "draftAttachment",
                         token: attachment.token,

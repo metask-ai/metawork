@@ -178,6 +178,41 @@ fn commitCanonical(
     return .committed;
 }
 
+/// Where the Custom Provider keys Models holds for the projection come and
+/// go. Each value is borrowed for the duration of its callback only.
+pub const ResidentSink = struct {
+    context: *anyopaque,
+    /// A key about to be held. It is not yet visited, so the callee can tell
+    /// whether anything else knew it. False: not held now, asked again at the
+    /// next sync.
+    admit_fn: *const fn (*anyopaque, []const u8) bool,
+    /// A key about to be dropped, still visited. False: kept until the next
+    /// sync, which only masks more.
+    retire_fn: *const fn (*anyopaque, []const u8) bool,
+};
+
+/// One configured Custom Provider whose key Models holds for the projection
+/// from the moment it is stored, not from its first use.
+const Resident = struct {
+    provider_id: []u8,
+    /// The provider revision `secret` was read at.
+    revision: u64,
+    /// Null when the key at `revision` is a placeholder or was not found.
+    secret: ?contract.SecretBuffer,
+    /// A revision whose read failed. Not read again until the revision
+    /// changes: some platform stores ask the person on every read.
+    failed_revision: u64 = 0,
+    /// A revision whose key the sink would not take or let go. Not read
+    /// again until the revision changes or the sink says it can try again.
+    refused_revision: u64 = 0,
+
+    fn deinit(self: *Resident, allocator: std.mem.Allocator) void {
+        if (self.secret) |*secret| secret.deinit();
+        allocator.free(self.provider_id);
+        self.* = undefined;
+    }
+};
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -202,6 +237,7 @@ pub const Runtime = struct {
         authorization_generation: u64,
     } = null,
     next_catalog_attempt_id: u64 = 1,
+    resident: std.ArrayList(Resident) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, main_thread_id: std.Thread.Id) Runtime {
         return .{
@@ -220,8 +256,113 @@ pub const Runtime = struct {
             self.allocator.destroy(public_catalog);
         if (self.store) |*store| store.deinit();
         self.metask_catalog.deinit();
+        for (self.resident.items) |*entry| entry.deinit(self.allocator);
+        self.resident.deinit(self.allocator);
         self.registry.deinit();
         self.* = undefined;
+    }
+
+    /// Every configured key held for the projection.
+    pub fn visitResidentCredentials(
+        self: *const Runtime,
+        context: *anyopaque,
+        visit_fn: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void,
+    ) std.mem.Allocator.Error!void {
+        for (self.resident.items) |*entry| if (entry.secret) |*secret| try visit_fn(context, secret.view());
+    }
+
+    /// Brings the held keys in line with the registry: a provider whose
+    /// credential is ready is held from the moment it is stored, and dropped
+    /// when it is gone, not ready, or Models stopped. Compared with the
+    /// registry each time, so no change has to report itself. A placeholder
+    /// key is not held: it is not a secret.
+    pub fn syncResidentCredentials(self: *Runtime, sink: ResidentSink) void {
+        self.assertMainThread();
+        const providers: []const contract.CustomProviderView = if (self.credential_vault != null) self.registry.views() else &.{};
+        var index: usize = 0;
+        while (index < self.resident.items.len) {
+            const entry = &self.resident.items[index];
+            const ready = if (findProviderView(providers, entry.provider_id)) |provider| provider.credential_status == .ready else false;
+            if (ready or !self.dropResident(entry, sink)) {
+                index += 1;
+                continue;
+            }
+            var removed = self.resident.orderedRemove(index);
+            removed.deinit(self.allocator);
+        }
+        for (providers) |provider| {
+            if (provider.credential_status != .ready) continue;
+            const entry = for (self.resident.items) |*candidate| {
+                if (std.mem.eql(u8, candidate.provider_id, provider.id)) break candidate;
+            } else blk: {
+                const provider_id = self.allocator.dupe(u8, provider.id) catch continue;
+                self.resident.append(self.allocator, .{ .provider_id = provider_id, .revision = 0, .secret = null }) catch {
+                    self.allocator.free(provider_id);
+                    continue;
+                };
+                break :blk &self.resident.items[self.resident.items.len - 1];
+            };
+            if (entry.revision == provider.provider_revision or
+                entry.failed_revision == provider.provider_revision or
+                entry.refused_revision == provider.provider_revision) continue;
+            self.readResident(entry, provider.provider_revision, sink);
+        }
+    }
+
+    fn readResident(self: *Runtime, entry: *Resident, revision: u64, sink: ResidentSink) void {
+        const vault = self.credential_vault.?;
+        var storage: [contract.Limits.credential_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &storage);
+        const read = vault.get(entry.provider_id, &storage) catch {
+            // Keep what was held: a stale key only masks more.
+            entry.failed_revision = revision;
+            return;
+        };
+        const value: []const u8 = if (read) |bytes|
+            if (contract.customProviderKeyIsSecret(bytes)) bytes else &.{}
+        else
+            &.{};
+        if (entry.secret) |*held| if (std.mem.eql(u8, held.view(), value)) {
+            entry.revision = revision;
+            return;
+        };
+        if (!self.dropResident(entry, sink)) {
+            entry.refused_revision = revision;
+            return;
+        }
+        if (value.len != 0) {
+            const owned = self.allocator.dupe(u8, value) catch {
+                entry.failed_revision = revision;
+                return;
+            };
+            if (!sink.admit_fn(sink.context, owned)) {
+                std.crypto.secureZero(u8, owned);
+                self.allocator.free(owned);
+                entry.refused_revision = revision;
+                return;
+            }
+            entry.secret = .initOwned(self.allocator, owned);
+        }
+        entry.revision = revision;
+        entry.failed_revision = 0;
+        entry.refused_revision = 0;
+    }
+
+    /// The sink can take or let go of keys again, as after its store
+    /// recovered: the next sync reads each refused revision once more.
+    pub fn retryRefusedResidentCredentials(self: *Runtime) void {
+        self.assertMainThread();
+        for (self.resident.items) |*entry| entry.refused_revision = 0;
+    }
+
+    /// Releases a held key after the sink has let it go. False: still held.
+    fn dropResident(self: *Runtime, entry: *Resident, sink: ResidentSink) bool {
+        _ = self;
+        const held = if (entry.secret) |*value| value else return true;
+        if (!sink.retire_fn(sink.context, held.view())) return false;
+        held.deinit();
+        entry.secret = null;
+        return true;
     }
 
     pub fn start(self: *Runtime, absolute_directory: []const u8, vault: ports.CredentialVault) StartError!void {
@@ -3171,4 +3312,158 @@ test "Metask source follows its account through a switch, a return, a restart an
     try runtime.start(home, vault.port());
     try std.testing.expect(runtime.pendingMetaskAdoption() == null);
     try std.testing.expectEqual(seen[0], runtime.view().providers[0].source_generation);
+}
+
+/// Passes allocations through and remembers whether anything freed still held
+/// `secret`, which is how a key that was not zeroed would be left behind.
+const SecretWatchingAllocator = struct {
+    secret: []const u8,
+    leaked: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        return std.testing.allocator.rawAlloc(len, alignment, ra);
+    }
+    fn resize(_: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+        return std.testing.allocator.rawResize(bytes, alignment, len, ra);
+    }
+    fn remap(_: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        return std.testing.allocator.rawRemap(bytes, alignment, len, ra);
+    }
+    fn free(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (std.mem.indexOf(u8, bytes, self.secret) != null) self.leaked = true;
+        std.testing.allocator.rawFree(bytes, alignment, ra);
+    }
+};
+
+test "a held key is zeroed when it is dropped and when Models is destroyed" {
+    const secret = "held-configured-key-0001";
+    const Sink = struct {
+        admitted: usize = 0,
+        retired: usize = 0,
+        held_at: ?[*]const u8 = null,
+        retired_at: ?[*]const u8 = null,
+        fn admit(context: *anyopaque, value: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(std.mem.eql(u8, value, secret));
+            self.admitted += 1;
+            return true;
+        }
+        fn retire(context: *anyopaque, value: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(std.mem.eql(u8, value, secret));
+            self.retired += 1;
+            self.retired_at = value.ptr;
+            return true;
+        }
+        fn remember(context: *anyopaque, value: []const u8) std.mem.Allocator.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.held_at = value.ptr;
+        }
+        fn port(self: *@This()) ResidentSink {
+            return .{ .context = self, .admit_fn = admit, .retire_fn = retire };
+        }
+        fn count(context: *anyopaque, _: []const u8) std.mem.Allocator.Error!void {
+            const held: *usize = @ptrCast(@alignCast(context));
+            held.* += 1;
+        }
+    };
+    // Dropped by a sync once Models stopped, or still held when it is destroyed.
+    for ([_]bool{ true, false }) |drop_before_deinit| {
+        var watching: SecretWatchingAllocator = .{ .secret = secret };
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+        var vault: TestVault = .{};
+        var runtime = Runtime.init(watching.allocator(), std.testing.io, std.Thread.getCurrentId());
+        try runtime.start(directory_storage[0..directory_len], vault.port());
+        try std.testing.expect(runtime.createWithCredential(secret, .{
+            .display_name = "Local",
+            .protocol = .openai_chat_completions,
+            .normalized_base_url = "http://127.0.0.1:11434/v1/chat/completions",
+        }).accepted);
+        var sink: Sink = .{};
+        runtime.syncResidentCredentials(sink.port());
+        var held: usize = 0;
+        try runtime.visitResidentCredentials(&held, Sink.count);
+        try std.testing.expectEqual(@as(usize, 1), sink.admitted);
+        try std.testing.expectEqual(@as(usize, 1), held);
+        try runtime.visitResidentCredentials(&sink, Sink.remember);
+        runtime.stop();
+        if (drop_before_deinit) {
+            runtime.syncResidentCredentials(sink.port());
+            try std.testing.expectEqual(@as(usize, 1), sink.retired);
+            // What leaves is the copy that was held, so a caller can tell it
+            // apart by pointer from another holder's equal bytes.
+            try std.testing.expectEqual(sink.held_at, sink.retired_at);
+            held = 0;
+            try runtime.visitResidentCredentials(&held, Sink.count);
+            try std.testing.expectEqual(@as(usize, 0), held);
+        }
+        runtime.deinit();
+        try std.testing.expect(!watching.leaked);
+    }
+}
+
+test "a key the sink refuses is not read again until its revision changes or the sink can try again" {
+    const Sink = struct {
+        refuse: bool = true,
+        admits: usize = 0,
+        retires: usize = 0,
+        fn admit(context: *anyopaque, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.admits += 1;
+            return !self.refuse;
+        }
+        fn retire(context: *anyopaque, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.retires += 1;
+            return !self.refuse;
+        }
+        fn port(self: *@This()) ResidentSink {
+            return .{ .context = self, .admit_fn = admit, .retire_fn = retire };
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory_storage[0..directory_len], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try std.testing.expect(runtime.createWithCredential("first-configured-key-0001", .{
+        .display_name = "Local",
+        .protocol = .openai_chat_completions,
+        .normalized_base_url = "http://127.0.0.1:11434/v1/chat/completions",
+    }).accepted);
+    var sink: Sink = .{};
+    // A key the sink cannot take now is asked about once per revision.
+    runtime.syncResidentCredentials(sink.port());
+    runtime.syncResidentCredentials(sink.port());
+    try std.testing.expectEqual(@as(usize, 1), sink.admits);
+    runtime.retryRefusedResidentCredentials();
+    sink.refuse = false;
+    runtime.syncResidentCredentials(sink.port());
+    try std.testing.expectEqual(@as(usize, 2), sink.admits);
+    // So is one it cannot let go of when the key is replaced.
+    sink.refuse = true;
+    const view = runtime.views()[0];
+    try std.testing.expect(runtime.replaceCredential("second-configured-key-02", .{ .source_id = view.id, .expected_provider_revision = view.provider_revision }).accepted);
+    runtime.syncResidentCredentials(sink.port());
+    runtime.syncResidentCredentials(sink.port());
+    try std.testing.expectEqual(@as(usize, 1), sink.retires);
+    try std.testing.expectEqual(@as(usize, 2), sink.admits);
+    runtime.retryRefusedResidentCredentials();
+    sink.refuse = false;
+    runtime.syncResidentCredentials(sink.port());
+    try std.testing.expectEqual(@as(usize, 2), sink.retires);
+    try std.testing.expectEqual(@as(usize, 3), sink.admits);
 }

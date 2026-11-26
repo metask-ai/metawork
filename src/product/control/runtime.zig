@@ -2599,7 +2599,7 @@ pub const Runtime = struct {
             }
         };
         var value: Max = .{};
-        if (self.account_credentials) |source| try source.visit(&value, Max.visit);
+        try self.visitOwnerCredentials(&value, Max.visit);
         try self.task_runtime.visitExecutionCredentials(&value, Max.visit);
         if (value.length > projection_step_bytes) return error.CredentialCapacity;
         return value.length -| 1;
@@ -2867,7 +2867,7 @@ pub const Runtime = struct {
     ) bool {
         const codepoint_len = credential_match.codepointLen(value, codepoint_start);
         for (0..codepoint_len) |offset| {
-            if (self.accountCredentialQuery(.{ .value = value[codepoint_start + offset ..], .kind = .continuation }).matched != 0) return true;
+            if (self.ownerCredentialQuery(.{ .value = value[codepoint_start + offset ..], .kind = .continuation }).matched != 0) return true;
             if (self.task_runtime.executionCredentialMayContinue(
                 value[codepoint_start + offset ..],
             )) return true;
@@ -3166,6 +3166,9 @@ pub const Runtime = struct {
     }
 
     fn publishAdmission(self: *Runtime, authority: *const ScheduleAuthority) void {
+        // Every Models change passes here, so a stored key is known before
+        // anything is published.
+        self.syncProviderCredentialsNoFail();
         _ = self.schedule.refreshAdmissionNoFail(authority.binding(), self.scheduleRedaction());
         _ = self.schedule.rearmNoFail(authority.binding(), self.scheduleRedaction());
         _ = self.schedule.takeChanged();
@@ -3233,6 +3236,7 @@ pub const Runtime = struct {
 
     pub fn stopCustomProviders(self: *Runtime) void {
         self.custom_providers.stop();
+        self.syncProviderCredentialsNoFail();
     }
 
     /// Hard-resets the Models canonical store after an explicit user
@@ -4341,7 +4345,7 @@ pub const Runtime = struct {
         var execution = source.intoConfig(generation) catch return error.ExecutionUnavailable;
         defer execution.deinit();
         const execution_input = execution.input();
-        try self.prepareTaskCredential(execution_input.api_key);
+        try self.prepareTaskCredential(execution_input.projectedKey());
         const permission_profile: PermissionProfile = switch (permission) {
             .interactive => |mode| (mode orelse self.default_approval_mode).profile(),
             .noninteractive => |profile| profile,
@@ -4619,7 +4623,7 @@ pub const Runtime = struct {
         if (!facts.has_model_intent) return error.RecoveryUnavailable;
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
         try self.validateTaskMetaskAuthorization(task_id);
-        try self.prepareTaskCredential(target.input().api_key);
+        try self.prepareTaskCredential(target.input().projectedKey());
         var capabilities: ?task_runtime.RestoreCapabilities = null;
         defer if (capabilities) |*value| value.deinit() catch {};
         if (try self.task_runtime.captureModelRebindInputs(task_id)) |captured| {
@@ -5964,6 +5968,8 @@ pub const Runtime = struct {
         };
         return switch (self.schedule.recoverPersistence(self.scheduleRedaction())) {
             .recovered => recovered: {
+                // A configured key Schedule could not scrub is tried again.
+                self.custom_providers.retryRefusedResidentCredentials();
                 self.publishAdmissionChangesNoFail();
                 break :recovered .recovered;
             },
@@ -7329,7 +7335,7 @@ pub const Runtime = struct {
         const storage = self.snapshotStorage();
         const request = try self.snapshot.begin(self.allocator, request_input, self.projection_security_epoch);
         const credentials = self.snapshot.credentialCollector();
-        if (self.account_credentials) |source| try source.visit(credentials, ProjectionCredentials.visit);
+        try self.visitOwnerCredentials(credentials, ProjectionCredentials.visit);
         try self.task_runtime.visitExecutionCredentials(credentials, ProjectionCredentials.visit);
         const text = self.snapshot.rootText(storage);
         if (builtin.is_test) self.assembling_snapshot = true;
@@ -8144,7 +8150,7 @@ pub const Runtime = struct {
         }) orelse return error.ExecutionUnavailable;
         errdefer candidate.deinit();
         const input = candidate.input();
-        try self.prepareTaskCredential(input.api_key);
+        try self.prepareTaskCredential(input.projectedKey());
         if (renew) {
             const renewal = self.task_runtime.renewMetaskCredential(task_id, input.credential_generation, input.api_key, .admission) catch |err| {
                 self.task_runtime.failMetaskCredentialUpdate(task_id, input.credential_generation, err, self.taskRuntimeOperationEffects());
@@ -9473,7 +9479,58 @@ pub const Runtime = struct {
         return scrub.rewrote;
     }
 
-    const AccountCredentialQuery = struct {
+    /// The credentials Host owners hold, which the projection masks and
+    /// refuses on; a Task reports its own through the Task runtime. Each value
+    /// is borrowed for the duration of its callback only.
+    fn visitOwnerCredentials(
+        self: *const Runtime,
+        context: *anyopaque,
+        visit_fn: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void,
+    ) std.mem.Allocator.Error!void {
+        if (self.account_credentials) |source| try source.visit(context, visit_fn);
+        try self.custom_providers.visitResidentCredentials(context, visit_fn);
+    }
+
+    /// Brings the Custom Provider keys Models holds into what the projection
+    /// knows. A key joining is a credential acquired, as a Task's would be:
+    /// one nothing knew may already have been shown in the clear, so the
+    /// security epoch advances, once however many join together. One leaving
+    /// is a release, unless a Task still holds it.
+    fn syncProviderCredentialsNoFail(self: *Runtime) void {
+        const Batch = struct {
+            control: *Runtime,
+            admitted: bool = false,
+            unknown: bool = false,
+
+            fn admit(context: *anyopaque, value: []const u8) bool {
+                const batch: *@This() = @ptrCast(@alignCast(context));
+                const control = batch.control;
+                _ = control.schedule.prepareCredentialRedaction(value, control.scheduleRedaction()) catch return false;
+                if (!control.retainsProjectionCredential(value)) batch.unknown = true;
+                control.reconcileMcpInstallation(value);
+                _ = control.redactAllProductProjectionsNoFail(value);
+                batch.admitted = true;
+                return true;
+            }
+
+            fn retire(context: *anyopaque, value: []const u8) bool {
+                const control = @as(*@This(), @ptrCast(@alignCast(context))).control;
+                // Nothing is shown after shutdown; a Task's copy is released
+                // with the Task.
+                if (control.shutting_down or control.task_runtime.retainsCredential(value)) return true;
+                if (!control.schedule.prepareCredentialRelease(value, control.scheduleRedaction())) return false;
+                control.retireProjectionCredential(value);
+                return true;
+            }
+        };
+        var batch: Batch = .{ .control = self };
+        self.custom_providers.syncResidentCredentials(.{ .context = &batch, .admit_fn = Batch.admit, .retire_fn = Batch.retire });
+        if (!batch.admitted) return;
+        if (batch.unknown) self.invalidateProjectionSecurity();
+        self.syncHistoryCredentials(null, null);
+    }
+
+    const OwnerCredentialQuery = struct {
         value: []const u8,
         kind: enum { retained, contains, prefix, continuation },
         matched: usize = 0,
@@ -9491,13 +9548,13 @@ pub const Runtime = struct {
         }
     };
 
-    fn accountCredentialQuery(self: *const Runtime, query: AccountCredentialQuery) AccountCredentialQuery {
+    fn ownerCredentialQuery(self: *const Runtime, query: OwnerCredentialQuery) OwnerCredentialQuery {
         var result = query;
-        if (self.account_credentials) |source| source.visit(&result, AccountCredentialQuery.visit) catch unreachable;
+        self.visitOwnerCredentials(&result, OwnerCredentialQuery.visit) catch unreachable;
         return result;
     }
 
-    const AccountCredentialRedaction = struct {
+    const OwnerCredentialRedaction = struct {
         value: []u8,
         changed: bool = false,
 
@@ -9509,7 +9566,7 @@ pub const Runtime = struct {
 
     fn retainsProjectionCredential(self: *const Runtime, credential: []const u8) bool {
         if (credential.len == 0) return false;
-        if (self.accountCredentialQuery(.{ .value = credential, .kind = .retained }).matched != 0) return true;
+        if (self.ownerCredentialQuery(.{ .value = credential, .kind = .retained }).matched != 0) return true;
         return self.task_runtime.retainsCredential(credential);
     }
 
@@ -9551,7 +9608,7 @@ pub const Runtime = struct {
         if (extra) |value| Collection.visit(&collected, value) catch {
             complete = false;
         };
-        if (self.account_credentials) |source| source.visit(&collected, Collection.visit) catch {
+        self.visitOwnerCredentials(&collected, Collection.visit) catch {
             complete = false;
         };
         self.task_runtime.visitExecutionCredentials(&collected, Collection.visit) catch {
@@ -9851,7 +9908,7 @@ pub const Runtime = struct {
         var known: Collection = .{ .allocator = self.allocator };
         defer known.values.deinit(self.allocator);
         for (credentials) |secret| try Collection.visit(&known, secret);
-        if (self.account_credentials) |source| try source.visit(&known, Collection.visit);
+        try self.visitOwnerCredentials(&known, Collection.visit);
         try self.task_runtime.visitExecutionCredentials(&known, Collection.visit);
         const capacity = @min(value.len, max);
         const scratch = try self.allocator.alloc(u8, capacity);
@@ -9961,7 +10018,7 @@ pub const Runtime = struct {
 
     fn containsKnownCredential(self: *const Runtime, value: []const u8) bool {
         if (builtin.is_test and self.assembling_snapshot) @panic("snapshot assembly used live text projection");
-        if (self.accountCredentialQuery(.{ .value = value, .kind = .contains }).matched != 0) return true;
+        if (self.ownerCredentialQuery(.{ .value = value, .kind = .contains }).matched != 0) return true;
         return self.task_runtime.containsExecutionCredential(value);
     }
 
@@ -9974,7 +10031,7 @@ pub const Runtime = struct {
     fn containsKnownHistoryCredential(self: *Runtime, state: task_persistence.StateWire, preserved: task_persistence.PreservedFrames) bool {
         var credentials: ProjectionCredentials = .{ .allocator = self.allocator };
         defer credentials.deinit();
-        if (self.account_credentials) |source| source.visit(&credentials, ProjectionCredentials.visit) catch return true;
+        self.visitOwnerCredentials(&credentials, ProjectionCredentials.visit) catch return true;
         self.task_runtime.visitExecutionCredentials(&credentials, ProjectionCredentials.visit) catch return true;
         for (credentials.values.items) |secret| {
             if ((task_persistence.security.contains(self.allocator, state, secret) catch true) or
@@ -9991,9 +10048,9 @@ pub const Runtime = struct {
             value,
             redactFixedWidthNoFail,
         );
-        var account_redaction: AccountCredentialRedaction = .{ .value = value };
-        if (self.account_credentials) |source| source.visit(&account_redaction, AccountCredentialRedaction.visit) catch unreachable;
-        return account_redaction.changed or changed;
+        var owner_redaction: OwnerCredentialRedaction = .{ .value = value };
+        self.visitOwnerCredentials(&owner_redaction, OwnerCredentialRedaction.visit) catch unreachable;
+        return owner_redaction.changed or changed;
     }
 
     fn matchedKnownCredentialLen(
@@ -10002,7 +10059,7 @@ pub const Runtime = struct {
     ) usize {
         var longest: usize = 0;
         if (builtin.is_test and self.assembling_snapshot) @panic("snapshot assembly used live text projection");
-        longest = @max(longest, self.accountCredentialQuery(.{ .value = value, .kind = .prefix }).matched);
+        longest = @max(longest, self.ownerCredentialQuery(.{ .value = value, .kind = .prefix }).matched);
         longest = @max(longest, self.task_runtime.matchedExecutionCredentialPrefix(value));
         return longest;
     }
@@ -10648,7 +10705,7 @@ pub const Runtime = struct {
         // The same credential set a snapshot read collects at begin.
         var credentials: ProjectionCredentials = .{ .allocator = self.allocator };
         defer credentials.deinit();
-        if (self.account_credentials) |source| try source.visit(&credentials, ProjectionCredentials.visit);
+        try self.visitOwnerCredentials(&credentials, ProjectionCredentials.visit);
         try self.task_runtime.visitExecutionCredentials(&credentials, ProjectionCredentials.visit);
         const text = credentials.text(self.allocator);
         return self.task_runtime.writeToolPage(self.allocator, output, text.task(), task_id, run_id, after_order, tool_page_source_bytes) catch |err| return @errorCast(err);
@@ -10781,6 +10838,11 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn attachmentMediaFixture(control: *Runtime, store: *AttachmentFileStore) !void {
         try testAttachmentMediaRuntime(control, store);
+    }
+
+    /// Whether the projection would mask, or refuse on, `text`.
+    pub fn knowsCredentialText(control: *const Runtime, text: []const u8) bool {
+        return control.containsKnownCredential(text);
     }
 
     pub fn invalidatePreviewSecurity(control: *Runtime) void {
@@ -16352,6 +16414,153 @@ fn createReadyTestCustomProvider(
     defer probe.deinit();
     try std.testing.expect(control.completeCustomModelTest(probe_command, true).accepted);
     return selection;
+}
+
+/// Two credential slots, so two providers can hold different keys.
+const TwoSlotTestVault = struct {
+    const slots = [2][]const u8{ "custom-provider-00000000000000000000000000000001", "custom-provider-00000000000000000000000000000002" };
+
+    secrets: [2][64]u8 = undefined,
+    lengths: [2]usize = @splat(0),
+    next: usize = 0,
+    reads: usize = 0,
+    read_fails: bool = false,
+
+    fn port(self: *@This()) models_ports.CredentialVault {
+        return .{ .context = self, .generate_slot_fn = generate, .store_fn = store, .get_fn = get, .delete_fn = delete };
+    }
+    fn index(slot: []const u8) usize {
+        return @intFromBool(std.mem.eql(u8, slot, slots[1]));
+    }
+    fn generate(context: *anyopaque, output: *[models_ports.credential_slot_bytes]u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        @memcpy(output, slots[self.next]);
+        self.next += 1;
+    }
+    fn store(context: *anyopaque, slot: []const u8, secret: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        @memcpy(self.secrets[index(slot)][0..secret.len], secret);
+        self.lengths[index(slot)] = secret.len;
+    }
+    fn get(context: *anyopaque, slot: []const u8, output: []u8) anyerror!?[]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.reads += 1;
+        if (self.read_fails) return error.ReadFailed;
+        const length = self.lengths[index(slot)];
+        if (length == 0) return null;
+        @memcpy(output[0..length], self.secrets[index(slot)][0..length]);
+        return output[0..length];
+    }
+    fn delete(context: *anyopaque, slot: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.lengths[index(slot)] = 0;
+    }
+};
+
+const configured_provider_spec: models_contract.CustomProviderSpec = .{
+    .display_name = "Local",
+    .protocol = .openai_chat_completions,
+    .normalized_base_url = "http://127.0.0.1:11434/v1/chat/completions",
+};
+
+fn startTwoSlotModels(control: *Runtime, tmp: *std.testing.TmpDir, vault: *TwoSlotTestVault) !void {
+    var storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    control.stopCustomProviders();
+    try control.startCustomProviders(storage[0..try tmp.dir.realPath(std.testing.io, &storage)], vault.port());
+}
+
+test "a configured Custom Provider key is known from the moment it is stored" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var vault: TwoSlotTestVault = .{};
+    try startTwoSlotModels(&control, &tmp, &vault);
+    defer control.stopCustomProviders();
+    const shown = "KEY=first-configured-key-0001 and KEY=second-configured-key-02";
+    // Saving a key nothing knew: what was shown may hold it.
+    var epoch = control.projection_security_epoch;
+    try std.testing.expect(control.createCustomProviderWithCredential("first-configured-key-0001", configured_provider_spec).accepted);
+    try std.testing.expectEqual(epoch + 1, control.projection_security_epoch);
+    try std.testing.expect(control.containsKnownCredential(shown));
+    // Its first use is not news, nor is saving the same bytes again.
+    epoch = control.projection_security_epoch;
+    try control.prepareTaskCredential("first-configured-key-0001");
+    try std.testing.expectEqual(epoch, control.projection_security_epoch);
+    // A placeholder key is never held, masked or refused on.
+    try std.testing.expect(control.createCustomProviderWithCredential("ollama", configured_provider_spec).accepted);
+    try std.testing.expectEqual(epoch, control.projection_security_epoch);
+    try std.testing.expect(!control.containsKnownCredential("notes/ollama.md"));
+    // Replacing a key drops the old one and learns the new one.
+    const view = control.custom_providers.views()[1];
+    _ = control.replaceCustomProviderCredential("second-configured-key-02", .{ .source_id = view.id, .expected_provider_revision = view.provider_revision });
+    try std.testing.expectEqual(epoch + 1, control.projection_security_epoch);
+    try std.testing.expect(control.containsKnownCredential("second-configured-key-02"));
+    // A restart reads both stored keys in one sync and advances once.
+    control.stopCustomProviders();
+    try std.testing.expect(!control.containsKnownCredential(shown));
+    epoch = control.projection_security_epoch;
+    const reads = vault.reads;
+    try startTwoSlotModels(&control, &tmp, &vault);
+    try std.testing.expectEqual(epoch + 1, control.projection_security_epoch);
+    try std.testing.expectEqual(reads + 2, vault.reads);
+    try std.testing.expect(control.containsKnownCredential("first-configured-key-0001"));
+    try std.testing.expect(control.containsKnownCredential("second-configured-key-02"));
+    // Removing a provider drops its key.
+    const removed = control.custom_providers.views()[0];
+    try std.testing.expect(control.submitCustomProviderCommand(.{ .remove = .{ .source_id = removed.id, .expected_provider_revision = removed.provider_revision } }).accepted);
+    try std.testing.expect(!control.containsKnownCredential("first-configured-key-0001"));
+    try std.testing.expect(control.containsKnownCredential("second-configured-key-02"));
+}
+
+test "a configured key joining scrubs the durable Schedule store" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const id = try fixture.control.createScheduledTask(.{
+        .title = "Review current work",
+        .model_selection = try TestSupport.fixtureModelSelection(&fixture.control),
+        .permission_profile = .approval_required,
+        .input = "Use first-configured-key-0001 then second-configured-key-02",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    // Saving a key nothing knew scrubs the durable definition at once.
+    const commits = fixture.persistence.commits;
+    try std.testing.expect(fixture.control.createCustomProviderWithCredential("first-configured-key-0001", configured_provider_spec).accepted);
+    try std.testing.expect(fixture.persistence.commits > commits);
+    try std.testing.expect(std.mem.indexOf(u8, fixture.stored(id).input, "first-configured-key-0001") == null);
+    try std.testing.expect(std.mem.indexOf(u8, fixture.stored(id).input, "second-configured-key-02") != null);
+    // A replacement scrubs the new key too, and the old one is released.
+    const view = fixture.control.custom_providers.views()[0];
+    _ = fixture.control.replaceCustomProviderCredential("second-configured-key-02", .{ .source_id = view.id, .expected_provider_revision = view.provider_revision });
+    try std.testing.expect(std.mem.indexOf(u8, fixture.stored(id).input, "second-configured-key-02") == null);
+    try std.testing.expect(!fixture.control.containsKnownCredential("first-configured-key-0001"));
+    try std.testing.expect(fixture.control.containsKnownCredential("second-configured-key-02"));
+}
+
+test "a configured key that cannot be read is not read again until it changes" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var vault: TwoSlotTestVault = .{};
+    try startTwoSlotModels(&control, &tmp, &vault);
+    defer control.stopCustomProviders();
+    try std.testing.expect(control.createCustomProviderWithCredential("unreadable-configured-key", configured_provider_spec).accepted);
+    control.stopCustomProviders();
+    vault.read_fails = true;
+    const epoch = control.projection_security_epoch;
+    try startTwoSlotModels(&control, &tmp, &vault);
+    const reads = vault.reads;
+    control.finishModelsCommitNoFail();
+    control.finishModelsCommitNoFail();
+    try std.testing.expectEqual(reads, vault.reads);
+    try std.testing.expectEqual(epoch, control.projection_security_epoch);
+    // Unknown until a Task first uses it, as before.
+    try std.testing.expect(!control.containsKnownCredential("unreadable-configured-key"));
+    try control.prepareTaskCredential("unreadable-configured-key");
+    try std.testing.expectEqual(epoch + 1, control.projection_security_epoch);
 }
 
 test "Account identity and Models execution publish through separate projections" {
