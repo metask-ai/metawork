@@ -38,7 +38,9 @@ pub const Error = state.Error || persistence.Error || error{
     PreviousTaskActive,
     /// The binding waits or holds: nothing was started or recorded.
     ScheduledTaskBindingWaiting,
-    /// The binding cannot run as it is; a stop it caused is already recorded.
+    /// The binding cannot run as it is and nothing started. A manual run of
+    /// a plan that would stop has stopped it; one that would skip, or of a
+    /// paused or finished plan, recorded nothing.
     ScheduledTaskBindingGone,
 };
 
@@ -1025,7 +1027,7 @@ pub const Runtime = struct {
                     // one it stops instead, without spending that run.
                     const point = if (source == .timer) triggered_at_unix_seconds else item.next_run_at_unix_seconds.?;
                     if (admission == .stop or (try item.recurrence.firstStrictlyAfter(point)) == null)
-                        return self.stopGone(id, source, redaction);
+                        return self.stopUnspent(id, source, redaction);
                     // A manual run never moves the plan; the due point
                     // records its own skip.
                     if (source == .manual) return error.ScheduledTaskBindingGone;
@@ -1122,9 +1124,10 @@ pub const Runtime = struct {
         }
     }
 
-    /// The definition can never run as bound: it stops for the user to edit,
-    /// and the due point it was judged at stays unspent.
-    fn stopGone(self: *Runtime, id: u64, source: OccurrenceSource, redaction: Redaction) anyerror!u64 {
+    /// Stops the definition for the user to edit without spending the due
+    /// point it was judged at: its source is gone for good, or skipping would
+    /// have ended it.
+    fn stopUnspent(self: *Runtime, id: u64, source: OccurrenceSource, redaction: Redaction) anyerror!u64 {
         var candidate = try self.store.clone(self.allocator);
         var owned = true;
         defer if (owned) candidate.deinit();
