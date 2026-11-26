@@ -196,7 +196,7 @@ Project（可空归属；Manual Workspace 提供默认目录）
 
 主窗口使用 `hidden_inset_tall`：Renderer 命令栏承担自定义标题栏的产品视觉，不叠加独立的标准系统标题行。React 绘制产品 header，以 SDK 正式标记声明拖拽区域及交互排除，并绘制带固定 `data-metawork-window-control` 语义的窗口按钮；browser-side Bridge 只把窗口按钮转换为受限 Host command。Native SDK/OS 承担 native hit test、拖动循环、系统菜单、resize、close policy 与真实窗口状态；SDK 缺失的原生输入路径只按[已登记兼容能力](architecture.md#35-native-sdk)补齐。React component 不推断平台、不直接调用 transport，也不持有原生窗口 identity、handle 或执行权。
 
-- 命令栏与一级导航共用背景色。任务列表和中央工作区的上沿由同色细线相接，侧栏与工作区的静态竖分隔线从命令栏下方开始。
+- 命令栏与一级导航共用背景色。品牌标志、左栏开关和搜索图标等距排列。一级导航常驻且系统窗口按钮安全区允许时，品牌标志与下方导航图标居中对齐。左侧按钮组右侧的标题栏空白可拖动窗口。任务列表和中央工作区的上沿由同色细线相接，侧栏与工作区的竖分隔线及其交互高亮均从命令栏下沿开始。
 - macOS 保留系统交通灯；Windows 由 Renderer 绘制最小化、最大化/还原与关闭按钮。Host 只发布 `rendererControls` capability、`maximized` 真值和安全 inset，browser-side Bridge 将它们转换为 document dataset/CSS variables；React 不读取平台名或调用 transport，最大化与还原使用互斥的可访问按钮，由 Host 真值控制显隐；
 - 产品 header 默认视觉基线为 52 px；Windows Renderer header 沿用历史实现的 40 px 高度，每个 window control 使用 46 px 命中宽度并贴齐窗口右缘。关闭 hover/focus 使用系统危险红色，其余按钮保持中性色。macOS 交通灯与可拖动 top band 的真实安全区以 Host geometry 为准；
 - MetaWork 品牌标志位于命令栏左端、左栏开关之前，避开系统窗口按钮的安全区。命令栏另承载当前 Task 名称、全局搜索、只读任务信息、Task Panel 常驻开关和按需异常/审批定位入口；不在 Task 名称前重复 Workspace，`左栏开关` 只控制能力与 Task 导航，不兼任 Task Panel 开关；

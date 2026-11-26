@@ -528,8 +528,13 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   );
   assert.match(
     css,
-    /\.workspace-resize-handle::after \{[\s\S]*?position: fixed;[\s\S]*?top: 0;[\s\S]*?bottom: 0;[\s\S]*?left: calc\(var\(--left-column\) - 1px\);/,
-    "left resize feedback must remain one continuous full-window divider",
+    /\.commandbar-leading-actions\s*\{[^}]*justify-self: start;/,
+    "the leading controls leave the rest of their titlebar column draggable",
+  );
+  assert.match(
+    css,
+    /\.workspace-resize-handle::after\s*\{[^}]*position: absolute;[^}]*top: 0;[^}]*bottom: 0;/,
+    "left resize feedback spans its handle below the titlebar",
   );
   assert.match(
     css,

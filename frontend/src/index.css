@@ -3646,7 +3646,11 @@ button.run-process-tool:hover {
 }
 
 .workbench-commandbar {
-  --commandbar-left-inset: calc(10px + var(--metawork-window-chrome-leading));
+  --commandbar-action-width: 32px;
+  --commandbar-left-inset: max(
+    10px + var(--metawork-window-chrome-leading),
+    (var(--docked-navigation-width) - var(--commandbar-action-width)) / 2
+  );
   position: relative;
   z-index: 50;
   display: grid;
@@ -3676,13 +3680,16 @@ button.run-process-tool:hover {
 
 .commandbar-leading-actions {
   display: flex;
+  justify-self: start;
   min-width: 0;
   align-items: center;
   gap: 4px;
 }
 
 .commandbar-leading-actions .brand-logo {
+  width: var(--commandbar-action-width);
   height: auto;
+  justify-content: center;
 }
 
 .commandbar-leading-actions .brand-logo > img {
@@ -3791,7 +3798,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .icon-button {
   display: grid;
-  width: 32px;
+  width: var(--commandbar-action-width, 32px);
   height: 32px;
   padding: 0;
   place-items: center;
@@ -4063,10 +4070,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .workspace-resize-handle::after {
-  position: fixed;
+  position: absolute;
   top: 0;
   bottom: 0;
-  left: calc(var(--left-column) - 1px);
+  left: 4px;
   width: 2px;
   background: transparent;
   content: "";
