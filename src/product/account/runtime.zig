@@ -793,7 +793,9 @@ pub const Runtime = struct {
         self.assertMainThread();
         if (!self.account.renewable()) return;
         self.confirm_failures = 0;
-        if (self.account.activeAttempt() != null) return;
+        // Only a wait after a failure is cut short: a token that is fine
+        // keeps its renewal point.
+        if (!self.retrying or self.account.activeAttempt() != null) return;
         const renew_at = if (self.renew_at) |*value| value else return;
         renew_at.boot = @min(renew_at.boot, self.confirm_ended_boot +| confirm_delays_seconds[0]);
     }
@@ -3504,6 +3506,24 @@ test "a stored login confirmed by nothing sent is tried every thirty seconds, by
     try std.testing.expect(runtime.authorization() == .available);
     try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
     try std.testing.expectEqual(@as(usize, 0), runtime.confirm_failures);
+}
+
+test "a reason to try now renews nothing that is fine" {
+    var transport: ConfirmTransport = .{ .refresh = .answered };
+    var runtime = transport.runtimeFor();
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try startStoredLogin(&runtime, &platform);
+    try std.testing.expect(runtime.authorization() == .available);
+    const renews_at = runtime.renew_at.?;
+    platform.now_unix_seconds = 1000;
+    runtime.expedite();
+    try std.testing.expect(runtime.prepareDue() == null);
+    try std.testing.expect(std.meta.eql(renews_at, runtime.renew_at.?));
+    try std.testing.expectEqual(@as(usize, 1), transport.refreshes);
 }
 
 test "a reason to try now that comes while a confirmation is underway still counts" {
