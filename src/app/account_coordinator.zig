@@ -276,6 +276,7 @@ pub const Coordinator = struct {
             .attempt_id = attempt_id,
             .attempt_terminal = attempt_terminal,
             .token_changed = prepared.token_changed,
+            .logged_out = prepared.logged_out,
         });
         self.publish();
         if (!self.stopping and self.runtime.reconcileSummary())

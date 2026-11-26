@@ -6149,10 +6149,18 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "inbox",
     "models",
     "newTaskAdmission",
+    "metaskStopTargets",
     "automaticWorkspaceRoot",
     "skillCatalog",
     "mcpInstallation",
   ]);
+  const metaskStopTargets = root.metaskStopTargets;
+  if (
+    typeof metaskStopTargets !== "number" ||
+    !Number.isSafeInteger(metaskStopTargets) ||
+    metaskStopTargets < 0
+  )
+    fail("$.context.metaskStopTargets", "must be a non-negative integer");
   const management = object(view.management, "$.management", ["kind", "value"]);
   if (
     management.kind !== scope.management ||
@@ -6889,6 +6897,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       root.newTaskAdmission,
       "$.newTaskAdmission",
     ),
+    metaskStopTargets,
     mcpInstallation: decodeMcpInstallation(
       root.mcpInstallation,
       "$.context.mcpInstallation",

@@ -520,6 +520,8 @@ export const enUS = {
   "account.logout": "Sign out",
   "account.logout_confirm":
     "Signing out removes your Metask sign-in credentials from this device. Sign in again to create new tasks using Metask models. Your custom models, local tasks and history, and workspace files will remain.",
+  "account.logout_stops_tasks":
+    "{count} tasks are using Metask models and will stop when you sign out.",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.command_failed":
@@ -1986,6 +1988,7 @@ export const enUS = {
   "outcome.dependency_contract_failure": "Task runtime failed",
   "cause.user_cancel": "Stopped by you",
   "cause.approval_mode_change": "Stopped to change the approval mode",
+  "cause.account_logout": "Stopped to sign out",
   "cause.edit_and_rerun": "Stopped to rerun from an edited message",
   "cause.timeout": "Timed out",
   "cause.session_close": "Session released",

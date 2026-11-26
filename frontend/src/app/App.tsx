@@ -5920,6 +5920,7 @@ export default function App() {
           </nav>
           <AccountIdentity
             account={snapshot.account}
+            metaskStopTargets={snapshot.metaskStopTargets}
             updates={snapshot.updates}
             updateControls={{
               disabled: bridgeUnavailable,
@@ -6338,6 +6339,7 @@ export default function App() {
               onDelete: requestTaskDeletion,
             }}
             account={snapshot.account}
+            metaskStopTargets={snapshot.metaskStopTargets}
             accountFeedback={accountFeedbackEntries.map((entry) => (
               <FeedbackNotice
                 key={`${statuses.epoch}:${entry.key}:${entry.cycle}`}

@@ -347,7 +347,7 @@ pub const Account = struct {
         if ((self.storeRead() and !self.readsStoreAgain()) or self.state.op != .idle)
             return .{ .rejected = .invalid_state };
         var next = self.state;
-        next.login = .{ .none = .{ .reason = if (unreadable) .unreadable else .absent } };
+        next.login = .{ .none = .{ .reason = if (unreadable) .unreadable else .absent, .residue = failure.residue } };
         next.setFailure(if (failure.error_code == .none) .fromCode(.credential_store_read_failed) else failure);
         return transitionNoAttempt(next, .operation_failed);
     }

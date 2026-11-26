@@ -47,6 +47,7 @@ export function SettingsPage({
   directoryManagement,
   globalInstructions,
   account,
+  metaskStopTargets,
   accountFeedback,
   accountDiagnostics,
   models,
@@ -80,6 +81,7 @@ export function SettingsPage({
   directoryManagement?: ReactNode;
   globalInstructions?: GlobalInstructionsActions;
   account: AccountView;
+  metaskStopTargets: number;
   accountFeedback?: ReactNode;
   accountDiagnostics?: ReactNode;
   models: ModelsView;
@@ -662,6 +664,7 @@ export function SettingsPage({
                     </AlertDialog.Trigger>
                     <SignOutConfirmation
                       disabled={disabled || accountDisabled}
+                      stopTargets={metaskStopTargets}
                       onLogout={onLogout}
                     />
                   </AlertDialog.Root>

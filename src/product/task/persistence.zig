@@ -4169,6 +4169,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         if (run.cause) |cause| if (!oneOf(cause, &.{
             "user_cancel",
             "approval_mode_change",
+            "account_logout",
             "edit_and_rerun",
             "timeout",
             "session_close",

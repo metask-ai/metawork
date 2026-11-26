@@ -3116,6 +3116,44 @@ pub const Runtime = struct {
         commit.assertValid();
         if (commit.token_changed) self.inspectAccountTokensNoFail();
         self.commitAccountFactNoFail(commit.fact);
+        if (commit.logged_out) self.stopMetaskWorkNoFail();
+    }
+
+    /// Signing out stops what runs on that Metask login: a Run as Stop would,
+    /// for its own reason, and a compaction. A Session that ends on its own
+    /// is left to do so.
+    fn stopMetaskWorkNoFail(self: *Runtime) void {
+        var stopped = false;
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            const task_id = task.durable.id;
+            const facts = self.task_runtime.modelFacts(task_id) orelse continue;
+            if (!usesMetask(facts)) continue;
+            switch (task.runtime.active_operation) {
+                .run => |run_id| stopped = (self.task_runtime.cancelRun(task_id, run_id, .account_logout, self.taskRuntimeOperationEffects()) catch false) or stopped,
+                .compact => |operation_id| {
+                    _ = self.task_runtime.cancelCompact(task_id, operation_id, .user_cancel, self.taskRuntimeOperationEffects()) catch continue;
+                    stopped = true;
+                },
+                .none, .restore => {},
+            }
+        };
+        if (!stopped) return;
+        self.commitTaskStateNoFail();
+        self.bumpRevision();
+    }
+
+    /// The Tasks signing out would stop now, for the sign-out confirmation.
+    pub fn metaskStopTargets(self: *Runtime) usize {
+        var count: usize = 0;
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            const facts = self.task_runtime.modelFacts(task.durable.id) orelse continue;
+            if (!usesMetask(facts)) continue;
+            switch (task.runtime.active_operation) {
+                .run, .compact => count += 1,
+                .none, .restore => {},
+            }
+        };
+        return count;
     }
 
     /// Reconcile independent Schedule sources after Models or Account facts change.
@@ -7223,6 +7261,8 @@ pub const Runtime = struct {
         try self.writeModels(writer, text);
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
         try self.writeNewTaskAdmission(writer);
+        writer.print(",\"metaskStopTargets\":{d}", .{self.metaskStopTargets()}) catch
+            return error.SnapshotTooLarge;
         writer.writeAll(",\"automaticWorkspaceRoot\":") catch
             return error.SnapshotTooLarge;
         try self.writeAutomaticWorkspaceRootConfiguration(writer, text);
@@ -18662,6 +18702,16 @@ test "a Metask Run that ended with 401 tells Account what Metask said" {
             try std.testing.expectEqual(generation, recorder.generation);
         }
     }
+}
+
+test "the sign-out confirmation counts the Tasks a sign-out would stop" {
+    var control = try testRuntime();
+    defer control.deinit();
+    // The fixture Task runs on Metask.
+    try std.testing.expectEqual(@as(usize, 1), control.metaskStopTargets());
+    // A commit that is no sign-out stops nothing.
+    control.commitAccountChangeNoFail(.{ .fact = .{ .kind = .signed_out, .view = .{ .state = .signed_out } }, .attempt_id = null, .attempt_terminal = false });
+    try std.testing.expectEqual(@as(usize, 1), control.metaskStopTargets());
 }
 
 test "Renderer transport failures never own Agent Run termination" {

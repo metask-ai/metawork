@@ -603,6 +603,46 @@ const Effects = struct {
     }
 };
 
+/// Revokes a refresh token that was deleted, on its own thread: one signed
+/// out of, or one a login that cannot renew any more left. It is told to
+/// cancel and never waited for, and only the log says when it failed.
+const RevokeJob = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    transport: metask_client.Transport,
+    wake: WakeSink,
+    token: oauth.Secret,
+    cancellation: metask_client.Cancellation,
+    finished: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+    next: ?*RevokeJob = null,
+
+    fn run(self: *RevokeJob) void {
+        defer {
+            self.finished.store(true, .release);
+            self.wake.notify();
+        }
+        const control: metask_client.RequestControl = .{
+            .cancellation = &self.cancellation,
+            .deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = .fromSeconds(5), .clock = .boot }),
+        };
+        metask_client.revokeRefreshToken(self.transport, &self.token, control) catch |err|
+            std.log.warn("Metask authorization was not revoked: {s}", .{@errorName(err)});
+    }
+
+    fn join(self: *RevokeJob) void {
+        const thread = self.thread orelse return;
+        thread.join();
+        self.thread = null;
+    }
+
+    fn destroy(self: *RevokeJob) void {
+        std.debug.assert(self.thread == null);
+        self.token.deinit();
+        self.allocator.destroy(self);
+    }
+};
+
 pub const Prepared = struct {
     transition: state_impl.PreparedTransition,
     login_exchange: ?login_attempt.CallbackExchangeInput = null,
@@ -614,6 +654,10 @@ pub const Prepared = struct {
     refresh_after_commit: bool = false,
     /// What the commit makes of the next renewal.
     renewal: enum { keep, reset, token, retry_fixed, retry_backoff } = .keep,
+    /// A deleted refresh token the commit revokes.
+    revoke: ?oauth.Secret = null,
+    /// The person signed out, whatever the store answered.
+    logged_out: bool = false,
 
     pub fn factKind(self: *const Prepared) contract.AccountFactKind {
         return self.transition.factKind();
@@ -632,6 +676,8 @@ pub const Prepared = struct {
         self.login_exchange = null;
         if (self.grant) |grant| grant.destroy();
         self.grant = null;
+        if (self.revoke) |*token| token.deinit();
+        self.revoke = null;
         self.transition.deinit();
         self.refresh_after_commit = false;
     }
@@ -673,6 +719,9 @@ pub const Runtime = struct {
     retired_summaries: ?*SummaryJob = null,
     /// The credential generation the summary was last fetched with.
     summary_generation: u64 = 0,
+    /// Revocations, newest first. Only the newest is still wanted; each is
+    /// joined once it has finished.
+    revokes: ?*RevokeJob = null,
     /// The token request underway: the clocks when it was issued (no wall
     /// clock before 1970), and whether the marker of the refresh token it
     /// sends is stored.
@@ -726,6 +775,12 @@ pub const Runtime = struct {
             self.retired_summaries = job.next;
             job.join();
             job.deinit();
+        }
+        while (self.revokes) |job| {
+            self.revokes = job.next;
+            job.cancellation.cancel();
+            job.join();
+            job.destroy();
         }
         self.effects.deinit();
         self.credentials.deinit();
@@ -959,7 +1014,7 @@ pub const Runtime = struct {
         // What still runs (a request in DNS no cancel reaches) is never
         // joined: what it publishes is only destroyed and wakes no one, and
         // a renewal left so keeps its marker.
-        if (self.effects.abandoned != null or self.retired_summaries != null) self.effects.detach();
+        if (self.effects.abandoned != null or self.retired_summaries != null or self.revokes != null) self.effects.detach();
         return .{ .transition = self.account.prepareShutdown() };
     }
 
@@ -1247,6 +1302,65 @@ pub const Runtime = struct {
         self.assertMainThread();
         _ = self.effects.reapAbandoned();
         self.reapRetiredSummaries();
+        var link = &self.revokes;
+        while (link.*) |job| {
+            if (!job.finished.load(.acquire)) {
+                link = &job.next;
+                continue;
+            }
+            link.* = job.next;
+            job.join();
+            job.destroy();
+        }
+    }
+
+    /// Revokes a deleted refresh token. An earlier revocation still underway
+    /// is told to stop: only the newest login is still at issue.
+    fn startRevoke(self: *Runtime, token_value: oauth.Secret) void {
+        var token = token_value;
+        var next = self.revokes;
+        while (next) |job| : (next = job.next) job.cancellation.cancel();
+        const job = self.allocator.create(RevokeJob) catch {
+            token.deinit();
+            return std.log.warn("Metask authorization was not revoked: OutOfMemory", .{});
+        };
+        job.* = .{
+            .allocator = self.allocator,
+            .io = self.io,
+            .transport = self.effects.transport,
+            .wake = self.effects.workerWake(),
+            .token = token,
+            .cancellation = metask_client.Cancellation.init(self.io),
+            .next = self.revokes,
+        };
+        job.thread = std.Thread.spawn(.{}, RevokeJob.run, .{job}) catch {
+            job.destroy();
+            return std.log.warn("Metask authorization was not revoked: ThreadSpawnFailed", .{});
+        };
+        self.revokes = job;
+    }
+
+    /// The refresh token a sign-out revokes: the one held, or what an earlier
+    /// one could not delete.
+    fn revokeCopy(self: *Runtime, platform: ports_impl.Platform) ?oauth.Secret {
+        if (self.credentials.refreshToken()) |token| return oauth.Secret.init(self.allocator, token.view()) catch null;
+        var storage: [oauth.Limits.secret_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &storage);
+        const stored = (platform.credentials.getRefreshToken(&storage) catch return null) orelse return null;
+        return oauth.Secret.init(self.allocator, stored) catch null;
+    }
+
+    /// A login that cannot renew any more is not left on disk: its token is
+    /// deleted and revoked, which also ends a rotation the server may have
+    /// committed. What cannot be deleted stays behind its marker.
+    fn discardLostLogin(self: *Runtime, failure: *state_impl.WorkerFailure) ?oauth.Secret {
+        const platform = self.platform orelse return null;
+        const token = self.credentials.refreshToken() orelse return null;
+        const revoke = oauth.Secret.init(self.allocator, token.view()) catch null;
+        credential_store.commitSignedOut(platform.credentials) catch {
+            failure.residue = true;
+        };
+        return revoke;
     }
 
     pub fn admitEffect(self: *Runtime, prepared: *Prepared) bool {
@@ -1324,6 +1438,11 @@ pub const Runtime = struct {
             self.clearRenewal();
             self.unauthorized = null;
             self.renew_next = false;
+        }
+        // Only once it is deleted for good is a token revoked.
+        if (prepared.revoke) |token| {
+            prepared.revoke = null;
+            self.startRevoke(token);
         }
     }
 
@@ -1416,11 +1535,22 @@ pub const Runtime = struct {
         // A verification that found nothing out leaves the schedule alone.
         const retry_identity = keeps_identity and !verifying;
         const token_refused = retry_identity and completion.payload.failed.error_code == .metask_token_invalid;
+        var revoke: ?oauth.Secret = null;
+        errdefer if (revoke) |*token| token.deinit();
         if (completion.payload == .failed) {
-            if (retry_unsent_refresh or keeps_identity)
-                completion.payload.failed.retryable = true
-            else if (refresh_attempt)
+            if (retry_unsent_refresh or keeps_identity) {
+                completion.payload.failed.retryable = true;
+            } else if (refresh_attempt) {
                 self.loseRenewal(&completion.payload.failed);
+                // Its marker blocks the token for good, so it is deleted and
+                // revoked: nothing is lost, and a rotation the server may have
+                // committed ends with it. One already deleted is not again.
+                const deleted = switch (completion.payload.failed.error_code) {
+                    .metask_unauthorized, .credential_store_delete_failed => true,
+                    else => false,
+                };
+                if (marked and !deleted) revoke = self.discardLostLogin(&completion.payload.failed);
+            }
         }
         const loaded_identity = completion.payload == .identity_loaded;
         return switch (self.account.prepareCompletion(completion)) {
@@ -1439,10 +1569,17 @@ pub const Runtime = struct {
                         .retry_backoff
                     else
                         .keep,
+                    .revoke = revoke,
                 },
             },
-            .rejected => |error_code| .{ .rejected = error_code },
-            .ignored_stale => .ignored_stale,
+            .rejected => |error_code| blk: {
+                if (revoke) |*token| token.deinit();
+                break :blk .{ .rejected = error_code };
+            },
+            .ignored_stale => blk: {
+                if (revoke) |*token| token.deinit();
+                break :blk .ignored_stale;
+            },
         };
     }
 
@@ -1506,9 +1643,17 @@ pub const Runtime = struct {
                 return .{ .prepared = preparedFromState(self.account.prepareLogoutFailure(.fromCode(accountStoreError(err)))) };
             };
         }
-        credential_store.commitSignedOut(platform.credentials) catch |err|
-            return .{ .prepared = preparedFromState(self.account.prepareSignedOut(true, .fromCode(accountStoreError(err)))) };
-        return .{ .prepared = preparedFromState(self.account.prepareSignedOut(false, null)) };
+        // Revoked even when it cannot be deleted: that is what keeps it from
+        // working.
+        const revoke = self.revokeCopy(platform);
+        var failure: ?state_impl.WorkerFailure = null;
+        credential_store.commitSignedOut(platform.credentials) catch |err| {
+            failure = .fromCode(accountStoreError(err));
+        };
+        var prepared = preparedFromState(self.account.prepareSignedOut(failure != null, failure));
+        prepared.revoke = revoke;
+        prepared.logged_out = true;
+        return .{ .prepared = prepared };
     }
 
     fn prepareAuthorizedLogin(
@@ -1772,7 +1917,17 @@ pub const Runtime = struct {
         ) catch |err| return self.preparedSignedOutRestoreFailure(accountRestoreError(err), restoreUnreadable(err));
         defer restored.deinit();
         return switch (restored) {
-            .blocked => self.preparedSignedOutRestoreFailure(.token_refresh_failed, false),
+            // A login that may have been spent is not kept: its token is
+            // deleted and revoked.
+            .blocked => |*token| blk: {
+                var failure: state_impl.WorkerFailure = .fromCode(.token_refresh_failed);
+                credential_store.commitSignedOut(self.platform.?.credentials) catch {
+                    failure.residue = true;
+                };
+                var prepared = preparedFromState(self.account.prepareSignedOutRestoreFailure(failure, false));
+                prepared.revoke = oauth.Secret.init(self.allocator, token.view()) catch null;
+                break :blk prepared;
+            },
             .signed_out => blk: {
                 var value: state_impl.RestoreResult = .{ .signed_out = {} };
                 break :blk preparedFromState(self.account.prepareRestore(&value));
@@ -2283,10 +2438,12 @@ const RuntimeTestTransport = struct {
 
     fn perform(
         context: *anyopaque,
-        _: metask_client.Request,
+        request: metask_client.Request,
         _: []u8,
     ) metask_client.TransportError!metask_client.Response {
         const self: *RuntimeTestTransport = @ptrCast(@alignCast(context));
+        // A revocation runs on its own thread; only the Account calls count.
+        if (request.kind == .revoke) return self.failure;
         self.calls += 1;
         return self.failure;
     }
@@ -2927,7 +3084,9 @@ test "unknown transport result blocks timer retry cancelled reauthentication and
         try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
         try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, runtime.view().error_code);
         try std.testing.expect(!runtime.credentials.available());
-        try std.testing.expect(platform.refresh_marker != null);
+        // Blocked for good, the token is deleted and revoked.
+        try std.testing.expect(platform.refresh_token_len == null and platform.refresh_marker == null);
+        try std.testing.expect(runtime.revokes != null);
         try std.testing.expect(runtime.prepareCommand(.retry_refresh) == .rejected);
         // Nothing renews a signed-out Account, however late it is.
         for ([_]i64{ 150, 200, 4000 }) |now| {
@@ -2954,8 +3113,9 @@ test "unknown transport result blocks timer retry cancelled reauthentication and
         defer restored.deinit();
         restarted.commit(&restored);
         try std.testing.expect(!restarted.takeRefreshAfterCommit(&restored));
+        // Nothing is left to restore.
         try std.testing.expectEqual(contract.AccountState.signed_out, restarted.view().state);
-        try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, restarted.view().error_code);
+        try std.testing.expectEqual(contract.ErrorCode.none, restarted.view().error_code);
         try std.testing.expectEqual(@as(usize, 1), transport.calls);
     }
 }
@@ -3008,10 +3168,12 @@ test "a refresh answered without a rotation signs out exactly as restore would" 
         try std.testing.expect(runtime.authorization() == .signed_out);
         platform.now_unix_seconds = 4000;
         try std.testing.expect(runtime.prepareDue() == null);
-        try std.testing.expectEqualStrings("refresh-token", platform.refresh_token[0..platform.refresh_token_len.?]);
-        try std.testing.expectEqual(case.blocks, platform.refresh_marker != null);
+        // One that may have been spent is deleted with its marker; one
+        // that was not is kept.
+        try std.testing.expectEqual(case.blocks, platform.refresh_token_len == null);
+        try std.testing.expect(platform.refresh_marker == null);
 
-        // A restart from the same store reaches the same public state.
+        // A restart from the same store tries what was kept once more.
         var restarted = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &transport, .notify_fn = runtimeTestWake });
         defer {
             TestSupport.detachPlatform(&restarted);
@@ -3031,7 +3193,7 @@ test "a refresh answered without a rotation signs out exactly as restore would" 
             try finishTestRefresh(&restarted);
         }
         try std.testing.expectEqual(contract.AccountState.signed_out, restarted.view().state);
-        try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, restarted.view().error_code);
+        try std.testing.expectEqual(if (case.blocks) contract.ErrorCode.none else .token_refresh_failed, restarted.view().error_code);
         try std.testing.expectEqual(@as(usize, if (case.blocks) 1 else 2), transport.calls);
     }
 }
@@ -3701,7 +3863,8 @@ test "a stored login whose confirmation was sent and lost is signed out for good
     try startDueRenewal(&runtime);
     try settleAttempt(&runtime);
     try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
-    try std.testing.expect(platform.refresh_marker != null);
+    // What may have been spent is deleted and revoked.
+    try std.testing.expect(platform.refresh_token_len == null and platform.refresh_marker == null);
     runtime.expedite();
     for ([_]i64{ 160, 1000, 100_000 }) |now| {
         platform.now_unix_seconds = now;
@@ -4395,6 +4558,77 @@ test "closing waits for a renewal underway only its own close wait and gives up 
             },
         }
     }
+}
+
+/// Answers a revocation and remembers what it was asked to revoke.
+const RevokeTransport = struct {
+    body: [256]u8 = undefined,
+    body_len: usize = 0,
+    revokes: std.atomic.Value(usize) = .init(0),
+
+    fn runtimeFor(self: *@This()) Runtime {
+        return Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = self, .perform_fn = perform, .retire_fn = metask_client.retireNothing }, TestSupport.loopbackEndpoint(), .{ .context = self, .notify_fn = runtimeTestWake });
+    }
+
+    fn perform(context: *anyopaque, request: metask_client.Request, output: []u8) metask_client.TransportError!metask_client.Response {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (request.kind != .revoke) return error.ProtocolFailed;
+        @memcpy(self.body[0..request.body.len], request.body);
+        self.body_len = request.body.len;
+        _ = self.revokes.fetchAdd(1, .release);
+        return .{ .status = 200, .body = output[0..0] };
+    }
+
+    fn expectRevoked(self: *@This(), runtime: *Runtime, count: usize) !void {
+        while (runtime.revokes) |job| {
+            while (!job.finished.load(.acquire)) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            runtime.reapAbandoned();
+        }
+        try std.testing.expectEqual(count, self.revokes.load(.acquire));
+        try std.testing.expectEqualStrings("token=stored-refresh&token_type_hint=refresh_token&client_id=metawork", self.body[0..self.body_len]);
+    }
+};
+
+test "signing out revokes the refresh token it deletes, and one it could not delete" {
+    for ([_]bool{ false, true }) |delete_fails| {
+        var transport: RevokeTransport = .{};
+        var runtime = transport.runtimeFor();
+        var platform: TestSupport.Platform = .{ .now_unix_seconds = 100, .credential_delete_fails = delete_fails };
+        defer {
+            TestSupport.detachPlatform(&runtime);
+            runtime.deinit();
+        }
+        try holdStoredLogin(&runtime, &platform, "stored-refresh");
+        try logOut(&runtime);
+        try transport.expectRevoked(&runtime, 1);
+        try std.testing.expectEqual(delete_fails, platform.refresh_token_len != null);
+        if (!delete_fails) continue;
+        // Clearing what was left revokes it again: that keeps it from working.
+        try logOut(&runtime);
+        try transport.expectRevoked(&runtime, 2);
+    }
+}
+
+test "a token its marker blocks at start is deleted and revoked" {
+    var transport: RevokeTransport = .{};
+    var runtime = transport.runtimeFor();
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try platform.setStoredRefreshToken("stored-refresh");
+    var stored = try oauth.Secret.init(std.testing.allocator, "stored-refresh");
+    defer stored.deinit();
+    try platform.ports().credentials.beginRefresh(&stored);
+    var start = runtime.prepareStart(platform.ports());
+    defer start.deinit();
+    try std.testing.expect(!runtime.takeRefreshAfterCommit(&start));
+    runtime.commit(&start);
+    try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, runtime.view().error_code);
+    try std.testing.expect(platform.refresh_token_len == null and platform.refresh_marker == null);
+    try transport.expectRevoked(&runtime, 1);
 }
 
 test "a store that cannot be read is read again, and one that holds no valid record asks for a sign-in" {

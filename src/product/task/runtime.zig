@@ -7959,7 +7959,10 @@ pub const Runtime = struct {
         if (!run.terminal_observed) {
             self.reportMetaskUnauthorized(task, run);
             const stopped_batch = run.input_stop_requested and (terminal.outcome == .stopped or terminal.outcome == .cancelled);
-            if (terminal.outcome != .completed and !stopped_batch) {
+            // Signing out stops the Run but not the messages behind it: they
+            // wait for a login and fail, keeping their text, when none comes.
+            const signed_out = terminal.cause == .account_logout;
+            if (terminal.outcome != .completed and !stopped_batch and !signed_out) {
                 // A Run this Task stopped to make room for an edited message
                 // does not retire that message: it is the reason the Run
                 // stopped, and it is still waiting for the rewind it carries.

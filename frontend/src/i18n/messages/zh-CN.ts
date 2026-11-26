@@ -447,6 +447,8 @@ export const zhCN: Record<MessageId, string> = {
   "account.logout": "退出登录",
   "account.logout_confirm":
     "退出将清除这台设备上的 Metask 登录凭据。创建使用 Metask 模型的新任务前，需要重新登录。自定义模型、本地任务及历史记录、工作区文件都会保留。",
+  "account.logout_stops_tasks":
+    "有 {count} 个任务正在使用 Metask 模型，退出后会停止。",
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
   "account.command_failed":
@@ -1733,6 +1735,7 @@ export const zhCN: Record<MessageId, string> = {
   "outcome.dependency_contract_failure": "任务运行环境失败",
   "cause.user_cancel": "由你停止",
   "cause.approval_mode_change": "为切换审批模式而停止",
+  "cause.account_logout": "为退出登录而停止",
   "cause.edit_and_rerun": "为从编辑后的消息重跑而停止",
   "cause.timeout": "已超时",
   "cause.session_close": "会话已释放",

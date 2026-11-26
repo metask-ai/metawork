@@ -182,6 +182,7 @@ export const initialWorkbenchState: WorkbenchState = {
       reason: "workspace_unavailable",
       metask: "none",
     },
+    metaskStopTargets: 0,
     skillCatalog: {
       availability: "uninitialized",
       redacted: false,

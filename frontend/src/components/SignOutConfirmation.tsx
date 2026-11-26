@@ -6,9 +6,12 @@ import { Button } from "./ui/button.tsx";
 
 export function SignOutConfirmation({
   disabled,
+  stopTargets,
   onLogout,
 }: {
   disabled: boolean;
+  /** Tasks whose Metask Run signing out stops. */
+  stopTargets: number;
   onLogout: () => void;
 }) {
   const { t } = useI18n();
@@ -21,6 +24,8 @@ export function SignOutConfirmation({
         <AlertDialog.Title>{t("account.logout")}</AlertDialog.Title>
         <AlertDialog.Description>
           {t("account.logout_confirm")}
+          {stopTargets > 0 &&
+            ` ${t("account.logout_stops_tasks", { count: String(stopTargets) })}`}
         </AlertDialog.Description>
         <div className="flex justify-end gap-2">
           <AlertDialog.Close

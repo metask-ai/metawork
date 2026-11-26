@@ -860,6 +860,7 @@ export type RunInputSkillView = {
 export const runCauses = [
   "user_cancel",
   "approval_mode_change",
+  "account_logout",
   "edit_and_rerun",
   "timeout",
   "session_close",
@@ -1740,6 +1741,8 @@ export type WorkbenchSnapshot = {
   account: AccountView;
   models: ModelsView;
   newTaskAdmission: NewTaskAdmissionView;
+  /** Tasks whose Metask Run or compaction signing out would stop now. */
+  metaskStopTargets: number;
   skillCatalog: SkillCatalogView;
   skillManagement: SkillManagementView | null;
   mcp: McpManagementView | null;

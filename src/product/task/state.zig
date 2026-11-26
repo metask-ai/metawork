@@ -123,6 +123,8 @@ pub const ActiveOperation = task_attachment.ActiveOperation;
 pub const RunCause = enum {
     user_cancel,
     approval_mode_change,
+    /// The person signed out of the Metask login the Run used.
+    account_logout,
     edit_and_rerun,
     timeout,
     session_close,
@@ -398,6 +400,9 @@ pub const PendingInterruption = enum(u8) {
     /// A Run stopped because an approval change crossed the Core profile
     /// boundary. Core still observes a user cancellation.
     approval_mode_change,
+    /// A Run stopped because the person signed out of its Metask login.
+    /// Core still observes a user cancellation.
+    account_logout,
 };
 
 /// Owned safe observation, separate from the decision about the Run outcome.
@@ -1668,6 +1673,7 @@ pub fn finalizedFileChangeObservation(run: *const RunRecord) FileChangeObservati
         .resource_limit => terminal.phase == .stopped,
         .user_cancel,
         .approval_mode_change,
+        .account_logout,
         .edit_and_rerun,
         .timeout,
         .session_close,

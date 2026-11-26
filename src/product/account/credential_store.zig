@@ -85,13 +85,15 @@ pub const RestoredAccount = struct {
 
 pub const RestoreResult = union(enum) {
     signed_out,
-    blocked,
+    /// The refresh token its marker blocks, to be revoked.
+    blocked: oauth.Secret,
     account: RestoredAccount,
 
     pub fn deinit(self: *RestoreResult) void {
         switch (self.*) {
             .account => |*account| account.deinit(),
-            .signed_out, .blocked => {},
+            .blocked => |*token| token.deinit(),
+            .signed_out => {},
         }
         self.* = .signed_out;
     }
@@ -116,7 +118,8 @@ pub fn restore(
         if (refresh_token) |token| {
             var expected = refreshMarker(token);
             defer std.crypto.secureZero(u8, &expected);
-            if (std.crypto.timing_safe.eql([marker_bytes]u8, expected, value[0..marker_bytes].*)) return .blocked;
+            if (std.crypto.timing_safe.eql([marker_bytes]u8, expected, value[0..marker_bytes].*))
+                return .{ .blocked = try oauth.Secret.init(allocator, token) };
         } else {
             // A marker without its token blocks nothing it could match.
             backend.clearRefreshMarker() catch {};

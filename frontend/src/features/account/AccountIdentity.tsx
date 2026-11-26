@@ -19,6 +19,7 @@ import {
 
 export function AccountIdentity({
   account,
+  metaskStopTargets,
   active,
   disabled,
   cancelDisabled,
@@ -31,6 +32,7 @@ export function AccountIdentity({
   updateControls,
 }: {
   account: AccountView;
+  metaskStopTargets: number;
   active: boolean;
   disabled: boolean;
   cancelDisabled: boolean;
@@ -235,7 +237,11 @@ export function AccountIdentity({
         open={authenticated && confirmSignOut}
         onOpenChange={setConfirmSignOut}
       >
-        <SignOutConfirmation disabled={disabled} onLogout={onLogout} />
+        <SignOutConfirmation
+          disabled={disabled}
+          stopTargets={metaskStopTargets}
+          onLogout={onLogout}
+        />
       </AlertDialog.Root>
     </>
   );

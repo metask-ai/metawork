@@ -7,6 +7,7 @@ pub const authority = "https://www.metask-ai.com";
 pub const authorize_url = authority ++ "/oauth/authorize";
 pub const token_url = authority ++ "/api/oauth/token";
 pub const userinfo_url = authority ++ "/api/oauth/userinfo";
+pub const revoke_url = authority ++ "/api/oauth/revoke";
 pub const client_id = "metawork";
 pub const scope = "read model:invoke";
 pub const callback_path = "/auth/metask/callback";
@@ -384,6 +385,21 @@ pub fn buildRefreshBody(
         .client_id = client_id,
         .refresh_token = refresh_token.view(),
     }) catch return error.BufferTooSmall;
+    return writer.buffered();
+}
+
+/// RFC 7009 revocation of a refresh token by this public client.
+pub fn buildRevokeBody(output: []u8, refresh_token: *const Secret) ProtocolError![]const u8 {
+    var writer = std.Io.Writer.fixed(output);
+    const pairs = [_]struct { []const u8, []const u8 }{
+        .{ "token", refresh_token.view() },
+        .{ "token_type_hint", "refresh_token" },
+        .{ "client_id", client_id },
+    };
+    for (pairs, 0..) |pair, index| {
+        if (index != 0) writer.writeByte('&') catch return error.BufferTooSmall;
+        mechanics.writeFormPair(&writer, pair[0], pair[1]) catch return error.BufferTooSmall;
+    }
     return writer.buffered();
 }
 

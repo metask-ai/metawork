@@ -73,7 +73,7 @@ checking | signed_out | authorizing | authenticated
 3. Application 将 lease 交给一次 Models Metask catalog operation；Models module 不导入 Account，也不持久化 OAuth token；
 4. Application 在每次 Account 提交后把当时的授权状态交给 Models coordinator：登出时取消并 join 在飞 catalog job，再把 Metask provider 置为 `needs_authentication`；authorization generation 变化后，旧 lease/completion 失效，以新 lease 重新加载；token 到期、续期和冷启动确认不是授权丧失，目录内容与在飞 catalog job 都保留；
 5. Models 清除 transient Metask credential 和可解析目录，但保留无 secret 的 Metask selection intent；custom source 不受影响；
-6. 已经交给 Task/Run 的 owned binding 按自己的生命周期收口：新登录与正常刷新一样，已接纳的 Run 原位采用当前凭据；退出登录或凭据清除不撤销在飞 Run 已持有的凭据。后续执行的接纳与续期由 [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff) 定义。
+6. 已经交给 Task/Run 的 owned binding 按自己的生命周期收口：新登录与正常刷新一样，已接纳的 Run 原位采用当前凭据。退出登录停掉用 Metask 模型的 Task 正在跑的 Run（结束原因 `account_logout`）和整理；排在后面的消息不因此失败，随后因未登录失败并保留内容，登录后可重发。会话自己失效时不停。后续执行的接纳与续期由 [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff) 定义。
 7. Account 向 Application 提供不分配 secret copy 的主线程授权状态，只有一个判断函数和四个值：`checking(epoch)` 持有登录但还没确认，或凭据库还没读；`signed_out`；与 lease 相同的 authenticated、generation 和 hard-expiry/clock gate 全部满足时为 `available(account, generation)`；已验证 identity 的 access token 已到 hard expiry 时为 `recovering(epoch)`。它只看登录本身，不看 Account 正在做什么：在没确认的登录上开始登录，消费方照旧等，排队的消息不会因此失败。消费方只读由它归成的三种用法：可以（generation）、等（epoch）、停（要登录）；`checking` 与 `recovering` 是等。epoch 数的是进程内有了结果的续期与取身份，消费方只用它把一次等待绑定到一次结果。查询没有副作用。状态、generation 与 epoch 都只在进程内使用，不进入 Renderer、日志或持久化 metadata。每装入一份 access token 推进一次 generation；授权不与 Task 绑定，既有 Task 在任意一次登录后的执行接纳与续期由 [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff) 定义。
 8. Account 向 Product 提供主线程投影 visitor：只在调用期出借已装入的 access token，以及被换下、随退出或会话结束退下来而仍可能被接受的那些，不给出 refresh token。一份 access token 从装入检查到它最迟可能失效之后 60 秒：有效期从装入时刻算起，只看 boot 时钟，换下、退出和墙钟变化都不提前。到时 Application 先交 Product 清洗再销毁；没有份数上限。提交只告诉 Product 有没有 access token 被装入或结束，token 不随提交传递。access token 不落盘，上一个进程的那一份在重启后不再检查。
 
@@ -130,7 +130,7 @@ Account summary 归账号，使用独立于 identity transaction 的有界单飞
 
 Metask 的 401 只由 Account 判断。用 Account 令牌调 Metask 的地方（模型运行、图片与视频、模型目录、用量）见到 401，都只报告令牌代次和种类：网关码 `token_expired`、`invalid_token` 是 token，其余是 other；目录、用量和媒体不解析网关错误体，一律报 other。报告可来自任何线程，并成一条待处理（代次取最新，种类有 token 就是 token），由 Account 在主线程的下一轮处理，报告方的调用里什么都不提交；不是当前令牌的忽略。已验证且空闲时：token 且这一代还没因 401 续过 → 立即续期；其余 → 向 Userinfo 核实一次（单飞）。续期与核实共用 60 秒间隔。核实到同一账号是误报，什么都不显示、续期计划不变；另一个账号或 `authorization_revoked` / `user_not_found` → 删除凭据、结束登录；`invalid_token` → 过了间隔后续期；其余失败也不显示、不改计划。403 不是凭据失效：目录不重试，用量按普通失败，运行以 `account_suspended` 提示到 Metask 官网查看，Account 不动。
 
-logout 是一次提交，持有登录或上次退出留下残留时都接受，不管在做什么：先写绑定当前 refresh token 的阻断记录（续期在途时这份记录已经写过，残留时它本来就在），再删除 Account-owned refresh credential 和这条记录，然后提交 `signed_out` 并结束内存中的 credential：refresh token 当场清零，access token 只留给投影检查。在途的动作被放弃：它的 worker 只被告知取消、不被等待，之后给出的任何结果（包括服务端已经轮换出的新 refresh token）都清零丢弃；worker 用的是自己的副本，所以本机删除不必等它。随后由 Application 通知 Models 授权不可用；它不读取 Models 或 consumer 状态。记录写入报错时什么都没有改变，只发布 Account error，并尽力删一次那条记录（报错不等于没写进去）。refresh token 删除失败时登录照样结束，进入带残留的 `signed_out` 并发布 Account error：那份 token 被记录挡住，永远不会再发；再次 logout 只需删除它。token 删除之后只是记录删不掉，不算失败：记录没有可匹配的 token，什么也挡不住。
+logout 是一次提交，持有登录或上次退出留下残留时都接受，不管在做什么：先写绑定当前 refresh token 的阻断记录（续期在途时这份记录已经写过，残留时它本来就在），再删除 Account-owned refresh credential 和这条记录，然后提交 `signed_out` 并结束内存中的 credential：refresh token 当场清零，access token 只留给投影检查。在途的动作被放弃：它的 worker 只被告知取消、不被等待，之后给出的任何结果（包括服务端已经轮换出的新 refresh token）都清零丢弃；worker 用的是自己的副本，所以本机删除不必等它。提交后向 Metask 的 `/api/oauth/revoke` 撤销删除的 refresh token（另起线程，5 秒，不等待，失败只记日志；新的撤销取消旧的），删不掉的残留照样撤销，再清一次时也撤销。随后由 Application 通知 Models 授权不可用；它不读取 Models 或 consumer 状态。记录写入报错时什么都没有改变，只发布 Account error，并尽力删一次那条记录（报错不等于没写进去）。refresh token 删除失败时登录照样结束，进入带残留的 `signed_out` 并发布 Account error：那份 token 被记录挡住，永远不会再发；再次 logout 只需删除它。token 删除之后只是记录删不掉，不算失败：记录没有可匹配的 token，什么也挡不住。
 
 Account credential port 的返回合同要求：正常返回成功表示该次保存或删除已提交，正常返回错误表示该次变更未提交。SDK 维护方负责公开凭据 API 的返回合同与行为验证，Application binding 负责保持该语义并映射为 Account port 的结果，不在成功提交后追加可能失败的步骤。进程终止或调用没有返回结果不视为明确失败；若接入的 SDK 不能提供该合同，必须先增加 `outcome_unknown`、readback 或 restart reconciliation，再允许后续状态迁移。
 
@@ -158,7 +158,7 @@ Account durable authority 由系统安全存储中的 Metask refresh token 与�
 
 结果不确定时保持阻断；timer、`retry_refresh`、错误展示变化、登录取消或时间经过都不能解除。`retry_refresh` 只用于未被阻断的已验证会话和没能确认的冷启动登录，不增加 signed_out restore 或保存恢复入口。除上一段的可重试失败外，已验证会话的 refresh 失败一律在本进程内立即进入 `signed_out`，包括结果不确定、收到的响应不是轮换、服务端明确拒绝、新 token 保存失败：
 
-- 提交时结束内存中的 credential，durable token 与阻断记录保持原样；
+- 提交时结束内存中的 credential；阻断记录永久挡住的 refresh token 删除并撤销（删它不丢任何东西，撤销还能结束服务端也许已轮换出的新 token），删不掉的留在记录后面成为残留；启动读到被记录挡住的 token 同样删除并撤销；
 - 错误发布为 `token_refresh_failed`，原因码作为安全诊断；invalid_grant 与删除失败沿用各自的错误。
 
 重启时，restore 从同一 durable 状态得到同一公开状态。显式新 OAuth 保存成功可替换 token 并清理旧记录；失败或取消保留原阻断。invalid_grant、明确 Userinfo 授权失效及 logout 均先删 token 再删记录，token 删除失败不得先清记录。

@@ -23,6 +23,8 @@ pub const AccountCommit = struct {
     /// An access token was installed or ended. Product inspects what its
     /// visitor lends from now on; no token is handed over here.
     token_changed: bool = false,
+    /// The person signed out: what runs on their Metask login stops.
+    logged_out: bool = false,
 
     pub fn assertValid(self: AccountCommit) void {
         account.validateFact(self.fact) catch

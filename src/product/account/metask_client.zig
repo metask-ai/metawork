@@ -15,6 +15,7 @@ pub const RequestKind = enum {
     refresh_token,
     userinfo,
     usage_stats,
+    revoke,
 };
 
 pub const Request = struct {
@@ -159,6 +160,24 @@ pub fn refreshWithToken(
         return error.ProtocolInvalid;
     }
     return tokens.take();
+}
+
+/// Asks Metask to end the authorization a refresh token belongs to. 200 is
+/// the only success; Metask answers it for any token it does not know too.
+pub fn revokeRefreshToken(
+    transport: Transport,
+    refresh_token: *const oauth.Secret,
+    control: ?RequestControl,
+) ClientError!void {
+    var request_body: [oauth.Limits.token_body_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &request_body);
+    const body = oauth.buildRevokeBody(&request_body, refresh_token) catch return error.ProtocolInvalid;
+    var response_storage: [512]u8 = undefined;
+    const response = transport.perform(
+        .{ .kind = .revoke, .principal = null, .body = body, .control = control },
+        &response_storage,
+    ) catch |err| return transportFailure(err);
+    if (response.status != 200) return nonCredentialFailure(response.status);
 }
 
 /// The identity an access token belongs to. Until it is known the request

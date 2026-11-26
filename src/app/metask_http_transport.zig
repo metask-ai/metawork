@@ -59,6 +59,7 @@ pub const Adapter = struct {
                     .refresh_token => .refresh_token,
                     .userinfo => .userinfo,
                     .usage_stats => .usage_stats,
+                    .revoke => .revoke,
                 },
                 .principal = request.principal,
                 .body = request.body,
@@ -149,6 +150,7 @@ pub const Adapter = struct {
         var endpoint_storage: [384]u8 = undefined;
         const endpoint, const method: std.http.Method = switch (request.kind) {
             .exchange_code, .refresh_token => .{ oauth.token_url, .POST },
+            .revoke => .{ oauth.revoke_url, .POST },
             .userinfo => .{ account_metask.userinfo_url, .GET },
             .usage_stats => blk: {
                 const range = request.usage_stats_range orelse
