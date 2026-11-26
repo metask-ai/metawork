@@ -1112,8 +1112,9 @@ pub const Runtime = struct {
         return true;
     }
 
-    /// Installed credentials were durably scrubbed before admission and every
-    /// later Schedule write scans live owners. A clean store needs no new I/O;
+    /// What a Task acquires was durably scrubbed before admission, an Account
+    /// token was stored nowhere before it was issued, and every later Schedule
+    /// write scans live owners. A clean store needs no new I/O;
     /// a dirty store must commit before its last protecting owner can leave.
     pub fn prepareCredentialRelease(self: *Runtime, credential: []const u8, redaction: Redaction) bool {
         if (!self.containsCredential(credential)) return true;

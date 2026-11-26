@@ -1412,9 +1412,6 @@ test "Task model credential collection carries more than 128 known values and re
     const Harness = struct {
         count: usize = 0,
         complete: bool = false,
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
         fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             var bytes: [32]u8 = undefined;
             for (0..140) |index| try callback(context, std.fmt.bufPrint(&bytes, "renewal-fixture-{d}", .{index}) catch unreachable);
@@ -1440,7 +1437,7 @@ test "Task model credential collection carries more than 128 known values and re
             for (values.values.items) |value| try callback(target, value);
         }
     };
-    control.account_credentials = .{ .context = &owned, .generation_fn = Harness.generation, .visit_fn = Source.visit };
+    control.account_credentials = .{ .context = &owned, .visit_fn = Source.visit };
     defer control.account_credentials = null;
     control.task_persistence = .{ .context = &harness, .credentials_fn = Harness.credentials };
     control.syncHistoryCredentials(null, null);
@@ -1522,9 +1519,6 @@ pub const Runtime = struct {
     assembling_snapshot: if (builtin.is_test) bool else void = if (builtin.is_test) false else {},
     projection_history_epoch: u64 = 1,
     account_credentials: ?account_contract.AccessTokenProjection = null,
-    account_credential_generation: u64 = 0,
-    /// The credential generation already scrubbed for execution renewal.
-    learned_renewal: u64 = 0,
     default_approval_mode: ApprovalMode = .auto_review,
     account_projection: account_projection.Projection,
     execution_generations: execution_state.Generations = .{},
@@ -2328,10 +2322,10 @@ pub const Runtime = struct {
 
     /// An accepted original does not change hands again: it stays under its
     /// Task until the Task is deleted, so the re-check is that the Task is
-    /// still readable. The record that names it is immutable history, and a
-    /// record that became redacted, or a credential installed since, advances
-    /// the projection security epoch, which the existing delivery and chunk
-    /// checks already refuse on. A file that is gone fails the read as
+    /// still readable. The record that names it is immutable history. A scrub
+    /// that rewrites what is shown, or an unknown credential learned since,
+    /// advances the projection security epoch, which the existing delivery and
+    /// chunk checks already refuse on. A file that is gone fails the read as
     /// `missing` without this having to predict it.
     fn taskAttachmentOriginalAuthority(self: *Runtime, task_id: u64) FilePreviewState {
         return if (self.task_runtime.mediaReadable(task_id)) .ready else .missing;
@@ -3111,7 +3105,6 @@ pub const Runtime = struct {
         self: *Runtime,
         fact: account_contract.AccountFact,
     ) void {
-        self.syncAccountProjectionCredentialNoFail();
         self.account_projection.commitNoFail(fact);
     }
 
@@ -3120,6 +3113,7 @@ pub const Runtime = struct {
         commit: control_ports.AccountCommit,
     ) void {
         commit.assertValid();
+        if (commit.token_changed) self.inspectAccountTokensNoFail();
         self.commitAccountFactNoFail(commit.fact);
     }
 
@@ -9369,44 +9363,50 @@ pub const Runtime = struct {
     fn redactWorkspaceProjectionsNoFail(
         self: *Runtime,
         credential: []const u8,
-    ) void {
-        self.workspace.redactNoFail(credential, self.workspaceStorage());
+    ) bool {
+        return self.workspace.redactNoFail(credential, self.workspaceStorage());
     }
 
     pub fn setAccountProjectionCredentials(self: *Runtime, source: account_contract.AccessTokenProjection) void {
         std.debug.assert(self.account_credentials == null);
         self.account_credentials = source;
-        self.syncAccountProjectionCredentialNoFail();
+        self.inspectAccountTokensNoFail();
     }
 
     pub fn clearAccountProjectionCredentials(self: *Runtime) void {
         const source = self.account_credentials orelse return;
-        source.visit(self, scrubAccountCredential) catch unreachable;
+        _ = self.scrubAccountTokens(source);
         self.account_credentials = null;
-        self.account_credential_generation = 0;
         self.syncHistoryCredentials(null, null);
         self.invalidateProjectionSecurity();
     }
 
-    fn syncAccountProjectionCredentialNoFail(self: *Runtime) void {
+    /// Account's own token was in nothing shown before it was installed, and a
+    /// token it replaced or ended is still inspected, so neither revokes what
+    /// was shown unless the scrub finds it there after all.
+    fn inspectAccountTokensNoFail(self: *Runtime) void {
         const source = self.account_credentials orelse return;
-        const generation = source.generation();
-        if (generation == self.account_credential_generation) return;
-        self.account_credential_generation = generation;
-        self.invalidateProjectionSecurity();
+        if (self.scrubAccountTokens(source)) self.invalidateProjectionSecurity();
         self.reconcileMcpInstallation(null);
-        source.visit(self, scrubAccountCredential) catch unreachable;
         self.syncHistoryCredentials(null, null);
     }
 
-    fn scrubAccountCredential(context: *anyopaque, credential: []const u8) std.mem.Allocator.Error!void {
-        const self: *Runtime = @ptrCast(@alignCast(context));
-        self.redactAllProductProjectionsNoFail(credential);
+    fn scrubAccountTokens(self: *Runtime, source: account_contract.AccessTokenProjection) bool {
+        const Scrub = struct {
+            control: *Runtime,
+            rewrote: bool = false,
+            fn visit(context: *anyopaque, token: []const u8) std.mem.Allocator.Error!void {
+                const scrub: *@This() = @ptrCast(@alignCast(context));
+                scrub.rewrote = scrub.control.redactAllProductProjectionsNoFail(token) or scrub.rewrote;
+            }
+        };
+        var scrub: Scrub = .{ .control = self };
+        source.visit(&scrub, Scrub.visit) catch unreachable;
+        return scrub.rewrote;
     }
 
     const AccountCredentialQuery = struct {
         value: []const u8,
-        releasing: ?[*]const u8 = null,
         kind: enum { retained, contains, prefix, continuation },
         matched: usize = 0,
 
@@ -9414,7 +9414,7 @@ pub const Runtime = struct {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (credential.len == 0) return;
             const matches = switch (self.kind) {
-                .retained => (self.releasing == null or self.releasing.? != credential.ptr) and std.mem.eql(u8, self.value, credential),
+                .retained => std.mem.eql(u8, self.value, credential),
                 .contains => std.mem.indexOf(u8, self.value, credential) != null,
                 .prefix => std.mem.startsWith(u8, self.value, credential),
                 .continuation => self.value.len < credential.len and std.mem.startsWith(u8, credential, self.value),
@@ -9439,26 +9439,28 @@ pub const Runtime = struct {
         }
     };
 
-    fn retainsProjectionCredential(self: *const Runtime, credential: []const u8, releasing: ?[*]const u8) bool {
+    fn retainsProjectionCredential(self: *const Runtime, credential: []const u8) bool {
         if (credential.len == 0) return false;
-        if (self.accountCredentialQuery(.{ .value = credential, .releasing = releasing, .kind = .retained }).matched != 0) return true;
-        return self.task_runtime.retainsCredential(credential, releasing);
+        if (self.accountCredentialQuery(.{ .value = credential, .kind = .retained }).matched != 0) return true;
+        return self.task_runtime.retainsCredential(credential);
     }
 
+    /// A value not known until now may have been shown in the clear. One that
+    /// was known has been masked wherever it showed, so rewriting it now
+    /// revokes nothing.
     fn learnProjectionCredential(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
-        if (!self.retainsProjectionCredential(credential, null)) self.invalidateProjectionSecurity();
+        if (!self.retainsProjectionCredential(credential)) self.invalidateProjectionSecurity();
         self.reconcileMcpInstallation(credential);
-        self.redactAllProductProjectionsNoFail(credential);
+        _ = self.redactAllProductProjectionsNoFail(credential);
         self.syncHistoryCredentials(credential, null);
     }
 
+    /// What was shown was masked by more than will be known from here on, so
+    /// only rewritten content is revoked.
     fn retireProjectionCredential(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
-        // All aliases into the retiring owner disappear together. Other owned
-        // copies of the exact value still protect the same projection boundary.
-        if (!self.retainsProjectionCredential(credential, credential.ptr)) self.invalidateProjectionSecurity();
-        self.redactAllProductProjectionsNoFail(credential);
+        if (self.redactAllProductProjectionsNoFail(credential)) self.invalidateProjectionSecurity();
         self.syncHistoryCredentials(null, credential.ptr);
     }
 
@@ -9506,27 +9508,29 @@ pub const Runtime = struct {
 
     /// Scrubbing is required at every acquisition/release; it is not itself a
     /// change of security authority and must not revoke unrelated UI state.
-    fn redactAllProductProjectionsNoFail(self: *Runtime, credential: []const u8) void {
-        if (credential.len == 0) return;
+    /// True when it rewrote or dropped anything shown. Preserved originals are
+    /// not shown.
+    fn redactAllProductProjectionsNoFail(self: *Runtime, credential: []const u8) bool {
+        if (credential.len == 0) return false;
         self.task_runtime.redactPreservedHistory(credential) catch self.markTaskPersistenceWriteFailed();
-        self.redactWorkspaceProjectionsNoFail(credential);
-        self.redactCatalogProjectionsNoFail(credential);
-        _ = self.schedule.redactInMemoryNoFail(
+        var rewrote = self.redactWorkspaceProjectionsNoFail(credential);
+        rewrote = self.redactCatalogProjectionsNoFail(credential) or rewrote;
+        rewrote = self.schedule.redactInMemoryNoFail(
             credential,
             self.scheduleRedaction(),
-        );
-        self.task_runtime.redactProjectionsNoFail(credential, .{
+        ) or rewrote;
+        return self.task_runtime.redactProjectionsNoFail(credential, .{
             .context = self,
             .redact_fn = redactFixedWidthNoFail,
             .release_projection_bytes_fn = releaseTaskRuntimeProjectionBytes,
-        });
+        }) or rewrote;
     }
 
     fn redactCatalogProjectionsNoFail(
         self: *Runtime,
         credential: []const u8,
-    ) void {
-        self.skill.redactCatalogsNoFail(
+    ) bool {
+        return self.skill.redactCatalogsNoFail(
             credential,
             self.skillProjectionBudget(),
         );
@@ -10130,6 +10134,7 @@ pub const Runtime = struct {
             .renew_fn = renewMetaskExecutionCredentials,
             .needs_fn = needsDeferredMetaskCredential,
             .waits_fn = waitsForMetask,
+            .retire_fn = retireAccountToken,
         };
     }
 
@@ -10152,20 +10157,17 @@ pub const Runtime = struct {
         return self.task_runtime.waitsForMetask(epoch);
     }
 
-    fn renewMetaskExecutionCredentials(context: *anyopaque, generation: u64, credential: ?[]const u8) void {
+    fn renewMetaskExecutionCredentials(context: *anyopaque, generation: u64, credential: []const u8) void {
         const self: *Runtime = @ptrCast(@alignCast(context));
         if (!self.currentCredentialGeneration(generation)) return;
-        if (credential) |value| if (self.learned_renewal != generation) {
-            self.prepareTaskCredential(value) catch {
-                self.task_runtime.deferMetaskCredentialRenewals();
-                self.bumpRevision();
-                return;
-            };
-            self.learned_renewal = generation;
-        };
         const changed = self.task_runtime.renewMetaskExecutions(generation, credential, self.taskRuntimeOperationEffects());
         self.retireQuiescentCredentials();
         if (changed) self.bumpRevision();
+    }
+
+    fn retireAccountToken(context: *anyopaque, token: []const u8) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.retireProjectionCredential(token);
     }
 
     fn retireQuiescentCredentials(self: *Runtime) void {
@@ -15651,7 +15653,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
     );
     run.input = history_input;
 
-    control.redactAllProductProjectionsNoFail("SECRET-KEY");
+    _ = control.redactAllProductProjectionsNoFail("SECRET-KEY");
     var detached = task.runtime.detach(.cold_start);
     var detached_execution = detached.execution;
     detached_execution.deinit();
@@ -16699,7 +16701,7 @@ test "released Task credential is permanently scrubbed from every product projec
     );
     @constCast(compactTerminalPayload(compact).?).diagnostic_len =
         "compact SECRET-KEY".len;
-    control.redactAllProductProjectionsNoFail("SECRET-KEY");
+    _ = control.redactAllProductProjectionsNoFail("SECRET-KEY");
     try std.testing.expect(run.execution.?.automatic_title.generated_redacted);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -16754,13 +16756,13 @@ test "known credential matching chooses the longest overlapping secret" {
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "***-KEY") == null);
 }
 
-test "Product view security epoch invalidates learned and retiring credentials" {
+test "Product view security epoch invalidates learned credentials and fails closed once exhausted" {
     var control = try testRuntime();
     defer control.deinit();
     const epoch = control.projectionSecurityEpoch();
     control.learnProjectionCredential("future-credential");
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
-    control.redactAllProductProjectionsNoFail("");
+    _ = control.redactAllProductProjectionsNoFail("");
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
     var storage: [96 * 1024]u8 = undefined;
     const view = try control.writeViewFixture(&storage, .{});
@@ -16768,7 +16770,7 @@ test "Product view security epoch invalidates learned and retiring credentials" 
     defer parsed.deinit();
     try std.testing.expectEqual(control.projectionSecurityEpoch(), try std.fmt.parseInt(u64, parsed.value.object.get("securityEpoch").?.string, 10));
     control.projection_security_epoch = std.math.maxInt(u64);
-    control.retireProjectionCredential("retiring-credential");
+    control.learnProjectionCredential("last-credential");
     try std.testing.expectEqual(@as(u64, 0), control.projectionSecurityEpoch());
     try std.testing.expectError(error.InvalidViewRequest, control.writeViewFixture(&storage, .{}));
 }
@@ -18472,9 +18474,6 @@ test "canonical prompt title and terminal diagnostic never retain the registered
 
 test "published model errors are scrubbed against Account credentials before terminal drain" {
     const Account = struct {
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
         fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             try callback(context, "LATE-SECRET");
         }
@@ -18482,7 +18481,7 @@ test "published model errors are scrubbed against Account credentials before ter
     var control = try testRuntime();
     defer control.deinit();
     var account: u8 = 0;
-    control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    control.setAccountProjectionCredentials(.{ .context = &account, .visit_fn = Account.visit });
     const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
     const storage = try control.allocator.create(task_test_state.RunModelError);
@@ -19729,9 +19728,6 @@ test "a Tool record whose references or name cannot fit is still sent, so later 
 
 test "Tool pages hide credentials learned after the record was kept" {
     const Account = struct {
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
         fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             try callback(context, "page-account-key");
         }
@@ -19740,7 +19736,7 @@ test "Tool pages hide credentials learned after the record was kept" {
     defer control.deinit();
     try applyTestToolResult(&control, "secret", "before page-account-key after");
     var owner: u8 = 0;
-    control.setAccountProjectionCredentials(.{ .context = &owner, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    control.setAccountProjectionCredentials(.{ .context = &owner, .visit_fn = Account.visit });
     var output: [16 * 1024]u8 = undefined;
     const text = control.liveViewText();
     const page = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, 0, tool_page_source_bytes);
@@ -20345,7 +20341,7 @@ test "Runtime re-scrubs file change diffs with credentials learned after write" 
     // intentionally left untouched; the read boundary must protect it using
     // the complete set of credentials that is live at read time.
     try TestSupport.installFixtureCredential(&control, late_credential);
-    control.redactAllProductProjectionsNoFail(late_credential);
+    _ = control.redactAllProductProjectionsNoFail(late_credential);
 
     const Capture = struct {
         calls: usize = 0,
@@ -22778,14 +22774,11 @@ test "empty MCP startup commits a proven manageable runtime" {
     ) != null);
     // The same Host-known credential predicate protects every write path.
     const Credential = struct {
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
         fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             try callback(context, "SYNTHETIC-MCP-CREDENTIAL");
         }
     };
-    const credentials: account_contract.AccessTokenProjection = .{ .context = &control, .generation_fn = Credential.generation, .visit_fn = Credential.visit };
+    const credentials: account_contract.AccessTokenProjection = .{ .context = &control, .visit_fn = Credential.visit };
     control.account_credentials = credentials;
     const leaking_http = try control.createMcpHttpServer(0, .{ .display_name = "Bad", .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL" });
     try std.testing.expectEqual(.rejected, leaking_http.outcome);
@@ -23903,7 +23896,7 @@ test "Product view duplicate credential ownership preserves reads while exact ne
     defer control.allocator.free(duplicate);
     control.learnProjectionCredential(duplicate);
     control.retireProjectionCredential(duplicate);
-    control.redactAllProductProjectionsNoFail(duplicate);
+    _ = control.redactAllProductProjectionsNoFail(duplicate);
     try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
     try std.testing.expectEqual(wakes, host.wakes.load(.monotonic));
     try control.writeSnapshotRange(read.id, &output, 0, 64);
@@ -23912,14 +23905,62 @@ test "Product view duplicate credential ownership preserves reads while exact ne
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
     try std.testing.expectEqual(wakes + 1, host.wakes.load(.monotonic));
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
-    const next = try control.writeSnapshot(&output, .{});
-    // The separately owned duplicate above preserved the live credential set;
-    // retiring the remaining Task owner must invalidate captured reads.
+    // The last owner leaves nothing to rewrite, so neither the captured read
+    // nor anything shown is revoked.
+    var next = try control.writeSnapshot(&output, .{ .task_id = 3 });
     const task_credential = (try control.task_runtime.testExecutionInput(3)).api_key;
     control.retireProjectionCredential(task_credential);
+    control.retireProjectionCredential("SECRET");
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    try std.testing.expectEqual(wakes + 1, host.wakes.load(.monotonic));
+    while (next.bytes == 0) next = try control.continueSnapshot(next.id, &output);
+    try control.writeSnapshotRange(next.id, &output, 0, 64);
+    // Learning a released value is learning an unknown one.
+    control.learnProjectionCredential("SECRET");
     try std.testing.expectEqual(epoch + 2, control.projectionSecurityEpoch());
-    try std.testing.expectEqual(wakes + 2, host.wakes.load(.monotonic));
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(next.id, &output, 0, 64));
+}
+
+test "Product view release revokes what its scrub rewrote or dropped and nothing else" {
+    const Owner = enum { task, workspace, pinned_text, pinned_identity, catalog_text, catalog_identity };
+    for (std.enums.values(Owner)) |owner| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const task = control.testTaskSlots()[0].?;
+        switch (owner) {
+            .task => try control.replaceTracked(&task.durable.title, "title late-secret", control.limits.max_task_title_bytes),
+            .workspace => product_workspace.testing.overwriteProjectedRoot(&control.workspace, 1, "late-secret"),
+            .pinned_text, .pinned_identity => {
+                const pinned = try testCommittedSkillCatalog(&control);
+                control.projection_bytes += pinned.projected_bytes;
+                task.runtime.attached().?.pinned_catalog = pinned;
+            },
+            .catalog_text, .catalog_identity => try installTestCommittedSkillAuthorities(&control),
+        }
+        const credential = switch (owner) {
+            .task, .workspace => "late-secret",
+            .pinned_text, .catalog_text => "Review changes",
+            .pinned_identity, .catalog_identity => "builtin.review",
+        };
+        var output: [96 * 1024]u8 = undefined;
+        const read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+        const epoch = control.projectionSecurityEpoch();
+        control.retireProjectionCredential(credential);
+        try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+        try std.testing.expectError(error.StaleSnapshot, control.continueSnapshot(read.id, &output));
+        control.retireProjectionCredential(credential);
+        try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    }
+
+    // A known value showed only masked, so finding it again revokes nothing.
+    var control = try testRuntime();
+    defer control.deinit();
+    const title = &control.testTaskSlots()[0].?.durable.title;
+    try control.replaceTracked(title, "title SECRET-KEY", control.limits.max_task_title_bytes);
+    const epoch = control.projectionSecurityEpoch();
+    control.learnProjectionCredential("SECRET-KEY");
+    try std.testing.expectEqualStrings("title **********", title.*);
+    try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
 }
 
 test "Product view history versions ignore unrelated revisions and observe terminal artifact completion" {
@@ -23999,9 +24040,6 @@ test "Product view failed preparation step releases its source and credentials" 
 test "the global instructions editor works under the home only and never carries a known credential" {
     const Account = struct {
         token: []const u8 = "account-instructions-token",
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
         fn visit(context: *anyopaque, visitor_context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             const self: *@This() = @ptrCast(@alignCast(context));
             try callback(visitor_context, self.token);
@@ -24010,7 +24048,7 @@ test "the global instructions editor works under the home only and never carries
     var control = try testRuntime();
     defer control.deinit();
     var account: Account = .{};
-    control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    control.setAccountProjectionCredentials(.{ .context = &account, .visit_fn = Account.visit });
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
@@ -24046,24 +24084,21 @@ test "the global instructions editor works under the home only and never carries
     try std.testing.expect(guarded.loaded.text == null);
 }
 
-test "Account image token protects Task views between Runs and rotation revokes reads" {
+test "Account token protects Task views and revokes reads only where it was shown" {
     const Account = struct {
         token: []const u8 = "account-image-token",
-        epoch: u64 = 1,
-        fn generation(context: *anyopaque) u64 {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            return self.epoch;
-        }
+        replaced: ?[]const u8 = null,
         fn visit(context: *anyopaque, visitor_context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             const self: *@This() = @ptrCast(@alignCast(context));
             try callback(visitor_context, self.token);
+            if (self.replaced) |token| try callback(visitor_context, token);
         }
     };
     var control = try testRuntime();
     defer control.deinit();
     try TestSupport.installFixtureCredential(&control, "custom-api-key");
     var account: Account = .{};
-    control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    control.setAccountProjectionCredentials(.{ .context = &account, .visit_fn = Account.visit });
     try std.testing.expect(!std.mem.eql(u8, account.token, TestSupport.fixtureExecution(&control).input().api_key));
     var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"account-tool\",\"name\":\"Bash\",\"input\":\"{\\\"command\\\":\\\"echo account\\\\u002dimage-token\\\"}\",\"content\":\"done\",\"is_error\":false,\"elapsed_ms\":1}}");
     defer event.deinit();
@@ -24095,13 +24130,36 @@ test "Account image token protects Task views between Runs and rotation revokes 
     var writer = std.Io.Writer.fixed(&output);
     try control.liveViewText().writeJson(&writer, "account-image-token");
     try std.testing.expectEqualStrings("\"***\"", writer.buffered());
-    account.token = "rotated-account-image-token";
-    account.epoch += 1;
-    control.syncAccountProjectionCredentialNoFail();
-    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    // A token from Account was in nothing shown before: a read goes on, whether
+    // it continues another or, as after a login, none was held.
+    const sink = control.accountCommitSink();
+    const changed: control_ports.AccountCommit = .{ .fact = .{ .kind = .session_changed, .view = .{ .state = .checking } }, .attempt_id = null, .attempt_terminal = false, .token_changed = true };
+    account = .{ .token = "renewed-account-token", .replaced = "account-image-token" };
+    sink.commitNoFail(changed);
+    try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
+    try control.writeSnapshotRange(read.id, &output, 0, 64);
+    try std.testing.expect(control.containsKnownCredential("prefix renewed-account-token suffix"));
+    try std.testing.expect(control.containsKnownCredential("prefix account-image-token suffix"));
+    // Found where it is shown, the one held or the one replaced was not hidden
+    // everywhere after all.
+    for ([_][]const u8{ "renewed-account-token", "account-image-token" }) |shown| {
+        const title = &control.testTaskSlots()[0].?.durable.title;
+        try control.replaceTracked(title, shown, control.limits.max_task_title_bytes);
+        const before = control.projectionSecurityEpoch();
+        sink.commitNoFail(changed);
+        try std.testing.expectEqual(before + 1, control.projectionSecurityEpoch());
+        sink.commitNoFail(changed);
+        try std.testing.expectEqual(before + 1, control.projectionSecurityEpoch());
+    }
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
-    control.syncAccountProjectionCredentialNoFail();
-    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    // Leaving, it revokes what it was found in, and nothing else.
+    const renewal = control.metaskCredentialRenewal();
+    const left = control.projectionSecurityEpoch();
+    renewal.retire(account.replaced.?);
+    try std.testing.expectEqual(left, control.projectionSecurityEpoch());
+    try control.replaceTracked(&control.testTaskSlots()[0].?.durable.title, account.replaced.?, control.limits.max_task_title_bytes);
+    renewal.retire(account.replaced.?);
+    try std.testing.expectEqual(left + 1, control.projectionSecurityEpoch());
 }
 
 test "history import degradation survives normalized startup metadata" {
@@ -24116,9 +24174,6 @@ test "history import degradation survives normalized startup metadata" {
 
 test "rejected credential-bearing history frees the encoded candidate on every attempt" {
     const Account = struct {
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
         fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             try callback(context, "unredacted-history-key");
         }
@@ -24128,7 +24183,7 @@ test "rejected credential-bearing history frees the encoded candidate on every a
     var history: TestTaskPersistence = .{ .storage = &storage };
     var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
     defer control.deinit();
-    control.setAccountProjectionCredentials(.{ .context = &owner, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    control.setAccountProjectionCredentials(.{ .context = &owner, .visit_fn = Account.visit });
     try control.replaceTracked(&control.testTask(3).?.durable.title, "unredacted-history-key", control.limits.max_task_title_bytes);
     const before = history.commits;
     for (0..8) |_| try std.testing.expectError(error.TaskStoreEncodeFailed, control.commitTaskState());
@@ -24146,12 +24201,12 @@ test "learned short credentials scrub Runtime retained and readonly originals wi
     const readonly = try std.fmt.allocPrint(control.allocator, "{s},\"future\":\"none\"}}", .{original[0 .. original.len - 1]});
     control.testTask(record.id).?.read_only_history = .{ .recent_order = record.recent_order, .payload = readonly };
     try control.task_runtime.retainRecord(.{ .kind = .task, .id = 93, .order = 93, .payload = "{\"checkpoint_anchor\":\"none\",\"future\":\"n\\u006fne\"}" });
-    control.redactAllProductProjectionsNoFail("none");
+    _ = control.redactAllProductProjectionsNoFail("none");
     const payload = control.testTask(record.id).?.read_only_history.?.payload;
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"checkpoint_anchor\":\"none\"") != null);
     try std.testing.expect(!try task_persistence.security.contains(control.allocator, task_persistence.ReadOnlyPayload{ .task_id = record.id, .recent_order = record.recent_order, .payload = payload }, "none"));
     try std.testing.expect(!try task_persistence.security.contains(control.allocator, control.task_runtime.retained.items, "none"));
-    control.redactAllProductProjectionsNoFail("none");
+    _ = control.redactAllProductProjectionsNoFail("none");
     try std.testing.expectEqual(@as(usize, 1), control.task_runtime.retained.items.len);
 }
 
@@ -24528,7 +24583,7 @@ test "late credential discovery revokes Output locators in current and durable p
     const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     try std.testing.expect(!run.outputs[0].?.redacted);
-    control.redactAllProductProjectionsNoFail("late-secret");
+    _ = control.redactAllProductProjectionsNoFail("late-secret");
     try std.testing.expect(run.outputs[0].?.redacted);
     try TestSupport.commitTaskHistory(&control);
     var decoded = try task_persistence.decode(std.testing.allocator, storage[0..history.len], testTaskPersistenceLimits());

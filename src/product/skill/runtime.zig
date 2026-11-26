@@ -777,13 +777,14 @@ pub const Runtime = struct {
         workspace.reschedule_pending = authorized;
     }
 
+    /// True when any catalog was rewritten or dropped.
     pub fn redactCatalogsNoFail(
         self: *Runtime,
         credential: []const u8,
         budget: ProjectionBudget,
-    ) void {
-        if (credential.len == 0) return;
-        redactControlNoFail(
+    ) bool {
+        if (credential.len == 0) return false;
+        var rewrote = redactControlNoFail(
             self,
             &self.state.catalog,
             credential,
@@ -795,10 +796,12 @@ pub const Runtime = struct {
             if (snapshot.identityContainsCredential(credential)) {
                 workspace.reschedule_pending = false;
                 self.invalidateControlWithBudget(&workspace.control, budget);
+                rewrote = true;
             } else {
-                snapshot.redactPresentationNoFail(credential);
+                rewrote = snapshot.redactPresentationNoFail(credential) or rewrote;
             }
         }
+        return rewrote;
     }
 
     pub fn enablementHealth(self: *const Runtime) state.EnablementHealth {
@@ -2038,12 +2041,12 @@ fn redactControlNoFail(
     control: *state.CatalogControl,
     credential: []const u8,
     budget: ProjectionBudget,
-) void {
-    const snapshot = control.slot.snapshot() orelse return;
-    if (snapshot.identityContainsCredential(credential))
-        self.invalidateControlWithBudget(control, budget)
-    else
-        snapshot.redactPresentationNoFail(credential);
+) bool {
+    const snapshot = control.slot.snapshot() orelse return false;
+    if (!snapshot.identityContainsCredential(credential))
+        return snapshot.redactPresentationNoFail(credential);
+    self.invalidateControlWithBudget(control, budget);
+    return true;
 }
 
 fn nextGeneration(current: u64) ?u64 {

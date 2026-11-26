@@ -1062,9 +1062,13 @@ pub const RedactionEffects = struct {
     redact_fn: *const fn ([]u8, []const u8) bool,
     release_projection_bytes_fn: *const fn (*anyopaque, usize) void,
     context: *anyopaque,
+    /// Set once any value was rewritten.
+    rewrote: ?*bool = null,
 
     fn redact(self: RedactionEffects, value: []u8, credential: []const u8) bool {
-        return self.redact_fn(value, credential);
+        if (!self.redact_fn(value, credential)) return false;
+        if (self.rewrote) |rewrote| rewrote.* = true;
+        return true;
     }
 
     fn releaseProjectionBytes(self: RedactionEffects, bytes: usize) void {
@@ -4687,7 +4691,8 @@ pub const Runtime = struct {
 
     /// Account authority is checked by Product Control. This owner owns the
     /// Session/Host atomic handoff; any current login renews the installed
-    /// credential in place. `value` and `generation` come from one lease.
+    /// credential in place. `value` is the token of `generation`, lent for the
+    /// call.
     pub fn renewMetaskCredential(self: *Runtime, task_id: u64, generation: u64, value: []const u8, origin: CredentialOrigin) !CredentialRenewal {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.restore_job != null) return .unrelated;
@@ -4767,25 +4772,13 @@ pub const Runtime = struct {
         return false;
     }
 
-    pub fn deferMetaskCredentialRenewals(self: *Runtime) void {
-        for (self.tasks) |entry| if (entry) |task| {
-            if (self.renewsMetaskCredential(task.durable.id))
-                task.runtime.credential_renewal_deferred = true;
-        };
-    }
-
-    pub fn renewMetaskExecutions(self: *Runtime, generation: u64, credential: ?[]const u8, effects: OperationEffects) bool {
+    pub fn renewMetaskExecutions(self: *Runtime, generation: u64, credential: []const u8, effects: OperationEffects) bool {
         var changed = false;
         for (self.tasks) |entry| if (entry) |task| {
             const id = task.durable.id;
             changed = self.renewMetaskMedia(id, generation, credential) or changed;
             if (!self.renewsMetaskCredential(id)) continue;
-            const value = credential orelse {
-                self.failCredentialRenewal(id, generation, true, false);
-                changed = true;
-                continue;
-            };
-            const outcome = self.renewMetaskCredential(id, generation, value, .delivery) catch |err| {
+            const outcome = self.renewMetaskCredential(id, generation, credential, .delivery) catch |err| {
                 self.failMetaskCredentialUpdate(id, generation, err, effects);
                 changed = true;
                 continue;
@@ -4814,7 +4807,7 @@ pub const Runtime = struct {
         access.requestTermination(task.runtime.active_run_id, .{ .credential_update_failure = if (contract) .dependency_contract else if (resource) .resource_limit else .rejected }) catch {};
     }
 
-    fn renewMetaskMedia(self: *Runtime, task_id: u64, generation: u64, value: ?[]const u8) bool {
+    fn renewMetaskMedia(self: *Runtime, task_id: u64, generation: u64, value: []const u8) bool {
         const task = self.find(task_id) orelse return false;
         var changed = false;
         for (task.durable.runs) |*entry| if (entry.*) |*run| {
@@ -4826,13 +4819,11 @@ pub const Runtime = struct {
         return changed;
     }
 
-    fn renewMediaCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, authorization: *task_state.MediaCredentials, generation: u64, value: ?[]const u8) bool {
+    fn renewMediaCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, authorization: *task_state.MediaCredentials, generation: u64, value: []const u8) bool {
         if (authorization.generation == generation) return false;
         const source = authorization.source orelse return false;
         authorization.generation = generation;
-        if (value) |key| {
-            installMediaCredential(allocator, run, authorization, key) catch source.invalidate();
-        } else source.invalidate();
+        installMediaCredential(allocator, run, authorization, value) catch source.invalidate();
         return true;
     }
 
@@ -6829,15 +6820,14 @@ pub const Runtime = struct {
         return false;
     }
 
-    /// Exact value membership, excluding aliases of an owner about to release.
-    /// The caller borrows bytes synchronously; this creates no secret registry.
-    pub fn retainsCredential(self: *const Runtime, value: []const u8, releasing: ?[*]const u8) bool {
+    /// Exact value membership. The caller borrows bytes synchronously; this
+    /// creates no secret registry.
+    pub fn retainsCredential(self: *const Runtime, value: []const u8) bool {
         if (value.len == 0) return false;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             var credentials = RetainedCredentials{ .task = task };
             while (credentials.next()) |credential| {
-                if (releasing != null and credential.ptr == releasing.?) continue;
                 if (std.mem.eql(u8, credential, value)) return true;
             }
         }
@@ -6911,12 +6901,16 @@ pub const Runtime = struct {
         return false;
     }
 
+    /// True when anything it covers was rewritten or dropped.
     pub fn redactProjectionsNoFail(
         self: *Runtime,
         credential: []const u8,
         effects: RedactionEffects,
-    ) void {
-        if (credential.len == 0) return;
+    ) bool {
+        if (credential.len == 0) return false;
+        var rewrote = false;
+        var observed = effects;
+        observed.rewrote = &rewrote;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             if (task.runtime.pinnedCatalog()) |snapshot| {
@@ -6924,8 +6918,9 @@ pub const Runtime = struct {
                     effects.releaseProjectionBytes(snapshot.projected_bytes);
                     snapshot.deinit();
                     task.runtime.live().?.pinned_catalog = null;
+                    rewrote = true;
                 } else {
-                    snapshot.redactPresentationNoFail(credential);
+                    rewrote = snapshot.redactPresentationNoFail(credential) or rewrote;
                 }
             }
             if (task.runtime.restore_catalog) |*snapshot| {
@@ -6933,10 +6928,12 @@ pub const Runtime = struct {
                     effects.releaseProjectionBytes(snapshot.projected_bytes);
                     snapshot.deinit();
                     task.runtime.restore_catalog = null;
-                } else snapshot.redactPresentationNoFail(credential);
+                    rewrote = true;
+                } else rewrote = snapshot.redactPresentationNoFail(credential) or rewrote;
             }
-            redactTaskProjection(task, credential, effects);
+            redactTaskProjection(task, credential, observed);
         }
+        return rewrote;
     }
 
     pub fn writeProjectionList(

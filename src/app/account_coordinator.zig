@@ -15,6 +15,23 @@ pub const AuthorizationFollower = struct {
     }
 };
 
+/// The authorization as last published. Its epochs change only with a commit,
+/// which publishes anyway.
+const Published = struct {
+    state: std.meta.Tag(account_contract.Authorization),
+    generation: u64,
+
+    fn of(authorization: account_contract.Authorization) Published {
+        return .{
+            .state = authorization,
+            .generation = switch (authorization) {
+                .available => |value| value.generation,
+                .checking, .signed_out, .authorizing, .recovering, .stalled => 0,
+            },
+        };
+    }
+};
+
 /// Application binder for Account: terminal commits, the authorization query,
 /// and the only way out for the current credential.
 pub const Coordinator = struct {
@@ -25,6 +42,7 @@ pub const Coordinator = struct {
     credential_renewal: ?control_ports.MetaskCredentialRenewal = null,
     /// The credential generation running executions already received.
     delivered_generation: u64 = 0,
+    published: ?Published = null,
     stopping: bool = false,
 
     pub fn init(
@@ -142,6 +160,18 @@ pub const Coordinator = struct {
             if (!self.commitPrepared(prepared).accepted) break;
             committed = true;
         }
+        // Product rewrites what only masking hid before the token leaves.
+        while (self.runtime.expiredGrant()) |grant| {
+            if (self.credential_renewal) |renewal| renewal.retire(grant.accessToken().?);
+            self.runtime.forgetGrant(grant);
+        }
+        // A token that expired, or a clock that reads again, is no commit. A
+        // token installed while no clock could judge it may be usable only now.
+        const current: Published = .of(self.runtime.authorization());
+        if (self.published) |published| if (!std.meta.eql(published, current)) {
+            self.publish();
+            committed = true;
+        };
         return committed;
     }
 
@@ -183,15 +213,8 @@ pub const Coordinator = struct {
     }
 
     fn renew(self: *Coordinator, renewal: control_ports.MetaskCredentialRenewal, generation: u64) void {
-        var credential = (self.runtime.credential() catch {
-            self.delivered_generation = generation;
-            renewal.renew(generation, null);
-            return;
-        }) orelse return;
-        defer credential.deinit();
-        std.debug.assert(credential.authorization_generation == generation);
         self.delivered_generation = generation;
-        renewal.renew(generation, credential.access_token);
+        renewal.renew(generation, self.runtime.accessToken().?);
     }
 
     fn readyGeneration(self: *Coordinator) ?u64 {
@@ -219,18 +242,15 @@ pub const Coordinator = struct {
 
         // Account commits its own state first; every later step is no-fail and
         // cannot re-enter or roll back that transaction. Product learns the
-        // fact and its credential before anyone uses it, running executions
-        // take the credential before the catalog follows, and scheduled work
-        // rearms only once all of them agree.
+        // fact and inspects the tokens before anyone uses the new one.
         self.runtime.commit(&prepared);
         self.control.commitNoFail(.{
             .fact = fact,
             .attempt_id = attempt_id,
             .attempt_terminal = attempt_terminal,
+            .token_changed = prepared.token_changed,
         });
-        self.deliverCredential();
-        if (self.follower) |follower| follower.follow(self.runtime.authorization());
-        self.control.settleNoFail();
+        self.publish();
         if (!self.stopping and self.runtime.reconcileSummary())
             self.commitSummaryNoFail();
 
@@ -253,6 +273,16 @@ pub const Coordinator = struct {
             std.debug.assert(refreshed.accepted);
         }
         return .acceptedAttempt(attempt_id);
+    }
+
+    /// Running executions take a new token before the catalog follows, and
+    /// scheduled work rearms only once all of them agree. Nothing is handed
+    /// over twice for one generation.
+    fn publish(self: *Coordinator) void {
+        self.deliverCredential();
+        if (self.follower) |follower| follower.follow(self.runtime.authorization());
+        self.published = .of(self.runtime.authorization());
+        self.control.settleNoFail();
     }
 
     pub fn beginShutdown(self: *Coordinator) void {
@@ -320,7 +350,6 @@ const RecordingSink = struct {
 
     fn settle(context: *anyopaque) void {
         const self: *RecordingSink = @ptrCast(@alignCast(context));
-        std.debug.assert(self.unsettled);
         self.unsettled = false;
         if (self.steps) |steps| steps.add(.settle);
     }
@@ -353,7 +382,7 @@ const RecordingSink = struct {
 };
 
 const CommitSteps = struct {
-    const Step = enum { commit, renew, renew_failed, follow, settle };
+    const Step = enum { commit, renew, follow, settle, retire };
     items: [16]Step = undefined,
     count: usize = 0,
 
@@ -368,13 +397,19 @@ const CommitSteps = struct {
     }
 
     fn renewal(self: *CommitSteps) control_ports.MetaskCredentialRenewal {
-        return .{ .context = self, .renew_fn = renew, .needs_fn = needs, .waits_fn = waits };
+        return .{ .context = self, .renew_fn = renew, .needs_fn = needs, .waits_fn = waits, .retire_fn = retire };
     }
 
-    fn renew(context: *anyopaque, generation: u64, credential: ?[]const u8) void {
+    fn renew(context: *anyopaque, generation: u64, credential: []const u8) void {
         const self: *CommitSteps = @ptrCast(@alignCast(context));
-        std.debug.assert(generation != 0);
-        self.add(if (credential == null) .renew_failed else .renew);
+        std.debug.assert(generation != 0 and credential.len != 0);
+        self.add(.renew);
+    }
+
+    fn retire(context: *anyopaque, credential: []const u8) void {
+        const self: *CommitSteps = @ptrCast(@alignCast(context));
+        std.debug.assert(std.mem.eql(u8, credential, "access-token"));
+        self.add(.retire);
     }
 
     fn needs(_: *anyopaque, _: u64) bool {
@@ -692,9 +727,14 @@ test "Account coordinator commits identity before notifying Product" {
     try std.testing.expect(!sink.records[0].attempt_terminal);
 }
 
-test "Account coordinator publishes explicit terminal attempt metadata" {
+test "Account logout reaches Product as one commit of no attempt" {
     var runtime = try initRuntimeForTest();
-    defer runtime.deinit();
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
         &runtime,
@@ -712,16 +752,14 @@ test "Account coordinator publishes explicit terminal attempt metadata" {
         ),
     );
 
-    const result = coordinator.commitPrepared(
-        account_api.TestSupport.prepareLoggedOutAfterExternalCommit(&runtime),
-    );
+    const result = coordinator.commandSink().submit(.logout);
 
     try std.testing.expect(result.accepted);
-    try std.testing.expectEqual(@as(usize, 2), sink.count);
-    try std.testing.expectEqual(account_contract.AccountFactKind.signed_out, sink.records[1].kind);
-    try std.testing.expectEqual(account_contract.AccountState.signed_out, sink.records[1].state);
-    try std.testing.expect(sink.records[1].attempt_id != null);
-    try std.testing.expect(sink.records[1].attempt_terminal);
+    const logout = sink.records[sink.count - 1];
+    try std.testing.expectEqual(account_contract.AccountFactKind.signed_out, logout.kind);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, logout.state);
+    try std.testing.expect(logout.attempt_id == null and !logout.attempt_terminal);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
 }
 
 test "Account test platform exposes deterministic clock timer and credential faults" {
@@ -1131,6 +1169,54 @@ test "Account follower keeps the authorization of a token still valid or expirin
     try std.testing.expectEqual(.recovering, follower.last);
 }
 
+test "Account publishes an authorization that only time changed" {
+    var transport: ClosingRefreshTransport = .{};
+    var runtime = account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), account_api.TestSupport.loopbackEndpoint(), .{ .context = &testing_wake_context, .notify_fn = testingWake });
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100, .boot_seconds = 100 };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var steps: CommitSteps = .{};
+    var sink: RecordingSink = .{ .runtime = &runtime, .steps = &steps };
+    var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+    coordinator.setFollower(steps.follower());
+    coordinator.setCredentialRenewal(steps.renewal());
+    _ = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask User", "access-token", "refresh-token", 150),
+    );
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    _ = steps.take();
+    // Expired, then no clock to judge it by, then the clock again. What was
+    // delivered is not delivered again.
+    for ([_]?i64{ 149, 150, null, 150 }) |now| {
+        platform.now_unix_seconds = now;
+        const changed = now == null or now.? == 150;
+        try std.testing.expectEqual(changed, coordinator.tick());
+        try std.testing.expectEqualSlices(CommitSteps.Step, if (changed) &.{ .follow, .settle } else &.{}, steps.take());
+        try std.testing.expect(!coordinator.tick());
+    }
+    // What a wait counts is no change of its own.
+    try std.testing.expectEqual(Published.of(.{ .recovering = 1 }), Published.of(.{ .recovering = 2 }));
+
+    // A token installed while the wall clock had run ahead is already over by
+    // it, so only the clock coming back makes it usable.
+    _ = coordinator.commitPrepared(account_api.TestSupport.prepareTokenRefresh(&runtime));
+    account_api.TestSupport.joinNetwork(&runtime);
+    platform.now_unix_seconds = 10_000;
+    coordinator.drain();
+    try std.testing.expectEqualStrings("new-access", runtime.accessToken().?);
+    try std.testing.expect(std.mem.indexOfScalar(CommitSteps.Step, steps.take(), .renew) == null);
+    const committed = sink.count;
+    platform.now_unix_seconds = 200;
+    try std.testing.expect(coordinator.tick());
+    try std.testing.expectEqualSlices(CommitSteps.Step, &.{ .renew, .follow, .settle }, steps.take());
+    try std.testing.expect(!coordinator.tick());
+    try std.testing.expectEqual(committed, sink.count);
+}
+
 test "Account commit installs, renews, follows and settles in that order" {
     var runtime = try initRuntimeForTest();
     var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
@@ -1153,17 +1239,18 @@ test "Account commit installs, renews, follows and settles in that order" {
     _ = coordinator.commandSink().submit(.cancel_operation);
     try std.testing.expect(std.mem.indexOfScalar(CommitSteps.Step, steps.take(), .renew) == null);
 
-    // Without memory for the copy, running executions end; none may go on
-    // with a credential Account already replaced.
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    runtime.authorization_generation += 1;
-    const allocator = runtime.allocator;
-    runtime.allocator = failing.allocator();
-    defer runtime.allocator = allocator;
-    coordinator.deliverCredential();
-    try std.testing.expectEqualSlices(CommitSteps.Step, &.{.renew_failed}, steps.take());
-    coordinator.deliverCredential();
+    // A token that ended is retired once nothing can accept it, which no wall
+    // clock decides, and is not inspected any more after that.
+    _ = coordinator.commandSink().submit(.logout);
+    _ = steps.take();
+    platform.boot_seconds = 259;
+    platform.now_unix_seconds = 100_000;
+    try std.testing.expect(!coordinator.tick());
     try std.testing.expectEqual(@as(usize, 0), steps.take().len);
+    platform.boot_seconds = 260;
+    try std.testing.expect(!coordinator.tick());
+    try std.testing.expectEqualSlices(CommitSteps.Step, &.{.retire}, steps.take());
+    try std.testing.expect(runtime.credentials.retired == null);
 }
 
 const ClosingRefreshTransport = struct {
@@ -1235,7 +1322,7 @@ test "Account shutdown saves mailbox or in-flight rotation once before detaching
         try std.testing.expect(coordinator.commandSink().submit(.begin_login).error_code == .invalid_state);
         try std.testing.expect(runtime.platform == null);
         try std.testing.expect(runtime.summary_job == null);
-        try std.testing.expect(!runtime.credentials.refreshAvailable());
+        try std.testing.expect(runtime.credentials.current == null);
     }
 }
 

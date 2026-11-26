@@ -1,378 +1,184 @@
 //! Product Account runtime credential ownership.
 const std = @import("std");
-const contract = @import("metawork_account_contract");
-const state = @import("account_state");
+const builtin = @import("builtin");
 const oauth = @import("account_oauth");
-const metask = @import("metask_client");
 
-/// Opaque refreshed OAuth generation. App may persist and atomically install
-/// it, but token bytes remain owned and interpreted by Account.
-pub const CredentialRotation = struct {
-    tokens: oauth.TokenSet,
-    owned: bool = true,
+/// A moment on both clocks. Whichever reaches it first decides: the wall
+/// clock can be set back, and only it survives a restart of the machine.
+pub const Moment = struct {
+    wall: ?i64,
+    boot: i64,
 
-    pub fn deinit(self: *CredentialRotation) void {
-        if (!self.owned) return;
-        self.tokens.deinit();
-        self.owned = false;
+    pub fn reached(self: Moment, wall_now: ?i64, boot_now: i64) bool {
+        if (self.boot <= boot_now) return true;
+        const at = self.wall orelse return false;
+        return at <= (wall_now orelse return false);
+    }
+};
+
+/// What one token response issued. Made before its request is sent, so a
+/// rotation the server already made is never lost to a local allocation.
+/// Lives on the heap and is never copied: its secrets are its own storage.
+pub const Grant = struct {
+    allocator: std.mem.Allocator,
+    storage: [2 * oauth.Limits.secret_bytes]u8 = undefined,
+    fixed: std.heap.FixedBufferAllocator = undefined,
+    refresh_token: oauth.Secret = .{},
+    /// Absent for a stored login whose refresh token was not exchanged yet.
+    access_token: oauth.Secret = .{},
+    expires_at: i64 = 0,
+    /// When the access token is over and when it is renewed, once dated.
+    times: ?struct { expires: Moment, renews: Moment } = null,
+    /// Boot seconds until which something may still accept the access token.
+    masked_until: i64 = 0,
+    next: ?*Grant = null,
+    /// Counts the access tokens installed in this process.
+    generation: u64 = 0,
+    /// False once a logout could not delete the stored refresh token: its
+    /// marker is stored beside it, so nothing may send it any more.
+    renewable: bool = true,
+
+    pub fn create(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Grant {
+        const self = try allocator.create(Grant);
+        self.* = .{ .allocator = allocator };
+        self.fixed = .init(&self.storage);
+        return self;
     }
 
-    pub fn accountId(self: *const CredentialRotation) []const u8 {
-        std.debug.assert(self.owned);
-        return self.tokens.accountId();
+    /// A login restored from its refresh token alone.
+    pub fn createStored(allocator: std.mem.Allocator, refresh_token: []const u8) !*Grant {
+        const self = try create(allocator);
+        errdefer self.destroy();
+        self.refresh_token = try .init(self.secretAllocator(), refresh_token);
+        return self;
     }
 
-    pub fn bindAccountId(
-        self: *CredentialRotation,
-        account_id: []const u8,
-    ) oauth.ProtocolError!void {
-        std.debug.assert(self.owned);
-        try self.tokens.bindAccountId(account_id);
+    pub fn destroy(self: *Grant) void {
+        self.refresh_token.deinit();
+        self.access_token.deinit();
+        std.crypto.secureZero(u8, &self.storage);
+        self.allocator.destroy(self);
     }
 
-    pub fn persistenceInput(
-        self: *const CredentialRotation,
-    ) *const oauth.TokenSet {
-        std.debug.assert(self.owned);
-        return &self.tokens;
+    /// Holds both secrets of a response at their largest.
+    pub fn secretAllocator(self: *Grant) std.mem.Allocator {
+        return self.fixed.allocator();
     }
 
-    pub fn take(self: *CredentialRotation) CredentialRotation {
-        std.debug.assert(self.owned);
-        const result: CredentialRotation = .{
-            .tokens = self.tokens.take(),
-        };
-        self.owned = false;
-        return result;
+    /// Takes tokens parsed into `secretAllocator`.
+    pub fn issue(self: *Grant, tokens: *oauth.TokenSet) void {
+        self.access_token = tokens.access_token.take();
+        self.refresh_token = tokens.refresh_token.take();
+        self.expires_at = tokens.expires_at;
     }
 
-    fn takeTokens(self: *CredentialRotation) oauth.TokenSet {
-        std.debug.assert(self.owned);
-        const result = self.tokens.take();
-        self.owned = false;
+    pub fn accessToken(self: *const Grant) ?[]const u8 {
+        return if (self.access_token.owned) self.access_token.view() else null;
+    }
+
+    /// Ownership leaves `slot`.
+    pub fn take(slot: *?*Grant) *Grant {
+        const result = slot.*.?;
+        slot.* = null;
         return result;
     }
 };
 
-/// Concrete Account-owned secret lifetime. App may compose this owner and
-/// coordinate commits, but it never receives a borrowed token slice or takes
-/// over the underlying allocations.
-pub const CredentialOwner = struct {
-    tokens: ?oauth.TokenSet = null,
-    stored_refresh_token: ?oauth.Secret = null,
+/// What this process holds of the login. Only a commit changes it. Requests are
+/// sent with their own copies, so nothing borrows it beyond a main-thread call.
+pub const Credentials = struct {
+    current: ?*Grant = null,
+    /// Access tokens that were replaced or ended and may still be accepted.
+    /// Their refresh tokens are gone.
+    retired: ?*Grant = null,
+    generation: u64 = 0,
 
-    pub fn installRefreshToken(
-        self: *CredentialOwner,
-        refresh_token: *oauth.Secret,
-    ) void {
-        self.clear();
-        self.stored_refresh_token = refresh_token.take();
+    pub fn install(self: *Credentials, grant: *Grant) void {
+        self.end();
+        if (grant.accessToken() != null) {
+            self.generation +%= 1;
+            if (self.generation == 0) self.generation = 1;
+            grant.generation = self.generation;
+        }
+        self.current = grant;
     }
 
-    pub fn installStored(
-        self: *CredentialOwner,
-        allocator: std.mem.Allocator,
-        access_token: []const u8,
-        refresh_token: []const u8,
-        expires_at: i64,
-        account_id: []const u8,
-    ) !void {
-        var stored = try oauth.TokenSet.fromStored(
-            allocator,
-            access_token,
-            refresh_token,
-            expires_at,
-            account_id,
-        );
-        self.replace(&stored);
+    pub fn end(self: *Credentials) void {
+        const grant = self.current orelse return;
+        self.current = null;
+        if (grant.accessToken() == null) return grant.destroy();
+        grant.refresh_token.deinit();
+        grant.next = self.retired;
+        self.retired = grant;
     }
 
-    pub fn replace(
-        self: *CredentialOwner,
-        replacement: *oauth.TokenSet,
-    ) void {
-        self.clear();
-        self.tokens = replacement.take();
+    /// An access token is held; a stored login may have none yet.
+    pub fn available(self: *const Credentials) bool {
+        return self.accessToken() != null;
     }
 
-    pub fn replaceRotation(
-        self: *CredentialOwner,
-        rotation: *CredentialRotation,
-    ) void {
-        self.clear();
-        self.tokens = rotation.takeTokens();
+    pub fn accessToken(self: *const Credentials) ?[]const u8 {
+        return (self.current orelse return null).accessToken();
     }
 
-    pub fn available(self: *const CredentialOwner) bool {
-        return self.tokens != null;
+    pub fn refreshToken(self: *const Credentials) ?*const oauth.Secret {
+        return &(self.current orelse return null).refresh_token;
     }
 
-    pub fn refreshAvailable(self: *const CredentialOwner) bool {
-        return self.tokens != null or self.stored_refresh_token != null;
-    }
-
-    pub fn expiresAt(self: *const CredentialOwner) ?i64 {
-        return if (self.tokens) |*tokens| tokens.expires_at else null;
-    }
-
-    pub fn belongsToPrincipal(
-        self: *const CredentialOwner,
-        principal_ref: []const u8,
-    ) bool {
-        const current = if (self.tokens) |*value| value else return false;
-        return std.mem.eql(u8, current.accountId(), principal_ref);
-    }
-
-    pub fn bindPrincipal(
-        self: *CredentialOwner,
-        principal_ref: []const u8,
-    ) oauth.ProtocolError!void {
-        const current = if (self.tokens) |*value| value else return error.InvalidTokenResponse;
-        try current.bindAccountId(principal_ref);
-    }
-
-    /// The principal bound to the installed credentials, if any.
-    pub fn principal(self: *const CredentialOwner) ?[]const u8 {
-        const current = if (self.tokens) |*value| value else return null;
-        return metask.principalOf(current);
-    }
-
-    pub fn refreshToken(self: *const CredentialOwner) ?*const oauth.Secret {
-        if (self.tokens) |*tokens| return &tokens.refresh_token;
-        if (self.stored_refresh_token) |*token| return token;
+    /// A retired token nothing accepts any more.
+    pub fn expired(self: *const Credentials, boot_now: i64) ?*Grant {
+        var next = self.retired;
+        while (next) |grant| : (next = grant.next) if (grant.masked_until <= boot_now) return grant;
         return null;
     }
 
-    pub fn refresh(
-        self: *const CredentialOwner,
-        allocator: std.mem.Allocator,
-        transport: metask.Transport,
-        now_unix_seconds: i64,
-        control: ?metask.RequestControl,
-    ) metask.ClientError!CredentialRotation {
-        var refreshed = if (self.tokens) |*current| try metask.refresh(
-            allocator,
-            transport,
-            current,
-            now_unix_seconds,
-            control,
-        ) else blk: {
-            const refresh_token = if (self.stored_refresh_token) |*value|
-                value
-            else
-                return error.TokenRefreshFailed;
-            // A refresh-only restore has no bound identity yet.
-            break :blk try metask.refreshWithToken(
-                allocator,
-                transport,
-                refresh_token,
-                null,
-                now_unix_seconds,
-                control,
-            );
-        };
-        return .{ .tokens = refreshed.take() };
+    pub fn forget(self: *Credentials, grant: *Grant) void {
+        var link = &self.retired;
+        while (link.* != grant) link = &link.*.?.next;
+        link.* = grant.next;
+        grant.destroy();
     }
 
-    pub fn fetchIdentity(
-        self: *const CredentialOwner,
-        transport: metask.Transport,
-        control: ?metask.RequestControl,
-    ) metask.ClientError!state.AccountIdentity {
-        const current = if (self.tokens) |*value|
-            value
-        else
-            return error.Unauthorized;
-        return metask.fetchIdentity(transport, current, control);
-    }
-
-    pub fn authorizationLease(
-        self: *const CredentialOwner,
-        allocator: std.mem.Allocator,
-        principal_ref: []const u8,
-        authorization_generation: u64,
-    ) !contract.OwnedAuthorizationLease {
-        const current = if (self.tokens) |*value| value else return error.Unauthorized;
-        if (!std.mem.eql(u8, current.accountId(), principal_ref))
-            return error.Unauthorized;
-        return contract.OwnedAuthorizationLease.init(
-            allocator,
-            principal_ref,
-            current.access_token.view(),
-            authorization_generation,
-        );
-    }
-
-    pub fn clear(self: *CredentialOwner) void {
-        if (self.tokens) |*current| current.deinit();
-        self.tokens = null;
-        if (self.stored_refresh_token) |*current| current.deinit();
-        self.stored_refresh_token = null;
-    }
-
-    pub fn deinit(self: *CredentialOwner) void {
-        self.clear();
+    pub fn deinit(self: *Credentials) void {
+        self.end();
+        while (self.retired) |grant| self.forget(grant);
     }
 };
 
-test "CredentialOwner replaces and clears OAuth secret ownership" {
-    var first = try oauth.TokenSet.fromStored(
-        std.testing.allocator,
-        "access-1",
-        "refresh-1",
-        10,
-        "account-1",
-    );
-    defer first.deinit();
-    var second = try oauth.TokenSet.fromStored(
-        std.testing.allocator,
-        "access-2",
-        "refresh-2",
-        20,
-        "account-1",
-    );
-    defer second.deinit();
-    var owner: CredentialOwner = .{};
-    defer owner.deinit();
+pub const TestSupport = if (builtin.is_test) struct {
+    /// A grant as a token response leaves it.
+    pub fn issued(allocator: std.mem.Allocator, access_token: []const u8, refresh_token: []const u8, expires_at: i64) !*Grant {
+        const grant = try Grant.createStored(allocator, refresh_token);
+        errdefer grant.destroy();
+        grant.access_token = try .init(grant.secretAllocator(), access_token);
+        grant.expires_at = expires_at;
+        return grant;
+    }
+} else struct {};
 
-    owner.replace(&first);
-    try std.testing.expect(owner.available());
-    owner.replace(&second);
-    try std.testing.expect(owner.available());
-    owner.clear();
-    try std.testing.expect(!owner.available());
-}
-
-test "CredentialOwner can restore a refresh-only session" {
-    var refresh = try oauth.Secret.init(
-        std.testing.allocator,
-        "refresh-only",
-    );
-    defer refresh.deinit();
-    var owner: CredentialOwner = .{};
-    defer owner.deinit();
-    owner.installRefreshToken(&refresh);
-    try std.testing.expect(owner.refreshAvailable());
-    try std.testing.expect(!owner.available());
-    owner.clear();
-    try std.testing.expect(!owner.refreshAvailable());
-}
-
-test "CredentialOwner issues a bounded authorization lease for its principal" {
-    var owner: CredentialOwner = .{};
-    defer owner.deinit();
-    try owner.installStored(
-        std.testing.allocator,
-        "access-token",
-        "refresh-token",
-        10,
-        "account-1",
-    );
-
-    var lease = try owner.authorizationLease(
-        std.testing.allocator,
-        "account-1",
-        7,
-    );
-    defer lease.deinit();
-    try std.testing.expectEqualStrings("account-1", lease.principal_ref);
-    try std.testing.expectEqualStrings("access-token", lease.access_token);
-    try std.testing.expectEqual(@as(u64, 7), lease.authorization_generation);
-    try std.testing.expectError(
-        error.Unauthorized,
-        owner.authorizationLease(std.testing.allocator, "account-2", 8),
-    );
-}
-
-test "refresh rotation is available before strict identity lookup" {
-    var owner: CredentialOwner = .{};
-    defer owner.deinit();
-    try owner.installStored(
-        std.testing.allocator,
-        "old-access",
-        "old-refresh",
-        10,
-        "account-1",
-    );
-    var fake = struct {
-        step: usize = 0,
-
-        fn perform(
-            context: *anyopaque,
-            request: metask.Request,
-            output: []u8,
-        ) metask.TransportError!metask.Response {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            defer self.step += 1;
-            return switch (self.step) {
-                0 => blk: {
-                    if (request.kind != .refresh_token) return error.ProtocolFailed;
-                    const body =
-                        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600}
-                    ;
-                    @memcpy(output[0..body.len], body);
-                    break :blk .{ .status = 200, .body = output[0..body.len] };
-                },
-                1 => blk: {
-                    if (request.kind != .userinfo or
-                        !std.mem.eql(u8, request.bearer orelse "", "new-access"))
-                        return error.ProtocolFailed;
-                    const body = "{\"code\":\"INVALID_API_KEY\"}";
-                    @memcpy(output[0..body.len], body);
-                    break :blk .{ .status = 401, .body = output[0..body.len] };
-                },
-                else => return error.ProtocolFailed,
-            };
-        }
-    }{};
-    var rotation = try owner.refresh(
-        std.testing.allocator,
-        .{ .context = &fake, .perform_fn = @TypeOf(fake).perform, .retire_fn = metask.retireNothing },
-        100,
-        null,
-    );
-    defer rotation.deinit();
-    try std.testing.expectEqualStrings(
-        "new-refresh",
-        rotation.persistenceInput().refresh_token.view(),
-    );
-    try std.testing.expectEqual(@as(usize, 1), fake.step);
-    owner.replaceRotation(&rotation);
-    try std.testing.expectError(
-        error.ProtocolInvalid,
-        owner.fetchIdentity(
-            .{ .context = &fake, .perform_fn = @TypeOf(fake).perform, .retire_fn = metask.retireNothing },
-            null,
-        ),
-    );
-    try std.testing.expectEqual(@as(usize, 2), fake.step);
-}
-
-test "refresh rotation binds the current principal before ownership transfer" {
-    var owner: CredentialOwner = .{};
-    defer owner.deinit();
-    try owner.installStored(
-        std.testing.allocator,
-        "old-access",
-        "old-refresh",
-        10,
-        "account-1",
-    );
-    var rotated_tokens = try oauth.parseTokenResponse(
-        std.testing.allocator,
-        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":20}
-    ,
-        0,
-    );
-    var rotation: CredentialRotation = .{
-        .tokens = rotated_tokens.take(),
-    };
-    defer rotation.deinit();
-
-    try std.testing.expectEqualStrings("", rotation.accountId());
-    try rotation.bindAccountId("account-1");
-    owner.replaceRotation(&rotation);
-
-    try std.testing.expect(owner.belongsToPrincipal("account-1"));
-    try std.testing.expect(owner.available());
+test "credentials hold one grant and a stored login has no access token" {
+    var credentials: Credentials = .{};
+    defer credentials.deinit();
+    try std.testing.expect(credentials.refreshToken() == null);
+    credentials.install(try Grant.createStored(std.testing.allocator, "refresh-only"));
+    try std.testing.expect(!credentials.available());
+    try std.testing.expectEqualStrings("refresh-only", credentials.refreshToken().?.view());
+    credentials.install(try TestSupport.issued(std.testing.allocator, "access-1", "refresh-1", 10));
+    try std.testing.expectEqualStrings("access-1", credentials.accessToken().?);
+    try std.testing.expectEqualStrings("refresh-1", credentials.refreshToken().?.view());
+    try std.testing.expectEqual(@as(u64, 1), credentials.current.?.generation);
+    credentials.install(try TestSupport.issued(std.testing.allocator, "access-2", "refresh-2", 20));
+    credentials.end();
+    try std.testing.expect(!credentials.available() and credentials.current == null);
+    // Both access tokens may still be accepted; neither refresh token is left.
+    const replaced = credentials.retired.?.next.?;
+    try std.testing.expectEqualStrings("access-1", replaced.accessToken().?);
+    try std.testing.expect(!replaced.refresh_token.owned);
+    replaced.masked_until = 10;
+    credentials.retired.?.masked_until = 20;
+    try std.testing.expect(credentials.expired(9) == null);
+    try std.testing.expectEqual(replaced, credentials.expired(10).?);
+    credentials.forget(replaced);
+    try std.testing.expect(credentials.expired(10) == null);
+    try std.testing.expectEqualStrings("access-2", credentials.expired(20).?.accessToken().?);
 }

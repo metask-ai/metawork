@@ -2070,10 +2070,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    account_credentials_runtime.addImport("account_state", account_state);
     account_credentials_runtime.addImport("account_oauth", account_oauth);
-    account_credentials_runtime.addImport("metawork_account_contract", account_contract);
-    account_credentials_runtime.addImport("metask_client", metask_client);
     const models_providers = b.createModule(.{
         .root_source_file = b.path("src/product/models/providers.zig"),
         .target = target,
@@ -2139,6 +2136,7 @@ fn wireAgentCore(
     });
     account_runtime.addImport("metawork_account_contract", account_contract);
     account_runtime.addImport("account_state", account_state);
+    account_runtime.addImport("account_oauth", account_oauth);
     account_runtime.addImport("metask_client", metask_client);
     account_runtime.addImport("account_credential_store", account_credential_store);
     account_runtime.addImport("account_ports", account_ports);

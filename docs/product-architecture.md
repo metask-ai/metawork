@@ -73,7 +73,7 @@ Account authorization 与 Models catalog 的 committed-state 路径为：
 
 ```text
 Account commits verified identity/credential generation
-→ Product Control copies the secret-free Account fact
+→ Product Control copies the secret-free Account fact and inspects the lent tokens
 → Application notifies Models coordinator
 → coordinator takes one owned authorization lease
 → Models prepares catalog attempt bound to principal + authorization generation
@@ -82,7 +82,7 @@ Account commits verified identity/credential generation
 → later explicit target admission independently resolves current authority
 ```
 
-authorization lease 由 Account 构造，Application 负责在主线程交付或单个 catalog job 的相应生命周期内持有并清零。刷新时先向已接纳消费者交付所需 owned copy，再替换目录 job。Models 只接收 attempt、principal、authorization generation 与 owned catalog completion；Models module 不导入 Account，也不持久化 OAuth token。成功 completion 把 access token 的 owned copy 作为当前 Metask source 的 transient execution credential，下一次 authorization generation 变化会重新加载目录并替换该 copy。Metask 的 source generation 由 principal 派生：同一账号在续期、重启和再次登录后不变，换账号随之改变，换回得到同一个值。credential 的新旧由随 candidate 交付的 Account authorization generation 表示，不由 source generation 表示。已选模型失格或合法空目录时仍接收新 credential，保留的模型意图仍不可执行，其他合格模型按新 credential 解析。纯 credential 轮换不改变用户的模型 selection revision。Application 另向 Product Control 提供主线程、无 secret 的当次授权校验 capability，返回 Account-owned authorization generation；每次 Metask 新执行接纳及恢复候选发布前重新查询，匹配 Models 已接纳目录的 authorization generation，不能由 cached authenticated view、目录仍存在或 Task model intent revision 相同推断授权有效；catalog worker 不拥有 committed state，陈旧 completion 只能销毁。Models 的失败不调用 Account abort、不改变登录状态，也不补写 Account error。
+authorization lease 由 Account 构造，Application 负责在主线程交付或单个 catalog job 的相应生命周期内持有并清零。刷新时先把当前 access token 借给已接纳消费者，由它们各自复制，再替换目录 job。Models 只接收 attempt、principal、authorization generation 与 owned catalog completion；Models module 不导入 Account，也不持久化 OAuth token。成功 completion 把 access token 的 owned copy 作为当前 Metask source 的 transient execution credential，下一次 authorization generation 变化会重新加载目录并替换该 copy。Metask 的 source generation 由 principal 派生：同一账号在续期、重启和再次登录后不变，换账号随之改变，换回得到同一个值。credential 的新旧由随 candidate 交付的 Account authorization generation 表示，不由 source generation 表示。已选模型失格或合法空目录时仍接收新 credential，保留的模型意图仍不可执行，其他合格模型按新 credential 解析。纯 credential 轮换不改变用户的模型 selection revision。Application 另向 Product Control 提供主线程、无 secret 的当次授权校验 capability，返回 Account-owned authorization generation；每次 Metask 新执行接纳及恢复候选发布前重新查询，匹配 Models 已接纳目录的 authorization generation，不能由 cached authenticated view、目录仍存在或 Task model intent revision 相同推断授权有效；catalog worker 不拥有 committed state，陈旧 completion 只能销毁。Models 的失败不调用 Account abort、不改变登录状态，也不补写 Account error。
 
 authorization loss 时 Application cancel/join Metask catalog job并销毁 lease；Models 清除可解析目录及 transient credential并发布 needs_authentication，保留无 secret 起始偏好。只关闭 Metask 新解析与执行资格，custom 来源及既有 owned binding 不被全局暂停；再次登录后既有 Task 按下文规则采用当前授权。
 
@@ -109,7 +109,7 @@ New task 创建只接受完整 `ModelRef + source generation + catalog generatio
 
 既有 Task 的模型选择由 Task owner 准备完整 ModelRef 与独立 revision 的 history overlay，Product Control 验证目标来源并完成 confirmed commit；选择不调用忙碌的 Session，不改变当前 Run 或实际 binding。明确失败回滚 overlay；未知结果保留精确历史候选与原意图，复用既有 history worker 读回，确认前禁止该 Task 新 Run 和再次选择。确认提交后保留新意图，确认未提交则恢复原意图；不能用后来状态重写未知候选来推断原结果。尚未安装的新意图在执行接纳前重新解析目标；已安装的同一意图保持自己的模型，不借用目录刷新或全局默认改变用户意图。Custom Provider 的 protocol、endpoint 与 credential 保持到用户再次选择；Metask 模型自己的 protocol、endpoint 或图片声明与已安装会话不同时，下一次接纳按当前目录重建一次会话，同来源其他模型的变化不影响它。
 
-Metask 的凭据续期与新执行接纳分开：Account 刷新或任意一次登录后，Application 在目录刷新前通过独立 capability 交付当前 lease；Product Control 以该凭据更新已接纳的 Metask 执行，不经过 Models catalog gate。idle、queued、在飞或等待审批的 Session 使用官方原位更新，同步替换 attachment 的当前凭据；单纯轮换不改变 Task binding epoch、execution generation、模型意图、对话或权限，也不重建 Session、重放 Run 或工具。新的 Run 接纳仍校验 Account 与当前目录；Task 已安装的凭据代次与 Account 当前代次不同，或上次原位更新失败，才算凭据旧；代次随解析出的候选带入，安装时不读取 Account 现值，因此恢复期间的续期不会把旧凭据记为当前凭据，下一次接纳原位更新。投影与接纳共用同一个绑定判断（保持、换凭据、setModel、重建、恢复、阻塞），投影不解析 credential。恢复候选沿用既有接纳校验，过时的配置、来源或目录代次拒绝发布，不新增候选热更新或自动重试路径。
+Metask 的凭据续期与新执行接纳分开：Account 刷新或任意一次登录后，Application 在目录刷新前通过独立 capability 借出当前 access token；Product Control 以该凭据更新已接纳的 Metask 执行，不经过 Models catalog gate。idle、queued、在飞或等待审批的 Session 使用官方原位更新，同步替换 attachment 的当前凭据；单纯轮换不改变 Task binding epoch、execution generation、模型意图、对话或权限，也不重建 Session、重放 Run 或工具。新的 Run 接纳仍校验 Account 与当前目录；Task 已安装的凭据代次与 Account 当前代次不同，或上次原位更新失败，才算凭据旧；代次随解析出的候选带入，安装时不读取 Account 现值，因此恢复期间的续期不会把旧凭据记为当前凭据，下一次接纳原位更新。投影与接纳共用同一个绑定判断（保持、换凭据、setModel、重建、恢复、阻塞），投影不解析 credential。恢复候选沿用既有接纳校验，过时的配置、来源或目录代次拒绝发布，不新增候选热更新或自动重试路径。
 
 自动审批仍在主线程准备后立即派发，准备时复制 attachment 当前凭据；已发出的独立请求保留自己的副本。自动标题与生图在每次请求准备时读取当前凭据，目标、模型、可用性和 effect 生命周期保持冻结；读取失败使用各自既有失败语义，不回退到初始 token。生图的 Metask 授权独立于主对话来源，不能把 Metask token 注入 Custom Provider Session。旧凭据仍参与全局脱敏，不能仅因过期或进入 waiting_ui 而删除；相关 operation 返回并经过 canonical event drain、Host 请求静止且历史维护完成后，才释放最后的保留副本。单个长 operation 的保留量及扫描成本可以随刷新次数增长，不以刷新次数上限终止 Run。
 
@@ -379,13 +379,15 @@ Product Task identity、Agent Session route identity、execution generation、Wo
 
 Credential redaction 是 owner 释放协议，而不是 snapshot 时的偶然过滤：
 
-1. Task 创建、恢复/rebind 安装或凭据续期取得新 credential 前，先清洗所有可能包含它的既有产品文本，包括 Schedule durable candidate；
+1. Task 创建、恢复/rebind 安装取得新 credential 前，先清洗所有可能包含它的既有产品文本，包括 Schedule durable candidate；
 2. 实际 credential 替换或释放前，清洗 Workspace、Task、Run、Tool、UI 与 Schedule 的相关 durable candidate；不依赖全局默认 execution；
 3. 释放 quiescent Task-owned ExecutionConfig 前，再用即将释放的 credential 清洗该 Task 的全部产品历史；
-4. durable commit 成功后才能转移或 secure-zero 对应 credential ownership；
+4. durable commit 成功后才能转移或 secure-zero 对应的 Task credential ownership；
 5. 新构建的投影块在交付前继续扫描所有 live credential，作为提交前的第二道防线；仅在内容版本和安全代次均未改变时，才允许复用已经检查过的编码块。
 
-Schedule 脱敏只在已加载计划内容命中待接纳或释放的 credential 时建立持久化前置条件；未命中时不得读取健康度或执行 I/O，也不得阻塞无关 Task。Schedule 脱敏由实际 credential 安装、续期及释放边界触发，覆盖新 credential 可能命中的既有计划文本及即将释放 credential 的历史；清洗失败或提交结果不确定时保留必要 owned credential 与恢复证据，禁止该次未完成保护的安装或释放。Models 纯偏好提交与该过程无关。
+Account 的 access token 单列：它在装入之前不可能出现在任何产品文本里，每次提交和离开检查之前都按正在检查的 token 清洗内存中的产品文本，没有落盘前置条件；续期只把已经在检查的 token 借给已接纳的执行，之后每次 Schedule 写入照常按全部在用 credential 清洗并检查。
+
+Schedule 的落盘前置条件只对 Task 取得和释放的 credential 成立：已加载计划内容命中它时才建立；未命中时不得读取健康度或执行 I/O，也不得阻塞无关 Task。它由实际 credential 安装及释放边界触发，覆盖新 credential 可能命中的既有计划文本及即将释放 credential 的历史；清洗失败或提交结果不确定时保留必要 owned credential 与恢复证据，禁止该次未完成保护的安装或释放。Models 纯偏好提交与该过程无关。
 
 Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 codepoint 边界；多个 credential 前缀重叠时采用最长匹配，不能因替换 secret 产生非法 UTF-8 产品事实。除 Custom Provider create/replace 与 MCP captureSecret command 的调用期手动凭据外，credential 不进入 Bridge 或 Renderer；credential、locator、Authorization header 和可重建 secret 的 metadata 永远不进入 projection、result、event、日志、产品历史或 checkpoint record。
 
@@ -491,7 +493,7 @@ Product aggregate 独占产品事实、局部事务和执行资格。Product Con
 
 大视图读取使用 Product-owned 的单个有界冻结计划。begin 冻结同一提交的 owned 事实；有界准备步逐块比较版本，不能推进业务或重新采样 aggregate。Tool 记录不进入大视图：Run 只带 Tool 摘要与文件引用，记录由按页读取命令在主线程同步格式化，每页源文本至多 256 KiB 且至少一条，与大视图使用同一 credential 集合。准备期的 credential 副本仅在 Host 临时 owner 内存在，完成或取消即清除；原始工具 JSON 与 credential 不得进入缓存、Bridge payload 或 worker。ready 计划只持已脱敏的 owned 内容、结构和内容版本，按编码预算逐步写入调用期借用的运输 buffer。工具展示只有一个 formatter；解析、脱敏、JSON 编码和缓存回填仍由 Product 拥有，Bridge 只承运准备状态、读取 identity 和 bytes，Renderer 只等待并渲染。版本比较基于精确的脱敏源内容，不能为取得长度或确认稳定版本而先同步编码完整正文；缓存只接纳源内容仍有效的结果。普通业务更新可以使当前缓存失效，但不会把已冻结读取拼接成多个提交；安全失效、读取替换和关闭则直接撤销计划。
 
-安全代次归 Product Control。安装、替换或释放 credential 仍须遵守原地清洗与 durable commit 协议；清洗本身不推进代次。已知凭据按精确字节值及现有 Host owner 判定，包含与对话来源独立的 Account access token；Account 仅通过主线程调用期 visitor 提供脱敏检查或有界冻结读取副本，Product 不长期保留其 token，Account 授权代次提交时撤销旧安全投影。重复取得或释放仍有其他 owner 持有的同值副本不改变安全边界，不额外建立长期凭据副本。真实凭据集合或执行安全 authority 变化使旧代次缓存和在途展示结果失效；即使外围 command 随后失败，也必须主动发布安全失效。缓存命中只在内容版本和安全代次均匹配时成立，新构建内容继续执行交付前的完整检查。Renderer 接收安全代次并清除过期缓存；它不持有 credential，也不执行脱敏。
+安全代次归 Product Control。安装、替换或释放 credential 仍须遵守原地清洗与 durable commit 协议；清洗没有改写展示内容时不推进代次。已知凭据按精确字节值及现有 Host owner 判定，包含与对话来源独立的 Account access token；Account 仅通过主线程调用期 visitor 提供脱敏检查或有界冻结读取副本，Product 不长期保留其 token。Account 签发给自己的 access token 在装入之前没有出口，任何展示都不可能带着它，被换下或结束的那一份继续检查到最迟失效之后；因此装入、续期、登录、退出和会话结束都不推进代次，只在 token 变化时按全部正在检查的 token 清洗一遍，到期离开之前再清洗一遍，清洗改写或丢弃了展示内容才推进。取得一个此前不是已知凭据的值时推进，因为它在此之前可能已被明文展示；再次取得已知值不推进，不额外建立长期凭据副本。释放只使已知集合变小，已展示的内容只会遮得更多，因此只在清洗改写或丢弃了展示内容时推进。执行安全 authority 变化同样推进。推进使旧代次缓存和在途展示结果失效；即使外围 command 随后失败，也必须主动发布安全失效。缓存命中只在内容版本和安全代次均匹配时成立，新构建内容继续执行交付前的完整检查。Renderer 接收安全代次并清除过期缓存；它不持有 credential，也不执行脱敏。
 
 主线程上的展示构建、编码、复制和分块处理必须满足[验证规范](validation.md#产品视图与执行隔离验收)的连续时间预算。首先使用有界范围与稳定块复用；只有测量表明仍超预算时，才引入有界分片或独立执行容量。异步投影不能持有 credential、Product Runtime 或可变 aggregate 指针，只接受 owned 数据或不可变输入；接纳结果前重新校验对象、连接、内容版本和安全代次。不能以编码已经移出主线程为由接受仍然超预算的脱敏操作。
 

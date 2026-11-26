@@ -20,6 +20,9 @@ pub const AccountCommit = struct {
     fact: account.AccountFact,
     attempt_id: ?u64,
     attempt_terminal: bool,
+    /// An access token was installed or ended. Product inspects what its
+    /// visitor lends from now on; no token is handed over here.
+    token_changed: bool = false,
 
     pub fn assertValid(self: AccountCommit) void {
         account.validateFact(self.fact) catch
@@ -41,7 +44,8 @@ pub const AccountCommitSink = struct {
         self.commit_fn(self.context, commit);
     }
 
-    /// Rearms scheduled work against the new facts and publishes them.
+    /// Rearms scheduled work against the new facts and publishes them: after a
+    /// commit, or when only time changed what Account answers.
     pub fn settleNoFail(self: AccountCommitSink) void {
         self.settle_fn(self.context);
     }
@@ -117,17 +121,23 @@ pub const ModelsManagement = struct {
     }
 };
 
-/// Account-only handoff for an already admitted execution, by credential
-/// generation. A null credential reports allocation failure, never logout or
-/// a catalog rejection.
+/// Account-only handoff to what was admitted before: the current token by its
+/// generation, and later its end. Both are lent for the call.
 pub const MetaskCredentialRenewal = struct {
     context: *anyopaque,
-    renew_fn: *const fn (*anyopaque, u64, ?[]const u8) void,
+    renew_fn: *const fn (*anyopaque, u64, []const u8) void,
     needs_fn: *const fn (*anyopaque, u64) bool,
     waits_fn: *const fn (*anyopaque, u64) bool,
+    retire_fn: *const fn (*anyopaque, []const u8) void,
 
-    pub fn renew(self: MetaskCredentialRenewal, generation: u64, credential: ?[]const u8) void {
+    pub fn renew(self: MetaskCredentialRenewal, generation: u64, credential: []const u8) void {
         self.renew_fn(self.context, generation, credential);
+    }
+
+    /// Nothing accepts this token any more, and nothing inspects it once this
+    /// returns.
+    pub fn retire(self: MetaskCredentialRenewal, credential: []const u8) void {
+        self.retire_fn(self.context, credential);
     }
 
     pub fn needs(self: MetaskCredentialRenewal, generation: u64) bool {
