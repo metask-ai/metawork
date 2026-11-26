@@ -132,7 +132,8 @@ export const enUS = {
 
   "settings.archived_tasks": "Archived tasks",
   "archive.search": "Search archived tasks",
-  "archive.count": "{count} archived tasks",
+  "archive.count": "Total: {count}",
+  "archive.filtered_count": "{matched} of {count}",
   "archive.empty": "Archived tasks will appear here.",
   "archive.no_results": "No matching tasks.",
   "archive.sync_unavailable":

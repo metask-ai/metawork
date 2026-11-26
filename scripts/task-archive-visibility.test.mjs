@@ -919,6 +919,14 @@ test("archive hides Task from Recent and Projects and settings manages the same 
   );
   assert.equal(screen.queryByRole("button", { name: "Archive target" }), null);
   assert.ok(screen.getByRole("button", { name: "Earlier archive" }));
+  const search = screen.getByRole("searchbox", {
+    name: "Search archived tasks",
+  });
+  await app.user.type(search, " missing");
+  await screen.findByText("No matching tasks.");
+  assert.ok(screen.getByText("0 of 2"));
+  await app.user.clear(search);
+  assert.ok(screen.getByRole("button", { name: "Archive target" }));
 });
 
 test("settings restore keeps its page and returns the same Task to navigation", async (ctx) => {
@@ -937,6 +945,7 @@ test("settings restore keeps its page and returns the same Task to navigation", 
   );
   await app.settle({ archived: false });
   await screen.findByText("Archived tasks will appear here.");
+  assert.equal(screen.queryByRole("searchbox"), null);
   assert.ok(screen.getByRole("heading", { name: "Archived tasks" }));
   assert.equal(taskRows("4").length, 2);
 });

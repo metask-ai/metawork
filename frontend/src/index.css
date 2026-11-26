@@ -10444,18 +10444,73 @@ button.file-card:hover {
   outline-offset: 2px;
 }
 
+.archived-tasks {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+  container-type: inline-size;
+}
+
+.archived-task-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
 .archived-task-search {
+  position: relative;
+  flex: 1 1 200px;
+  max-width: 320px;
+  min-width: 0;
+}
+
+.archived-task-search svg {
+  position: absolute;
+  inset-inline-start: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--settings-muted);
+  pointer-events: none;
+}
+
+.archived-task-search input {
   width: 100%;
-  padding: 10px 12px;
+  min-height: 36px;
+  padding: 6px 10px 6px 34px;
   border: 1px solid var(--settings-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--settings-paper);
   color: var(--settings-ink);
+  font-size: var(--text-control);
 }
-.archived-task-count {
-  margin: 16px 0 8px;
+
+.archived-task-count,
+.archived-task-sync {
   color: var(--settings-muted);
+  font-size: var(--text-control);
 }
+
+.archived-task-empty {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 10px;
+  min-height: 160px;
+  padding: 24px 16px;
+  border: 1px solid var(--settings-line);
+  border-radius: 14px;
+  background: var(--settings-paper);
+  color: var(--settings-muted);
+  font-size: var(--text-control);
+  text-align: center;
+}
+
+.archived-task-empty svg {
+  font-size: 24px;
+}
+
 .archived-task-list {
   margin: 0;
   padding: 0;
@@ -10468,11 +10523,24 @@ button.file-card:hover {
   border-top: 1px solid var(--settings-line);
 }
 .archived-task-copy {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
   min-width: 0;
+  gap: 5px;
+}
+.archived-task-copy .archived-task-directory {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.archived-task-copy > .selection-trigger {
+  width: fit-content;
+  max-width: 100%;
+  font-size: var(--text-control);
 }
 .archived-task-title {
-  padding: 2px 0;
   text-align: left;
+  font-size: var(--text-body);
   font-weight: 650;
   overflow-wrap: anywhere;
 }
@@ -10481,7 +10549,7 @@ button.file-card:hover {
   flex-wrap: wrap;
   gap: 8px;
 }
-@media (max-width: 620px) {
+@container (max-width: 480px) {
   .archived-task-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;

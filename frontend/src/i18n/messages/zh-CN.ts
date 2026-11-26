@@ -102,7 +102,8 @@ export const zhCN: Record<MessageId, string> = {
 
   "settings.archived_tasks": "已归档任务",
   "archive.search": "搜索已归档任务",
-  "archive.count": "{count} 个已归档任务",
+  "archive.count": "共 {count} 项",
+  "archive.filtered_count": "匹配 {matched} 项，共 {count} 项",
   "archive.empty": "归档的任务会显示在这里。",
   "archive.no_results": "没有找到匹配的任务。",
   "archive.sync_unavailable": "任务列表当前不可用，重新连接后可管理归档任务。",
