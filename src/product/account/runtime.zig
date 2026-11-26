@@ -942,7 +942,7 @@ pub const Runtime = struct {
         if (self.stopping or self.account.currentIdentity() == null) return;
         const grant = self.credentials.current orelse return;
         if (generation != grant.generation) return;
-        const token = kind == .token or (if (self.unauthorized) |pending| pending.kind == .token else false);
+        const token = kind == .token or (if (self.unauthorized) |pending| pending.generation == generation and pending.kind == .token else false);
         self.unauthorized = .{ .generation = generation, .kind = if (token) .token else .other };
     }
 

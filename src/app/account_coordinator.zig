@@ -47,6 +47,11 @@ pub const Coordinator = struct {
     /// One Metask 401 waiting for the main thread, from any thread: its
     /// generation shifted left once, low bit set for the token kind. 0 is none.
     unauthorized: std.atomic.Value(u64) = .init(0),
+    io: std.Io,
+    /// Once Account has closed, a report only folds: the platform's wake is
+    /// gone and the Runtime may be. A reporter holds the lock while it wakes.
+    report_lock: std.Io.Mutex = .init,
+    closed: bool = false,
 
     pub fn init(
         runtime: *account_api.Runtime,
@@ -57,6 +62,7 @@ pub const Coordinator = struct {
             .runtime = runtime,
             .control = control,
             .main_thread_id = main_thread_id,
+            .io = runtime.io,
         };
     }
 
@@ -245,16 +251,23 @@ pub const Coordinator = struct {
         return .{ .context = self, .report_fn = reportUnauthorized };
     }
 
-    /// Any thread. Reports fold into one: the newest generation, the token
-    /// kind if any said it.
+    /// Any thread. Reports fold into one: the newest generation, and the
+    /// token kind if a report of that generation said it. One for an older
+    /// token says nothing.
     fn reportUnauthorized(context: *anyopaque, generation: u64, kind: account_contract.Unauthorized) void {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         if (generation == 0 or generation > std.math.maxInt(u64) >> 1) return;
         const token: u64 = @intFromBool(kind == .token);
         var current = self.unauthorized.load(.acquire);
-        while (self.unauthorized.cmpxchgWeak(current, (@max(current >> 1, generation) << 1) | (current & 1) | token, .acq_rel, .acquire)) |seen|
-            current = seen;
-        self.runtime.wakeFromAnyThread();
+        while (true) {
+            const held = current >> 1;
+            if (generation < held) return;
+            const next = if (generation == held) current | token else (generation << 1) | token;
+            current = self.unauthorized.cmpxchgWeak(current, next, .acq_rel, .acquire) orelse break;
+        }
+        self.report_lock.lockUncancelable(self.io);
+        defer self.report_lock.unlock(self.io);
+        if (!self.closed) self.runtime.wakeFromAnyThread();
     }
 
     fn readyGeneration(self: *Coordinator) ?u64 {
@@ -342,6 +355,9 @@ pub const Coordinator = struct {
             result = self.commitPrepared(self.runtime.prepareShutdown());
         }
         std.debug.assert(result.accepted);
+        self.report_lock.lockUncancelable(self.io);
+        self.closed = true;
+        self.report_lock.unlock(self.io);
     }
 
     fn commitSummaryNoFail(self: *Coordinator) void {
@@ -1293,6 +1309,58 @@ test "Account folds 401 reports into one and takes it on its next turn" {
     try std.testing.expectEqual(generation, runtime.unauthorized.?.generation);
     try std.testing.expectEqual(account_contract.Unauthorized.token, runtime.unauthorized.?.kind);
     try std.testing.expectEqual(@as(u64, 0), coordinator.unauthorized.load(.acquire));
+
+    // A token complaint belongs to its generation: a newer report starts
+    // over, an older one changes nothing.
+    report.report(generation, .token);
+    report.report(generation + 1, .other);
+    try std.testing.expectEqual((generation + 1) << 1, coordinator.unauthorized.load(.acquire));
+    report.report(generation, .token);
+    try std.testing.expectEqual((generation + 1) << 1, coordinator.unauthorized.load(.acquire));
+    _ = coordinator.unauthorized.swap(0, .acq_rel);
+    runtime.unauthorized = .{ .generation = generation - 1, .kind = .token };
+    runtime.reportUnauthorized(generation, .other);
+    try std.testing.expectEqual(account_contract.Unauthorized.other, runtime.unauthorized.?.kind);
+}
+
+test "a 401 reported after Account closed wakes nobody and folds only" {
+    const Wakes = struct {
+        var count: std.atomic.Value(usize) = .init(0);
+        fn notify(_: *anyopaque) void {
+            _ = count.fetchAdd(1, .acq_rel);
+        }
+    };
+    var runtime = account_api.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        testingTransport(),
+        account_api.TestSupport.loopbackEndpoint(),
+        .{ .context = &testing_wake_context, .notify_fn = Wakes.notify },
+    );
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+    _ = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask User", "access-token", "refresh-token", 200),
+    );
+    // Nothing is left running: the Runtime itself would stop waking.
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    const report = coordinator.unauthorizedReport();
+    report.report(3, .other);
+    try std.testing.expect(Wakes.count.load(.acquire) != 0);
+    coordinator.shutdown();
+    try std.testing.expect(!runtime.effects.detached);
+    const before = Wakes.count.load(.acquire);
+    report.report(4, .token);
+    try std.testing.expectEqual(before, Wakes.count.load(.acquire));
+    try std.testing.expectEqual((4 << 1) | 1, coordinator.unauthorized.load(.acquire));
 }
 
 test "Account commit installs, renews, follows and settles in that order" {
