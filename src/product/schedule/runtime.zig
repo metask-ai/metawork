@@ -1054,7 +1054,15 @@ pub const Runtime = struct {
                     return cause;
                 },
             }
-        } else if (source != .timer) return error.PreviousTaskActive;
+        } else {
+            if (source != .timer) return error.PreviousTaskActive;
+            // A skip may never end a plan: a one-time plan's only run waits
+            // for the one still going instead.
+            if ((try item.recurrence.firstStrictlyAfter(triggered_at_unix_seconds)) == null) {
+                item.preflight_retry_at_unix_seconds = triggered_at_unix_seconds +| preflight_retry_seconds;
+                return error.PreviousTaskActive;
+            }
+        }
         item.preflight_retry_at_unix_seconds = null;
         // No run of a plan overlaps another: this due point is skipped.
         if (blocking_task_id != 0)
@@ -2598,6 +2606,27 @@ test "a schedule that cannot run as bound stops without spending its run" {
         try std.testing.expectEqual(@as(u64, 300), runtime.store.find(id).?.last_occurrence.?.planned_at_unix_seconds);
         try std.testing.expectEqual(@as(u64, 43), tasks.next_task_id);
     };
+}
+
+test "a one-time plan waits for a run still going instead of skipping its only run" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence(), .notifier = effects.notifier() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const id = try runtime.create(testDefinition("once", "inspect"), testBinding(), redaction);
+    _ = runtime.setBackgroundAvailable(true, testBinding(), redaction);
+    tasks.active_task_id = try runtime.runNow(id, 1, testBinding(), redaction, tasks.effects());
+    effects.now = 200;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expect(runtime.store.find(id).?.health == .ready and runtime.store.find(id).?.occurrence_count == 1);
+    try std.testing.expectEqual(@as(?u64, 260), effects.armed_at);
+    try std.testing.expectEqual(@as(usize, 0), effects.notifications);
+    tasks.active_task_id = 0;
+    effects.now = 260;
+    runtime.onTimer(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(u64, 200), runtime.store.find(id).?.last_occurrence.?.planned_at_unix_seconds);
+    try std.testing.expectEqual(@as(u64, 44), tasks.next_task_id);
 }
 
 test "running a paused plan by hand reports a binding that cannot run and changes nothing" {
