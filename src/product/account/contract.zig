@@ -175,13 +175,13 @@ pub const OwnedAuthorizationLease = struct {
 };
 
 /// The one Metask authorization fact. Main-thread only: its slices borrow
-/// committed Account state for the call that receives them.
+/// committed Account state for the call that receives them. It follows the
+/// login alone; a sign-in underway does not change it.
 pub const Authorization = union(enum) {
-    /// A stored login is being confirmed. The epoch counts finished renewal
-    /// attempts, so a waiter waits for exactly one of them.
+    /// A login is held but not confirmed, or the store is not read yet. The
+    /// epoch counts finished confirmations, so a waiter waits for exactly one.
     checking: u64,
     signed_out,
-    authorizing,
     available: struct { account_id: []const u8, generation: u64 },
     /// The access token expired and Account will renew it. The epoch is
     /// waited out as above.
@@ -203,7 +203,7 @@ pub const Authorization = union(enum) {
             .available => |value| .{ .ready = value.generation },
             .checking, .recovering => |epoch| .{ .wait = epoch },
             .stalled => .{ .stop = .no_connection },
-            .signed_out, .authorizing => .{ .stop = .sign_in },
+            .signed_out => .{ .stop = .sign_in },
         };
     }
 };

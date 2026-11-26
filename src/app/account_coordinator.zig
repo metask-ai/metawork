@@ -26,7 +26,7 @@ const Published = struct {
             .state = authorization,
             .generation = switch (authorization) {
                 .available => |value| value.generation,
-                .checking, .signed_out, .authorizing, .recovering, .stalled => 0,
+                .checking, .signed_out, .recovering, .stalled => 0,
             },
         };
     }
@@ -658,8 +658,8 @@ test "Account summary stays across renewals and is fetched again behind them" {
     try expectHistory(&runtime, .ready, 5, &transport);
     try std.testing.expect(runtime.summary_job == null);
 
-    // Another account's sign-in takes it away.
-    _ = coordinator.commitPrepared(account_api.TestSupport.prepareBeginLoginWithoutEffect(&runtime));
+    // Signing out, as changing accounts begins, takes it away.
+    try std.testing.expect(coordinator.commandSink().submit(.logout).accepted);
     try std.testing.expectEqual(account_contract.SummaryAvailability.unavailable, runtime.summary.view().history.availability);
 }
 

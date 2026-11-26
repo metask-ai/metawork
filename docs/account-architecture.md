@@ -62,7 +62,7 @@ checking | signed_out | authorizing | authenticated
 
 `AccountView` 只包含 `state`、`can_cancel`、`can_retry`、经过验证的 `account_id`、best-effort `display_name/email_hint/phone_hint/concurrency_limit`、Account-owned error，以及嵌套的 `summary`；四个资料字段都可以缺失，`concurrency_limit = null` 表示后端资料缺失或不可用，`concurrency_limit = 0` 精确表示 Metask 后端的不限并发语义。完整邮箱和手机号不得进入view、fact、Snapshot、日志或安全诊断；非authenticated状态必须隐藏全部identity字段。`can_retry` 只在没有在途 attempt 时为真，且只有两种情况：`checking` 带错误，或 `authenticated` 带 `refresh_schedule_failed`；`checking` 没有错误却为真是无效的 view。`summary` 保留全局 `operation = idle | refreshing`、`usage_eligibility = unknown | disabled | enabled` 与 `wallet/usage/history` 的稳定 wire shape；当前 OAuth 合同在 authenticated history 同步时将 eligibility 置为 enabled，wallet 与 usage 保持 unavailable且不携带数据或错误，history 发布后端返回的日历范围以及最多 371 个严格递增且日期唯一的每日 input/output/cache creation/cache read/total Token与 recorded cost。日期精确为 `YYYY-MM-DD`，金额和 Token 都以 canonical decimal string 越过 Bridge，Host 不发布浮点数。模型目录、默认模型、source、generation、Task admission、API Key和 connection 均不得进入 `AccountView` 或 `AccountFact`。
 
-公开命令只有 `begin_login | cancel_operation | retry_refresh | refresh_summary | open_recharge | logout`。`retry_refresh` 只恢复已验证会话的 Account-owned token refresh 调度：token 已到续期点时立即启动 refresh，否则重新启动续期节拍；冷启动的登录没能确认时（`checking` 且 `can_retry`），它当场再确认一次，此时也接受 `begin_login`；`refresh_summary` 只在 authenticated 时显式刷新 usage history，不刷新 token或 Models目录。`open_recharge` 只在authenticated时请求平台通过系统浏览器打开Account-owned固定充值页 `https://www.metask-ai.com/app/billing`，不接收URL、token、account id或query，也不改变Account状态或发布fact。Account error space只描述 OAuth、identity、refresh token、summary、平台 effect 和自身资源失败，不包含 catalog、model、source、execution、Task、Session 或 consumer 语义。
+公开命令只有 `begin_login | cancel_operation | retry_refresh | refresh_summary | open_recharge | logout`。`retry_refresh` 只恢复已验证会话的 Account-owned token refresh 调度：token 已到续期点时立即启动 refresh，否则重新启动续期节拍；保存的登录没能确认时（`checking` 且 `can_retry`），它当场再确认一次。`begin_login` 只在没有登录、或持有的登录还没确认，且没有别的动作在途时接受；已验证的登录不接受，换账号要先退出；`refresh_summary` 只在 authenticated 时显式刷新 usage history，不刷新 token或 Models目录。`open_recharge` 只在authenticated时请求平台通过系统浏览器打开Account-owned固定充值页 `https://www.metask-ai.com/app/billing`，不接收URL、token、account id或query，也不改变Account状态或发布fact。Account error space只描述 OAuth、identity、refresh token、summary、平台 effect 和自身资源失败，不包含 catalog、model、source、execution、Task、Session 或 consumer 语义。
 
 ## 4. Authorization lease 与 Metask provider
 
@@ -71,10 +71,10 @@ checking | signed_out | authorizing | authenticated
 1. Account 只在公开状态为 `authenticated`、authorization generation 非零且 access token 尚未到 hard expiry 时，向 Application 产生一份 owned authorization lease；`authenticated` 下持有的 credential 就是该 identity 验证时所用的那一份或它的续期，因此 credential 不另带账号；hard expiry 由墙钟与含睡眠的 boot 时钟共同判定，任一到点即到期，读不到墙钟时不签发；到续期点本身不撤销仍未过期的 lease，正常 refresh commit 也不得误杀使用同一 generation 的在飞 Models operation；
 2. lease 只包含 opaque principal、当前 access token 和 authorization generation，必须有界、单次持有并在结束时清零；
 3. Application 将 lease 交给一次 Models Metask catalog operation；Models module 不导入 Account，也不持久化 OAuth token；
-4. Application 在每次 Account 提交后把当时的授权状态交给 Models coordinator：登出或登录进行中时取消并 join 在飞 catalog job，再把 Metask provider 置为 `needs_authentication`；authorization generation 变化后，旧 lease/completion 失效，以新 lease 重新加载；token 到期、续期和冷启动确认不是授权丧失，目录内容与在飞 catalog job 都保留；
+4. Application 在每次 Account 提交后把当时的授权状态交给 Models coordinator：登出时取消并 join 在飞 catalog job，再把 Metask provider 置为 `needs_authentication`；authorization generation 变化后，旧 lease/completion 失效，以新 lease 重新加载；token 到期、续期和冷启动确认不是授权丧失，目录内容与在飞 catalog job 都保留；
 5. Models 清除 transient Metask credential 和可解析目录，但保留无 secret 的 Metask selection intent；custom source 不受影响；
 6. 已经交给 Task/Run 的 owned binding 按自己的生命周期收口：新登录与正常刷新一样，已接纳的 Run 原位采用当前凭据；退出登录或凭据清除不撤销在飞 Run 已持有的凭据。后续执行的接纳与续期由 [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff) 定义。
-7. Account 向 Application 提供不分配 secret copy 的主线程授权状态，只有一个判断函数和六个值：`checking(epoch)` 正在确认 retained 登录；`signed_out`；`authorizing`；与 lease 相同的 authenticated、generation 和 hard-expiry/clock gate 全部满足时为 `available(account, generation)`；已验证 identity 的 access token 已到 hard expiry 时为 `recovering(epoch)`；已验证 identity 但读不到墙钟、也没有在途续期时为 `stalled`。消费方只读由它归成的三种用法：可以（generation）、等（epoch）、停（要登录，或连不上）；`checking` 与 `recovering` 是等，`stalled` 是连不上。epoch 是进程内结束的 refresh attempt 计数，消费方只用它把一次等待绑定到一次结果。查询没有副作用。状态、generation 与 epoch 都只在进程内使用，不进入 Renderer、日志或持久化 metadata。每装入一份 access token 推进一次 generation；授权不与 Task 绑定，既有 Task 在任意一次登录后的执行接纳与续期由 [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff) 定义。
+7. Account 向 Application 提供不分配 secret copy 的主线程授权状态，只有一个判断函数和五个值：`checking(epoch)` 持有登录但还没确认，或凭据库还没读；`signed_out`；与 lease 相同的 authenticated、generation 和 hard-expiry/clock gate 全部满足时为 `available(account, generation)`；已验证 identity 的 access token 已到 hard expiry 时为 `recovering(epoch)`；已验证 identity 但读不到墙钟、也没有在途续期时为 `stalled`。它只看登录本身，不看 Account 正在做什么：在没确认的登录上开始登录，消费方照旧等，排队的消息不会因此失败。消费方只读由它归成的三种用法：可以（generation）、等（epoch）、停（要登录，或连不上）；`checking` 与 `recovering` 是等，`stalled` 是连不上。epoch 数的是进程内有了结果的续期与取身份，消费方只用它把一次等待绑定到一次结果。查询没有副作用。状态、generation 与 epoch 都只在进程内使用，不进入 Renderer、日志或持久化 metadata。每装入一份 access token 推进一次 generation；授权不与 Task 绑定，既有 Task 在任意一次登录后的执行接纳与续期由 [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff) 定义。
 8. Account 向 Product 提供主线程投影 visitor：只在调用期出借已装入的 access token，以及被换下、随退出或会话结束退下来而仍可能被接受的那些，不给出 refresh token。一份 access token 从装入检查到它最迟可能失效之后 60 秒：有效期从装入时刻算起，只看 boot 时钟，换下、退出和墙钟变化都不提前。到时 Application 先交 Product 清洗再销毁；没有份数上限。提交只告诉 Product 有没有 access token 被装入或结束，token 不随提交传递。access token 不落盘，上一个进程的那一份在重启后不再检查。
 
 Account 不知道 provider 当前是否为默认值、是否存在 custom source、是否有 Task 正在运行，也不因这些事实拒绝 logout。Models 也不能调用 Account 登录、刷新或退出；它只能接受当次 lease 或观察授权不可用。
@@ -109,18 +109,16 @@ Userinfo 仅将完整有界 JSON 的 `401 + authorization_revoked / user_not_fou
 
 ## 6. 事务、effect 与 commit
 
-Account 只允许一个 identity transaction：
+Account 把两件事分开：登录本身，和正在做的那一个动作。
 
 ```text
-none
-| oauth_callback(attempt)
-| token_exchange(attempt, login | refresh_token)
-| loading_identity(attempt, login | refresh_token)
+登录  none(unread | absent) | held | verified(identity)
+动作  idle | authorize(attempt, exchanging) | renew(attempt) | identity(attempt)
 ```
 
-每个非 `none` transaction 拥有非零 attempt identity、唯一合法阶段、至多一个 worker/effect，以及成功、明确失败、取消、deadline 和 shutdown 的 terminal 规则。command 和 completion 先产生 prepared transition：先做不读写端口的合法性校验，再写盘，写盘的结果决定提交成功还是失败的转换。内存中的 credential 只在提交里改变，与状态一次换好；提交到 `signed_out` 或关闭时一定结束。写盘之后没有能拒绝提交的步骤，唯一不提交的是关闭：它只存盘，不装入。coordinator 必须按 committed current 与 prepared next 把它精确分类为 `starts | continues | finishes | no_attempt`。新 attempt 的 effect admission 失败不得提交；continuation admission 失败先提交已经观察到的外部阶段，再以 typed failure 关闭同一 attempt；terminal/no-attempt admission 失败不得误判为 continuation 或触发无 active attempt 的 panic，shutdown 必须在销毁未提交 effect 后完成收口。
+`held` 是持有 refresh token（可能还有 access token）但还没确认身份；`unread` 是凭据库还没读。动作排他，每个非 `idle` 动作拥有非零 attempt identity、至多一个 worker/effect，以及成功、明确失败、取消、deadline 和 shutdown 的 terminal 规则。动作失败只让动作回到 `idle`，登录保持原样；改变登录的只有两类结果：换令牌成功（登录换成时，之前持有或验证过的登录当场结束，新的成为 `held`，再取身份），以及证明登录不能再用的失败（不能安全重发的续期、Userinfo 明说授权没了）。公开状态由两者推出：动作是 `authorize` 时为 `authorizing`，否则按登录取 `checking`（`held` 或 `unread`）、`signed_out`、`authenticated`。command 和 completion 先产生 prepared transition：先做不读写端口的合法性校验，再写盘，写盘的结果决定提交成功还是失败的转换。内存中的 credential 只在提交里改变，与状态一次换好；提交到 `signed_out` 或关闭时一定结束。写盘之后没有能拒绝提交的步骤，唯一不提交的是关闭：它只存盘，不装入。coordinator 必须按 committed current 与 prepared next 把它精确分类为 `starts | continues | finishes | no_attempt`。新 attempt 的 effect admission 失败不得提交；continuation admission 失败先提交已经观察到的外部阶段，再以 typed failure 关闭同一 attempt；terminal/no-attempt admission 失败不得误判为 continuation 或触发无 active attempt 的 panic，shutdown 必须在销毁未提交 effect 后完成收口。
 
-登录路径为：OAuth callback → token exchange → refresh token durable commit → Userinfo identity validation → Account terminal commit。loopback worker 只等待 callback并交付包含 authorization code、PKCE verifier、callback port 与总 deadline 的 owned exchange input；主线程必须先提交 `token_exchange(login)`，再由独立 network attempt 发出一次 token request，不得在 callback worker 内跨过 commit boundary或自动重放 code exchange。登录总 deadline 为 5 分钟，exchange deadline 为 `min(总 deadline 剩余时间, 30 秒)`。token 已提交后，identity 请求失败不能回滚旧 token。每次显式 `begin_login` 都开始新的 OAuth，不得消费安全存储中保留的 refresh token；显式重新登录可以替换 identity，但旧 identity 在新 Userinfo 验证成功前不得被新值冒充。
+登录路径为：OAuth callback → token exchange → refresh token durable commit → Userinfo identity validation → Account terminal commit。loopback worker 只等待 callback并交付包含 authorization code、PKCE verifier、callback port 与总 deadline 的 owned exchange input；主线程必须先提交 `authorize(exchanging)`，再由独立 network attempt 发出一次 token request，不得在 callback worker 内跨过 commit boundary或自动重放 code exchange。登录总 deadline 为 5 分钟，exchange deadline 为 `min(总 deadline 剩余时间, 30 秒)`。token 已提交后，identity 请求失败不能回滚旧 token：除 Userinfo 明说授权没了之外，新登录保持 `held`，按冷启动确认的退避再取身份。每次显式 `begin_login` 都开始新的 OAuth，不得消费安全存储中保留的 refresh token；它只在没有登录或登录还没确认时接受，所以新登录替换的只能是未确认的那一份，旧 identity 在新 Userinfo 验证成功前不得被新值冒充。
 
 Account coordinator 必须先提交 Account Runtime，再依次：把 canonical Account fact 交给 Product Control，token 变了就由它通过 visitor 清洗并检查；把新 credential 借给已接纳的执行；把授权状态交给 Models coordinator；最后由 Product Control 重排定时任务并发布。后几步都不会失败，定时任务只对照全部完成后的事实重排。token 到期、墙钟读不到或恢复不是提交：每次检查到点的工作时，coordinator 把当时的授权（不含等待的 epoch）与上次发布的比较，不同就同样依次交付、跟随、重排并发布：墙钟读不到或走偏时装入的 token 可能到这时才可用。交付和跟随按 generation 各做一次。generation 不进入 fact。Models 的 refresh/clear/install 结果不得回写、回滚或补充 Account transaction。
 
@@ -148,9 +146,9 @@ Account durable authority 由系统安全存储中的 Metask refresh token 与�
 
 冷启动是唯一可以消费 retained refresh token 的入口。没有 token 时进入 `signed_out`，合法残留记录仅尝试清理；有 token 且记录缺失时尝试 restore；记录合法且摘要匹配当前 token 时，禁止刷新并以普通登录入口要求重新登录；记录合法但摘要不匹配时，本地 token 已被替换，可以 restore 当前 token。任何读取失败、未知版本、损坏或超长记录都 fail closed，不发 refresh HTTP，发布 Account 存储错误。每次 restore 必须先 refresh并 durable commit，再以 Userinfo 建立 identity；后续显式登录总是新 OAuth，`signed_out` 之后没有任何自动 restore。
 
-没有证明任何事的 restore 停在 `checking` 并保留错误，不算未登录：一是 refresh 能证明没有发出且记录已清除（与已验证会话的重试是同一个判断）；二是 token 已换并已保存，只是 Userinfo 暂时不可达（网络、deadline、429、5xx 或 worker 启动失败）。它按 boot 时钟隔 30 秒、1 分钟、2 分钟、之后每 5 分钟再确认一次，再试时不清错误；已换好的 token 到自己的续期点之前只重取 identity，不再换。窗口激活或有消息开始等待时，间隔回到起点，下一次提前到上次结束后 30 秒；`retry_refresh` 当场发起。试到成功、被证明无效、结果不确定、用户重新登录或退出为止；结果不确定、服务端明确拒绝、保存失败与 identity 明确失效仍按各自规则进入 `signed_out`。节拍无法启动时不另换错误，由事件循环的检查驱动；读不到墙钟时的尝试以没有发出结束，等待它的消息因此有结果。
+没有证明任何事的 restore 停在 `checking` 并保留错误，不算未登录：一是 refresh 能证明没有发出且记录已清除（与已验证会话的重试是同一个判断）；二是 token 已换并已保存，只是没取到 identity：除 Userinfo 明说授权没了（`authorization_revoked`、`user_not_found`）以外的任何失败，包括网络、deadline、429、5xx、协议错误或 worker 启动失败。它按 boot 时钟隔 30 秒、1 分钟、2 分钟、之后每 5 分钟再确认一次，再试时不清错误；已换好的 token 到自己的续期点之前只重取 identity，不再换。窗口激活或有消息开始等待时，间隔回到起点，下一次提前到上次结束后 30 秒；`retry_refresh` 当场发起。试到成功、被证明无效、结果不确定、用户重新登录或退出为止；结果不确定、服务端明确拒绝、保存失败与 identity 明确失效仍按各自规则进入 `signed_out`。节拍无法启动时不另换错误，由事件循环的检查驱动；读不到墙钟时的尝试以没有发出结束，等待它的消息因此有结果。
 
-没能确认时也可以重新登录，而且可以换账号。授权取消、回调失败、超时或换 token 失败时，保存的 refresh token 没有被替换，回到原来的确认，重试时间不变；换 token 成功后它已被替换，identity 失败即 `signed_out`。
+没能确认时也可以重新登录，而且可以换账号；登录期间授权仍是等。授权取消、回调失败、超时或换 token 失败时，保存的 refresh token 没有被替换，回到原来的确认，重试时间不变；换 token 成功后它已被替换，新登录按上一段从头退避再取 identity。已验证的登录不接受新的登录，换账号先退出。
 
 每个 worker 只持自己那份 credential 副本，不借用会话内存；令牌请求在发送前备好存放应答的内存，并要求不压缩的应答，发送之后到保存之前 Account 自己不再分配。备不出内存等于没有发送，也不写阻断记录。每次 refresh 先成功写入绑定当前 token 的阻断记录，再发送唯一 HTTP。记录写入失败不发 HTTP；调用 transport 前的明确本地失败、transport 证明未发送或服务端明确未消费结果只尝试一次清理记录，清理失败保持阻断。合法轮换必须返回不同的新 refresh token，主线程只尝试一次保存新 token；失败保留旧记录并阻断刷新，释放未提交新 token，不建立本地保存恢复流程。新 token 保存成功后清理旧记录，再随状态一起提交安装；清理失败不回滚成功轮换，因为记录与新 token 摘要不匹配，重启可恢复新 token，下一次 HTTP 前仍必须成功覆盖记录。
 

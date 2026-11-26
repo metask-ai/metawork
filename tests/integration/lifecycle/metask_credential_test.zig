@@ -215,7 +215,7 @@ test "Metask restart without a connection keeps the login and each message waits
     try characterizeCredentialExpiry(.restart_unreachable);
 }
 
-test "Metask login cancelled on a signed-in account refetches the same generation's catalog" {
+test "Metask sign-in over a signed-in account is refused and keeps its generation and catalog" {
     try characterizeCredentialExpiry(.login_cancelled);
 }
 
@@ -1526,8 +1526,8 @@ fn characterizeUnreachableRestart(
     try expectWaitingInputRuns(wake_loop, control, task_id, "resent-while-checking");
 }
 
-/// Cancelling returns to the same credential generation, whose catalog the
-/// login had given up.
+/// A sign-in is refused over a verified login: its generation, its catalog
+/// and the next Run are untouched, and there is nothing to cancel.
 fn characterizeCancelledLogin(
     wake_loop: *fixture.LifecycleWakeLoop,
     control: *control_api.Runtime,
@@ -1536,14 +1536,12 @@ fn characterizeCancelledLogin(
     network: *Network,
     task_id: u64,
 ) !void {
+    _ = coordinator;
     const generation = accounts.runtime.authorization().use().ready;
-    try std.testing.expect(account_coordinator.TestSupport.commit(accounts, account.TestSupport.prepareBeginLoginWithoutEffect(accounts.runtime)).accepted);
-    try std.testing.expectEqual(.needs_authentication, control.modelsView().providers[0].catalog_state);
-    try expectBlockedFor(control, task_id, "while-authorizing", .metask_authorization_required);
-    try std.testing.expect(accounts.commandSink().submit(.cancel_operation).accepted);
+    try std.testing.expect(!accounts.commandSink().submit(.begin_login).accepted);
+    try std.testing.expect(!accounts.commandSink().submit(.cancel_operation).accepted);
     try std.testing.expectEqual(generation, accounts.runtime.authorization().use().ready);
-    try drainCatalog(coordinator);
-    try std.testing.expectEqual(@as(usize, 2), network.catalog_calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), network.catalog_calls.load(.acquire));
     try std.testing.expectEqual(.ready, control.modelsView().providers[0].catalog_state);
     try runAndExpect(wake_loop, control, task_id, "after-cancel", .completed);
 }
@@ -1602,10 +1600,13 @@ fn copyTestImage(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8
 }
 
 /// A new OAuth login. Its every commit goes through the Account coordinator,
-/// so Product, running executions and the catalog see each step.
+/// so Product, running executions and the catalog see each step. A verified
+/// login is never replaced by a sign-in, so it signs out first, as changing
+/// accounts does.
 fn relogin(accounts: *account_coordinator.Coordinator) !void {
     const runtime = accounts.runtime;
     const commit = account_coordinator.TestSupport.commit;
+    if (runtime.view().state == .authenticated) try signOut(accounts);
     try std.testing.expect(commit(accounts, account.TestSupport.prepareBeginLoginWithoutEffect(runtime)).accepted);
     var input = try account.TestSupport.exchangeInput(std.testing.allocator, "synthetic-authorization-code");
     defer input.deinit();

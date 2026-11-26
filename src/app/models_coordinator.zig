@@ -455,7 +455,7 @@ pub const Coordinator = struct {
         self.assertMainThread();
         switch (authorization) {
             .checking, .recovering, .stalled => {},
-            .signed_out, .authorizing => {
+            .signed_out => {
                 self.cancelCatalogRetry();
                 self.cancelCatalog();
                 if (self.observed_authorization_generation != 0)
