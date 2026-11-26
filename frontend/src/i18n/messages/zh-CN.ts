@@ -332,6 +332,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.about_product": "关于 {product}",
   "about.current_version": "当前版本",
   "about.visit_website": "前往官网",
+  "about.contact_us": "联系我们",
   "about.developer": "开发者",
   "about.developer_name": "Metask",
   "about.version": "版本",

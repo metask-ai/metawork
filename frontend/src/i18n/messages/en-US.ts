@@ -384,6 +384,7 @@ export const enUS = {
   "settings.about_product": "About {product}",
   "about.current_version": "Current version",
   "about.visit_website": "Visit website",
+  "about.contact_us": "Contact us",
   "about.developer": "Developer",
   "about.developer_name": "Metask",
   "about.version": "Version",

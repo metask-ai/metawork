@@ -40,7 +40,10 @@ export function useUpdateActions(
     };
   }, [open, updateControls.disabled, updateControls.generation, reset]);
 
-  async function act(action: UpdateAction) {
+  async function act(
+    action: UpdateAction,
+    openWebsite = updateControls.website,
+  ) {
     if (inFlight.current || updateControls.disabled) return;
     const version = updates.latestVersion;
     if (action === "download" && version === null) return;
@@ -55,7 +58,7 @@ export function useUpdateActions(
           ? await updateControls.check()
           : action === "download"
             ? await updateControls.download(version!)
-            : await updateControls.website();
+            : await openWebsite();
       if (request.current === current && !accepted)
         setActionError(action === "website" ? "browser" : "unavailable");
     } catch {

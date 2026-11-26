@@ -522,6 +522,10 @@ test("About follows Archived tasks in settings and shows offline metadata in the
     within(rows[1]).getByRole("button", { name: "前往官网" }).disabled,
     true,
   );
+  assert.equal(
+    within(rows[1]).getByRole("button", { name: "联系我们" }).disabled,
+    true,
+  );
   await user.click(screen.getByRole("link", { name: "通用" }));
   assert.equal(screen.queryByRole("region", { name: "关于 MetaWork" }), null);
 });
@@ -850,6 +854,47 @@ test("Visit website hands off only on click and allows retry after a browser err
     screen.queryByRole("dialog", { name: "Check for updates" }),
     null,
   );
+});
+
+test("Contact us opens the contact page once per click and can retry a failed handoff", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const calls = [];
+  let finish;
+  renderAboutSettings({
+    onOpenExternalLink: (url) => {
+      calls.push(url);
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    },
+    updateControls: {
+      ...updateControls,
+      website: async () => {
+        calls.push("homepage");
+        return true;
+      },
+    },
+  });
+  await user.click(screen.getByRole("link", { name: "About", exact: true }));
+  const visit = screen.getByRole("button", { name: "Visit website" });
+  const contact = screen.getByRole("button", { name: "Contact us" });
+  assert.equal(visit.nextElementSibling, contact);
+  assert.deepEqual(calls, []);
+  const url = "https://metawork.metask-ai.com/contact.html";
+  await user.dblClick(contact);
+  assert.deepEqual(calls, [url]);
+  assert.equal(contact.disabled, true);
+  await act(async () => finish(false));
+  await screen.findByText(translate("en-US", "updates.browser_failed"));
+  await user.click(contact);
+  await act(async () => finish(true));
+  assert.equal(screen.queryByRole("alert"), null);
+  assert.equal(
+    screen.queryByRole("dialog", { name: "Check for updates" }),
+    null,
+  );
+  await user.click(visit);
+  assert.deepEqual(calls, [url, url, "homepage"]);
 });
 
 test(

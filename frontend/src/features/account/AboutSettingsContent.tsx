@@ -10,14 +10,22 @@ import { type UpdateControls, useUpdateActions } from "./update-actions.ts";
 export function AboutSettingsContent({
   updates,
   updateControls,
+  onOpenExternalLink,
 }: {
   updates: UpdateView;
   updateControls: UpdateControls;
+  onOpenExternalLink: (url: string) => Promise<boolean>;
 }) {
   const { t } = useI18n();
   const checkButton = useRef<HTMLButtonElement>(null);
   const [showCheck, setShowCheck] = useState(false);
   const actions = useUpdateActions(updates, updateControls);
+  const linksDisabled = updateControls.disabled || actions.pending !== null;
+
+  function visit(open: () => Promise<boolean>) {
+    setShowCheck(false);
+    void actions.act("website", open);
+  }
 
   return (
     <>
@@ -42,20 +50,34 @@ export function AboutSettingsContent({
             {t("updates.check")}
           </Button>
         </div>
-        <div className="settings-about-row">
+        <div className="settings-about-row settings-about-links">
           <span>{t("settings.about_product", { product: t("app.name") })}</span>
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={updateControls.disabled || actions.pending !== null}
-            onClick={() => {
-              setShowCheck(false);
-              void actions.act("website");
-            }}
-          >
-            {t("about.visit_website")}
-            <Icon name="external-link" />
-          </Button>
+          <div className="ms-auto flex max-w-full flex-wrap justify-end gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={linksDisabled}
+              onClick={() => visit(updateControls.website)}
+            >
+              {t("about.visit_website")}
+              <Icon name="external-link" />
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={linksDisabled}
+              onClick={() =>
+                visit(() =>
+                  onOpenExternalLink(
+                    "https://metawork.metask-ai.com/contact.html",
+                  ),
+                )
+              }
+            >
+              {t("about.contact_us")}
+              <Icon name="external-link" />
+            </Button>
+          </div>
         </div>
       </div>
       {!showCheck && actions.commandError && (

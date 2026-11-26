@@ -6270,6 +6270,7 @@ export default function App() {
               <AboutSettingsContent
                 updates={snapshot.updates}
                 updateControls={updateControls}
+                onOpenExternalLink={openExternalLink}
               />
             }
             globalInstructions={globalInstructions}

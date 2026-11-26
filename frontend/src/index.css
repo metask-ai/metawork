@@ -826,6 +826,11 @@ summary::-webkit-details-marker {
   font-size: var(--text-body);
 }
 
+.settings-about-links {
+  display: flex;
+  flex-wrap: wrap;
+}
+
 .settings-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
