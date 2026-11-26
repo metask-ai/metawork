@@ -2505,7 +2505,12 @@ test("the open viewer reads the original again under a newer security epoch", as
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(MediaLightbox, { target, load, securityEpoch, onClose() {} }),
+      createElement(MediaLightbox, {
+        target,
+        load,
+        securityEpoch,
+        onClose() {},
+      }),
     );
   const view = render(viewer("1"));
   await waitFor(() => assert.equal(calls.loads, 1));

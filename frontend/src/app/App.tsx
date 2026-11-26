@@ -1106,7 +1106,12 @@ export default function App() {
           }
         : undefined,
     );
-  }, [snapshot.taskIndex, snapshot.taskPage, snapshotLoaded, taskReadingMemory]);
+  }, [
+    snapshot.taskIndex,
+    snapshot.taskPage,
+    snapshotLoaded,
+    taskReadingMemory,
+  ]);
   function retainTaskHistory(taskId: string, runId: string) {
     setHistoryRequests((goals) => {
       const previous = goals[taskId];
