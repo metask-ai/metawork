@@ -50,6 +50,8 @@ pub const OwnedImageExecution = state.OwnedImageExecution;
 pub const OwnedVideoExecution = state.OwnedVideoExecution;
 pub const MediaCredentialGeneration = state.MediaCredentialGeneration;
 pub const MediaCredentials = state.MediaCredentials;
+/// Why Product stops a Run or a compaction.
+pub const PendingInterruption = state.PendingInterruption;
 pub const OwnedFileDelivery = state.OwnedFileDelivery;
 pub const RunError = runtime.RunError;
 pub const EditError = runtime.EditError;

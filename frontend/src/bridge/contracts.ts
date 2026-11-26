@@ -1142,6 +1142,7 @@ export const compactPhases = [
 export type CompactPhase = (typeof compactPhases)[number];
 export const compactCauses = [
   "user_cancel",
+  "account_logout",
   "session_close",
   "app_shutdown",
   "resource_limit",

@@ -1711,6 +1711,9 @@ pub const Runtime = struct {
     /// logout left has one stored.
     fn prepareLogout(self: *Runtime) PrepareResult {
         if (!self.account.acceptsLogout()) return .{ .rejected = .invalid_state };
+        // Clearing what an earlier end left behind ends no login: nothing
+        // that runs is stopped for it.
+        const clearing = self.account.residue();
         const platform = self.platform orelse
             return .{ .prepared = preparedFromState(self.account.prepareLogoutFailure(.fromCode(.credential_store_write_failed))) };
         if (!self.account.residue() and !self.request.marked) {
@@ -1730,7 +1733,7 @@ pub const Runtime = struct {
         };
         var prepared = preparedFromState(self.account.prepareSignedOut(failure != null, failure));
         prepared.revoke = revoke;
-        prepared.logged_out = true;
+        prepared.logged_out = !clearing;
         return .{ .prepared = prepared };
     }
 
@@ -4772,7 +4775,14 @@ test "signing out revokes the refresh token it deletes, and one it could not del
         try std.testing.expectEqual(delete_fails, platform.refresh_token_len != null);
         if (!delete_fails) continue;
         // Clearing what was left revokes it again: that keeps it from working.
-        try logOut(&runtime);
+        // No login ends there, so nothing that runs is stopped for it.
+        var clear = switch (runtime.prepareCommand(.logout)) {
+            .prepared => |prepared| prepared,
+            else => return error.TestUnexpectedResult,
+        };
+        defer clear.deinit();
+        try std.testing.expect(!clear.logged_out);
+        runtime.commit(&clear);
         try transport.expectRevoked(&runtime, 2);
     }
 }

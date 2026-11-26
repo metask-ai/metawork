@@ -4217,7 +4217,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                 std.mem.eql(u8, compact.phase, "failed");
             if (failed != (compact.cause != null)) return error.Invalid;
             if (compact.cause) |cause|
-                if (!oneOf(cause, &.{ "user_cancel", "session_close", "app_shutdown", "resource_limit", "agent_failure", "dependency_contract_failure" }))
+                if (!oneOf(cause, &.{ "user_cancel", "account_logout", "session_close", "app_shutdown", "resource_limit", "agent_failure", "dependency_contract_failure" }))
                     return error.Invalid;
         }
     }

@@ -849,6 +849,12 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     if (login_during_run) {
         const logout = scenario == .logout_during_run;
         if (logout) {
+            // An Account commit that is no sign-out stops nothing.
+            control.commitAccountChangeNoFail(.{ .fact = .{ .view = accounts.runtime.view() } });
+            try std.testing.expectEqual(.none, old.durable.runs[1].?.pending_termination.load(.acquire));
+            // A message waits behind the Run that signing out stops.
+            const behind = try control.sendInput("behind-the-run", old_id, .{ .text = "Then reply once more." });
+            try std.testing.expectEqual(.accepted, behind.outcome);
             try signOut(&accounts);
         } else {
             if (scenario == .account_switch_during_run) network.login_principal = switched_principal;
@@ -883,8 +889,25 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         // that login, for that reason.
         try std.testing.expectEqual(@as(?@TypeOf(terminal.cause.?), .account_logout), terminal.cause);
         if (logout) {
-            try expectBlockedFor(&control, old_id, "after-logout-run", .metask_authorization_required);
+            // The stop did not fail it: it waited for a login and failed for
+            // want of one, keeping what it said.
+            const behind = control.task_runtime.retrySubmission(old_id, "behind-the-run") orelse
+                return error.MessageBehindTheRunDidNotFail;
+            try std.testing.expectEqual(.metask_authorization_required, behind.reason.?);
+            try std.testing.expect(behind.retry_payload != null);
             try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
+            // Signed in again, it is sent again.
+            network.expected_access = access_b;
+            try relogin(&accounts);
+            try drainCatalog(&coordinator);
+            const resent = try control.retryTaskInput(old_id, "behind-the-run", "behind-the-run-again");
+            try std.testing.expectEqual(.accepted, resent.outcome);
+            for (0..5000) |_| {
+                try wake_loop.drain(&control);
+                if (control.task_runtime.hasInputReceipt(old_id, "behind-the-run-again") and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.ResentMessageDidNotRun;
+            try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
             return;
         }
         try expectOldTaskAdoptsLogin(&wake_loop, &control, old_id, "after-login-run", 1);

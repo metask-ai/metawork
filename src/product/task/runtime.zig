@@ -3944,7 +3944,7 @@ pub const Runtime = struct {
         self: *Runtime,
         task_id: u64,
         operation_id: u64,
-        interruption: agent.ExternalInterruption,
+        origin: task_state.PendingInterruption,
         effects: OperationEffects,
     ) ControlError!task_state.CompactTerminationDispatch {
         const task = self.find(task_id) orelse return error.UnknownTask;
@@ -3958,7 +3958,7 @@ pub const Runtime = struct {
             task.durable.compacts,
             operation_id,
         ) orelse return error.NoSuchCompact;
-        return cancelCompactRecord(self, task, compact, interruption, effects);
+        return cancelCompactRecord(self, task, compact, origin, effects);
     }
 
     pub fn cancelRun(
@@ -11330,12 +11330,12 @@ fn cancelCompactRecord(
     self: *Runtime,
     task: *task_state.Task,
     compact: *task_state.CompactRecord,
-    interruption: agent.ExternalInterruption,
+    pending: task_state.PendingInterruption,
     effects: OperationEffects,
 ) ControlError!task_state.CompactTerminationDispatch {
+    std.debug.assert(pending != .none and pending != .approval_mode_change);
     if (task_state.compactTerminalPayload(compact) != null)
         return .already_terminal;
-    const pending = task_policy.pendingInterruption(interruption);
     const prior = compact.pending_interruption.cmpxchgStrong(
         .none,
         pending,

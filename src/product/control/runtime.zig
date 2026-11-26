@@ -3123,24 +3123,23 @@ pub const Runtime = struct {
     /// for its own reason, and a compaction. A Session that ends on its own
     /// is left to do so.
     fn stopMetaskWorkNoFail(self: *Runtime) void {
-        var stopped = false;
         var cursor: task_runtime.Runtime.OperationCursor = .{};
         while (self.task_runtime.nextActiveOperation(&cursor)) |active| {
             const task_id = active.task_id;
             const facts = self.task_runtime.modelFacts(task_id) orelse continue;
-            if (!usesMetask(facts)) continue;
+            if (!runsOnMetask(facts)) continue;
             switch (active.operation) {
-                .run => |run_id| stopped = (self.task_runtime.cancelRun(task_id, run_id, .account_logout, self.taskRuntimeOperationEffects()) catch false) or stopped,
-                .compact => |operation_id| {
-                    _ = self.task_runtime.cancelCompact(task_id, operation_id, .user_cancel, self.taskRuntimeOperationEffects()) catch continue;
-                    stopped = true;
-                },
+                .run => |run_id| self.stopRun(task_id, run_id, .account_logout) catch {},
+                .compact => |operation_id| self.stopCompact(task_id, operation_id, .account_logout) catch {},
                 .none, .restore => {},
             }
         }
-        if (!stopped) return;
-        self.commitTaskStateNoFail();
-        self.bumpRevision();
+    }
+
+    /// What the Task is running on now. A model chosen for its next turn
+    /// does not move the Run or the compaction underway.
+    fn runsOnMetask(facts: task_runtime.Runtime.ModelFacts) bool {
+        return if (facts.installed) |installed| installed.is_metask else false;
     }
 
     /// The Tasks signing out would stop now, for the sign-out confirmation.
@@ -3149,7 +3148,7 @@ pub const Runtime = struct {
         var cursor: task_runtime.Runtime.OperationCursor = .{};
         while (self.task_runtime.nextActiveOperation(&cursor)) |active| {
             const facts = self.task_runtime.modelFacts(active.task_id) orelse continue;
-            if (!usesMetask(facts)) continue;
+            if (!runsOnMetask(facts)) continue;
             switch (active.operation) {
                 .run, .compact => count += 1,
                 .none, .restore => {},
@@ -5536,11 +5535,16 @@ pub const Runtime = struct {
         task_id: u64,
         operation_id: u64,
     ) Error!void {
+        try self.stopCompact(task_id, operation_id, .user_cancel);
+    }
+
+    /// Stops a compaction as Stop does, for `origin`.
+    fn stopCompact(self: *Runtime, task_id: u64, operation_id: u64, origin: product_task.PendingInterruption) Error!void {
         self.syncLifecycle();
         _ = try self.task_runtime.cancelCompact(
             task_id,
             operation_id,
-            .user_cancel,
+            origin,
             self.taskRuntimeOperationEffects(),
         );
         self.commitTaskStateNoFail();
@@ -5576,6 +5580,12 @@ pub const Runtime = struct {
     }
 
     pub fn cancel(self: *Runtime, task_id: u64, run_id: u64) Error!void {
+        try self.stopRun(task_id, run_id, .user_cancel);
+    }
+
+    /// Stops a Run as Stop does, for `origin`: with the MCP installation it
+    /// asked for, and the lifecycle facts around it.
+    fn stopRun(self: *Runtime, task_id: u64, run_id: u64, origin: product_task.PendingInterruption) Error!void {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         if (self.observeMcpInstallation(null)) |observation| {
@@ -5586,7 +5596,7 @@ pub const Runtime = struct {
         if (try self.task_runtime.cancelRun(
             task_id,
             run_id,
-            .user_cancel,
+            origin,
             self.taskRuntimeOperationEffects(),
         )) {
             self.commitTaskStateNoFail();
@@ -18648,10 +18658,17 @@ test "a Metask Run that ended with 401 tells Account what Metask said" {
 test "the sign-out confirmation counts the Tasks a sign-out would stop" {
     var control = try testRuntime();
     defer control.deinit();
-    // The fixture Task runs on Metask.
+    // The fixture Task runs on Metask. What stops, and what does not, is
+    // the sign-out lifecycle's to show with a Run that is running.
     try std.testing.expectEqual(@as(usize, 1), control.metaskStopTargets());
-    // A commit that is no sign-out stops nothing.
-    control.commitAccountChangeNoFail(.{ .fact = .{ .view = .{ .state = .signed_out } } });
+    // What the Run runs on decides, not the model chosen for the next turn.
+    const task = control.testTask(3).?;
+    const chosen = task.durable.model_intent;
+    task.durable.model_intent = try .init(control.allocator, .{ .source_id = "custom_provider:fixture", .model_id = "model" }, 9);
+    defer {
+        task.durable.model_intent.?.deinit(control.allocator);
+        task.durable.model_intent = chosen;
+    }
     try std.testing.expectEqual(@as(usize, 1), control.metaskStopTargets());
 }
 

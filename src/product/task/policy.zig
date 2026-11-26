@@ -245,17 +245,6 @@ pub fn dispatchedControlStale(dispatch: task_state.RunTerminationDispatch) bool 
     };
 }
 
-pub fn pendingInterruption(
-    interruption: agent.ExternalInterruption,
-) task_state.PendingInterruption {
-    return switch (interruption) {
-        .user_cancel => .user_cancel,
-        .session_close => .session_close,
-        .app_shutdown => .app_shutdown,
-        .timeout => .timeout,
-    };
-}
-
 pub fn pendingTerminationSignal(
     run: *const task_state.RunRecord,
 ) agent.TerminationSignal {
@@ -276,14 +265,25 @@ pub fn pendingExternalInterruption(
     compact: *const task_state.CompactRecord,
 ) agent.ExternalInterruption {
     return switch (compact.pending_interruption.load(.acquire)) {
-        // A change in approval mode cannot interrupt a Compact; signing out
-        // cancels one as the user would.
-        .none, .approval_mode_change, .account_logout => unreachable,
-        .user_cancel => .user_cancel,
+        // A change in approval mode cannot interrupt a Compact.
+        .none, .approval_mode_change => unreachable,
+        // Core has no Product stop reason: signing out reaches it as a
+        // cancellation.
+        .user_cancel, .account_logout => .user_cancel,
         .timeout => .timeout,
         .session_close => .session_close,
         .app_shutdown => .app_shutdown,
     };
+}
+
+/// Core reports a compaction stopped to sign out as the user's
+/// cancellation; Product keeps its own reason.
+pub fn productCompactCause(
+    compact: *const task_state.CompactRecord,
+    cause: ?task_state.CompactCause,
+) ?task_state.CompactCause {
+    if (cause != .user_cancel) return cause;
+    return if (compact.pending_interruption.load(.acquire) == .account_logout) .account_logout else cause;
 }
 
 pub fn compactCauseForInterruption(
@@ -1116,6 +1116,17 @@ pub fn foldTerminalDisposition(
         .poisoned => attached.health = .session_poisoned,
         .closing => std.debug.assert(task.runtime.beginClosing()),
     }
+}
+
+test "a compaction stopped to sign out keeps its own reason" {
+    var compact: task_state.CompactRecord = undefined;
+    compact.pending_interruption = .init(.account_logout);
+    // Core is told it is a cancellation, and reports one.
+    try std.testing.expectEqual(agent.ExternalInterruption.user_cancel, pendingExternalInterruption(&compact));
+    try std.testing.expectEqual(@as(?task_state.CompactCause, .account_logout), productCompactCause(&compact, .user_cancel));
+    try std.testing.expectEqual(@as(?task_state.CompactCause, .session_close), productCompactCause(&compact, .session_close));
+    compact.pending_interruption = .init(.user_cancel);
+    try std.testing.expectEqual(@as(?task_state.CompactCause, .user_cancel), productCompactCause(&compact, .user_cancel));
 }
 
 test "Agent terminal facts map into Product Task outcomes" {
