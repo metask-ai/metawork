@@ -1444,6 +1444,8 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
         try image_product.rotateCredential(&accounts, &platform, &coordinator);
         try std.testing.expectEqualStrings("synthetic-dialogue-key", task.runtime.executionConst().?.secret);
         try std.testing.expectEqual(@as(usize, 1), task.durable.runs[0].?.image_execution.?.authorization.versions.items.len);
+        // A refusal of what the Run sends now names the renewed generation.
+        try std.testing.expectEqual(accounts.runtime.authorization().use().ready, task.durable.runs[0].?.image_execution.?.authorization.source.?.currentGeneration());
     }
     const cancelled = std.mem.eql(u8, mode, "hold");
     try image_product.finish(&control, task_id, first_id, if (cancelled) &effects else null);

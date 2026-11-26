@@ -413,33 +413,24 @@ test("SelectionMenu exposes a visible busy state without a false chevron", () =>
 
 const readySettingsAccount = {
   state: "authenticated",
-  canCancel: false,
-  canRetry: false,
+  actions: {
+    cancel: false,
+    retry: false,
+    login: false,
+    logout: true,
+    clear: false,
+  },
+  unreachable: false,
+  attempt: null,
   accountId: "account-1",
   displayName: "Metask User",
   emailHint: "m***@example.com",
   phoneHint: "",
-  concurrencyLimit: 5,
   errorCode: "none",
   safeDiagnostic: "",
   summary: {
     operation: "idle",
     usageEligibility: "unknown",
-    wallet: {
-      availability: "unavailable",
-      balanceU: null,
-      syncedAt: null,
-      errorCode: "none",
-      safeDiagnostic: "",
-    },
-    usage: {
-      availability: "unavailable",
-      today: null,
-      total: null,
-      syncedAt: null,
-      errorCode: "none",
-      safeDiagnostic: "",
-    },
     history: {
       availability: "unavailable",
       startDate: null,
@@ -2040,6 +2031,23 @@ test("Models adds a model independently without listing or reusing legacy provid
   assert.deepEqual(removals, [["provider-multi", "3", "7", "model-a"]]);
 });
 
+test("the sign-out confirmation says how many Tasks it stops, in the right number", async () => {
+  for (const [count, sentence] of [
+    [1, /1 task is using Metask models and will stop when you sign out./],
+    [2, /2 tasks are using Metask models and will stop when you sign out./],
+  ]) {
+    const user = userEvent.setup({ document: dom.window.document });
+    renderSettings(readySettingsAccount, {
+      initialSection: "account",
+      metaskStopTargets: count,
+    });
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Sign out" });
+    assert.match(dialog.textContent, sentence);
+    cleanup();
+  }
+});
+
 test("Settings signs out only after confirming in a modal", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   let logoutCalls = 0;
@@ -2058,13 +2066,19 @@ test("Settings signs out only after confirming in a modal", async () => {
   await waitFor(() => assert.ok(document.activeElement === heading));
   const trigger = screen.getByRole("button", { name: "Sign out" });
   assert.equal(screen.queryByRole("heading", { name: "Security" }), null);
-  assert.equal(screen.queryByText(/Sign in again to create new tasks/), null);
+  assert.equal(
+    screen.queryByText(/can't use Metask models until you sign in again/),
+    null,
+  );
   await user.click(trigger);
 
   const dialog = await screen.findByRole("alertdialog", { name: "Sign out" });
   const cancel = within(dialog).getByRole("button", { name: "Cancel" });
   await waitFor(() => assert.ok(document.activeElement === cancel));
-  assert.match(dialog.textContent, /Sign in again to create new tasks/);
+  assert.match(
+    dialog.textContent,
+    /After you sign out, you can't use Metask models until you sign in again\./,
+  );
   assert.equal(logoutCalls, 0);
 
   await user.keyboard("{Escape}");
@@ -2088,7 +2102,11 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
   const user = userEvent.setup({ document: dom.window.document });
   let cancellations = 0;
   renderSettings(
-    { ...readySettingsAccount, state: "authorizing", canCancel: true },
+    {
+      ...readySettingsAccount,
+      state: "authorizing",
+      actions: { ...readySettingsAccount.actions, cancel: true },
+    },
     {
       models: settingsModels(
         { catalogState: "loading", models: [] },

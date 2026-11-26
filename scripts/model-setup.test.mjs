@@ -102,13 +102,19 @@ function signedOut() {
   snapshot.capabilities.customModelTest = true;
   Object.assign(snapshot.account, {
     state: "signed_out",
-    canCancel: false,
-    canRetry: false,
+    actions: {
+      cancel: false,
+      retry: false,
+      login: false,
+      logout: false,
+      clear: false,
+    },
+    unreachable: false,
+    attempt: null,
     accountId: "",
     displayName: "",
     emailHint: "",
     phoneHint: "",
-    concurrencyLimit: null,
   });
   Object.assign(snapshot.models, {
     availability: "needs_authentication",
@@ -204,14 +210,14 @@ async function renderApp(
     beginLogin: async () => {
       calls.login++;
       snapshot.account.state = "authorizing";
-      snapshot.account.canCancel = true;
+      snapshot.account.actions.cancel = true;
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
       return { accepted: true, errorCode: "none", attemptId: "login-1" };
     },
     cancelAccountOperation: async () => {
       calls.cancel++;
       snapshot.account.state = "signed_out";
-      snapshot.account.canCancel = false;
+      snapshot.account.actions.cancel = false;
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
       return { accepted: true, errorCode: "none", attemptId: null };
     },
@@ -360,7 +366,7 @@ test("a retained Metask choice explains authorization before generic admission f
   state.account.state = "checking";
   assert.deepEqual(classify(state), { reason: "checking", action: null });
   state.account.state = "authorizing";
-  state.account.canCancel = true;
+  state.account.actions.cancel = true;
   assert.deepEqual(classify(state), {
     reason: "authorizing",
     action: "cancel",
@@ -437,7 +443,7 @@ test("Host preparation, failures and default selection are not first-use setup",
   state.account.errorCode = "none";
   state.account.state = "authorizing";
   assert.deepEqual(classify(state), { reason: "authorizing", action: null });
-  state.account.canCancel = true;
+  state.account.actions.cancel = true;
   assert.deepEqual(classify(state), {
     reason: "authorizing",
     action: "cancel",
@@ -920,7 +926,7 @@ test("an unconfirmed login offers one retry that waits out the attempt underway"
   Object.assign(state.account, {
     state: "checking",
     errorCode: "metask_service_unavailable",
-    canRetry: true,
+    actions: { ...state.account.actions, retry: true, logout: true },
   });
   state.models.defaultSelection = structuredClone(
     fixture.models.defaultSelection,
@@ -928,7 +934,7 @@ test("an unconfirmed login offers one retry that waits out the attempt underway"
   let retries = 0;
   ctx.mock.method(BridgeClient.prototype, "retryAccountRefresh", async () => {
     retries++;
-    state.account.canRetry = false;
+    state.account.actions.retry = false;
     state.revision = String(BigInt(state.revision) + 1n);
     return { accepted: true, errorCode: "none", attemptId: "retry-1" };
   });

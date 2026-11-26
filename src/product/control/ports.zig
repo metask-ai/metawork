@@ -13,21 +13,19 @@ const workspace = @import("metawork_product_workspace");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
 
-/// One committed Account revision delivered to Product Control. Attempt
-/// identity remains explicit for Account command lifecycle observation; model
+/// One committed Account revision delivered to Product Control. Model
 /// availability is owned and delivered independently by Models.
 pub const AccountCommit = struct {
     fact: account.AccountFact,
-    attempt_id: ?u64,
-    attempt_terminal: bool,
     /// An access token was installed or ended. Product inspects what its
     /// visitor lends from now on; no token is handed over here.
     token_changed: bool = false,
+    /// The person signed out: what runs on their Metask login stops.
+    logged_out: bool = false,
 
     pub fn assertValid(self: AccountCommit) void {
         account.validateFact(self.fact) catch
             @panic("Account commit sink received an invalid Account fact");
-        std.debug.assert(!self.attempt_terminal or self.attempt_id != null);
     }
 };
 

@@ -1,94 +1,22 @@
 import type { AccountView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { accountErrorText } from "../../i18n/account-error.ts";
 import { useI18n } from "../../i18n/context.ts";
-import {
-  formatAccountDecimal,
-  formatAccountSyncedAt,
-} from "./account-summary-format.ts";
+import { formatAccountSyncedAt } from "./account-summary-format.ts";
 import { AccountUsageHeatmap } from "./AccountUsageHeatmap.tsx";
 
 type AccountSummary = AccountView["summary"];
 
-function oldestSyncedAt(summary: AccountSummary) {
-  const values = [
-    summary.wallet.syncedAt,
-    summary.usage.syncedAt,
-    summary.history.syncedAt,
-  ].filter((value): value is string => value !== null);
-  return values.reduce<string | null>(
-    (oldest, value) =>
-      oldest === null || BigInt(value) < BigInt(oldest) ? value : oldest,
-    null,
-  );
-}
-
-function SummaryState({
-  availability,
-  errorCode,
-  safeDiagnostic,
-}: {
-  availability: AccountSummary["wallet"]["availability"];
-  errorCode: AccountSummary["wallet"]["errorCode"];
-  safeDiagnostic: string;
-}) {
-  const { t } = useI18n();
-  if (availability === "loading") {
-    return <span role="status">{t("settings.account_usage_syncing")}</span>;
-  }
-  if (availability === "stale") {
-    return (
-      <span className="settings-account-usage-stale" role="status">
-        {t("settings.account_usage_stale")}
-      </span>
-    );
-  }
-  if (availability === "unavailable") {
-    return (
-      <span role={errorCode === "none" ? "status" : "alert"}>
-        {safeDiagnostic ||
-          (errorCode === "none"
-            ? t("settings.account_usage_unavailable")
-            : accountErrorText(errorCode, t))}
-      </span>
-    );
-  }
-  return null;
-}
-
-export function AccountBalance({
-  wallet,
+export function AccountRecharge({
   disabled,
   onRecharge,
 }: {
-  wallet: AccountSummary["wallet"];
   disabled: boolean;
   onRecharge: () => void;
 }) {
   const { t } = useI18n();
-  const ready =
-    (wallet.availability === "ready" || wallet.availability === "stale") &&
-    wallet.balanceU !== null;
-
   return (
     <div className="settings-identity-wallet">
-      {ready ? (
-        <div
-          className="settings-identity-balance"
-          data-availability={wallet.availability}
-        >
-          <span className="settings-identity-balance-label">
-            {t("settings.account_usage_balance")}
-          </span>
-          <strong>
-            {t("settings.account_usage_cost", {
-              value: formatAccountDecimal(wallet.balanceU!),
-            })}
-          </strong>
-          <SummaryState {...wallet} />
-        </div>
-      ) : null}
       <Button
         variant="primary"
         size="lg"
@@ -116,14 +44,10 @@ export function AccountUsageSummary({
   if (summary.usageEligibility === "disabled") return null;
 
   const refreshing = summary.operation === "refreshing";
-  const syncedAt = oldestSyncedAt(summary);
+  const syncedAt = summary.history.syncedAt;
   const formattedSyncedAt = syncedAt
     ? formatAccountSyncedAt(syncedAt, locale)
     : null;
-  const usageReady =
-    (summary.usage.availability === "ready" ||
-      summary.usage.availability === "stale") &&
-    summary.usage.total !== null;
 
   return (
     <div className="settings-group">
@@ -143,47 +67,7 @@ export function AccountUsageSummary({
             <span>{t("settings.account_usage_mode_unknown")}</span>
           </div>
         ) : (
-          <>
-            {summary.usage.availability !== "unavailable" ? (
-              <div
-                className="settings-account-usage-row"
-                data-availability={summary.usage.availability}
-              >
-                <div className="settings-account-usage-copy">
-                  <span>{t("settings.account_usage_total")}</span>
-                  <SummaryState {...summary.usage} />
-                </div>
-                <div className="settings-account-usage-values">
-                  {usageReady ? (
-                    <>
-                      <strong>
-                        {t("settings.account_usage_tokens", {
-                          value: formatAccountDecimal(
-                            summary.usage.total!.totalTokens,
-                          ),
-                        })}
-                      </strong>
-                      <span>
-                        {t("settings.account_usage_cost", {
-                          value: formatAccountDecimal(
-                            summary.usage.total!.actualCostU,
-                          ),
-                        })}
-                      </span>
-                    </>
-                  ) : (
-                    <strong
-                      aria-label={t("settings.account_usage_unavailable")}
-                    >
-                      —
-                    </strong>
-                  )}
-                </div>
-              </div>
-            ) : null}
-
-            <AccountUsageHeatmap history={summary.history} />
-          </>
+          <AccountUsageHeatmap history={summary.history} />
         )}
 
         <div className="settings-account-usage-footer">

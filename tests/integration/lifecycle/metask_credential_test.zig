@@ -849,6 +849,12 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     if (login_during_run) {
         const logout = scenario == .logout_during_run;
         if (logout) {
+            // An Account commit that is no sign-out stops nothing.
+            control.commitAccountChangeNoFail(.{ .fact = .{ .view = accounts.runtime.view() } });
+            try std.testing.expectEqual(.none, old.durable.runs[1].?.pending_termination.load(.acquire));
+            // A message waits behind the Run that signing out stops.
+            const behind = try control.sendInput("behind-the-run", old_id, .{ .text = "Then reply once more." });
+            try std.testing.expectEqual(.accepted, behind.outcome);
             try signOut(&accounts);
         } else {
             if (scenario == .account_switch_during_run) network.login_principal = switched_principal;
@@ -858,7 +864,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
         }
         // A new login renews the admitted Run's Session like a token refresh;
         // logout leaves the credential it already holds. Neither changes its
-        // binding or execution generation, or interrupts the Run.
+        // binding or execution generation; only a logout stops the Run.
         const held = if (logout) access_a else access_b;
         try std.testing.expectEqualStrings(held, old.runtime.executionConst().?.secret);
         try std.testing.expectEqualDeep(fixture.credentialDigest(held), fake_core.sessions[0].credential_digest);
@@ -872,12 +878,36 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
             if (old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         } else return error.RunDidNotSettle;
-        try std.testing.expectEqual(.completed, fixture.product_task.testing.state_module.productTerminalFacts(&old.durable.runs[1].?).?.outcome);
+        // The fake core remembers the stop until it is rearmed, unlike Core;
+        // the next Run then finishes as the held one would have.
+        fake_core.rearmControlled();
+        fake_core.releaseControlled();
+        const terminal = fixture.product_task.testing.state_module.productTerminalFacts(&old.durable.runs[1].?).?;
         try std.testing.expectEqual(@as(usize, 2), runCalls());
         try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+        // Signing out, also on the way to another login, stopped the Run on
+        // that login, for that reason.
+        try std.testing.expectEqual(@as(?@TypeOf(terminal.cause.?), .account_logout), terminal.cause);
         if (logout) {
-            try expectBlockedFor(&control, old_id, "after-logout-run", .metask_authorization_required);
+            // The stop did not fail it: it waited for a login and failed for
+            // want of one, keeping what it said.
+            const behind = control.task_runtime.retrySubmission(old_id, "behind-the-run") orelse
+                return error.MessageBehindTheRunDidNotFail;
+            try std.testing.expectEqual(.metask_authorization_required, behind.reason.?);
+            try std.testing.expect(behind.retry_payload != null);
             try std.testing.expectEqualStrings(access_a, old.runtime.executionConst().?.secret);
+            // Signed in again, it is sent again.
+            network.expected_access = access_b;
+            try relogin(&accounts);
+            try drainCatalog(&coordinator);
+            const resent = try control.retryTaskInput(old_id, "behind-the-run", "behind-the-run-again");
+            try std.testing.expectEqual(.accepted, resent.outcome);
+            for (0..5000) |_| {
+                try wake_loop.drain(&control);
+                if (control.task_runtime.hasInputReceipt(old_id, "behind-the-run-again") and old.runtime.active_operation == .none and !old.runtime.worker_leases.hasLive()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.ResentMessageDidNotRun;
+            try std.testing.expectEqualStrings(access_b, old.runtime.executionConst().?.secret);
             return;
         }
         try expectOldTaskAdoptsLogin(&wake_loop, &control, old_id, "after-login-run", 1);
@@ -1155,7 +1185,9 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
                     try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
                 } else return error.RestoreDidNotSettle;
                 const source = old.durable.runs[1].?;
-                try std.testing.expectEqual(if (scenario == .continuation_cancelled) fixture.product_task.RunOutcome.cancelled else .completed, fixture.product_task.testing.state_module.productTerminalFacts(&source).?.outcome);
+                // A relogin signs out first, which stops the Run.
+                const stopped = scenario == .continuation_cancelled or scenario == .continuation_stale_auth;
+                try std.testing.expectEqual(if (stopped) fixture.product_task.RunOutcome.cancelled else .completed, fixture.product_task.testing.state_module.productTerminalFacts(&source).?.outcome);
                 try std.testing.expect(source.input_continuation_failure != null);
                 try std.testing.expect(!source.input_continuation_pending);
                 try std.testing.expectEqual(.unadopted, source.additional_inputs[0].?.state);
@@ -1331,8 +1363,9 @@ fn characterizeRenewal(
             defer restored.deinit();
             try std.testing.expect(!restarted.takeRefreshAfterCommit(&restored));
             restarted.commit(&restored);
+            // What may have been spent was deleted, so nothing is left to try.
             try std.testing.expectEqual(.signed_out, restarted.view().state);
-            try std.testing.expectEqual(.token_refresh_failed, restarted.view().error_code);
+            try std.testing.expectEqual(.none, restarted.view().error_code);
             try std.testing.expectEqual(@as(usize, 1), network.refresh_attempts.load(.acquire));
         },
         else => unreachable,
@@ -1500,7 +1533,7 @@ fn characterizeUnreachableRestart(
         accounts.drain();
     }
     try std.testing.expectEqual(.checking, control.accountView().state);
-    try std.testing.expect(control.accountView().can_retry);
+    try std.testing.expect(control.accountView().actions.retry);
     try std.testing.expectEqual(.@"unreachable", control.newTaskAdmissionView().metask);
     control.syncLifecycle();
     const unsent = control.task_runtime.retrySubmission(task_id, "while-checking") orelse

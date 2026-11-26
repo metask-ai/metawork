@@ -416,6 +416,8 @@ pub fn build(b: *std.Build) void {
             b.step("test-product-task-persistence", "Run Product Task history codec and restore tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_task_runtime)
             b.step("test-product-task-runtime", "Run Product Task runtime kernel tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_task_policy)
+            b.step("test-product-task-policy", "Run Product Task outcome and feedback policy tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_task_execution)
             b.step("test-product-task-execution", "Run Product Task executor and terminal publication tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_control_runtime)
@@ -501,6 +503,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"image Run"},
         })).step);
     }
+    b.step("test-models-coordinator", "Run Models coordinator catalog and media preparation tests")
+        .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.models_coordinator })).step);
     const model_metadata_step = b.step("test-model-metadata", "Run Models declarations, resolution and Host/Renderer contract tests");
     for ([_]*std.Build.Module{ test_modules.models_contract, test_modules.models_metask, test_modules.models_providers, test_modules.models_runtime }) |module| {
         model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);

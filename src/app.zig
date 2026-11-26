@@ -367,6 +367,9 @@ const App = struct {
         control_storage.setVideoRunPreparation(models_management.videoRunPreparation());
         control_storage.setAccountAuthorization(account.authorizationQuery());
         account.setCredentialRenewal(control_storage.metaskCredentialRenewal());
+        // Every Metask 401 on the Account token is Account's to judge.
+        control_storage.setAccountUnauthorizedReport(account.unauthorizedReport());
+        models_management.setUnauthorizedReport(account.unauthorizedReport());
         control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery, .validate_path_fn = output_file.validatePath });
         control_storage.setFileEffects(self.platform.fileEffects());
         control_storage.setFileSave(self.platform.fileSave());

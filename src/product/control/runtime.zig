@@ -1529,6 +1529,7 @@ pub const Runtime = struct {
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
     video_run_preparation: ?control_ports.VideoRunPreparation = null,
     account_authorization: ?account_contract.AuthorizationQuery = null,
+    account_unauthorized: ?account_contract.UnauthorizedReport = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     file_actions: file_action.Lane = .{},
     file_effects: ?control_ports.FileEffects = null,
@@ -3116,6 +3117,45 @@ pub const Runtime = struct {
         commit.assertValid();
         if (commit.token_changed) self.inspectAccountTokensNoFail();
         self.commitAccountFactNoFail(commit.fact);
+        if (commit.logged_out) self.stopMetaskWorkNoFail();
+    }
+
+    /// Signing out stops what runs on that Metask login: a Run as Stop would,
+    /// for its own reason, and a compaction. A Session that ends on its own
+    /// is left to do so.
+    fn stopMetaskWorkNoFail(self: *Runtime) void {
+        var cursor: task_runtime.Runtime.OperationCursor = .{};
+        while (self.task_runtime.nextActiveOperation(&cursor)) |active| {
+            const task_id = active.task_id;
+            const facts = self.task_runtime.modelFacts(task_id) orelse continue;
+            if (!runsOnMetask(facts)) continue;
+            switch (active.operation) {
+                .run => |run_id| self.stopRun(task_id, run_id, .account_logout) catch {},
+                .compact => |operation_id| self.stopCompact(task_id, operation_id, .account_logout) catch {},
+                .none, .restore => {},
+            }
+        }
+    }
+
+    /// What the Task is running on now. A model chosen for its next turn
+    /// does not move the Run or the compaction underway.
+    fn runsOnMetask(facts: task_runtime.Runtime.ModelFacts) bool {
+        return if (facts.installed) |installed| installed.is_metask else false;
+    }
+
+    /// The Tasks signing out would stop now, for the sign-out confirmation.
+    pub fn metaskStopTargets(self: *Runtime) usize {
+        var count: usize = 0;
+        var cursor: task_runtime.Runtime.OperationCursor = .{};
+        while (self.task_runtime.nextActiveOperation(&cursor)) |active| {
+            const facts = self.task_runtime.modelFacts(active.task_id) orelse continue;
+            if (!runsOnMetask(facts)) continue;
+            switch (active.operation) {
+                .run, .compact => count += 1,
+                .none, .restore => {},
+            }
+        }
+        return count;
     }
 
     /// Models or Account facts changed. Schedule rearms on them and judges
@@ -3157,7 +3197,7 @@ pub const Runtime = struct {
     fn newTaskMetask(self: *Runtime, use: ?account_contract.Authorization.Use) execution_state.MetaskAdmission {
         return switch (use orelse return .none) {
             .ready => .none,
-            .wait => if (self.account_projection.view().error_code == .none) .recovering else .@"unreachable",
+            .wait => if (self.account_projection.view().cannot_reach) .@"unreachable" else .recovering,
             .stop => .none,
         };
     }
@@ -5517,11 +5557,16 @@ pub const Runtime = struct {
         task_id: u64,
         operation_id: u64,
     ) Error!void {
+        try self.stopCompact(task_id, operation_id, .user_cancel);
+    }
+
+    /// Stops a compaction as Stop does, for `origin`.
+    fn stopCompact(self: *Runtime, task_id: u64, operation_id: u64, origin: product_task.PendingInterruption) Error!void {
         self.syncLifecycle();
         _ = try self.task_runtime.cancelCompact(
             task_id,
             operation_id,
-            .user_cancel,
+            origin,
             self.taskRuntimeOperationEffects(),
         );
         self.commitTaskStateNoFail();
@@ -5557,6 +5602,12 @@ pub const Runtime = struct {
     }
 
     pub fn cancel(self: *Runtime, task_id: u64, run_id: u64) Error!void {
+        try self.stopRun(task_id, run_id, .user_cancel);
+    }
+
+    /// Stops a Run as Stop does, for `origin`: with the MCP installation it
+    /// asked for, and the lifecycle facts around it.
+    fn stopRun(self: *Runtime, task_id: u64, run_id: u64, origin: product_task.PendingInterruption) Error!void {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         if (self.observeMcpInstallation(null)) |observation| {
@@ -5567,7 +5618,7 @@ pub const Runtime = struct {
         if (try self.task_runtime.cancelRun(
             task_id,
             run_id,
-            .user_cancel,
+            origin,
             self.taskRuntimeOperationEffects(),
         )) {
             self.commitTaskStateNoFail();
@@ -7254,6 +7305,8 @@ pub const Runtime = struct {
         try self.writeModels(writer, text);
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
         try self.writeNewTaskAdmission(writer);
+        writer.print(",\"metaskStopTargets\":{d}", .{self.metaskStopTargets()}) catch
+            return error.SnapshotTooLarge;
         writer.writeAll(",\"automaticWorkspaceRoot\":") catch
             return error.SnapshotTooLarge;
         try self.writeAutomaticWorkspaceRootConfiguration(writer, text);
@@ -7466,14 +7519,24 @@ pub const Runtime = struct {
         text: *const view_read.Text,
     ) Error!void {
         const view = self.accountView();
+        const actions = view.actions;
         writer.print(
-            "{{\"state\":\"{s}\",\"canCancel\":{},\"canRetry\":{},\"accountId\":",
-            .{
-                @tagName(view.state),
-                view.can_cancel,
-                view.can_retry,
-            },
+            "{{\"state\":\"{s}\",\"actions\":{{\"cancel\":{},\"retry\":{},\"login\":{},\"logout\":{},\"clear\":{}}},\"unreachable\":{},\"attempt\":",
+            .{ @tagName(view.state), actions.cancel, actions.retry, actions.login, actions.logout, actions.clear, view.cannot_reach },
         ) catch return error.SnapshotTooLarge;
+        if (view.attempt) |attempt| {
+            writer.print("{{\"id\":\"{d}\",\"action\":\"{s}\",\"outcome\":", .{ attempt.id, @tagName(attempt.action) }) catch
+                return error.SnapshotTooLarge;
+            if (attempt.outcome) |outcome|
+                writer.print("\"{s}\"", .{@tagName(outcome)}) catch return error.SnapshotTooLarge
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(attempt.error_code)}) catch
+                return error.SnapshotTooLarge;
+            try text.writeJson(writer, attempt.safe_diagnostic);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"accountId\":") catch return error.SnapshotTooLarge;
         try text.writeJson(writer, view.account_id);
         writer.writeAll(",\"displayName\":") catch
             return error.SnapshotTooLarge;
@@ -7484,60 +7547,16 @@ pub const Runtime = struct {
         writer.writeAll(",\"phoneHint\":") catch
             return error.SnapshotTooLarge;
         try text.writeJson(writer, view.phone_hint);
-        writer.writeAll(",\"concurrencyLimit\":") catch
-            return error.SnapshotTooLarge;
-        if (view.concurrency_limit) |limit|
-            writer.print("{d}", .{limit}) catch return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
             @tagName(view.error_code),
         }) catch return error.SnapshotTooLarge;
         try text.writeJson(writer, view.safe_diagnostic);
         const summary = view.summary;
-        writer.print(",\"summary\":{{\"operation\":\"{s}\",\"usageEligibility\":\"{s}\",\"wallet\":{{\"availability\":\"{s}\",\"balanceU\":", .{
+        writer.print(",\"summary\":{{\"operation\":\"{s}\",\"usageEligibility\":\"{s}\",\"history\":{{\"availability\":\"{s}\",\"startDate\":", .{
             @tagName(summary.operation),
             @tagName(summary.usage_eligibility),
-            @tagName(summary.wallet.availability),
+            @tagName(summary.history.availability),
         }) catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(writer, summary.wallet.balance_u, text);
-        writer.writeAll(",\"syncedAt\":") catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(writer, summary.wallet.synced_at_unix_ms, text);
-        writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.wallet.error_code)}) catch
-            return error.SnapshotTooLarge;
-        try text.writeJson(writer, summary.wallet.safe_diagnostic);
-        writer.print("}},\"usage\":{{\"availability\":\"{s}\",\"today\":", .{@tagName(summary.usage.availability)}) catch
-            return error.SnapshotTooLarge;
-        if (summary.usage.today) |today| {
-            writer.writeAll("{\"inputTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.input_tokens);
-            writer.writeAll(",\"outputTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.output_tokens);
-            writer.writeAll(",\"cacheCreationTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.cache_creation_tokens);
-            writer.writeAll(",\"cacheReadTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.cache_read_tokens);
-            writer.writeAll(",\"totalTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.total_tokens);
-            writer.writeAll(",\"actualCostU\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.actual_cost_u);
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"total\":") catch return error.SnapshotTooLarge;
-        if (summary.usage.total) |total| {
-            writer.writeAll("{\"totalTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, total.total_tokens);
-            writer.writeAll(",\"actualCostU\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, total.actual_cost_u);
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"syncedAt\":") catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(writer, summary.usage.synced_at_unix_ms, text);
-        writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.usage.error_code)}) catch
-            return error.SnapshotTooLarge;
-        try text.writeJson(writer, summary.usage.safe_diagnostic);
-        writer.print("}},\"history\":{{\"availability\":\"{s}\",\"startDate\":", .{@tagName(summary.history.availability)}) catch
-            return error.SnapshotTooLarge;
         try writeNullableProjectedJsonValue(writer, summary.history.start_date, text);
         writer.writeAll(",\"endDate\":") catch return error.SnapshotTooLarge;
         try writeNullableProjectedJsonValue(writer, summary.history.end_date, text);
@@ -10177,6 +10196,18 @@ pub const Runtime = struct {
         self.account_authorization = query;
     }
 
+    /// A Run's Metask 401 goes to Account, which alone may judge it.
+    pub fn setAccountUnauthorizedReport(self: *Runtime, report: account_contract.UnauthorizedReport) void {
+        self.account_unauthorized = report;
+        self.task_runtime.metask_unauthorized = .{ .context = self, .report_fn = reportRunUnauthorized };
+    }
+
+    fn reportRunUnauthorized(context: *anyopaque, generation: u64, code: ?[]const u8) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const report = self.account_unauthorized orelse return;
+        report.report(generation, account_contract.Unauthorized.fromCode(code));
+    }
+
     pub fn metaskCredentialRenewal(self: *Runtime) control_ports.MetaskCredentialRenewal {
         return .{
             .context = self,
@@ -11020,14 +11051,12 @@ pub const TestSupport = if (builtin.is_test) struct {
             generation + 3,
         );
         control.commitAccountFactNoFail(.{
-            .kind = .session_changed,
             .view = .{
                 .state = .authenticated,
                 .account_id = "account-1",
                 .display_name = "Fixture User",
                 .email_hint = "f***@example.com",
                 .phone_hint = "138****8000",
-                .concurrency_limit = 5,
             },
         });
 
@@ -13482,34 +13511,14 @@ test "Product Control snapshot serializer preserves complete Account summary his
         .actual_cost_u = "0.25",
     }};
     control.commitAccountFactNoFail(.{
-        .kind = .summary_changed,
         .view = .{
             .state = .authenticated,
             .account_id = "account-1",
             .display_name = "Fixture User",
             .email_hint = "f***@example.com",
             .phone_hint = "138****8000",
-            .concurrency_limit = 5,
             .summary = .{
                 .usage_eligibility = .enabled,
-                .wallet = .{
-                    .availability = .ready,
-                    .balance_u = "-1.25",
-                    .synced_at_unix_ms = "1720000000000",
-                },
-                .usage = .{
-                    .availability = .ready,
-                    .today = .{
-                        .input_tokens = "10",
-                        .output_tokens = "20",
-                        .cache_creation_tokens = "3",
-                        .cache_read_tokens = "4",
-                        .total_tokens = "37",
-                        .actual_cost_u = "0.125",
-                    },
-                    .total = .{ .total_tokens = "300", .actual_cost_u = "2.5" },
-                    .synced_at_unix_ms = "1720000000000",
-                },
                 .history = .{
                     .availability = .ready,
                     .start_date = "2025-09-15",
@@ -13525,12 +13534,8 @@ test "Product Control snapshot serializer preserves complete Account summary his
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
     const summary = parsed.value.object.get("account").?.object.get("summary").?.object;
-    const wallet = summary.get("wallet").?.object;
-    const usage = summary.get("usage").?.object;
+    try std.testing.expect(summary.get("wallet") == null and summary.get("usage") == null);
     const history = summary.get("history").?.object;
-    try std.testing.expectEqualStrings("-1.25", wallet.get("balanceU").?.string);
-    try std.testing.expectEqualStrings("37", usage.get("today").?.object.get("totalTokens").?.string);
-    try std.testing.expectEqualStrings("2.5", usage.get("total").?.object.get("actualCostU").?.string);
     try std.testing.expectEqualStrings("2025-09-15", history.get("startDate").?.string);
     try std.testing.expectEqualStrings("10", history.get("days").?.array.items[0].object.get("totalTokens").?.string);
 }
@@ -14585,7 +14590,6 @@ test "Product Control snapshot serializer keeps durable Metask intent after auth
     const binding_epoch = try control.taskBindingEpoch(task_id);
 
     control.commitAccountFactNoFail(.{
-        .kind = .signed_out,
         .view = .{ .state = .signed_out },
     });
     control.publishAdmissionChangesNoFail();
@@ -16433,7 +16437,7 @@ test "identity replacement does not disturb live Task runtime references" {
     const task = control.testTaskSlots()[0].?;
     const route_id = task.runtime.routeId();
     const execution = task.runtime.executionConst().?;
-    control.commitAccountFactNoFail(.{ .kind = .signed_out, .view = .{ .state = .signed_out } });
+    control.commitAccountFactNoFail(.{ .view = .{ .state = .signed_out } });
     control.setMetaskAuthorizationUnavailable();
     try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
@@ -16451,7 +16455,7 @@ test "identity replacement does not disturb live Task runtime references" {
     run.event_stream_finalized = true;
     task.runtime.active_run_id = 0;
     var replacement_lease = try task.runtime.worker_leases.acquire();
-    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .checking } });
+    control.commitAccountFactNoFail(.{ .view = .{ .state = .checking } });
     try std.testing.expectEqual(@as(usize, 1), task.runtime.worker_leases.liveCount());
     try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
@@ -18831,6 +18835,71 @@ test "Metask balance failure projects the first-party reason to the shared Rende
     }
 }
 
+test "a Metask Run that ended with 401 tells Account what Metask said" {
+    const Recorder = struct {
+        calls: usize = 0,
+        generation: u64 = 0,
+        kind: account_contract.Unauthorized = .other,
+        fn report(context: *anyopaque, generation: u64, kind: account_contract.Unauthorized) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.generation = generation;
+            self.kind = kind;
+        }
+    };
+    const Case = struct { status: u16, code: []const u8, kind: ?account_contract.Unauthorized };
+    for ([_]Case{
+        .{ .status = 401, .code = "token_expired", .kind = .token },
+        .{ .status = 401, .code = "authorization_revoked", .kind = .other },
+        // A suspended account is no credential failure.
+        .{ .status = 403, .code = "account_suspended", .kind = null },
+    }) |case| {
+        var control = try testRuntime();
+        defer control.deinit();
+        var recorder: Recorder = .{};
+        control.setAccountUnauthorizedReport(.{ .context = &recorder, .report_fn = Recorder.report });
+        const task = control.testTask(3).?;
+        const run = &task.durable.runs[0].?;
+        const storage = try control.allocator.create(task_test_state.RunModelError);
+        run.model_error_storage = storage;
+        storage.* = .{ .source = .metask, .detail = try lifecycle.ModelError.init(.{
+            .run_id = 77,
+            .category = .authentication,
+            .message = "refused",
+            .code = case.code,
+            .http_status = case.status,
+            .retry = .not_retryable,
+            .attempts = 1,
+        }) };
+        try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
+        run.terminal_payload.model_error = storage;
+        const generation = task.runtime.executionConst().?.credential_generation;
+        finalizeTestTerminalEvents(&control);
+        try std.testing.expectEqual(@as(usize, if (case.kind != null) 1 else 0), recorder.calls);
+        if (case.kind) |kind| {
+            try std.testing.expectEqual(kind, recorder.kind);
+            try std.testing.expectEqual(generation, recorder.generation);
+        }
+    }
+}
+
+test "the sign-out confirmation counts the Tasks a sign-out would stop" {
+    var control = try testRuntime();
+    defer control.deinit();
+    // The fixture Task runs on Metask. What stops, and what does not, is
+    // the sign-out lifecycle's to show with a Run that is running.
+    try std.testing.expectEqual(@as(usize, 1), control.metaskStopTargets());
+    // What the Run runs on decides, not the model chosen for the next turn.
+    const task = control.testTask(3).?;
+    const chosen = task.durable.model_intent;
+    task.durable.model_intent = try .init(control.allocator, .{ .source_id = "custom_provider:fixture", .model_id = "model" }, 9);
+    defer {
+        task.durable.model_intent.?.deinit(control.allocator);
+        task.durable.model_intent = chosen;
+    }
+    try std.testing.expectEqual(@as(usize, 1), control.metaskStopTargets());
+}
+
 test "Renderer transport failures never own Agent Run termination" {
     const cases = [_]struct {
         stage: TransportFailureStage,
@@ -18970,14 +19039,12 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
     const diagnostic: [account_contract.Limits.safe_diagnostic_bytes]u8 =
         @splat('x');
     control.commitAccountFactNoFail(.{
-        .kind = .session_changed,
         .view = .{
             .state = .authenticated,
             .account_id = &account_id,
             .display_name = &display_name,
             .email_hint = &email_hint,
             .phone_hint = &phone_hint,
-            .concurrency_limit = std.math.maxInt(u32),
             .error_code = .invalid_state,
             .safe_diagnostic = &diagnostic,
         },
@@ -24362,7 +24429,7 @@ test "Account token protects Task views and revokes reads only where it was show
     // A token from Account was in nothing shown before: a read goes on, whether
     // it continues another or, as after a login, none was held.
     const sink = control.accountCommitSink();
-    const changed: control_ports.AccountCommit = .{ .fact = .{ .kind = .session_changed, .view = .{ .state = .checking } }, .attempt_id = null, .attempt_terminal = false, .token_changed = true };
+    const changed: control_ports.AccountCommit = .{ .fact = .{ .view = .{ .state = .checking } }, .token_changed = true };
     account = .{ .token = "renewed-account-token", .replaced = "account-image-token" };
     sink.commitNoFail(changed);
     try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());

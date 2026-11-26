@@ -69,6 +69,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.model_error.category.unknown": "模型服务未能完成这次请求。",
   "run.model_error.reason.metask_insufficient_balance":
     "Metask 账户余额和套餐额度不足。",
+  "run.model_error.reason.metask_account_suspended":
+    "Metask 账号已被停用，请到 Metask 官网查看原因。",
   "run.guidance.review_context": "缩短下一条消息，或在可用时整理对话。",
   "run.guidance.revise_instruction": "调整指令或缩小请求范围后继续。",
   "run.guidance.wait": "请稍后再试。",
@@ -442,9 +444,14 @@ export const zhCN: Record<MessageId, string> = {
   "account.retry_refresh": "重试登录刷新",
   "account.retry_now": "立即重试",
   "account.login_again": "重新登录",
+  "account.clear_residue": "再清一次",
   "account.logout": "退出登录",
   "account.logout_confirm":
-    "退出将清除这台设备上的 Metask 登录凭据。创建使用 Metask 模型的新任务前，需要重新登录。自定义模型、本地任务及历史记录、工作区文件都会保留。",
+    "退出后，重新登录前不能使用 Metask 模型。自定义模型、本地任务和历史记录、工作区文件都会保留。",
+  "account.logout_stops_tasks.one":
+    "有 {count} 个任务正在使用 Metask 模型，退出后会停止。",
+  "account.logout_stops_tasks.other":
+    "有 {count} 个任务正在使用 Metask 模型，退出后会停止。",
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
   "account.command_failed":
@@ -1539,14 +1546,8 @@ export const zhCN: Record<MessageId, string> = {
   "settings.account_usage": "账户用量",
   "settings.account_usage_scope":
     "数据来自整个 Metask 账户，不仅统计 MetaWork 中的使用。",
-  "settings.account_usage_balance": "余额",
-  "settings.account_concurrency_limit": "并发额度 {value}",
-  "settings.account_concurrency_unlimited": "不限",
   "settings.account_recharge": "充值",
   "settings.account_recharge_browser_hint": "在浏览器中打开 Metask 充值页面",
-  "settings.account_usage_total": "累计",
-  "settings.account_usage_tokens": "{value} Token",
-  "settings.account_usage_cost": "{value} U",
   "settings.account_usage_stale": "可能已过期",
   "settings.account_usage_syncing": "正在同步…",
   "settings.account_usage_unavailable": "暂时无法获取",
@@ -1731,6 +1732,7 @@ export const zhCN: Record<MessageId, string> = {
   "outcome.dependency_contract_failure": "任务运行环境失败",
   "cause.user_cancel": "由你停止",
   "cause.approval_mode_change": "为切换审批模式而停止",
+  "cause.account_logout": "为退出登录而停止",
   "cause.edit_and_rerun": "为从编辑后的消息重跑而停止",
   "cause.timeout": "已超时",
   "cause.session_close": "会话已释放",

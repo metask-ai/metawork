@@ -104,7 +104,7 @@ export function modelSetupNotice({
   if (needsMetask && account.state === "authorizing")
     return {
       reason: "authorizing",
-      action: account.canCancel ? "cancel" : null,
+      action: account.actions.cancel ? "cancel" : null,
     };
   if (
     models.availability === "loading" ||

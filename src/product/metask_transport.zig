@@ -11,6 +11,7 @@ pub const RequestKind = enum {
     userinfo,
     usage_stats,
     models,
+    revoke,
 };
 
 pub const Request = struct {

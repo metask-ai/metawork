@@ -65,8 +65,17 @@ test.after(async () => {
   dom.window.close();
 });
 
+const actions = (offered = {}) => ({
+  cancel: false,
+  retry: false,
+  login: false,
+  logout: false,
+  clear: false,
+  ...offered,
+});
 const account = {
   state: "authenticated",
+  actions: actions({ logout: true }),
   errorCode: "none",
   displayName: "Metask User",
   emailHint: "m***@example.com",
@@ -158,6 +167,7 @@ test("authenticated account without a username uses its email hint", () => {
     {},
     {
       state: "authenticated",
+      actions: actions({ logout: true }),
       displayName: "",
       emailHint: "m***@example.com",
       phoneHint: "138****8000",
@@ -176,6 +186,7 @@ test("authenticated phone account uses its masked phone hint", () => {
     {},
     {
       state: "authenticated",
+      actions: actions({ logout: true }),
       displayName: "",
       emailHint: "",
       phoneHint: "138****8000",
@@ -192,7 +203,13 @@ test("authenticated phone account uses its masked phone hint", () => {
 test("authenticated account without profile data uses a neutral identity", () => {
   const { container } = renderIdentity(
     {},
-    { state: "authenticated", displayName: "", emailHint: "", phoneHint: "" },
+    {
+      state: "authenticated",
+      actions: actions({ logout: true }),
+      displayName: "",
+      emailHint: "",
+      phoneHint: "",
+    },
   );
 
   const trigger = screen.getByRole("button", {
@@ -213,7 +230,13 @@ test("signed-out account identity separates account, status, and login action", 
       onOpenSettings() {},
       onLogout() {},
     },
-    { state: "signed_out", displayName: "", emailHint: "", phoneHint: "" },
+    {
+      state: "signed_out",
+      actions: actions({ login: true }),
+      displayName: "",
+      emailHint: "",
+      phoneHint: "",
+    },
   );
 
   const trigger = screen.getByRole("button", {
@@ -317,8 +340,8 @@ test("authorization without cancellation keeps app actions available without an 
     {},
     {
       state: "authorizing",
+      actions: actions(),
       displayName: "",
-      canCancel: false,
     },
   );
 
@@ -350,6 +373,7 @@ test("account menu offers keyboard sign-in once a lost renewal or cancelled sign
       {
         ...account,
         state: "signed_out",
+        actions: actions({ login: true }),
         displayName: "",
         emailHint: "",
         errorCode,
@@ -371,8 +395,8 @@ test("account menu offers keyboard sign-in once a lost renewal or cancelled sign
   }
 });
 
-test("an unconfirmed account keeps its two ways out, and neither before a failure", async () => {
-  for (const [errorCode, canRetry] of [
+test("a held login offers each way out only while it is available", async () => {
+  for (const [errorCode, retry] of [
     ["none", false],
     ["metask_service_unavailable", false],
     ["metask_service_unavailable", true],
@@ -390,7 +414,7 @@ test("an unconfirmed account keeps its two ways out, and neither before a failur
         displayName: "",
         emailHint: "",
         errorCode,
-        canRetry,
+        actions: actions({ retry, login: true, logout: true }),
       },
     );
     const trigger = screen.getByRole("button", {
@@ -402,25 +426,58 @@ test("an unconfirmed account keeps its two ways out, and neither before a failur
         ? "Checking sign-in"
         : "Can't confirm your sign-in yet",
     );
-    for (const [name, call] of [
-      ["Try again now", "retry"],
-      ["Sign in again", "login"],
+    for (const [name, call, offered] of [
+      ["Try again now", "retry", retry],
+      ["Sign in again", "login", true],
     ]) {
       await user.click(trigger);
       await screen.findByRole("menu");
       const item = screen.queryByRole("menuitem", { name });
-      if (errorCode === "none") {
+      if (!offered) {
         assert.equal(item, null);
       } else {
-        assert.equal(item.getAttribute("aria-disabled") === "true", !canRetry);
         await user.click(item);
-        assert.equal(calls.at(-1) === call, canRetry);
+        assert.equal(calls.at(-1), call);
       }
       await user.keyboard("{Escape}");
       await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
     }
     cleanup();
   }
+});
+
+test("a signed-out account offers reading the store again and clearing what a sign-out left", async () => {
+  const calls = [];
+  const user = userEvent.setup({ document: dom.window.document });
+  renderIdentity(
+    {
+      onRetryRefresh: () => calls.push("retry"),
+      onLogout: () => calls.push("clear"),
+    },
+    {
+      ...account,
+      state: "signed_out",
+      displayName: "",
+      emailHint: "",
+      errorCode: "credential_store_read_failed",
+      actions: actions({ retry: true, login: true, clear: true }),
+    },
+  );
+  const trigger = screen.getByRole("button", {
+    name: "Sign in · Account and application menu",
+  });
+  for (const [name, call] of [
+    ["Try again now", "retry"],
+    ["Clear sign-in again", "clear"],
+  ]) {
+    await user.click(trigger);
+    await user.click(await screen.findByRole("menuitem", { name }));
+    assert.equal(calls.at(-1), call);
+    await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+  }
+  await user.click(trigger);
+  await screen.findByRole("menu");
+  assert.equal(screen.queryByRole("menuitem", { name: "Sign out…" }), null);
 });
 
 test("a signed-in account never offers sign-in, whatever its recent error", async () => {
@@ -664,7 +721,13 @@ test("update entry works signed out in Chinese and never depends on account comm
   const user = userEvent.setup({ document: dom.window.document });
   renderIdentity(
     { updates: updateAvailable, disabled: true },
-    { state: "signed_out", displayName: "", emailHint: "", phoneHint: "" },
+    {
+      state: "signed_out",
+      actions: actions({ login: true }),
+      displayName: "",
+      emailHint: "",
+      phoneHint: "",
+    },
     "zh-CN",
   );
   await user.click(screen.getByRole("button", { name: "查看新版本 0.2.10" }));

@@ -1381,6 +1381,13 @@ pub const FailureRecord = struct {
     reason: []u8,
 };
 
+/// Main thread: a Metask model call ended with 401 on the credential of
+/// this generation, with Metask's error code.
+pub const MetaskUnauthorizedSink = struct {
+    context: *anyopaque,
+    report_fn: *const fn (*anyopaque, u64, ?[]const u8) void,
+};
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     tasks: []?*task_state.Task,
@@ -1409,6 +1416,9 @@ pub const Runtime = struct {
     approval_cleanup_leases: worker_lease.WorkerLeaseSet = .{},
     approval_jobs: [approval_job.max_operations]?struct { recipient: ApprovalJobRecipient, job: *approval_job.Job } = @splat(null),
     pending_model_intent: ?PreparedModelIntent = null,
+    /// Told of a Metask model call that ended with 401, which only Account
+    /// may judge.
+    metask_unauthorized: ?MetaskUnauthorizedSink = null,
     held_create: ?struct { slot: usize, task: *task_state.Task } = null,
 
     pub const testing = if (@import("builtin").is_test) struct {
@@ -3884,6 +3894,26 @@ pub const Runtime = struct {
         };
     }
 
+    /// Walks every Task with an operation underway, once each; stopping the
+    /// one it gave does not move it.
+    pub const OperationCursor = struct { slot: usize = 0 };
+
+    pub const TaskOperation = struct {
+        task_id: u64,
+        operation: task_state.ActiveOperation,
+    };
+
+    pub fn nextActiveOperation(self: *const Runtime, cursor: *OperationCursor) ?TaskOperation {
+        while (cursor.slot < self.tasks.len) {
+            const slot = cursor.slot;
+            cursor.slot += 1;
+            const task = self.tasks[slot] orelse continue;
+            if (task.runtime.active_operation == .none) continue;
+            return .{ .task_id = task.durable.id, .operation = task.runtime.active_operation };
+        }
+        return null;
+    }
+
     /// The Run this Task is executing, if it is executing one. A caller that
     /// only needs the Run stopped reads this instead of `stopOperation`,
     /// which would also cancel a compaction or a restore the user asked for.
@@ -3914,7 +3944,7 @@ pub const Runtime = struct {
         self: *Runtime,
         task_id: u64,
         operation_id: u64,
-        interruption: agent.ExternalInterruption,
+        origin: task_state.PendingInterruption,
         effects: OperationEffects,
     ) ControlError!task_state.CompactTerminationDispatch {
         const task = self.find(task_id) orelse return error.UnknownTask;
@@ -3928,7 +3958,7 @@ pub const Runtime = struct {
             task.durable.compacts,
             operation_id,
         ) orelse return error.NoSuchCompact;
-        return cancelCompactRecord(self, task, compact, interruption, effects);
+        return cancelCompactRecord(self, task, compact, origin, effects);
     }
 
     pub fn cancelRun(
@@ -4850,7 +4880,7 @@ pub const Runtime = struct {
             if (run.credential_views.items.len == 0) run.credential_views.appendSliceAssumeCapacity(run.initialCredentialViews());
             run.credential_views.appendAssumeCapacity(owned);
         }
-        source.replace(value);
+        source.replaceAt(value, authorization.generation);
     }
 
     /// Returns one retired value only after every operation and worker that
@@ -7947,8 +7977,12 @@ pub const Runtime = struct {
             changed = true;
         }
         if (!run.terminal_observed) {
+            self.reportMetaskUnauthorized(task, run);
             const stopped_batch = run.input_stop_requested and (terminal.outcome == .stopped or terminal.outcome == .cancelled);
-            if (terminal.outcome != .completed and !stopped_batch) {
+            // Signing out stops the Run but not the messages behind it: they
+            // wait for a login and fail, keeping their text, when none comes.
+            const signed_out = terminal.cause == .account_logout;
+            if (terminal.outcome != .completed and !stopped_batch and !signed_out) {
                 // A Run this Task stopped to make room for an edited message
                 // does not retire that message: it is the reason the Run
                 // stopped, and it is still waiting for the rewind it carries.
@@ -7988,6 +8022,15 @@ pub const Runtime = struct {
             changed = true;
         }
         return changed;
+    }
+
+    fn reportMetaskUnauthorized(self: *Runtime, task: *const task_state.Task, run: *const task_state.RunRecord) void {
+        const sink = self.metask_unauthorized orelse return;
+        const detail = (task_state.terminalPayload(run) orelse return).model_error orelse return;
+        if (detail.source != .metask or detail.detail.http_status != 401) return;
+        // The token the Run held last; one renewed meanwhile is the newer.
+        const execution = task.runtime.executionConst() orelse return;
+        sink.report_fn(sink.context, execution.credential_generation, detail.detail.view().code);
     }
 
     /// Turns the Agent-owned noninteractive permission stop observation into
@@ -11287,12 +11330,12 @@ fn cancelCompactRecord(
     self: *Runtime,
     task: *task_state.Task,
     compact: *task_state.CompactRecord,
-    interruption: agent.ExternalInterruption,
+    pending: task_state.PendingInterruption,
     effects: OperationEffects,
 ) ControlError!task_state.CompactTerminationDispatch {
+    std.debug.assert(pending != .none and pending != .approval_mode_change);
     if (task_state.compactTerminalPayload(compact) != null)
         return .already_terminal;
-    const pending = task_policy.pendingInterruption(interruption);
     const prior = compact.pending_interruption.cmpxchgStrong(
         .none,
         pending,

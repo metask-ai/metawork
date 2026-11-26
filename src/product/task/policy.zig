@@ -245,17 +245,6 @@ pub fn dispatchedControlStale(dispatch: task_state.RunTerminationDispatch) bool 
     };
 }
 
-pub fn pendingInterruption(
-    interruption: agent.ExternalInterruption,
-) task_state.PendingInterruption {
-    return switch (interruption) {
-        .user_cancel => .user_cancel,
-        .session_close => .session_close,
-        .app_shutdown => .app_shutdown,
-        .timeout => .timeout,
-    };
-}
-
 pub fn pendingTerminationSignal(
     run: *const task_state.RunRecord,
 ) agent.TerminationSignal {
@@ -264,7 +253,7 @@ pub fn pendingTerminationSignal(
             .none => unreachable,
             // Core has no Product stop reason of its own; every one of these
             // reaches it as a cancellation.
-            .user_cancel, .approval_mode_change => .user_cancel,
+            .user_cancel, .approval_mode_change, .account_logout => .user_cancel,
             .timeout => .timeout,
             .session_close => .session_close,
             .app_shutdown => .app_shutdown,
@@ -278,11 +267,23 @@ pub fn pendingExternalInterruption(
     return switch (compact.pending_interruption.load(.acquire)) {
         // A change in approval mode cannot interrupt a Compact.
         .none, .approval_mode_change => unreachable,
-        .user_cancel => .user_cancel,
+        // Core has no Product stop reason: signing out reaches it as a
+        // cancellation.
+        .user_cancel, .account_logout => .user_cancel,
         .timeout => .timeout,
         .session_close => .session_close,
         .app_shutdown => .app_shutdown,
     };
+}
+
+/// Core reports a compaction stopped to sign out as the user's
+/// cancellation; Product keeps its own reason.
+pub fn productCompactCause(
+    compact: *const task_state.CompactRecord,
+    cause: ?task_state.CompactCause,
+) ?task_state.CompactCause {
+    if (cause != .user_cancel) return cause;
+    return if (compact.pending_interruption.load(.acquire) == .account_logout) .account_logout else cause;
 }
 
 pub fn compactCauseForInterruption(
@@ -324,6 +325,7 @@ pub fn productCancelCause(
     if (cause != .user_cancel) return cause;
     return switch (run.pending_termination.load(.acquire)) {
         .approval_mode_change => .approval_mode_change,
+        .account_logout => .account_logout,
         else => cause,
     };
 }
@@ -423,6 +425,8 @@ pub const RunGuidance = enum {
 /// First-party provider failure reason recognized from an exact gateway code.
 pub const RunProviderReason = enum {
     metask_insufficient_balance,
+    /// The account itself is suspended; signing in again does not help.
+    metask_account_suspended,
 };
 
 pub const RunFeedback = struct {
@@ -435,6 +439,7 @@ pub const RunFeedback = struct {
 /// matched byte-for-byte; message, type and HTTP status are never parsed.
 const metask_error_codes = [_]struct { code: []const u8, reason: RunProviderReason }{
     .{ .code = "insufficient_balance", .reason = .metask_insufficient_balance },
+    .{ .code = "account_suspended", .reason = .metask_account_suspended },
 };
 
 /// Advice never grants execution, login, payment, or model mutation authority.
@@ -449,6 +454,8 @@ pub fn runFeedback(
         null;
     const guidance: RunGuidance = if (provider_reason) |known| switch (known) {
         .metask_insufficient_balance => .recharge,
+        // Only the Metask website can say why, so no action here helps.
+        .metask_account_suspended => .none,
     } else switch (outcome) {
         .completed, .dependency_contract_failure => .none,
         .cancelled => if (cause == .timeout) .prepare_retry else .none,
@@ -568,6 +575,25 @@ test "Metask first-party reason requires the exact Metask code on the primary pr
     const absent = runFeedback(.failed, .provider_failure, null);
     try std.testing.expectEqual(@as(?RunProviderReason, null), absent.reason);
     try std.testing.expectEqual(.prepare_retry, absent.guidance);
+}
+
+test "a suspended Metask account is told apart from a refused login" {
+    var detail: task_state.RunModelError = .{ .source = .metask, .detail = try agent.ModelError.init(.{
+        .run_id = 1,
+        .category = .permission,
+        .code = "account_suspended",
+        .type = "account_suspended",
+        .message = "account suspended",
+        .http_status = 403,
+        .retry = .not_retryable,
+        .attempts = 1,
+    }) };
+    const suspended = runFeedback(.failed, .provider_failure, &detail);
+    try std.testing.expectEqual(@as(?RunProviderReason, .metask_account_suspended), suspended.reason);
+    // Signing in again or changing settings would not help.
+    try std.testing.expectEqual(.none, suspended.guidance);
+    detail.source = .custom_provider;
+    try std.testing.expectEqual(@as(?RunProviderReason, null), runFeedback(.failed, .provider_failure, &detail).reason);
 }
 
 test "model recovery advice respects exact source and primary cause without granting replay authority" {
@@ -1090,6 +1116,17 @@ pub fn foldTerminalDisposition(
         .poisoned => attached.health = .session_poisoned,
         .closing => std.debug.assert(task.runtime.beginClosing()),
     }
+}
+
+test "a compaction stopped to sign out keeps its own reason" {
+    var compact: task_state.CompactRecord = undefined;
+    compact.pending_interruption = .init(.account_logout);
+    // Core is told it is a cancellation, and reports one.
+    try std.testing.expectEqual(agent.ExternalInterruption.user_cancel, pendingExternalInterruption(&compact));
+    try std.testing.expectEqual(@as(?task_state.CompactCause, .account_logout), productCompactCause(&compact, .user_cancel));
+    try std.testing.expectEqual(@as(?task_state.CompactCause, .session_close), productCompactCause(&compact, .session_close));
+    compact.pending_interruption = .init(.user_cancel);
+    try std.testing.expectEqual(@as(?task_state.CompactCause, .user_cancel), productCompactCause(&compact, .user_cancel));
 }
 
 test "Agent terminal facts map into Product Task outcomes" {

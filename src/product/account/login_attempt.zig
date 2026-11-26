@@ -241,9 +241,12 @@ pub const LoginAttempt = struct {
         };
         defer callback.deinit();
         switch (callback) {
-            .rejected => {
+            .rejected => |*refusal| {
                 var failure: WorkerResult = .{
-                    .failed = .fromCode(.user_cancelled),
+                    .failed = if (refusal.declined())
+                        .fromCode(.user_cancelled)
+                    else
+                        .authorizationRefused(refusal.code()),
                 };
                 self.sink.publish(self.attempt_id, &failure);
             },
@@ -343,10 +346,14 @@ const FakeLoopback = struct {
     }
 
     fn provideCode(self: *FakeLoopback, expected_state: []const u8) !void {
+        try self.provide("code=code", expected_state);
+    }
+
+    fn provide(self: *FakeLoopback, query: []const u8, expected_state: []const u8) !void {
         var writer = std.Io.Writer.fixed(&self.target);
         try writer.print(
-            oauth.callback_path ++ "?code=code&state={s}",
-            .{expected_state},
+            oauth.callback_path ++ "?{s}&state={s}",
+            .{ query, expected_state },
         );
         self.target_len = writer.buffered().len;
         self.state.store(1, .release);
@@ -457,6 +464,25 @@ test "login attempt publishes owned callback exchange input" {
         &attempt.material.verifier,
         &result.exchange.verifier,
     );
+}
+
+test "a refused sign-in is a cancellation only when the person declined it" {
+    for ([_]struct { []const u8, contract.ErrorCode, []const u8 }{
+        .{ "error=access_denied", .user_cancelled, "" },
+        .{ "error=temporarily_unavailable&error_description=busy", .oauth_callback_rejected, "temporarily_unavailable" },
+        .{ "error=Not%20A%20Code", .oauth_callback_rejected, "" },
+    }) |case| {
+        var fake_loopback: FakeLoopback = .{ .io = std.testing.io };
+        var capture: CaptureSink = .{};
+        var attempt: LoginAttempt = .{};
+        try attempt.start(std.testing.allocator, std.testing.io, fake_loopback.endpoint(), 10, capture.sink());
+        defer attempt.deinit();
+        try fake_loopback.provide(case[0], &attempt.material.state);
+        attempt.join();
+        const failure = capture.result.?.failed;
+        try std.testing.expectEqual(case[1], failure.error_code);
+        try std.testing.expectEqualStrings(case[2], failure.safe_diagnostic.bytes[0..failure.safe_diagnostic.len]);
+    }
 }
 
 test "cancel plus join publishes one typed cancellation" {
