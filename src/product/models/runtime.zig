@@ -178,6 +178,38 @@ fn commitCanonical(
     return .committed;
 }
 
+/// Where the Custom Provider keys Models holds for the projection come and
+/// go. Each value is borrowed for the duration of its callback only.
+pub const ResidentSink = struct {
+    context: *anyopaque,
+    /// A key about to be held. It is not yet visited, so the callee can tell
+    /// whether anything else knew it. False: not held now, asked again at the
+    /// next sync.
+    admit_fn: *const fn (*anyopaque, []const u8) bool,
+    /// A key about to be dropped, still visited. False: kept until the next
+    /// sync, which only masks more.
+    retire_fn: *const fn (*anyopaque, []const u8) bool,
+};
+
+/// One configured Custom Provider whose key Models holds for the projection
+/// from the moment it is stored, not from its first use.
+const Resident = struct {
+    provider_id: []u8,
+    /// The provider revision `secret` was read at.
+    revision: u64,
+    /// Null when the key at `revision` is a placeholder or was not found.
+    secret: ?contract.SecretBuffer,
+    /// A revision whose read failed. Not read again until the revision
+    /// changes: some platform stores ask the person on every read.
+    failed_revision: u64 = 0,
+
+    fn deinit(self: *Resident, allocator: std.mem.Allocator) void {
+        if (self.secret) |*secret| secret.deinit();
+        allocator.free(self.provider_id);
+        self.* = undefined;
+    }
+};
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -202,6 +234,7 @@ pub const Runtime = struct {
         authorization_generation: u64,
     } = null,
     next_catalog_attempt_id: u64 = 1,
+    resident: std.ArrayList(Resident) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, main_thread_id: std.Thread.Id) Runtime {
         return .{
@@ -220,8 +253,99 @@ pub const Runtime = struct {
             self.allocator.destroy(public_catalog);
         if (self.store) |*store| store.deinit();
         self.metask_catalog.deinit();
+        for (self.resident.items) |*entry| entry.deinit(self.allocator);
+        self.resident.deinit(self.allocator);
         self.registry.deinit();
         self.* = undefined;
+    }
+
+    /// Every configured key held for the projection.
+    pub fn visitResidentCredentials(
+        self: *const Runtime,
+        context: *anyopaque,
+        visit_fn: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void,
+    ) std.mem.Allocator.Error!void {
+        for (self.resident.items) |*entry| if (entry.secret) |*secret| try visit_fn(context, secret.view());
+    }
+
+    /// Brings the held keys in line with the registry: a provider whose
+    /// credential is ready is held from the moment it is stored, and dropped
+    /// when it is gone, not ready, or Models stopped. Compared with the
+    /// registry each time, so no change has to report itself. A placeholder
+    /// key is not held: it is not a secret.
+    pub fn syncResidentCredentials(self: *Runtime, sink: ResidentSink) void {
+        self.assertMainThread();
+        const providers: []const contract.CustomProviderView = if (self.credential_vault != null) self.registry.views() else &.{};
+        var index: usize = 0;
+        while (index < self.resident.items.len) {
+            const entry = &self.resident.items[index];
+            const ready = if (findProviderView(providers, entry.provider_id)) |provider| provider.credential_status == .ready else false;
+            if (ready or !self.dropResident(entry, sink)) {
+                index += 1;
+                continue;
+            }
+            var removed = self.resident.orderedRemove(index);
+            removed.deinit(self.allocator);
+        }
+        for (providers) |provider| {
+            if (provider.credential_status != .ready) continue;
+            const entry = for (self.resident.items) |*candidate| {
+                if (std.mem.eql(u8, candidate.provider_id, provider.id)) break candidate;
+            } else blk: {
+                const provider_id = self.allocator.dupe(u8, provider.id) catch continue;
+                self.resident.append(self.allocator, .{ .provider_id = provider_id, .revision = 0, .secret = null }) catch {
+                    self.allocator.free(provider_id);
+                    continue;
+                };
+                break :blk &self.resident.items[self.resident.items.len - 1];
+            };
+            if (entry.revision == provider.provider_revision or entry.failed_revision == provider.provider_revision) continue;
+            self.readResident(entry, provider.provider_revision, sink);
+        }
+    }
+
+    fn readResident(self: *Runtime, entry: *Resident, revision: u64, sink: ResidentSink) void {
+        const vault = self.credential_vault.?;
+        var storage: [contract.Limits.credential_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &storage);
+        const read = vault.get(entry.provider_id, &storage) catch {
+            // Keep what was held: a stale key only masks more.
+            entry.failed_revision = revision;
+            return;
+        };
+        const value: []const u8 = if (read) |bytes|
+            if (contract.customProviderKeyIsSecret(bytes)) bytes else &.{}
+        else
+            &.{};
+        if (entry.secret) |*held| if (std.mem.eql(u8, held.view(), value)) {
+            entry.revision = revision;
+            return;
+        };
+        if (!self.dropResident(entry, sink)) return;
+        if (value.len != 0) {
+            const owned = self.allocator.dupe(u8, value) catch {
+                entry.failed_revision = revision;
+                return;
+            };
+            if (!sink.admit_fn(sink.context, owned)) {
+                std.crypto.secureZero(u8, owned);
+                self.allocator.free(owned);
+                return;
+            }
+            entry.secret = .initOwned(self.allocator, owned);
+        }
+        entry.revision = revision;
+        entry.failed_revision = 0;
+    }
+
+    /// Releases a held key after the sink has let it go. False: still held.
+    fn dropResident(self: *Runtime, entry: *Resident, sink: ResidentSink) bool {
+        _ = self;
+        const held = if (entry.secret) |*value| value else return true;
+        if (!sink.retire_fn(sink.context, held.view())) return false;
+        held.deinit();
+        entry.secret = null;
+        return true;
     }
 
     pub fn start(self: *Runtime, absolute_directory: []const u8, vault: ports.CredentialVault) StartError!void {

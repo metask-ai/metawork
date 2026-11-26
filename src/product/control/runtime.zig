@@ -3166,6 +3166,9 @@ pub const Runtime = struct {
     }
 
     fn publishAdmission(self: *Runtime, authority: *const ScheduleAuthority) void {
+        // Every Models change passes here, so a stored key is known before
+        // anything is published.
+        self.syncProviderCredentialsNoFail();
         _ = self.schedule.refreshAdmissionNoFail(authority.binding(), self.scheduleRedaction());
         _ = self.schedule.rearmNoFail(authority.binding(), self.scheduleRedaction());
         _ = self.schedule.takeChanged();
@@ -3233,6 +3236,7 @@ pub const Runtime = struct {
 
     pub fn stopCustomProviders(self: *Runtime) void {
         self.custom_providers.stop();
+        self.syncProviderCredentialsNoFail();
     }
 
     /// Hard-resets the Models canonical store after an explicit user
@@ -9482,6 +9486,46 @@ pub const Runtime = struct {
         visit_fn: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void,
     ) std.mem.Allocator.Error!void {
         if (self.account_credentials) |source| try source.visit(context, visit_fn);
+        try self.custom_providers.visitResidentCredentials(context, visit_fn);
+    }
+
+    /// Brings the Custom Provider keys Models holds into what the projection
+    /// knows. A key joining is a credential acquired, as a Task's would be:
+    /// one nothing knew may already have been shown in the clear, so the
+    /// security epoch advances, once however many join together. One leaving
+    /// is a release, unless a Task still holds it.
+    fn syncProviderCredentialsNoFail(self: *Runtime) void {
+        const Batch = struct {
+            control: *Runtime,
+            admitted: bool = false,
+            unknown: bool = false,
+
+            fn admit(context: *anyopaque, value: []const u8) bool {
+                const batch: *@This() = @ptrCast(@alignCast(context));
+                const control = batch.control;
+                _ = control.schedule.prepareCredentialRedaction(value, control.scheduleRedaction()) catch return false;
+                if (!control.retainsProjectionCredential(value)) batch.unknown = true;
+                control.reconcileMcpInstallation(value);
+                _ = control.redactAllProductProjectionsNoFail(value);
+                batch.admitted = true;
+                return true;
+            }
+
+            fn retire(context: *anyopaque, value: []const u8) bool {
+                const control = @as(*@This(), @ptrCast(@alignCast(context))).control;
+                // Nothing is shown after shutdown; a Task's copy is released
+                // with the Task.
+                if (control.shutting_down or control.task_runtime.retainsCredential(value)) return true;
+                if (!control.schedule.prepareCredentialRelease(value, control.scheduleRedaction())) return false;
+                control.retireProjectionCredential(value);
+                return true;
+            }
+        };
+        var batch: Batch = .{ .control = self };
+        self.custom_providers.syncResidentCredentials(.{ .context = &batch, .admit_fn = Batch.admit, .retire_fn = Batch.retire });
+        if (!batch.admitted) return;
+        if (batch.unknown) self.invalidateProjectionSecurity();
+        self.syncHistoryCredentials(null, null);
     }
 
     const OwnerCredentialQuery = struct {
@@ -16363,6 +16407,127 @@ fn createReadyTestCustomProvider(
     defer probe.deinit();
     try std.testing.expect(control.completeCustomModelTest(probe_command, true).accepted);
     return selection;
+}
+
+/// Two credential slots, so two providers can hold different keys.
+const TwoSlotTestVault = struct {
+    const slots = [2][]const u8{ "custom-provider-00000000000000000000000000000001", "custom-provider-00000000000000000000000000000002" };
+
+    secrets: [2][64]u8 = undefined,
+    lengths: [2]usize = @splat(0),
+    next: usize = 0,
+    reads: usize = 0,
+    read_fails: bool = false,
+
+    fn port(self: *@This()) models_ports.CredentialVault {
+        return .{ .context = self, .generate_slot_fn = generate, .store_fn = store, .get_fn = get, .delete_fn = delete };
+    }
+    fn index(slot: []const u8) usize {
+        return @intFromBool(std.mem.eql(u8, slot, slots[1]));
+    }
+    fn generate(context: *anyopaque, output: *[models_ports.credential_slot_bytes]u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        @memcpy(output, slots[self.next]);
+        self.next += 1;
+    }
+    fn store(context: *anyopaque, slot: []const u8, secret: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        @memcpy(self.secrets[index(slot)][0..secret.len], secret);
+        self.lengths[index(slot)] = secret.len;
+    }
+    fn get(context: *anyopaque, slot: []const u8, output: []u8) anyerror!?[]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.reads += 1;
+        if (self.read_fails) return error.ReadFailed;
+        const length = self.lengths[index(slot)];
+        if (length == 0) return null;
+        @memcpy(output[0..length], self.secrets[index(slot)][0..length]);
+        return output[0..length];
+    }
+    fn delete(context: *anyopaque, slot: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.lengths[index(slot)] = 0;
+    }
+};
+
+const configured_provider_spec: models_contract.CustomProviderSpec = .{
+    .display_name = "Local",
+    .protocol = .openai_chat_completions,
+    .normalized_base_url = "http://127.0.0.1:11434/v1/chat/completions",
+};
+
+fn startTwoSlotModels(control: *Runtime, tmp: *std.testing.TmpDir, vault: *TwoSlotTestVault) !void {
+    var storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    control.stopCustomProviders();
+    try control.startCustomProviders(storage[0..try tmp.dir.realPath(std.testing.io, &storage)], vault.port());
+}
+
+test "a configured Custom Provider key is known from the moment it is stored" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var vault: TwoSlotTestVault = .{};
+    try startTwoSlotModels(&control, &tmp, &vault);
+    defer control.stopCustomProviders();
+    const shown = "KEY=first-configured-key-0001 and KEY=second-configured-key-02";
+    // Saving a key nothing knew: what was shown may hold it.
+    var epoch = control.projection_security_epoch;
+    try std.testing.expect(control.createCustomProviderWithCredential("first-configured-key-0001", configured_provider_spec).accepted);
+    try std.testing.expectEqual(epoch + 1, control.projection_security_epoch);
+    try std.testing.expect(control.containsKnownCredential(shown));
+    // Its first use is not news, nor is saving the same bytes again.
+    epoch = control.projection_security_epoch;
+    try control.prepareTaskCredential("first-configured-key-0001");
+    try std.testing.expectEqual(epoch, control.projection_security_epoch);
+    // A placeholder key is never held, masked or refused on.
+    try std.testing.expect(control.createCustomProviderWithCredential("ollama", configured_provider_spec).accepted);
+    try std.testing.expectEqual(epoch, control.projection_security_epoch);
+    try std.testing.expect(!control.containsKnownCredential("notes/ollama.md"));
+    // Replacing a key drops the old one and learns the new one.
+    const view = control.custom_providers.views()[1];
+    _ = control.replaceCustomProviderCredential("second-configured-key-02", .{ .source_id = view.id, .expected_provider_revision = view.provider_revision });
+    try std.testing.expectEqual(epoch + 1, control.projection_security_epoch);
+    try std.testing.expect(control.containsKnownCredential("second-configured-key-02"));
+    // A restart reads both stored keys in one sync and advances once.
+    control.stopCustomProviders();
+    try std.testing.expect(!control.containsKnownCredential(shown));
+    epoch = control.projection_security_epoch;
+    const reads = vault.reads;
+    try startTwoSlotModels(&control, &tmp, &vault);
+    try std.testing.expectEqual(epoch + 1, control.projection_security_epoch);
+    try std.testing.expectEqual(reads + 2, vault.reads);
+    try std.testing.expect(control.containsKnownCredential("first-configured-key-0001"));
+    try std.testing.expect(control.containsKnownCredential("second-configured-key-02"));
+    // Removing a provider drops its key.
+    const removed = control.custom_providers.views()[0];
+    try std.testing.expect(control.submitCustomProviderCommand(.{ .remove = .{ .source_id = removed.id, .expected_provider_revision = removed.provider_revision } }).accepted);
+    try std.testing.expect(!control.containsKnownCredential("first-configured-key-0001"));
+    try std.testing.expect(control.containsKnownCredential("second-configured-key-02"));
+}
+
+test "a configured key that cannot be read is not read again until it changes" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var vault: TwoSlotTestVault = .{};
+    try startTwoSlotModels(&control, &tmp, &vault);
+    defer control.stopCustomProviders();
+    try std.testing.expect(control.createCustomProviderWithCredential("unreadable-configured-key", configured_provider_spec).accepted);
+    control.stopCustomProviders();
+    vault.read_fails = true;
+    const epoch = control.projection_security_epoch;
+    try startTwoSlotModels(&control, &tmp, &vault);
+    const reads = vault.reads;
+    control.finishModelsCommitNoFail();
+    control.finishModelsCommitNoFail();
+    try std.testing.expectEqual(reads, vault.reads);
+    try std.testing.expectEqual(epoch, control.projection_security_epoch);
+    // Unknown until a Task first uses it, as before.
+    try std.testing.expect(!control.containsKnownCredential("unreadable-configured-key"));
+    try control.prepareTaskCredential("unreadable-configured-key");
+    try std.testing.expectEqual(epoch + 1, control.projection_security_epoch);
 }
 
 test "Account identity and Models execution publish through separate projections" {

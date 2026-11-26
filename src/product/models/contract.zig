@@ -337,8 +337,14 @@ pub const min_custom_provider_secret_characters: usize = 16;
 /// the value; only the projection ignores it.
 pub fn projectedCredential(provider_id: []const u8, credential: []const u8) []const u8 {
     if (!std.mem.startsWith(u8, provider_id, custom_provider_prefix)) return credential;
+    return if (customProviderKeyIsSecret(credential)) credential else &.{};
+}
+
+/// Whether a Custom Provider key is long enough to be a secret; bytes that
+/// are not UTF-8 count one character each.
+pub fn customProviderKeyIsSecret(credential: []const u8) bool {
     const characters = std.unicode.utf8CountCodepoints(credential) catch credential.len;
-    return if (characters < min_custom_provider_secret_characters) &.{} else credential;
+    return characters >= min_custom_provider_secret_characters;
 }
 
 /// The source a resolved provider identity names.
@@ -545,12 +551,13 @@ pub const ValidationError = error{
     UnsupportedProtocol,
 };
 
-const SecretBuffer = struct {
+/// Heap secret bytes with one owner, zeroed when released.
+pub const SecretBuffer = struct {
     allocator: std.mem.Allocator = undefined,
     bytes: []u8 = &.{},
     owned: bool = false,
 
-    fn initOwned(allocator: std.mem.Allocator, bytes: []u8) SecretBuffer {
+    pub fn initOwned(allocator: std.mem.Allocator, bytes: []u8) SecretBuffer {
         std.debug.assert(bytes.len > 0);
         return .{ .allocator = allocator, .bytes = bytes, .owned = true };
     }
@@ -562,12 +569,12 @@ const SecretBuffer = struct {
         return result;
     }
 
-    fn view(self: *const SecretBuffer) []const u8 {
+    pub fn view(self: *const SecretBuffer) []const u8 {
         std.debug.assert(self.owned);
         return self.bytes;
     }
 
-    fn deinit(self: *SecretBuffer) void {
+    pub fn deinit(self: *SecretBuffer) void {
         if (!self.owned) return;
         secureFree(self.allocator, self.bytes);
         self.* = .{};
