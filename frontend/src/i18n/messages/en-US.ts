@@ -90,6 +90,8 @@ export const enUS = {
     "The model service could not complete this request.",
   "run.model_error.reason.metask_insufficient_balance":
     "Your Metask balance and plan quota are insufficient.",
+  "run.model_error.reason.metask_account_suspended":
+    "Your Metask account is suspended. See the Metask website for details.",
   "run.guidance.review_context":
     "Shorten your next message or compact the conversation when available.",
   "run.guidance.revise_instruction":

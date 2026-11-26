@@ -14,7 +14,11 @@ pub const Limits = struct {
 };
 
 pub const Error = error{
+    /// 401: the token was refused. Account decides what that means; the
+    /// catalog is only tried again.
     Unauthorized,
+    /// 403: the account may not use this, whatever its token.
+    Forbidden,
     RateLimited,
     ServiceUnavailable,
     Cancelled,
@@ -29,7 +33,8 @@ pub const Error = error{
 
 pub fn errorCode(err: Error) contract.ModelsError {
     return switch (err) {
-        error.Unauthorized => .authorization_unavailable,
+        error.Unauthorized,
+        error.Forbidden,
         error.RateLimited,
         error.ServiceUnavailable,
         error.Cancelled,
@@ -785,7 +790,8 @@ fn validHeaderCredential(value: []const u8) bool {
 fn requireSuccess(status: u16) Error!void {
     return switch (status) {
         200 => {},
-        401, 403 => error.Unauthorized,
+        401 => error.Unauthorized,
+        403 => error.Forbidden,
         429 => error.RateLimited,
         500...599 => error.ServiceUnavailable,
         else => error.ProtocolInvalid,
@@ -1158,7 +1164,10 @@ test "catalog enforces response and field bounds before publication" {
 test "catalog status mapping is fail closed" {
     try requireSuccess(200);
     try std.testing.expectError(error.Unauthorized, requireSuccess(401));
-    try std.testing.expectError(error.Unauthorized, requireSuccess(403));
+    try std.testing.expectError(error.Forbidden, requireSuccess(403));
+    // Neither says the login is gone: only Account may decide that.
+    try std.testing.expectEqual(contract.ModelsError.catalog_unavailable, errorCode(error.Unauthorized));
+    try std.testing.expectEqual(contract.ModelsError.catalog_unavailable, errorCode(error.Forbidden));
     try std.testing.expectError(error.RateLimited, requireSuccess(429));
     try std.testing.expectError(
         error.ServiceUnavailable,

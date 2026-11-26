@@ -69,6 +69,8 @@ pub const ClientError = error{
     OAuthExchangeFailed,
     TokenRefreshFailed,
     Unauthorized,
+    /// 403: the account may not do this, whatever its token.
+    Forbidden,
     RateLimited,
     ServiceUnavailable,
     ProtocolInvalid,
@@ -81,6 +83,7 @@ pub fn errorCode(client_error: ClientError) contract.ErrorCode {
         error.OAuthExchangeFailed => .oauth_exchange_failed,
         error.TokenRefreshFailed => .token_refresh_failed,
         error.Unauthorized => .metask_unauthorized,
+        error.Forbidden => .account_operation_failed,
         error.RateLimited => .metask_rate_limited,
         error.ServiceUnavailable => .metask_service_unavailable,
         error.ProtocolInvalid => .metask_protocol_invalid,
@@ -265,19 +268,17 @@ fn nonCredentialFailure(status: u16) ClientError {
 fn classifyStatus(status: u16, exchange: bool) ClientError {
     return switch (status) {
         400 => if (exchange) error.OAuthExchangeFailed else error.ProtocolInvalid,
-        401, 403 => if (exchange)
-            error.OAuthExchangeFailed
-        else
-            error.Unauthorized,
+        401 => if (exchange) error.OAuthExchangeFailed else error.Unauthorized,
+        403 => if (exchange) error.OAuthExchangeFailed else error.Forbidden,
         429 => error.RateLimited,
         500...599 => error.ServiceUnavailable,
         else => error.ProtocolInvalid,
     };
 }
 
-test "401 and 403 invalidate retained credentials outside code exchange" {
+test "outside code exchange 401 refuses the token and 403 the account" {
     try std.testing.expectEqual(error.Unauthorized, classifyStatus(401, false));
-    try std.testing.expectEqual(error.Unauthorized, classifyStatus(403, false));
+    try std.testing.expectEqual(error.Forbidden, classifyStatus(403, false));
     try std.testing.expectEqual(error.OAuthExchangeFailed, classifyStatus(401, true));
     try std.testing.expectEqual(error.OAuthExchangeFailed, classifyStatus(403, true));
 }

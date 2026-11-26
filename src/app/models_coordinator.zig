@@ -200,7 +200,9 @@ const CatalogJob = struct {
             control,
         ) catch |err| {
             self.error_code = models_metask.errorCode(err);
-            self.retryable_failure = err == error.ServiceUnavailable or err == error.DeadlineExceeded;
+            // A refused token may be renewed meanwhile; a refused account
+            // stays refused.
+            self.retryable_failure = err == error.ServiceUnavailable or err == error.DeadlineExceeded or err == error.Unauthorized;
             return;
         };
         self.completion = models_metask.OwnedCatalogCompletion.init(&session);
@@ -657,6 +659,54 @@ fn managementError(error_code: models_contract.ModelsError) models_contract.Mana
         .no_models,
         => .catalog_unavailable,
     };
+}
+
+test "a catalog refused for its token is tried again, one refused for the account is not" {
+    const Fixture = struct {
+        status: u16,
+        failed: ?models_contract.ModelsError = null,
+        retries: usize = 0,
+
+        fn take(_: *anyopaque) std.mem.Allocator.Error!?account_contract.OwnedAuthorizationLease {
+            return account_contract.OwnedAuthorizationLease.init(std.testing.allocator, "account-catalog", "catalog-access", 3) catch |err| switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => unreachable,
+            };
+        }
+        fn prepare(_: *anyopaque, principal: []const u8, generation: u64) models_contract.CatalogRefreshPrepareResult {
+            return .{ .ready = .{ .attempt_id = 1, .principal_ref = principal, .authorization_generation = generation } };
+        }
+        fn fail(context: *anyopaque, _: u64, _: u64, error_code: models_contract.ModelsError, _: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.failed = error_code;
+        }
+        fn modelsHttp(context: *anyopaque, _: metask_transport.Request, _: []u8) metask_transport.TransportError!metask_transport.Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return .{ .status = self.status, .body = "" };
+        }
+        fn notify(_: *anyopaque) void {}
+        fn startTimer(context: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.retries += 1;
+        }
+        fn cancelTimer(_: ?*anyopaque, _: u64) anyerror!void {}
+    };
+    for ([_]u16{ 401, 403 }) |status| {
+        var fixture: Fixture = .{ .status = status };
+        var management: control_ports.ModelsManagement = undefined;
+        management.context = &fixture;
+        management.prepare_metask_catalog_refresh_fn = Fixture.prepare;
+        management.fail_metask_catalog_refresh_fn = Fixture.fail;
+        var coordinator = Coordinator.init(.{ .context = &fixture, .take_fn = Fixture.take }, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
+        coordinator.setProbeNotifier(.{ .context = &fixture, .notify_fn = Fixture.notify });
+        coordinator.setRetryTimer(.{ .context = &fixture, .start_fn = Fixture.startTimer, .cancel_fn = Fixture.cancelTimer });
+        try std.testing.expect(coordinator.refreshCatalog().accepted);
+        while (!coordinator.catalog_job.?.finished.load(.acquire)) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        coordinator.drain();
+        // Neither ends the login here; only Account may.
+        try std.testing.expectEqual(@as(?models_contract.ModelsError, .catalog_unavailable), fixture.failed);
+        try std.testing.expectEqual(@as(usize, if (status == 401) 1 else 0), fixture.retries);
+    }
 }
 
 test "image Run preparation takes one whole credential and freezes owned output authority" {

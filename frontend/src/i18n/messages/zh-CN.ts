@@ -69,6 +69,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.model_error.category.unknown": "模型服务未能完成这次请求。",
   "run.model_error.reason.metask_insufficient_balance":
     "Metask 账户余额和套餐额度不足。",
+  "run.model_error.reason.metask_account_suspended":
+    "Metask 账号已被停用，请到 Metask 官网查看原因。",
   "run.guidance.review_context": "缩短下一条消息，或在可用时整理对话。",
   "run.guidance.revise_instruction": "调整指令或缩小请求范围后继续。",
   "run.guidance.wait": "请稍后再试。",

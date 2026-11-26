@@ -917,7 +917,10 @@ export const runGuidances = [
   "review_image_input",
   "none",
 ] as const;
-export const runProviderReasons = ["metask_insufficient_balance"] as const;
+export const runProviderReasons = [
+  "metask_insufficient_balance",
+  "metask_account_suspended",
+] as const;
 export type RunFeedback = {
   guidance: (typeof runGuidances)[number];
   reason: (typeof runProviderReasons)[number] | null;

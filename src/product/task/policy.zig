@@ -423,6 +423,8 @@ pub const RunGuidance = enum {
 /// First-party provider failure reason recognized from an exact gateway code.
 pub const RunProviderReason = enum {
     metask_insufficient_balance,
+    /// The account itself is suspended; signing in again does not help.
+    metask_account_suspended,
 };
 
 pub const RunFeedback = struct {
@@ -435,6 +437,7 @@ pub const RunFeedback = struct {
 /// matched byte-for-byte; message, type and HTTP status are never parsed.
 const metask_error_codes = [_]struct { code: []const u8, reason: RunProviderReason }{
     .{ .code = "insufficient_balance", .reason = .metask_insufficient_balance },
+    .{ .code = "account_suspended", .reason = .metask_account_suspended },
 };
 
 /// Advice never grants execution, login, payment, or model mutation authority.
@@ -449,6 +452,8 @@ pub fn runFeedback(
         null;
     const guidance: RunGuidance = if (provider_reason) |known| switch (known) {
         .metask_insufficient_balance => .recharge,
+        // Only the Metask website can say why, so no action here helps.
+        .metask_account_suspended => .none,
     } else switch (outcome) {
         .completed, .dependency_contract_failure => .none,
         .cancelled => if (cause == .timeout) .prepare_retry else .none,
@@ -568,6 +573,25 @@ test "Metask first-party reason requires the exact Metask code on the primary pr
     const absent = runFeedback(.failed, .provider_failure, null);
     try std.testing.expectEqual(@as(?RunProviderReason, null), absent.reason);
     try std.testing.expectEqual(.prepare_retry, absent.guidance);
+}
+
+test "a suspended Metask account is told apart from a refused login" {
+    var detail: task_state.RunModelError = .{ .source = .metask, .detail = try agent.ModelError.init(.{
+        .run_id = 1,
+        .category = .permission,
+        .code = "account_suspended",
+        .type = "account_suspended",
+        .message = "account suspended",
+        .http_status = 403,
+        .retry = .not_retryable,
+        .attempts = 1,
+    }) };
+    const suspended = runFeedback(.failed, .provider_failure, &detail);
+    try std.testing.expectEqual(@as(?RunProviderReason, .metask_account_suspended), suspended.reason);
+    // Signing in again or changing settings would not help.
+    try std.testing.expectEqual(.none, suspended.guidance);
+    detail.source = .custom_provider;
+    try std.testing.expectEqual(@as(?RunProviderReason, null), runFeedback(.failed, .provider_failure, &detail).reason);
 }
 
 test "model recovery advice respects exact source and primary cause without granting replay authority" {
