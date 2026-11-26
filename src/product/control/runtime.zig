@@ -3124,11 +3124,12 @@ pub const Runtime = struct {
     /// is left to do so.
     fn stopMetaskWorkNoFail(self: *Runtime) void {
         var stopped = false;
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            const task_id = task.durable.id;
+        var cursor: task_runtime.Runtime.OperationCursor = .{};
+        while (self.task_runtime.nextActiveOperation(&cursor)) |active| {
+            const task_id = active.task_id;
             const facts = self.task_runtime.modelFacts(task_id) orelse continue;
             if (!usesMetask(facts)) continue;
-            switch (task.runtime.active_operation) {
+            switch (active.operation) {
                 .run => |run_id| stopped = (self.task_runtime.cancelRun(task_id, run_id, .account_logout, self.taskRuntimeOperationEffects()) catch false) or stopped,
                 .compact => |operation_id| {
                     _ = self.task_runtime.cancelCompact(task_id, operation_id, .user_cancel, self.taskRuntimeOperationEffects()) catch continue;
@@ -3136,7 +3137,7 @@ pub const Runtime = struct {
                 },
                 .none, .restore => {},
             }
-        };
+        }
         if (!stopped) return;
         self.commitTaskStateNoFail();
         self.bumpRevision();
@@ -3145,14 +3146,15 @@ pub const Runtime = struct {
     /// The Tasks signing out would stop now, for the sign-out confirmation.
     pub fn metaskStopTargets(self: *Runtime) usize {
         var count: usize = 0;
-        for (self.task_runtime.tasks) |entry| if (entry) |task| {
-            const facts = self.task_runtime.modelFacts(task.durable.id) orelse continue;
+        var cursor: task_runtime.Runtime.OperationCursor = .{};
+        while (self.task_runtime.nextActiveOperation(&cursor)) |active| {
+            const facts = self.task_runtime.modelFacts(active.task_id) orelse continue;
             if (!usesMetask(facts)) continue;
-            switch (task.runtime.active_operation) {
+            switch (active.operation) {
                 .run, .compact => count += 1,
                 .none, .restore => {},
             }
-        };
+        }
         return count;
     }
 

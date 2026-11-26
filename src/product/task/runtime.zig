@@ -3894,6 +3894,26 @@ pub const Runtime = struct {
         };
     }
 
+    /// Walks every Task with an operation underway, once each; stopping the
+    /// one it gave does not move it.
+    pub const OperationCursor = struct { slot: usize = 0 };
+
+    pub const TaskOperation = struct {
+        task_id: u64,
+        operation: task_state.ActiveOperation,
+    };
+
+    pub fn nextActiveOperation(self: *const Runtime, cursor: *OperationCursor) ?TaskOperation {
+        while (cursor.slot < self.tasks.len) {
+            const slot = cursor.slot;
+            cursor.slot += 1;
+            const task = self.tasks[slot] orelse continue;
+            if (task.runtime.active_operation == .none) continue;
+            return .{ .task_id = task.durable.id, .operation = task.runtime.active_operation };
+        }
+        return null;
+    }
+
     /// The Run this Task is executing, if it is executing one. A caller that
     /// only needs the Run stopped reads this instead of `stopOperation`,
     /// which would also cancel a compaction or a restore the user asked for.
