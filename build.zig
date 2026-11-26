@@ -630,6 +630,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-state-focused", .root_module = test_modules.account_state },
         .{ .name = "metawork-account-runtime-focused", .root_module = test_modules.account_runtime },
         .{ .name = "metawork-account-focused", .root_module = test_modules.account },
+        .{ .name = "metawork-metask-http-transport-focused", .root_module = test_modules.metask_http_transport },
     };
     for (account_focused_modules) |spec| {
         const tests = b.addTest(.{
@@ -1093,6 +1094,7 @@ const WiredModules = struct {
     video_output: *std.Build.Module,
     output_file: *std.Build.Module,
     account_coordinator: *std.Build.Module,
+    metask_http_transport: *std.Build.Module,
     models_coordinator: *std.Build.Module,
     product_workspace_view: *std.Build.Module,
     product_schedule: *std.Build.Module,
@@ -2927,6 +2929,17 @@ fn wireAgentCore(
     account_coordinator.addImport("metawork_account", account);
     account_coordinator.addImport("metawork_account_contract", account_contract);
     account_coordinator.addImport("metawork_product_control_ports", product_control_ports);
+    // Compiled into the app; a module of its own so test-account runs its tests.
+    const metask_http_transport = b.createModule(.{
+        .root_source_file = b.path("src/app/metask_http_transport.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    metask_http_transport.addImport("metawork_http_transport", metawork_http_transport);
+    metask_http_transport.addImport("account_oauth", account_oauth);
+    metask_http_transport.addImport("metask_client", metask_client);
+    metask_http_transport.addImport("metask_transport", metask_transport);
+    metask_http_transport.addImport("product_models_metask", models_metask);
     const models_coordinator = b.createModule(.{
         .root_source_file = b.path("src/app/models_coordinator.zig"),
         .target = target,
@@ -3101,6 +3114,7 @@ fn wireAgentCore(
         .video_output = video_output,
         .output_file = output_file,
         .account_coordinator = account_coordinator,
+        .metask_http_transport = metask_http_transport,
         .models_coordinator = models_coordinator,
         .product_workspace_view = product_workspace_view,
         .product_schedule = product_schedule,

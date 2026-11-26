@@ -3141,10 +3141,7 @@ pub const Runtime = struct {
         return switch (use orelse return .none) {
             .ready => .none,
             .wait => if (self.account_projection.view().error_code == .none) .recovering else .@"unreachable",
-            .stop => |reason| switch (reason) {
-                .sign_in => .none,
-                .no_connection => .@"unreachable",
-            },
+            .stop => .none,
         };
     }
 
@@ -10134,6 +10131,7 @@ pub const Runtime = struct {
             .renew_fn = renewMetaskExecutionCredentials,
             .needs_fn = needsDeferredMetaskCredential,
             .waits_fn = waitsForMetask,
+            .holds_fn = holdsMetaskCredential,
             .retire_fn = retireAccountToken,
         };
     }
@@ -10155,6 +10153,11 @@ pub const Runtime = struct {
     fn waitsForMetask(context: *anyopaque, epoch: u64) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
         return self.task_runtime.waitsForMetask(epoch);
+    }
+
+    fn holdsMetaskCredential(context: *anyopaque) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.task_runtime.holdsMetaskCredential();
     }
 
     fn renewMetaskExecutionCredentials(context: *anyopaque, generation: u64, credential: []const u8) void {
@@ -10191,7 +10194,7 @@ pub const Runtime = struct {
     /// which compose no Account; without that capability the desktop stops.
     fn metaskUse(self: *Runtime) ?account_contract.Authorization.Use {
         const query = self.account_authorization orelse
-            return if (builtin.is_test) null else .{ .stop = .sign_in };
+            return if (builtin.is_test) null else .stop;
         return query.status().use();
     }
 
@@ -10226,10 +10229,7 @@ pub const Runtime = struct {
         if (!usesMetask(facts)) return .{};
         return switch (use orelse return .{}) {
             .wait => |epoch| .{ .blocker = .metask_authorization_recovering, .recovery_epoch = epoch },
-            .stop => |reason| .{ .blocker = switch (reason) {
-                .sign_in => .metask_authorization_required,
-                .no_connection => .metask_connection_unavailable,
-            } },
+            .stop => .{ .blocker = .metask_authorization_required },
             .ready => |generation| .{ .blocker = switch (self.custom_providers.metaskInputCatalogState(generation)) {
                 .ready => null,
                 .loading => .models_catalog_loading,

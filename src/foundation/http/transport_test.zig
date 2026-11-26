@@ -644,6 +644,8 @@ const Pool = struct {
         /// Send the head and part of the body, cancel the client through
         /// `cancel_on_drop`, then wait for the client to close.
         stall,
+        /// Read the request head and answer nothing until the client closes.
+        silent,
     };
 
     const Options = struct {
@@ -727,6 +729,10 @@ const Pool = struct {
                 .truncate => {
                     writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Le") catch {};
                     writer.interface.flush() catch {};
+                    return;
+                },
+                .silent => {
+                    _ = reader.interface.discardRemaining() catch {};
                     return;
                 },
                 .stall => {
@@ -1329,4 +1335,58 @@ test "HTTP saturated ordinary work leaves capacity for a held MCP continuation" 
     const continuation = engine.run(.{ .consumer = .mcp, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(30), .clock = .awake }) }, .continuation = true }, Held.complete, .{});
     try std.testing.expectEqual(@as(u8, 42), continuation.outcome.completed);
     try std.testing.expect(continuation.diagnostic == null);
+}
+
+fn freshPost(operation: *http.Operation, url: []const u8, pause: Io.Duration, output: []u8) http.Error!Reply {
+    var request = try operation.open(.POST, std.Uri.parse(url) catch return error.InvalidRequest, .{ .fresh = true });
+    defer request.deinit();
+    // A pause before the send is no part of the answer's budget.
+    Io.sleep(std.testing.io, pause, .awake) catch return error.Cancelled;
+    try request.send("grant");
+    var response = try request.receiveHead();
+    const bytes = try request.readAll(&response, output);
+    return .{ .status = @intFromEnum(response.head.status), .length = bytes.len };
+}
+
+fn phasedPost(engine: *http.Engine, url: []const u8, response: Io.Duration, pause: Io.Duration, output: []u8) http.Result(http.Error!Reply) {
+    return engine.run(.{
+        .consumer = .metask,
+        .isolation = .public,
+        .budget = .{ .phased = .{ .connect = .fromSeconds(3), .response = response } },
+    }, freshPost, .{ url, pause, output });
+}
+
+test "HTTP fresh request connects anew beside an idle pooled connection" {
+    const pool = try Pool.create(.{ .connections = 2 });
+    defer pool.destroy();
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var url_buffer: [64]u8 = undefined;
+    const url = pool.url(&url_buffer);
+    var output: [8]u8 = undefined;
+    const pooled = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(3), .clock = .boot }) } }, plainGet, .{ url, &output });
+    try std.testing.expectEqual(@as(u16, 200), (try pooled.outcome.completed).status);
+    const result = phasedPost(&engine, url, .fromSeconds(3), .fromMilliseconds(0), &output);
+    try std.testing.expectEqual(@as(u16, 200), (try result.outcome.completed).status);
+    try std.testing.expect(!result.reused);
+    try std.testing.expectEqual(@as(usize, 2), pool.accepted.load(.acquire));
+}
+
+fn silentAlways(_: usize, _: usize) Pool.Action {
+    return .silent;
+}
+
+test "HTTP phased budget bounds the answer from its send, not from admission" {
+    const pool = try Pool.create(.{ .connections = 1, .action = silentAlways });
+    defer pool.destroy();
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var url_buffer: [64]u8 = undefined;
+    var output: [8]u8 = undefined;
+    // The pause before the send is longer than the answer's whole budget.
+    const result = phasedPost(&engine, pool.url(&url_buffer), .fromMilliseconds(200), .fromMilliseconds(300), &output);
+    try std.testing.expectEqual(error.DeadlineExceeded, result.outcome.failed);
+    try std.testing.expectEqual(contract.Send.may_have_been_sent, result.send);
 }

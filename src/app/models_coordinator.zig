@@ -454,8 +454,8 @@ pub const Coordinator = struct {
     pub fn follow(self: *Coordinator, authorization: account_contract.Authorization) void {
         self.assertMainThread();
         switch (authorization) {
-            .checking, .recovering, .stalled => {},
-            .signed_out, .authorizing => {
+            .checking, .recovering => {},
+            .signed_out => {
                 self.cancelCatalogRetry();
                 self.cancelCatalog();
                 if (self.observed_authorization_generation != 0)

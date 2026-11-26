@@ -53,6 +53,7 @@ const SummaryJob = struct {
     completion: ?summary_impl.Completion = null,
     finished: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
+    next: ?*SummaryJob = null,
 
     fn create(
         allocator: std.mem.Allocator,
@@ -233,8 +234,18 @@ const Effects = struct {
     mailbox: ?MailboxResult = null,
     login_attempt: login_attempt.LoginAttempt = .{},
     login_active: bool = false,
-    network_attempt: network_attempt.NetworkAttempt = .{},
+    /// The network worker whose result is awaited. Heap owned, so one given
+    /// up on can outlive the next one started.
+    network: ?*network_attempt.NetworkAttempt = null,
+    /// Network workers given up on: told to cancel and never waited for.
+    /// Each result is discarded when it comes, and each is joined once its
+    /// thread is done. Linked through the attempts; changed under the
+    /// mailbox lock.
+    abandoned: ?*network_attempt.NetworkAttempt = null,
     mailbox_collision: bool = false,
+    /// Set under the mailbox lock once nothing may be woken any more: every
+    /// result published after it is only destroyed.
+    detached: bool = false,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -252,6 +263,19 @@ const Effects = struct {
         };
     }
 
+    /// Wakes the main thread unless nothing may be woken any more. Workers
+    /// other than these attempts (the summary job) wake through it too.
+    fn workerWake(self: *Effects) WakeSink {
+        return .{ .context = self, .notify_fn = notifyUnlessDetached };
+    }
+
+    fn notifyUnlessDetached(context: *anyopaque) void {
+        const self: *Effects = @ptrCast(@alignCast(context));
+        self.lockMailbox();
+        defer self.unlockMailbox();
+        if (!self.detached) self.wake.notify();
+    }
+
     fn loginSink(self: *Effects) login_attempt.ResultSink {
         return .{ .context = self, .publish_fn = publishLoginResult };
     }
@@ -263,16 +287,16 @@ const Effects = struct {
     ) bool {
         const self: *Effects = @ptrCast(@alignCast(context));
         self.lockMailbox();
+        defer self.unlockMailbox();
+        if (self.detached) return false;
         if (self.mailbox != null) {
             self.mailbox_collision = true;
-            self.unlockMailbox();
             return false;
         }
         self.mailbox = .{ .login_callback = .{
             .attempt_id = attempt_id,
             .result = result.take(),
         } };
-        self.unlockMailbox();
         self.wake.notify();
         return true;
     }
@@ -288,21 +312,24 @@ const Effects = struct {
     ) bool {
         const self: *Effects = @ptrCast(@alignCast(context));
         self.lockMailbox();
+        defer self.unlockMailbox();
+        if (self.detached) return false;
+        // A worker given up on only says it is done, so it can be joined.
+        var next = self.abandoned;
+        while (next) |entry| : (next = entry.next_abandoned) if (entry.attempt_id == attempt_id) {
+            self.wake.notify();
+            return false;
+        };
         if (self.mailbox != null) {
             self.mailbox_collision = true;
-            self.unlockMailbox();
             return false;
         }
         self.mailbox = switch (result.take()) {
             .login => |grant| .{ .login_exchange = .{ .attempt_id = attempt_id, .grant = grant } },
             .refresh => |grant| .{ .refresh = .{ .attempt_id = attempt_id, .grant = grant } },
             .completion => |completion| .{ .completion = completion },
-            .consumed => {
-                self.unlockMailbox();
-                return false;
-            },
+            .consumed => return false,
         };
-        self.unlockMailbox();
         self.wake.notify();
         return true;
     }
@@ -313,14 +340,14 @@ const Effects = struct {
     ) void {
         var completion = completion_value;
         self.lockMailbox();
+        defer self.unlockMailbox();
+        if (self.detached) return completion.deinit();
         if (self.mailbox != null) {
             completion.deinit();
             self.mailbox_collision = true;
-            self.unlockMailbox();
             return;
         }
         self.mailbox = .{ .completion = completion };
-        self.unlockMailbox();
         self.wake.notify();
     }
 
@@ -371,21 +398,35 @@ const Effects = struct {
     fn startRequest(
         self: *Effects,
         attempt_id: u64,
-        work: network_attempt.Work,
+        work_value: network_attempt.Work,
         now_unix_seconds: i64,
     ) void {
+        var work = work_value;
         const refreshing = work == .refresh;
-        self.network_attempt.start(
+        std.debug.assert(self.network == null);
+        const attempt = self.allocator.create(network_attempt.NetworkAttempt) catch {
+            work.deinit();
+            return self.publishCompletion(.{
+                .attempt_id = attempt_id,
+                .payload = .{ .failed = .{ .error_code = .local_resource_exhausted, .refresh_not_consumed = refreshing } },
+            });
+        };
+        attempt.* = .{};
+        attempt.start(
             self.io,
             attempt_id,
             self.transport,
             work,
             self.networkSink(),
             now_unix_seconds,
-        ) catch self.publishCompletion(.{
-            .attempt_id = attempt_id,
-            .payload = .{ .failed = .{ .error_code = .local_resource_exhausted, .refresh_not_consumed = refreshing } },
-        });
+        ) catch {
+            self.allocator.destroy(attempt);
+            return self.publishCompletion(.{
+                .attempt_id = attempt_id,
+                .payload = .{ .failed = .{ .error_code = .local_resource_exhausted, .refresh_not_consumed = refreshing } },
+            });
+        };
+        self.network = attempt;
     }
 
     fn failLoginAttempt(
@@ -407,22 +448,105 @@ const Effects = struct {
         });
     }
 
-    fn cancelAttemptAndDiscard(self: *Effects, attempt_id: u64) void {
+    /// Gives up the worker of an attempt without waiting for it. A browser
+    /// callback wait ends at once when told to, so it is joined here; a
+    /// network request may wait on DNS that no cancel reaches, so it is only
+    /// told to cancel and set aside. Either way its result is discarded.
+    fn abandon(self: *Effects, attempt_id: u64) void {
         if (self.login_active and self.login_attempt.matches(attempt_id)) {
             self.login_attempt.cancel();
             self.joinLogin();
-        } else if (self.network_attempt.matches(attempt_id)) {
-            self.network_attempt.cancel();
-            self.network_attempt.join();
-            self.network_attempt.deinit();
+            return self.discardMailbox(attempt_id);
         }
+        const attempt = self.network orelse return self.discardMailbox(attempt_id);
+        if (attempt.attempt_id != attempt_id) return self.discardMailbox(attempt_id);
+        self.network = null;
+        attempt.cancel();
+        self.lockMailbox();
+        defer self.unlockMailbox();
+        attempt.next_abandoned = self.abandoned;
+        self.abandoned = attempt;
+        if (self.mailbox) |*published| if (published.attemptId() == attempt_id) {
+            published.deinit();
+            self.mailbox = null;
+        };
+        self.mailbox_collision = false;
+    }
+
+    fn discardMailbox(self: *Effects, attempt_id: u64) void {
+        self.lockMailbox();
+        defer self.unlockMailbox();
+        if (self.mailbox) |*published| if (published.attemptId() == attempt_id) {
+            published.deinit();
+            self.mailbox = null;
+        };
+        self.mailbox_collision = false;
+    }
+
+    /// Joins every worker given up on whose thread is done, whether or not
+    /// it published. True when one was.
+    fn reapAbandoned(self: *Effects) bool {
+        var reaped = false;
+        while (true) {
+            self.lockMailbox();
+            var link = &self.abandoned;
+            const done = while (link.*) |entry| {
+                if (entry.done.load(.acquire) != 0) {
+                    link.* = entry.next_abandoned;
+                    break entry;
+                }
+                link = &entry.next_abandoned;
+            } else null;
+            self.unlockMailbox();
+            const attempt = done orelse return reaped;
+            attempt.join();
+            self.destroyNetwork(attempt);
+            reaped = true;
+        }
+    }
+
+    /// Closing: what ends when told to is joined; a request still underway
+    /// is given up like any other and left to finish, and what is done by
+    /// now is joined. Nothing here waits on DNS.
+    fn endForClosing(self: *Effects) void {
+        self.endLogin();
+        if (self.network) |attempt| {
+            if (attempt.done.load(.acquire) != 0) {
+                attempt.join();
+                self.destroyNetwork(attempt);
+                self.network = null;
+            } else self.abandon(attempt.attempt_id);
+        }
+        _ = self.reapAbandoned();
         if (self.takeMailbox()) |value| {
             var discarded = value;
-            if (discarded.attemptId() != attempt_id)
-                @panic("Account cancel discarded another attempt");
             discarded.deinit();
         }
         _ = self.takeCollision();
+    }
+
+    fn destroyNetwork(self: *Effects, attempt: *network_attempt.NetworkAttempt) void {
+        attempt.deinit();
+        self.allocator.destroy(attempt);
+    }
+
+    fn networkRefreshing(self: *const Effects) bool {
+        const attempt = self.network orelse return false;
+        return attempt.refreshing();
+    }
+
+    /// A callback wait ends at once when told to, so it is joined.
+    fn endLogin(self: *Effects) void {
+        if (!self.login_active) return;
+        self.login_attempt.cancel();
+        self.joinLogin();
+    }
+
+    /// Nothing may be woken any more.
+    fn detach(self: *Effects) void {
+        self.lockMailbox();
+        defer self.unlockMailbox();
+        self.detached = true;
     }
 
     fn joinLogin(self: *Effects) void {
@@ -433,9 +557,11 @@ const Effects = struct {
     }
 
     fn joinNetwork(self: *Effects, attempt_id: u64) void {
-        if (!self.network_attempt.matches(attempt_id)) return;
-        self.network_attempt.join();
-        self.network_attempt.deinit();
+        const attempt = self.network orelse return;
+        if (attempt.attempt_id != attempt_id) return;
+        attempt.join();
+        self.destroyNetwork(attempt);
+        self.network = null;
     }
 
     fn cancelJoinAndDiscard(self: *Effects) void {
@@ -443,10 +569,17 @@ const Effects = struct {
             self.login_attempt.cancel();
             self.joinLogin();
         }
-        if (self.network_attempt.started) {
-            self.network_attempt.cancel();
-            self.network_attempt.join();
-            self.network_attempt.deinit();
+        if (self.network) |attempt| {
+            attempt.cancel();
+            attempt.join();
+            self.destroyNetwork(attempt);
+            self.network = null;
+        }
+        while (self.abandoned) |attempt| {
+            self.abandoned = attempt.next_abandoned;
+            attempt.cancel();
+            attempt.join();
+            self.destroyNetwork(attempt);
         }
         if (self.takeMailbox()) |value| {
             var discarded = value;
@@ -476,13 +609,11 @@ pub const Prepared = struct {
     /// What the commit installs. Its refresh token is stored by now, so a
     /// prepared grant is committed unless the process is closing.
     grant: ?*credentials_impl.Grant = null,
-    /// The stored refresh token may be there still, but nothing sends it.
-    ends_renewal: bool = false,
     /// Set by the commit: it installed or ended an access token.
     token_changed: bool = false,
     refresh_after_commit: bool = false,
     /// What the commit makes of the next renewal.
-    renewal: enum { keep, token, retry } = .keep,
+    renewal: enum { keep, reset, token, retry_fixed, retry_backoff } = .keep,
 
     pub fn factKind(self: *const Prepared) contract.AccountFactKind {
         return self.transition.factKind();
@@ -510,6 +641,9 @@ pub const AttemptDisposition = enum {
     starts,
     continues,
     finishes,
+    /// Gives one attempt up for the one it starts, as a sign-in replaces an
+    /// identity request.
+    replaces,
     no_attempt,
 };
 
@@ -534,18 +668,28 @@ pub const Runtime = struct {
     credentials: credentials_impl.Credentials = .{},
     summary: summary_impl.State = .{},
     summary_job: ?*SummaryJob = null,
+    /// Summary jobs told to cancel and not waited for; each is joined once it
+    /// has finished.
+    retired_summaries: ?*SummaryJob = null,
     /// The credential generation the summary was last fetched with.
     summary_generation: u64 = 0,
-    /// The token request underway: the clocks when it was issued, and whether
-    /// the marker of the refresh token it sends is stored.
-    request: struct { wall: i64 = 0, boot: i64 = 0, marked: bool = false } = .{},
+    /// The token request underway: the clocks when it was issued (no wall
+    /// clock before 1970), and whether the marker of the refresh token it
+    /// sends is stored.
+    request: struct { wall: ?i64 = null, boot: i64 = 0, marked: bool = false } = .{},
     /// When the next renewal is due. Null keeps every automatic one off.
     renew_at: ?Moment = null,
+    /// `renew_at` waits out a failure, which an ended token does not cut short.
+    retrying: bool = false,
     beat_running: bool = false,
+    /// Consecutive failures that reached the server or the store; each waits
+    /// longer than the last. A request that never left waits the first wait.
     confirm_failures: usize = 0,
     confirm_ended_boot: i64 = 0,
-    /// Advances each time a refresh attempt finishes, whatever its outcome.
+    /// Advances each time a confirmation has a result.
     renewal_epoch: u64 = 0,
+    /// How long closing waits for a renewal underway, from when it begins to.
+    close_wait: std.Io.Duration = .fromSeconds(2),
     stopping: bool = false,
 
     pub fn init(
@@ -568,6 +712,11 @@ pub const Runtime = struct {
         self.assertMainThread();
         std.debug.assert(self.platform == null);
         self.cancelSummaryJob();
+        while (self.retired_summaries) |job| {
+            self.retired_summaries = job.next;
+            job.join();
+            job.deinit();
+        }
         self.effects.deinit();
         self.credentials.deinit();
         self.* = undefined;
@@ -588,7 +737,8 @@ pub const Runtime = struct {
 
     pub fn prepareStartUnavailable(self: *Runtime) Prepared {
         self.assertMainThread();
-        return self.preparedSignedOutRestoreFailure(.credential_store_read_failed);
+        // No store to read again: only a sign-in, once one exists, can follow.
+        return self.preparedSignedOutRestoreFailure(.credential_store_read_failed, false);
     }
 
     pub fn prepareCommand(
@@ -607,13 +757,17 @@ pub const Runtime = struct {
         return timer_id == beat_timer_id;
     }
 
-    /// What the clocks ask of Account now. Every wake may call it: it commits
-    /// nothing itself, and answers null until something is due.
+    /// What the clocks, and a sign-in that waited, ask of Account now. Every
+    /// wake may call it: it commits nothing itself, and answers null until
+    /// something is due.
     pub fn prepareDue(self: *Runtime) ?Prepared {
         self.assertMainThread();
+        if (self.stopping) return null;
+        // A sign-in that waited for the operation begins once it ended.
+        if (self.account.loginWaiting() and self.account.activeAttempt() == null)
+            return preparedFromState(self.account.prepareWaitingLogin());
         const renew_at = self.renew_at orelse return null;
         const platform = self.platform orelse return null;
-        if (self.stopping) return null;
         const beating = self.keepBeat(platform);
         if (self.account.activeAttempt() != null) return null;
         // Its own failure is on display already, and unlike a renewal it is
@@ -622,25 +776,27 @@ pub const Runtime = struct {
             return if (reached(renew_at, platform)) preparedFromState(self.prepareConfirmation(platform)) else null;
         std.debug.assert(self.account.view().state == .authenticated);
         const reported = self.account.view().error_code == .refresh_schedule_failed;
-        const renewable = self.credentials.current.?.renewable;
-        // Otherwise it keeps its own failure, which no retry can answer.
-        if (!beating and !reported and renewable)
+        if (!beating and !reported)
             return preparedFromState(self.account.prepareRefreshScheduleFailure());
         if (beating and reported) return preparedFromState(self.account.prepareRetryRefresh());
-        // Without a wall clock no request can be dated, so none is made.
-        if (!reached(renew_at, platform) or platform.wall_clock.nowUnixSeconds() == null) return null;
-        if (renewable) return preparedFromState(self.account.prepareTokenRefresh());
-        // This session can never be renewed; it ends as a restart ends it.
-        return preparedFromState(self.account.prepareSessionLost(.fromCode(.token_refresh_failed)));
+        // An ended token is due whatever the clocks say now, unless a failure
+        // is waited out first.
+        if (!reached(renew_at, platform) and (self.retrying or !self.tokenEnded(platform))) return null;
+        return preparedFromState(self.account.prepareTokenRefresh());
     }
 
     /// Someone is there for the result: the next confirmation comes as early
     /// as a first failure would allow, and backs off from there again.
+    /// Counts while an attempt is underway too: the next wait after it is the
+    /// first one again.
     pub fn expedite(self: *Runtime) void {
         self.assertMainThread();
-        if (!self.account.confirming()) return;
-        const renew_at = if (self.renew_at) |*value| value else return;
+        if (!self.account.renewable()) return;
         self.confirm_failures = 0;
+        // Only a wait after a failure is cut short: a token that is fine
+        // keeps its renewal point.
+        if (!self.retrying or self.account.activeAttempt() != null) return;
+        const renew_at = if (self.renew_at) |*value| value else return;
         renew_at.boot = @min(renew_at.boot, self.confirm_ended_boot +| confirm_delays_seconds[0]);
     }
 
@@ -664,6 +820,7 @@ pub const Runtime = struct {
     /// No renewal is ahead. The only place that stops the beat.
     fn clearRenewal(self: *Runtime) void {
         self.renew_at = null;
+        self.retrying = false;
         if (!self.beat_running) return;
         self.beat_running = false;
         const platform = self.platform orelse return;
@@ -704,6 +861,8 @@ pub const Runtime = struct {
             .continues
         else if (current != null and next == null and prepared_attempt == current)
             .finishes
+        else if (current != null and next != null and next != current and prepared_attempt == next)
+            .replaces
         else
             unreachable;
     }
@@ -722,27 +881,42 @@ pub const Runtime = struct {
         self.stopping = true;
         self.clearRenewal();
         _ = self.clearSummary();
+        // Nothing but a renewal is worth waiting for when closing; told to
+        // stop now, the rest has usually finished by the time Account closes.
+        if (self.effects.network) |attempt| if (!attempt.refreshing()) self.effects.abandon(attempt.attempt_id);
     }
 
     pub fn prepareShutdown(self: *Runtime) Prepared {
         self.assertMainThread();
         self.stopAdmission();
         self.discardQueuedEffectForShutdown();
-        // Refresh keeps its original network deadline. Join before taking the
-        // mailbox so a complete rotation is saved once while ports are alive.
-        if (self.effects.network_attempt.refreshing()) {
-            self.effects.network_attempt.join();
-            if (self.prepareNextCompletion()) |result| switch (result) {
-                .prepared => |value| {
-                    var observed = value;
-                    // Persistence is already settled; never admit Userinfo or
-                    // commit a second identity/terminal fact while closing.
-                    observed.deinit();
-                },
-                .rejected, .ignored_stale => {},
-            };
+        self.effects.endLogin();
+        // A renewal underway has the close wait of its own, from here, so a
+        // complete rotation is saved, or an unsent one's marker deleted,
+        // while ports are alive. Any other request is given up.
+        if (self.effects.network) |attempt| {
+            if (attempt.refreshing() and attempt.waitDone(self.close_wait)) {
+                attempt.join();
+                if (self.prepareNextCompletion()) |result| switch (result) {
+                    .prepared => |value| {
+                        var observed = value;
+                        // Persistence is already settled; never admit Userinfo or
+                        // commit a second identity/terminal fact while closing.
+                        observed.deinit();
+                    },
+                    .rejected, .ignored_stale => {},
+                };
+            } else self.effects.abandon(attempt.attempt_id);
         }
+        self.reapAbandoned();
         return .{ .transition = self.account.prepareShutdown() };
+    }
+
+    /// Closing left a worker running that is never joined. What it uses
+    /// stays alive until the process ends, so neither this Runtime nor the
+    /// HTTP engine may be torn down.
+    pub fn detached(self: *const Runtime) bool {
+        return self.effects.detached;
     }
 
     pub fn prepareNextCompletion(self: *Runtime) ?PrepareResult {
@@ -826,9 +1000,9 @@ pub const Runtime = struct {
         self.assertMainThread();
         if (self.stopping) return false;
         const current = switch (self.authorization()) {
-            .checking, .signed_out, .authorizing => return self.clearSummary(),
+            .checking, .signed_out => return self.clearSummary(),
             // Still the same account; its next credential fetches again.
-            .recovering, .stalled => return false,
+            .recovering => return false,
             .available => |value| value,
         };
         if (self.summary.belongsTo(current.account_id)) {
@@ -843,6 +1017,7 @@ pub const Runtime = struct {
     /// after it.
     pub fn drainSummary(self: *Runtime) bool {
         self.assertMainThread();
+        self.reapRetiredSummaries();
         const job = self.summary_job orelse return false;
         if (!job.finished.load(.acquire)) return false;
         job.join();
@@ -911,21 +1086,17 @@ pub const Runtime = struct {
     }
 
     /// Admission and every Task blocker read this one fact, without effect.
+    /// Follows the login alone: what Account is doing does not change it, so
+    /// a sign-in begun over a held login keeps every consumer waiting.
     pub fn authorization(self: *Runtime) contract.Authorization {
         self.assertMainThread();
-        switch (self.account.view().state) {
-            .checking => return .{ .checking = self.renewal_epoch },
-            .signed_out => return .signed_out,
-            .authorizing => return .authorizing,
-            .authenticated => {},
+        switch (self.account.login()) {
+            .none => return if (self.account.storeRead()) .signed_out else .{ .checking = self.renewal_epoch },
+            .held => return .{ .checking = self.renewal_epoch },
+            .verified => {},
         }
         if (self.availableAuthorizationIdentity() != null)
             return .{ .available = .{ .account_id = self.account.accountId(), .generation = self.credentials.current.?.generation } };
-        const clock_reads = if (self.platform) |platform|
-            platform.wall_clock.nowUnixSeconds() != null
-        else
-            false;
-        if (!clock_reads and !self.account.refreshInFlight()) return .stalled;
         return .{ .recovering = self.renewal_epoch };
     }
 
@@ -971,7 +1142,7 @@ pub const Runtime = struct {
             self.allocator,
             self.io,
             self.effects.transport,
-            self.effects.wake,
+            self.effects.workerWake(),
             preparation.attempt_id,
             synced_at,
             history_range,
@@ -993,12 +1164,36 @@ pub const Runtime = struct {
         };
     }
 
+    /// Tells the job to cancel without waiting for it: a request may wait on
+    /// DNS that no cancel reaches. It is joined once it has finished.
     fn cancelSummaryJob(self: *Runtime) void {
         const job = self.summary_job orelse return;
-        job.cancel();
-        job.join();
         self.summary_job = null;
-        job.deinit();
+        job.cancel();
+        job.next = self.retired_summaries;
+        self.retired_summaries = job;
+        self.reapRetiredSummaries();
+    }
+
+    fn reapRetiredSummaries(self: *Runtime) void {
+        var link = &self.retired_summaries;
+        while (link.*) |job| {
+            if (!job.finished.load(.acquire)) {
+                link = &job.next;
+                continue;
+            }
+            link.* = job.next;
+            job.join();
+            job.deinit();
+        }
+    }
+
+    /// Joins every worker given up on that has finished, and every summary
+    /// job told to cancel. Each event-loop turn may call it.
+    pub fn reapAbandoned(self: *Runtime) void {
+        self.assertMainThread();
+        _ = self.effects.reapAbandoned();
+        self.reapRetiredSummaries();
     }
 
     pub fn admitEffect(self: *Runtime, prepared: *Prepared) bool {
@@ -1015,12 +1210,23 @@ pub const Runtime = struct {
     pub fn commit(self: *Runtime, prepared: *Prepared) void {
         self.assertMainThread();
         const terminal = prepared.finishesAttempt();
-        const renewal_finished = terminal and self.account.refreshInFlight();
+        const abandoned = prepared.transition.abandoned;
+        // A waiter waits for one confirmation's result: not for one given up
+        // on, and not for one a sign-in takes over from.
+        const renewal_finished = terminal and abandoned == null and
+            self.account.confirmationInFlight() and !prepared.transition.loginWaits();
         const ended = prepared.transition.endsLogin();
+        const was_signing_in = self.account.signingIn();
         // Pooled connections of the account end with its credential.
         if (ended and self.credentials.available() and self.account.accountId().len != 0)
             self.effects.transport.retire(self.account.accountId());
         prepared.transition.commit(&self.account);
+        // Its worker is told to cancel and never waited for; whatever it
+        // answers is discarded.
+        if (abandoned) |attempt_id| {
+            self.effects.abandon(attempt_id);
+            self.request = .{};
+        }
         // The only place the credential changes.
         prepared.token_changed = ended and self.credentials.available();
         if (prepared.grant) |grant| {
@@ -1029,29 +1235,47 @@ pub const Runtime = struct {
             self.credentials.install(grant);
             self.request.marked = false;
         } else if (ended) self.credentials.end();
-        if (prepared.ends_renewal) self.credentials.current.?.renewable = false;
         std.debug.assert(!ended or self.credentials.current == null);
         std.debug.assert(self.account.view().state != .authenticated or self.credentials.available());
         if (terminal) self.request = .{};
         if (renewal_finished) self.renewal_epoch +%= 1;
         switch (prepared.renewal) {
             .keep => {},
-            .token => if (self.credentials.current.?.times) |times| {
-                self.renew_at = times.renews;
+            // A new login's tokens: whatever its predecessor was waiting for
+            // is no longer due, and its backoff starts over.
+            .reset => {
+                self.renew_at = null;
+                self.retrying = false;
+                self.confirm_failures = 0;
             },
-            .retry => if (self.platform) |platform| {
+            .token => {
+                self.confirm_failures = 0;
+                self.retrying = false;
+                if (self.credentials.current.?.times) |times| self.renew_at = times.renews;
+            },
+            .retry_fixed, .retry_backoff => if (self.platform) |platform| {
                 const now = platform.boot_clock.nowSeconds();
                 var delay = renewal_retry_seconds;
-                if (self.account.confirming()) {
+                if (prepared.renewal == .retry_backoff) {
                     delay = confirm_delays_seconds[@min(self.confirm_failures, confirm_delays_seconds.len - 1)];
                     self.confirm_failures += 1;
-                    self.confirm_ended_boot = now;
                 }
+                self.confirm_ended_boot = now;
                 self.renew_at = .{ .wall = null, .boot = now +| delay };
+                self.retrying = true;
             },
         }
-        if (!self.account.unconfirmed()) self.confirm_failures = 0;
-        if (!self.account.renewable()) self.clearRenewal();
+        // A sign-in that gave up a held login's confirmation and then ended
+        // without replacing it leaves nothing scheduled: one is due now.
+        if (was_signing_in and terminal and self.account.confirming() and !self.account.loginWaiting() and self.renew_at == null)
+            if (self.platform) |platform| {
+                self.renew_at = .{ .wall = null, .boot = platform.boot_clock.nowSeconds() };
+                self.retrying = false;
+            };
+        if (!self.account.renewable()) {
+            self.confirm_failures = 0;
+            self.clearRenewal();
+        }
     }
 
     pub fn takeRefreshAfterCommit(
@@ -1088,6 +1312,9 @@ pub const Runtime = struct {
                 .payload = .{ .failed = .fromCode(.account_operation_failed) },
             };
         }
+        // The marker could not be stored, so nothing was sent.
+        const store_failed = refresh_attempt and completion.payload == .failed and
+            completion.payload.failed.error_code == .credential_store_write_failed;
         var marked = self.request.marked;
         if (completion.payload == .failed and refresh_attempt and
             marked and completion.payload.failed.refresh_not_consumed)
@@ -1102,7 +1329,11 @@ pub const Runtime = struct {
         if (completion.payload == .failed and
             completion.payload.failed.error_code == .metask_unauthorized and
             self.account.activeRequestUsesCredential())
-            completion.payload.failed.error_code = self.deleteInvalidCredential();
+        {
+            const deletion = self.deleteInvalidCredential();
+            completion.payload.failed.error_code = deletion.error_code;
+            completion.payload.failed.residue = deletion.residue;
+        }
 
         // Only a refresh proven unsent, whose marker is gone, can be sent
         // again. An explicit request or client rejection was not consumed,
@@ -1110,27 +1341,36 @@ pub const Runtime = struct {
         const retry_unsent_refresh = refresh_attempt and !marked and
             completion.payload == .failed and completion.payload.failed.refresh_not_consumed and
             completion.payload.failed.error_code != .token_refresh_failed;
-        // The token of a stored login is exchanged and kept; an identity that
-        // cannot be reached now says nothing about it.
-        const retry_identity = self.account.confirmingIdentity() and
-            completion.payload == .failed and identityUnreachable(completion.payload.failed.error_code);
-        if (completion.payload == .failed and refresh_attempt) {
+        // The exchanged token is held and kept; an identity that cannot be
+        // read now says nothing about it. Only the server saying the
+        // authorization is gone ends the login.
+        const retry_identity = self.account.identityInFlight() and
+            completion.payload == .failed and identityKeepsLogin(completion.payload.failed.error_code);
+        if (completion.payload == .failed) {
             if (retry_unsent_refresh or retry_identity)
                 completion.payload.failed.retryable = true
-            else
+            else if (refresh_attempt)
                 self.loseRenewal(&completion.payload.failed);
         }
         const loaded_identity = completion.payload == .identity_loaded;
         return switch (self.account.prepareCompletion(completion)) {
-            .transition => |transition| .{ .prepared = .{
-                .transition = transition,
-                .renewal = if (loaded_identity and transition.view().state == .authenticated)
-                    .token
-                else if (retry_unsent_refresh or retry_identity)
-                    .retry
-                else
-                    .keep,
-            } },
+            .transition => |transition| .{
+                .prepared = .{
+                    .transition = transition,
+                    // A request that never left wrote nothing and reached no one:
+                    // it is tried again in the fixed interval. One the server
+                    // answered without a result, or one the store refused, backs
+                    // off.
+                    .renewal = if (loaded_identity and transition.view().state == .authenticated)
+                        .token
+                    else if (retry_unsent_refresh and !store_failed)
+                        .retry_fixed
+                    else if (retry_unsent_refresh or retry_identity)
+                        .retry_backoff
+                    else
+                        .keep,
+                },
+            },
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
         };
@@ -1158,38 +1398,47 @@ pub const Runtime = struct {
         return self.prepareFailureValue(attempt_id, failure);
     }
 
+    const Deletion = struct {
+        error_code: contract.ErrorCode,
+        /// The refresh token is still stored, its marker beside it.
+        residue: bool = false,
+    };
+
     /// Deletes what is stored; the failure it reports ends the login either
     /// way. A marker goes first, so whatever is left is never sent.
-    fn deleteInvalidCredential(self: *Runtime) contract.ErrorCode {
-        const platform = self.platform orelse return .credential_store_delete_failed;
-        if (self.credentials.current) |grant| if (grant.renewable and !self.request.marked)
-            platform.credentials.beginRefresh(&grant.refresh_token) catch |err| return accountStoreError(err);
-        credential_store.commitSignedOut(platform.credentials) catch |err| return accountStoreError(err);
-        return .metask_unauthorized;
-    }
-
-    /// Deletes what is stored and signs out in one commit. A marker goes first
-    /// here too, so a token that could not be deleted is never sent.
-    fn prepareLogout(self: *Runtime) PrepareResult {
-        const signed_out = switch (self.account.prepareSignedOut()) {
-            .transition => |transition| transition,
-            .rejected => |error_code| return .{ .rejected = error_code },
-            .ignored_stale => unreachable,
-        };
-        const grant = self.credentials.current.?;
-        const platform = self.platform orelse
-            return self.prepareLogoutFailure(.credential_store_write_failed, false);
-        if (grant.renewable) platform.credentials.beginRefresh(&grant.refresh_token) catch |err|
-            return self.prepareLogoutFailure(accountStoreError(err), false);
+    fn deleteInvalidCredential(self: *Runtime) Deletion {
+        const platform = self.platform orelse return .{ .error_code = .credential_store_delete_failed };
+        if (self.credentials.current) |grant| if (!self.request.marked)
+            platform.credentials.beginRefresh(&grant.refresh_token) catch |err| {
+                // An error may still have stored it.
+                platform.credentials.clearRefreshMarker() catch {};
+                return .{ .error_code = accountStoreError(err) };
+            };
         credential_store.commitSignedOut(platform.credentials) catch |err|
-            return self.prepareLogoutFailure(accountStoreError(err), true);
-        return .{ .prepared = .{ .transition = signed_out } };
+            return .{ .error_code = accountStoreError(err), .residue = true };
+        return .{ .error_code = .metask_unauthorized };
     }
 
-    fn prepareLogoutFailure(self: *Runtime, error_code: contract.ErrorCode, ends_renewal: bool) PrepareResult {
-        var prepared = preparedFromState(self.account.prepareLogoutFailure(.fromCode(error_code)));
-        prepared.ends_renewal = ends_renewal;
-        return .{ .prepared = prepared };
+    /// Deletes what is stored and signs out in one commit, whatever is
+    /// underway: a worker has its own copy, and its result is discarded. A
+    /// marker goes first, so a token that could not be deleted is never sent;
+    /// a renewal underway stored one for this token already, and what a
+    /// logout left has one stored.
+    fn prepareLogout(self: *Runtime) PrepareResult {
+        if (!self.account.acceptsLogout()) return .{ .rejected = .invalid_state };
+        const platform = self.platform orelse
+            return .{ .prepared = preparedFromState(self.account.prepareLogoutFailure(.fromCode(.credential_store_write_failed))) };
+        if (!self.account.residue() and !self.request.marked) {
+            const grant = self.credentials.current.?;
+            platform.credentials.beginRefresh(&grant.refresh_token) catch |err| {
+                // An error may still have stored it; nothing else changed.
+                platform.credentials.clearRefreshMarker() catch {};
+                return .{ .prepared = preparedFromState(self.account.prepareLogoutFailure(.fromCode(accountStoreError(err)))) };
+            };
+        }
+        credential_store.commitSignedOut(platform.credentials) catch |err|
+            return .{ .prepared = preparedFromState(self.account.prepareSignedOut(true, .fromCode(accountStoreError(err)))) };
+        return .{ .prepared = preparedFromState(self.account.prepareSignedOut(false, null)) };
     }
 
     fn prepareAuthorizedLogin(
@@ -1205,6 +1454,7 @@ pub const Runtime = struct {
         return .{ .prepared = .{
             .transition = transition,
             .grant = credentials_impl.Grant.take(grant),
+            .renewal = .reset,
         } };
     }
 
@@ -1288,10 +1538,7 @@ pub const Runtime = struct {
                     self.publishFailure(attempt_id, .credential_store_read_failed);
                     return;
                 };
-                const now = platform.wall_clock.nowUnixSeconds() orelse {
-                    self.publishFailure(attempt_id, .account_operation_failed);
-                    return;
-                };
+                const now = platform.wall_clock.nowUnixSeconds();
                 const input = if (entry.login_exchange) |*value| value else {
                     self.publishFailure(attempt_id, .account_operation_failed);
                     return;
@@ -1301,7 +1548,9 @@ pub const Runtime = struct {
                     return;
                 };
                 self.request = .{ .wall = now, .boot = platform.boot_clock.nowSeconds() };
-                self.effects.startRequest(attempt_id, .{ .login_exchange = .{ .input = input.take(), .grant = grant } }, now);
+                // Without a wall clock (before 1970) the answer is dated
+                // from 0 and only its lifetime is kept, on the boot clock.
+                self.effects.startRequest(attempt_id, .{ .login_exchange = .{ .input = input.take(), .grant = grant } }, now orelse 0);
             },
             .refresh_token => {
                 const attempt_id = entry.attempt_id orelse
@@ -1314,10 +1563,7 @@ pub const Runtime = struct {
                     self.publishFailure(attempt_id, .credential_store_read_failed);
                     return;
                 };
-                const now = platform.wall_clock.nowUnixSeconds() orelse {
-                    self.publishUnsentRefreshFailure(attempt_id, .account_operation_failed);
-                    return;
-                };
+                const now = platform.wall_clock.nowUnixSeconds();
                 // No marker means no HTTP: these failures are safely retryable.
                 var work = self.refreshWork(refresh_token) catch {
                     self.publishUnsentRefreshFailure(attempt_id, .local_resource_exhausted);
@@ -1325,11 +1571,13 @@ pub const Runtime = struct {
                 };
                 platform.credentials.beginRefresh(refresh_token) catch |err| {
                     work.deinit();
+                    // An error may still have stored it.
+                    platform.credentials.clearRefreshMarker() catch {};
                     self.publishUnsentRefreshFailure(attempt_id, accountStoreError(err));
                     return;
                 };
                 self.request = .{ .wall = now, .boot = platform.boot_clock.nowSeconds(), .marked = true };
-                self.effects.startRequest(attempt_id, work, now);
+                self.effects.startRequest(attempt_id, work, now orelse 0);
             },
             .load_identity => {
                 const attempt_id = entry.attempt_id orelse
@@ -1344,9 +1592,13 @@ pub const Runtime = struct {
                 };
                 self.effects.startRequest(attempt_id, .{ .load_identity = copy }, 0);
             },
-            .cancel_attempt => |attempt_id| self.effects.cancelAttemptAndDiscard(attempt_id),
             .shutdown => {
-                self.effects.cancelJoinAndDiscard();
+                self.effects.endForClosing();
+                self.reapRetiredSummaries();
+                // What still runs (a request in DNS no cancel reaches) is
+                // never joined: what it publishes is only destroyed and wakes
+                // no one, and a renewal left so keeps its marker.
+                if (self.effects.abandoned != null or self.retired_summaries != null) self.effects.detach();
                 self.platform = null;
             },
         }
@@ -1378,23 +1630,46 @@ pub const Runtime = struct {
         });
     }
 
+    /// Its renewal comes before its end, however short its lifetime. Without
+    /// a wall clock (before 1970) the answer was dated from 0, so its expiry
+    /// is its lifetime and only the boot clock judges it.
     fn dateGrant(self: *const Runtime, platform: ports_impl.Platform, grant: *credentials_impl.Grant) void {
-        const boot_expires_at = self.request.boot +| (grant.expires_at -| self.request.wall);
-        const wall_now = platform.wall_clock.nowUnixSeconds() orelse self.request.wall;
+        const lifetime = grant.expires_at -| (self.request.wall orelse 0);
         const boot_now = platform.boot_clock.nowSeconds();
-        grant.masked_until = boot_now +| (grant.expires_at -| self.request.wall) +| masked_margin_seconds;
+        const boot_expires = self.request.boot +| lifetime;
+        grant.masked_until = boot_now +| lifetime +| masked_margin_seconds;
+        const wall_expires: ?i64 = if (self.request.wall != null) grant.expires_at else null;
+        const wall_now = platform.wall_clock.nowUnixSeconds() orelse self.request.wall;
         grant.times = .{
-            .expires = .{ .wall = grant.expires_at, .boot = boot_expires_at },
+            .expires = .{ .wall = wall_expires, .boot = boot_expires },
             .renews = .{
-                .wall = @max(grant.expires_at -| renewal_lead_seconds, wall_now +| renewal_min_age_seconds),
-                .boot = @max(boot_expires_at -| renewal_lead_seconds, boot_now +| renewal_min_age_seconds),
+                .wall = if (wall_expires) |at|
+                    @min(@max(at -| renewal_lead_seconds, (wall_now orelse at) +| renewal_min_age_seconds), at)
+                else
+                    null,
+                .boot = @min(@max(boot_expires -| renewal_lead_seconds, boot_now +| renewal_min_age_seconds), boot_expires),
             },
         };
     }
 
+    /// Ended once either clock reached its end. Setting a clock back does not
+    /// bring it back, and an ended token is due for renewal.
+    fn tokenEnded(self: *Runtime, platform: ports_impl.Platform) bool {
+        const grant = self.credentials.current orelse return true;
+        if (grant.ended) return true;
+        const times = grant.times orelse return false;
+        if (reached(times.expires, platform)) grant.ended = true;
+        return grant.ended;
+    }
+
     /// Renews now when the token is due for it. Otherwise only the beat can
-    /// have failed, and it is started again.
+    /// have failed, and it is started again. A store that could not be read
+    /// is read again.
     fn prepareRetryRefresh(self: *Runtime) PrepareResult {
+        if (self.account.readsStoreAgain()) {
+            if (self.platform == null) return .{ .rejected = .invalid_state };
+            return .{ .prepared = self.prepareRestore() };
+        }
         if (self.account.confirming()) {
             if (!self.account.view().can_retry) return .{ .rejected = .invalid_state };
             const platform = self.platform orelse return .{ .rejected = .invalid_state };
@@ -1404,10 +1679,9 @@ pub const Runtime = struct {
         if (self.account.view().state != .authenticated or self.account.activeAttempt() != null)
             return .{ .rejected = .invalid_state };
         const grant = self.credentials.current.?;
-        if (!grant.renewable) return .{ .rejected = .invalid_state };
         const platform = self.platform orelse return .{ .rejected = .invalid_state };
         const times = grant.times orelse return .{ .rejected = .invalid_state };
-        if (reached(times.renews, platform))
+        if (reached(times.renews, platform) or self.tokenEnded(platform))
             return wrapPrepareResult(self.account.prepareTokenRefresh());
         return wrapPrepareResult(if (self.keepBeat(platform))
             self.account.prepareRetryRefresh()
@@ -1418,26 +1692,29 @@ pub const Runtime = struct {
     fn availableAuthorizationIdentity(self: *Runtime) ?state_impl.AccountIdentity {
         if (self.account.view().state != .authenticated) return null;
         const platform = self.platform orelse return null;
-        const times = self.credentials.current.?.times orelse return null;
-        if (platform.wall_clock.nowUnixSeconds() == null or reached(times.expires, platform)) return null;
+        if (self.credentials.current.?.times == null or self.tokenEnded(platform)) return null;
         return self.account.currentIdentity();
     }
 
+    /// Reads the store strictly. What it cannot read now may be read later,
+    /// and nothing is written over it; what it holds that is not valid is
+    /// replaced by the next sign-in. Neither keeps the application from
+    /// starting.
     fn prepareRestore(self: *Runtime) Prepared {
         var restored = credential_store.restore(
             self.allocator,
             self.platform.?.credentials,
-        ) catch |err| return self.preparedSignedOutRestoreFailure(accountRestoreError(err));
+        ) catch |err| return self.preparedSignedOutRestoreFailure(accountRestoreError(err), restoreUnreadable(err));
         defer restored.deinit();
         return switch (restored) {
-            .blocked => self.preparedSignedOutRestoreFailure(.token_refresh_failed),
+            .blocked => self.preparedSignedOutRestoreFailure(.token_refresh_failed, false),
             .signed_out => blk: {
                 var value: state_impl.RestoreResult = .{ .signed_out = {} };
                 break :blk preparedFromState(self.account.prepareRestore(&value));
             },
             .account => |*account| blk: {
                 const grant = credentials_impl.Grant.createStored(self.allocator, account.refresh_token.view()) catch |err|
-                    return self.preparedSignedOutRestoreFailure(accountRestoreError(err));
+                    return self.preparedSignedOutRestoreFailure(accountRestoreError(err), restoreUnreadable(err));
                 var value: state_impl.RestoreResult = .{ .refresh_only = {} };
                 var prepared = preparedFromState(self.account.prepareRestore(&value));
                 prepared.grant = grant;
@@ -1450,8 +1727,9 @@ pub const Runtime = struct {
     fn preparedSignedOutRestoreFailure(
         self: *Runtime,
         error_code: contract.ErrorCode,
+        unreadable: bool,
     ) Prepared {
-        return preparedFromState(self.account.prepareSignedOutRestoreFailure(.fromCode(error_code)));
+        return preparedFromState(self.account.prepareSignedOutRestoreFailure(.fromCode(error_code), unreadable));
     }
 
     fn assertMainThread(self: *const Runtime) void {
@@ -1689,7 +1967,7 @@ pub const TestSupport = if (builtin.is_test) struct {
     fn issuedGrant(runtime: *Runtime, access_token: []const u8, refresh_token: []const u8, expires_at: i64) !*credentials_impl.Grant {
         const grant = try credentials_impl.TestSupport.issued(runtime.allocator, access_token, refresh_token, expires_at);
         if (runtime.platform) |platform| {
-            runtime.request = .{ .wall = platform.wall_clock.nowUnixSeconds() orelse 0, .boot = platform.boot_clock.nowSeconds() };
+            runtime.request = .{ .wall = platform.wall_clock.nowUnixSeconds(), .boot = platform.boot_clock.nowSeconds() };
             runtime.dateGrant(platform, grant);
         }
         return grant;
@@ -1831,7 +2109,7 @@ pub const TestSupport = if (builtin.is_test) struct {
     }
 
     pub fn joinNetwork(runtime: *Runtime) void {
-        runtime.effects.network_attempt.join();
+        if (runtime.effects.network) |attempt| attempt.join();
     }
 
     pub fn occupyEffectQueue(runtime: *Runtime) void {
@@ -1870,11 +2148,13 @@ fn wrapPrepareResult(result: state_impl.PrepareResult) PrepareResult {
     };
 }
 
-/// Network, deadline, rate limit, server failure, or no thread to ask with.
-fn identityUnreachable(error_code: contract.ErrorCode) bool {
+/// Userinfo ends a login only for `authorization_revoked` and `user_not_found`
+/// (published integration guide §3.5, §6), which arrive here as
+/// `metask_unauthorized`; deleting what is stored may then have failed too.
+fn identityKeepsLogin(error_code: contract.ErrorCode) bool {
     return switch (error_code) {
-        .metask_service_unavailable, .deadline_exceeded, .metask_rate_limited, .local_resource_exhausted => true,
-        else => false,
+        .metask_unauthorized, .credential_store_delete_failed => false,
+        else => true,
     };
 }
 
@@ -1885,8 +2165,15 @@ fn preparedFromState(result: state_impl.PrepareResult) Prepared {
     };
 }
 
+/// A read that may succeed later: the store did not answer, or no memory was
+/// left to hold what it answered.
+fn restoreUnreadable(err: anyerror) bool {
+    return err == error.ReadFailed or err == error.OutOfMemory;
+}
+
 fn accountRestoreError(err: anyerror) contract.ErrorCode {
     return switch (err) {
+        error.OutOfMemory => .local_resource_exhausted,
         error.ReadFailed => .credential_store_read_failed,
         error.DeleteFailed => .credential_store_delete_failed,
         error.WriteFailed => .account_operation_failed,
@@ -1981,10 +2268,16 @@ test "authorization lease requires authenticated matching unexpired credentials"
     // Run preparation must call the lease capability at admission. Neither
     // cached authenticated state nor a matching generation proves the clock
     // still permits a new consumer, and no notification is needed to expire it.
+    // Without a wall clock the boot clock alone judges it.
+    platform.boot_seconds = 100;
     platform.now_unix_seconds = null;
-    try std.testing.expect((try runtime.credential()) == null);
-    try std.testing.expect(runtime.authorization() == .stalled);
+    try std.testing.expectEqual(generation, runtime.authorization().use().ready);
+    platform.boot_seconds = null;
     platform.now_unix_seconds = 101;
+    try std.testing.expect((try runtime.credential()) == null);
+    try std.testing.expect(runtime.authorization() == .recovering);
+    // An ended token stays ended whatever a clock says later.
+    platform.now_unix_seconds = 100;
     try std.testing.expect((try runtime.credential()) == null);
     try std.testing.expect(runtime.authorization() == .recovering);
     try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
@@ -2170,29 +2463,24 @@ test "cold restore alone consumes a retained refresh credential" {
     try std.testing.expect(refresh.transition.takeEffect().? == .refresh_token);
 }
 
+/// Reads a stored login without confirming it: held, nothing underway.
+fn holdStoredLogin(runtime: *Runtime, platform: *TestSupport.Platform, refresh_token: []const u8) !void {
+    try platform.setStoredRefreshToken(refresh_token);
+    var start = runtime.prepareStart(platform.ports());
+    defer start.deinit();
+    _ = runtime.takeRefreshAfterCommit(&start);
+    runtime.commit(&start);
+}
+
 test "unauthorized login code exchange preserves the retained credential" {
     var transport: RuntimeTestTransport = .{};
     var runtime = try initRuntimeForUnitTest(&transport);
     var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
-    try platform.setStoredRefreshToken("retained-refresh");
-    TestSupport.attachPlatform(&runtime, &platform);
     defer {
         TestSupport.detachPlatform(&runtime);
         runtime.deinit();
     }
-    var authenticated = try TestSupport.prepareAuthenticated(
-        &runtime,
-        "account-1",
-        "Metask User",
-        "old-access",
-        "retained-refresh",
-        200,
-    );
-    defer authenticated.deinit();
-    runtime.commit(&authenticated);
-    var previous_lease = (try runtime.credential()).?;
-    const previous_generation = previous_lease.authorization_generation;
-    previous_lease.deinit();
+    try holdStoredLogin(&runtime, &platform, "retained-refresh");
 
     _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
     var input = try TestSupport.exchangeInput(std.testing.allocator, "authorization-code");
@@ -2218,32 +2506,20 @@ test "unauthorized login code exchange preserves the retained credential" {
         platform.refresh_token[0..platform.refresh_token_len.?],
     );
     runtime.commit(&failed);
-    try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
-    var retained_lease = (try runtime.credential()).?;
-    defer retained_lease.deinit();
-    try std.testing.expectEqual(previous_generation, retained_lease.authorization_generation);
+    // The held login is still the one to confirm.
+    try std.testing.expectEqual(contract.AccountState.checking, runtime.view().state);
+    try std.testing.expectEqualStrings("retained-refresh", runtime.credentials.refreshToken().?.view());
 }
 
 test "unauthorized login identity validation deletes the newly committed credential" {
     var transport: RuntimeTestTransport = .{};
     var runtime = try initRuntimeForUnitTest(&transport);
     var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
-    try platform.setStoredRefreshToken("retained-refresh");
-    TestSupport.attachPlatform(&runtime, &platform);
     defer {
         TestSupport.detachPlatform(&runtime);
         runtime.deinit();
     }
-    var authenticated = try TestSupport.prepareAuthenticated(
-        &runtime,
-        "account-1",
-        "Metask User",
-        "old-access",
-        "retained-refresh",
-        200,
-    );
-    defer authenticated.deinit();
-    runtime.commit(&authenticated);
+    try holdStoredLogin(&runtime, &platform, "retained-refresh");
 
     _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
     var input = try TestSupport.exchangeInput(std.testing.allocator, "authorization-code");
@@ -2287,7 +2563,7 @@ test "unauthorized login identity validation deletes the newly committed credent
     try std.testing.expect((try runtime.credential()) == null);
 }
 
-test "authorization lease is refused while authorizing" {
+test "a verified login refuses a sign-in and keeps its lease" {
     var transport: RuntimeTestTransport = .{};
     var runtime = try initRuntimeForUnitTest(&transport);
     var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
@@ -2306,8 +2582,10 @@ test "authorization lease is refused while authorizing" {
     );
     defer authenticated.deinit();
     runtime.commit(&authenticated);
-    _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
-    try std.testing.expect((try runtime.credential()) == null);
+    try std.testing.expect(runtime.prepareCommand(.begin_login) == .rejected);
+    var lease = (try runtime.credential()).?;
+    defer lease.deinit();
+    try std.testing.expectEqualStrings("access-token", lease.access_token);
 }
 
 test "healthy refresh window preserves authorization generation" {
@@ -2458,7 +2736,7 @@ test "cold restore request error preserves the retained refresh credential" {
     try std.testing.expect(runtime.admitEffect(&refresh));
     runtime.commit(&refresh);
     runtime.dispatchCommitted();
-    runtime.effects.network_attempt.join();
+    TestSupport.joinNetwork(&runtime);
     var failed = switch (runtime.prepareNextCompletion().?) {
         .prepared => |prepared| prepared,
         else => return error.TestUnexpectedResult,
@@ -2493,7 +2771,7 @@ fn startDueRenewal(runtime: *Runtime) !void {
 }
 
 fn finishTestRefresh(runtime: *Runtime) !void {
-    runtime.effects.network_attempt.join();
+    TestSupport.joinNetwork(runtime);
     var failed = switch (runtime.prepareNextCompletion().?) {
         .prepared => |prepared| prepared,
         else => return error.TestUnexpectedResult,
@@ -2512,7 +2790,7 @@ test "marker write failure sends no refresh HTTP and remains safely retryable" {
         runtime.deinit();
     }
     try beginTestRefresh(&runtime, &platform);
-    runtime.effects.network_attempt.join();
+    TestSupport.joinNetwork(&runtime);
     var failed = switch (runtime.prepareNextCompletion().?) {
         .prepared => |prepared| prepared,
         else => return error.TestUnexpectedResult,
@@ -2533,10 +2811,11 @@ test "marker write failure sends no refresh HTTP and remains safely retryable" {
     try std.testing.expect(runtime.credentials.available());
 }
 
-test "a refresh that cannot read the clock keeps the verified session" {
-    var transport: RuntimeTestTransport = .{};
-    var runtime = try initRuntimeForUnitTest(&transport);
-    var platform: TestSupport.Platform = .{};
+test "a renewal sent without a wall clock dates its token by the boot clock alone" {
+    var transport: RotationTestTransport = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &transport, .notify_fn = runtimeTestWake });
+    var platform: TestSupport.Platform = .{ .boot_seconds = 500 };
+    try platform.setStoredRefreshToken("refresh-token");
     defer {
         TestSupport.detachPlatform(&runtime);
         runtime.deinit();
@@ -2551,23 +2830,19 @@ test "a refresh that cannot read the clock keeps the verified session" {
     runtime.commit(&refresh);
     platform.now_unix_seconds = null;
     runtime.dispatchCommitted();
-    var failed = switch (runtime.prepareNextCompletion().?) {
-        .prepared => |prepared| prepared,
-        else => return error.TestUnexpectedResult,
-    };
-    defer failed.deinit();
-    runtime.commit(&failed);
-    try std.testing.expectEqual(@as(usize, 0), transport.calls);
-    try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
-    try std.testing.expectEqual(contract.ErrorCode.account_operation_failed, runtime.view().error_code);
-    try std.testing.expect(platform.refresh_marker == null);
-    // Without a clock nothing retries and nothing waits for it; a retry is
-    // due once the clock reads again.
-    platform.boot_seconds = 1000;
+    try finishTestRefresh(&runtime);
+    try std.testing.expectEqual(@as(usize, 1), transport.calls);
+    try std.testing.expectEqual(contract.ErrorCode.none, runtime.view().error_code);
+    try std.testing.expectEqualStrings("new-access", runtime.credentials.accessToken().?);
+    try std.testing.expect(runtime.authorization() == .available);
+    const times = runtime.credentials.current.?.times.?;
+    try std.testing.expect(times.expires.wall == null and times.renews.wall == null);
+    try std.testing.expectEqual(@as(i64, 4100), times.expires.boot);
+    platform.boot_seconds = 4009;
     try std.testing.expect(runtime.prepareDue() == null);
-    try std.testing.expect(runtime.authorization() == .stalled);
-    platform.now_unix_seconds = 100;
+    platform.boot_seconds = 4010;
     try startDueRenewal(&runtime);
+    try finishTestRefresh(&runtime);
 }
 
 test "unknown transport result blocks timer retry cancelled reauthentication and restart" {
@@ -2735,22 +3010,21 @@ test "every Account state answers one authorization" {
     try std.testing.expectEqual(Use{ .ready = generation }, verified.authorization().use());
     // The identity is borrowed from committed state, not from a copy.
     try std.testing.expectEqual(verified.account.accountId().ptr, verified.authorization().available.account_id.ptr);
-    // Without a wall clock nothing says whether the token still holds, so
-    // nothing waits for it.
+    // Without a wall clock the boot clock alone says whether it still holds.
+    verified_platform.boot_seconds = 100;
     verified_platform.now_unix_seconds = null;
-    try std.testing.expect(verified.authorization() == .stalled);
-    try std.testing.expectEqual(Use{ .stop = .no_connection }, verified.authorization().use());
-    // An expired token recovers; an attempt underway always has an outcome.
+    try std.testing.expectEqual(Use{ .ready = generation }, verified.authorization().use());
+    // An expired token recovers and stays expired whatever a clock says
+    // later; an attempt underway always has an outcome.
+    verified_platform.boot_seconds = null;
     verified_platform.now_unix_seconds = 200;
     try std.testing.expectEqual(Use{ .wait = 0 }, verified.authorization().use());
+    verified_platform.now_unix_seconds = 100;
     try std.testing.expectEqual(@as(u64, 0), verified.authorization().recovering);
     var refresh = TestSupport.prepareTokenRefreshWithoutEffect(&verified);
     defer refresh.deinit();
     verified.commit(&refresh);
-    verified_platform.now_unix_seconds = null;
     try std.testing.expect(verified.authorization() == .recovering);
-    verified_platform.now_unix_seconds = 100;
-    try std.testing.expectEqual(Use{ .ready = generation }, verified.authorization().use());
     TestSupport.publishUnsentRefreshFailure(&verified, .account_operation_failed);
     var unsent = switch (verified.prepareNextCompletion().?) {
         .prepared => |prepared| prepared,
@@ -2758,22 +3032,12 @@ test "every Account state answers one authorization" {
     };
     defer unsent.deinit();
     verified.commit(&unsent);
-    verified_platform.now_unix_seconds = 200;
     try std.testing.expectEqual(Use{ .wait = 1 }, verified.authorization().use());
 
-    // A login from the verified session needs the person to finish it.
-    verified_platform.now_unix_seconds = 100;
-    _ = TestSupport.commitBeginLoginWithoutDispatch(&verified);
-    try std.testing.expect(verified.authorization() == .authorizing);
-    try std.testing.expectEqual(Use{ .stop = .sign_in }, verified.authorization().use());
-    var cancel = switch (verified.prepareCommand(.cancel_operation)) {
-        .prepared => |prepared| prepared,
-        else => return error.TestUnexpectedResult,
-    };
-    defer cancel.deinit();
-    _ = cancel.transition.takeEffect();
-    verified.commit(&cancel);
-    try std.testing.expectEqual(Use{ .ready = generation }, verified.authorization().use());
+    // A verified login is never replaced by a sign-in: changing accounts
+    // means signing out first.
+    try std.testing.expect(verified.prepareCommand(.begin_login) == .rejected);
+    try std.testing.expectEqual(Use{ .wait = 1 }, verified.authorization().use());
 
     try logOut(&verified);
     try std.testing.expect(verified.authorization() == .signed_out);
@@ -2804,7 +3068,8 @@ test "the beat starts a due renewal and no query does" {
         runtime.deinit();
     }
     TestSupport.attachPlatform(&runtime, &platform);
-    // A token that lives ten seconds is not renewed before it is thirty old.
+    // A token that lives ten seconds is renewed when it ends, not thirty
+    // seconds after it came.
     var authenticated = try TestSupport.prepareAuthenticatedAndSchedule(&runtime, "account-1", "Metask", "access-token", "refresh-token", 110);
     defer authenticated.deinit();
     runtime.commit(&authenticated);
@@ -2812,7 +3077,8 @@ test "the beat starts a due renewal and no query does" {
     try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
     try std.testing.expectEqual(beat_interval_ns, platform.last_timer_interval_ns);
     const generation = runtime.credentials.current.?.generation;
-    platform.now_unix_seconds = 129;
+    try std.testing.expectEqual(@as(?i64, 110), runtime.renew_at.?.wall);
+    platform.now_unix_seconds = 109;
     try std.testing.expect(runtime.prepareDue() == null);
     // However late the beat, a query only reads.
     platform.now_unix_seconds = 230;
@@ -2837,25 +3103,23 @@ test "the beat starts a due renewal and no query does" {
     try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
 }
 
-test "a renewal missed during a login starts when the login ends" {
+test "a confirmation missed during a login starts when the login ends" {
     const Ending = enum { cancelled, callback_failed, deadline };
     for ([_]Ending{ .cancelled, .callback_failed, .deadline }) |ending| {
-        var transport: RuntimeTestTransport = .{};
-        var runtime = try initRuntimeForUnitTest(&transport);
+        var transport: ConfirmTransport = .{};
+        var runtime = transport.runtimeFor();
         var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
-        TestSupport.attachPlatform(&runtime, &platform);
         defer {
             TestSupport.detachPlatform(&runtime);
             runtime.deinit();
         }
-        var authenticated = try TestSupport.prepareAuthenticatedAndSchedule(&runtime, "account-1", "Metask", "access-token", "refresh-token", 200);
-        defer authenticated.deinit();
-        runtime.commit(&authenticated);
+        try startStoredLogin(&runtime, &platform);
 
         const login = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
         platform.now_unix_seconds = 140;
         try std.testing.expect(runtime.prepareDue() == null);
-        try std.testing.expect(runtime.authorization() == .authorizing);
+        // Signing in changes nothing a consumer waits for.
+        try std.testing.expect(runtime.authorization() == .checking);
         switch (ending) {
             .cancelled => {
                 var cancel = switch (runtime.prepareCommand(.cancel_operation)) {
@@ -2881,52 +3145,39 @@ test "a renewal missed during a login starts when the login ends" {
                 runtime.dispatchCommitted();
             },
         }
-        try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
-        try std.testing.expect(runtime.authorization() == .available);
+        try std.testing.expectEqual(contract.AccountState.checking, runtime.view().state);
+        try std.testing.expect(runtime.authorization() == .checking);
         var refresh = runtime.prepareDue() orelse return error.TestUnexpectedResult;
         defer refresh.deinit();
         try std.testing.expect(refresh.transition.takeEffect().? == .refresh_token);
     }
 }
 
-test "a login that replaced the token leaves no renewal of the old one" {
-    var transport: RotationTestTransport = .{ .identity_failure = true };
-    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &transport, .notify_fn = runtimeTestWake });
+test "a login's exchanged token replaces the held one and is kept while its identity cannot be read" {
+    var transport: ConfirmTransport = .{};
+    var runtime = transport.runtimeFor();
     var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
-    TestSupport.attachPlatform(&runtime, &platform);
     defer {
         TestSupport.detachPlatform(&runtime);
         runtime.deinit();
     }
-    var authenticated = try TestSupport.prepareAuthenticatedAndSchedule(&runtime, "account-1", "Metask", "access-token", "refresh-token", 200);
-    defer authenticated.deinit();
-    runtime.commit(&authenticated);
-    try std.testing.expect(runtime.prepareDue() == null);
-    _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
-    try std.testing.expect(runtime.renew_at != null);
-    var input = try TestSupport.exchangeInput(std.testing.allocator, "authorization-code");
-    defer input.deinit();
-    var exchange = TestSupport.prepareLoginExchange(&runtime, &input);
-    defer exchange.deinit();
-    try std.testing.expect(runtime.admitEffect(&exchange));
-    runtime.commit(&exchange);
-    runtime.dispatchCommitted();
-    runtime.effects.network_attempt.join();
-    var replaced = switch (runtime.prepareNextCompletion().?) {
-        .prepared => |prepared| prepared,
-        else => return error.TestUnexpectedResult,
-    };
-    defer replaced.deinit();
-    try std.testing.expect(runtime.admitEffect(&replaced));
-    runtime.commit(&replaced);
-    try std.testing.expect(runtime.renew_at == null);
-    try std.testing.expectEqual(@as(usize, 1), platform.timer_cancel_count);
-    runtime.dispatchCommitted();
-    // Its identity could not be confirmed, so no session is left to renew.
-    try finishTestRefresh(&runtime);
-    try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
-    platform.now_unix_seconds = 4000;
-    try std.testing.expect(runtime.prepareDue() == null);
+    try startStoredLogin(&runtime, &platform);
+    transport.refresh = .answered;
+    transport.identity = .unavailable;
+    try loginAgain(&runtime);
+    try expectUnconfirmed(&runtime, .metask_service_unavailable);
+    // The unsent confirmation counted once; the login's exchange answered second.
+    try std.testing.expectEqualStrings("next-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
+    try std.testing.expectEqualStrings("next-access", runtime.credentials.accessToken().?);
+    // A new login backs off from the start and asks only for its identity.
+    try std.testing.expectEqual(@as(i64, 130), runtime.renew_at.?.boot);
+    transport.identity = .answered;
+    platform.now_unix_seconds = 130;
+    try startDueRenewal(&runtime);
+    try settleAttempt(&runtime);
+    try std.testing.expect(runtime.authorization() == .available);
+    try std.testing.expectEqual(@as(usize, 2), transport.refreshes);
+    try std.testing.expectEqual(@as(usize, 2), transport.identities);
 }
 
 test "either clock ends a token and starts its renewal" {
@@ -2955,38 +3206,6 @@ test "either clock ends a token and starts its renewal" {
     }
 }
 
-test "a session whose logout kept its credential ends at its renewal" {
-    var transport: RuntimeTestTransport = .{};
-    var runtime = try initRuntimeForUnitTest(&transport);
-    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100, .credential_delete_fails = true };
-    try platform.setStoredRefreshToken("refresh-token");
-    TestSupport.attachPlatform(&runtime, &platform);
-    defer {
-        TestSupport.detachPlatform(&runtime);
-        runtime.deinit();
-    }
-    var authenticated = try TestSupport.prepareAuthenticatedAndSchedule(&runtime, "account-1", "Metask", "access-token", "refresh-token", 200);
-    defer authenticated.deinit();
-    runtime.commit(&authenticated);
-    try logOut(&runtime);
-    try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
-    try std.testing.expectEqual(contract.ErrorCode.credential_store_delete_failed, runtime.view().error_code);
-    // Its token still works, but nothing may renew it.
-    try std.testing.expect(runtime.authorization() == .available);
-    try std.testing.expect(runtime.prepareCommand(.retry_refresh) == .rejected);
-    platform.now_unix_seconds = 129;
-    try std.testing.expect(runtime.prepareDue() == null);
-    platform.now_unix_seconds = 130;
-    var ended = runtime.prepareDue() orelse return error.TestUnexpectedResult;
-    defer ended.deinit();
-    runtime.commit(&ended);
-    try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
-    try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, runtime.view().error_code);
-    try std.testing.expect(!runtime.credentials.available());
-    try std.testing.expect(runtime.prepareDue() == null);
-    try std.testing.expectEqual(@as(usize, 0), transport.calls);
-}
-
 /// The whole logout: one commit, whatever the store answered.
 fn logOut(runtime: *Runtime) !void {
     var logout = switch (runtime.prepareCommand(.logout)) {
@@ -2994,7 +3213,9 @@ fn logOut(runtime: *Runtime) !void {
         else => return error.TestUnexpectedResult,
     };
     defer logout.deinit();
-    try std.testing.expect(logout.attemptId() == null and logout.transition.takeEffect() == null);
+    // It starts nothing; an operation underway is given up by it.
+    try std.testing.expect(logout.transition.takeEffect() == null);
+    try std.testing.expect(logout.attemptId() == runtime.account.activeAttempt());
     runtime.commit(&logout);
 }
 
@@ -3011,8 +3232,8 @@ fn loginAgain(runtime: *Runtime) !void {
     try settleAttempt(runtime);
 }
 
-test "a logout is one commit and one it could not finish ends with the next login" {
-    const Outcome = enum { done, marker_kept, token_kept };
+test "a logout is one commit whether it deleted everything, nothing, all but the token, or all but its marker" {
+    const Outcome = enum { done, marker_kept, token_kept, marker_left };
     for (std.enums.values(Outcome)) |outcome| {
         var transport: ConfirmTransport = .{ .refresh = .answered };
         var runtime = transport.runtimeFor();
@@ -3020,6 +3241,7 @@ test "a logout is one commit and one it could not finish ends with the next logi
             .now_unix_seconds = 100,
             .marker_write_fails = outcome == .marker_kept,
             .credential_delete_fails = outcome == .token_kept,
+            .marker_delete_fails = outcome == .marker_left,
         };
         try platform.setStoredRefreshToken("refresh-token");
         TestSupport.attachPlatform(&runtime, &platform);
@@ -3031,28 +3253,39 @@ test "a logout is one commit and one it could not finish ends with the next logi
         defer authenticated.deinit();
         runtime.commit(&authenticated);
         try logOut(&runtime);
-        if (outcome == .done) {
-            try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
-            try std.testing.expect(runtime.credentials.current == null);
-            try std.testing.expect(platform.refresh_token_len == null and platform.refresh_marker == null);
-            continue;
+        switch (outcome) {
+            .done, .marker_left => {
+                // A marker without its token blocks nothing: no failure.
+                try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+                try std.testing.expectEqual(contract.ErrorCode.none, runtime.view().error_code);
+                try std.testing.expect(runtime.credentials.current == null and !runtime.account.residue());
+                try std.testing.expect(platform.refresh_token_len == null);
+                try std.testing.expectEqual(outcome == .marker_left, platform.refresh_marker != null);
+                continue;
+            },
+            .marker_kept => {
+                // Nothing was deleted, so the login goes on with what it holds.
+                try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
+                try std.testing.expectEqualStrings("access-token", runtime.credentials.accessToken().?);
+                try std.testing.expect(platform.refresh_marker == null);
+            },
+            .token_kept => {
+                // No login is held any more; what is stored is blocked.
+                try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+                try std.testing.expectEqual(contract.ErrorCode.credential_store_delete_failed, runtime.view().error_code);
+                try std.testing.expect(runtime.account.residue() and runtime.credentials.current == null);
+                try std.testing.expect(platform.refresh_token_len != null and platform.refresh_marker != null);
+                try std.testing.expect(runtime.authorization() == .signed_out);
+            },
         }
-        // Nothing was deleted, so the login goes on with what it holds.
-        try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
-        try std.testing.expectEqualStrings("access-token", runtime.credentials.accessToken().?);
-        try std.testing.expectEqual(outcome == .token_kept, platform.refresh_marker != null);
-        try std.testing.expectEqual(outcome == .marker_kept, runtime.credentials.current.?.renewable);
+        // Logging out again finishes what could not be deleted.
         platform.marker_write_fails = false;
-        // What could not be deleted is replaced by the next login, which
-        // renews as any other does.
-        try loginAgain(&runtime);
-        try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
-        try std.testing.expect(runtime.credentials.current.?.renewable);
-        platform.now_unix_seconds = 3700;
-        try startDueRenewal(&runtime);
-        try settleAttempt(&runtime);
-        try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
-        try std.testing.expectEqualStrings("next-access", runtime.credentials.accessToken().?);
+        platform.credential_delete_fails = false;
+        try logOut(&runtime);
+        try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+        try std.testing.expect(!runtime.account.residue());
+        try std.testing.expect(platform.refresh_token_len == null and platform.refresh_marker == null);
+        try std.testing.expect(runtime.prepareCommand(.logout) == .rejected);
     }
 }
 
@@ -3068,37 +3301,39 @@ test "a login that ends keeps no credential and its tokens are inspected until t
         }
     };
     for (std.enums.values(Ending)) |ending| {
-        var transport: ConfirmTransport = .{ .refresh = if (ending == .renewal) .lost else .answered, .identity = .malformed };
+        // Only an identity the server says is gone ends a held login.
+        var transport: ConfirmTransport = .{ .refresh = if (ending == .renewal) .lost else .answered, .identity = .revoked };
         var runtime = transport.runtimeFor();
         var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
         defer {
             TestSupport.detachPlatform(&runtime);
             runtime.deinit();
         }
-        if (ending == .confirmation) {
-            try startStoredLogin(&runtime, &platform);
-        } else {
-            TestSupport.attachPlatform(&runtime, &platform);
-            var authenticated = try TestSupport.prepareAuthenticatedAndSchedule(&runtime, "account-1", "Metask", "access-token", "refresh-token", 200);
-            defer authenticated.deinit();
-            runtime.commit(&authenticated);
-            switch (ending) {
-                .logout => try logOut(&runtime),
-                .renewal => {
+        switch (ending) {
+            .confirmation => try startStoredLogin(&runtime, &platform),
+            .login_identity => {
+                try holdStoredLogin(&runtime, &platform, "refresh-token");
+                try loginAgain(&runtime);
+            },
+            .logout, .renewal => {
+                TestSupport.attachPlatform(&runtime, &platform);
+                var authenticated = try TestSupport.prepareAuthenticatedAndSchedule(&runtime, "account-1", "Metask", "access-token", "refresh-token", 200);
+                defer authenticated.deinit();
+                runtime.commit(&authenticated);
+                if (ending == .logout) {
+                    try logOut(&runtime);
+                } else {
                     platform.now_unix_seconds = 130;
                     try startDueRenewal(&runtime);
                     try settleAttempt(&runtime);
-                },
-                .login_identity => try loginAgain(&runtime),
-                .confirmation => unreachable,
-            }
+                }
+            },
         }
         try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
         try std.testing.expect(runtime.credentials.current == null);
         const expected: []const []const u8 = switch (ending) {
             .logout, .renewal => &.{"access-token"},
-            .login_identity => &.{ "new-access", "access-token" },
-            .confirmation => &.{"new-access"},
+            .login_identity, .confirmation => &.{"new-access"},
         };
         var inspection: Inspection = .{};
         try runtime.accessTokenProjection().visit(&inspection, Inspection.visit);
@@ -3207,7 +3442,7 @@ fn startStoredLogin(runtime: *Runtime, platform: *TestSupport.Platform) !void {
 
 fn settleAttempt(runtime: *Runtime) !void {
     while (runtime.account.activeAttempt() != null) {
-        runtime.effects.network_attempt.join();
+        TestSupport.joinNetwork(runtime);
         var next = switch (runtime.prepareNextCompletion().?) {
             .prepared => |prepared| prepared,
             else => return error.TestUnexpectedResult,
@@ -3226,7 +3461,7 @@ fn expectUnconfirmed(runtime: *Runtime, error_code: contract.ErrorCode) !void {
     try std.testing.expect(runtime.authorization() == .checking);
 }
 
-test "a stored login that cannot be reached is confirmed ever less often" {
+test "a stored login confirmed by nothing sent is tried every thirty seconds, by a bad answer ever less often" {
     var transport: ConfirmTransport = .{};
     var runtime = transport.runtimeFor();
     var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
@@ -3236,10 +3471,21 @@ test "a stored login that cannot be reached is confirmed ever less often" {
     }
     try startStoredLogin(&runtime, &platform);
     var now: i64 = 100;
-    for ([_]i64{ 30, 60, 120, 300, 300 }, 1..) |delay, failures| {
+    for (1..4) |failures| {
         try expectUnconfirmed(&runtime, .metask_service_unavailable);
         try std.testing.expectEqual(contract.Authorization.Use{ .wait = failures }, runtime.authorization().use());
         try std.testing.expect(platform.refresh_marker == null);
+        now += 30;
+        platform.now_unix_seconds = now - 1;
+        try std.testing.expect(runtime.prepareDue() == null);
+        platform.now_unix_seconds = now;
+        // The last one reaches the server; its identity does not come.
+        if (failures == 3) transport = .{ .refresh = .answered, .identity = .unavailable, .refreshes = transport.refreshes };
+        try startDueRenewal(&runtime);
+        try settleAttempt(&runtime);
+    }
+    for ([_]i64{ 30, 60, 120, 300, 300 }) |delay| {
+        try expectUnconfirmed(&runtime, .metask_service_unavailable);
         now += delay;
         platform.now_unix_seconds = now - 1;
         try std.testing.expect(runtime.prepareDue() == null);
@@ -3249,7 +3495,8 @@ test "a stored login that cannot be reached is confirmed ever less often" {
         try std.testing.expect(!runtime.view().can_retry);
         try settleAttempt(&runtime);
     }
-    try std.testing.expectEqual(@as(usize, 6), transport.refreshes);
+    try std.testing.expectEqual(@as(usize, 4), transport.refreshes);
+    try std.testing.expectEqual(@as(usize, 6), transport.identities);
     // Someone is there for it: at once when the last attempt is thirty
     // seconds old, and patient from the start again.
     platform.now_unix_seconds = now + 29;
@@ -3259,7 +3506,7 @@ test "a stored login that cannot be reached is confirmed ever less often" {
     try startDueRenewal(&runtime);
     try settleAttempt(&runtime);
     platform.now_unix_seconds = now + 60;
-    transport.refresh = .answered;
+    transport.identity = .answered;
     try startDueRenewal(&runtime);
     try settleAttempt(&runtime);
     try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
@@ -3267,6 +3514,43 @@ test "a stored login that cannot be reached is confirmed ever less often" {
     try std.testing.expect(runtime.authorization() == .available);
     try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
     try std.testing.expectEqual(@as(usize, 0), runtime.confirm_failures);
+}
+
+test "a reason to try now renews nothing that is fine" {
+    var transport: ConfirmTransport = .{ .refresh = .answered };
+    var runtime = transport.runtimeFor();
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try startStoredLogin(&runtime, &platform);
+    try std.testing.expect(runtime.authorization() == .available);
+    const renews_at = runtime.renew_at.?;
+    platform.now_unix_seconds = 1000;
+    runtime.expedite();
+    try std.testing.expect(runtime.prepareDue() == null);
+    try std.testing.expect(std.meta.eql(renews_at, runtime.renew_at.?));
+    try std.testing.expectEqual(@as(usize, 1), transport.refreshes);
+}
+
+test "a reason to try now that comes while a confirmation is underway still counts" {
+    for ([_]bool{ false, true }) |expedited| {
+        var transport: ConfirmTransport = .{ .refresh = .answered, .identity = .unavailable };
+        var runtime = transport.runtimeFor();
+        var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+        defer {
+            TestSupport.detachPlatform(&runtime);
+            runtime.deinit();
+        }
+        try startStoredLogin(&runtime, &platform);
+        platform.now_unix_seconds = 130;
+        try startDueRenewal(&runtime);
+        if (expedited) runtime.expedite();
+        try settleAttempt(&runtime);
+        // The wait after it is the first one again, not the second.
+        try std.testing.expectEqual(@as(i64, if (expedited) 160 else 190), runtime.renew_at.?.boot);
+    }
 }
 
 test "a stored login whose confirmation was sent and lost is signed out for good" {
@@ -3352,9 +3636,16 @@ test "a login that cannot be confirmed can be retried or replaced and is kept ot
         platform.now_unix_seconds = 130;
         try startDueRenewal(&runtime);
         try std.testing.expect(runtime.prepareCommand(.retry_refresh) == .rejected);
-        try std.testing.expect(runtime.prepareCommand(.begin_login) == .rejected);
+        // A sign-in is taken while the confirmation is underway; it waits.
+        var waiting = switch (runtime.prepareCommand(.begin_login)) {
+            .prepared => |prepared| prepared,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expect(waiting.transition.loginWaits());
+        waiting.deinit();
         try settleAttempt(&runtime);
-        try std.testing.expectEqual(@as(i64, 190), runtime.renew_at.?.boot);
+        // Nothing was sent: the next try is thirty seconds on.
+        try std.testing.expectEqual(@as(i64, 160), runtime.renew_at.?.boot);
         // At once, and patient from the start again.
         var retry = switch (runtime.prepareCommand(.retry_refresh)) {
             .prepared => |prepared| prepared,
@@ -3369,7 +3660,7 @@ test "a login that cannot be confirmed can be retried or replaced and is kept ot
         try std.testing.expectEqual(@as(i64, 160), runtime.renew_at.?.boot);
 
         const login = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
-        try std.testing.expect(runtime.authorization() == .authorizing);
+        try std.testing.expect(runtime.authorization() == .checking);
         platform.now_unix_seconds = 200;
         try std.testing.expect(runtime.prepareDue() == null);
         switch (ending) {
@@ -3409,9 +3700,10 @@ test "a login that cannot be confirmed can be retried or replaced and is kept ot
             },
         }
         if (ending == .identity_failed) {
-            // The new token replaced the stored one, so nothing is kept.
-            try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
-            try std.testing.expect(runtime.prepareDue() == null);
+            // The new token replaced the stored one and is kept: its identity
+            // is asked again from the start of the backoff.
+            try expectUnconfirmed(&runtime, .metask_service_unavailable);
+            try std.testing.expectEqual(@as(i64, 230), runtime.renew_at.?.boot);
             continue;
         }
         try std.testing.expectEqual(@as(i64, 160), runtime.renew_at.?.boot);
@@ -3492,7 +3784,7 @@ test "userinfo invalid token preserves the newly committed restore credential" {
     try std.testing.expect(runtime.admitEffect(&refresh));
     runtime.commit(&refresh);
     runtime.dispatchCommitted();
-    runtime.effects.network_attempt.join();
+    TestSupport.joinNetwork(&runtime);
     var identity = switch (runtime.prepareNextCompletion().?) {
         .prepared => |p| p,
         else => return error.TestUnexpectedResult,
@@ -3502,8 +3794,12 @@ test "userinfo invalid token preserves the newly committed restore credential" {
     runtime.commit(&identity);
     runtime.dispatchCommitted();
     try finishTestRefresh(&runtime);
+    // Not a refusal of the authorization: the exchanged login stays held and
+    // is confirmed again later.
     try std.testing.expectEqualStrings("new-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
-    try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expectEqual(contract.AccountState.checking, runtime.view().state);
+    try std.testing.expect(runtime.view().can_retry);
+    try std.testing.expect(runtime.renew_at != null);
     try std.testing.expect(platform.refresh_marker == null);
     try std.testing.expectEqual(@as(usize, 2), transport.calls);
 }
@@ -3544,7 +3840,7 @@ test "committed replacement remains available after marker cleanup failure" {
         runtime.deinit();
     }
     try beginTestRefresh(&runtime, &platform);
-    runtime.effects.network_attempt.join();
+    TestSupport.joinNetwork(&runtime);
     var completed = switch (runtime.prepareNextCompletion().?) {
         .prepared => |p| p,
         else => return error.TestUnexpectedResult,
@@ -3688,9 +3984,8 @@ test "a beat that cannot start is reported once and delays nothing due" {
     try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
     try std.testing.expectEqual(contract.ErrorCode.refresh_schedule_failed, runtime.view().error_code);
     for (0..3) |_| try std.testing.expect(runtime.prepareDue() == null);
-    // Any event-loop turn still finds the renewal due, and it is waited for.
-    platform.now_unix_seconds = 200;
-    try std.testing.expectEqual(contract.Authorization.Use{ .wait = 0 }, runtime.authorization().use());
+    // Any event-loop turn still finds the renewal due.
+    platform.now_unix_seconds = 130;
     var refresh = runtime.prepareDue() orelse return error.TestUnexpectedResult;
     try std.testing.expect(refresh.transition.takeEffect().? == .refresh_token);
     refresh.deinit();
@@ -3713,7 +4008,7 @@ test "stopping suppresses a prepared unsent refresh retry" {
         runtime.deinit();
     }
     try beginTestRefresh(&runtime, &platform);
-    runtime.effects.network_attempt.join();
+    TestSupport.joinNetwork(&runtime);
     var failed = switch (runtime.prepareNextCompletion().?) {
         .prepared => |prepared| prepared,
         else => return error.TestUnexpectedResult,
@@ -3724,4 +4019,331 @@ test "stopping suppresses a prepared unsent refresh retry" {
     platform.now_unix_seconds = 4000;
     try std.testing.expect(runtime.prepareDue() == null);
     try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
+}
+
+/// Holds a request of the chosen kind until the test lets it go, then
+/// answers it: a token request with a rotation, Userinfo with an identity.
+const HeldTransport = struct {
+    hold_tokens: bool = false,
+    hold_identity: bool = false,
+    unsent: bool = false,
+    started: std.Io.Event = .unset,
+    release: std.Io.Event = .unset,
+
+    fn runtimeFor(self: *@This()) Runtime {
+        return Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = self, .perform_fn = perform, .retire_fn = metask_client.retireNothing }, TestSupport.loopbackEndpoint(), .{ .context = self, .notify_fn = runtimeTestWake });
+    }
+
+    fn perform(context: *anyopaque, request: metask_client.Request, output: []u8) metask_client.TransportError!metask_client.Response {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const tokens = request.kind == .refresh_token or request.kind == .exchange_code;
+        if ((tokens and self.hold_tokens) or (request.kind == .userinfo and self.hold_identity)) {
+            self.started.set(std.testing.io);
+            self.release.wait(std.testing.io) catch return error.NetworkNotSent;
+        }
+        if (self.unsent) return error.NetworkNotSent;
+        const body = if (tokens)
+            "{\"access_token\":\"held-access\",\"refresh_token\":\"held-refresh\",\"token_type\":\"Bearer\",\"expires_in\":3600}"
+        else if (request.kind == .userinfo)
+            "{\"sub\":\"account-1\",\"name\":\"Metask\",\"client_id\":\"metawork\",\"authorization_id\":\"authorization-1\"}"
+        else
+            return error.ProtocolFailed;
+        @memcpy(output[0..body.len], body);
+        return .{ .status = 200, .body = output[0..body.len] };
+    }
+};
+
+/// Commits the next result and dispatches what it starts.
+fn commitNextResult(runtime: *Runtime) !void {
+    TestSupport.joinNetwork(runtime);
+    var next = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer next.deinit();
+    try std.testing.expect(runtime.admitEffect(&next));
+    runtime.commit(&next);
+    runtime.dispatchCommitted();
+}
+
+/// Lets the worker given up on finish, and joins it.
+fn finishAbandoned(runtime: *Runtime, transport: *HeldTransport) !void {
+    transport.release.set(std.testing.io);
+    runtime.effects.abandoned.?.join();
+    runtime.reapAbandoned();
+    try std.testing.expect(runtime.effects.abandoned == null);
+    try std.testing.expect(runtime.prepareNextCompletion() == null);
+}
+
+test "a logout ends the login at once whatever Account is doing and discards what answers late" {
+    const Doing = enum { confirmation, identity, callback, exchange };
+    for (std.enums.values(Doing)) |doing| {
+        var transport: HeldTransport = .{ .hold_tokens = doing != .identity, .hold_identity = doing == .identity };
+        var runtime = transport.runtimeFor();
+        var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+        defer {
+            transport.release.set(std.testing.io);
+            TestSupport.detachPlatform(&runtime);
+            runtime.deinit();
+        }
+        try holdStoredLogin(&runtime, &platform, "stored-refresh");
+        switch (doing) {
+            .confirmation, .identity => {
+                var refresh = runtime.prepareRestoredRefresh();
+                defer refresh.deinit();
+                try std.testing.expect(runtime.admitEffect(&refresh));
+                runtime.commit(&refresh);
+                runtime.dispatchCommitted();
+                if (doing == .identity) try commitNextResult(&runtime);
+            },
+            .callback, .exchange => {
+                _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+                if (doing == .exchange) {
+                    var input = try TestSupport.exchangeInput(std.testing.allocator, "authorization-code");
+                    defer input.deinit();
+                    var exchange = TestSupport.prepareLoginExchange(&runtime, &input);
+                    defer exchange.deinit();
+                    try std.testing.expect(runtime.admitEffect(&exchange));
+                    runtime.commit(&exchange);
+                    runtime.dispatchCommitted();
+                }
+            },
+        }
+        if (doing != .callback) try transport.started.wait(std.testing.io);
+        try std.testing.expect(runtime.account.activeAttempt() != null);
+
+        try logOut(&runtime);
+        try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+        try std.testing.expect(runtime.authorization() == .signed_out);
+        try std.testing.expect(runtime.account.activeAttempt() == null and runtime.credentials.current == null);
+        try std.testing.expect(platform.refresh_token_len == null and platform.refresh_marker == null);
+        if (doing == .callback) {
+            try std.testing.expect(runtime.prepareNextCompletion() == null);
+            continue;
+        }
+        // What answers after the logout is destroyed, never stored.
+        try finishAbandoned(&runtime, &transport);
+        try std.testing.expect(platform.refresh_token_len == null);
+        try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+    }
+}
+
+test "a sign-in waits for a confirmation underway and is not needed if it confirms the login" {
+    for ([_]bool{ false, true }) |confirmed| {
+        var transport: HeldTransport = .{ .hold_tokens = true, .unsent = !confirmed };
+        var runtime = transport.runtimeFor();
+        var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+        defer {
+            transport.release.set(std.testing.io);
+            TestSupport.detachPlatform(&runtime);
+            runtime.deinit();
+        }
+        try holdStoredLogin(&runtime, &platform, "stored-refresh");
+        var refresh = runtime.prepareRestoredRefresh();
+        defer refresh.deinit();
+        try std.testing.expect(runtime.admitEffect(&refresh));
+        runtime.commit(&refresh);
+        runtime.dispatchCommitted();
+        try transport.started.wait(std.testing.io);
+        const epoch = runtime.authorization().checking;
+
+        var login = switch (runtime.prepareCommand(.begin_login)) {
+            .prepared => |prepared| prepared,
+            else => return error.TestUnexpectedResult,
+        };
+        defer login.deinit();
+        try std.testing.expect(login.transition.takeEffect() == null);
+        runtime.commit(&login);
+        try std.testing.expectEqual(contract.AccountState.authorizing, runtime.view().state);
+        try std.testing.expect(runtime.view().can_cancel);
+        // Messages keep waiting for the same confirmation.
+        try std.testing.expectEqual(epoch, runtime.authorization().checking);
+
+        transport.release.set(std.testing.io);
+        try commitNextResult(&runtime);
+        if (confirmed) {
+            try settleAttempt(&runtime);
+            try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
+            try std.testing.expect(!runtime.account.loginWaiting());
+            try std.testing.expect(runtime.prepareDue() == null);
+            continue;
+        }
+        // The confirmation proved nothing; the sign-in takes over from it and
+        // the messages wait on through it.
+        try std.testing.expectEqual(epoch, runtime.authorization().checking);
+        var begun = runtime.prepareDue() orelse return error.TestUnexpectedResult;
+        defer begun.deinit();
+        try std.testing.expect(begun.transition.takeEffect().? == .begin_oauth);
+        runtime.commit(&begun);
+        try std.testing.expectEqual(contract.AccountState.authorizing, runtime.view().state);
+        try std.testing.expectEqualStrings("stored-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
+    }
+}
+
+test "a sign-in gives up an identity request and keeps the authorization waiting" {
+    var transport: HeldTransport = .{ .hold_identity = true };
+    var runtime = transport.runtimeFor();
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    defer {
+        transport.release.set(std.testing.io);
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try holdStoredLogin(&runtime, &platform, "stored-refresh");
+    var refresh = runtime.prepareRestoredRefresh();
+    defer refresh.deinit();
+    try std.testing.expect(runtime.admitEffect(&refresh));
+    runtime.commit(&refresh);
+    runtime.dispatchCommitted();
+    try commitNextResult(&runtime);
+    try transport.started.wait(std.testing.io);
+    const epoch = runtime.authorization().checking;
+
+    var login = switch (runtime.prepareCommand(.begin_login)) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer login.deinit();
+    try std.testing.expectEqual(AttemptDisposition.replaces, runtime.attemptDisposition(&login));
+    try std.testing.expect(login.transition.takeEffect().? == .begin_oauth);
+    runtime.commit(&login);
+    // The browser opens at once; the identity request is left to finish.
+    try std.testing.expectEqual(contract.AccountState.authorizing, runtime.view().state);
+    try std.testing.expect(runtime.effects.network == null and runtime.effects.abandoned != null);
+    try std.testing.expectEqual(epoch, runtime.authorization().checking);
+    try finishAbandoned(&runtime, &transport);
+    try std.testing.expectEqual(contract.AccountState.authorizing, runtime.view().state);
+    // Given up, the sign-in leaves the held login to be confirmed at once.
+    var cancel = switch (runtime.prepareCommand(.cancel_operation)) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer cancel.deinit();
+    _ = cancel.transition.takeEffect();
+    runtime.commit(&cancel);
+    try std.testing.expectEqual(contract.AccountState.checking, runtime.view().state);
+    var confirmation = runtime.prepareDue() orelse return error.TestUnexpectedResult;
+    defer confirmation.deinit();
+    try std.testing.expect(confirmation.transition.takeEffect().? == .load_identity);
+}
+
+test "closing waits for a renewal underway only its own close wait and gives up any other request" {
+    const Case = enum { renewal_unsent, renewal_silent, identity };
+    for (std.enums.values(Case)) |case| {
+        var transport: HeldTransport = .{ .hold_tokens = case == .renewal_silent, .hold_identity = case == .identity, .unsent = case == .renewal_unsent };
+        var runtime = transport.runtimeFor();
+        var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+        defer {
+            transport.release.set(std.testing.io);
+            TestSupport.detachPlatform(&runtime);
+            runtime.deinit();
+        }
+        try holdStoredLogin(&runtime, &platform, "stored-refresh");
+        var refresh = runtime.prepareRestoredRefresh();
+        defer refresh.deinit();
+        try std.testing.expect(runtime.admitEffect(&refresh));
+        runtime.commit(&refresh);
+        runtime.dispatchCommitted();
+        if (case == .identity) try commitNextResult(&runtime);
+        if (case != .renewal_unsent) try transport.started.wait(std.testing.io);
+
+        runtime.close_wait = if (case == .renewal_silent) .fromMilliseconds(50) else .fromSeconds(10);
+        const begun: std.Io.Clock.Timestamp = .now(std.testing.io, .awake);
+        var closing = runtime.prepareShutdown();
+        defer closing.deinit();
+        // The closing effect runs too: nothing in it waits for a request.
+        try std.testing.expect(runtime.admitEffect(&closing));
+        runtime.commit(&closing);
+        runtime.dispatchCommitted();
+        try std.testing.expect(runtime.platform == null);
+        const waited_ns = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds - begun.raw.nanoseconds;
+        switch (case) {
+            // Back unsent in time: its marker is deleted and nothing is left.
+            .renewal_unsent => {
+                try std.testing.expect(!runtime.detached() and platform.refresh_marker == null);
+                try std.testing.expectEqualStrings("stored-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
+            },
+            // No answer in its time: left running, its marker kept, so the
+            // next start asks for a sign-in.
+            .renewal_silent => {
+                try std.testing.expect(waited_ns >= 50 * std.time.ns_per_ms and waited_ns < 5 * std.time.ns_per_s);
+                try std.testing.expect(runtime.detached() and platform.refresh_marker != null);
+            },
+            // Not waited for at all.
+            .identity => {
+                try std.testing.expect(waited_ns < 5 * std.time.ns_per_s);
+                try std.testing.expect(runtime.detached());
+                try std.testing.expectEqualStrings("held-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
+            },
+        }
+    }
+}
+
+test "once closing left a worker running, nothing it does wakes anyone" {
+    const Wakes = struct {
+        fn count(context: *anyopaque) void {
+            const wakes: *std.atomic.Value(usize) = @ptrCast(@alignCast(context));
+            _ = wakes.fetchAdd(1, .acq_rel);
+        }
+    };
+    var wakes: std.atomic.Value(usize) = .init(0);
+    var transport: RuntimeTestTransport = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &wakes, .notify_fn = Wakes.count });
+    defer runtime.deinit();
+    const wake = runtime.effects.workerWake();
+    wake.notify();
+    try std.testing.expectEqual(@as(usize, 1), wakes.load(.acquire));
+    runtime.effects.detach();
+    wake.notify();
+    runtime.effects.publishCompletion(.{ .attempt_id = 1, .payload = .{ .failed = .fromCode(.account_operation_failed) } });
+    try std.testing.expectEqual(@as(usize, 1), wakes.load(.acquire));
+    try std.testing.expect(runtime.prepareNextCompletion() == null);
+}
+
+test "a store that cannot be read is read again, and one that holds no valid record asks for a sign-in" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100, .credential_read_fails = true };
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try platform.setStoredRefreshToken("stored-refresh");
+    var start = runtime.prepareStart(platform.ports());
+    defer start.deinit();
+    try std.testing.expect(!runtime.takeRefreshAfterCommit(&start));
+    runtime.commit(&start);
+    try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expectEqual(contract.ErrorCode.credential_store_read_failed, runtime.view().error_code);
+    try std.testing.expect(runtime.account.readsStoreAgain());
+    // Reading again writes nothing over what is stored.
+    try std.testing.expectEqual(@as(usize, 0), platform.credential_write_count);
+    platform.credential_read_fails = false;
+    var again = switch (runtime.prepareCommand(.retry_refresh)) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer again.deinit();
+    try std.testing.expect(runtime.takeRefreshAfterCommit(&again));
+    runtime.commit(&again);
+    try std.testing.expectEqual(contract.AccountState.checking, runtime.view().state);
+    try std.testing.expectEqualStrings("stored-refresh", runtime.credentials.refreshToken().?.view());
+
+    // A marker this version never writes: reading again cannot help.
+    var other_transport: RuntimeTestTransport = .{};
+    var other = try initRuntimeForUnitTest(&other_transport);
+    var other_platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    defer {
+        TestSupport.detachPlatform(&other);
+        other.deinit();
+    }
+    try other_platform.setStoredRefreshToken("stored-refresh");
+    other_platform.refresh_marker = @splat('x');
+    var invalid = other.prepareStart(other_platform.ports());
+    defer invalid.deinit();
+    other.commit(&invalid);
+    try std.testing.expectEqual(contract.AccountState.signed_out, other.view().state);
+    try std.testing.expectEqual(contract.ErrorCode.recovery_state_invalid, other.view().error_code);
+    try std.testing.expect(!other.account.readsStoreAgain());
+    try std.testing.expect(other.prepareCommand(.retry_refresh) == .rejected);
 }
