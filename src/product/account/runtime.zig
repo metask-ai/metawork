@@ -841,6 +841,15 @@ pub const Runtime = struct {
         self.attempt = previous;
     }
 
+    /// What the failure an attempt ended with makes of it.
+    fn attemptOutcome(error_code: contract.ErrorCode) contract.AccountAttempt.Outcome {
+        return switch (error_code) {
+            .none => .succeeded,
+            .user_cancelled => .cancelled,
+            else => .failed,
+        };
+    }
+
     /// The person's attempt settles once what its own commit started has
     /// ended (a sign-in, once nothing signs in): what Account shows then is
     /// its result. An operation that was already underway is not its.
@@ -866,11 +875,7 @@ pub const Runtime = struct {
         }
         const shown = self.account.view();
         attempt.error_code = shown.error_code;
-        attempt.outcome = switch (shown.error_code) {
-            .none => .succeeded,
-            .user_cancelled => .cancelled,
-            else => .failed,
-        };
+        attempt.outcome = attemptOutcome(shown.error_code);
         attempt.safe_diagnostic_len = @min(shown.safe_diagnostic.len, attempt.safe_diagnostic.len);
         @memcpy(attempt.safe_diagnostic[0..attempt.safe_diagnostic_len], shown.safe_diagnostic[0..attempt.safe_diagnostic_len]);
     }
@@ -1217,7 +1222,7 @@ pub const Runtime = struct {
                     else => .none,
                 };
                 attempt.error_code = error_code;
-                attempt.outcome = if (error_code == .none) .succeeded else .failed;
+                attempt.outcome = attemptOutcome(error_code);
             };
             _ = self.summary.complete(completion);
         } else _ = self.summary.fail(job.attempt_id, .account_operation_failed);
@@ -1346,6 +1351,12 @@ pub const Runtime = struct {
     fn cancelSummaryJob(self: *Runtime) void {
         const job = self.summary_job orelse return;
         self.summary_job = null;
+        // A refresh the person asked for that is taken away ends cancelled,
+        // or nothing would ever report it.
+        if (self.attempt) |*attempt| if (attempt.action == .refresh_summary and attempt.outcome == null) {
+            attempt.error_code = .user_cancelled;
+            attempt.outcome = attemptOutcome(.user_cancelled);
+        };
         job.cancel();
         job.next = self.retired_summaries;
         self.retired_summaries = job;
@@ -4841,6 +4852,34 @@ test "a token its marker blocks at start is deleted and revoked" {
     try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, runtime.view().error_code);
     try std.testing.expect(platform.refresh_token_len == null and platform.refresh_marker == null);
     try transport.expectRevoked(&runtime, 1);
+}
+
+test "a summary refresh the person asked for ends cancelled when it is taken away" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &transport, .notify_fn = runtimeTestWake });
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 1_789_440_000 };
+    TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var authenticated = try TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask", "access-token", "refresh-token", 1_789_441_000);
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+    const receipt = runtime.beginAttempt(.refresh_summary);
+    try std.testing.expect(runtime.refreshSummary().result.accepted);
+    try std.testing.expect(runtime.view().attempt.?.outcome == null);
+    _ = runtime.clearSummary();
+    const attempt = runtime.view().attempt.?;
+    try std.testing.expectEqual(receipt, attempt.id);
+    try std.testing.expectEqual(contract.AccountAttempt.Outcome.cancelled, attempt.outcome.?);
+    try std.testing.expectEqual(contract.ErrorCode.user_cancelled, attempt.error_code);
+    // One table maps every result, so none makes a view that fails its checks.
+    for (std.enums.values(contract.ErrorCode)) |code| {
+        const outcome = Runtime.attemptOutcome(code);
+        try std.testing.expectEqual(code == .none, outcome == .succeeded);
+        try std.testing.expectEqual(code == .user_cancelled, outcome == .cancelled);
+    }
 }
 
 test "once closing left a worker running, nothing it does wakes anyone" {
