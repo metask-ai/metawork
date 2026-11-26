@@ -206,6 +206,31 @@ pub const Authorization = union(enum) {
     }
 };
 
+/// What a Metask 401 on an Account token says, by the gateway's code.
+pub const Unauthorized = enum {
+    /// `token_expired` or `invalid_token`: the access token, not the login.
+    token,
+    /// Anything else: only asking Metask who this is can tell.
+    other,
+
+    pub fn fromCode(code: ?[]const u8) Unauthorized {
+        const value = code orelse return .other;
+        return if (std.mem.eql(u8, value, "token_expired") or std.mem.eql(u8, value, "invalid_token")) .token else .other;
+    }
+};
+
+/// Any thread: a Metask request made with the Account token of
+/// `generation` was answered 401. Account acts on it later, on its own
+/// thread; an older generation is ignored.
+pub const UnauthorizedReport = struct {
+    context: *anyopaque,
+    report_fn: *const fn (*anyopaque, u64, Unauthorized) void,
+
+    pub fn report(self: UnauthorizedReport, generation: u64, kind: Unauthorized) void {
+        self.report_fn(self.context, generation, kind);
+    }
+};
+
 /// Secret-free view of Account authorization for admission and projection.
 pub const AuthorizationQuery = struct {
     context: *anyopaque,
@@ -242,6 +267,8 @@ pub const ErrorCode = enum {
     deadline_exceeded,
     token_refresh_failed,
     metask_unauthorized,
+    /// Metask refused the access token; a renewal may fix it.
+    metask_token_invalid,
     metask_rate_limited,
     metask_service_unavailable,
     metask_protocol_invalid,

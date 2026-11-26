@@ -73,6 +73,7 @@ export type AccountErrorCode =
   | "deadline_exceeded"
   | "token_refresh_failed"
   | "metask_unauthorized"
+  | "metask_token_invalid"
   | "metask_rate_limited"
   | "metask_service_unavailable"
   | "metask_protocol_invalid"

@@ -84,7 +84,9 @@ pub const Op = union(enum) {
     idle,
     authorize: struct { attempt: u64, exchanging: bool = false },
     renew: struct { attempt: u64 },
-    identity: struct { attempt: u64 },
+    /// `verifying`: a verified login asked again after a 401 that did not
+    /// say what was wrong; what it finds out is not shown unless it ends it.
+    identity: struct { attempt: u64, verifying: bool = false },
 
     fn attempt(self: Op) ?u64 {
         return switch (self) {
@@ -244,6 +246,11 @@ pub const Account = struct {
         return self.state.op == .renew;
     }
 
+    /// A verified login is being asked who it is, after a 401.
+    pub fn verifying(self: *const Account) bool {
+        return self.state.op == .identity and self.state.op.identity.verifying;
+    }
+
     pub fn identityInFlight(self: *const Account) bool {
         return self.state.op == .identity;
     }
@@ -375,6 +382,18 @@ pub const Account = struct {
             return .{ .rejected = .generation_mismatch };
         var next = self.state;
         next.op = .{ .identity = .{ .attempt = attempt.current } };
+        next.next_attempt_id = attempt.next;
+        return transition(next, .session_changed, attempt.current, .load_identity);
+    }
+
+    /// Asks Metask who a verified login is, after a 401 that did not say why.
+    pub fn prepareVerification(self: *const Account) PrepareResult {
+        if (self.state.login != .verified or self.state.op != .idle or self.state.intent != .none)
+            return .{ .rejected = .invalid_state };
+        const attempt = nextAttempt(self.state.next_attempt_id) orelse
+            return .{ .rejected = .generation_mismatch };
+        var next = self.state;
+        next.op = .{ .identity = .{ .attempt = attempt.current, .verifying = true } };
         next.next_attempt_id = attempt.next;
         return transition(next, .session_changed, attempt.current, .load_identity);
     }
@@ -587,6 +606,8 @@ pub const Account = struct {
         var next = self.state;
         next.login = .{ .verified = identity };
         next.op = .idle;
+        // A verification that found the same account changes nothing shown.
+        if (loading.verifying) return transitionNoEffect(next, .session_changed, loading.attempt);
         // A sign-in that waited for this confirmation is not needed any more.
         next.intent = .none;
         next.clearError();
@@ -610,6 +631,11 @@ pub const Account = struct {
                 next.login = .{ .none = .{ .residue = failure.residue } };
             },
             .idle => unreachable,
+        }
+        // A verification that found nothing out is not shown.
+        if (failure.retryable and self.state.op == .identity and self.state.op.identity.verifying) {
+            next.op = .idle;
+            return transitionNoEffect(next, .session_changed, attempt_id);
         }
         next.op = .idle;
         next.setFailure(failure);
@@ -646,7 +672,7 @@ fn stateIsValid(state: *const CommittedState) bool {
         .idle => true,
         .authorize => may_sign_in,
         .renew => state.login != .none,
-        .identity => state.login == .held,
+        .identity => |value| if (value.verifying) state.login == .verified else state.login == .held,
     };
 }
 

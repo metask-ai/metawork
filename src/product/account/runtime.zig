@@ -32,6 +32,8 @@ const masked_margin_seconds: i64 = 60;
 /// A stored login is confirmed again and again, ever less often, until it is
 /// confirmed or disproved, or someone signs in instead.
 const confirm_delays_seconds = [_]i64{ 30, 60, 120, 300 };
+/// A 401 renews or verifies at most once in this interval, whichever it is.
+const unauthorized_interval_seconds: i64 = 60;
 
 const Moment = credentials_impl.Moment;
 
@@ -49,6 +51,8 @@ const SummaryJob = struct {
     history_range: ?summary_impl.HistoryRange,
     lease: contract.OwnedAuthorizationLease,
     lease_active: bool = true,
+    /// The credential generation it asked with.
+    generation: u64,
     cancellation: metask_client.Cancellation,
     completion: ?summary_impl.Completion = null,
     finished: std.atomic.Value(bool) = .init(false),
@@ -74,6 +78,7 @@ const SummaryJob = struct {
             .attempt_id = attempt_id,
             .synced_at_unix_ms = synced_at_unix_ms,
             .history_range = history_range,
+            .generation = lease.authorization_generation,
             .lease = lease.take(),
             .cancellation = metask_client.Cancellation.init(io),
         };
@@ -685,6 +690,16 @@ pub const Runtime = struct {
     renewal_epoch: u64 = 0,
     /// How long closing waits for a renewal underway, from when it begins to.
     close_wait: std.Io.Duration = .fromSeconds(2),
+    /// The strongest Metask 401 reported on the current token and not acted
+    /// on yet.
+    unauthorized: ?struct { generation: u64, kind: contract.Unauthorized } = null,
+    /// The generation a 401 renewed already: each is renewed once for one.
+    unauthorized_renewed: u64 = 0,
+    /// When a 401 last started a renewal or a verification, in boot seconds.
+    unauthorized_acted: ?i64 = null,
+    /// Userinfo refused a held login's access token: its next confirmation
+    /// renews the token instead of asking again.
+    renew_next: bool = false,
     stopping: bool = false,
 
     pub fn init(
@@ -770,6 +785,7 @@ pub const Runtime = struct {
         if (self.account.confirming())
             return if (reached(renew_at, platform)) preparedFromState(self.prepareConfirmation(platform)) else null;
         std.debug.assert(self.account.view().state == .authenticated);
+        if (self.prepareUnauthorized(platform)) |prepared| return prepared;
         const reported = self.account.view().error_code == .refresh_schedule_failed;
         if (!beating and !reported)
             return preparedFromState(self.account.prepareRefreshScheduleFailure());
@@ -793,7 +809,48 @@ pub const Runtime = struct {
         renew_at.boot = @min(renew_at.boot, self.confirm_ended_boot +| confirm_delays_seconds[0]);
     }
 
+    /// A Metask 401 reported for the token of `generation`. One for an older
+    /// token, or while no login is verified, says nothing now.
+    pub fn reportUnauthorized(self: *Runtime, generation: u64, kind: contract.Unauthorized) void {
+        self.assertMainThread();
+        if (self.stopping or self.account.currentIdentity() == null) return;
+        const grant = self.credentials.current orelse return;
+        if (generation != grant.generation) return;
+        const token = kind == .token or (if (self.unauthorized) |pending| pending.kind == .token else false);
+        self.unauthorized = .{ .generation = generation, .kind = if (token) .token else .other };
+    }
+
+    /// Any thread: the main thread looks at Account again soon.
+    pub fn wakeFromAnyThread(self: *Runtime) void {
+        Effects.notifyUnlessDetached(&self.effects);
+    }
+
+    /// Acts on a reported 401 once the shared interval allows: the token's
+    /// own complaint renews it, once a generation; anything else asks Metask
+    /// who this is.
+    fn prepareUnauthorized(self: *Runtime, platform: ports_impl.Platform) ?Prepared {
+        const pending = self.unauthorized orelse return null;
+        if (pending.generation != self.credentials.current.?.generation) {
+            self.unauthorized = null;
+            return null;
+        }
+        const now = platform.boot_clock.nowSeconds();
+        if (self.unauthorized_acted) |at| if (now -| at < unauthorized_interval_seconds) return null;
+        const renews = pending.kind == .token and self.unauthorized_renewed != pending.generation;
+        const result = if (renews) self.account.prepareTokenRefresh() else self.account.prepareVerification();
+        const transition = switch (result) {
+            .transition => |value| value,
+            .rejected, .ignored_stale => return null,
+        };
+        self.unauthorized = null;
+        self.unauthorized_acted = now;
+        if (renews) self.unauthorized_renewed = pending.generation;
+        return .{ .transition = transition };
+    }
+
     fn prepareConfirmation(self: *Runtime, platform: ports_impl.Platform) state_impl.PrepareResult {
+        // Userinfo refused the access token: renew it rather than ask again.
+        if (self.renew_next) return self.account.prepareRestoredTokenRefresh();
         // An exchanged token is not exchanged again for an identity alone.
         if (self.credentials.current.?.times) |times| if (!reached(times.renews, platform))
             return self.account.prepareRestoredIdentity();
@@ -1015,10 +1072,12 @@ pub const Runtime = struct {
         const job = self.summary_job orelse return false;
         if (!job.finished.load(.acquire)) return false;
         job.join();
-        if (job.completion) |*completion|
-            _ = self.summary.complete(completion)
-        else
-            _ = self.summary.fail(job.attempt_id, .account_operation_failed);
+        if (job.completion) |*completion| {
+            // Its 401 is Account's to judge, not the summary's alone.
+            if (completion.history == .failed and completion.history.failed == .metask_unauthorized)
+                self.reportUnauthorized(job.generation, .other);
+            _ = self.summary.complete(completion);
+        } else _ = self.summary.fail(job.attempt_id, .account_operation_failed);
         self.summary_job = null;
         job.deinit();
         return true;
@@ -1227,6 +1286,8 @@ pub const Runtime = struct {
             prepared.token_changed = grant.accessToken() != null;
             self.credentials.install(grant);
             self.request.marked = false;
+            // A new access token is asked about, not renewed again.
+            self.renew_next = false;
         } else if (ended) self.credentials.end();
         std.debug.assert(!ended or self.credentials.current == null);
         std.debug.assert(self.account.view().state != .authenticated or self.credentials.available());
@@ -1261,6 +1322,8 @@ pub const Runtime = struct {
         if (!self.account.renewable()) {
             self.confirm_failures = 0;
             self.clearRenewal();
+            self.unauthorized = null;
+            self.renew_next = false;
         }
     }
 
@@ -1312,6 +1375,24 @@ pub const Runtime = struct {
                 } else |_| completion.payload.failed.error_code = .credential_store_delete_failed;
             }
         }
+        const verifying = self.account.verifying();
+        // A verification that found another account ended the login it
+        // asked about.
+        if (verifying and completion.payload == .identity_loaded and
+            !std.mem.eql(u8, completion.payload.identity_loaded.accountId(), self.account.accountId()))
+        {
+            completion.deinit();
+            completion.* = .{
+                .attempt_id = completion.attempt_id,
+                .payload = .{ .failed = .fromCode(.metask_unauthorized) },
+            };
+        }
+        // Userinfo refused the access token, not the login: it is renewed.
+        if (completion.payload == .failed and completion.payload.failed.error_code == .metask_token_invalid) {
+            if (verifying) {
+                self.unauthorized = .{ .generation = self.credentials.current.?.generation, .kind = .token };
+            } else self.renew_next = true;
+        }
         if (completion.payload == .failed and
             completion.payload.failed.error_code == .metask_unauthorized and
             self.account.activeRequestUsesCredential())
@@ -1330,10 +1411,13 @@ pub const Runtime = struct {
         // The exchanged token is held and kept; an identity that cannot be
         // read now says nothing about it. Only the server saying the
         // authorization is gone ends the login.
-        const retry_identity = self.account.identityInFlight() and
+        const keeps_identity = self.account.identityInFlight() and
             completion.payload == .failed and identityKeepsLogin(completion.payload.failed.error_code);
+        // A verification that found nothing out leaves the schedule alone.
+        const retry_identity = keeps_identity and !verifying;
+        const token_refused = retry_identity and completion.payload.failed.error_code == .metask_token_invalid;
         if (completion.payload == .failed) {
-            if (retry_unsent_refresh or retry_identity)
+            if (retry_unsent_refresh or keeps_identity)
                 completion.payload.failed.retryable = true
             else if (refresh_attempt)
                 self.loseRenewal(&completion.payload.failed);
@@ -1349,7 +1433,7 @@ pub const Runtime = struct {
                     // off.
                     .renewal = if (loaded_identity and transition.view().state == .authenticated)
                         .token
-                    else if (retry_unsent_refresh and !store_failed)
+                    else if ((retry_unsent_refresh and !store_failed) or token_refused)
                         .retry_fixed
                     else if (retry_unsent_refresh or retry_identity)
                         .retry_backoff
@@ -3366,7 +3450,7 @@ const RotationTestTransport = struct {
 
 const ConfirmTransport = struct {
     refresh: enum { unsent, lost, answered } = .unsent,
-    identity: enum { unavailable, revoked, malformed, answered } = .answered,
+    identity: enum { unavailable, revoked, malformed, answered, other_account, token_refused } = .answered,
     refreshes: usize = 0,
     identities: usize = 0,
 
@@ -3397,12 +3481,15 @@ const ConfirmTransport = struct {
                     .revoked => "{\"error\":\"authorization_revoked\"}",
                     .malformed => "{}",
                     .answered => "{\"sub\":\"account-1\",\"name\":\"Metask\",\"client_id\":\"metawork\",\"authorization_id\":\"authorization-1\"}",
+                    .other_account => "{\"sub\":\"account-2\",\"name\":\"Other\",\"client_id\":\"metawork\",\"authorization_id\":\"authorization-2\"}",
+                    .token_refused => "{\"error\":\"invalid_token\"}",
                 };
             },
             else => return error.ProtocolFailed,
         };
         @memcpy(output[0..body.len], body);
-        return .{ .status = if (request.kind == .userinfo and self.identity == .revoked) 401 else 200, .body = output[0..body.len] };
+        const refused = request.kind == .userinfo and (self.identity == .revoked or self.identity == .token_refused);
+        return .{ .status = if (refused) 401 else 200, .body = output[0..body.len] };
     }
 };
 
@@ -3514,6 +3601,89 @@ test "a reason to try now that comes while a confirmation is underway still coun
         // The wait after it is the first one again, not the second.
         try std.testing.expectEqual(@as(i64, if (expedited) 160 else 190), runtime.renew_at.?.boot);
     }
+}
+
+test "a 401 that does not say why asks who the login is, and only Metask's answer ends it" {
+    const Case = enum { same, unavailable, other_account, revoked, token_refused };
+    for (std.enums.values(Case)) |case| {
+        var transport: ConfirmTransport = .{ .refresh = .answered };
+        var runtime = transport.runtimeFor();
+        var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+        defer {
+            TestSupport.detachPlatform(&runtime);
+            runtime.deinit();
+        }
+        try startStoredLogin(&runtime, &platform);
+        const renews_at = runtime.renew_at.?;
+        transport.identity = switch (case) {
+            .same => .answered,
+            .unavailable => .unavailable,
+            .other_account => .other_account,
+            .revoked => .revoked,
+            .token_refused => .token_refused,
+        };
+        runtime.reportUnauthorized(runtime.credentials.current.?.generation, .other);
+        try startDueRenewal(&runtime);
+        try std.testing.expect(runtime.account.verifying());
+        try std.testing.expect(runtime.authorization() == .available);
+        try settleAttempt(&runtime);
+        switch (case) {
+            // Nothing found out: nothing shown, nothing rescheduled.
+            .same, .unavailable => {
+                try std.testing.expect(runtime.authorization() == .available);
+                try std.testing.expectEqual(contract.ErrorCode.none, runtime.view().error_code);
+                try std.testing.expect(std.meta.eql(renews_at, runtime.renew_at.?));
+            },
+            .other_account, .revoked => {
+                try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+                try std.testing.expect(platform.refresh_token_len == null);
+            },
+            // The access token itself: renewed once the minute is over.
+            .token_refused => {
+                try std.testing.expect(runtime.authorization() == .available);
+                platform.now_unix_seconds = 159;
+                try std.testing.expect(runtime.prepareDue() == null);
+                platform.now_unix_seconds = 160;
+                try startDueRenewal(&runtime);
+                try std.testing.expect(runtime.account.refreshInFlight());
+                try settleAttempt(&runtime);
+                try std.testing.expectEqual(@as(usize, 2), transport.refreshes);
+            },
+        }
+    }
+}
+
+test "a 401 on the token renews it at once, and only for the current token" {
+    var transport: ConfirmTransport = .{ .refresh = .answered };
+    var runtime = transport.runtimeFor();
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try startStoredLogin(&runtime, &platform);
+    const generation = runtime.credentials.current.?.generation;
+    // Another token's 401 says nothing about this one.
+    runtime.reportUnauthorized(generation + 1, .token);
+    try std.testing.expect(runtime.prepareDue() == null);
+    // Its own renews it now, however far its renewal point is.
+    runtime.reportUnauthorized(generation, .token);
+    try startDueRenewal(&runtime);
+    try std.testing.expect(runtime.account.refreshInFlight());
+    try settleAttempt(&runtime);
+    const renewed = runtime.credentials.current.?.generation;
+    try std.testing.expect(renewed != generation);
+    // The old token's late 401 is ignored; the new one's waits out the minute.
+    runtime.reportUnauthorized(generation, .token);
+    try std.testing.expect(runtime.prepareDue() == null);
+    runtime.reportUnauthorized(renewed, .token);
+    platform.now_unix_seconds = 159;
+    try std.testing.expect(runtime.prepareDue() == null);
+    platform.now_unix_seconds = 160;
+    try startDueRenewal(&runtime);
+    try std.testing.expect(runtime.account.refreshInFlight());
+    try settleAttempt(&runtime);
+    try std.testing.expectEqual(@as(usize, 3), transport.refreshes);
 }
 
 test "a stored login whose confirmation was sent and lost is signed out for good" {

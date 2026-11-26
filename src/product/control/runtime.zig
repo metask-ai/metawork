@@ -1529,6 +1529,7 @@ pub const Runtime = struct {
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
     video_run_preparation: ?control_ports.VideoRunPreparation = null,
     account_authorization: ?account_contract.AuthorizationQuery = null,
+    account_unauthorized: ?account_contract.UnauthorizedReport = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     file_actions: file_action.Lane = .{},
     file_effects: ?control_ports.FileEffects = null,
@@ -10125,6 +10126,18 @@ pub const Runtime = struct {
         self.account_authorization = query;
     }
 
+    /// A Run's Metask 401 goes to Account, which alone may judge it.
+    pub fn setAccountUnauthorizedReport(self: *Runtime, report: account_contract.UnauthorizedReport) void {
+        self.account_unauthorized = report;
+        self.task_runtime.metask_unauthorized = .{ .context = self, .report_fn = reportRunUnauthorized };
+    }
+
+    fn reportRunUnauthorized(context: *anyopaque, generation: u64, code: ?[]const u8) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const report = self.account_unauthorized orelse return;
+        report.report(generation, account_contract.Unauthorized.fromCode(code));
+    }
+
     pub fn metaskCredentialRenewal(self: *Runtime) control_ports.MetaskCredentialRenewal {
         return .{
             .context = self,
@@ -18600,6 +18613,54 @@ test "Metask balance failure projects the first-party reason to the shared Rende
         inline for (.{ "guidance", "reason" }) |field|
             try std.testing.expectEqualStrings(expected_feedback.get(field).?.string, feedback.get(field).?.string);
         try std.testing.expectEqual(expected_feedback.get("offerInputPreparation").?.bool, feedback.get("offerInputPreparation").?.bool);
+    }
+}
+
+test "a Metask Run that ended with 401 tells Account what Metask said" {
+    const Recorder = struct {
+        calls: usize = 0,
+        generation: u64 = 0,
+        kind: account_contract.Unauthorized = .other,
+        fn report(context: *anyopaque, generation: u64, kind: account_contract.Unauthorized) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.generation = generation;
+            self.kind = kind;
+        }
+    };
+    const Case = struct { status: u16, code: []const u8, kind: ?account_contract.Unauthorized };
+    for ([_]Case{
+        .{ .status = 401, .code = "token_expired", .kind = .token },
+        .{ .status = 401, .code = "authorization_revoked", .kind = .other },
+        // A suspended account is no credential failure.
+        .{ .status = 403, .code = "account_suspended", .kind = null },
+    }) |case| {
+        var control = try testRuntime();
+        defer control.deinit();
+        var recorder: Recorder = .{};
+        control.setAccountUnauthorizedReport(.{ .context = &recorder, .report_fn = Recorder.report });
+        const task = control.testTask(3).?;
+        const run = &task.durable.runs[0].?;
+        const storage = try control.allocator.create(task_test_state.RunModelError);
+        run.model_error_storage = storage;
+        storage.* = .{ .source = .metask, .detail = try lifecycle.ModelError.init(.{
+            .run_id = 77,
+            .category = .authentication,
+            .message = "refused",
+            .code = case.code,
+            .http_status = case.status,
+            .retry = .not_retryable,
+            .attempts = 1,
+        }) };
+        try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
+        run.terminal_payload.model_error = storage;
+        const generation = task.runtime.executionConst().?.credential_generation;
+        finalizeTestTerminalEvents(&control);
+        try std.testing.expectEqual(@as(usize, if (case.kind != null) 1 else 0), recorder.calls);
+        if (case.kind) |kind| {
+            try std.testing.expectEqual(kind, recorder.kind);
+            try std.testing.expectEqual(generation, recorder.generation);
+        }
     }
 }
 

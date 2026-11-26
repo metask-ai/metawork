@@ -44,6 +44,9 @@ pub const Coordinator = struct {
     delivered_generation: u64 = 0,
     published: ?Published = null,
     stopping: bool = false,
+    /// One Metask 401 waiting for the main thread, from any thread: its
+    /// generation shifted left once, low bit set for the token kind. 0 is none.
+    unauthorized: std.atomic.Value(u64) = .init(0),
 
     pub fn init(
         runtime: *account_api.Runtime,
@@ -150,6 +153,9 @@ pub const Coordinator = struct {
     pub fn tick(self: *Coordinator) bool {
         self.assertMainThread();
         if (self.stopping) return false;
+        // A 401 is handed over here, never in its reporter's call.
+        const pending = self.unauthorized.swap(0, .acq_rel);
+        if (pending != 0) self.runtime.reportUnauthorized(pending >> 1, if (pending & 1 == 1) .token else .other);
         // A message that began to wait, or a Run whose token ended, is a
         // reason to try now.
         if (self.credential_renewal) |renewal| switch (self.runtime.authorization()) {
@@ -219,6 +225,23 @@ pub const Coordinator = struct {
     fn renew(self: *Coordinator, renewal: control_ports.MetaskCredentialRenewal, generation: u64) void {
         self.delivered_generation = generation;
         renewal.renew(generation, self.runtime.accessToken().?);
+    }
+
+    /// Where every Metask consumer reports a 401 on the Account token.
+    pub fn unauthorizedReport(self: *Coordinator) account_contract.UnauthorizedReport {
+        return .{ .context = self, .report_fn = reportUnauthorized };
+    }
+
+    /// Any thread. Reports fold into one: the newest generation, the token
+    /// kind if any said it.
+    fn reportUnauthorized(context: *anyopaque, generation: u64, kind: account_contract.Unauthorized) void {
+        const self: *Coordinator = @ptrCast(@alignCast(context));
+        if (generation == 0 or generation > std.math.maxInt(u64) >> 1) return;
+        const token: u64 = @intFromBool(kind == .token);
+        var current = self.unauthorized.load(.acquire);
+        while (self.unauthorized.cmpxchgWeak(current, (@max(current >> 1, generation) << 1) | (current & 1) | token, .acq_rel, .acquire)) |seen|
+            current = seen;
+        self.runtime.wakeFromAnyThread();
     }
 
     fn readyGeneration(self: *Coordinator) ?u64 {
@@ -1235,6 +1258,37 @@ test "Account tries at once for a Run that holds an ended token" {
         try std.testing.expectEqual(@as(i64, if (holding) 175 else 1000), runtime.renew_at.?.boot);
         try std.testing.expect(runtime.account.activeAttempt() == null);
     }
+}
+
+test "Account folds 401 reports into one and takes it on its next turn" {
+    var runtime = try initRuntimeForTest();
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+    _ = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask User", "access-token", "refresh-token", 200),
+    );
+    const generation = runtime.credentials.current.?.generation;
+    const report = coordinator.unauthorizedReport();
+    const Reporter = struct {
+        fn run(port: account_contract.UnauthorizedReport, value: u64) void {
+            port.report(value, .token);
+        }
+    };
+    report.report(generation, .other);
+    const thread = try std.Thread.spawn(.{}, Reporter.run, .{ report, generation });
+    thread.join();
+    // Nothing is decided in a reporter's call.
+    try std.testing.expect(runtime.unauthorized == null);
+    _ = coordinator.tick();
+    try std.testing.expectEqual(generation, runtime.unauthorized.?.generation);
+    try std.testing.expectEqual(account_contract.Unauthorized.token, runtime.unauthorized.?.kind);
+    try std.testing.expectEqual(@as(u64, 0), coordinator.unauthorized.load(.acquire));
 }
 
 test "Account commit installs, renews, follows and settles in that order" {

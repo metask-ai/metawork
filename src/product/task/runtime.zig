@@ -1381,6 +1381,13 @@ pub const FailureRecord = struct {
     reason: []u8,
 };
 
+/// Main thread: a Metask model call ended with 401 on the credential of
+/// this generation, with Metask's error code.
+pub const MetaskUnauthorizedSink = struct {
+    context: *anyopaque,
+    report_fn: *const fn (*anyopaque, u64, ?[]const u8) void,
+};
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     tasks: []?*task_state.Task,
@@ -1409,6 +1416,9 @@ pub const Runtime = struct {
     approval_cleanup_leases: worker_lease.WorkerLeaseSet = .{},
     approval_jobs: [approval_job.max_operations]?struct { recipient: ApprovalJobRecipient, job: *approval_job.Job } = @splat(null),
     pending_model_intent: ?PreparedModelIntent = null,
+    /// Told of a Metask model call that ended with 401, which only Account
+    /// may judge.
+    metask_unauthorized: ?MetaskUnauthorizedSink = null,
     held_create: ?struct { slot: usize, task: *task_state.Task } = null,
 
     pub const testing = if (@import("builtin").is_test) struct {
@@ -7947,6 +7957,7 @@ pub const Runtime = struct {
             changed = true;
         }
         if (!run.terminal_observed) {
+            self.reportMetaskUnauthorized(task, run);
             const stopped_batch = run.input_stop_requested and (terminal.outcome == .stopped or terminal.outcome == .cancelled);
             if (terminal.outcome != .completed and !stopped_batch) {
                 // A Run this Task stopped to make room for an edited message
@@ -7988,6 +7999,15 @@ pub const Runtime = struct {
             changed = true;
         }
         return changed;
+    }
+
+    fn reportMetaskUnauthorized(self: *Runtime, task: *const task_state.Task, run: *const task_state.RunRecord) void {
+        const sink = self.metask_unauthorized orelse return;
+        const detail = (task_state.terminalPayload(run) orelse return).model_error orelse return;
+        if (detail.source != .metask or detail.detail.http_status != 401) return;
+        // The token the Run held last; one renewed meanwhile is the newer.
+        const execution = task.runtime.executionConst() orelse return;
+        sink.report_fn(sink.context, execution.credential_generation, detail.detail.view().code);
     }
 
     /// Turns the Agent-owned noninteractive permission stop observation into

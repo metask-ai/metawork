@@ -71,6 +71,8 @@ pub const ClientError = error{
     Unauthorized,
     /// 403: the account may not do this, whatever its token.
     Forbidden,
+    /// Userinfo refused the access token itself; the refresh token may hold.
+    TokenInvalid,
     RateLimited,
     ServiceUnavailable,
     ProtocolInvalid,
@@ -84,6 +86,7 @@ pub fn errorCode(client_error: ClientError) contract.ErrorCode {
         error.TokenRefreshFailed => .token_refresh_failed,
         error.Unauthorized => .metask_unauthorized,
         error.Forbidden => .account_operation_failed,
+        error.TokenInvalid => .metask_token_invalid,
         error.RateLimited => .metask_rate_limited,
         error.ServiceUnavailable => .metask_service_unavailable,
         error.ProtocolInvalid => .metask_protocol_invalid,
@@ -234,7 +237,7 @@ fn oauthError(response: Response) ?[]const u8 {
     return mechanics.errorCode(
         .{ .body_bytes = oauth.Limits.token_body_bytes },
         response.body,
-        &.{ "invalid_grant", "invalid_request", "invalid_client", "unauthorized_client", "unsupported_grant_type", "invalid_scope", "authorization_revoked", "user_not_found" },
+        &.{ "invalid_grant", "invalid_request", "invalid_client", "unauthorized_client", "unsupported_grant_type", "invalid_scope", "authorization_revoked", "user_not_found", "invalid_token" },
     );
 }
 
@@ -252,6 +255,7 @@ fn classifyIdentityFailure(response: Response) ClientError {
     if (response.status == 401) {
         if (oauthError(response)) |code| {
             if (std.mem.eql(u8, code, "authorization_revoked") or std.mem.eql(u8, code, "user_not_found")) return error.Unauthorized;
+            if (std.mem.eql(u8, code, "invalid_token")) return error.TokenInvalid;
         }
     }
     return nonCredentialFailure(response.status);
@@ -475,10 +479,10 @@ test "refresh and identity invalidate only exact endpoint error pairs" {
     try std.testing.expectEqual(error.ProtocolInvalid, classifyRefreshFailure(.{ .status = 401, .body = "{\"error\":\"invalid_grant\"}" }));
     try std.testing.expectEqual(error.ProtocolInvalid, classifyRefreshFailure(.{ .status = 403, .body = "{}" }));
     try std.testing.expectEqual(error.ServiceUnavailable, classifyRefreshFailure(.{ .status = 503, .body = "{\"error\":\"invalid_grant\"}" }));
-    try std.testing.expectEqual(error.ProtocolInvalid, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"invalid_token\"}" }));
     try std.testing.expectEqual(error.ProtocolInvalid, classifyIdentityFailure(.{ .status = 403, .body = "{\"error\":\"authorization_revoked\"}" }));
     try std.testing.expectEqual(error.Unauthorized, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"authorization_revoked\"}" }));
     try std.testing.expectEqual(error.Unauthorized, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"user_not_found\"}" }));
+    try std.testing.expectEqual(error.TokenInvalid, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"invalid_token\"}" }));
 }
 
 test {
