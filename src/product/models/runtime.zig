@@ -3327,6 +3327,8 @@ test "a held key is zeroed when it is dropped and when Models is destroyed" {
     const Sink = struct {
         admitted: usize = 0,
         retired: usize = 0,
+        held_at: ?[*]const u8 = null,
+        retired_at: ?[*]const u8 = null,
         fn admit(context: *anyopaque, value: []const u8) bool {
             const self: *@This() = @ptrCast(@alignCast(context));
             std.debug.assert(std.mem.eql(u8, value, secret));
@@ -3337,7 +3339,12 @@ test "a held key is zeroed when it is dropped and when Models is destroyed" {
             const self: *@This() = @ptrCast(@alignCast(context));
             std.debug.assert(std.mem.eql(u8, value, secret));
             self.retired += 1;
+            self.retired_at = value.ptr;
             return true;
+        }
+        fn remember(context: *anyopaque, value: []const u8) std.mem.Allocator.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.held_at = value.ptr;
         }
         fn port(self: *@This()) ResidentSink {
             return .{ .context = self, .admit_fn = admit, .retire_fn = retire };
@@ -3368,10 +3375,14 @@ test "a held key is zeroed when it is dropped and when Models is destroyed" {
         try runtime.visitResidentCredentials(&held, Sink.count);
         try std.testing.expectEqual(@as(usize, 1), sink.admitted);
         try std.testing.expectEqual(@as(usize, 1), held);
+        try runtime.visitResidentCredentials(&sink, Sink.remember);
         runtime.stop();
         if (drop_before_deinit) {
             runtime.syncResidentCredentials(sink.port());
             try std.testing.expectEqual(@as(usize, 1), sink.retired);
+            // What leaves is the copy that was held, so a caller can tell it
+            // apart by pointer from another holder's equal bytes.
+            try std.testing.expectEqual(sink.held_at, sink.retired_at);
             held = 0;
             try runtime.visitResidentCredentials(&held, Sink.count);
             try std.testing.expectEqual(@as(usize, 0), held);

@@ -10838,6 +10838,11 @@ pub const TestSupport = if (builtin.is_test) struct {
         try testAttachmentMediaRuntime(control, store);
     }
 
+    /// Whether the projection would mask, or refuse on, `text`.
+    pub fn knowsCredentialText(control: *const Runtime, text: []const u8) bool {
+        return control.containsKnownCredential(text);
+    }
+
     pub fn invalidatePreviewSecurity(control: *Runtime) void {
         control.invalidateProjectionSecurity();
     }
@@ -16504,6 +16509,32 @@ test "a configured Custom Provider key is known from the moment it is stored" {
     try std.testing.expect(control.submitCustomProviderCommand(.{ .remove = .{ .source_id = removed.id, .expected_provider_revision = removed.provider_revision } }).accepted);
     try std.testing.expect(!control.containsKnownCredential("first-configured-key-0001"));
     try std.testing.expect(control.containsKnownCredential("second-configured-key-02"));
+}
+
+test "a configured key joining scrubs the durable Schedule store" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const id = try fixture.control.createScheduledTask(.{
+        .title = "Review current work",
+        .model_selection = try TestSupport.fixtureModelSelection(&fixture.control),
+        .permission_profile = .approval_required,
+        .input = "Use first-configured-key-0001 then second-configured-key-02",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    // Saving a key nothing knew scrubs the durable definition at once.
+    const commits = fixture.persistence.commits;
+    try std.testing.expect(fixture.control.createCustomProviderWithCredential("first-configured-key-0001", configured_provider_spec).accepted);
+    try std.testing.expect(fixture.persistence.commits > commits);
+    try std.testing.expect(std.mem.indexOf(u8, fixture.stored(id).input, "first-configured-key-0001") == null);
+    try std.testing.expect(std.mem.indexOf(u8, fixture.stored(id).input, "second-configured-key-02") != null);
+    // A replacement scrubs the new key too, and the old one is released.
+    const view = fixture.control.custom_providers.views()[0];
+    _ = fixture.control.replaceCustomProviderCredential("second-configured-key-02", .{ .source_id = view.id, .expected_provider_revision = view.provider_revision });
+    try std.testing.expect(std.mem.indexOf(u8, fixture.stored(id).input, "second-configured-key-02") == null);
+    try std.testing.expect(!fixture.control.containsKnownCredential("first-configured-key-0001"));
+    try std.testing.expect(fixture.control.containsKnownCredential("second-configured-key-02"));
 }
 
 test "a configured key that cannot be read is not read again until it changes" {
