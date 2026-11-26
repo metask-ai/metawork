@@ -274,11 +274,6 @@ const Claim = struct {
     }
 };
 
-const BeginOutcome = union(enum) {
-    skipped: u64,
-    claimed: Claim,
-};
-
 const PendingCompletion = struct {
     scheduled_task_id: u64,
     planned_at_unix_seconds: u64,
@@ -696,7 +691,7 @@ pub const Runtime = struct {
         binding: ExecutionBinding,
         redaction: Redaction,
     ) bool {
-        if (self.persistence_health != .ready or !binding.available) return false;
+        if (self.persistence_health != .ready) return false;
         var candidate = self.store.clone(self.allocator) catch return false;
         var owned = true;
         defer if (owned) candidate.deinit();
@@ -707,10 +702,10 @@ pub const Runtime = struct {
             changed = stopGoneBinding(&candidate, item, binding) or changed;
         }
         if (!changed) return false;
+        // Like a source rebinding, the caller publishes and rearms next.
         self.commitCandidate(&candidate, redaction) catch return false;
         self.replace(&candidate);
         owned = false;
-        _ = self.rearmNoFail(binding, redaction);
         return true;
     }
 
@@ -787,33 +782,10 @@ pub const Runtime = struct {
         planned_at: u64,
         triggered_at: u64,
         source: OccurrenceSource,
-        blocking_task_id: u64,
         catalog_generation: u64,
         redaction: Redaction,
-    ) Error!BeginOutcome {
+    ) Error!Claim {
         _ = self.store.find(id) orelse return error.UnknownScheduledTask;
-        if (blocking_task_id != 0) {
-            if (source != .timer) return error.PreviousTaskActive;
-            var skipped = try self.store.clone(self.allocator);
-            var owned = true;
-            defer if (owned) skipped.deinit();
-            try skipped.markSkipped(
-                skipped.find(id).?,
-                planned_at,
-                triggered_at,
-                blocking_task_id,
-            );
-            try self.commitCandidate(&skipped, redaction);
-            self.replace(&skipped);
-            owned = false;
-            _ = self.notifier.notify(.{
-                .scheduled_task_id = id,
-                .task_id = blocking_task_id,
-                .title = self.store.find(id).?.title,
-                .kind = .skipped,
-            });
-            return .{ .skipped = blocking_task_id };
-        }
         var candidate = try self.store.clone(self.allocator);
         var owned = true;
         defer if (owned) candidate.deinit();
@@ -842,7 +814,7 @@ pub const Runtime = struct {
         try self.commitCandidate(&candidate, redaction);
         self.replace(&candidate);
         owned = false;
-        return .{ .claimed = .{
+        return .{
             .allocator = self.allocator,
             .id = id,
             .planned_at_unix_seconds = planned_at,
@@ -856,7 +828,7 @@ pub const Runtime = struct {
             .protocol = current_binding.protocol,
             .permission_profile = candidate_item.permission_profile,
             .completion = completion,
-        } };
+        };
     }
 
     fn activeTaskId(self: *Runtime, id: u64, tasks: TaskEffects) Error!u64 {
@@ -1051,7 +1023,7 @@ pub const Runtime = struct {
                     // A manual run never moves the plan; the due point
                     // records its own skip.
                     if (source == .manual) return error.ExecutionGenerationMismatch;
-                    return self.skipGoneModel(id, planned_at_unix_seconds, triggered_at_unix_seconds, redaction);
+                    return self.skipOccurrence(id, planned_at_unix_seconds, triggered_at_unix_seconds, 0, redaction);
                 },
                 .stop => return self.stopGone(id, source, redaction),
             }
@@ -1077,21 +1049,19 @@ pub const Runtime = struct {
                     return cause;
                 },
             }
-        }
+        } else if (source != .timer) return error.PreviousTaskActive;
         item.preflight_retry_at_unix_seconds = null;
-        const begin = try self.beginOccurrence(
+        // No run of a plan overlaps another: this due point is skipped.
+        if (blocking_task_id != 0)
+            return self.skipOccurrence(id, planned_at_unix_seconds, triggered_at_unix_seconds, blocking_task_id, redaction);
+        var claim = try self.beginOccurrence(
             id,
             planned_at_unix_seconds,
             triggered_at_unix_seconds,
             source,
-            blocking_task_id,
             catalog_generation,
             redaction,
         );
-        var claim = switch (begin) {
-            .skipped => |task_id| return task_id,
-            .claimed => |value| value,
-        };
         defer claim.deinit();
         const completion = &claim.completion.?;
         const launch = tasks.launch(.{
@@ -1159,33 +1129,43 @@ pub const Runtime = struct {
         return if (source == .timer) 0 else error.ExecutionGenerationMismatch;
     }
 
-    /// Records that the bound model was gone at this due point and moves on;
-    /// the plan stays enabled. Only the first of consecutive such skips is
-    /// announced, so the latest occurrence is read before this one replaces it.
-    fn skipGoneModel(
+    /// Records a skipped due point and moves the plan on, which stays enabled:
+    /// the previous run of this plan is still active (`blocking_task_id`), or
+    /// its model is gone (0). A gone model is announced only at the first of
+    /// consecutive skips, so the latest occurrence is read before this one
+    /// replaces it.
+    fn skipOccurrence(
         self: *Runtime,
         id: u64,
         planned_at_unix_seconds: u64,
         triggered_at_unix_seconds: u64,
+        blocking_task_id: u64,
         redaction: Redaction,
     ) anyerror!u64 {
-        const repeated = if (self.store.find(id).?.last_occurrence) |last|
+        const model_gone = blocking_task_id == 0;
+        const repeated = model_gone and if (self.store.find(id).?.last_occurrence) |last|
             last.result == .skipped and last.reason == .execution_changed
         else
             false;
         var candidate = try self.store.clone(self.allocator);
         var owned = true;
         defer if (owned) candidate.deinit();
-        try candidate.markModelSkipped(candidate.find(id).?, planned_at_unix_seconds, triggered_at_unix_seconds);
+        const item = candidate.find(id).?;
+        item.preflight_retry_at_unix_seconds = null;
+        if (model_gone)
+            try candidate.markModelSkipped(item, planned_at_unix_seconds, triggered_at_unix_seconds)
+        else
+            try candidate.markSkipped(item, planned_at_unix_seconds, triggered_at_unix_seconds, blocking_task_id);
         try self.commitCandidate(&candidate, redaction);
         self.replace(&candidate);
         owned = false;
         if (!repeated) _ = self.notifier.notify(.{
             .scheduled_task_id = id,
+            .task_id = blocking_task_id,
             .title = self.store.find(id).?.title,
-            .kind = .model_unavailable,
+            .kind = if (model_gone) .model_unavailable else .skipped,
         });
-        return 0;
+        return blocking_task_id;
     }
 
     fn reconcileCompletionNoFail(
@@ -1886,18 +1866,14 @@ test "occurrence claim owns launch facts across later store replacement" {
         redaction,
     );
     _ = runtime.takeChanged();
-    var claim = switch (try runtime.beginOccurrence(
+    var claim = try runtime.beginOccurrence(
         id,
         200,
         200,
         .manual,
-        0,
         1,
         redaction,
-    )) {
-        .claimed => |value| value,
-        .skipped => return error.TestUnexpectedResult,
-    };
+    );
     defer claim.deinit();
     _ = try runtime.create(
         testDefinition("second", "other input"),
