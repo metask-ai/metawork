@@ -516,17 +516,25 @@ pub const Store = struct {
     fn sanitizePending(self: *Store) bool {
         if (self.incompatible or self.pending_publication != null or self.credential_capacity_failed or self.security_epoch == 0) return false;
         if (self.requires_reopen and !self.refreshConfirmed()) return false;
+        // Every value discovered since the last pass is scrubbed in one pass
+        // over the whole history: a start that learns several keys at once
+        // costs what one did.
+        var pending: std.ArrayList([]const u8) = .empty;
+        defer pending.deinit(self.allocator);
+        for (self.credentials.items) |slot| {
+            if (slot.length != 0 and slot.pending)
+                pending.append(self.allocator, slot.bytes[0..slot.length]) catch return false;
+        }
+        if (pending.items.len != 0) {
+            const token = self.newToken() catch return false;
+            self.repository.?.sanitize(pending.items, token) catch {
+                self.requires_reopen = true;
+                return false;
+            };
+            for (self.credentials.items) |slot| slot.pending = false;
+        }
         for (self.credentials.items) |slot| {
             if (slot.length == 0) continue;
-            const value = slot.bytes[0..slot.length];
-            if (slot.pending) {
-                const token = self.newToken() catch return false;
-                self.repository.?.sanitize(value, token) catch {
-                    self.requires_reopen = true;
-                    return false;
-                };
-                slot.pending = false;
-            }
             if (!slot.retained and !slot.memory_pending) self.clearCredential(slot);
         }
         var index: usize = 0;
@@ -1064,6 +1072,31 @@ test "SQLite history newly learned credential is removed and repeated borrows do
     store.credential("newly-discovered-value", false);
     for (store.credentials.items) |slot| try std.testing.expectEqual(@as(usize, 0), slot.length);
     try std.testing.expectEqual(wire.Commit.failed, commitFixtureGeneration(&store, bytes, 1, true));
+}
+
+test "SQLite history scrubs credentials learned together in one maintenance commit" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const state = try testHistory(arena.allocator(), 1, 1, "first-batched-secret then second-batched-secret");
+    var store = try Store.init(std.testing.io, a, directory);
+    defer store.deinit();
+    if (try store.loadFixtureAlloc(a)) |bytes| a.free(bytes);
+    const bytes = try wire.encodeAlloc(arena.allocator(), state, .{}, store.limits);
+    try std.testing.expectEqual(wire.Commit.committed, commitFixture(&store, bytes, true));
+    const generation = store.repository.?.witness.generation;
+    try std.testing.expect(store.syncCredentials(&.{ "first-batched-secret", "second-batched-secret" }, true, .{}).ready);
+    // One history pass for both, not one each.
+    try std.testing.expectEqual(generation + 1, store.repository.?.witness.generation);
+    const loaded = try product.loadHistory(arena.allocator(), std.testing.allocator, store.database.?.capability(), store.limits);
+    const assistant = loaded.value.tasks[0].runs[0].assistant;
+    try std.testing.expect(std.mem.indexOf(u8, assistant, "first-batched-secret") == null);
+    try std.testing.expect(std.mem.indexOf(u8, assistant, "second-batched-secret") == null);
+    try std.testing.expect(std.mem.indexOf(u8, assistant, "then") != null);
 }
 
 test "SQLite history credential cleanup covers readonly retained memory and SQL while preserving the import source" {

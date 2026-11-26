@@ -398,12 +398,14 @@ pub const Repository = struct {
         return result;
     }
 
-    pub fn sanitize(self: *Repository, credential: []const u8, token: wire.CommitToken) !void {
+    /// Removes every newly known credential from the whole history in one
+    /// load, one commit and one purge, however many arrived together.
+    pub fn sanitize(self: *Repository, credentials: []const []const u8, token: wire.CommitToken) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const loaded = try codec.loadPreserving(a, self.allocator, self.database, self.limits);
-        const cleaned = try redact(a, loaded, credential);
+        var cleaned = try codec.loadPreserving(a, self.allocator, self.database, self.limits);
+        for (credentials) |credential| cleaned = try redact(a, cleaned, credential);
         var prepared = try self.prepare(cleaned.value, cleaned.preserved, token);
         defer prepared.deinit();
         if (prepared.changed_rows != 0 or prepared.deleted_rows != 0) {

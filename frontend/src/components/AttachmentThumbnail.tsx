@@ -28,12 +28,17 @@ export function AttachmentThumbnail<Target>({
   label,
   formatLabel,
   load,
+  securityEpoch,
   onOpen,
 }: {
   target: Target;
   label: string;
   formatLabel: string;
   load?: AttachmentThumbnailLoader<Target>;
+  /// The security epoch the thumbnail is checked under. A newer one revokes
+  /// what was delivered, so the chip asks again in place instead of showing a
+  /// failure. Absent where the chip is remounted with its content anyway.
+  securityEpoch?: string;
   /// Absent when this original cannot be opened in the viewer tier at all, so
   /// the chip shows the thumbnail without an entry that is certain to fail.
   onOpen?: (opener: HTMLButtonElement) => void;
@@ -103,7 +108,7 @@ export function AttachmentThumbnail<Target>({
       if (owned?.state === "ready") owned.release();
       observer?.disconnect();
     };
-  }, [key, load]);
+  }, [key, load, securityEpoch]);
 
   const image = loaded?.state === "ready" ? loaded.image : undefined;
   const content = image ? (
@@ -121,7 +126,9 @@ export function AttachmentThumbnail<Target>({
   );
   return (
     <span ref={root} className="attachment-thumbnail">
-      {image && onOpen ? (
+      {/* The entry is the original's, not the thumbnail's: a thumbnail that
+          failed or has not arrived still opens the viewer, which says why. */}
+      {onOpen ? (
         <button
           type="button"
           className="attachment-thumbnail-open focus-ring"
