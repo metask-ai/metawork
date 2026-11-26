@@ -529,6 +529,20 @@ const Effects = struct {
         return attempt.refreshing();
     }
 
+    /// A callback wait ends at once when told to, so it is joined.
+    fn endLogin(self: *Effects) void {
+        if (!self.login_active) return;
+        self.login_attempt.cancel();
+        self.joinLogin();
+    }
+
+    /// Nothing may be woken any more.
+    fn detach(self: *Effects) void {
+        self.lockMailbox();
+        defer self.unlockMailbox();
+        self.detached = true;
+    }
+
     fn joinLogin(self: *Effects) void {
         if (!self.login_active) return;
         self.login_attempt.join();
@@ -669,6 +683,8 @@ pub const Runtime = struct {
     confirm_ended_boot: i64 = 0,
     /// Advances each time a confirmation has a result.
     renewal_epoch: u64 = 0,
+    /// How long closing waits for a renewal underway, from when it begins to.
+    close_wait: std.Io.Duration = .fromSeconds(2),
     stopping: bool = false,
 
     pub fn init(
@@ -864,21 +880,37 @@ pub const Runtime = struct {
         self.assertMainThread();
         self.stopAdmission();
         self.discardQueuedEffectForShutdown();
-        // Refresh keeps its original network deadline. Join before taking the
-        // mailbox so a complete rotation is saved once while ports are alive.
-        if (self.effects.networkRefreshing()) {
-            self.effects.network.?.join();
-            if (self.prepareNextCompletion()) |result| switch (result) {
-                .prepared => |value| {
-                    var observed = value;
-                    // Persistence is already settled; never admit Userinfo or
-                    // commit a second identity/terminal fact while closing.
-                    observed.deinit();
-                },
-                .rejected, .ignored_stale => {},
-            };
+        self.effects.endLogin();
+        // A renewal underway has the close wait of its own, from here, so a
+        // complete rotation is saved, or an unsent one's marker deleted,
+        // while ports are alive. Any other request is given up.
+        if (self.effects.network) |attempt| {
+            if (attempt.refreshing() and attempt.waitDone(self.close_wait)) {
+                attempt.join();
+                if (self.prepareNextCompletion()) |result| switch (result) {
+                    .prepared => |value| {
+                        var observed = value;
+                        // Persistence is already settled; never admit Userinfo or
+                        // commit a second identity/terminal fact while closing.
+                        observed.deinit();
+                    },
+                    .rejected, .ignored_stale => {},
+                };
+            } else self.effects.abandon(attempt.attempt_id);
         }
+        self.reapAbandoned();
+        // What still runs (a request in DNS no cancel reaches) is never
+        // joined: what it publishes is only destroyed and wakes no one, and
+        // a renewal left so keeps its marker.
+        if (self.effects.abandoned != null or self.retired_summaries != null) self.effects.detach();
         return .{ .transition = self.account.prepareShutdown() };
+    }
+
+    /// Closing left a worker running that is never joined. What it uses
+    /// stays alive until the process ends, so neither this Runtime nor the
+    /// HTTP engine may be torn down.
+    pub fn detached(self: *const Runtime) bool {
+        return self.effects.detached;
     }
 
     pub fn prepareNextCompletion(self: *Runtime) ?PrepareResult {
@@ -4144,6 +4176,55 @@ test "a sign-in gives up an identity request and keeps the authorization waiting
     try std.testing.expectEqual(epoch, runtime.authorization().checking);
     try finishAbandoned(&runtime, &transport);
     try std.testing.expectEqual(contract.AccountState.authorizing, runtime.view().state);
+}
+
+test "closing waits for a renewal underway only its own close wait and gives up any other request" {
+    const Case = enum { renewal_unsent, renewal_silent, identity };
+    for (std.enums.values(Case)) |case| {
+        var transport: HeldTransport = .{ .hold_tokens = case == .renewal_silent, .hold_identity = case == .identity, .unsent = case == .renewal_unsent };
+        var runtime = transport.runtimeFor();
+        var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+        defer {
+            transport.release.set(std.testing.io);
+            TestSupport.detachPlatform(&runtime);
+            runtime.deinit();
+        }
+        try holdStoredLogin(&runtime, &platform, "stored-refresh");
+        var refresh = runtime.prepareRestoredRefresh();
+        defer refresh.deinit();
+        try std.testing.expect(runtime.admitEffect(&refresh));
+        runtime.commit(&refresh);
+        runtime.dispatchCommitted();
+        if (case == .identity) try commitNextResult(&runtime);
+        if (case != .renewal_unsent) try transport.started.wait(std.testing.io);
+
+        runtime.close_wait = if (case == .renewal_silent) .fromMilliseconds(50) else .fromSeconds(10);
+        const begun: std.Io.Clock.Timestamp = .now(std.testing.io, .awake);
+        var closing = runtime.prepareShutdown();
+        defer closing.deinit();
+        _ = closing.transition.takeEffect();
+        runtime.commit(&closing);
+        const waited_ns = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds - begun.raw.nanoseconds;
+        switch (case) {
+            // Back unsent in time: its marker is deleted and nothing is left.
+            .renewal_unsent => {
+                try std.testing.expect(!runtime.detached() and platform.refresh_marker == null);
+                try std.testing.expectEqualStrings("stored-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
+            },
+            // No answer in its time: left running, its marker kept, so the
+            // next start asks for a sign-in.
+            .renewal_silent => {
+                try std.testing.expect(waited_ns >= 50 * std.time.ns_per_ms);
+                try std.testing.expect(runtime.detached() and platform.refresh_marker != null);
+            },
+            // Not waited for at all.
+            .identity => {
+                try std.testing.expect(waited_ns < 5 * std.time.ns_per_s);
+                try std.testing.expect(runtime.detached());
+                try std.testing.expectEqualStrings("held-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
+            },
+        }
+    }
 }
 
 test "a store that cannot be read is read again, and one that holds no valid record asks for a sign-in" {

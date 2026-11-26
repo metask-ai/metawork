@@ -173,8 +173,8 @@ Account durable authority 由系统安全存储中的 Metask refresh token 与�
 - 被阻断的 refresh 不得调度或发布可重试的 `refresh_schedule_failed` 来覆盖原失败；只有明确未消费且记录解除成功才能恢复刷新资格；
 - 已验证 identity 的授权状态只能是 `available` 或 `recovering`；不能安全重试的续期结果，在运行中与重启后给出同一公开状态 `signed_out`；
 - 续期节拍无法启动不得静默：`refresh_schedule_failed` 必须保留 `authenticated` identity、提供显式 retry，并与 hard-expiry lease gate 共同 fail closed；授权状态仍是可以或等，由事件循环的检查驱动；
-- 真正 Host stop 入口先停止 Account command、timer、summary 与 Models 的授权跟随。窗口隐藏、托盘后台与 Renderer reload 不执行 Account shutdown；
-- shutdown 的在飞 refresh 使用原 network deadline 等待唯一结果，join 后在主线程尝试一次持久化合法新 token，然后清理旧记录；已进入 mailbox 的合法结果同样收口。存储与 worker 收口期间保持平台 ports 和单实例 lease 有效；关闭不发送 Userinfo、不安装新 identity、不启动 summary/catalog，也不在退出时重新保存运行中已失败的结果；
+- 真正 Host stop 入口最先停止 Account command、timer、summary 与 Models 的授权跟随；Account 在执行进程关闭之后才收口，等它的续期时没有任务还在跑。窗口隐藏、托盘后台与 Renderer reload 不执行 Account shutdown；
+- shutdown 只等在飞的 refresh，而且只等 Account 自己的 2 秒（从开始等 Account 时算起）：其间有了结果就 join，在主线程尝试一次持久化合法新 token，然后清理旧记录，没发出的删掉记录；已进入 mailbox 的合法结果同样收口。2 秒内没有结果就放弃它，阻断记录留在盘上，下次启动要求重新登录。取身份、换令牌直接放弃，回调等待当场结束。放弃后仍没结束的 worker（卡在取消不到的 DNS）不 join：闩上后它发布的一切只销毁、不唤醒，Application 不再销毁 Account Runtime 和 HTTP engine，交给进程退出，其余收口照常。存储与 worker 收口期间保持平台 ports 和单实例 lease 有效；关闭不发送 Userinfo、不安装新 identity、不启动 summary/catalog，也不在退出时重新保存运行中已失败的结果；
 - transport selector 已选中完整 refresh 响应时，后到的取消不能覆盖该结果；deadline/cancellation 先胜出时，必须 join worker 后检查发送边界；确认未发送才可解除阻断，否则按结果不确定保留阻断。网络 deadline 不等于 worker join 或系统存储的墙钟上限，不得提前销毁 worker 仍使用的资源；
 - 关闭最终只按 Account → Product 顺序提交唯一 shutdown terminal fact，credential 随它结束，再 cancel/join 其他 worker，销毁 mailbox 并断开 ports；`deinit` 不执行平台 effect；
 - 登录、refresh、restore、重新登录、取消、logout、明确 credential-store 失败、network/deadline failure、stale completion、mailbox collision 与 shutdown 都必须保持单一 terminal fact；

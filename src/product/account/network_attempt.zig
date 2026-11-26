@@ -117,6 +117,8 @@ pub const NetworkAttempt = struct {
     sink: ResultSink = undefined,
     cancellation: metask.Cancellation = undefined,
     deadline: std.Io.Clock.Timestamp = undefined,
+    /// 1 once the worker has published its result and is returning.
+    done: std.atomic.Value(u32) = .init(0),
     thread: ?std.Thread = null,
     started: bool = false,
     joined: bool = false,
@@ -133,6 +135,19 @@ pub const NetworkAttempt = struct {
         thread.join();
         self.thread = null;
         self.joined = true;
+    }
+
+    /// Waits at most `limit` of awake time for the worker to finish. True
+    /// once it has; it is still to be joined.
+    pub fn waitDone(self: *NetworkAttempt, limit: std.Io.Duration) bool {
+        if (!self.started or self.joined) return true;
+        const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = limit, .clock = .awake });
+        while (self.done.load(.acquire) == 0) {
+            if (deadline.raw.nanoseconds <= deadline.clock.now(self.io).nanoseconds) return false;
+            self.io.futexWaitTimeout(u32, &self.done.raw, 0, .{ .deadline = deadline }) catch
+                return self.done.load(.acquire) != 0;
+        }
+        return true;
     }
 
     pub fn deinit(self: *NetworkAttempt) void {
@@ -192,6 +207,11 @@ pub const NetworkAttempt = struct {
     }
 
     fn workerMain(self: *NetworkAttempt) void {
+        // Joined before it is destroyed, so the wake cannot outlive it.
+        defer {
+            self.done.store(1, .release);
+            self.io.futexWake(u32, &self.done.raw, 1);
+        }
         const control: metask.RequestControl = .{
             .cancellation = &self.cancellation,
             .deadline = self.deadline,
