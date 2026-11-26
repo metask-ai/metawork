@@ -12,19 +12,8 @@ export const zhCN: Record<MessageId, string> = {
   "task.change_project": "更改项目",
   "task.project_change_failed": "未能更改所属项目，请刷新后重试。",
   "task.draft_preserved": "原项目的草稿已保留，当前显示目标项目的草稿。",
-  "settings.working_directories": "工作目录",
   "workspace.directory_capacity":
-    "已达到工作目录数量上限。请在设置的“工作目录”中撤销不再需要的目录授权。",
-  "workspace.directory_management_body":
-    "管理已授权的本地工作目录。选择目录只登记授权；侧栏项目由“添加项目”创建。",
-  "workspace.choose_directory": "选择工作目录",
-  "workspace.revoke_directory": "撤销目录授权",
-  "workspace.no_directories": "尚未登记工作目录。",
-  "workspace.directory_action_failed": "未能完成目录操作，请刷新后重试。",
-  "workspace.revoke_directory_body":
-    "撤销“{title}”的目录授权，将收口实际在此目录工作的任务。该目录关联 {count} 条会话，历史和本地文件会保留。",
-  "workspace.revoke_project_body":
-    "“{title}”的项目入口将一并移除。在其他目录中的 {count} 条会话仍可从“最近”访问，归档会话保留在归档列表；重新添加此项目后恢复分组。",
+    "已达到工作目录数量上限。请选择已登记的目录。",
   "run.input_history_loading": "正在读取输入历史…",
   "run.input_history_failed": "未能读取输入历史，按 ↑ 重试。",
   "model_setup.preference_not_saved":
@@ -115,7 +104,8 @@ export const zhCN: Record<MessageId, string> = {
 
   "settings.archived_tasks": "已归档任务",
   "archive.search": "搜索已归档任务",
-  "archive.count": "{count} 个已归档任务",
+  "archive.count": "共 {count} 项",
+  "archive.filtered_count": "匹配 {matched} 项，共 {count} 项",
   "archive.empty": "归档的任务会显示在这里。",
   "archive.no_results": "没有找到匹配的任务。",
   "archive.sync_unavailable": "任务列表当前不可用，重新连接后可管理归档任务。",
@@ -322,6 +312,7 @@ export const zhCN: Record<MessageId, string> = {
   "common.remove": "删除",
   "common.cancel": "取消",
   "common.close": "关闭",
+  "common.ok": "确定",
   "time.just_now": "刚刚",
   "copy.input": "复制输入",
   "copy.response": "复制回复",
@@ -329,7 +320,11 @@ export const zhCN: Record<MessageId, string> = {
   "copy.copied": "已复制",
   "copy.failed": "复制失败",
   "link.open_failed": "无法打开此链接。",
-  "about.menu_item": "关于",
+  "settings.about": "关于",
+  "settings.about_product": "关于 {product}",
+  "about.current_version": "当前版本",
+  "about.visit_website": "前往官网",
+  "about.contact_us": "联系我们",
   "about.developer": "开发者",
   "about.developer_name": "Metask",
   "about.version": "版本",

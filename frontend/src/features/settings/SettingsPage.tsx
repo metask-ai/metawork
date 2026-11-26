@@ -33,22 +33,16 @@ import {
   GlobalInstructionsSettings,
   type GlobalInstructionsActions,
 } from "./GlobalInstructionsSettings.tsx";
-export type SettingsFocusTarget =
-  "title" | "account" | "models" | "archived" | "directories";
+export type SettingsFocusTarget = "title" | "account" | "models" | "archived";
 
 type SettingsSection =
-  | "general"
-  | "account"
-  | "models"
-  | "instructions"
-  | "archived"
-  | "directories";
+  "general" | "account" | "models" | "instructions" | "archived" | "about";
 type AutomaticWorkspaceRootAction = "choose" | "reset" | "retry";
 type AutomaticWorkspaceRootMutationOutcome = "applied" | "cancelled" | false;
 export function SettingsPage({
   archiveManagement,
-  directoryManagement,
   globalInstructions,
+  aboutContent,
   account,
   metaskStopTargets,
   accountFeedback,
@@ -81,8 +75,8 @@ export function SettingsPage({
   onLogout,
 }: {
   archiveManagement?: ArchivedTasksProps;
-  directoryManagement?: ReactNode;
   globalInstructions?: GlobalInstructionsActions;
+  aboutContent: ReactNode;
   account: AccountView;
   metaskStopTargets: number;
   accountFeedback?: ReactNode;
@@ -120,6 +114,7 @@ export function SettingsPage({
   onLogout: () => void;
 } & CustomModelActions) {
   const { locale, setLocale, t } = useI18n();
+  const aboutTitle = t("settings.about_product", { product: t("app.name") });
   const customProviderSettingsAvailable = supportsCustomProviders(
     customProviderCapabilities,
   );
@@ -137,6 +132,7 @@ export function SettingsPage({
   const accountHeading = useRef<HTMLHeadingElement>(null);
   const modelsHeading = useRef<HTMLHeadingElement>(null);
   const instructionsHeading = useRef<HTMLHeadingElement>(null);
+  const aboutHeading = useRef<HTMLHeadingElement>(null);
   const automaticRootChooseButton = useRef<HTMLButtonElement>(null);
   const automaticRootResetButton = useRef<HTMLButtonElement>(null);
   const automaticRootRetryButton = useRef<HTMLButtonElement>(null);
@@ -168,9 +164,7 @@ export function SettingsPage({
     [t],
   );
   useEffect(() => {
-    if (focusTarget === "directories") {
-      setActiveSection("directories");
-    } else if (focusTarget === "archived") {
+    if (focusTarget === "archived") {
       setActiveSection("archived");
     } else if (focusTarget === "models") {
       setActiveSection("models");
@@ -188,6 +182,8 @@ export function SettingsPage({
         modelsHeading.current?.focus();
       } else if (activeSection === "instructions") {
         instructionsHeading.current?.focus();
+      } else if (activeSection === "about") {
+        aboutHeading.current?.focus();
       }
     });
     return () => window.cancelAnimationFrame(frame);
@@ -351,22 +347,6 @@ export function SettingsPage({
           )}
           <a
             className="focus-ring"
-            href="#settings-directories"
-            aria-current={
-              activeSection === "directories" ? "location" : undefined
-            }
-            onClick={(event) => {
-              event.preventDefault();
-              setActiveSection("directories");
-            }}
-          >
-            <span className="settings-nav-icon" aria-hidden="true">
-              <Icon name="workspace" />
-            </span>
-            <span>{t("settings.working_directories")}</span>
-          </a>
-          <a
-            className="focus-ring"
             href="#settings-archived"
             aria-current={activeSection === "archived" ? "location" : undefined}
             onClick={(event) => {
@@ -378,6 +358,20 @@ export function SettingsPage({
               <Icon name="archive" />
             </span>
             <span>{t("settings.archived_tasks")}</span>
+          </a>
+          <a
+            className="focus-ring"
+            href="#settings-about"
+            aria-current={activeSection === "about" ? "location" : undefined}
+            onClick={(event) => {
+              event.preventDefault();
+              setActiveSection("about");
+            }}
+          >
+            <span className="settings-nav-icon" aria-hidden="true">
+              <Icon name="info" />
+            </span>
+            <span>{t("settings.about")}</span>
           </a>
         </nav>
 
@@ -397,7 +391,6 @@ export function SettingsPage({
           >
             {t("settings.title")}
           </h1>
-          {activeSection === "directories" && directoryManagement}
           {activeSection === "instructions" && globalInstructions && (
             <GlobalInstructionsSettings
               actions={globalInstructions}
@@ -407,6 +400,20 @@ export function SettingsPage({
           )}
           {activeSection === "archived" && archiveManagement && (
             <ArchivedTasks {...archiveManagement} />
+          )}
+          {activeSection === "about" && (
+            <section
+              id="settings-about"
+              className="settings-section"
+              aria-labelledby="settings-about-title"
+            >
+              <div className="settings-section-heading">
+                <h2 id="settings-about-title" ref={aboutHeading} tabIndex={-1}>
+                  {aboutTitle}
+                </h2>
+              </div>
+              {aboutContent}
+            </section>
           )}
           {activeSection === "general" && (
             <section id="settings-general" className="settings-section">

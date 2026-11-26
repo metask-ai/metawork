@@ -43,7 +43,7 @@ if (!HTMLElement.prototype.setPointerCapture)
 if (!HTMLElement.prototype.releasePointerCapture)
   HTMLElement.prototype.releasePointerCapture = () => undefined;
 
-const { cleanup, render, screen, waitFor } =
+const { act, cleanup, render, screen, waitFor, within } =
   await import("./renderer-testing-library.mjs");
 const { default: userEvent } = await import("@testing-library/user-event");
 
@@ -56,6 +56,15 @@ const vite = await createServer({
 const { AccountIdentity } = await vite.ssrLoadModule(
   "/src/features/account/AccountIdentity.tsx",
 );
+const { SettingsPage } = await vite.ssrLoadModule(
+  "/src/features/settings/SettingsPage.tsx",
+);
+const { AboutSettingsContent } = await vite.ssrLoadModule(
+  "/src/features/account/AboutSettingsContent.tsx",
+);
+const {
+  initialWorkbenchState: { snapshot },
+} = await vite.ssrLoadModule("/src/workbench/store.ts");
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -146,6 +155,46 @@ function identityElement(callbacks, accountView = account, locale = "en-US") {
 
 function renderIdentity(callbacks, accountView = account, locale = "en-US") {
   return render(identityElement(callbacks, accountView, locale));
+}
+
+function assertFocused(target) {
+  const active = document.activeElement;
+  // A pending focus change must not make assert format entire React DOM trees.
+  assert.ok(
+    active === target,
+    `Expected focus on ${target.tagName}, found ${active?.tagName ?? "none"}`,
+  );
+}
+
+function renderAboutSettings(props = {}, locale = "en-US") {
+  return render(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale,
+          setLocale() {},
+          t: (id, values) => translate(locale, id, values),
+        },
+      },
+      createElement(SettingsPage, {
+        account: snapshot.account,
+        models: snapshot.models,
+        automaticWorkspaceRoot: snapshot.automaticWorkspaceRoot,
+        customProviderCapabilities: {
+          management: false,
+          secretCapture: false,
+          modelTest: false,
+        },
+        focusTarget: "title",
+        aboutContent: createElement(AboutSettingsContent, {
+          updates: { ...snapshot.updates, checkState: "unchecked" },
+          updateControls,
+          ...props,
+        }),
+      }),
+    ),
+  );
 }
 
 test("authenticated account identity shows a compact avatar and describes the account", async () => {
@@ -307,31 +356,208 @@ test("account-menu sign out confirms in place without opening settings", async (
   assert.equal(screen.queryByRole("alertdialog"), null);
 });
 
-test("about MetaWork shows developer and version metadata and returns focus", async () => {
+test("checking for updates closes the menu and reports progress, retry and the result in a compact dialog", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  const { container } = renderIdentity({});
+  const signedOut = { ...account, state: "signed_out" };
+  const requests = [];
+  const props = {
+    updateControls: {
+      ...updateControls,
+      check: () => new Promise((resolve) => requests.push(resolve)),
+    },
+  };
+  const view = renderIdentity(props, signedOut, "zh-CN");
+  const trigger = screen.getByRole("button", { name: /账户与应用菜单/ });
+  await user.click(trigger);
+  const item = await screen.findByRole("menuitem", {
+    name: `检查更新 v${productVersion}`,
+  });
+  assert.ok(item.querySelector("svg.lucide-circle-arrow-up"));
+  const items = screen.getAllByRole("menuitem");
+  assert.equal(
+    items[items.indexOf(item) - 1],
+    screen.getByRole("menuitem", { name: "设置" }),
+  );
+  assert.equal(screen.queryByRole("menuitem", { name: /关于/ }), null);
+  await user.click(item);
+  await screen.findByText("正在检查更新…");
+  const dialog = screen.getByRole("dialog", { name: "检查更新" });
+  assert.equal(screen.queryByRole("menu"), null);
+  assert.equal(dialog.querySelector("dl"), null);
+  assert.equal(requests.length, 1);
+  requests[0](false);
+  await screen.findByText("暂时无法执行此操作，请查看当前状态后重试。");
+  await user.click(screen.getByRole("button", { name: "重试检查" }));
+  assert.equal(requests.length, 2);
+  view.rerender(
+    identityElement(
+      {
+        ...props,
+        updates: {
+          ...updateAvailable,
+          updateAvailable: false,
+          downloadAvailable: false,
+        },
+      },
+      signedOut,
+      "zh-CN",
+    ),
+  );
+  requests[1](true);
+  await screen.findByText("当前已是最新版本。");
+  assert.equal(dialog.querySelectorAll("button").length, 1);
+  await user.click(screen.getByRole("button", { name: "确定" }));
+  await waitFor(() => assertFocused(trigger));
+  await user.click(trigger);
+  assert.equal(screen.queryByText("当前已是最新版本。"), null);
+  await screen.findByRole("menuitem", { name: "设置" });
+  assert.equal(requests.length, 2);
+});
+
+test("the update dialog offers an explicit download or website handoff", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const handoffs = [];
+  const controls = {
+    ...updateControls,
+    download: async (version) => {
+      handoffs.push(version);
+      return true;
+    },
+    website: async () => {
+      handoffs.push("website");
+      return true;
+    },
+  };
+  const view = renderIdentity({
+    updates: updateAvailable,
+    updateControls: controls,
+  });
+  await user.click(
+    screen.getByRole("button", { name: "Account and application menu" }),
+  );
+  const check = await screen.findByRole("menuitem", {
+    name: /Check for updates/,
+  });
+  assert.equal(
+    screen.queryByRole("menuitem", { name: "Download update" }),
+    null,
+  );
+  await user.click(check);
+  await screen.findByText("Version 0.2.10 is available");
+  assert.deepEqual(handoffs, []);
+  await user.click(screen.getByRole("button", { name: "Download update" }));
+  view.rerender(
+    identityElement({
+      updates: { ...updateAvailable, downloadState: "opened" },
+      updateControls: controls,
+    }),
+  );
+  await screen.findByText("Sent to your browser. Check the download there.");
+  view.rerender(
+    identityElement({
+      updates: { ...updateAvailable, downloadAvailable: false },
+      updateControls: controls,
+    }),
+  );
+  await screen.findByText(translate("en-US", "updates.package_missing"));
+  await user.click(
+    screen.getByRole("button", {
+      name: translate("en-US", "updates.website"),
+    }),
+  );
+  assert.deepEqual(handoffs, ["0.2.10", "website"]);
+  await user.keyboard("{Escape}");
+  assert.equal(screen.queryByRole("dialog"), null);
+});
+
+test("closing an update check ignores its late response and allows a fresh check", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const requests = [];
+  renderIdentity({
+    updateControls: {
+      ...updateControls,
+      check: () => new Promise((resolve) => requests.push(resolve)),
+    },
+  });
   const trigger = screen.getByRole("button", {
     name: "Account and application menu",
   });
+  async function check() {
+    await user.click(trigger);
+    await user.click(
+      await screen.findByRole("menuitem", { name: /Check for updates/ }),
+    );
+    await screen.findByText(translate("en-US", "updates.checking"));
+  }
+  await check();
+  await user.keyboard("{Escape}");
+  await waitFor(() => assertFocused(trigger));
+  await check();
+  assert.equal(requests.length, 2);
+  await act(async () => requests[0](false));
+  assert.equal(
+    screen.getByRole("status").textContent,
+    translate("en-US", "updates.checking"),
+  );
+  await act(async () => requests[1](false));
+  await screen.findByText(translate("en-US", "updates.action_unavailable"));
+});
+
+test("the menu disables update checks while the bridge is unavailable", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  renderIdentity({ updateControls: { ...updateControls, disabled: true } });
+  await user.click(
+    screen.getByRole("button", { name: "Account and application menu" }),
+  );
+  const item = await screen.findByRole("menuitem", {
+    name: `Check for updates v${productVersion}`,
+  });
+  assert.equal(item.getAttribute("aria-disabled"), "true");
+  assert.ok(screen.getByRole("menuitem", { name: "Settings" }));
+});
+
+test("About follows Archived tasks in settings and shows offline metadata in the content pane", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  renderAboutSettings(
+    { updateControls: { ...updateControls, disabled: true } },
+    "zh-CN",
+  );
+  const trigger = screen.getByRole("link", { name: "关于", exact: true });
+  assert.equal(
+    trigger.previousElementSibling,
+    screen.getByRole("link", { name: "已归档任务" }),
+  );
+  assert.equal(trigger.nextElementSibling, null);
+  assert.equal(screen.queryByRole("region", { name: "关于 MetaWork" }), null);
 
   await user.click(trigger);
-  await user.click(await screen.findByRole("menuitem", { name: "About" }));
 
-  const dialog = await screen.findByRole("dialog", {
-    name: "MetaWork",
+  const section = await screen.findByRole("region", { name: "关于 MetaWork" });
+  assert.equal(trigger.getAttribute("aria-current"), "location");
+  assert.equal(screen.getAllByRole("dialog").length, 1);
+  const heading = within(section).getByRole("heading", {
+    name: "关于 MetaWork",
   });
-  assert.doesNotMatch(dialog.textContent, /native desktop workbench/iu);
-  assert.match(dialog.textContent, /DeveloperMetask/u);
-  assert.match(
-    dialog.textContent,
-    new RegExp(productVersion.replaceAll(".", "\\."), "u"),
+  await waitFor(() => assertFocused(heading));
+  const rows = section.querySelectorAll(".settings-about-row");
+  assert.equal(rows.length, 2);
+  assert.ok(within(rows[0]).getByText("当前版本"));
+  assert.ok(within(rows[0]).getByText(`v${productVersion}`));
+  assert.equal(
+    within(rows[0]).getByRole("button", { name: "检查更新" }).disabled,
+    true,
   );
-  assert.equal(dialog.querySelector(".about-dialog-mark img") !== null, true);
-
-  await user.keyboard("{Escape}");
-  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
-  await waitFor(() => assert.equal(dom.window.document.activeElement, trigger));
-  assert.equal(container.querySelector(".account-menu"), null);
+  assert.ok(within(rows[1]).getByText("关于 MetaWork"));
+  assert.equal(
+    within(rows[1]).getByRole("button", { name: "前往官网" }).disabled,
+    true,
+  );
+  assert.equal(
+    within(rows[1]).getByRole("button", { name: "联系我们" }).disabled,
+    true,
+  );
+  await user.click(screen.getByRole("link", { name: "通用" }));
+  assert.equal(screen.queryByRole("region", { name: "关于 MetaWork" }), null);
 });
 
 test("authorization without cancellation keeps app actions available without an empty group", async () => {
@@ -353,11 +579,8 @@ test("authorization without cancellation keeps app actions available without an 
   });
   assert.match(menu.textContent, /Finishing Metask sign-in/);
   assert.equal(screen.queryByRole("menuitem", { name: "Cancel" }), null);
-  await user.click(screen.getByRole("menuitem", { name: "About" }));
-  assert.notEqual(
-    await screen.findByRole("dialog", { name: "MetaWork" }),
-    null,
-  );
+  assert.ok(screen.getByRole("menuitem", { name: "Settings" }));
+  assert.ok(screen.getByRole("menuitem", { name: /Check for updates/ }));
 });
 
 test("account menu offers keyboard sign-in once a lost renewal or cancelled sign-in leaves the account signed out", async () => {
@@ -390,7 +613,7 @@ test("account menu offers keyboard sign-in once a lost renewal or cancelled sign
     await user.keyboard("{Enter}");
     assert.equal(loginCalls, 1);
     await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
-    await waitFor(() => assert.equal(document.activeElement, trigger));
+    await waitFor(() => assertFocused(trigger));
     cleanup();
   }
 });
@@ -515,8 +738,12 @@ test("native drag exclusions cover mounted menu/dialog portals and their backdro
   assert.ok(
     menu.closest("[data-base-ui-portal][data-native-window-drag-exclude]"),
   );
-  await user.click(await screen.findByRole("menuitem", { name: "About" }));
-  const dialog = await screen.findByRole("dialog", { name: "MetaWork" });
+  await user.click(
+    await screen.findByRole("menuitem", { name: /Check for updates/ }),
+  );
+  const dialog = await screen.findByRole("dialog", {
+    name: "Check for updates",
+  });
   const portal = dialog.closest("[data-base-ui-portal]");
   assert.ok(portal.hasAttribute("data-native-window-drag-exclude"));
   assert.ok(
@@ -551,7 +778,7 @@ test("new version uses a separate corner button without a dropdown arrow or acci
   assert.ok(updateTrigger.querySelector("svg"));
   assert.equal(updateTrigger.textContent, "");
   await user.tab();
-  assert.equal(document.activeElement, updateTrigger);
+  assertFocused(updateTrigger);
   assert.equal(
     (await screen.findByText("Update available")).dataset.instant,
     "focus",
@@ -566,7 +793,7 @@ test("new version uses a separate corner button without a dropdown arrow or acci
   await user.click(screen.getByRole("button", { name: "Download update" }));
   await waitFor(() => assert.equal(download, "0.2.10"));
   await user.keyboard("{Escape}");
-  await waitFor(() => assert.ok(document.activeElement === updateTrigger));
+  await waitFor(() => assertFocused(updateTrigger));
 });
 
 test("invalid download offers an explicit website action without automatically opening it", async () => {
@@ -631,11 +858,11 @@ test("update statuses distinguish a missing package, last confirmed release and 
   }
 });
 
-test("manual check prevents duplicate clicks and waits for authoritative state", async () => {
+test("checking from Settings opens the compact dialog once and restores focus", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   let complete;
   let calls = 0;
-  renderIdentity({
+  renderAboutSettings({
     updateControls: {
       ...updateControls,
       check: () => {
@@ -646,27 +873,92 @@ test("manual check prevents duplicate clicks and waits for authoritative state",
       },
     },
   });
-  await user.click(
-    screen.getByRole("button", { name: "Account and application menu" }),
-  );
-  await user.click(await screen.findByRole("menuitem", { name: "About" }));
-  await user.dblClick(
-    screen.getByRole("button", { name: "Check for updates" }),
-  );
+  await user.click(screen.getByRole("link", { name: "About", exact: true }));
+  const check = screen.getByRole("button", { name: "Check for updates" });
+  assert.equal(calls, 0);
+  await user.dblClick(check);
   assert.equal(calls, 1);
-  assert.equal(
-    screen.getByRole("button", { name: "Check for updates" }).disabled,
-    true,
-  );
+  assert.equal(check.disabled, true);
+  const dialog = await screen.findByRole("dialog", {
+    name: "Check for updates",
+  });
   assert.match(screen.getByRole("status").textContent, /Checking for updates/u);
   complete(true);
-  await waitFor(() =>
-    assert.equal(
-      screen.getByRole("button", { name: "Check for updates" }).disabled,
-      false,
-    ),
-  );
+  await waitFor(() => assert.equal(check.disabled, false));
   assert.doesNotMatch(screen.getByRole("status").textContent, /up to date/iu);
+  await user.click(within(dialog).getByRole("button", { name: "OK" }));
+  await waitFor(() => assertFocused(check));
+});
+
+test("Visit website hands off only on click and allows retry after a browser error", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const calls = [];
+  renderAboutSettings({
+    updateControls: {
+      ...updateControls,
+      website: async () => {
+        calls.push("website");
+        return calls.length === 2;
+      },
+      check: async () => {
+        calls.push("check");
+        return true;
+      },
+    },
+  });
+  await user.click(screen.getByRole("link", { name: "About", exact: true }));
+  const visit = screen.getByRole("button", { name: "Visit website" });
+  assert.deepEqual(calls, []);
+  await user.click(visit);
+  await screen.findByText(translate("en-US", "updates.browser_failed"));
+  await user.click(visit);
+  await waitFor(() => assert.equal(screen.queryByRole("alert"), null));
+  assert.deepEqual(calls, ["website", "website"]);
+  assert.equal(
+    screen.queryByRole("dialog", { name: "Check for updates" }),
+    null,
+  );
+});
+
+test("Contact us opens the contact page once per click and can retry a failed handoff", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const calls = [];
+  let finish;
+  renderAboutSettings({
+    onOpenExternalLink: (url) => {
+      calls.push(url);
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    },
+    updateControls: {
+      ...updateControls,
+      website: async () => {
+        calls.push("homepage");
+        return true;
+      },
+    },
+  });
+  await user.click(screen.getByRole("link", { name: "About", exact: true }));
+  const visit = screen.getByRole("button", { name: "Visit website" });
+  const contact = screen.getByRole("button", { name: "Contact us" });
+  assert.equal(visit.nextElementSibling, contact);
+  assert.deepEqual(calls, []);
+  const url = "https://metawork.metask-ai.com/contact.html";
+  await user.dblClick(contact);
+  assert.deepEqual(calls, [url]);
+  assert.equal(contact.disabled, true);
+  await act(async () => finish(false));
+  await screen.findByText(translate("en-US", "updates.browser_failed"));
+  await user.click(contact);
+  await act(async () => finish(true));
+  assert.equal(screen.queryByRole("alert"), null);
+  assert.equal(
+    screen.queryByRole("dialog", { name: "Check for updates" }),
+    null,
+  );
+  await user.click(visit);
+  assert.deepEqual(calls, [url, url, "homepage"]);
 });
 
 test(
@@ -709,9 +1001,8 @@ test(
     );
     await user.keyboard("{Escape}");
     await waitFor(() =>
-      assert.ok(
-        document.activeElement ===
-          screen.getByRole("button", { name: "Account and application menu" }),
+      assertFocused(
+        screen.getByRole("button", { name: "Account and application menu" }),
       ),
     );
   },
@@ -741,12 +1032,12 @@ test("update entry works signed out in Chinese and never depends on account comm
 
 test("a failed check keeps one sentence and hides the technical detail behind a disclosure", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  renderIdentity({ updates: updateFailed });
-  await user.click(
-    screen.getByRole("button", { name: "Account and application menu" }),
-  );
-  await user.click(await screen.findByRole("menuitem", { name: "About" }));
-  const dialog = await screen.findByRole("dialog", { name: "MetaWork" });
+  renderAboutSettings({ updates: updateFailed });
+  await user.click(screen.getByRole("link", { name: "About", exact: true }));
+  await user.click(screen.getByRole("button", { name: "Check for updates" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "Check for updates",
+  });
   assert.match(
     screen.getByRole("status").textContent,
     /^Couldn.t check for updates\. Try again later\.$/u,
@@ -769,12 +1060,12 @@ test("a failed check keeps one sentence and hides the technical detail behind a 
 
 test("a check that did not fail shows no diagnostics entry at all", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  renderIdentity({ updates: updateAvailable });
-  await user.click(
-    screen.getByRole("button", { name: "Account and application menu" }),
-  );
-  await user.click(await screen.findByRole("menuitem", { name: "About" }));
-  const dialog = await screen.findByRole("dialog", { name: "MetaWork" });
+  renderAboutSettings({ updates: updateAvailable });
+  await user.click(screen.getByRole("link", { name: "About", exact: true }));
+  await user.click(screen.getByRole("button", { name: "Check for updates" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "Check for updates",
+  });
   assert.equal(dialog.querySelector("details.feedback-diagnostics"), null);
   assert.doesNotMatch(dialog.textContent, /Check details/u);
 });

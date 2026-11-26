@@ -2,6 +2,7 @@ import { useEffect, useRef, type ReactNode } from "react";
 import type { TaskSummary, WorkspaceView } from "../../bridge/contracts.ts";
 import { Button } from "../../components/ui/button.tsx";
 import { DiagnosticDisclosure } from "../../components/ui/DiagnosticDisclosure.tsx";
+import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { taskActionBlockerMessageId } from "../../i18n/formatters.ts";
 
@@ -82,22 +83,33 @@ export function ArchivedTasks({
           {t("settings.archived_tasks")}
         </h2>
       </div>
-      <div className="settings-group archived-tasks">
-        <label className="sr-only" htmlFor="archived-task-search">
-          {t("archive.search")}
-        </label>
-        <input
-          id="archived-task-search"
-          className="archived-task-search focus-ring"
-          type="search"
-          value={query}
-          onChange={(event) => onQuery(event.target.value)}
-          placeholder={t("archive.search")}
-        />
-        {!synchronized && <p role="status">{t("archive.sync_unavailable")}</p>}
-        {(synchronized || archived.length > 0) && (
-          <p className="archived-task-count">
-            {t("archive.count", { count: archived.length })}
+      <div className="archived-tasks">
+        {archived.length > 0 && (
+          <div className="archived-task-toolbar">
+            <label className="archived-task-search">
+              <Icon name="search" />
+              <span className="sr-only">{t("archive.search")}</span>
+              <input
+                className="focus-ring"
+                type="search"
+                value={query}
+                onChange={(event) => onQuery(event.target.value)}
+                placeholder={t("archive.search")}
+              />
+            </label>
+            <span className="archived-task-count">
+              {needle
+                ? t("archive.filtered_count", {
+                    matched: visible.length,
+                    count: archived.length,
+                  })
+                : t("archive.count", { count: archived.length })}
+            </span>
+          </div>
+        )}
+        {!synchronized && (
+          <p className="archived-task-sync" role="status">
+            {t("archive.sync_unavailable")}
           </p>
         )}
         <ul
@@ -128,7 +140,12 @@ export function ArchivedTasks({
                   >
                     {task.title || t("task.item", { id: task.id })}
                   </button>
-                  {workspace && <p>{workspace.displayName}</p>}
+                  {workspace && (
+                    <p className="archived-task-directory">
+                      {t("workspace.working_directory")} ·{" "}
+                      {workspace.displayName}
+                    </p>
+                  )}
                   {renderProject?.(
                     task,
                     !synchronized ||
@@ -196,9 +213,10 @@ export function ArchivedTasks({
           })}
         </ul>
         {synchronized && visible.length === 0 && (
-          <p role="status">
+          <div className="archived-task-empty" role="status">
+            <Icon name={archived.length === 0 ? "archive" : "search"} />
             {t(archived.length === 0 ? "archive.empty" : "archive.no_results")}
-          </p>
+          </div>
         )}
       </div>
     </section>

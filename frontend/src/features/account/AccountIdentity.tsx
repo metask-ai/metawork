@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { productVersion } from "../../app/product-identity.ts";
 import type { AccountView, UpdateView } from "../../bridge/contracts.ts";
 import { SignOutConfirmation } from "../../components/SignOutConfirmation.tsx";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
@@ -12,10 +13,9 @@ import {
   accountIdentityLabel,
   accountUnconfirmed,
 } from "../../workbench/account-identity.ts";
-import {
-  AboutMetaWorkDialog,
-  type UpdateControls,
-} from "./AboutMetaWorkDialog.tsx";
+import { AboutMetaWorkDialog } from "./AboutMetaWorkDialog.tsx";
+import { CheckForUpdatesDialog } from "./CheckForUpdatesDialog.tsx";
+import { type UpdateControls, useUpdateActions } from "./update-actions.ts";
 
 export function AccountIdentity({
   account,
@@ -50,6 +50,7 @@ export function AccountIdentity({
   const [aboutOpen, setAboutOpen] = useState(false);
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const aboutReturnFocus = useRef<HTMLButtonElement | null>(null);
+  const manualUpdate = useUpdateActions(updates, updateControls);
   const authenticated = account.state === "authenticated";
   const identityName = authenticated
     ? accountIdentityLabel(account, t("account.signed_in"))
@@ -145,15 +146,14 @@ export function AccountIdentity({
                   {t("settings.title")}
                 </Menu.Item>
                 <Menu.Item
-                  onClick={() =>
-                    choose(() => {
-                      aboutReturnFocus.current = trigger.current;
-                      setAboutOpen(true);
-                    })
-                  }
+                  disabled={manualUpdate.checkDisabled}
+                  onClick={() => choose(() => void manualUpdate.act("check"))}
                 >
-                  <Icon name="info" />
-                  {t("about.menu_item")}
+                  <Icon name="update-available" />
+                  {t("updates.check")}
+                  <span className="ml-auto text-(--ui-content-muted)">
+                    v{productVersion}
+                  </span>
                 </Menu.Item>
                 {actions.logout && (
                   <>
@@ -219,13 +219,18 @@ export function AccountIdentity({
         </div>
       </Menu.Root>
 
+      <CheckForUpdatesDialog
+        updates={updates}
+        actions={manualUpdate}
+        returnFocus={trigger}
+      />
       <AboutMetaWorkDialog
         updates={updates}
         updateControls={updateControls}
         open={aboutOpen}
         onOpenChange={(nextOpen) => {
           setAboutOpen(nextOpen);
-          if (!nextOpen)
+          if (!nextOpen) {
             window.requestAnimationFrame(() => {
               const target = aboutReturnFocus.current;
               (target?.isConnected && !target.disabled
@@ -233,6 +238,7 @@ export function AccountIdentity({
                 : trigger.current
               )?.focus();
             });
+          }
         }}
       />
 
