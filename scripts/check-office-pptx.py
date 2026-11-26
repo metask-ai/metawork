@@ -228,14 +228,14 @@ class PPTXQualification(unittest.TestCase):
             self.assertNotIn("secret", result.stdout + result.stderr)
 
     def test_retained_viewer_evidence_identity_and_structure(self):
-        report = json.loads((ROOT / "docs/evidence/office-pptx-metaskoffice-20261030.json").read_text())
-        for case in report["qualification"]["cases"]:
-            for file in case["files"]:
-                path = ROOT / file["path"]
-                self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), file["sha256"])
-                self.assertEqual(path.stat().st_size, file["bytes"])
-                result = invoke(ENTRY, "python", VALIDATE, path)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        fixtures = ROOT / "tests/fixtures/office/metaskoffice-20261030"
+        files = json.loads((fixtures / "manifest.json").read_text(encoding="utf-8"))
+        for file in files:
+            path = fixtures / file["file"]
+            self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), file["sha256"])
+            self.assertEqual(path.stat().st_size, file["bytes"])
+            result = invoke(ENTRY, "python", VALIDATE, path)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 unittest.main(argv=[sys.argv[0], *remaining])
