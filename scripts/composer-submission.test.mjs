@@ -3519,3 +3519,159 @@ for (const path of ["fresh", "lost", "not-created"]) {
     },
   );
 }
+
+/// A finished Task that delivered one file, with the Host's reference staging
+/// and file checks recorded.
+async function renderReferenceApp(ctx) {
+  const fixture = await renderSubmissionApp(ctx, {
+    active: true,
+    attachmentsEnabled: true,
+  });
+  const run = fixture.task.runs[0];
+  Object.assign(run, {
+    phase: "completed",
+    activity: null,
+    terminal: {
+      outcome: "completed",
+      cause: null,
+      diagnosticDisposition: "absent",
+      recordingIncomplete: false,
+      feedback: {
+        guidance: "none",
+        reason: null,
+        offerInputPreparation: false,
+      },
+      modelError: null,
+    },
+    additionalInputs: [],
+  });
+  const output = {
+    id: "0a".repeat(16),
+    displayPath: "results/report.txt",
+    sizeBytes: "12",
+    redacted: false,
+  };
+  Object.assign(fixture.task, {
+    activeOperation: null,
+    currentRunPhase: null,
+    inputReady: true,
+    conversationOutputs: [{ ...output, runId: run.id }],
+  });
+  await fixture.publish();
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const { AttachmentAddOperation } = await vite.ssrLoadModule(
+    "/src/bridge/attachment-receive.ts",
+  );
+  const sources = [];
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createAttachmentAdd",
+    () =>
+      new AttachmentAddOperation(
+        {
+          begin: async (source) => {
+            sources.push(source);
+            return {
+              status: "ready",
+              attachments: [
+                {
+                  token: "d".repeat(48),
+                  kind: "file",
+                  displayName: "report.txt",
+                  sizeBytes: "12",
+                },
+              ],
+            };
+          },
+          append: async () => assert.fail("A reference sends no bytes"),
+          finish: async () => assert.fail("A reference is ready at once"),
+          cancel: async () => ({ status: "cleaned", released: true }),
+          recover: async () => assert.fail("No recovery expected"),
+        },
+        3,
+      ),
+  );
+  const checks = [];
+  let check = "ready";
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "fileAction",
+    async (target, action) => {
+      checks.push([target, action]);
+      return check;
+    },
+  );
+  const user = userEvent.setup({ document });
+  return {
+    fixture,
+    run,
+    output,
+    sources,
+    checks,
+    answerChecksWith: (value) => {
+      check = value;
+    },
+    chips: () => document.querySelectorAll(".composer-attachment").length,
+    reference: async () => {
+      await user.click(screen.getByRole("button", { name: "Add to message" }));
+      await user.click(
+        await screen.findByRole("menuitem", {
+          name: "Reference conversation files",
+        }),
+      );
+      const picker = await screen.findByRole("dialog", {
+        name: "Reference conversation files",
+      });
+      await user.click(
+        within(picker).getByRole("button", { name: /report\.txt/ }),
+      );
+    },
+  };
+}
+
+test("App adds a conversation file once however often the same file is chosen", async (ctx) => {
+  const app = await renderReferenceApp(ctx);
+  await app.reference();
+  await waitFor(() => assert.equal(app.chips(), 1));
+  await app.reference();
+  await waitFor(() => assert.ok(!screen.queryByRole("dialog")));
+  assert.equal(app.chips(), 1);
+  assert.deepEqual(app.sources, [
+    {
+      kind: "workspace_file",
+      target: {
+        kind: "output",
+        taskId: app.fixture.task.id,
+        runId: app.run.id,
+        outputId: app.output.id,
+      },
+    },
+  ]);
+  assert.equal(app.fixture.inputs.length, 0);
+});
+
+test("App keeps the whole draft when a referenced file fails its check before sending", async (ctx) => {
+  const app = await renderReferenceApp(ctx);
+  await app.reference();
+  await waitFor(() => assert.equal(app.chips(), 1));
+  fireEvent.change(app.fixture.textarea, {
+    target: { value: "Summarize the report" },
+  });
+  app.answerChecksWith("missing");
+  fireEvent.keyDown(app.fixture.textarea, { key: "Enter" });
+  await screen.findByText(/The referenced workspace file is unavailable/);
+  assert.deepEqual(app.checks, [
+    [
+      {
+        kind: "output",
+        taskId: app.fixture.task.id,
+        runId: app.run.id,
+        outputId: app.output.id,
+      },
+      "check_current",
+    ],
+  ]);
+  assert.equal(app.fixture.inputs.length, 0);
+  assert.equal(app.fixture.textarea.value, "Summarize the report");
+  assert.equal(app.chips(), 1);
+});

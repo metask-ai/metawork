@@ -6,7 +6,10 @@ import {
   workspaceConversationFile,
   type ConversationFile,
 } from "../features/composer/conversation-files.ts";
-import { conversationFiles } from "./conversation-files.ts";
+import {
+  conversationFileReferable,
+  conversationFiles,
+} from "./conversation-files.ts";
 import { editCustomModel } from "./edit-custom-model.ts";
 import { notificationTextRegistration } from "../features/tasks/notification-text.ts";
 import {
@@ -21,7 +24,6 @@ import {
 import {
   performFileMenuAction,
   type FileReferenceResult,
-  fileTargetShown,
   menuFile,
 } from "../features/tasks/reply-files.ts";
 import {
@@ -4914,22 +4916,18 @@ export default function App() {
     signal?: AbortSignal,
   ): Promise<FileReferenceResult> {
     const current = taskDraftActionContext.current;
-    const source = file.source;
-    const target =
-      source.kind === "workspace_file" ? source.target : source.attachment;
     if (
-      !file.available ||
       signal?.aborted ||
-      !current.allowed ||
-      !current.task ||
-      current.audience !== fileReferenceAudience ||
-      current.task.id !== target.taskId ||
-      composerDraftScopeRef.current !== "task:" + target.taskId ||
-      (source.kind === "workspace_file" &&
-        !fileTargetShown(current.task, current.workspaces, source.target))
+      !conversationFileReferable(file, {
+        allowed: current.allowed,
+        task: current.task,
+        workspaces: current.workspaces,
+        current: current.audience === fileReferenceAudience,
+        scope: composerDraftScopeRef.current,
+      })
     )
       return "edit_unavailable";
-    if (!(await addAttachments(source, { file, detail }, signal)))
+    if (!(await addAttachments(file.source, { file, detail }, signal)))
       return signal?.aborted ? "cancelled" : "edit_unavailable";
     window.requestAnimationFrame(() => {
       if (

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { appendHandoffQuote } from "../frontend/src/features/composer/drafts.ts";
-import { conversationFiles } from "../frontend/src/app/conversation-files.ts";
+import {
+  conversationFileReferable,
+  conversationFiles,
+} from "../frontend/src/app/conversation-files.ts";
 import {
   composerDraftToRunInput,
   draftWithAttachments,
@@ -126,4 +129,52 @@ test("only reply links inside the task workspace enter the picker", () => {
     ["reports/one.pdf"],
   );
   assert.equal(files[0].source.target.kind, "workspace");
+});
+
+test("a conversation file joins only the draft of its own Task", () => {
+  const upload = {
+    key: "upload",
+    name: "quote.xlsx",
+    time: null,
+    available: true,
+    source: {
+      kind: "message_file",
+      attachment: {
+        kind: "messageAttachment",
+        taskId: "3",
+        message: { kind: "run", runId: "7" },
+        index: 0,
+      },
+    },
+  };
+  const draft = {
+    allowed: true,
+    task: { id: "3" },
+    workspaces: [],
+    current: true,
+    scope: "task:3",
+  };
+  assert.equal(conversationFileReferable(upload, draft), true);
+  // Another Task is open now: its draft never receives this Task's file.
+  assert.equal(
+    conversationFileReferable(upload, {
+      ...draft,
+      task: { id: "4" },
+      scope: "task:4",
+    }),
+    false,
+  );
+  assert.equal(
+    conversationFileReferable(upload, { ...draft, scope: "task:4" }),
+    false,
+  );
+  for (const change of [{ allowed: false }, { current: false }, { task: null }])
+    assert.equal(
+      conversationFileReferable(upload, { ...draft, ...change }),
+      false,
+    );
+  assert.equal(
+    conversationFileReferable({ ...upload, available: false }, draft),
+    false,
+  );
 });

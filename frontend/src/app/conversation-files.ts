@@ -12,10 +12,40 @@ import { referencePlugin } from "../components/ai/markdown-file-links.ts";
 import { runFileReferenceLinks } from "../workbench/run-file-references.ts";
 import { resolveWorkspaceFileLink } from "../workbench/workspace-file-links.ts";
 import { deriveAssistantOutputParts } from "../features/tasks/assistant-output.ts";
+import { fileTargetShown } from "../features/tasks/reply-files.ts";
 import {
   workspaceConversationFile,
   type ConversationFile,
 } from "../features/composer/conversation-files.ts";
+
+/// Whether a file a conversation offered may join the draft open now: the
+/// draft is that Task's, it can take input, nothing changed in between, and a
+/// Workspace file is still shown in it. A file of another Task never joins.
+export function conversationFileReferable(
+  file: ConversationFile,
+  draft: {
+    allowed: boolean;
+    task: TaskView | null | undefined;
+    workspaces: readonly WorkspaceView[];
+    /** The draft and audience are the ones the file was offered to. */
+    current: boolean;
+    scope: string;
+  },
+): boolean {
+  const source = file.source;
+  const target =
+    source.kind === "workspace_file" ? source.target : source.attachment;
+  return (
+    file.available &&
+    draft.allowed &&
+    draft.current &&
+    !!draft.task &&
+    draft.task.id === target.taskId &&
+    draft.scope === "task:" + target.taskId &&
+    (source.kind !== "workspace_file" ||
+      fileTargetShown(draft.task, draft.workspaces, source.target))
+  );
+}
 
 const replyParser = unified()
   .use(remarkParse)
