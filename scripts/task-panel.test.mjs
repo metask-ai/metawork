@@ -2746,6 +2746,48 @@ test("reply metadata stays with its response before a later user interjection", 
   }
 });
 
+test("the outputs entry follows the reply content and precedes its info bar and execution details", () => {
+  const file = {
+    id: "output-1",
+    displayPath: "result.png",
+    redacted: false,
+    sizeBytes: "16",
+    open: "default_app",
+  };
+  const completed = run({ outputs: [file], tools: [technicalTool()] });
+  const value = task({
+    runs: [completed],
+    conversationOutputs: [{ ...file, runId: completed.id }],
+  });
+  const options = { outputsEnabled: true, onShowOutputs() {} };
+  const view = render(taskContentElement(value, "1", options));
+  const entry = view.container.querySelector(".run-outputs-entry");
+  const info = view.container.querySelector(
+    '.message-info-bar[data-role="assistant"]',
+  );
+  const details = screen.getByText("Execution details");
+  assert.equal(entry.nextElementSibling, info);
+  assert.ok(entry.previousElementSibling?.querySelector("[data-output-id]"));
+  assert.ok(
+    info.compareDocumentPosition(details) &
+      dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  assert.equal(view.container.querySelectorAll(".run-outputs-entry").length, 1);
+
+  const emptyReply = {
+    ...completed,
+    output: { ...completed.output, response: "" },
+  };
+  view.rerender(
+    taskContentElement({ ...value, runs: [emptyReply] }, "2", options),
+  );
+  assert.equal(view.container.querySelectorAll(".run-outputs-entry").length, 1);
+  assert.equal(
+    view.container.querySelector('.message-info-bar[data-role="assistant"]'),
+    null,
+  );
+});
+
 test("reply footer uses the product tooltip for the finished time", async (context) => {
   const user = userEvent.setup({ document: dom.window.document });
   const finishedAt = new Date(2026, 8, 11, 10, 25).getTime();

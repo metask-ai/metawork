@@ -8097,7 +8097,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   align-items: center;
   gap: 7px;
   border: 1px solid var(--ui-border);
-  border-left: 2px solid var(--ui-action-primary);
   border-radius: 8px;
   background: var(--ui-surface-panel-2);
 }
@@ -8177,6 +8176,48 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.conversation-file-icon {
+  display: grid;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--ui-surface-panel-2);
+  color: var(--ui-content-muted);
+}
+.conversation-file-icon .attachment-thumbnail {
+  --attachment-thumbnail-size: 36px;
+}
+
+.composer-reference-detail summary {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-reference-detail summary::-webkit-details-marker {
+  display: none;
+}
+.composer-reference-detail summary svg {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-content-muted);
+}
+.composer-reference-detail[open] summary svg {
+  transform: rotate(90deg);
+}
+.composer-reference-detail[open] > small {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  user-select: text;
 }
 
 .composer-attachment-copy strong {
@@ -10002,13 +10043,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .reply-media {
   margin: 16px 0;
 }
-.reply-image,
-.reply-video {
-  max-width: min(100%, 576px);
-}
 .reply-image {
   margin: 0;
   width: fit-content;
+  max-width: 100%;
 }
 .reply-image-open {
   display: block;
@@ -10029,7 +10067,6 @@ button.reply-image-open {
   width: auto;
   height: auto;
   max-width: 100%;
-  max-height: 360px;
   object-fit: contain;
   background: var(--ui-surface-panel-2);
 }
@@ -10043,7 +10080,7 @@ button.reply-image-open {
 .reply-image-placeholder {
   display: grid;
   place-items: center;
-  min-height: 160px;
+  min-height: 80px;
   padding: 16px;
   color: var(--ui-content-muted);
 }
@@ -10073,6 +10110,18 @@ button.reply-image-open {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
+}
+
+.task-panel-preview-image-open {
+  min-width: 0;
+  max-width: 100%;
+  max-height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.task-panel-preview-image-open:not([aria-disabled="true"]) {
+  cursor: zoom-in;
 }
 
 .file-preview-decoded {
@@ -10216,70 +10265,111 @@ button.file-card:hover {
     min-height: 44px;
   }
 }
+.run-outputs-entry {
+  justify-self: start;
+  align-self: start;
+  width: fit-content;
+  gap: 7px;
+  padding-inline: 10px 7px;
+  border: 1px solid var(--ui-border);
+  color: var(--ui-content-primary);
+  font-size: var(--text-label);
+}
+.run-outputs-entry svg:last-child {
+  color: var(--ui-content-muted);
+}
+.ai-message > .run-outputs-entry {
+  margin-block-start: 8px;
+}
 .run-outputs-list {
   display: grid;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
   margin: 0;
-  padding: 0;
+  padding: 10px 8px;
   list-style: none;
 }
-.run-output {
+.run-output-row {
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: center;
   min-width: 0;
-  padding: 12px;
-  border: 1px solid var(--ui-border);
-  border-radius: 12px;
-  background: var(--ui-surface-panel);
+  min-height: 34px;
+  border-radius: 7px;
 }
-.run-output-icon {
-  flex: 0 0 20px;
-  padding-top: 2px;
-  color: var(--ui-content-muted);
-  font-size: 18px;
+.run-output-row:hover,
+.run-output-row:focus-within,
+.run-output [data-menu-open] .run-output-row {
+  background: var(--ui-action-hover-surface);
 }
-.run-output-content {
+.run-output-file {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  gap: 9px;
+  min-height: 34px;
   min-width: 0;
-}
-.run-output-name,
-.run-output-path,
-.run-output-meta {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-.run-output-name {
+  padding: 4px 9px;
+  border-radius: inherit;
+  text-align: start;
   color: var(--ui-content-primary);
   font-size: 13px;
-  font-weight: 500;
 }
-.run-output-path {
-  margin-top: 4px;
-  color: var(--ui-content-muted);
-  font-size: 12px;
+button.run-output-file,
+.run-output-more {
+  cursor: pointer;
 }
-.run-output-meta {
-  margin-top: 4px;
-  color: var(--ui-content-muted);
-  font-size: 12px;
+.run-output-file .file-type-icon {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
 }
-
-.run-output-actions {
+.run-output-name {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 8px;
+  align-items: baseline;
+  min-width: 0;
+  white-space: nowrap;
 }
-.run-output-status {
-  margin: 8px 0 0;
+.run-output-name > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.run-output-name > span + span {
+  flex: none;
+  max-width: 50%;
+}
+.run-output-more {
+  display: grid;
+  place-items: center;
+  flex: 0 0 30px;
+  height: 30px;
+  margin-inline-end: 2px;
+  border-radius: 6px;
   color: var(--ui-content-muted);
-  font-size: 12px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
 }
-
+@media (hover: hover) and (pointer: fine) {
+  .run-output-row:not(:hover):not(:focus-within) .run-output-more {
+    opacity: 0;
+  }
+}
+@media (pointer: coarse) {
+  .run-output-file,
+  .run-output-more {
+    min-height: 44px;
+  }
+  .run-output-more {
+    flex-basis: 44px;
+  }
+}
+.run-output-more:hover {
+  color: var(--ui-content-primary);
+  background: var(--ui-surface-panel);
+}
+.run-output .file-menu-status {
+  padding-inline: 9px;
+}
 .reply-video {
   position: relative;
+  max-width: min(100%, 576px);
   aspect-ratio: 16 / 9;
   max-height: min(60vh, 480px);
   border-radius: 8px;
@@ -10306,24 +10396,6 @@ button.file-card:hover {
   padding: 8px;
   text-align: center;
   color: var(--ui-content-muted);
-}
-
-@media (max-width: 640px) {
-  .run-output-actions button {
-    min-height: 44px;
-  }
-}
-
-.run-output-actions button {
-  font-size: 12px;
-}
-.run-output-actions button:disabled {
-  opacity: 0.45;
-}
-
-.run-output-actions button:focus-visible {
-  outline: 2px solid var(--ui-focus-ring);
-  outline-offset: 2px;
 }
 
 .archived-tasks {

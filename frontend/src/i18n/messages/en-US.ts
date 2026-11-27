@@ -1208,6 +1208,15 @@ export const enUS = {
   "run.activity.requesting_stop": "Requesting stop…",
   "attachment.add": "Add files",
   "composer.add": "Add to message",
+  "attachment.error.reference_unavailable":
+    "The referenced workspace file is unavailable. Check the original file or remove its attachment card.",
+  "composer.upload_number": "Attachment {index}",
+  "composer.reference_files": "Reference conversation files",
+  "composer.uploaded_file": "Uploaded by you",
+  "composer.no_files": "No files to reference",
+  "composer.old_file": "Add the original file again to use it",
+  "composer.older_files": "Load earlier files",
+  "composer.loading_files": "Loading earlier files…",
   "composer.add_skill": "Add Skill",
   "composer.add_skill_selected":
     "Each message uses one Skill. Remove the selected Skill to choose another.",
@@ -1363,6 +1372,7 @@ export const enUS = {
   "file_preview.link_unavailable.unsupported_path":
     "Can't open: unsupported file path",
   "file_preview.refresh": "Refresh",
+  "file_preview.enlarge_image": "Enlarge {name}",
   "file_preview.mode": "File display mode",
   "file_preview.rendered": "Preview",
   "file_preview.source": "Source",
@@ -1388,15 +1398,9 @@ export const enUS = {
   "outputs.edit": "Reference in conversation",
   "outputs.copy_path": "Copy path",
   "outputs.copy_image": "Copy image",
-  "outputs.copying_image": "Copying image…",
   "outputs.register": "Add to outputs",
   "outputs.state.registered": "Added to outputs",
-  "outputs.edit_reference": "Workspace file {path}:",
   "outputs.state.edit_prepared": "File reference added to the input.",
-  "outputs.state.edit_draft_busy":
-    "Skill draft preserved. Finish the current input first.",
-  "outputs.state.edit_too_long":
-    "The draft is near its limit and was preserved.",
   "outputs.state.edit_unavailable":
     "Cannot reference this file now. Check it again.",
   "outputs.check": "Check file",
@@ -1421,6 +1425,7 @@ export const enUS = {
   "outputs.state.failed": "File operation failed. Try again.",
   "outputs.title": "Delivered files",
   "outputs.view": "View outputs",
+  "outputs.more": "More file actions",
   "outputs.open_browser": "Open in browser",
   "outputs.view_source": "View source",
   "outputs.open": "Open in default app",
@@ -1429,7 +1434,6 @@ export const enUS = {
   "outputs.state.open_failed":
     "The system did not open this file. It may have no associated app.",
   "outputs.state.path_copied": "Path copied",
-  "outputs.state.image_copied": "Image copied",
   "outputs.state.copy_failed": "Could not copy. Try again.",
   "outputs.state.opened": "Sent to the default application",
   "outputs.updated": "File changed during this turn",

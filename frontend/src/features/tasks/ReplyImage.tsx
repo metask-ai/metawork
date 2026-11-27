@@ -16,8 +16,8 @@ import {
   type FilePreviewLoader,
 } from "./reply-files.ts";
 
-const maxWidth = 576;
-const maxHeight = 360;
+const maxWidth = 288;
+const maxHeight = 180;
 
 /** The box an image of this size is shown in, so nothing moves when it loads. */
 function imageBox(size: { width: number; height: number }): CSSProperties {
@@ -215,7 +215,7 @@ function ImageFigure({
   });
   const state =
     image || preview?.state === "ready" ? undefined : preview?.state;
-  const natural = image && decoded?.id === image.id ? decoded : size;
+  const natural = image && decoded?.id === image.id ? decoded : (size ?? image);
   const content = image ? (
     <PreviewImageView
       image={image}

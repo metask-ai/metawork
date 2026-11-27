@@ -8,13 +8,13 @@ import {
   type ReactNode,
 } from "react";
 import { useI18n, type MessageId } from "../i18n/context.ts";
-import { Button } from "./ui/button.tsx";
 import {
   contextMenuProps,
   createContextMenuAnchor,
   type ContextMenuAnchor,
   type ContextMenuEvent,
 } from "./ui/context-menu-anchor.ts";
+import { Button } from "./ui/button.tsx";
 import { Icon } from "./ui/Icon.tsx";
 import { Menu } from "./ui/menu.tsx";
 
@@ -27,6 +27,8 @@ export type MenuFile = {
   available?: boolean;
   /** False when the Host said it does not open it. Nobody asked when absent. */
   openable?: boolean;
+  /** The delivery list can compare this file with the recorded delivery. */
+  delivery?: { opensInBrowser: boolean; viewSource?: () => void };
   /**
    * Copies the image it is shown as, from what the interface already holds.
    * Null while there is none to copy, absent for anything but an image.
@@ -35,10 +37,10 @@ export type MenuFile = {
 };
 
 export type FileMenuAction =
-  "open" | "reveal" | "reference" | "copy_path" | "save";
+  "open" | "reveal" | "reference" | "copy_path" | "save" | "check";
 
-/** What there is to say about a finished action; null when it speaks for itself. */
-export type FileMenuOutcome = { message: MessageId; brief?: boolean } | null;
+/** A failure that needs attention, or null for a silent outcome. */
+export type FileMenuOutcome = { message: MessageId } | null;
 
 export type FileMenuHandler = {
   connected: boolean;
@@ -53,7 +55,11 @@ export type FileMenuHandler = {
 const FileMenuHandlerContext = createContext<FileMenuHandler | null>(null);
 export const FileMenuProvider = FileMenuHandlerContext.Provider;
 
-export type OpenFileMenu = (file: MenuFile, event: ContextMenuEvent) => void;
+export type OpenFileMenu = (
+  file: MenuFile,
+  event: ContextMenuEvent,
+  atTrigger?: boolean,
+) => void;
 const OpenFileMenuContext = createContext<OpenFileMenu | null>(null);
 
 type MenuAction = FileMenuAction | "copy_image";
@@ -108,61 +114,62 @@ export function FileMenuScope({
   const popup = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLElement | null>(null);
   const keyboardOpen = useRef(false);
-  const active = useRef<AbortController | null>(null);
+  /** In-flight actions, one per file: another file's menu stays usable. */
+  const active = useRef(new Map<string, AbortController>());
   const [menu, setMenu] = useState<{
     file: MenuFile;
     anchor: ContextMenuAnchor;
   } | null>(null);
   const [open, setOpen] = useState(false);
-  const [pending, setPending] = useState<MenuAction | null>(null);
-  const [cancelling, setCancelling] = useState(false);
+  const [pending, setPending] = useState<
+    ReadonlyMap<string, { action: MenuAction; cancelling: boolean }>
+  >(new Map());
   const [notice, setNotice] = useState<FileMenuOutcome>(null);
 
   useEffect(
     () => () => {
-      active.current?.abort();
-      active.current = null;
-      setPending(null);
+      for (const controller of active.current.values()) controller.abort();
+      active.current.clear();
+      setPending(new Map());
       setNotice(null);
       setOpen(false);
     },
     [resetKey, connected],
   );
   useEffect(() => setNotice(null), [noticeKey]);
-  useEffect(() => {
-    if (!notice?.brief) return;
-    const timer = setTimeout(() => setNotice(null), 1200);
-    return () => clearTimeout(timer);
-  }, [notice]);
-
-  const openMenu = useCallback<OpenFileMenu>((file, event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const element = event.currentTarget;
-    // Focus returns to what held it, which may be inside the element: a
-    // playing video keeps the focus of its own controls.
-    trigger.current =
-      document.activeElement instanceof HTMLElement &&
-      element.contains(document.activeElement)
-        ? document.activeElement
-        : element;
-    keyboardOpen.current = !("clientX" in event);
-    setMenu({
-      file,
-      anchor:
-        "clientX" in event
-          ? createContextMenuAnchor(element, event.clientX, event.clientY)
-          : element,
-    });
-    setOpen(true);
-  }, []);
+  const openMenu = useCallback<OpenFileMenu>(
+    (file, event, atTrigger = false) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const element = event.currentTarget;
+      // Focus returns to what held it, which may be inside the element: a
+      // playing video keeps the focus of its own controls.
+      trigger.current =
+        document.activeElement instanceof HTMLElement &&
+        element.contains(document.activeElement)
+          ? document.activeElement
+          : element;
+      keyboardOpen.current = atTrigger || !("clientX" in event);
+      setMenu({
+        file,
+        anchor:
+          !atTrigger && "clientX" in event
+            ? createContextMenuAnchor(element, event.clientX, event.clientY)
+            : element,
+      });
+      setOpen(true);
+    },
+    [],
+  );
 
   async function perform(file: MenuFile, action: MenuAction) {
-    if (!handler || active.current) return;
+    const path = file.displayPath;
+    if (!handler || active.current.has(path)) return;
     const controller = new AbortController();
-    active.current = controller;
-    setPending(action);
-    setCancelling(false);
+    active.current.set(path, controller);
+    setPending((current) =>
+      new Map(current).set(path, { action, cancelling: false }),
+    );
     setNotice(null);
     // An image is copied within the click: the clipboard asks for that.
     const outcome = await (
@@ -170,16 +177,32 @@ export function FileMenuScope({
         ? file.copyImage!(controller.signal)
         : handler.perform(file, action, controller.signal)
     ).catch((): FileMenuOutcome => ({ message: "outputs.state.failed" }));
-    if (active.current !== controller) return;
-    active.current = null;
-    setPending(null);
+    if (active.current.get(path) !== controller) return;
+    active.current.delete(path);
+    setPending((current) => {
+      const next = new Map(current);
+      next.delete(path);
+      return next;
+    });
     setNotice(outcome);
+  }
+
+  function cancel(path: string) {
+    const controller = active.current.get(path);
+    if (!controller) return;
+    controller.abort();
+    setPending((current) => {
+      const entry = current.get(path);
+      return entry
+        ? new Map(current).set(path, { ...entry, cancelling: true })
+        : current;
+    });
   }
 
   function disabled(file: MenuFile, action: MenuAction): boolean {
     return (
       !handler?.connected ||
-      pending !== null ||
+      pending.has(file.displayPath) ||
       file.available === false ||
       (action === "copy_image" && !file.copyImage) ||
       (action === "open" && file.openable === false) ||
@@ -191,40 +214,41 @@ export function FileMenuScope({
     <OpenFileMenuContext.Provider value={handler ? openMenu : null}>
       <div
         ref={root}
+        aria-busy={pending.size > 0}
+        data-menu-open={open || undefined}
         className={
           className ? `file-menu-scope ${className}` : "file-menu-scope"
         }
         tabIndex={-1}
       >
         {children}
-        {(pending || notice) && (
-          <div className="file-menu-status">
-            <p role="status" aria-live="polite">
-              {pending
-                ? t(
-                    cancelling
+        {/* A check can take a while and is asked for in order to see its
+            answer, so it says it is under way; routine actions stay quiet. */}
+        {[...pending].map(
+          ([path, entry]) =>
+            entry.action === "check" && (
+              <div key={path} className="file-menu-status">
+                <p role="status" aria-live="polite">
+                  {t(
+                    entry.cancelling
                       ? "outputs.cancelling"
-                      : pending === "save"
-                        ? "outputs.saving"
-                        : pending === "copy_image"
-                          ? "outputs.copying_image"
-                          : "outputs.checking",
-                  )
-                : notice && t(notice.message)}
-            </p>
-            {pending && (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={cancelling}
-                onClick={() => {
-                  active.current?.abort();
-                  setCancelling(true);
-                }}
-              >
-                {t("outputs.cancel")}
-              </Button>
-            )}
+                      : "outputs.checking",
+                  )}
+                </p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={entry.cancelling}
+                  onClick={() => cancel(path)}
+                >
+                  {t("outputs.cancel")}
+                </Button>
+              </div>
+            ),
+        )}
+        {notice && (
+          <div className="file-menu-status">
+            <p role="status">{t(notice.message)}</p>
           </div>
         )}
       </div>
@@ -275,9 +299,50 @@ export function FileMenuScope({
                     onClick={() => void perform(menu.file, action)}
                   >
                     <Icon name={icon} />
-                    {t(label)}
+                    {t(
+                      action === "open" && menu.file.delivery?.opensInBrowser
+                        ? "outputs.open_browser"
+                        : label,
+                    )}
                   </Menu.Item>
                 ))}
+              {menu?.file.delivery && (
+                <>
+                  <Menu.Separator />
+                  {menu.file.delivery.viewSource && (
+                    <Menu.Item
+                      disabled={disabled(menu.file, "check")}
+                      onClick={menu.file.delivery.viewSource}
+                    >
+                      <Icon name="skill-file" />
+                      {t("outputs.view_source")}
+                    </Menu.Item>
+                  )}
+                  <Menu.Item
+                    disabled={disabled(menu.file, "check")}
+                    onClick={() => void perform(menu.file, "check")}
+                  >
+                    <Icon name="check" />
+                    {t("outputs.check")}
+                  </Menu.Item>
+                </>
+              )}
+              {menu && pending.has(menu.file.displayPath) && (
+                <>
+                  <Menu.Separator />
+                  <Menu.Item
+                    disabled={pending.get(menu.file.displayPath)!.cancelling}
+                    onClick={() => cancel(menu.file.displayPath)}
+                  >
+                    <Icon name="close" />
+                    {t(
+                      pending.get(menu.file.displayPath)!.cancelling
+                        ? "outputs.cancelling"
+                        : "outputs.cancel",
+                    )}
+                  </Menu.Item>
+                </>
+              )}
             </Menu.Popup>
           </Menu.Positioner>
         </Menu.Portal>

@@ -5,8 +5,7 @@ import type {
   MediaTarget,
 } from "../../bridge/contracts.ts";
 import { Dialog } from "../../components/ui/dialog.tsx";
-import { Icon } from "../../components/ui/Icon.tsx";
-import { Button } from "../../components/ui/button.tsx";
+import { ImageLightboxPopup } from "../../components/ImageLightboxPopup.tsx";
 import { PreviewImageView } from "../../components/PreviewImageView.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
@@ -90,59 +89,37 @@ export function MediaLightbox({
         if (!open) onClose();
       }}
     >
-      <Dialog.Portal>
-        <Dialog.Backdrop />
-        <Dialog.Popup className="media-lightbox">
-          <div className="media-lightbox-bar">
-            <Dialog.Title className="media-lightbox-title" dir="auto">
-              {target?.name ?? ""}
-            </Dialog.Title>
-            <Dialog.Close
-              render={
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={t("attachment.close_preview")}
-                >
-                  <Icon name="close" />
-                </Button>
-              }
-            />
-          </div>
-          <div className="media-lightbox-body">
-            {image ? (
-              <PreviewImageView
-                image={image}
-                alt={target?.name ?? ""}
-                onFailure={() =>
-                  setResult(
-                    key
-                      ? {
-                          key,
-                          value: {
-                            state: "error",
-                            content: "",
-                            truncated: false,
-                            redacted: false,
-                          },
-                        }
-                      : null,
-                  )
-                }
-              />
-            ) : (
-              <p className="media-lightbox-state" aria-live="polite">
-                {preview?.reason
-                  ? t(`file_preview.state.${preview.reason}`)
-                  : failure
-                    ? t(`file_preview.state.${failure}`)
-                    : t("file_preview.loading")}
-              </p>
-            )}
-          </div>
-        </Dialog.Popup>
-      </Dialog.Portal>
+      <ImageLightboxPopup name={target?.name ?? ""}>
+        {image ? (
+          <PreviewImageView
+            image={image}
+            alt={target?.name ?? ""}
+            onFailure={() =>
+              setResult(
+                key
+                  ? {
+                      key,
+                      value: {
+                        state: "error",
+                        content: "",
+                        truncated: false,
+                        redacted: false,
+                      },
+                    }
+                  : null,
+              )
+            }
+          />
+        ) : (
+          <p className="media-lightbox-state" aria-live="polite">
+            {preview?.reason
+              ? t(`file_preview.state.${preview.reason}`)
+              : failure
+                ? t(`file_preview.state.${failure}`)
+                : t("file_preview.loading")}
+          </p>
+        )}
+      </ImageLightboxPopup>
     </Dialog.Root>
   );
 }

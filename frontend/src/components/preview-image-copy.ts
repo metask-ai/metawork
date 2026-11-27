@@ -39,14 +39,13 @@ async function copyPreviewImage(
         throw new Error("The image is not authorized any more");
       return png;
     });
-    return { message: "outputs.state.image_copied", brief: true };
+    return null;
   } catch {
+    if (signal.aborted) return null;
     return {
-      message: signal.aborted
-        ? "outputs.state.cancelled"
-        : image.current()
-          ? "outputs.state.copy_failed"
-          : "outputs.state.stale_security",
+      message: image.current()
+        ? "outputs.state.copy_failed"
+        : "outputs.state.stale_security",
     };
   }
 }

@@ -76,7 +76,7 @@ pub fn validWorkspacePath(path: []const u8, allow_root: bool) bool {
     return true;
 }
 
-fn openWorkspaceDirectory(io: std.Io, root: std.Io.Dir, path: []const u8) !std.Io.Dir {
+pub fn openWorkspaceDirectory(io: std.Io, root: std.Io.Dir, path: []const u8) !std.Io.Dir {
     if (!validWorkspacePath(path, true)) return error.AccessDenied;
     if ((try root.stat(io)).kind != .directory) return error.AccessDenied;
     var current = try root.openDir(io, ".", .{ .iterate = true, .follow_symlinks = false });

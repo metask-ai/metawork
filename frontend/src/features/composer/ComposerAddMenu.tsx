@@ -14,6 +14,7 @@ export function ComposerAddMenu({
   skillText,
   skillCatalog,
   onChooseAttachments,
+  onReferenceFiles,
   onRefreshSkills,
   onChooseSkill,
 }: {
@@ -23,6 +24,7 @@ export function ComposerAddMenu({
   skillText: string | null;
   skillCatalog: SkillCatalogView;
   onChooseAttachments: () => void;
+  onReferenceFiles?: () => void;
   onRefreshSkills: () => void;
   onChooseSkill: (
     candidate: Extract<SlashCandidate, { kind: "skill" }>,
@@ -65,6 +67,12 @@ export function ComposerAddMenu({
               <Menu.Item onClick={onChooseAttachments}>
                 <Icon name="paperclip" />
                 {t("attachment.add")}
+              </Menu.Item>
+            )}
+            {onReferenceFiles && (
+              <Menu.Item onClick={onReferenceFiles}>
+                <Icon name="history" />
+                {t("composer.reference_files")}
               </Menu.Item>
             )}
             <Menu.SubmenuRoot

@@ -5942,7 +5942,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Compare these\",\"attachments\":[{\"kind\":\"image\",\"format\":\"png\",\"displayName\":\"diagram.png\",\"sizeBytes\":\"12\",\"media\":true,\"redacted\":false},{\"kind\":\"image\",\"format\":\"webp\",\"displayName\":\"brief.webp\",\"sizeBytes\":\"16\",\"media\":true,\"redacted\":false}],\"skill\":null,\"redacted\":false}",
+        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Compare these\",\"attachments\":[{\"kind\":\"image\",\"format\":\"png\",\"displayName\":\"diagram.png\",\"sizeBytes\":\"12\",\"canReference\":true,\"media\":true,\"redacted\":false},{\"kind\":\"image\",\"format\":\"webp\",\"displayName\":\"brief.webp\",\"sizeBytes\":\"16\",\"canReference\":true,\"media\":true,\"redacted\":false}],\"skill\":null,\"redacted\":false}",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "attachmentTokens") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "PNG\\r\\n") == null);
@@ -5972,7 +5972,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(std.mem.indexOf(
         u8,
         pure_snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":null,\"attachments\":[{\"kind\":\"image\",\"format\":\"jpeg\",\"displayName\":\"photo.jpg\",\"sizeBytes\":\"7\",\"media\":true,\"redacted\":false}],\"skill\":null,\"redacted\":false}",
+        "\"input\":{\"kind\":\"multimodal\",\"text\":null,\"attachments\":[{\"kind\":\"image\",\"format\":\"jpeg\",\"displayName\":\"photo.jpg\",\"sizeBytes\":\"7\",\"canReference\":true,\"media\":true,\"redacted\":false}],\"skill\":null,\"redacted\":false}",
     ) != null);
 
     const text_files = [_]product_control.AttachmentCandidate{.{
@@ -6009,7 +6009,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(std.mem.indexOf(
         u8,
         text_snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Summarize this file\",\"attachments\":[{\"kind\":\"file\",\"displayName\":\"report.docx\",\"sizeBytes\":\"12\",\"redacted\":false}],\"skill\":null,\"redacted\":false}",
+        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Summarize this file\",\"attachments\":[{\"kind\":\"file\",\"displayName\":\"report.docx\",\"sizeBytes\":\"12\",\"canReference\":true,\"redacted\":false}],\"skill\":null,\"redacted\":false}",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, text_snapshot, "PK\x03\x04\x00\xffbinary") == null);
     try std.testing.expect(!workbench.releaseAttachment(retry_ids[0]));
@@ -6198,7 +6198,7 @@ test "a Skill selected with attachments runs as one multimodal Run carrying its 
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Summarize by month\",\"attachments\":[{\"kind\":\"file\",\"displayName\":\"sales.xlsx\",\"sizeBytes\":\"9\",\"redacted\":false}],\"skill\":{\"skillId\":\"" ++
+        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Summarize by month\",\"attachments\":[{\"kind\":\"file\",\"displayName\":\"sales.xlsx\",\"sizeBytes\":\"9\",\"canReference\":true,\"redacted\":false}],\"skill\":{\"skillId\":\"" ++
             fixture.fixture_skill_id ++ "\",\"catalogRevision\":\"" ++ fixture.fixture_catalog_revision ++
             "\",\"invocationName\":\"review\",\"displayName\":\"Review\"},\"redacted\":false}",
     ) != null);

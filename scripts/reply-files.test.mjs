@@ -396,9 +396,10 @@ test("every menu action names its file and reports where it was asked", async ()
     );
     assert.deepEqual(calls.at(-1).target, reference);
     assert.equal(calls.at(-1).action, action);
+    assert.equal(screen.queryByRole("status"), null);
     assert.equal(
-      screen.getByRole("status").textContent,
-      action === "save" ? "Preparing and saving file…" : "Checking file…",
+      element.closest(".file-menu-scope").getAttribute("aria-busy"),
+      "true",
     );
     // One operation at a time in a region.
     await waitFor(() => assert.ok(!screen.queryByRole("menu")));
@@ -421,38 +422,33 @@ test("every menu action names its file and reports where it was asked", async ()
   assert.equal(calls.length, actions.length);
 });
 
-test("a brief answer goes away by itself and a rejected action is a failure", async (ctx) => {
-  ctx.mock.timers.enable({ apis: ["setTimeout"] });
-  let outcome = { message: "outputs.state.path_copied", brief: true };
+test("the next file action clears an error and successful completion stays quiet", async () => {
+  let fail = true;
   const { handler } = handlerFixture({
     perform: async () => {
-      if (!outcome) throw new Error("transport");
-      return outcome;
+      if (fail) throw new Error("transport");
+      return fileMenuOutcome("path_copied");
     },
   });
-  const mounted = render(view(handler, card()));
+  render(view(handler, card()));
   const element = screen.getByRole("group", { name: /report\.docx/ });
-  const choose = async (name) => {
-    await act(async () => fireEvent.contextMenu(element));
+  const choose = async () => {
+    const menu = await openMenu(element);
     await act(async () =>
-      fireEvent.click(screen.getByRole("menuitem", { name })),
+      fireEvent.click(
+        within(menu).getByRole("menuitem", { name: "Copy path" }),
+      ),
     );
+    await waitFor(() => assert.ok(!screen.queryByRole("menu")));
   };
-  await choose("Copy path");
-  assert.equal(screen.getByRole("status").textContent, "Path copied");
-  await act(async () => ctx.mock.timers.tick(1199));
-  assert.ok(screen.queryByRole("status"));
-  await act(async () => ctx.mock.timers.tick(1));
-  assert.ok(!screen.queryByRole("status"));
-  outcome = null;
-  await choose("Open folder");
+  await choose();
   assert.equal(
     screen.getByRole("status").textContent,
     "File operation failed. Try again.",
   );
-  await act(async () => ctx.mock.timers.tick(60_000));
-  assert.ok(screen.queryByRole("status"));
-  mounted.unmount();
+  fail = false;
+  await choose();
+  assert.equal(screen.queryByRole("status"), null);
 });
 
 test("cancelling waits for the Host, and a change of file, Task or connection drops what is in flight", async () => {
@@ -471,17 +467,19 @@ test("cancelling waits for the Host, and a change of file, Task or connection dr
     await waitFor(() => assert.ok(!screen.queryByRole("menu")));
   };
   await choose("Save as…");
-  await act(async () =>
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" })),
-  );
+  await choose("Cancel");
   assert.equal(requests[0].signal.aborted, true);
-  assert.equal(screen.getByRole("status").textContent, "Cancelling…");
-  assert.equal(screen.getByRole("button", { name: "Cancel" }).disabled, true);
-  // Too late: what happened is what is reported.
-  await act(async () =>
-    requests[0].resolve({ message: "outputs.state.saved" }),
+  const element = screen.getByRole("group", { name: /report\.docx/ });
+  const busyMenu = await openMenu(element);
+  assert.deepEqual(disabledItems(busyMenu), [...five, "Cancelling…"]);
+  await closeMenu(busyMenu);
+  assert.equal(screen.queryByRole("status"), null);
+  await act(async () => requests[0].resolve(fileMenuOutcome("saved")));
+  assert.equal(
+    element.closest(".file-menu-scope").getAttribute("aria-busy"),
+    "false",
   );
-  assert.equal(screen.getByRole("status").textContent, "File saved");
+  assert.equal(screen.queryByRole("status"), null);
 
   await choose("Open folder");
   mounted.rerender(view(handler, card({}, { resetKey: "second" })));
@@ -497,9 +495,7 @@ test("cancelling waits for the Host, and a change of file, Task or connection dr
     view({ ...handler, connected: false }, card({}, { resetKey: "second" })),
   );
   assert.equal(requests[2].signal.aborted, true);
-  await act(async () =>
-    requests[2].resolve({ message: "outputs.state.path_copied" }),
-  );
+  await act(async () => requests[2].resolve(fileMenuOutcome("path_copied")));
   assert.ok(!screen.queryByRole("status"));
   mounted.rerender(view(handler, card({}, { resetKey: "second" })));
   await choose("Copy path");
@@ -507,19 +503,86 @@ test("cancelling waits for the Host, and a change of file, Task or connection dr
   assert.equal(requests[3].signal.aborted, true);
 });
 
+test("a file in progress locks only its own menu; the other files of its region stay usable", async () => {
+  const requests = [];
+  const perform = (file, action, signal) =>
+    new Promise((resolve) =>
+      requests.push({ path: file.displayPath, action, signal, resolve }),
+    );
+  const { handler } = handlerFixture({ perform });
+  render(
+    view(
+      handler,
+      createElement(
+        FileMenuScope,
+        {},
+        createElement(FileCard, {
+          name: "report.docx",
+          detail: ["2.3 MB"],
+          menu: menuFile(reference, "results/report.docx"),
+        }),
+        createElement(FileCard, {
+          name: "notes.txt",
+          detail: ["1 KB"],
+          menu: menuFile(
+            { ...reference, fileReferenceId: "file-3-1-1-2" },
+            "results/notes.txt",
+          ),
+        }),
+      ),
+    ),
+  );
+  const report = screen.getByRole("group", { name: /report\.docx/ });
+  const notes = screen.getByRole("group", { name: /notes\.txt/ });
+  // The save dialog stays open for as long as the person needs it.
+  let menu = await openMenu(report);
+  await act(async () =>
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Save as…" })),
+  );
+  await waitFor(() => assert.ok(!screen.queryByRole("menu")));
+  menu = await openMenu(notes);
+  assert.deepEqual(disabledItems(menu), []);
+  await act(async () =>
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Copy path" })),
+  );
+  await waitFor(() => assert.ok(!screen.queryByRole("menu")));
+  assert.deepEqual(
+    requests.map(({ path, action }) => [path, action]),
+    [
+      ["results/report.docx", "save"],
+      ["results/notes.txt", "copy_path"],
+    ],
+  );
+  menu = await openMenu(report);
+  assert.deepEqual(disabledItems(menu), five);
+  assert.ok(within(menu).getByRole("menuitem", { name: "Cancel" }));
+  await closeMenu(menu);
+  await act(async () => requests[1].resolve(null));
+  await act(async () => requests[0].resolve(null));
+  assert.equal(
+    report.closest(".file-menu-scope").getAttribute("aria-busy"),
+    "false",
+  );
+});
+
 test("an action's answer is said only where it is needed", () => {
-  for (const state of ["opened", "revealed"])
-    assert.equal(fileMenuOutcome("open", state), null);
-  assert.deepEqual(fileMenuOutcome("copy_path", "path_copied"), {
-    message: "outputs.state.path_copied",
-    brief: true,
-  });
+  for (const state of [
+    "opened",
+    "revealed",
+    "saved",
+    "path_copied",
+    "edit_prepared",
+    // The Composer already says why the attachment could not be added.
+    "edit_reported",
+    "cancelled",
+  ])
+    assert.equal(fileMenuOutcome(state), null);
   // Nothing in a menu compares with a delivery.
-  assert.deepEqual(fileMenuOutcome("save", "changed"), {
+  assert.deepEqual(fileMenuOutcome("changed"), {
     message: "outputs.state.file_changed",
   });
   for (const state of [
-    "saved",
+    "save_failed",
     "copy_failed",
     "open_unsupported",
     "open_failed",
@@ -527,10 +590,9 @@ test("an action's answer is said only where it is needed", () => {
     "restricted",
     "busy",
     "stale_security",
-    "edit_prepared",
     "edit_unavailable",
   ]) {
-    const outcome = fileMenuOutcome("open", state);
+    const outcome = fileMenuOutcome(state);
     assert.deepEqual(outcome, { message: `outputs.state.${state}` });
     for (const locale of ["zh-CN", "en-US"])
       assert.notEqual(translate(locale, outcome.message), outcome.message);
@@ -730,6 +792,22 @@ async function shownImage(handler, resource) {
   };
 }
 
+test("large reply images fit the compact thumbnail before and after decoding", async (t) => {
+  installImageEncoding(t, { decode: async () => {} });
+  const resource = imageResource();
+  Object.assign(resource.image, { width: 1200, height: 2400 });
+  const { button, decode } = await shownImage(
+    handlerFixture().handler,
+    resource,
+  );
+  assert.equal(button.style.width, "90px");
+  assert.match(button.style.aspectRatio, /1200 ?\/ ?2400/);
+  // The displayed image's decoded dimensions take precedence over its header.
+  await decode();
+  assert.equal(button.style.width, "288px");
+  assert.match(button.style.aspectRatio, /400 ?\/ ?200/);
+});
+
 test("copying an image is offered first, on an image alone, once it is shown", async (t) => {
   installImageEncoding(t, { decode: async () => {} });
   const { handler, calls } = handlerFixture();
@@ -798,10 +876,10 @@ test("an image is copied within the click, in its own size and as PNG alone", as
     assert.equal(writes.length, 1);
   });
   assert.deepEqual(Object.keys(writes[0].items), ["image/png"]);
-  assert.equal(screen.getByRole("status").textContent, "Copying image…");
+  assert.equal(screen.queryByRole("status"), null);
   await act(async () => {});
   await act(async () => finishDecode());
-  assert.equal(screen.getByRole("status").textContent, "Image copied");
+  assert.equal(screen.queryByRole("status"), null);
   const blob = await writes[0].items["image/png"];
   assert.equal(blob.type, "image/png");
   assert.equal(drawn.length, 1);
@@ -834,12 +912,18 @@ test("an image that cannot be copied says why and writes nothing", async (t) => 
     },
     {
       setup: {},
-      meanwhile: () =>
-        fireEvent.click(screen.getByRole("button", { name: "Cancel" })),
-      message: "Operation cancelled",
+      meanwhile: async (_resource, button) => {
+        const menu = await openMenu(button);
+        await act(async () =>
+          fireEvent.click(
+            within(menu).getByRole("menuitem", { name: "Cancel" }),
+          ),
+        );
+      },
+      message: null,
     },
   ]) {
-    await t.test(message, async (t) => {
+    await t.test(message ?? "cancelled silently", async (t) => {
       let finishDecode;
       const { writes } = installImageEncoding(t, {
         decode: () =>
@@ -864,10 +948,10 @@ test("an image that cannot be copied says why and writes nothing", async (t) => 
         );
       });
       if (meanwhile) {
-        await act(async () => meanwhile(resource));
+        await meanwhile(resource, button);
         await act(async () => finishDecode());
       }
-      assert.equal(screen.getByRole("status").textContent, message);
+      assert.equal(screen.queryByRole("status")?.textContent ?? null, message);
       if (!setup.write) assert.deepEqual(settled, ["refused"]);
       cleanup();
     });
@@ -1444,10 +1528,11 @@ test("what a panel says about a file goes with its tab, and what it is doing doe
   await choose("Save as…");
   mounted.rerender(view(handler, panel({ activeTabId: "workspace" })));
   assert.equal(requests[0].signal.aborted, false);
-  await act(async () =>
-    requests[0].resolve({ message: "outputs.state.saved" }),
+  await act(async () => requests[0].resolve(fileMenuOutcome("save_failed")));
+  assert.equal(
+    screen.getByRole("status").textContent,
+    translate("en-US", "outputs.state.save_failed"),
   );
-  assert.equal(screen.getByRole("status").textContent, "File saved");
   mounted.rerender(view(handler, panel({ activeTabId: "preview" })));
   assert.ok(!screen.queryByRole("status"));
   await choose("Copy path");
@@ -1458,53 +1543,56 @@ test("what a panel says about a file goes with its tab, and what it is doing doe
     ),
   );
   assert.equal(requests[1].signal.aborted, true);
-  await act(async () =>
-    requests[1].resolve({ message: "outputs.state.path_copied" }),
-  );
+  await act(async () => requests[1].resolve(fileMenuOutcome("path_copied")));
   assert.ok(!screen.queryByRole("status"));
 });
+
+function panelFilePreview(preview) {
+  return createElement(FilePreviewView, {
+    state: {
+      selected: {
+        id: reference.fileReferenceId,
+        title: "",
+        displayPath: "a.png",
+      },
+      phase: "settled",
+      preview: {
+        state: "ready",
+        content: "",
+        truncated: false,
+        redacted: false,
+        ...preview,
+      },
+    },
+    file: menuFile(reference, "a.png"),
+    mode: "preview",
+    scrollTop: 0,
+    onModeChange() {},
+    onScrollTopChange() {},
+    onRetry() {},
+    webLink: { failedLabel: "", onOpen: async () => true },
+  });
+}
 
 test("an image in the panel opens the menu of its tab with the image to copy, and text opens none", async (t) => {
   const { writes } = installImageEncoding(t, { decode: async () => {} });
   const { handler, calls } = handlerFixture();
-  const content = (preview) =>
-    createElement(FilePreviewView, {
-      state: {
-        selected: {
-          id: reference.fileReferenceId,
-          title: "",
-          displayPath: "a.png",
-        },
-        phase: "settled",
-        preview: {
-          state: "ready",
-          content: "",
-          truncated: false,
-          redacted: false,
-          ...preview,
-        },
-      },
-      file: menuFile(reference, "a.png"),
-      mode: "preview",
-      scrollTop: 0,
-      onModeChange() {},
-      onScrollTopChange() {},
-      onRetry() {},
-      webLink: { failedLabel: "", onOpen: async () => true },
-    });
   const mounted = render(
-    view(handler, panel({}, content({ image: imageResource().image }))),
+    view(
+      handler,
+      panel({}, panelFilePreview({ image: imageResource().image })),
+    ),
   );
-  const group = screen.getByRole("group", { name: "a.png" });
-  assert.equal(group.tabIndex, 0);
-  let menu = await openMenu(group, "menu key");
+  const opener = screen.getByRole("button", { name: "Enlarge a.png" });
+  assert.equal(opener.tabIndex, 0);
+  let menu = await openMenu(opener, "menu key");
   assert.deepEqual(disabledItems(menu), ["Copy image"]);
   await closeMenu(menu);
   await waitFor(() =>
     assert.ok(mounted.container.querySelector("img")?.getAttribute("src")),
   );
   await act(async () => fireEvent.load(mounted.container.querySelector("img")));
-  menu = await openMenu(group);
+  menu = await openMenu(opener);
   assert.deepEqual(
     menuItems(menu).map((item) => item.name),
     ["Copy image", ...five],
@@ -1514,18 +1602,59 @@ test("an image in the panel opens the menu of its tab with the image to copy, an
     fireEvent.click(within(menu).getByRole("menuitem", { name: "Copy image" })),
   );
   assert.equal(writes.length, 1);
-  await waitFor(() =>
-    assert.equal(screen.getByRole("status").textContent, "Image copied"),
-  );
+  await act(async () => {
+    await writes[0].items["image/png"];
+  });
+  assert.equal(screen.queryByRole("status"), null);
   assert.deepEqual(calls, []);
   await waitFor(() => assert.ok(!screen.queryByRole("menu")));
 
   // The secondary button stays with the text it selects.
   mounted.rerender(
-    view(handler, panel({}, content({ content: "plain text" }))),
+    view(handler, panel({}, panelFilePreview({ content: "plain text" }))),
   );
   fireEvent.contextMenu(screen.getByText("plain text"));
   assert.ok(!screen.queryByRole("menu"));
+});
+
+test("the panel enlarges its decoded original and restores focus after closing", async (t) => {
+  installImageEncoding(t, { decode: async () => {} });
+  const user = userEvent.setup({ document });
+  const { image } = imageResource();
+  const mounted = render(view(null, panelFilePreview({ image })));
+  const opener = screen.getByRole("button", { name: "Enlarge a.png" });
+  await user.click(opener);
+  assert.equal(screen.queryByRole("dialog"), null);
+  const inline = within(opener).getByRole("img");
+  await waitFor(() => assert.equal(inline.getAttribute("src"), image.src));
+  await act(async () => fireEvent.load(inline));
+  await user.click(opener);
+  const dialog = await screen.findByRole("dialog", { name: "a.png" });
+  const enlarged = within(dialog).getByRole("img", { name: "a.png" });
+  await waitFor(() => assert.equal(enlarged.getAttribute("src"), image.src));
+  await act(async () => fireEvent.load(enlarged));
+  await user.keyboard("{Escape}");
+  await waitFor(() =>
+    assert.ok(
+      !screen.queryByRole("dialog") && document.activeElement === opener,
+    ),
+  );
+  await user.keyboard("{Enter}");
+  await user.click(
+    within(await screen.findByRole("dialog")).getByRole("button", {
+      name: "Close image preview",
+    }),
+  );
+  await waitFor(() =>
+    assert.ok(
+      !screen.queryByRole("dialog") && document.activeElement === opener,
+    ),
+  );
+  await user.keyboard(" ");
+  await screen.findByRole("dialog");
+  mounted.rerender(view(null, panelFilePreview({ content: "replacement" })));
+  assert.equal(screen.queryByRole("dialog"), null);
+  assert.ok(screen.getByText("replacement"));
 });
 
 test("a reply shows each of its files once", () => {

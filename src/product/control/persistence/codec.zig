@@ -960,7 +960,7 @@ comptime {
     if (std.meta.fields(wire.BindingWire).len != 4) @compileError("Review history fixture coverage after BindingWire changes");
     if (std.meta.fields(wire.OperationWire).len != 2) @compileError("Review history fixture coverage after OperationWire changes");
     if (std.meta.fields(wire.RunInputWire).len != 9) @compileError("Review history fixture coverage after RunInputWire changes");
-    if (std.meta.fields(wire.AttachmentWire).len != 6) @compileError("Review history fixture coverage after AttachmentWire changes");
+    if (std.meta.fields(wire.AttachmentWire).len != 8) @compileError("Review history fixture coverage after AttachmentWire changes");
     if (std.meta.fields(wire.AttachmentMediaWire).len != 5) @compileError("Review history fixture coverage after AttachmentMediaWire changes");
     if (std.meta.fields(wire.FileReferencePositionWire).len != 2) @compileError("Review history fixture coverage after FileReferencePositionWire changes");
     if (std.meta.fields(wire.FileReferenceRangeWire).len != 2) @compileError("Review history fixture coverage after FileReferenceRangeWire changes");

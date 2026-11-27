@@ -24,6 +24,8 @@ import {
   useAutosizeTextarea,
 } from "../../components/ui/textarea.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
+import { ConversationFilePicker } from "./ConversationFilePicker.tsx";
+import type { ConversationFile } from "./conversation-files.ts";
 import { ComposerAddMenu } from "./ComposerAddMenu.tsx";
 import {
   AttachmentThumbnail,
@@ -99,6 +101,7 @@ function attachmentErrorMessage(reason: string): MessageId {
     staging_capacity: "attachment.error.staging_capacity",
     read_failed: "attachment.error.read_failed",
     file_changed: "attachment.error.file_changed",
+    reference_unavailable: "attachment.error.reference_unavailable",
     shutting_down: "attachment.error.shutting_down",
     invalid_transfer: "attachment.error.invalid_transfer",
     stale_transfer: "attachment.error.stale_transfer",
@@ -160,6 +163,10 @@ export function ComposerFooter({
   stopDisabled,
   onDraftChange,
   onChooseAttachments,
+  referenceFiles,
+  onChooseReference,
+  onLoadEarlierFiles,
+  loadingEarlierFiles,
   onDropFiles,
   onPasteImages,
   onCancelAttachments,
@@ -225,6 +232,10 @@ export function ComposerFooter({
   stopDisabled: boolean;
   onDraftChange: (value: ComposerDraft) => void;
   onChooseAttachments: () => void;
+  referenceFiles?: () => ConversationFile[];
+  onChooseReference?: (file: ConversationFile, detail: string) => void;
+  onLoadEarlierFiles?: () => void;
+  loadingEarlierFiles?: boolean;
   onDropFiles?: (files: File[]) => void;
   onPasteImages?: (files: File[]) => void;
   onCancelAttachments?: () => void;
@@ -249,6 +260,40 @@ export function ComposerFooter({
   onSelectModel: (id: string) => void;
 }) {
   const { t } = useI18n();
+  const [referenceScope, setReferenceScope] = useState<string | null>(null);
+  /// The `@` that opened the picker: typed like any other character, removed
+  /// once a file is chosen in its place, kept when the picker is dismissed.
+  /// `typed` is false between the key and the text change that inserts it.
+  const referenceTrigger = useRef<{
+    scope: string;
+    offset: number;
+    typed: boolean;
+  } | null>(null);
+  useEffect(() => {
+    setReferenceScope(null);
+    referenceTrigger.current = null;
+  }, [draftScope, composeDisabled, attachmentActionsDisabled]);
+  function openReferencePicker() {
+    referenceTrigger.current = null;
+    setReferenceScope(draftScope);
+  }
+  function chooseReference(file: ConversationFile, detail: string) {
+    const trigger = referenceTrigger.current;
+    referenceTrigger.current = null;
+    if (
+      trigger?.typed &&
+      trigger.scope === draftScope &&
+      text[trigger.offset] === "@"
+    ) {
+      updateText(
+        text.slice(0, trigger.offset) + text.slice(trigger.offset + 1),
+      );
+      window.requestAnimationFrame(() =>
+        textareaRef.current?.setSelectionRange(trigger.offset, trigger.offset),
+      );
+    }
+    onChooseReference?.(file, detail);
+  }
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [activeCandidateKey, setActiveCandidateKey] = useState<string | null>(
     null,
@@ -684,6 +729,22 @@ export function ComposerFooter({
           }
         >
           {contextHeader}
+          {referenceFiles &&
+            onChooseReference &&
+            referenceScope === draftScope &&
+            !composeDisabled &&
+            !attachmentActionsDisabled && (
+              <ConversationFilePicker
+                loadThumbnail={loadAttachmentThumbnail}
+                files={referenceFiles}
+                anchor={attachmentButtonRef}
+                onClose={() => setReferenceScope(null)}
+                onChoose={chooseReference}
+                onLoadEarlier={onLoadEarlierFiles}
+                loading={loadingEarlierFiles}
+                textareaRef={textareaRef}
+              />
+            )}
           {draft.kind === "multimodal" && (
             <div
               className="composer-attachments"
@@ -720,15 +781,25 @@ export function ComposerFooter({
                       <Icon name="skill-file" />
                     </span>
                   )}
-                  <span className="composer-attachment-copy">
-                    <strong dir="auto" title={attachment.displayName}>
-                      {attachment.displayName}
-                    </strong>
+                  <div className="composer-attachment-copy">
+                    {attachment.reference ? (
+                      <details className="composer-reference-detail">
+                        <summary title={attachment.displayName}>
+                          <strong dir="auto">{attachment.displayName}</strong>
+                          <Icon name="chevron-right" aria-hidden="true" />
+                        </summary>
+                        <small dir="auto">{attachment.reference.detail}</small>
+                      </details>
+                    ) : (
+                      <strong dir="auto" title={attachment.displayName}>
+                        {attachment.displayName}
+                      </strong>
+                    )}
                     <small>
                       {attachmentTypeLabel(attachment, t)} ·{" "}
                       {formatAttachmentSize(attachment.sizeBytes)}
                     </small>
-                  </span>
+                  </div>
                   <Button
                     type="button"
                     variant="ghost"
@@ -832,8 +903,37 @@ export function ComposerFooter({
               onChange={(event) => {
                 setMenuDismissed(false);
                 updateText(event.target.value);
+                // Open the picker only once the `@` is in the text, so the
+                // character is never lost to the popup taking focus first.
+                const trigger = referenceTrigger.current;
+                if (trigger && !trigger.typed) {
+                  if (event.target.value[trigger.offset] === "@") {
+                    trigger.typed = true;
+                    setReferenceScope(trigger.scope);
+                  } else referenceTrigger.current = null;
+                }
               }}
-              onKeyDown={keyboard.onTextKeyDown}
+              onKeyDown={(event) => {
+                const input = event.currentTarget;
+                if (referenceTrigger.current?.typed === false)
+                  referenceTrigger.current = null;
+                if (
+                  event.key === "@" &&
+                  referenceFiles &&
+                  fileDropEnabled &&
+                  !event.nativeEvent.isComposing &&
+                  input.selectionStart === input.selectionEnd &&
+                  (input.selectionStart === 0 ||
+                    /\s/.test(input.value[input.selectionStart - 1]!))
+                ) {
+                  referenceTrigger.current = {
+                    scope: draftScope,
+                    offset: input.selectionStart,
+                    typed: false,
+                  };
+                }
+                keyboard.onTextKeyDown(event);
+              }}
               onPaste={pasteImages}
             />
           </div>
@@ -892,7 +992,7 @@ export function ComposerFooter({
             aria-label={t("run.context")}
           >
             <div className="composer-context-actions">
-              {draft.kind !== "skill" &&
+              {(draft.kind !== "skill" || attachmentsEnabled) &&
                 (attachmentBusy ? (
                   <Button
                     type="button"
@@ -939,6 +1039,7 @@ export function ComposerFooter({
                     skillText={selectedSkill ? null : text}
                     skillCatalog={skillCatalog}
                     onChooseAttachments={onChooseAttachments}
+                    onReferenceFiles={referenceFiles && openReferencePicker}
                     onRefreshSkills={onRefreshSkillCatalog}
                     onChooseSkill={chooseCandidate}
                   />

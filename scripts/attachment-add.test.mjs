@@ -7,6 +7,7 @@ import {
   decodeAttachmentAddAcceptance,
   decodeAttachmentCancelResult,
 } from "../frontend/src/bridge/decode-contracts.ts";
+import { AttachmentAddOperation } from "../frontend/src/bridge/attachment-receive.ts";
 const wire = JSON.parse(
   readFileSync(
     new URL("../src/bridge/attachment_add.fixture", import.meta.url),
@@ -44,4 +45,23 @@ test("unified async attachment fixture preserves exact result variants", () => {
       writerStopped: true,
     }),
   );
+});
+
+test("conversation references send exact Host targets and hand off ordinary ready attachments", async () => {
+  for (const { source } of [wire.workspaceFile, wire.messageFile]) {
+    const add = new AttachmentAddOperation(
+      {
+        begin: async (value) => {
+          assert.deepEqual(value, source);
+          return wire.ready;
+        },
+      },
+      131072,
+    );
+    assert.deepEqual(await add.run(source), wire.ready);
+    assert.equal(
+      add.handoff(() => true),
+      true,
+    );
+  }
 });

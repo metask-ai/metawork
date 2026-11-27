@@ -16,8 +16,10 @@ import {
 } from "../../components/ai/Markdown.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
+import { Dialog } from "../../components/ui/dialog.tsx";
 import { Tabs } from "../../components/ui/tabs.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import { ImageLightboxPopup } from "../../components/ImageLightboxPopup.tsx";
 import { HighlightedSource } from "./HighlightedSource.tsx";
 import type { FilePreviewMode } from "./useTaskPanelViewStates.ts";
 export type FilePreviewViewState = {
@@ -36,28 +38,46 @@ function PreviewedImage({
   file: MenuFile | null;
   onFailure: () => void;
 }) {
-  const [decoded, setDecoded] = useState<string | null>(null);
+  const { t } = useI18n();
+  const [decoded, setDecoded] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const trigger = useFileMenuTrigger(
     file && {
       ...file,
-      copyImage: previewImageCopy(image, decoded === image.id),
+      copyImage: previewImageCopy(image, decoded),
     },
   );
   return (
-    <div
-      className="task-panel-preview-image focus-ring"
-      role="group"
-      tabIndex={0}
-      aria-label={displayPath}
-      {...trigger}
+    <Dialog.Root
+      open={expanded}
+      onOpenChange={(open) => {
+        if (!open || (decoded && image.valid() && image.current()))
+          setExpanded(open);
+      }}
     >
-      <PreviewImageView
-        image={image}
-        alt={displayPath}
-        onReady={() => setDecoded(image.id)}
-        onFailure={onFailure}
-      />
-    </div>
+      <div className="task-panel-preview-image">
+        <Dialog.Trigger
+          className="task-panel-preview-image-open"
+          aria-label={t("file_preview.enlarge_image", { name: displayPath })}
+          aria-disabled={!decoded || undefined}
+          {...trigger}
+        >
+          <PreviewImageView
+            image={image}
+            alt={displayPath}
+            onReady={() => setDecoded(true)}
+            onFailure={() => {
+              setDecoded(false);
+              setExpanded(false);
+              onFailure();
+            }}
+          />
+        </Dialog.Trigger>
+      </div>
+      <ImageLightboxPopup name={displayPath.split("/").at(-1) || displayPath}>
+        <PreviewImageView image={image} alt={displayPath} />
+      </ImageLightboxPopup>
+    </Dialog.Root>
   );
 }
 
@@ -139,6 +159,10 @@ export function FilePreviewView({
             )}
             {state.preview.image ? (
               <PreviewedImage
+                key={JSON.stringify([
+                  state.selected.id,
+                  state.preview.image.id,
+                ])}
                 image={state.preview.image}
                 displayPath={state.selected.displayPath}
                 file={file}

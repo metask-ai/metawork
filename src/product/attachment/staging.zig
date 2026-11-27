@@ -20,7 +20,20 @@ pub fn reject(err: anyerror) Rejection {
         else => .read_failed,
     };
 }
+/// A Product-authorized file. Its opener operates beneath the supplied root.
+pub const ReferenceSource = struct {
+    root: []const u8,
+    relative: []const u8,
+    display_name: []const u8,
+    expected_size: ?u64 = null,
+    /// A file that is not an image stays where it is: only its path is handed
+    /// on, so nothing is copied and the staging byte limits do not apply. An
+    /// image is still copied, because its pixels are the visual input.
+    in_place: bool = false,
+    open_fn: *const fn (std.Io, []const u8, []const u8) anyerror!attachment.store.Source,
+};
 pub const Input = struct {
+    reference: ?ReferenceSource = null,
     completion_id: u64,
     path_count: usize,
     paths: []const u8,
@@ -28,7 +41,7 @@ pub const Input = struct {
     file_store: *attachment.FileStore,
 };
 pub const Phase = enum { probed, copied, initialized, written, validated };
-pub const Completion = struct { completion_id: u64, phase: Phase, rejection: ?Rejection, cancelled: bool, files: []const attachment.ReceiveFile };
+pub const Completion = struct { completion_id: u64, phase: Phase, rejection: ?Rejection, cancelled: bool, files: []const attachment.ReceiveFile, kept_in_place: bool = false };
 pub const Taken = struct { job: *anyopaque, completion: Completion };
 pub const Notifier = struct { context: ?*anyopaque = null, wake_fn: *const fn (?*anyopaque) bool };
 pub const ExecutorJob = struct { identity: *anyopaque, context: *anyopaque, execute_fn: *const fn (*anyopaque) void, cancel_fn: *const fn (*anyopaque) void };
@@ -48,6 +61,13 @@ const Job = struct {
     cancelled: std.atomic.Value(bool) = .init(false),
     rejection: ?Rejection = null,
     paths: []u8 = &.{},
+    reference_root: []u8 = &.{},
+    reference_name: []u8 = &.{},
+    expected_size: ?u64 = null,
+    open_reference: ?@FieldType(ReferenceSource, "open_fn") = null,
+    in_place: bool = false,
+    /// The probe found an in-place reference is not an image: no copy follows.
+    kept_in_place: bool = false,
     metadata: []attachment.ReceiveFile = &.{},
     sources: []attachment.store.Source = &.{},
     source_count: usize = 0,
@@ -85,16 +105,29 @@ const Job = struct {
                     try self.check();
                     const path = split.next() orelse return error.InvalidInput;
                     if (path.len == 0) return error.ReadFailed;
-                    if (!std.fs.path.isAbsolute(path)) return error.ReadFailed;
-                    const source = try self.file_store.openSource(path);
+                    const source = if (self.open_reference) |open|
+                        try open(self.file_store.io, self.reference_root, path)
+                    else if (std.fs.path.isAbsolute(path))
+                        try self.file_store.openSource(path)
+                    else
+                        return error.ReadFailed;
                     self.sources[index] = source;
                     self.source_count += 1;
+                    if (self.expected_size) |size| if (source.before.size != size) return error.FileChanged;
                     meta.* = .{
-                        .display_name = std.fs.path.basename(path),
+                        .display_name = if (self.open_reference != null) self.reference_name else std.fs.path.basename(path),
                         .size_bytes = std.math.cast(usize, source.before.size) orelse return error.FileTooLarge,
                     };
                 }
                 if (split.next() != null) return error.InvalidInput;
+                if (self.in_place) {
+                    var prefix: [12]u8 = undefined;
+                    const count = self.sources[0].handle.readPositionalAll(self.file_store.io, &prefix, 0) catch return error.ReadFailed;
+                    if (attachment.detectFormat(prefix[0..count]) == null) {
+                        self.kept_in_place = true;
+                        self.closeSources();
+                    }
+                }
             },
             .copied => {
                 for (self.targets, self.sources) |file, source| {
@@ -124,7 +157,7 @@ const Job = struct {
     }
     fn deinit(self: *Job) void {
         self.closeSources();
-        for ([_][]u8{ self.paths, self.chunk }) |bytes| {
+        for ([_][]u8{ self.paths, self.chunk, self.reference_root, self.reference_name }) |bytes| {
             std.crypto.secureZero(u8, bytes);
             self.lane.allocator.free(bytes);
         }
@@ -181,6 +214,14 @@ pub const Lane = struct {
         try self.begin(.{ .completion_id = completion_id, .path_count = path_count, .paths = paths, .limits = runtime.limits, .file_store = runtime.file_store orelse return error.StagingCapacity });
         self.operation = .{ .completion_id = completion_id, .product_id = id };
     }
+    pub fn beginReference(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64, reference: ReferenceSource) Error!void {
+        errdefer _ = runtime.cancelPreparing(id);
+        if (self.operation != null) return error.InputBusy;
+        if (runtime.preparing != id) return error.StaleTransfer;
+        try self.begin(.{ .completion_id = completion_id, .path_count = 1, .paths = reference.relative, .reference = reference, .limits = runtime.limits, .file_store = runtime.file_store orelse return error.StagingCapacity });
+        self.operation = .{ .completion_id = completion_id, .product_id = id };
+    }
+
     pub fn beginPreparedBytes(self: *Lane, runtime: *attachment.Runtime, completion_id: u64, id: u64, files: []const attachment.ReceiveFile) Error!void {
         if (self.operation != null) return error.InputBusy;
         if (runtime.preparing != id) return error.StaleTransfer;
@@ -229,6 +270,16 @@ pub const Lane = struct {
                     continue;
                 };
                 self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, if (op.cancel_requested or raw.cancelled) .cancelled else .{ .rejected = raw.rejection.? });
+                continue;
+            }
+            if (raw.phase == .probed and raw.kept_in_place) {
+                self.operation = null;
+                var descriptors: [1]attachment.Descriptor = undefined;
+                const ready = runtime.publishInPlace(op.product_id, raw.files[0], &descriptors) catch |err| {
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = reject(err) });
+                    continue;
+                };
+                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .ready = ready });
                 continue;
             }
             if (raw.phase == .probed) {
@@ -335,6 +386,13 @@ pub const Lane = struct {
         if (input.path_count == 0 or input.paths.len == 0) return error.InvalidInput;
         const job = try self.allocate(input.completion_id, input.file_store);
         errdefer self.release(.{ .job = job, .completion = undefined });
+        if (input.reference) |ref| {
+            job.reference_root = try self.allocator.dupe(u8, ref.root);
+            job.reference_name = try self.allocator.dupe(u8, ref.display_name);
+            job.open_reference = ref.open_fn;
+            job.expected_size = ref.expected_size;
+            job.in_place = ref.in_place and input.path_count == 1;
+        }
         job.paths = try self.allocator.dupe(u8, input.paths);
         job.metadata = try self.allocator.alloc(attachment.ReceiveFile, input.path_count);
         job.sources = try self.allocator.alloc(attachment.store.Source, input.path_count);
@@ -390,7 +448,7 @@ pub const Lane = struct {
         self.completions[self.head] = null;
         self.head = (self.head + 1) % max_in_flight;
         self.completion_count -= 1;
-        return .{ .job = job, .completion = .{ .completion_id = job.completion_id, .phase = job.phase, .rejection = job.rejection, .cancelled = job.cancelled.load(.acquire), .files = job.metadata } };
+        return .{ .job = job, .completion = .{ .completion_id = job.completion_id, .phase = job.phase, .rejection = job.rejection, .cancelled = job.cancelled.load(.acquire), .files = job.metadata, .kept_in_place = job.kept_in_place } };
     }
     fn release(self: *Lane, taken: Taken) void {
         const job: *Job = @ptrCast(@alignCast(taken.job));

@@ -1,14 +1,24 @@
 import type {
+  FileTarget,
+  MediaTarget,
   AttachmentAddResult,
   AttachmentAddBeginResult,
   AttachmentAddAcceptance,
   AttachmentCancelResult,
 } from "./contracts.ts";
+export type ReferenceSource =
+  | { kind: "workspace_file"; target: FileTarget }
+  | {
+      kind: "message_file";
+      attachment: Extract<MediaTarget, { kind: "messageAttachment" }>;
+    };
 export type AddSource =
+  | ReferenceSource
   | { kind: "picker" }
   | { kind: "native_paths"; paths: string[] }
   | { kind: "file_bytes"; files: readonly File[] };
 export type AddWireSource =
+  | ReferenceSource
   | { kind: "picker" }
   | { kind: "native_paths"; paths: string[] }
   | { kind: "file_bytes"; files: { name: string; sizeBytes: string }[] };

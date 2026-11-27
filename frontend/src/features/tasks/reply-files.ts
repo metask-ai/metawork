@@ -1,4 +1,5 @@
 import type {
+  FileActionHandler,
   FileActionState,
   FileDescriptionResult,
   FilePreview,
@@ -14,7 +15,9 @@ import type {
 } from "../../components/FileMenu.tsx";
 import type { MessageId } from "../../i18n/context.ts";
 import { findRunFileReference } from "../../workbench/run-file-references.ts";
-import type { FileReferenceResult } from "./RunOutputs.tsx";
+/** `edit_reported`: it failed, and the Composer already says why. */
+export type FileReferenceResult =
+  "edit_prepared" | "cancelled" | "edit_reported" | "edit_unavailable";
 
 export type FilePreviewLoader = (
   target: FileTarget,
@@ -39,23 +42,55 @@ export function menuFileTarget(file: MenuFile): FileTarget {
   return file.target as FileTarget;
 }
 
-/**
- * What to say about a finished action. A file that was opened or shown in its
- * folder answers for itself; the rest is said where it was asked.
- */
-export function fileMenuOutcome(
+export async function performFileMenuAction(
+  file: MenuFile,
   action: FileMenuAction,
+  signal: AbortSignal,
+  runAction: FileActionHandler,
+  reference: (
+    target: FileTarget,
+    path: string,
+    signal: AbortSignal,
+  ) => Promise<FileReferenceResult>,
+): Promise<FileMenuOutcome> {
+  const target = menuFileTarget(file);
+  try {
+    const state = await runAction(
+      target,
+      action === "reference" ? "check_current" : action,
+      signal,
+    );
+    if (action === "reference" && state === "ready")
+      return signal.aborted
+        ? null
+        : fileMenuOutcome(await reference(target, file.displayPath, signal));
+    return fileMenuOutcome(state, action);
+  } catch {
+    if (action === "save") return { message: "outputs.state.save_unknown" };
+    return signal.aborted ? null : { message: "outputs.state.failed" };
+  }
+}
+
+export function fileMenuOutcome(
   state: FileActionState | FileReferenceResult,
+  action?: FileMenuAction,
 ): FileMenuOutcome {
   switch (state) {
     case "opened":
     case "revealed":
-      return null;
+    case "saved":
     case "path_copied":
-      return { message: "outputs.state.path_copied", brief: true };
-    // Nothing in the menu compares with a delivery.
+    case "edit_prepared":
+    case "edit_reported":
+    case "cancelled":
+      return null;
     case "changed":
-      return { message: "outputs.state.file_changed" };
+      return {
+        message:
+          action === "check"
+            ? "outputs.state.changed"
+            : "outputs.state.file_changed",
+      };
     default:
       return { message: `outputs.state.${state}` };
   }
