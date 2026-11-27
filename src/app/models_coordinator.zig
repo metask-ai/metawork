@@ -873,6 +873,76 @@ test "the catalog timer runs only when Models names a time, and a renewal asks f
     try std.testing.expectEqual(@as(?u64, models_metask.refresh_interval_ms), fixture.armed_ms);
 }
 
+test "a catalog request takes a credential only when due, and goes with the account it was for" {
+    const Fixture = struct {
+        due_now: bool = false,
+        dropped: bool = false,
+        taken: usize = 0,
+        begun: usize = 0,
+        cancelled: std.atomic.Value(bool) = .init(false),
+
+        fn take(context: *anyopaque) std.mem.Allocator.Error!?account_contract.OwnedAuthorizationLease {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.taken += 1;
+            return account_contract.OwnedAuthorizationLease.init(std.testing.allocator, "account-drop", "drop-access", 4) catch |err| switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => unreachable,
+            };
+        }
+        fn follow(context: *anyopaque, _: ?[]const u8, _: u64) models_contract.MetaskFollow {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return .{ .changed = self.dropped, .dropped = self.dropped };
+        }
+        fn due(context: *anyopaque, _: u64) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.due_now;
+        }
+        fn begin(context: *anyopaque, _: models_contract.CatalogRequestKind, _: models_contract.CatalogCredential, _: u64) models_contract.CatalogRequestStart {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.begun += 1;
+            self.due_now = false;
+            return .{ .outcome = .{ .started = 1 }, .changed = false };
+        }
+        /// Underway until cancelled.
+        fn modelsHttp(context: *anyopaque, request: metask_transport.Request, _: []u8) metask_transport.TransportError!metask_transport.Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            request.control.?.cancellation.wait();
+            self.cancelled.store(true, .release);
+            return error.Cancelled;
+        }
+        fn notify(_: *anyopaque) void {}
+    };
+    var fixture: Fixture = .{};
+    var management: control_ports.ModelsManagement = undefined;
+    management.context = &fixture;
+    management.follow_metask_principal_fn = Fixture.follow;
+    management.metask_catalog_due_fn = Fixture.due;
+    management.begin_metask_catalog_request_fn = Fixture.begin;
+    var coordinator = Coordinator.init(.{ .context = &fixture, .take_fn = Fixture.take }, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
+    coordinator.setProbeNotifier(.{ .context = &fixture, .notify_fn = Fixture.notify });
+    const available: account_contract.Authorization = .{ .available = .{ .account_id = "account-drop", .generation = 4 } };
+    // Nothing due: no credential is taken, on a publication or a wake.
+    coordinator.follow(available);
+    coordinator.onTimer();
+    try std.testing.expectEqual(@as(usize, 0), fixture.taken);
+    try std.testing.expectEqual(@as(usize, 0), fixture.begun);
+    fixture.due_now = true;
+    coordinator.onTimer();
+    try std.testing.expectEqual(@as(usize, 1), fixture.taken);
+    try std.testing.expectEqual(@as(usize, 1), fixture.begun);
+    // A publication that keeps the account leaves the request alone.
+    coordinator.follow(available);
+    try std.testing.expect(coordinator.catalog_job != null);
+    try std.testing.expect(!fixture.cancelled.load(.acquire));
+    // One that drops it cancels, joins and frees the request, its
+    // credential copy included.
+    fixture.dropped = true;
+    coordinator.follow(.signed_out);
+    try std.testing.expect(coordinator.catalog_job == null);
+    try std.testing.expect(fixture.cancelled.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), fixture.taken);
+}
+
 test "a media request refused for its token tells Account the generation it sends" {
     const Fixture = struct {
         status: u16 = 401,

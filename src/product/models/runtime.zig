@@ -61,8 +61,11 @@ pub const TestSupport = if (builtin.is_test) struct {
     /// nothing one test left in it reaches the next.
     pub var shared_credentials: FakeMetaskCredentials = .{};
 
+    /// A port the test installed itself stays: the helper only installs the
+    /// shared one where none, or the shared one, is.
     pub fn useSharedCredentials(runtime: *Runtime, account: []const u8, token: []const u8) void {
         shared_credentials = FakeMetaskCredentials.init(account, token, FakeMetaskCredentials.default_generation);
+        if (runtime.metask_credentials) |installed| if (installed.context != @as(*anyopaque, @ptrCast(&shared_credentials))) return;
         runtime.metask_credentials = shared_credentials.port();
     }
 
@@ -289,6 +292,9 @@ pub const Runtime = struct {
     const Metask = struct {
         /// The account followed; empty while none is signed in.
         principal: FixedText(contract.Limits.principal_ref_bytes) = .{},
+        /// The credential generation of the last Account publication
+        /// followed; 0 while no account is.
+        followed_generation: u64 = 0,
         /// No account because one signed out or Models stopped.
         signed_out: bool = false,
         /// That account's catalog; a legal empty one is content too.
@@ -304,7 +310,9 @@ pub const Runtime = struct {
             failed: struct { code: contract.ModelsError, generation: u64 },
         } = .none,
         /// The one request underway.
-        request: ?struct { id: u64, generation: u64, visible: bool, user: bool } = null,
+        /// `followed`: the publication followed when it began; another one
+        /// since means Account has a newer credential to try.
+        request: ?struct { id: u64, generation: u64, followed: u64, visible: bool, user: bool } = null,
         next_request_id: u64 = 1,
         /// When to send the next request and why.
         next: union(enum) {
@@ -691,8 +699,11 @@ pub const Runtime = struct {
         self.assertMainThread();
         const principal = principal_ref orelse {
             if (self.metask.principal.len == 0) {
-                const changed = !self.metask.signed_out;
-                self.metask.signed_out = true;
+                // Signed out only after an account: at a cold start without
+                // one nothing was lost.
+                const changed = !self.metask.signed_out and self.metask.followed_generation != 0;
+                if (changed) self.metask.signed_out = true;
+                self.metask.followed_generation = 0;
                 return .{ .changed = changed, .dropped = false };
             }
             const dropped = self.metask.request != null;
@@ -700,6 +711,7 @@ pub const Runtime = struct {
             return .{ .changed = true, .dropped = dropped };
         };
         if (std.mem.eql(u8, principal, self.metask.principal.view())) {
+            self.metask.followed_generation = generation;
             if (self.metask.request == null) {
                 const retry = switch (self.metask.next) {
                     .credential => true,
@@ -714,6 +726,7 @@ pub const Runtime = struct {
         }
         const dropped = self.metask.request != null;
         self.clearMetask(false);
+        self.metask.followed_generation = generation;
         // Account validated the account it gives; one Models could not hold
         // is no account here.
         if (!self.metask.principal.set(principal) or principal.len == 0) {
@@ -767,7 +780,10 @@ pub const Runtime = struct {
             .unavailable => null,
             .exhausted => {
                 if (kind == .user and self.metask.catalog == null) self.metask.load = .{ .loading = .{} };
-                self.settleMetaskFailure(self.metask.catalog == null and self.metask.load == .loading, 0, .{ .code = .local_resource_exhausted, .retryable = false }, now_ms);
+                // Nothing to do with the credential: the one of the moment
+                // is as good as tried, so only another one, or the beat,
+                // asks again.
+                self.settleMetaskFailure(self.metask.catalog == null and self.metask.load == .loading, self.metask.followed_generation, false, .{ .code = .local_resource_exhausted, .retryable = false }, now_ms);
                 return .{ .outcome = .{ .rejected = .local_resource_exhausted }, .changed = self.metaskChanged(before) };
             },
         } orelse {
@@ -782,6 +798,7 @@ pub const Runtime = struct {
         self.metask.request = .{
             .id = id,
             .generation = ready.generation,
+            .followed = self.metask.followed_generation,
             .visible = self.metask.catalog == null and self.metask.load == .loading,
             .user = kind == .user,
         };
@@ -830,7 +847,7 @@ pub const Runtime = struct {
             break :failure null;
         };
         if (failure) |code| {
-            self.settleMetaskFailure(request.visible, request.generation, .{ .code = code, .retryable = false }, now_ms);
+            self.settleMetaskFailure(request.visible, request.generation, request.followed != self.metask.followed_generation, .{ .code = code, .retryable = false }, now_ms);
         } else {
             self.metask.next = .{ .beat = now_ms +| metask_provider.refresh_interval_ms };
         }
@@ -843,14 +860,15 @@ pub const Runtime = struct {
         if (request.id != id) return false;
         const before = self.metaskFacts();
         self.metask.request = null;
-        self.settleMetaskFailure(request.visible, request.generation, failure, now_ms);
+        self.settleMetaskFailure(request.visible, request.generation, request.followed != self.metask.followed_generation, failure, now_ms);
         return self.metaskChanged(before);
     }
 
     /// A load gets one more try a moment later when that may help; then it
-    /// ends as failed and the beat takes over. A failure out of sight
-    /// changes nothing anyone sees.
-    fn settleMetaskFailure(self: *Runtime, visible: bool, generation: u64, failure: contract.CatalogFailure, now_ms: u64) void {
+    /// ends as failed and the beat takes over, unless Account gave another
+    /// credential while this one was underway: that one is tried at once.
+    /// A failure out of sight changes nothing anyone sees.
+    fn settleMetaskFailure(self: *Runtime, visible: bool, generation: u64, superseded: bool, failure: contract.CatalogFailure, now_ms: u64) void {
         if (visible and self.metask.load == .loading) {
             if (failure.retryable and self.metask.load.loading.failures == 0) {
                 self.metask.load.loading.failures = 1;
@@ -862,7 +880,8 @@ pub const Runtime = struct {
             .failed => |*failed| failed.generation = generation,
             .none, .loading => {},
         };
-        self.metask.next = .{ .beat = now_ms +| metask_provider.refresh_interval_ms };
+        const again = superseded and self.metask.catalog == null and self.metask.load == .failed;
+        self.metask.next = if (again) .{ .soon = 0 } else .{ .beat = now_ms +| metask_provider.refresh_interval_ms };
     }
 
     /// The source identity of the account whose content is installed, in
@@ -1422,6 +1441,7 @@ pub const Runtime = struct {
     fn clearMetask(self: *Runtime, signed_out: bool) void {
         self.dropMetaskContent();
         self.metask.principal = .{};
+        self.metask.followed_generation = 0;
         self.metask.signed_out = signed_out;
         self.metask.load = .none;
         self.metask.request = null;
@@ -3153,7 +3173,8 @@ test "image preparation requires current lease and falls back only before sendin
     runtime.metask_credentials = credentials.port();
     try std.testing.expectEqual(contract.ManagementError.catalog_unavailable, runtime.prepareMediaCandidate(.image).rejected);
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", test_image_catalog));
-    runtime.metask_credentials = credentials.port();
+    // The helper left the port this test installed.
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&credentials)), runtime.metask_credentials.?.context);
     for (0..3) |case| {
         var wrong = TestSupport.FakeMetaskCredentials.init("principal", "fresh-secret", 17);
         switch (case) {
@@ -3182,10 +3203,12 @@ test "image preparation requires current lease and falls back only before sendin
         try std.testing.expectEqual(contract.ManagementError.model_not_found, runtime.prepareMediaCandidate(.image).rejected);
     }
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", absent));
+    // Each preparation reads the credential of its own moment.
+    credentials.set("principal", "later-secret");
     var fallback = runtime.prepareMediaCandidate(.image).ready;
     defer fallback.deinit();
     try std.testing.expectEqualStrings("other-image", fallback.input().selection.model_id);
-    try std.testing.expectEqualStrings("refreshed-secret", fallback.input().bearer);
+    try std.testing.expectEqualStrings("later-secret", fallback.input().bearer);
     try std.testing.expectEqualStrings("fresh-secret", candidate.input().bearer);
     try std.testing.expectEqualStrings(contract.metask_default_image_model, candidate.input().selection.model_id);
 }
@@ -3681,6 +3704,10 @@ test "the Metask catalog follows its account: a new credential changes nothing, 
     try std.testing.expectEqual(contract.CatalogState.needs_authentication, fixture.provider().catalog_state);
     try std.testing.expectEqual(contract.ModelsError.none, fixture.provider().error_code);
     try std.testing.expectEqual(@as(?u64, null), runtime.metaskCatalogNext());
+    // A cold start without an account lost none: no reason to show.
+    try std.testing.expect(!runtime.followMetaskPrincipal(null, 0).changed);
+    try std.testing.expectEqual(contract.CatalogState.needs_authentication, fixture.provider().catalog_state);
+    try std.testing.expectEqual(contract.ModelsError.none, fixture.provider().error_code);
     const first = runtime.followMetaskPrincipal("principal", 17);
     try std.testing.expect(first.changed and !first.dropped);
     try std.testing.expectEqual(contract.CatalogState.loading, fixture.provider().catalog_state);
@@ -3751,9 +3778,13 @@ test "a Metask refresh with content in hand publishes only a change of content" 
     try std.testing.expectEqual(contract.ModelsOperation.refreshing_catalog, runtime.view().operation);
     try std.testing.expect(try fixture.complete(own.outcome.started, &catalog_one, 3 * due));
     try std.testing.expectEqual(contract.ModelsOperation.idle, runtime.view().operation);
-    // In the background nothing comes due.
+    // In the background nothing comes due, however long it stays there.
     runtime.setMetaskCatalogActive(false);
     try std.testing.expectEqual(@as(?u64, null), runtime.metaskCatalogNext());
+    try std.testing.expect(!runtime.metaskCatalogDue(10 * due));
+    // Back in front after its time passed: due at once.
+    runtime.setMetaskCatalogActive(true);
+    try std.testing.expect(runtime.metaskCatalogDue(10 * due));
 }
 
 test "a Metask load tries once more before it fails, and stays lit in between" {
@@ -3813,6 +3844,31 @@ test "a failed Metask load tries once with another credential, out of sight, and
     try std.testing.expect(try fixture.complete(quiet.outcome.started, &catalog_one, 2_000));
     try std.testing.expectEqual(contract.CatalogState.ready, fixture.provider().catalog_state);
     try std.testing.expectEqual(contract.ModelsOperation.idle, runtime.view().operation);
+}
+
+test "a Metask load that fails after Account renewed under it tries the new credential at once" {
+    var fixture: MetaskCatalogFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    const retry = metask_provider.retry_delay_ms;
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    _ = runtime.failMetaskCatalogRequest(fixture.begin(.due, 17, 0).outcome.started, .{ .code = .catalog_unavailable, .retryable = true }, 0);
+    // The second try goes out with 17, and Account renews while it is underway.
+    const second = fixture.begin(.due, 17, retry).outcome.started;
+    _ = runtime.followMetaskPrincipal("principal", 18);
+    try std.testing.expect(runtime.failMetaskCatalogRequest(second, .{ .code = .catalog_unavailable, .retryable = true }, retry));
+    try std.testing.expectEqual(contract.CatalogState.failed, fixture.provider().catalog_state);
+    // Not the beat: 18 has not been tried.
+    try std.testing.expect(runtime.metaskCatalogDue(retry));
+    const third = fixture.begin(.due, 18, retry);
+    try std.testing.expect(!third.changed);
+    try std.testing.expect(!runtime.failMetaskCatalogRequest(third.outcome.started, .{ .code = .catalog_unavailable, .retryable = true }, retry));
+    // 18 failed too: now the beat.
+    try std.testing.expect(!runtime.metaskCatalogDue(retry));
+    try std.testing.expectEqual(@as(?u64, null), runtime.metaskCatalogNext());
+    runtime.setMetaskCatalogActive(true);
+    try std.testing.expectEqual(@as(?u64, retry + metask_provider.refresh_interval_ms), runtime.metaskCatalogNext());
 }
 
 test "a Metask request without a credential waits for Account, and a reset loads the catalog again" {
