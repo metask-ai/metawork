@@ -261,9 +261,39 @@ export function ComposerFooter({
 }) {
   const { t } = useI18n();
   const [referenceScope, setReferenceScope] = useState<string | null>(null);
+  /// The `@` that opened the picker: typed like any other character, removed
+  /// once a file is chosen in its place, kept when the picker is dismissed.
+  /// `typed` is false between the key and the text change that inserts it.
+  const referenceTrigger = useRef<{
+    scope: string;
+    offset: number;
+    typed: boolean;
+  } | null>(null);
   useEffect(() => {
     setReferenceScope(null);
+    referenceTrigger.current = null;
   }, [draftScope, composeDisabled, attachmentActionsDisabled]);
+  function openReferencePicker() {
+    referenceTrigger.current = null;
+    setReferenceScope(draftScope);
+  }
+  function chooseReference(file: ConversationFile, detail: string) {
+    const trigger = referenceTrigger.current;
+    referenceTrigger.current = null;
+    if (
+      trigger?.typed &&
+      trigger.scope === draftScope &&
+      text[trigger.offset] === "@"
+    ) {
+      updateText(
+        text.slice(0, trigger.offset) + text.slice(trigger.offset + 1),
+      );
+      window.requestAnimationFrame(() =>
+        textareaRef.current?.setSelectionRange(trigger.offset, trigger.offset),
+      );
+    }
+    onChooseReference?.(file, detail);
+  }
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [activeCandidateKey, setActiveCandidateKey] = useState<string | null>(
     null,
@@ -709,7 +739,7 @@ export function ComposerFooter({
                 files={referenceFiles}
                 anchor={attachmentButtonRef}
                 onClose={() => setReferenceScope(null)}
-                onChoose={onChooseReference}
+                onChoose={chooseReference}
                 onLoadEarlier={onLoadEarlierFiles}
                 loading={loadingEarlierFiles}
                 textareaRef={textareaRef}
@@ -873,9 +903,20 @@ export function ComposerFooter({
               onChange={(event) => {
                 setMenuDismissed(false);
                 updateText(event.target.value);
+                // Open the picker only once the `@` is in the text, so the
+                // character is never lost to the popup taking focus first.
+                const trigger = referenceTrigger.current;
+                if (trigger && !trigger.typed) {
+                  if (event.target.value[trigger.offset] === "@") {
+                    trigger.typed = true;
+                    setReferenceScope(trigger.scope);
+                  } else referenceTrigger.current = null;
+                }
               }}
               onKeyDown={(event) => {
                 const input = event.currentTarget;
+                if (referenceTrigger.current?.typed === false)
+                  referenceTrigger.current = null;
                 if (
                   event.key === "@" &&
                   referenceFiles &&
@@ -885,9 +926,13 @@ export function ComposerFooter({
                   (input.selectionStart === 0 ||
                     /\s/.test(input.value[input.selectionStart - 1]!))
                 ) {
-                  event.preventDefault();
-                  setReferenceScope(draftScope);
-                } else keyboard.onTextKeyDown(event);
+                  referenceTrigger.current = {
+                    scope: draftScope,
+                    offset: input.selectionStart,
+                    typed: false,
+                  };
+                }
+                keyboard.onTextKeyDown(event);
               }}
               onPaste={pasteImages}
             />
@@ -994,9 +1039,7 @@ export function ComposerFooter({
                     skillText={selectedSkill ? null : text}
                     skillCatalog={skillCatalog}
                     onChooseAttachments={onChooseAttachments}
-                    onReferenceFiles={
-                      referenceFiles && (() => setReferenceScope(draftScope))
-                    }
+                    onReferenceFiles={referenceFiles && openReferencePicker}
                     onRefreshSkills={onRefreshSkillCatalog}
                     onChooseSkill={chooseCandidate}
                   />

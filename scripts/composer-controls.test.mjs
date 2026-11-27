@@ -4000,9 +4000,52 @@ test("Add and @ select the same conversation file without changing the instructi
   composer.textarea.focus();
   composer.textarea.setSelectionRange(0, 0);
   await user.keyboard("@");
+  // The `@` is typed like any character; choosing a file takes its place.
+  assert.equal(composer.textarea.value, "@请检查当前实现");
   await user.click(await screen.findByRole("button", { name: /quote.xlsx/ }));
   assert.deepEqual(chosen, [file.key, file.key]);
   assert.equal(composer.textarea.value, "请检查当前实现");
+  assert.equal(composer.submissions(), 0);
+});
+
+test("@ stays in the text when the conversation file picker is dismissed", async () => {
+  const user = userEvent.setup({ document });
+  const chosen = [];
+  const composer = renderComposer({
+    attachmentsEnabled: true,
+    referenceFiles: () => [
+      {
+        key: "run:7:0",
+        name: "quote.xlsx",
+        time: "1000",
+        available: true,
+        source: {
+          kind: "message_file",
+          attachment: {
+            kind: "messageAttachment",
+            taskId: "3",
+            message: { kind: "run", runId: "7" },
+            index: 0,
+          },
+        },
+      },
+    ],
+    onChooseReference: (item) => chosen.push(item.key),
+  });
+  composer.textarea.focus();
+  composer.textarea.setSelectionRange(0, 0);
+  await user.keyboard("@");
+  await screen.findByRole("button", { name: /quote.xlsx/ });
+  await user.keyboard("{Escape}");
+  await waitFor(() =>
+    assert.equal(screen.queryByRole("button", { name: /quote.xlsx/ }), null),
+  );
+  assert.equal(composer.textarea.value, "@请检查当前实现");
+  assert.deepEqual(chosen, []);
+  // Text written after the `@`, like a decorator, is ordinary input.
+  composer.textarea.setSelectionRange(1, 1);
+  await user.keyboard("Override ");
+  assert.equal(composer.textarea.value, "@Override 请检查当前实现");
   assert.equal(composer.submissions(), 0);
 });
 
