@@ -2038,6 +2038,13 @@ pub const Runtime = struct {
     fn revalidateFileAction(self: *const Runtime, input: *const file_action.Input) file_target.Error!void {
         if (input.security_epoch == 0 or input.security_epoch != self.projection_security_epoch)
             return error.StaleSecurityEpoch;
+        try self.revalidateFileLocation(input);
+    }
+
+    /// The location half of that check, judged with today's authorization and
+    /// known credentials: the subject still resolves to exactly the location
+    /// it was admitted at.
+    fn revalidateFileLocation(self: *const Runtime, input: *const file_action.Input) file_target.Error!void {
         var scratch: [file_target.max_path_bytes]u8 = undefined;
         const current = switch (input.subject) {
             .file => |value| try self.resolveFileTarget(value.target, &scratch),
@@ -2244,7 +2251,6 @@ pub const Runtime = struct {
         completion_id: u64,
         attachment_id: ?u64 = null,
         task_id: u64,
-        epoch: u64,
         source: union(enum) {
             workspace: file_action.Input,
             message: struct { target: MessageAttachment, original: [32]u8 },
@@ -2256,10 +2262,15 @@ pub const Runtime = struct {
                 .message => |m| if (m.target.message == .submission) allocator.free(m.target.message.submission),
             }
         }
+        /// Judged under the current security epoch, not the one the file was
+        /// chosen under. The staged bytes are the draft's own, as an upload's
+        /// are, so a new epoch reads the reference again rather than losing
+        /// it; only a source that no longer resolves, or now shows a known
+        /// credential, refuses.
         fn current(input: *const ReferenceInput, control: *const Runtime) bool {
-            if (input.epoch == 0 or input.epoch != control.projection_security_epoch) return false;
+            if (control.projection_security_epoch == 0) return false;
             switch (input.source) {
-                .workspace => |*file| control.revalidateFileAction(file) catch return false,
+                .workspace => |*file| control.revalidateFileLocation(file) catch return false,
                 .message => |m| {
                     const record = control.task_runtime.messageFile(m.target.task_id, m.target.message, m.target.index) orelse return false;
                     const name = record.retainedOriginal() orelse return false;
@@ -2285,14 +2296,14 @@ pub const Runtime = struct {
         } else return error.Capacity;
         var scratch: [file_target.max_path_bytes]u8 = undefined;
         var source: attachment_staging.ReferenceSource = undefined;
-        var input: ReferenceInput = .{ .completion_id = completion, .task_id = undefined, .epoch = self.projection_security_epoch, .source = undefined };
+        var input: ReferenceInput = .{ .completion_id = completion, .task_id = undefined, .source = undefined };
         switch (target) {
             .file => |file| {
                 const location = try self.resolveFileTarget(file, &scratch);
                 input.task_id = switch (file) {
                     inline else => |v| v.task_id,
                 };
-                input.source = .{ .workspace = try file_action.Input.init(self.allocator, .{ .file = .{ .target = file, .action = .check_current } }, location, input.epoch) };
+                input.source = .{ .workspace = try file_action.Input.init(self.allocator, .{ .file = .{ .target = file, .action = .check_current } }, location, self.projection_security_epoch) };
                 source = .{ .root = location.root, .relative = location.relative, .display_name = std.fs.path.basename(location.relative), .open_fn = openReferenceSource };
             },
             .message => |msg| {
@@ -21887,6 +21898,8 @@ test "conversation attachment reference selects the exact retained upload and bi
     const target: Runtime.ReferenceTarget = .{ .message = .{ .task_id = 3, .message = .{ .run = 7 }, .index = 0 } };
     const staged_id = try stageTestConversationReference(control, target);
     try std.testing.expect(staged_id != 0);
+    // A new security epoch judges the reference again instead of losing it.
+    control.invalidateProjectionSecurity();
     const command: TaskRunInput = .{ .multimodal = .{ .text = "inspect", .attachment_ids = &.{staged_id} } };
     var staged: Runtime.StagedTaskInput = .{};
     try std.testing.expectError(error.UnknownAttachment, control.borrowTaskInput(4, command, &staged, false));
@@ -21926,6 +21939,10 @@ test "workspace attachment reference sends visual input and the workspace origin
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = staged_jpeg });
     const id = try stageTestConversationReference(control, target);
     try std.testing.expect(id != 0);
+    // A new security epoch reads the referenced image again, as it does an
+    // uploaded one, rather than restricting it.
+    control.invalidateProjectionSecurity();
+    try std.testing.expect(control.mediaThumbnail(.{ .draft_attachment = id }, &thumbnail_scratch) == .ready);
     const command: TaskRunInput = .{ .multimodal = .{ .text = "Revise this picture", .attachment_ids = &.{id} } };
     var staged: Runtime.StagedTaskInput = .{};
     const input = (try control.borrowTaskInput(3, command, &staged, false)).multimodal;
