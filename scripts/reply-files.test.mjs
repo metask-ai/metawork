@@ -503,6 +503,68 @@ test("cancelling waits for the Host, and a change of file, Task or connection dr
   assert.equal(requests[3].signal.aborted, true);
 });
 
+test("a file in progress locks only its own menu; the other files of its region stay usable", async () => {
+  const requests = [];
+  const perform = (file, action, signal) =>
+    new Promise((resolve) =>
+      requests.push({ path: file.displayPath, action, signal, resolve }),
+    );
+  const { handler } = handlerFixture({ perform });
+  render(
+    view(
+      handler,
+      createElement(
+        FileMenuScope,
+        {},
+        createElement(FileCard, {
+          name: "report.docx",
+          detail: ["2.3 MB"],
+          menu: menuFile(reference, "results/report.docx"),
+        }),
+        createElement(FileCard, {
+          name: "notes.txt",
+          detail: ["1 KB"],
+          menu: menuFile(
+            { ...reference, fileReferenceId: "file-3-1-1-2" },
+            "results/notes.txt",
+          ),
+        }),
+      ),
+    ),
+  );
+  const report = screen.getByRole("group", { name: /report\.docx/ });
+  const notes = screen.getByRole("group", { name: /notes\.txt/ });
+  // The save dialog stays open for as long as the person needs it.
+  let menu = await openMenu(report);
+  await act(async () =>
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Save as…" })),
+  );
+  await waitFor(() => assert.ok(!screen.queryByRole("menu")));
+  menu = await openMenu(notes);
+  assert.deepEqual(disabledItems(menu), []);
+  await act(async () =>
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Copy path" })),
+  );
+  await waitFor(() => assert.ok(!screen.queryByRole("menu")));
+  assert.deepEqual(
+    requests.map(({ path, action }) => [path, action]),
+    [
+      ["results/report.docx", "save"],
+      ["results/notes.txt", "copy_path"],
+    ],
+  );
+  menu = await openMenu(report);
+  assert.deepEqual(disabledItems(menu), five);
+  assert.ok(within(menu).getByRole("menuitem", { name: "Cancel" }));
+  await closeMenu(menu);
+  await act(async () => requests[1].resolve(null));
+  await act(async () => requests[0].resolve(null));
+  assert.equal(
+    report.closest(".file-menu-scope").getAttribute("aria-busy"),
+    "false",
+  );
+});
+
 test("an action's answer is said only where it is needed", () => {
   for (const state of [
     "opened",

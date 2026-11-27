@@ -187,6 +187,24 @@ test("delivery checks distinguish changed content and expose a truthful result",
   resolve("changed");
   await screen.findByText("Changed since delivery");
 });
+test("a check under way says so under its row and can be cancelled there", async () => {
+  let signal;
+  render(
+    view({
+      onAction: (_target, _action, s) => {
+        signal = s;
+        return new Promise(() => {});
+      },
+    }),
+  );
+  await chooseFileAction("Check file");
+  assert.ok(await screen.findByText("Checking file…"));
+  assert.ok(row().contains(screen.getByText("Checking file…")));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  assert.equal(signal.aborted, true);
+  assert.ok(screen.getByText("Cancelling…"));
+  assert.equal(screen.getByRole("button", { name: "Cancel" }).disabled, true);
+});
 test("cancellation through the reopened file menu waits for the Host; unknown save results remain visible", async () => {
   let finish, fail, signal;
   render(

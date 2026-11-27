@@ -14,6 +14,7 @@ import {
   type ContextMenuAnchor,
   type ContextMenuEvent,
 } from "./ui/context-menu-anchor.ts";
+import { Button } from "./ui/button.tsx";
 import { Icon } from "./ui/Icon.tsx";
 import { Menu } from "./ui/menu.tsx";
 
@@ -113,21 +114,23 @@ export function FileMenuScope({
   const popup = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLElement | null>(null);
   const keyboardOpen = useRef(false);
-  const active = useRef<AbortController | null>(null);
+  /** In-flight actions, one per file: another file's menu stays usable. */
+  const active = useRef(new Map<string, AbortController>());
   const [menu, setMenu] = useState<{
     file: MenuFile;
     anchor: ContextMenuAnchor;
   } | null>(null);
   const [open, setOpen] = useState(false);
-  const [pendingPath, setPendingPath] = useState<string | null>(null);
-  const [cancelling, setCancelling] = useState(false);
+  const [pending, setPending] = useState<
+    ReadonlyMap<string, { action: MenuAction; cancelling: boolean }>
+  >(new Map());
   const [notice, setNotice] = useState<FileMenuOutcome>(null);
 
   useEffect(
     () => () => {
-      active.current?.abort();
-      active.current = null;
-      setPendingPath(null);
+      for (const controller of active.current.values()) controller.abort();
+      active.current.clear();
+      setPending(new Map());
       setNotice(null);
       setOpen(false);
     },
@@ -160,11 +163,13 @@ export function FileMenuScope({
   );
 
   async function perform(file: MenuFile, action: MenuAction) {
-    if (!handler || active.current) return;
+    const path = file.displayPath;
+    if (!handler || active.current.has(path)) return;
     const controller = new AbortController();
-    active.current = controller;
-    setPendingPath(file.displayPath);
-    setCancelling(false);
+    active.current.set(path, controller);
+    setPending((current) =>
+      new Map(current).set(path, { action, cancelling: false }),
+    );
     setNotice(null);
     // An image is copied within the click: the clipboard asks for that.
     const outcome = await (
@@ -172,16 +177,32 @@ export function FileMenuScope({
         ? file.copyImage!(controller.signal)
         : handler.perform(file, action, controller.signal)
     ).catch((): FileMenuOutcome => ({ message: "outputs.state.failed" }));
-    if (active.current !== controller) return;
-    active.current = null;
-    setPendingPath(null);
+    if (active.current.get(path) !== controller) return;
+    active.current.delete(path);
+    setPending((current) => {
+      const next = new Map(current);
+      next.delete(path);
+      return next;
+    });
     setNotice(outcome);
+  }
+
+  function cancel(path: string) {
+    const controller = active.current.get(path);
+    if (!controller) return;
+    controller.abort();
+    setPending((current) => {
+      const entry = current.get(path);
+      return entry
+        ? new Map(current).set(path, { ...entry, cancelling: true })
+        : current;
+    });
   }
 
   function disabled(file: MenuFile, action: MenuAction): boolean {
     return (
       !handler?.connected ||
-      pendingPath !== null ||
+      pending.has(file.displayPath) ||
       file.available === false ||
       (action === "copy_image" && !file.copyImage) ||
       (action === "open" && file.openable === false) ||
@@ -193,7 +214,7 @@ export function FileMenuScope({
     <OpenFileMenuContext.Provider value={handler ? openMenu : null}>
       <div
         ref={root}
-        aria-busy={pendingPath !== null}
+        aria-busy={pending.size > 0}
         data-menu-open={open || undefined}
         className={
           className ? `file-menu-scope ${className}` : "file-menu-scope"
@@ -201,6 +222,30 @@ export function FileMenuScope({
         tabIndex={-1}
       >
         {children}
+        {/* A check can take a while and is asked for in order to see its
+            answer, so it says it is under way; routine actions stay quiet. */}
+        {[...pending].map(
+          ([path, entry]) =>
+            entry.action === "check" && (
+              <div key={path} className="file-menu-status">
+                <p role="status" aria-live="polite">
+                  {t(
+                    entry.cancelling
+                      ? "outputs.cancelling"
+                      : "outputs.checking",
+                  )}
+                </p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={entry.cancelling}
+                  onClick={() => cancel(path)}
+                >
+                  {t("outputs.cancel")}
+                </Button>
+              </div>
+            ),
+        )}
         {notice && (
           <div className="file-menu-status">
             <p role="status">{t(notice.message)}</p>
@@ -282,19 +327,19 @@ export function FileMenuScope({
                   </Menu.Item>
                 </>
               )}
-              {menu && pendingPath === menu.file.displayPath && (
+              {menu && pending.has(menu.file.displayPath) && (
                 <>
                   <Menu.Separator />
                   <Menu.Item
-                    disabled={cancelling}
-                    onClick={() => {
-                      if (!active.current) return;
-                      active.current.abort();
-                      setCancelling(true);
-                    }}
+                    disabled={pending.get(menu.file.displayPath)!.cancelling}
+                    onClick={() => cancel(menu.file.displayPath)}
                   >
                     <Icon name="close" />
-                    {t(cancelling ? "outputs.cancelling" : "outputs.cancel")}
+                    {t(
+                      pending.get(menu.file.displayPath)!.cancelling
+                        ? "outputs.cancelling"
+                        : "outputs.cancel",
+                    )}
                   </Menu.Item>
                 </>
               )}
