@@ -2323,6 +2323,21 @@ pub const Runtime = struct {
         slot.* = input;
     }
 
+    /// Whether the Workspace file a reference names is still there as a
+    /// regular file. Sending decides it, not the Renderer's check before the
+    /// send: a resend never runs that check, and the model is pointed at
+    /// this very file. A link or a directory in its place is not the file.
+    fn referencedFilePresent(self: *const Runtime, location: file_target.Location) bool {
+        if (!file_preview.validWorkspacePath(location.relative, false)) return false;
+        var root = std.Io.Dir.openDirAbsolute(self.io, location.root, .{ .follow_symlinks = false }) catch return false;
+        defer root.close(self.io);
+        const separator = std.mem.lastIndexOfScalar(u8, location.relative, '/');
+        var parent = file_preview.openWorkspaceDirectory(self.io, root, if (separator) |pos| location.relative[0..pos] else "") catch return false;
+        defer parent.close(self.io);
+        const stat = parent.statFile(self.io, std.fs.path.basename(location.relative), .{ .follow_symlinks = false }) catch return false;
+        return stat.kind == .file;
+    }
+
     /// The Agent's file tools take absolute paths, so a referenced Workspace
     /// file is named by its root and relative path joined in the Host's own
     /// separator.
@@ -5471,6 +5486,8 @@ pub const Runtime = struct {
                     const id = entry.attachment_id orelse continue;
                     if (std.mem.indexOfScalar(u64, multimodal.attachment_ids, id)) |index| {
                         if (entry.task_id != task_id or !entry.current(self)) return error.UnknownAttachment;
+                        if (entry.source == .workspace and !self.referencedFilePresent(entry.source.workspace.location))
+                            return error.UnknownAttachment;
                         referenced[index] = true;
                     }
                 };
@@ -22012,6 +22029,38 @@ test "a Workspace attachment reference that is not an image is not copied and is
     // No copy was staged, nor moved into the Task's originals.
     for ([_][]const u8{ "0", "3" }) |directory|
         try std.testing.expectError(error.FileNotFound, store.root.openDir(std.testing.io, directory, .{}));
+}
+
+test "a resent Workspace attachment reference is refused by the Host once its file is gone" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, root);
+    defer store.deinit();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testAttachmentMediaRuntime(control, &store);
+    defer control.deinit();
+    try bindTestImageWorkspace(control, root);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "notes.txt", .data = "line one\n" });
+    const id = try stageTestConversationReference(control, .{ .file = .{ .workspace = testWorkspacePath(3, 1, "notes.txt") } });
+    try std.testing.expect(id != 0);
+    const command: TaskRunInput = .{ .multimodal = .{ .text = "Summarize", .attachment_ids = &.{id} } };
+    // Sent once, then kept for a resend, which skips the Renderer's check.
+    var sent: Runtime.StagedTaskInput = .{};
+    _ = try control.borrowTaskInput(3, command, &sent, false);
+    sent.borrow.?.retainForTask();
+    try std.testing.expect(control.attachments.retainTaskInputForRetry(id, 3, 1));
+    var resent: Runtime.StagedTaskInput = .{};
+    _ = try control.borrowTaskInput(3, command, &resent, true);
+    resent.borrow.?.rollback();
+    try tmp.dir.deleteFile(std.testing.io, "notes.txt");
+    var gone: Runtime.StagedTaskInput = .{};
+    try std.testing.expectError(error.UnknownAttachment, control.borrowTaskInput(3, command, &gone, true));
+    // A directory where the file was is not the file either.
+    try tmp.dir.createDir(std.testing.io, "notes.txt", .default_dir);
+    try std.testing.expectError(error.UnknownAttachment, control.borrowTaskInput(3, command, &gone, true));
 }
 
 test "a sent image attachment serves both media tiers from the identity its message persisted" {
