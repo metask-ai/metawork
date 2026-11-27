@@ -13275,8 +13275,13 @@ test "an accepted attachment answers for its message from waiting through its Ru
     const message: task_state.MessageIdentity = .{ .submission = "op-1" };
     try std.testing.expectEqual(media, runtime.acceptedAttachment(1, message, 0).?.media);
     try std.testing.expect(runtime.acceptedAttachment(1, .{ .submission = "op-2" }, 0) == null);
-    task.input_submissions.items[0].state = .cancelled;
-    try std.testing.expect(runtime.messageFile(1, message, 0) == null);
+    try std.testing.expect(runtime.messageFile(1, message, 0) != null);
+    // Only a waiting submission still owns its input: a cancelled or failed
+    // one answers for no file.
+    for ([_]@TypeOf(task.input_submissions.items[0].state){ .cancelled, .failed }) |state| {
+        task.input_submissions.items[0].state = state;
+        try std.testing.expect(runtime.messageFile(1, message, 0) == null);
+    }
     task.input_submissions.items[0].state = .waiting;
 
     // While acceptance still owns its input, the prepared Run already is the

@@ -22031,6 +22031,122 @@ test "a Workspace attachment reference that is not an image is not copied and is
         try std.testing.expectError(error.FileNotFound, store.root.openDir(std.testing.io, directory, .{}));
 }
 
+const ReferenceTestCapture = struct {
+    done: bool = false,
+    id: u64 = 0,
+    rejection: ?attachment_staging.Rejection = null,
+    cancelled: bool = false,
+    fn complete(context: *anyopaque, _: u64, result: attachment_staging.Result) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.done = true;
+        switch (result) {
+            .ready => |ready| self.id = ready[0].id,
+            .rejected => |reason| self.rejection = reason,
+            .cancelled => self.cancelled = true,
+            .accepted => {},
+        }
+    }
+    fn wait(self: *@This(), control: *Runtime) !void {
+        for (0..5000) |_| {
+            control.drainAttachmentStagingCompletions(.{ .context = self, .complete_fn = complete });
+            if (self.done) return;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        return error.TestUnexpectedResult;
+    }
+};
+
+test "a Workspace attachment reference refuses under a new epoch once its authority or its path is lost" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, root);
+    defer store.deinit();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testAttachmentMediaRuntime(control, &store);
+    defer control.deinit();
+    try bindTestImageWorkspace(control, root);
+    const learned = "QUARTERLY-ACCESS-TOKEN-7";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = staged_jpeg });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = learned ++ ".jpg", .data = staged_jpeg });
+    const plain = try stageTestConversationReference(control, .{ .file = .{ .workspace = testWorkspacePath(3, 1, "image.jpg") } });
+    const named = try stageTestConversationReference(control, .{ .file = .{ .workspace = testWorkspacePath(3, 1, learned ++ ".jpg") } });
+    try std.testing.expect(plain != 0 and named != 0);
+
+    // The Workspace stops being authorized: the reference no longer resolves.
+    product_workspace.testing.setAuthorization(&control.workspace, 2, .removing);
+    control.invalidateProjectionSecurity();
+    try std.testing.expectEqual(FilePreviewState.restricted, control.mediaThumbnail(.{ .draft_attachment = plain }, &thumbnail_scratch).unavailable);
+    var staged: Runtime.StagedTaskInput = .{};
+    try std.testing.expectError(error.UnknownAttachment, control.borrowTaskInput(3, .{ .multimodal = .{ .text = "look", .attachment_ids = &.{plain} } }, &staged, false));
+    product_workspace.testing.setAuthorization(&control.workspace, 2, .available);
+    try std.testing.expect(control.mediaThumbnail(.{ .draft_attachment = plain }, &thumbnail_scratch) == .ready);
+
+    // A credential learned since appears in the referenced path.
+    const Learned = struct {
+        fn visit(_: *anyopaque, target: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
+            try callback(target, learned);
+        }
+    };
+    const previous = control.account_credentials;
+    defer control.account_credentials = previous;
+    control.account_credentials = .{ .context = control, .visit_fn = Learned.visit };
+    control.invalidateProjectionSecurity();
+    try std.testing.expectEqual(FilePreviewState.restricted, control.mediaThumbnail(.{ .draft_attachment = named }, &thumbnail_scratch).unavailable);
+    try std.testing.expectError(error.UnknownAttachment, control.borrowTaskInput(3, .{ .multimodal = .{ .text = "look", .attachment_ids = &.{named} } }, &staged, false));
+    try std.testing.expect(control.mediaThumbnail(.{ .draft_attachment = plain }, &thumbnail_scratch) == .ready);
+}
+
+test "a conversation attachment reference that loses authority while staging releases its copy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, root);
+    defer store.deinit();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testAttachmentMediaRuntime(control, &store);
+    defer control.deinit();
+    try bindTestImageWorkspace(control, root);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = staged_jpeg });
+    try control.beginAttachmentReference(37, try control.prepareAttachmentAdd(), .{ .file = .{ .workspace = testWorkspacePath(3, 1, "image.jpg") } });
+    // Authority goes away after the copy began; completion judges it again.
+    product_workspace.testing.setAuthorization(&control.workspace, 2, .removing);
+    var capture: ReferenceTestCapture = .{};
+    try capture.wait(control);
+    try std.testing.expectEqual(@as(?attachment_staging.Rejection, .stale_transfer), capture.rejection);
+    try std.testing.expectEqual(@as(usize, 0), control.attachments.used_bytes);
+    for (control.attachments.slots) |slot| try std.testing.expect(slot == null);
+    for (control.reference_inputs) |slot| try std.testing.expect(slot == null);
+}
+
+test "a cancelled conversation attachment reference frees its slot" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, root);
+    defer store.deinit();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    try testAttachmentMediaRuntime(control, &store);
+    defer control.deinit();
+    try bindTestImageWorkspace(control, root);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image.jpg", .data = staged_jpeg });
+    const target: Runtime.ReferenceTarget = .{ .file = .{ .workspace = testWorkspacePath(3, 1, "image.jpg") } };
+    try control.beginAttachmentReference(37, try control.prepareAttachmentAdd(), target);
+    try std.testing.expect(control.cancelAttachmentStaging(37));
+    var capture: ReferenceTestCapture = .{};
+    try capture.wait(control);
+    try std.testing.expect(capture.cancelled);
+    for (control.reference_inputs) |slot| try std.testing.expect(slot == null);
+    for (control.attachments.slots) |slot| try std.testing.expect(slot == null);
+    try std.testing.expect(try stageTestConversationReference(control, target) != 0);
+}
+
 test "a resent Workspace attachment reference is refused by the Host once its file is gone" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
