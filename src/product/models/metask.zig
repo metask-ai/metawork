@@ -50,6 +50,21 @@ pub fn errorCode(err: Error) contract.ModelsError {
     };
 }
 
+/// How often a catalog in hand is asked for again while MetaWork is in front.
+pub const refresh_interval_ms: u64 = 5 * 60 * 1000;
+/// How long a load nobody has content for waits before its one second try.
+pub const retry_delay_ms: u64 = 2 * 1000;
+
+/// What one failed request means for the next: a refused token may be
+/// renewed meanwhile, and a service or a deadline may recover in a moment.
+/// A refused account, a limit or a malformed answer does not change soon.
+pub fn failure(err: Error) contract.CatalogFailure {
+    return .{
+        .code = errorCode(err),
+        .retryable = err == error.ServiceUnavailable or err == error.DeadlineExceeded or err == error.Unauthorized,
+    };
+}
+
 fn BoundedString(comptime capacity: usize) type {
     return struct {
         bytes: [capacity]u8 = undefined,
@@ -84,38 +99,6 @@ const ModelId = BoundedString(contract.Limits.model_id_bytes);
 const ModelDisplayName =
     BoundedString(contract.Limits.model_display_name_bytes);
 
-const Secret = struct {
-    allocator: std.mem.Allocator = undefined,
-    bytes: []u8 = &.{},
-    owned: bool = false,
-
-    fn init(
-        allocator: std.mem.Allocator,
-        value: []const u8,
-    ) Error!Secret {
-        if (!validHeaderCredential(value))
-            return error.ProtocolInvalid;
-        if (value.len > contract.Limits.credential_bytes)
-            return error.CatalogFieldTooLarge;
-        return .{
-            .allocator = allocator,
-            .bytes = allocator.dupe(u8, value) catch return error.OutOfMemory,
-            .owned = true,
-        };
-    }
-
-    fn view(self: *const Secret) []const u8 {
-        if (!self.owned) return "";
-        return self.bytes;
-    }
-
-    fn deinit(self: *Secret) void {
-        if (!self.owned) return;
-        secureFree(self.allocator, self.bytes);
-        self.* = .{};
-    }
-};
-
 const ModelEntry = struct {
     id: ModelId,
     display_name: ModelDisplayName,
@@ -125,10 +108,11 @@ const ModelEntry = struct {
     video_generation: bool = false,
 };
 
+/// One account's catalog as Metask answered it. It holds no token: whoever
+/// resolves from it brings the credential of that moment.
 pub const CatalogSession = struct {
     allocator: std.mem.Allocator,
     models: std.ArrayList(ModelEntry) = .empty,
-    credential: Secret = .{},
     owner_account_id: AccountId = .{},
     /// HTTP status of the most recent catalog request, 0 before any request
     /// or after a transport-level failure. Owned by the single in-flight
@@ -140,7 +124,6 @@ pub const CatalogSession = struct {
     }
 
     pub fn deinit(self: *CatalogSession) void {
-        self.credential.deinit();
         self.models.deinit(self.allocator);
         self.* = undefined;
     }
@@ -152,11 +135,14 @@ pub const CatalogSession = struct {
     }
 
     pub fn reset(self: *CatalogSession) void {
-        self.credential.deinit();
         self.models.clearRetainingCapacity();
         self.owner_account_id = .{};
     }
 
+    /// Loads the catalog with the token of this request, which is not kept.
+    /// A display name carrying that token is dropped here, where the token
+    /// and the server's bytes meet, so nothing taken from this catalog can
+    /// hold it.
     pub fn loadModels(
         self: *CatalogSession,
         transport: transport_api.Transport,
@@ -175,27 +161,27 @@ pub const CatalogSession = struct {
             &self.last_http_status,
         );
         errdefer replacement.deinit();
-        var credential = try Secret.init(self.allocator, oauth_access_token);
-        errdefer credential.deinit();
-        self.credential.deinit();
+        if (oauth_access_token.len != 0) for (replacement.entries.items) |*entry| {
+            if (std.mem.indexOf(u8, entry.display_name.view(), oauth_access_token) != null) entry.display_name = .{};
+        };
         self.models.deinit(self.allocator);
         self.models = replacement.entries;
         replacement.entries = .empty;
-        self.credential = credential;
-        credential = .{};
         self.owner_account_id = validated_account_id;
     }
 
+    /// `bearer` is the credential of this moment, copied into the candidate.
     pub fn prepareSourceCandidate(
         self: *CatalogSession,
         model_id: []const u8,
         metask_source_generation: u64,
+        bearer: []const u8,
     ) Error!contract.OwnedSourceCandidate {
         if (metask_source_generation == 0)
             return error.SourceCandidateInvalid;
         const model_index = self.findModel(model_id) orelse return error.ModelNotFound;
         const protocol = self.models.items[model_index].protocol orelse return error.ModelNotFound;
-        if (self.credential.view().len == 0)
+        if (!validHeaderCredential(bearer))
             return error.SourceCandidateInvalid;
 
         var owned_model: ?[]u8 = self.allocator.dupe(
@@ -208,13 +194,9 @@ pub const CatalogSession = struct {
             contract.metaskEndpoint(protocol) orelse return error.SourceCandidateInvalid,
         ) catch return error.OutOfMemory;
         errdefer if (owned_base_url) |bytes| self.allocator.free(bytes);
-        // The Models source retains its runtime credential so it can issue
-        // more than one independently owned binding. Each candidate receives
-        // a bounded copy that it will secure-zero on every terminal path.
-        const owned_secret = self.allocator.dupe(
-            u8,
-            self.credential.view(),
-        ) catch return error.OutOfMemory;
+        // Each candidate receives a bounded copy that it will secure-zero on
+        // every terminal path.
+        const owned_secret = self.allocator.dupe(u8, bearer) catch return error.OutOfMemory;
         const transferred_model = owned_model.?;
         const transferred_base_url = owned_base_url.?;
         owned_model = null;
@@ -272,29 +254,17 @@ pub const CatalogSession = struct {
     }
 
     pub fn modelProtocol(self: *const CatalogSession, model_id: []const u8) ?contract.Protocol {
-        if (self.credential.view().len == 0) return null;
         const index = self.findModel(model_id) orelse return null;
         return self.models.items[index].protocol;
     }
 
+    /// A dialogue model's display name; `loadModels` already dropped one that
+    /// carried the token it was loaded with.
     pub fn preferenceDisplayName(self: *const CatalogSession, model_id: []const u8) []const u8 {
         const index = self.findModel(model_id) orelse return "";
         const model = &self.models.items[index];
-        const credential = self.credential.view();
-        const name = model.display_name.view();
-        if (model.protocol == null or credential.len == 0 or std.mem.indexOf(u8, name, credential) != null) return "";
-        return name;
-    }
-
-    pub fn ownsSourceSelection(
-        self: *const CatalogSession,
-        account_id: []const u8,
-        model_id: []const u8,
-    ) bool {
-        if (!std.mem.eql(u8, self.ownerAccountId(), account_id) or
-            !self.hasModel(model_id))
-            return false;
-        return self.credential.view().len > 0;
+        if (model.protocol == null) return "";
+        return model.display_name.view();
     }
 
     pub fn firstModelId(self: *const CatalogSession) ?[]const u8 {
@@ -336,6 +306,31 @@ pub const CatalogSession = struct {
 
     pub fn ownerAccountId(self: *const CatalogSession) []const u8 {
         return self.owner_account_id.view();
+    }
+
+    /// The same models with the same declarations, in any order. Order alone
+    /// is no change: the order already published stays.
+    pub fn sameContent(self: *const CatalogSession, other: *const CatalogSession) bool {
+        if (self.models.items.len != other.models.items.len) return false;
+        for (other.models.items) |*entry| {
+            const index = self.findModel(entry.id.view()) orelse return false;
+            if (!sameEntry(&self.models.items[index], entry)) return false;
+        }
+        return true;
+    }
+
+    /// Every parsed field takes part, so a field added later does too.
+    fn sameEntry(a: *const ModelEntry, b: *const ModelEntry) bool {
+        inline for (std.meta.fields(ModelEntry)) |field| {
+            const left = &@field(a, field.name);
+            const right = &@field(b, field.name);
+            const same = if (comptime @typeInfo(field.type) == .@"struct" and @hasDecl(field.type, "view"))
+                std.mem.eql(u8, left.view(), right.view())
+            else
+                std.meta.eql(left.*, right.*);
+            if (!same) return false;
+        }
+        return true;
     }
 
     fn findModel(self: *const CatalogSession, id: []const u8) ?usize {
@@ -507,12 +502,10 @@ pub const TestSupport = if (builtin.is_test) struct {
     pub fn replaceOwnedCatalog(
         session: *CatalogSession,
         account_id: []const u8,
-        access_token: []const u8,
         models: []const contract.ModelView,
     ) Error!void {
         session.reset();
         session.owner_account_id = try .init(account_id);
-        session.credential = try Secret.init(session.allocator, access_token);
         for (models) |model| {
             session.models.append(session.allocator, .{
                 .id = try .init(model.id),
@@ -816,12 +809,6 @@ fn parseError(err: anyerror) Error {
     };
 }
 
-fn secureFree(allocator: std.mem.Allocator, bytes: []u8) void {
-    if (bytes.len == 0) return;
-    std.crypto.secureZero(u8, bytes);
-    allocator.rawFree(bytes, .of(u8), @returnAddress());
-}
-
 const key_fixture =
     \\{"code":0,"message":"success","data":{"items":[{
     \\"id":325,"user_id":7,"key":"test-api-key-1234","name":"Prod",
@@ -967,15 +954,16 @@ test "OAuth catalog issues independent Anthropic Messages candidates" {
     var session = CatalogSession.init(std.testing.allocator);
     defer session.deinit();
     session.owner_account_id = try .init("account-1");
-    session.credential = try Secret.init(std.testing.allocator, "oauth-access");
     var models = try parseModels(std.testing.allocator, model_fixture);
     session.models = models.entries;
     models.entries = .empty;
     try std.testing.expectEqualStrings("model-1", session.firstModelId().?);
     var public_catalog: PublicCatalog = .{};
     public_catalog.replaceFromSession(&session);
+    // The catalog keeps no token: each candidate is given the one of its moment.
+    try std.testing.expectError(error.SourceCandidateInvalid, session.prepareSourceCandidate("model-1", 1, ""));
 
-    var candidate = try session.prepareSourceCandidate("model-1", 1);
+    var candidate = try session.prepareSourceCandidate("model-1", 1, "oauth-access");
     defer candidate.deinit();
     try std.testing.expectEqual(
         contract.Protocol.anthropic_messages,
@@ -989,12 +977,13 @@ test "OAuth catalog issues independent Anthropic Messages candidates" {
         "oauth-access",
         candidate.input().api_key,
     );
-    var second_candidate = try session.prepareSourceCandidate("model-1", 2);
+    var second_candidate = try session.prepareSourceCandidate("model-1", 2, "oauth-access-renewed");
     defer second_candidate.deinit();
     try std.testing.expectEqualStrings(
-        "oauth-access",
+        "oauth-access-renewed",
         second_candidate.input().api_key,
     );
+    try std.testing.expectEqualStrings("oauth-access", candidate.input().api_key);
     session.reset();
     const public_models = public_catalog.modelViews();
     try std.testing.expectEqual(@as(usize, 1), public_models.len);
@@ -1108,8 +1097,7 @@ test "one OAuth catalog request owns both purpose projections across reset and i
     try std.testing.expectEqualStrings("chat", session.firstModelId().?);
     try std.testing.expectEqual(contract.Protocol.anthropic_messages, session.modelProtocol("chat").?);
     try std.testing.expect(!session.hasModel("image"));
-    try std.testing.expect(!session.ownsSourceSelection("principal", "image"));
-    try std.testing.expectError(error.ModelNotFound, session.prepareSourceCandidate("image", 1));
+    try std.testing.expectError(error.ModelNotFound, session.prepareSourceCandidate("image", 1, "catalog-only-secret"));
     try std.testing.expect(session.hasImageModel("image"));
     try std.testing.expect(!session.hasImageModel("chat"));
     var image_storage: [contract.Limits.model_entries]contract.ModelView = undefined;
@@ -1230,14 +1218,13 @@ test "image endpoints exclude dialogue resolution and enter only the public imag
     var session = CatalogSession.init(std.testing.allocator);
     defer session.deinit();
     session.owner_account_id = try .init("account-1");
-    session.credential = try Secret.init(std.testing.allocator, "oauth-access");
     var parsed = try parseModels(std.testing.allocator, "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"chat_completions\":{\"supported\":true},\"images_generations\":{\"supported\":true}}}},{\"id\":\"chat\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}");
     session.models = parsed.entries;
     parsed.entries = .empty;
     try std.testing.expect(!session.hasModel("media"));
     try std.testing.expect(session.hasImageModel("media"));
     try std.testing.expect(session.modelProtocol("media") == null);
-    try std.testing.expectError(error.ModelNotFound, session.prepareSourceCandidate("media", 1));
+    try std.testing.expectError(error.ModelNotFound, session.prepareSourceCandidate("media", 1, "oauth-access"));
     try std.testing.expectEqualStrings("chat", session.firstModelId().?);
     var catalog: PublicCatalog = .{};
     catalog.replaceFromSession(&session);
@@ -1269,10 +1256,9 @@ test "endpoint declarations choose a deterministic protocol with no implicit sup
             defer session.deinit();
             session.models = parsed.entries;
             parsed.entries = .empty;
-            session.credential = try Secret.init(std.testing.allocator, "oauth-access");
             session.owner_account_id = try .init("principal");
             try std.testing.expectEqual(protocol, session.modelProtocol("model").?);
-            var candidate = try session.prepareSourceCandidate("model", 17);
+            var candidate = try session.prepareSourceCandidate("model", 17, "oauth-access");
             defer candidate.deinit();
             try std.testing.expectEqual(protocol, candidate.input().target.protocol);
             try std.testing.expectEqualStrings(contract.metaskEndpoint(protocol).?, candidate.input().target.base_url);
@@ -1426,7 +1412,7 @@ test "Metask image declarations freeze the exact execution route and survive own
         \\{"id":"image-model","object":"model","type":"model","capabilities":{"endpoints":{"images_generations":{"supported":true}},"input":{"image":{"supported":true}}}}
         \\]}
     );
-    var candidate = try session.prepareSourceCandidate("glm-5.3-flash", 1);
+    var candidate = try session.prepareSourceCandidate("glm-5.3-flash", 1, "synthetic-token");
     defer candidate.deinit();
     var moved = candidate.take();
     defer moved.deinit();
@@ -1441,4 +1427,86 @@ test "Metask image declarations freeze the exact execution route and survive own
     try std.testing.expect(declarations[0].supported);
     try std.testing.expectEqualStrings("text-model", declarations[1].model);
     try std.testing.expect(!declarations[1].supported);
+}
+
+test "a display name carrying the token it was loaded with is dropped at load" {
+    var session = CatalogSession.init(std.testing.allocator);
+    defer session.deinit();
+    try TestSupport.loadCatalogResponse(&session, "principal", "synthetic-token-1234",
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"echo","object":"model","type":"model","display_name":"Echo synthetic-token-1234","capabilities":{"endpoints":{"messages":{"supported":true}}}},
+        \\{"id":"plain","object":"model","type":"model","display_name":"Plain","capabilities":{"endpoints":{"messages":{"supported":true}}}}
+        \\]}
+    );
+    try std.testing.expectEqualStrings("", session.preferenceDisplayName("echo"));
+    try std.testing.expectEqualStrings("Plain", session.preferenceDisplayName("plain"));
+    var views: [contract.Limits.model_entries]contract.ModelView = undefined;
+    for (session.writeModelViews(&views)) |view|
+        try std.testing.expect(std.mem.indexOf(u8, view.display_name, "synthetic-token-1234") == null);
+}
+
+test "catalog content is the same models with the same declarations, in any order" {
+    const base =
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":10,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}},
+        \\{"id":"b","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}}
+        \\]}
+    ;
+    const reordered =
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"b","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}},
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":10,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}}
+        \\]}
+    ;
+    const changes = [_][]const u8{
+        // A display name.
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A2","max_tokens":10,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}},
+        \\{"id":"b","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}}
+        \\]}
+        ,
+        // A token limit.
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":11,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}},
+        \\{"id":"b","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}}
+        \\]}
+        ,
+        // A capability.
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":10,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":false}}}},
+        \\{"id":"b","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}}
+        \\]}
+        ,
+        // A protocol.
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":10,"capabilities":{"endpoints":{"responses":{"supported":true}},"input":{"image":{"supported":true}}}},
+        \\{"id":"b","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}}
+        \\]}
+        ,
+        // A model gone.
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":10,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}}
+        \\]}
+        ,
+        // A model in its place.
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":10,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}},
+        \\{"id":"c","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}}
+        \\]}
+        ,
+    };
+    var current = CatalogSession.init(std.testing.allocator);
+    defer current.deinit();
+    try TestSupport.loadCatalogResponse(&current, "principal", "token", base);
+    var other = CatalogSession.init(std.testing.allocator);
+    defer other.deinit();
+    try TestSupport.loadCatalogResponse(&other, "principal", "token", base);
+    try std.testing.expect(current.sameContent(&other));
+    try TestSupport.loadCatalogResponse(&other, "principal", "token", reordered);
+    try std.testing.expect(current.sameContent(&other));
+    for (changes) |body| {
+        try TestSupport.loadCatalogResponse(&other, "principal", "token", body);
+        try std.testing.expect(!current.sameContent(&other));
+        try std.testing.expect(!other.sameContent(&current));
+    }
 }

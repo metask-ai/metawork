@@ -154,7 +154,7 @@ const Host = struct {
         var catalog = catalog_api.CatalogSession.init(self.init.gpa);
         defer catalog.deinit();
         try catalog.loadModels(self.http.modelsTransport(), lease.access_token, lease.principal_ref, null);
-        var candidate = try catalog.prepareSourceCandidate(self.model, 1);
+        var candidate = try catalog.prepareSourceCandidate(self.model, 1, lease.access_token);
         defer candidate.deinit();
         const input = candidate.input();
         var model_views: [models_contract.Limits.model_entries]models_contract.ModelView = undefined;

@@ -327,7 +327,8 @@ pub const Coordinator = struct {
         return .acceptedAttempt(attempt_id);
     }
 
-    /// Running executions take a new token before the catalog follows, and
+    /// Running executions take a new token before Models follows the
+    /// account, which a new token for the same account leaves as it is, and
     /// scheduled work rearms only once all of them agree. Nothing is handed
     /// over twice for one generation.
     fn publish(self: *Coordinator) void {

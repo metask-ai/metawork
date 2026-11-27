@@ -716,7 +716,7 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 ### 7.5 当前状态、请求与结果
 
 - 已确认未执行的消息在原条目显示 Host 的失败原因。有保留输入时在同一条目提供「重发原消息」与次要的「放弃重发」。重发进入正常阅读顺序并保留原失败条目。接收前拒绝可恢复原草稿及仍有效的附件；目标已有新内容时保留原提交的恢复入口。
-- 已有 Task 的 Composer 按 Host 提供的原因显示 Metask 目录等待、目录刷新失败或授权变化。目录失败时可从当前 Task 重试刷新；历史失败条目仍说明当时的结果。
+- 已有 Task 的 Composer 按 Host 提供的原因显示 Metask 目录等待、目录加载失败或授权变化。目录失败时可从当前 Task 重试刷新；历史失败条目仍说明当时的结果。
 - 当前 Task 的 Session 关闭失败且可重试时，在 Composer 附近提供「重试关闭会话」。关闭成功后按普通发送恢复会话，已失败的提交仍由用户显式重发。
 - active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。工具数量、单工具分类与未知状态的文案遵守 [Activity 与 Tool presentation](#activity-与-tool-presentation)，不在主状态中暴露原始 Tool 名称、参数或命令；
 - Tool 摘要属于次要 technical work evidence，active Run 内与唯一 live status 共用默认折叠的 process surface；展开内容遵守本节 Tool 证据规则，不带入 usage 或 Run ID。一轮的 Tool 调用数不设上限：展开后才按页读取 Tool 记录，已读的页按 activity order 连续显示；还有未读记录时在列表末尾提供“显示更多调用（剩余 {count} 条）”，不做虚拟化或自动续读。收起后保留已读页，重新展开直接显示；任务页的 Tool 版本推进时只重读仍在运行的记录及之后的已读部分，Run 结束后把活动期间读过的部分再读一次；已读页按 Task 与安全代次区分，切换 Task 不复用。读取中与读取失败在列表内原位说明，失败提供“重试”，不影响 live status 或正文。Run terminal 后 live status 消失；既没有 Tool 也没有已自动允许记录时整个 surface 卸载，有任一类记录时保留默认折叠的“执行详情”摘要，并在 Host 最终耗时可用时于右侧显示“本轮用时 {duration}”。普通 Tool 可以在所属行下方查看完整 input/result；Edit 与 Write 不显示协议 JSON、不提供 disclosure，当其唯一 `fileRefs.displayPath` 与同 Run typed File Changes 的一个文件分组精确相等时，路径显示为审计链接并打开该 Run Review、展开且聚焦对应文件，否则保持只读摘要。该匹配只建立导航，不生成或补造 File Change。Work 与逐 Tool disclosure choice 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态；
@@ -1214,7 +1214,7 @@ Account与 Models状态在设置中分别投影：Account按 `checking | signed_
 - 编辑模型使用完整 `ModelRef`、expected provider revision 与 catalog generation。内置厂商编辑只提供模型与 API Key，自定义服务才提供地址与协议编辑；新模型的连接与凭据独立管理；既有共享配置只有在同源存在多个模型时才说明共同影响。弹窗使用一个“保存”动作，按地址、非空 API Key、模型 ID 的实际变化顺序提交现有 revision-bound mutation；每步须重新读取 canonical Models 并核对 revision、catalog 与目标模型后才继续，不假装为原子事务。明确失败时说明已保存的字段，保留其余非 secret 草稿并更新 revision；结果未知或配置发生冲突时停止，清除临时 secret，并提示重新打开确认，不自动重放。API Key 留空表示保留已有凭据。已保存地址保持原事实，若与模板不同，替换 Key 时必须披露真实目标 host，不静默改用官方地址。API Key 使用空的 password input，可粘贴、禁用自动填充，永不回填；成功、失败、取消、离页、失去 capability 或来源 revision 变化后清除临时 secret；
 - endpoint、protocol 或 credential authority 变化推进 source generation 并使同源全部模型回到待验证状态；普通模型 add/replace/remove 只推进对应 revision/catalog generation。Provider 可在模型集合为空时持久处于 configuring，不把模型伪装成 Provider identity 的一部分；
 - `Test model` 只通过 Host/Agent Completion 发起有界请求，不创建 Task、历史 Run 或持久 Conversation；generation readiness 与最新测试状态分别显示。ready 模型失败重测不撤销已验证 generation、默认选择或既有 owned binding；
-- 管理页不提供默认模型设置；Account 只影响 Metask 授权，自定义模型独立可用。后台同步只更新目录与状态，不隐式选择其他来源或改写草稿、既有 Task 或定时任务绑定；
+- 管理页不提供默认模型设置；Account 只影响 Metask 授权，自定义模型独立可用。后台同步只更新目录与状态，不隐式选择其他来源或改写草稿、既有 Task 或定时任务绑定；有目录时的后台更新不显示加载、不清空或重排模型菜单，只有目录内容真变了菜单才变；
 - 编辑和删除不因来源正被 Task/Session/Run 使用而禁用，也不查询 consumer usage。若 mutation 使 desired default 不可解析，Product Control 独立关闭新 admission 并进入 reconciliation；既有消费者保持 owned binding，历史不改写。该分组不扩展到 Workspace、权限策略或 AgentCore 内部状态。
 
 Skill 中心、MCP 与定时任务按 §5.2–§5.5 进入工作台工具区。MCP 使用稳定入口，并分别消费 Host-owned management health、Runtime/catalog availability 与 new Task access。空 registry 是可管理空状态，management capability 未接通或 outcome unknown 才进入对应不可用/恢复面；Renderer 不从 Runtime ready 推导管理动作。其他连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航，不照搬其他 Agent 产品的信息架构。

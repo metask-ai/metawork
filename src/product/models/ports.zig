@@ -49,6 +49,27 @@ pub const CredentialVault = struct {
     }
 };
 
+/// The Metask credential in force now: account, access token and its Account
+/// generation, taken together. Both slices point into the caller's storage.
+pub const MetaskCredential = struct {
+    account: []const u8,
+    token: []const u8,
+    generation: u64,
+};
+
+/// Where Models reads the Metask credential of the moment, beside the
+/// credential vault. Main thread only. The value is written into the
+/// caller's storage, which the caller zeroes; null when none may be used now.
+/// Models keeps no copy of it.
+pub const MetaskCredentials = struct {
+    context: *anyopaque,
+    read_fn: *const fn (*anyopaque, []u8, []u8) std.mem.Allocator.Error!?MetaskCredential,
+
+    pub fn read(self: MetaskCredentials, account_storage: []u8, token_storage: []u8) std.mem.Allocator.Error!?MetaskCredential {
+        return self.read_fn(self.context, account_storage, token_storage);
+    }
+};
+
 pub fn validCredentialSlot(slot: []const u8) bool {
     if (slot.len != credential_slot_bytes or
         !std.mem.startsWith(u8, slot, credential_slot_prefix)) return false;

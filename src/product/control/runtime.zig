@@ -3312,54 +3312,49 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn prepareMetaskCatalogRefresh(
-        self: *Runtime,
-        principal_ref: []const u8,
-        authorization_generation: u64,
-    ) models_contract.CatalogRefreshPrepareResult {
-        const result = self.custom_providers.prepareMetaskCatalogRefresh(
-            principal_ref,
-            authorization_generation,
-        );
-        if (result == .ready) self.bumpRevision();
+    /// Models follows the account an Account publication leaves.
+    pub fn followMetaskPrincipal(self: *Runtime, principal_ref: ?[]const u8, generation: u64) models_contract.MetaskFollow {
+        const result = self.custom_providers.followMetaskPrincipal(principal_ref, generation);
+        if (result.changed) self.finishModelsCommitNoFail();
         return result;
     }
 
-    pub fn completeMetaskCatalogRefresh(
-        self: *Runtime,
-        attempt_id: u64,
-        authorization_generation: u64,
-        completion: *models_ports.OwnedCatalogCompletion,
-    ) models_contract.ModelsError {
-        const result = self.custom_providers.completeMetaskCatalogRefresh(
-            attempt_id,
-            authorization_generation,
-            completion,
-        );
-        self.finishModelsCommitNoFail();
+    pub fn setMetaskCatalogActive(self: *Runtime, active: bool) void {
+        self.custom_providers.setMetaskCatalogActive(active);
+    }
+
+    pub fn metaskCatalogNext(self: *Runtime) ?u64 {
+        return self.custom_providers.metaskCatalogNext();
+    }
+
+    pub fn metaskCatalogDue(self: *Runtime, now_ms: u64) bool {
+        return self.custom_providers.metaskCatalogDue(now_ms);
+    }
+
+    /// A catalog request publishes only what anyone can see: a load, or the
+    /// person's own request. One in the background changes nothing here.
+    pub fn beginMetaskCatalogRequest(self: *Runtime, kind: models_contract.CatalogRequestKind, credential: models_contract.CatalogCredential, now_ms: u64) models_contract.CatalogRequestStart {
+        const result = self.custom_providers.beginMetaskCatalogRequest(kind, credential, now_ms);
+        if (result.changed) self.finishModelsCommitNoFail();
         return result;
     }
 
-    pub fn failMetaskCatalogRefresh(
-        self: *Runtime,
-        attempt_id: u64,
-        authorization_generation: u64,
-        error_code: models_contract.ModelsError,
-        safe_diagnostic: []const u8,
-    ) void {
-        self.custom_providers.failMetaskCatalogRefresh(
-            attempt_id,
-            authorization_generation,
-            error_code,
-            safe_diagnostic,
-        );
-        self.finishModelsCommitNoFail();
+    pub fn joinMetaskCatalogRequest(self: *Runtime) bool {
+        const changed = self.custom_providers.joinMetaskCatalogRequest();
+        if (changed) self.finishModelsCommitNoFail();
+        return changed;
     }
 
-    pub fn setMetaskAuthorizationUnavailable(self: *Runtime) void {
-        self.custom_providers.setMetaskAuthorizationUnavailable();
+    pub fn completeMetaskCatalogRequest(self: *Runtime, id: u64, completion: *models_ports.OwnedCatalogCompletion, now_ms: u64) bool {
+        const changed = self.custom_providers.completeMetaskCatalogRequest(id, completion, now_ms);
+        if (changed) self.finishModelsCommitNoFail();
+        return changed;
+    }
 
-        self.finishModelsCommitNoFail();
+    pub fn failMetaskCatalogRequest(self: *Runtime, id: u64, failure: models_contract.CatalogFailure, now_ms: u64) bool {
+        const changed = self.custom_providers.failMetaskCatalogRequest(id, failure, now_ms);
+        if (changed) self.finishModelsCommitNoFail();
+        return changed;
     }
 
     pub fn createCustomProviderWithCredential(
@@ -8313,9 +8308,8 @@ pub const Runtime = struct {
                 .wait => return .wait,
                 .ready => {},
             }
-            // The catalog must be this authorization's before its content
-            // means anything: right after a renewal and before the refresh
-            // starts it is still the previous one's.
+            // Without a catalog for this account its content says nothing
+            // yet; a renewal leaves the catalog as it is.
             _ = self.admittedMetaskGeneration(use) orelse return .wait;
         }
         return switch (self.custom_providers.boundModel(binding.model_ref, binding.source_generation)) {
@@ -10325,6 +10319,33 @@ pub const Runtime = struct {
         return false;
     }
 
+    /// What a Metask use may do now: one Account sample and the Models
+    /// answer for the account it follows, judged in one place.
+    const MetaskGate = union(enum) {
+        ready: u64,
+        account_wait: u64,
+        catalog_loading,
+        catalog_failed,
+        stop,
+        /// Models follows no account although Account has one: only for the
+        /// instant between an Account commit and the Models follow.
+        absent,
+    };
+
+    /// Null only when no Account governs the use.
+    fn metaskGate(self: *Runtime, use: ?account_contract.Authorization.Use) ?MetaskGate {
+        return switch (use orelse return null) {
+            .wait => |epoch| .{ .account_wait = epoch },
+            .stop => .stop,
+            .ready => |generation| switch (self.custom_providers.metaskCatalog()) {
+                .ready => .{ .ready = generation },
+                .loading => .catalog_loading,
+                .failed => .catalog_failed,
+                .absent => .absent,
+            },
+        };
+    }
+
     fn checkMetaskAuthorization(self: *Runtime, provider_id: []const u8) Error!void {
         if (!std.mem.eql(u8, provider_id, models_contract.metask_source_id)) return;
         _ = self.admittedMetaskGeneration(self.metaskUse()) orelse return error.ExecutionUnavailable;
@@ -10342,9 +10363,9 @@ pub const Runtime = struct {
     /// Account governs it.
     fn admittedMetaskGeneration(self: *Runtime, use: ?account_contract.Authorization.Use) ?u64 {
         if (self.shutting_down) return null;
-        return switch (use orelse return 0) {
-            .ready => |generation| if (self.custom_providers.acceptsMetaskAuthorization(generation)) generation else null,
-            .wait, .stop => null,
+        return switch (self.metaskGate(use) orelse return 0) {
+            .ready => |generation| generation,
+            .account_wait, .catalog_loading, .catalog_failed, .stop, .absent => null,
         };
     }
 
@@ -10367,21 +10388,22 @@ pub const Runtime = struct {
     fn taskMetaskInput(self: *Runtime, task_id: u64, use: ?account_contract.Authorization.Use) MetaskInput {
         const facts = self.task_runtime.modelFacts(task_id) orelse return .{};
         if (!usesMetask(facts)) return .{};
-        return switch (use orelse return .{}) {
-            .wait => |epoch| .{ .blocker = .metask_authorization_recovering, .recovery_epoch = epoch },
-            .stop => .{ .blocker = .metask_authorization_required },
-            .ready => |generation| .{ .blocker = switch (self.custom_providers.metaskInputCatalogState(generation)) {
-                .ready => null,
-                .loading => .models_catalog_loading,
-                .failed => .models_catalog_failed,
-                .needs_authentication => .metask_authorization_required,
-                else => .binding_unavailable,
-            } },
+        return switch (self.metaskGate(use) orelse return .{}) {
+            .account_wait => |epoch| .{ .blocker = .metask_authorization_recovering, .recovery_epoch = epoch },
+            .stop, .absent => .{ .blocker = .metask_authorization_required },
+            .ready => .{},
+            .catalog_loading => .{ .blocker = .models_catalog_loading },
+            .catalog_failed => .{ .blocker = .models_catalog_failed },
         };
     }
 
     pub fn setImageRunPreparation(self: *Runtime, preparation: ?control_ports.ImageRunPreparation) void {
         self.image_run_preparation = preparation;
+    }
+
+    /// Where Models reads the Metask credential of the moment when it resolves.
+    pub fn setMetaskCredentials(self: *Runtime, credentials: ?models_ports.MetaskCredentials) void {
+        self.custom_providers.metask_credentials = credentials;
     }
 
     pub fn setVideoRunPreparation(self: *Runtime, preparation: ?control_ports.VideoRunPreparation) void {
@@ -10418,10 +10440,14 @@ pub const Runtime = struct {
             .submit_custom_provider_fn = controlSubmitCustomProvider,
             .begin_custom_provider_probe_fn = controlBeginCustomProviderProbe,
             .complete_custom_model_test_fn = controlCompleteCustomModelTest,
-            .prepare_metask_catalog_refresh_fn = controlPrepareMetaskCatalogRefresh,
-            .complete_metask_catalog_refresh_fn = controlCompleteMetaskCatalogRefresh,
-            .fail_metask_catalog_refresh_fn = controlFailMetaskCatalogRefresh,
-            .metask_authorization_unavailable_fn = controlMetaskAuthorizationUnavailable,
+            .follow_metask_principal_fn = controlFollowMetaskPrincipal,
+            .set_metask_catalog_active_fn = controlSetMetaskCatalogActive,
+            .metask_catalog_next_fn = controlMetaskCatalogNext,
+            .metask_catalog_due_fn = controlMetaskCatalogDue,
+            .begin_metask_catalog_request_fn = controlBeginMetaskCatalogRequest,
+            .join_metask_catalog_request_fn = controlJoinMetaskCatalogRequest,
+            .complete_metask_catalog_request_fn = controlCompleteMetaskCatalogRequest,
+            .fail_metask_catalog_request_fn = controlFailMetaskCatalogRequest,
         };
     }
 
@@ -11155,8 +11181,8 @@ fn controlStopCustomProviders(context: *anyopaque) void {
 fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
     return controlOwner(context).resetModelsStore(expected_revision);
 }
-fn controlPrepareMediaCandidate(context: *anyopaque, input: models_contract.MediaPreparationInput) models_contract.MediaPreparation {
-    return controlOwner(context).custom_providers.prepareMediaCandidate(input);
+fn controlPrepareMediaCandidate(context: *anyopaque, kind: models_contract.MediaKind) models_contract.MediaPreparation {
+    return controlOwner(context).custom_providers.prepareMediaCandidate(kind);
 }
 fn controlCreateCustomProvider(context: *anyopaque, secret: []const u8, spec: models_contract.CustomProviderSpec) models_contract.CommandResult {
     return controlOwner(context).createCustomProviderWithCredential(secret, spec);
@@ -11179,17 +11205,29 @@ fn controlBeginCustomProviderProbe(context: *anyopaque, command: models_contract
 fn controlCompleteCustomModelTest(context: *anyopaque, command: models_contract.CustomModelTestCommand, succeeded: bool) models_contract.CommandResult {
     return controlOwner(context).completeCustomModelTest(command, succeeded);
 }
-fn controlPrepareMetaskCatalogRefresh(context: *anyopaque, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
-    return controlOwner(context).prepareMetaskCatalogRefresh(principal_ref, authorization_generation);
+fn controlFollowMetaskPrincipal(context: *anyopaque, principal_ref: ?[]const u8, generation: u64) models_contract.MetaskFollow {
+    return controlOwner(context).followMetaskPrincipal(principal_ref, generation);
 }
-fn controlCompleteMetaskCatalogRefresh(context: *anyopaque, attempt_id: u64, authorization_generation: u64, completion: *models_ports.OwnedCatalogCompletion) models_contract.ModelsError {
-    return controlOwner(context).completeMetaskCatalogRefresh(attempt_id, authorization_generation, completion);
+fn controlSetMetaskCatalogActive(context: *anyopaque, active: bool) void {
+    controlOwner(context).setMetaskCatalogActive(active);
 }
-fn controlFailMetaskCatalogRefresh(context: *anyopaque, attempt_id: u64, authorization_generation: u64, error_code: models_contract.ModelsError, safe_diagnostic: []const u8) void {
-    controlOwner(context).failMetaskCatalogRefresh(attempt_id, authorization_generation, error_code, safe_diagnostic);
+fn controlMetaskCatalogNext(context: *anyopaque) ?u64 {
+    return controlOwner(context).metaskCatalogNext();
 }
-fn controlMetaskAuthorizationUnavailable(context: *anyopaque) void {
-    controlOwner(context).setMetaskAuthorizationUnavailable();
+fn controlMetaskCatalogDue(context: *anyopaque, now_ms: u64) bool {
+    return controlOwner(context).metaskCatalogDue(now_ms);
+}
+fn controlBeginMetaskCatalogRequest(context: *anyopaque, kind: models_contract.CatalogRequestKind, credential: models_contract.CatalogCredential, now_ms: u64) models_contract.CatalogRequestStart {
+    return controlOwner(context).beginMetaskCatalogRequest(kind, credential, now_ms);
+}
+fn controlJoinMetaskCatalogRequest(context: *anyopaque) bool {
+    return controlOwner(context).joinMetaskCatalogRequest();
+}
+fn controlCompleteMetaskCatalogRequest(context: *anyopaque, id: u64, completion: *models_ports.OwnedCatalogCompletion, now_ms: u64) bool {
+    return controlOwner(context).completeMetaskCatalogRequest(id, completion, now_ms);
+}
+fn controlFailMetaskCatalogRequest(context: *anyopaque, id: u64, failure: models_contract.CatalogFailure, now_ms: u64) bool {
+    return controlOwner(context).failMetaskCatalogRequest(id, failure, now_ms);
 }
 fn controlDrainAgentEvents(context: *anyopaque) anyerror!void {
     return controlOwner(context).drainAgentEvents();
@@ -14655,7 +14693,7 @@ test "Product Control snapshot serializer keeps durable Metask intent after auth
         .view = .{ .state = .signed_out },
     });
     control.publishAdmissionChangesNoFail();
-    control.setMetaskAuthorizationUnavailable();
+    _ = control.followMetaskPrincipal(null, 0);
 
     try std.testing.expectEqual(account_contract.AccountState.signed_out, control.accountView().state);
     const after = control.modelsView();
@@ -15105,7 +15143,7 @@ test "Scheduled Task keeps its Metask model across renewals, logins and restarts
     const commits = fixture.persistence.commits;
     try fixture.loadCatalog("token-b");
     // A login passes through no authorization at all.
-    fixture.control.setMetaskAuthorizationUnavailable();
+    _ = fixture.control.followMetaskPrincipal(null, 0);
     try fixture.loadCatalog("token-c");
     try fixture.restartModels();
     try fixture.loadCatalog("token-d");
@@ -15245,17 +15283,12 @@ test "a due Metask schedule reads the Account once and waits while it is confirm
     try std.testing.expectEqual(@as(usize, 1), account.reads);
     try std.testing.expect(fixture.stored(id).health == .ready and fixture.stored(id).last_occurrence == null);
     try std.testing.expectEqual(@as(?u64, 2_060), fixture.clock.armed_at);
-    // Confirmed, but the catalog is still the previous authorization's: its
-    // content is not judged, so the plan waits again.
-    account.value = TestAccount.available(18);
-    fixture.clock.now = 2_060;
-    fixture.control.onScheduledTaskTimer();
-    try std.testing.expect(fixture.stored(id).last_occurrence == null);
-    try std.testing.expectEqual(@as(?u64, 2_120), fixture.clock.armed_at);
     try std.testing.expectEqual(commits, fixture.persistence.commits);
-    // On the authorization its catalog was loaded with, it runs.
-    account.value = TestAccount.available(17);
-    fixture.clock.now = 2_120;
+    // Confirmed with a credential renewed since the catalog was loaded: the
+    // catalog is the account's, not the token's, so the plan runs at once.
+    account.value = TestAccount.available(18);
+    models_aggregate.TestSupport.shared_credentials.generation = 18;
+    fixture.clock.now = 2_060;
     fixture.control.onScheduledTaskTimer();
     try std.testing.expectEqual(@as(u64, 2_000), fixture.stored(id).last_occurrence.?.planned_at_unix_seconds);
 }
@@ -16647,7 +16680,7 @@ test "identity replacement does not disturb live Task runtime references" {
     const route_id = task.runtime.routeId();
     const execution = task.runtime.executionConst().?;
     control.commitAccountFactNoFail(.{ .view = .{ .state = .signed_out } });
-    control.setMetaskAuthorizationUnavailable();
+    _ = control.followMetaskPrincipal(null, 0);
     try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
 
@@ -16763,11 +16796,17 @@ test "Product Control publishes Task model selection availability from cross-own
         control.taskModelSelectionAvailability(query),
     );
 
-    const refresh = control.prepareMetaskCatalogRefresh("account-1", 17);
-    const preparation = switch (refresh) {
-        .ready => |value| value,
-        .rejected => return error.TestUnexpectedResult,
-    };
+    // A request with content in hand is out of sight; only a load is seen.
+    const background = control.beginMetaskCatalogRequest(.user, .{ .ready = .{ .principal_ref = "account-1", .generation = 17 } }, 0).outcome.started;
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.available,
+        control.taskModelSelectionAvailability(query),
+    );
+    _ = control.failMetaskCatalogRequest(background, .{ .code = .catalog_unavailable, .retryable = true }, 0);
+    // Without content the account's load is what a selection waits for.
+    _ = control.followMetaskPrincipal(null, 0);
+    _ = control.followMetaskPrincipal("account-1", 17);
+    const load = control.beginMetaskCatalogRequest(.due, .{ .ready = .{ .principal_ref = "account-1", .generation = 17 } }, 0).outcome.started;
     try std.testing.expectEqual(
         product_task.ModelSelectionAvailability.catalog_loading,
         control.taskModelSelectionAvailability(query),
@@ -16775,12 +16814,7 @@ test "Product Control publishes Task model selection availability from cross-own
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"modelSelectionAvailability\":\"catalog_loading\"") != null);
-    control.failMetaskCatalogRefresh(
-        preparation.attempt_id,
-        preparation.authorization_generation,
-        .catalog_unavailable,
-        "fixture unavailable",
-    );
+    _ = control.failMetaskCatalogRequest(load, .{ .code = .catalog_unavailable, .retryable = false }, 0);
     try std.testing.expectEqual(
         product_task.ModelSelectionAvailability.catalog_unavailable,
         control.taskModelSelectionAvailability(query),
@@ -16928,17 +16962,21 @@ test "unchanged Task binding skips candidate allocation and credential publicati
     _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
     var failing = std.testing.FailingAllocator.init(control.allocator, .{ .fail_index = 0 });
-    const original = control.custom_providers.metask_catalog.allocator;
-    control.custom_providers.metask_catalog.allocator = failing.allocator();
-    defer control.custom_providers.metask_catalog.allocator = original;
+    const original = control.custom_providers.metask.catalog.?.allocator;
+    control.custom_providers.metask.catalog.?.allocator = failing.allocator();
+    defer control.custom_providers.metask.catalog.?.allocator = original;
     const revision = control.currentRevision();
     const security_epoch = control.projection_security_epoch;
+    const credential_reads = models_aggregate.TestSupport.shared_credentials.reads;
     try std.testing.expectEqualDeep(Runtime.PreparedBinding{ .plan = .keep }, try control.prepareTaskBinding(3));
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    // Nothing was resolved, so no credential was even read.
+    try std.testing.expectEqual(credential_reads, models_aggregate.TestSupport.shared_credentials.reads);
     try std.testing.expectEqual(revision, control.currentRevision());
     try std.testing.expectEqual(security_epoch, control.projection_security_epoch);
     task.runtime.execution().?.model_intent_revision = 0;
     try std.testing.expectError(error.OutOfMemory, control.prepareTaskBinding(3));
+    try std.testing.expectEqual(credential_reads + 1, models_aggregate.TestSupport.shared_credentials.reads);
 }
 
 test "Task model installed intent does not borrow a catalog refresh as new execution authority" {
@@ -16947,12 +16985,11 @@ test "Task model installed intent does not borrow a catalog refresh as new execu
     const task = control.testTask(3).?;
     _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
-    const refresh = control.prepareMetaskCatalogRefresh("account-1", 17);
-    const preparation = switch (refresh) {
-        .ready => |value| value,
-        .rejected => return error.TestUnexpectedResult,
-    };
-    control.failMetaskCatalogRefresh(preparation.attempt_id, preparation.authorization_generation, .catalog_unavailable, "unavailable catalog");
+    // The account's catalog is gone and loading it again failed.
+    _ = control.followMetaskPrincipal(null, 0);
+    _ = control.followMetaskPrincipal("account-1", 17);
+    const load = control.beginMetaskCatalogRequest(.due, .{ .ready = .{ .principal_ref = "account-1", .generation = 17 } }, 0).outcome.started;
+    _ = control.failMetaskCatalogRequest(load, .{ .code = .catalog_unavailable, .retryable = false }, 0);
     try std.testing.expectEqualDeep(Runtime.PreparedBinding{ .plan = .keep }, try control.prepareTaskBinding(3));
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     // An uninstalled/newly selected revision still needs exact current source
@@ -16971,9 +17008,10 @@ test "Task model projection reads its binding plan without resolving a credentia
     control.setAccountAuthorization(account.query());
     try std.testing.expectEqualDeep(task_runtime.Runtime.BindingPlan.renew, control.taskBindingPlan(3, control.metaskUse()));
     var failing = std.testing.FailingAllocator.init(control.allocator, .{ .fail_index = 0 });
-    const original = control.custom_providers.metask_catalog.allocator;
-    control.custom_providers.metask_catalog.allocator = failing.allocator();
-    defer control.custom_providers.metask_catalog.allocator = original;
+    const original = control.custom_providers.metask.catalog.?.allocator;
+    control.custom_providers.metask.catalog.?.allocator = failing.allocator();
+    defer control.custom_providers.metask.catalog.?.allocator = original;
+    const credential_reads = models_aggregate.TestSupport.shared_credentials.reads;
     const projected = control.observeTaskRecoveryAuthority(.{
         .task_id = 3,
         .workspace_id = task.durable.workspace_id,
@@ -16987,8 +17025,11 @@ test "Task model projection reads its binding plan without resolving a credentia
     try std.testing.expect(!projected.model_rebind_required);
     try std.testing.expectEqual(.available, projected.execution_admission);
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    // A projection never reads the credential.
+    try std.testing.expectEqual(credential_reads, models_aggregate.TestSupport.shared_credentials.reads);
     // Only an admission resolves the candidate the plan asks for.
     try std.testing.expectError(error.OutOfMemory, control.prepareTaskBinding(3));
+    try std.testing.expectEqual(credential_reads + 1, models_aggregate.TestSupport.shared_credentials.reads);
 }
 
 test "Task model selection does not depend on a starting preference" {

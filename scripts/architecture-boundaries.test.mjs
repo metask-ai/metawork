@@ -2105,6 +2105,7 @@ test("Account authorization and Models provider state remain separate owners", (
   const accountState = read("src/product/account/state.zig");
   const accountContract = read("src/product/account/contract.zig");
   const modelsRuntime = read("src/product/models/runtime.zig");
+  const modelsMetask = read("src/product/models/metask.zig");
 
   assert.match(ports, /pub const AccountCommitSink = struct/);
   assert.doesNotMatch(
@@ -2156,12 +2157,16 @@ test("Account authorization and Models provider state remain separate owners", (
   assert.match(accountRuntime, /pub fn credential\(/);
   assert.match(modelsCoordinator, /self\.credentials\.take\(\)/);
   assert.doesNotMatch(modelsCoordinator, /@import\("metawork_account"\)/);
+  // Models follows the account Account publishes; signing out empties it.
   assert.match(
     modelsCoordinator,
-    /self\.management\.setMetaskAuthorizationUnavailable\(\)/,
+    /self\.management\.followMetaskPrincipal\(null, 0\)/,
   );
-  assert.match(modelsRuntime, /pub fn setMetaskAuthorizationUnavailable/);
-  assert.match(modelsRuntime, /clearMetaskRuntime\(\.needs_authentication/);
+  assert.match(modelsRuntime, /pub fn followMetaskPrincipal/);
+  assert.match(modelsRuntime, /self\.clearMetask\(true\)/);
+  // The Metask catalog keeps no token: whoever resolves brings the
+  // credential of the moment.
+  assert.doesNotMatch(modelsMetask, /Secret = struct/);
   assert.doesNotMatch(
     [accountContract, accountRuntime, accountState].join("\n"),
     /ModelView|ModelMetadata|CatalogState|source_resolution|selected_model|OwnedSourceCandidate|execution_generation/,

@@ -15,6 +15,60 @@ pub const StartError = error{
 pub const ModelBinding = registry_impl.Registry.ModelBinding;
 
 pub const TestSupport = if (builtin.is_test) struct {
+    /// A Metask credential port for tests, as `TestVault` is for keys. A
+    /// test that needs its own values or counts holds its own instance.
+    pub const FakeMetaskCredentials = struct {
+        account_bytes: [contract.Limits.principal_ref_bytes]u8 = undefined,
+        account_len: usize = 0,
+        token_bytes: [contract.Limits.credential_bytes]u8 = undefined,
+        token_len: usize = 0,
+        generation: u64 = default_generation,
+        /// How many times Models read it.
+        reads: usize = 0,
+
+        /// The generation fixtures have always paired with their catalog.
+        pub const default_generation: u64 = 17;
+
+        pub fn init(account: []const u8, token: []const u8, generation: u64) FakeMetaskCredentials {
+            var result: FakeMetaskCredentials = .{ .generation = generation };
+            result.set(account, token);
+            return result;
+        }
+
+        pub fn set(self: *FakeMetaskCredentials, account: []const u8, token: []const u8) void {
+            @memcpy(self.account_bytes[0..account.len], account);
+            self.account_len = account.len;
+            @memcpy(self.token_bytes[0..token.len], token);
+            self.token_len = token.len;
+        }
+
+        pub fn port(self: *FakeMetaskCredentials) ports.MetaskCredentials {
+            return .{ .context = self, .read_fn = read };
+        }
+
+        fn read(context: *anyopaque, account_storage: []u8, token_storage: []u8) std.mem.Allocator.Error!?ports.MetaskCredential {
+            const self: *FakeMetaskCredentials = @ptrCast(@alignCast(context));
+            self.reads += 1;
+            if (self.token_len == 0) return null;
+            @memcpy(account_storage[0..self.account_len], self.account_bytes[0..self.account_len]);
+            @memcpy(token_storage[0..self.token_len], self.token_bytes[0..self.token_len]);
+            return .{ .account = account_storage[0..self.account_len], .token = token_storage[0..self.token_len], .generation = self.generation };
+        }
+    };
+
+    /// The one the catalog helpers below install, for the many tests that
+    /// compose Models only through them. Every install starts it afresh, so
+    /// nothing one test left in it reaches the next.
+    pub var shared_credentials: FakeMetaskCredentials = .{};
+
+    /// A port the test installed itself stays: the helper only installs the
+    /// shared one where none, or the shared one, is.
+    pub fn useSharedCredentials(runtime: *Runtime, account: []const u8, token: []const u8) void {
+        shared_credentials = FakeMetaskCredentials.init(account, token, FakeMetaskCredentials.default_generation);
+        if (runtime.metask_credentials) |installed| if (installed.context != @as(*anyopaque, @ptrCast(&shared_credentials))) return;
+        runtime.metask_credentials = shared_credentials.port();
+    }
+
     pub fn fixtureSelectionAvailable(runtime: *Runtime) bool {
         const target = runtime.view().default_selection orelse return false;
         const view = runtime.view();
@@ -48,25 +102,10 @@ pub const TestSupport = if (builtin.is_test) struct {
         credential: []const u8,
         models: []const contract.ModelView,
     ) !contract.ModelsError {
-        const preparation = switch (runtime.prepareMetaskCatalogRefresh(principal_ref, 17)) {
-            .ready => |value| value,
-            .rejected => return error.TestUnexpectedResult,
-        };
         var session = metask_provider.CatalogSession.init(runtime.allocator);
         defer session.deinit();
-        try metask_provider.TestSupport.replaceOwnedCatalog(
-            &session,
-            principal_ref,
-            credential,
-            models,
-        );
-        var completion = metask_provider.OwnedCatalogCompletion.init(&session);
-        var port = completion.ownedPort();
-        return runtime.completeMetaskCatalogRefresh(
-            preparation.attempt_id,
-            preparation.authorization_generation,
-            &port,
-        );
+        try metask_provider.TestSupport.replaceOwnedCatalog(&session, principal_ref, models);
+        return completeRequest(runtime, principal_ref, credential, &session);
     }
 
     pub fn refreshMetaskCatalogResponse(
@@ -74,16 +113,26 @@ pub const TestSupport = if (builtin.is_test) struct {
         principal_ref: []const u8,
         response_body: []const u8,
     ) !contract.ModelsError {
-        const preparation = switch (runtime.prepareMetaskCatalogRefresh(principal_ref, 17)) {
-            .ready => |value| value,
-            .rejected => return error.TestUnexpectedResult,
-        };
         var session = metask_provider.CatalogSession.init(runtime.allocator);
         defer session.deinit();
         try metask_provider.TestSupport.loadCatalogResponse(&session, principal_ref, "refreshed-secret", response_body);
-        var completion = metask_provider.OwnedCatalogCompletion.init(&session);
+        return completeRequest(runtime, principal_ref, "refreshed-secret", &session);
+    }
+
+    /// One whole request as the person would ask for it: Models follows the
+    /// account, the request starts with the credential of this moment and
+    /// lands with `session`. The catalog error the view then shows, or none.
+    fn completeRequest(runtime: *Runtime, principal_ref: []const u8, credential: []const u8, session: *metask_provider.CatalogSession) !contract.ModelsError {
+        useSharedCredentials(runtime, principal_ref, credential);
+        _ = runtime.followMetaskPrincipal(principal_ref, shared_credentials.generation);
+        const id = switch (runtime.beginMetaskCatalogRequest(.user, .{ .ready = .{ .principal_ref = principal_ref, .generation = shared_credentials.generation } }, 0).outcome) {
+            .started => |value| value,
+            .skipped, .rejected => return error.TestUnexpectedResult,
+        };
+        var completion = metask_provider.OwnedCatalogCompletion.init(session);
         var port = completion.ownedPort();
-        return runtime.completeMetaskCatalogRefresh(preparation.attempt_id, preparation.authorization_generation, &port);
+        _ = runtime.completeMetaskCatalogRequest(id, &port, 0);
+        return if (runtime.metask.catalog != null) .none else runtime.metaskError();
     }
 
     pub fn installMetaskDefault(
@@ -98,15 +147,13 @@ pub const TestSupport = if (builtin.is_test) struct {
         catalog_generation: u64,
     ) !void {
         runtime.assertMainThread();
-        runtime.metask_catalog.deinit();
-        runtime.metask_catalog = metask_provider.CatalogSession.init(runtime.allocator);
-        try metask_provider.TestSupport.replaceOwnedCatalog(
-            &runtime.metask_catalog,
-            principal_ref,
-            secret,
-            models,
-        );
-        if (!runtime.metask_catalog.hasModel(selected_model))
+        runtime.clearMetask(false);
+        if (!runtime.metask.principal.set(principal_ref)) return error.InvalidTestModel;
+        runtime.metask.catalog = metask_provider.CatalogSession.init(runtime.allocator);
+        const catalog = &runtime.metask.catalog.?;
+        try metask_provider.TestSupport.replaceOwnedCatalog(catalog, principal_ref, models);
+        useSharedCredentials(runtime, principal_ref, secret);
+        if (!catalog.hasModel(selected_model))
             return error.InvalidTestModel;
         _ = metask_selection_revision;
         try runtime.registry.configureMetaskSource(principal_ref, source_generation);
@@ -118,22 +165,30 @@ pub const TestSupport = if (builtin.is_test) struct {
         }
         try runtime.registry.rememberPreference(
             .{ .source_id = contract.metask_source_id, .model_id = selected_model },
-            runtime.metask_catalog.preferenceDisplayName(selected_model),
+            catalog.preferenceDisplayName(selected_model),
             default_selection_revision,
         );
-        runtime.metask_catalog_state = .ready;
-        runtime.metask_catalog_generation = catalog_generation;
-        runtime.metask_catalog_authorization_generation = 17;
-        runtime.metask_error = .none;
+        runtime.metask.generation = catalog_generation;
         runtime.store_healthy = true;
         if (runtime.metask_public_catalog == null) {
             const public_catalog = try runtime.allocator.create(metask_provider.PublicCatalog);
             public_catalog.* = .{};
             runtime.metask_public_catalog = public_catalog;
         }
-        runtime.metask_public_catalog.?.replaceFromSession(&runtime.metask_catalog);
+        runtime.metask_public_catalog.?.replaceFromSession(catalog);
     }
 } else struct {};
+
+/// Where one read of the Metask credential lands; zeroed after the call.
+const MetaskCredentialStorage = struct {
+    account: [contract.Limits.principal_ref_bytes]u8 = undefined,
+    token: [contract.Limits.credential_bytes]u8 = undefined,
+
+    fn zero(self: *MetaskCredentialStorage) void {
+        std.crypto.secureZero(u8, &self.token);
+        std.crypto.secureZero(u8, &self.account);
+    }
+};
 
 fn FixedText(comptime capacity: usize) type {
     return struct {
@@ -221,23 +276,58 @@ pub const Runtime = struct {
     store: ?registry_impl.FileStore = null,
     store_healthy: bool = false,
     credential_vault: ?ports.CredentialVault = null,
-    metask_catalog: metask_provider.CatalogSession,
+    /// Where the Metask credential of the moment comes from, beside the vault.
+    /// Read once per resolution; Models keeps no Metask token.
+    metask_credentials: ?ports.MetaskCredentials = null,
+    /// The Metask source's catalog, and when to ask for it again.
+    metask: Metask = .{},
     metask_public_catalog: ?*metask_provider.PublicCatalog = null,
-    metask_catalog_state: contract.CatalogState = .needs_authentication,
     preference_error: contract.ModelsError = .none,
-    metask_catalog_generation: u64 = 0,
-    metask_catalog_authorization_generation: u64 = 0,
-    metask_catalog_attempt_generation: u64 = 0,
-    metask_error: contract.ModelsError = .none,
-    metask_safe_diagnostic: FixedText(contract.Limits.safe_diagnostic_bytes) = .{},
     provider_views: [1]contract.ProviderView = undefined,
-    catalog_attempt: ?struct {
-        id: u64,
-        principal_ref: FixedText(contract.Limits.principal_ref_bytes),
-        authorization_generation: u64,
-    } = null,
-    next_catalog_attempt_id: u64 = 1,
     resident: std.ArrayList(Resident) = .empty,
+
+    /// The Metask catalog: one account's content, the load someone waits
+    /// for while there is none, and the next time to ask. Its timing is
+    /// Models' own; the Application only runs the timer and the request.
+    const Metask = struct {
+        /// The account followed; empty while none is signed in.
+        principal: FixedText(contract.Limits.principal_ref_bytes) = .{},
+        /// The credential generation of the last Account publication
+        /// followed; 0 while no account is.
+        followed_generation: u64 = 0,
+        /// No account because one signed out or Models stopped.
+        signed_out: bool = false,
+        /// That account's catalog; a legal empty one is content too.
+        catalog: ?metask_provider.CatalogSession = null,
+        /// Changes only when the content does; 0 without content.
+        generation: u64 = 0,
+        /// Without content: the load someone waits for, or how it ended.
+        load: union(enum) {
+            none,
+            loading: struct { failures: u1 = 0 },
+            /// `generation`: the credential generation the last failed
+            /// request used. Another one is worth one more try.
+            failed: struct { code: contract.ModelsError, generation: u64 },
+        } = .none,
+        /// The one request underway.
+        /// `followed`: the publication followed when it began; another one
+        /// since means Account has a newer credential to try.
+        request: ?struct { id: u64, generation: u64, followed: u64, visible: bool, user: bool } = null,
+        next_request_id: u64 = 1,
+        /// When to send the next request and why.
+        next: union(enum) {
+            none,
+            /// At this time, in front or not: a load, its second try, a
+            /// try with another credential, a reload after a reset.
+            soon: u64,
+            /// When Account next has a credential to give.
+            credential,
+            /// The beat: last result plus the interval, only in front.
+            beat: u64,
+        } = .none,
+        /// MetaWork is in front.
+        active: bool = false,
+    };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, main_thread_id: std.Thread.Id) Runtime {
         return .{
@@ -245,7 +335,6 @@ pub const Runtime = struct {
             .io = io,
             .main_thread_id = main_thread_id,
             .registry = registry_impl.Registry.init(allocator),
-            .metask_catalog = metask_provider.CatalogSession.init(allocator),
         };
     }
 
@@ -255,7 +344,7 @@ pub const Runtime = struct {
         if (self.metask_public_catalog) |public_catalog|
             self.allocator.destroy(public_catalog);
         if (self.store) |*store| store.deinit();
-        self.metask_catalog.deinit();
+        if (self.metask.catalog) |*catalog| catalog.deinit();
         for (self.resident.items) |*entry| entry.deinit(self.allocator);
         self.resident.deinit(self.allocator);
         self.registry.deinit();
@@ -389,7 +478,7 @@ pub const Runtime = struct {
         self.store = null;
         self.store_healthy = false;
         self.credential_vault = null;
-        self.clearMetaskRuntime(.needs_authentication, .authorization_unavailable);
+        self.clearMetask(true);
         if (self.metask_public_catalog) |public_catalog| {
             self.allocator.destroy(public_catalog);
             self.metask_public_catalog = null;
@@ -408,16 +497,16 @@ pub const Runtime = struct {
             .id = contract.metask_source_id,
             .display_name = "Metask",
             .recommended = true,
-            .catalog_state = self.metask_catalog_state,
+            .catalog_state = self.metaskCatalogState(),
             .principal_ref = if (intent) |value| value.principal_ref else "",
             .models = if (self.metask_public_catalog) |public_catalog|
                 public_catalog.modelViews()
             else
                 &.{},
-            .catalog_generation = self.metask_catalog_generation,
+            .catalog_generation = self.metask.generation,
             .source_generation = if (intent) |value| value.source_generation else 0,
-            .error_code = self.metask_error,
-            .safe_diagnostic = self.metask_safe_diagnostic.view(),
+            .error_code = self.metaskError(),
+            .safe_diagnostic = "",
         };
         return .{
             .availability = if (self.store_healthy) .ready else .unavailable,
@@ -431,8 +520,8 @@ pub const Runtime = struct {
             .default_selection = self.registry.defaultSelection(),
             .default_selection_display_name = if (self.registry.default_display_name.len == 0) null else self.registry.default_display_name,
             .selection_revision = self.registry.selection_revision,
-            .operation = if (self.catalog_attempt == null) .idle else .refreshing_catalog,
-            .error_code = if (!self.store_healthy) .persistence_unavailable else if (self.preference_error != .none) self.preference_error else self.metask_error,
+            .operation = self.metaskOperation(),
+            .error_code = if (!self.store_healthy) .persistence_unavailable else if (self.preference_error != .none) self.preference_error else self.metaskError(),
             .builtin_provider_presets = builtin_providers.views(),
             .custom_providers = self.registry.views(),
         };
@@ -444,7 +533,7 @@ pub const Runtime = struct {
             const source = self.registry.metaskSource();
             return .{
                 .source = if (source) |value| value.source_generation else 0,
-                .catalog = self.metask_catalog_generation,
+                .catalog = self.metask.generation,
             };
         }
         return self.registry.sourceGenerations(source_id);
@@ -536,193 +625,303 @@ pub const Runtime = struct {
         return false;
     }
 
-    pub fn prepareMetaskCatalogRefresh(
-        self: *Runtime,
-        principal_ref: []const u8,
-        authorization_generation: u64,
-    ) contract.CatalogRefreshPrepareResult {
-        self.assertMainThread();
-        return self.beginMetaskCatalogRefresh(
-            principal_ref,
-            authorization_generation,
-        );
-    }
-
-    /// Tests the accepted catalog against an Application-supplied authorization.
-    pub fn acceptsMetaskAuthorization(self: *Runtime, generation: u64) bool {
-        self.assertMainThread();
-        return generation != 0 and generation == self.metask_catalog_authorization_generation and self.metask_catalog_state == .ready;
-    }
-
-    pub fn metaskInputCatalogState(self: *Runtime, generation: u64) contract.CatalogState {
-        if (self.acceptsMetaskAuthorization(generation)) return .ready;
-        if (generation == 0 or self.metask_catalog_attempt_generation != generation) return .unavailable;
-        return switch (self.metask_catalog_state) {
-            .loading => if (self.catalog_attempt != null) .loading else .unavailable,
-            .failed, .needs_authentication => self.metask_catalog_state,
-            else => .unavailable,
+    /// What the Metask source can do now, for the account it follows: the
+    /// one Models answer every Metask admission reads.
+    pub fn metaskCatalog(self: *const Runtime) contract.MetaskCatalogAvailability {
+        if (self.metask.principal.len == 0) return .absent;
+        if (self.metask.catalog != null) return .ready;
+        return switch (self.metask.load) {
+            .none => .absent,
+            .loading => .loading,
+            .failed => .failed,
         };
     }
 
-    /// Resolve the preferred model or the first eligible catalog entry using
-    /// the current authorization lease. No user selection is persisted.
-    pub fn prepareMediaCandidate(self: *Runtime, input: contract.MediaPreparationInput) contract.MediaPreparation {
+    fn metaskCatalogState(self: *const Runtime) contract.CatalogState {
+        return switch (self.metaskCatalog()) {
+            .absent => .needs_authentication,
+            .ready => .ready,
+            .loading => .loading,
+            .failed => .failed,
+        };
+    }
+
+    fn metaskError(self: *const Runtime) contract.ModelsError {
+        if (self.metask.principal.len == 0) return if (self.metask.signed_out) .authorization_unavailable else .none;
+        if (self.metask.catalog != null) {
+            const public_catalog = self.metask_public_catalog orelse return .none;
+            return if (public_catalog.model_count == 0) .no_models else .none;
+        }
+        return switch (self.metask.load) {
+            .failed => |failed| failed.code,
+            .none, .loading => .none,
+        };
+    }
+
+    /// Lit while a load runs, its retry included, or while the person's own
+    /// request does; a request in the background never lights it. A failed
+    /// load is idle: the person asking turns it back into a load first.
+    fn metaskOperation(self: *const Runtime) contract.ModelsOperation {
+        if (self.metask.catalog == null) return switch (self.metask.load) {
+            .loading => .refreshing_catalog,
+            .none, .failed => .idle,
+        };
+        const request = self.metask.request orelse return .idle;
+        return if (request.user) .refreshing_catalog else .idle;
+    }
+
+    /// What a request's outcome can change that anyone sees.
+    const MetaskFacts = struct {
+        state: contract.CatalogState,
+        error_code: contract.ModelsError,
+        operation: contract.ModelsOperation,
+        generation: u64,
+    };
+
+    fn metaskFacts(self: *const Runtime) MetaskFacts {
+        return .{
+            .state = self.metaskCatalogState(),
+            .error_code = self.metaskError(),
+            .operation = self.metaskOperation(),
+            .generation = self.metask.generation,
+        };
+    }
+
+    fn metaskChanged(self: *const Runtime, before: MetaskFacts) bool {
+        return !std.meta.eql(before, self.metaskFacts());
+    }
+
+    /// Follows the account an Account publication leaves. The content
+    /// belongs to the account: another one, or none, empties it; a new
+    /// credential for the same one changes nothing, except that a load
+    /// waiting for a credential, or one that failed on another, may now try.
+    pub fn followMetaskPrincipal(self: *Runtime, principal_ref: ?[]const u8, generation: u64) contract.MetaskFollow {
         self.assertMainThread();
-        if (!self.store_healthy) return .{ .rejected = .persistence_unavailable };
-        if (self.catalog_attempt != null or self.metask_catalog_state != .ready or self.metask_catalog_generation == 0)
-            return .{ .rejected = .catalog_unavailable };
-        if (!std.mem.eql(u8, self.metask_catalog.ownerAccountId(), input.principal_ref) or
-            input.authorization_generation == 0 or
-            input.authorization_generation != self.metask_catalog_authorization_generation or
-            input.bearer.len == 0 or input.bearer.len > contract.Limits.credential_bytes)
-            return .{ .rejected = .authorization_unavailable };
-        const selected = switch (input.kind) {
-            .image => if (self.metask_catalog.hasImageModel(contract.metask_default_image_model))
-                contract.metask_default_image_model
-            else
-                self.metask_catalog.firstImageModelId(),
-            .video => self.metask_catalog.selectVideoModel(contract.metask_default_video_model),
+        const principal = principal_ref orelse {
+            if (self.metask.principal.len == 0) {
+                // Signed out only after an account: at a cold start without
+                // one nothing was lost.
+                const changed = !self.metask.signed_out and self.metask.followed_generation != 0;
+                if (changed) self.metask.signed_out = true;
+                self.metask.followed_generation = 0;
+                return .{ .changed = changed, .dropped = false };
+            }
+            const dropped = self.metask.request != null;
+            self.clearMetask(true);
+            return .{ .changed = true, .dropped = dropped };
         };
-        return .{ .ready = contract.OwnedMediaCandidate.copy(
-            self.allocator,
-            input.kind,
-            selected orelse return .{ .rejected = .model_not_found },
-            input.bearer,
-            self.metask_catalog_generation,
-        ) catch |err| return .{ .rejected = if (err == error.OutOfMemory) .local_resource_exhausted else .invalid_provider } };
+        if (std.mem.eql(u8, principal, self.metask.principal.view())) {
+            self.metask.followed_generation = generation;
+            if (self.metask.request == null) {
+                const retry = switch (self.metask.next) {
+                    .credential => true,
+                    else => if (self.metask.catalog == null) switch (self.metask.load) {
+                        .failed => |failed| failed.generation != generation,
+                        .none, .loading => false,
+                    } else false,
+                };
+                if (retry) self.metask.next = .{ .soon = 0 };
+            }
+            return .{ .changed = false, .dropped = false };
+        }
+        const dropped = self.metask.request != null;
+        self.clearMetask(false);
+        self.metask.followed_generation = generation;
+        // Account validated the account it gives; one Models could not hold
+        // is no account here.
+        if (!self.metask.principal.set(principal) or principal.len == 0) {
+            self.metask.principal = .{};
+            return .{ .changed = true, .dropped = dropped };
+        }
+        self.metask.load = .{ .loading = .{} };
+        self.metask.next = .{ .soon = 0 };
+        return .{ .changed = true, .dropped = dropped };
     }
 
-    fn beginMetaskCatalogRefresh(
-        self: *Runtime,
-        principal_ref: []const u8,
-        authorization_generation: u64,
-    ) contract.CatalogRefreshPrepareResult {
-        if (!self.store_healthy) return .{ .rejected = .persistence_unavailable };
-        if (self.catalog_attempt != null) return .{ .rejected = .operation_in_progress };
-        if (principal_ref.len == 0 or
-            principal_ref.len > contract.Limits.principal_ref_bytes or
-            authorization_generation == 0 or
-            !std.unicode.utf8ValidateSlice(principal_ref))
-            return .{ .rejected = .authorization_unavailable };
-        var principal: FixedText(contract.Limits.principal_ref_bytes) = .{};
-        if (!principal.set(principal_ref))
-            return .{ .rejected = .authorization_unavailable };
-        const attempt_id = self.next_catalog_attempt_id;
-        self.next_catalog_attempt_id +%= 1;
-        if (self.next_catalog_attempt_id == 0) self.next_catalog_attempt_id = 1;
-        self.catalog_attempt = .{
-            .id = attempt_id,
-            .principal_ref = principal,
-            .authorization_generation = authorization_generation,
-        };
-        self.metask_catalog_attempt_generation = authorization_generation;
-        self.metask_catalog_state = .loading;
-        self.metask_error = .none;
-        self.metask_safe_diagnostic.len = 0;
-        return .{ .ready = .{
-            .attempt_id = attempt_id,
-            .principal_ref = self.catalog_attempt.?.principal_ref.view(),
-            .authorization_generation = authorization_generation,
-        } };
+    pub fn setMetaskCatalogActive(self: *Runtime, active: bool) void {
+        self.assertMainThread();
+        self.metask.active = active;
     }
 
-    pub fn completeMetaskCatalogRefresh(
-        self: *Runtime,
-        attempt_id: u64,
-        authorization_generation: u64,
-        completion_port: *ports.OwnedCatalogCompletion,
-    ) contract.ModelsError {
+    /// When the next catalog request is due; null when none is asked for
+    /// now. The beat waits in the background and while the store cannot be
+    /// trusted; a load still comes due there, so its wait can end.
+    pub fn metaskCatalogNext(self: *const Runtime) ?u64 {
+        if (self.metask.principal.len == 0 or self.metask.request != null) return null;
+        return switch (self.metask.next) {
+            .none, .credential => null,
+            .soon => |at| at,
+            .beat => |at| if (self.metask.active and self.store_healthy) at else null,
+        };
+    }
+
+    pub fn metaskCatalogDue(self: *const Runtime, now_ms: u64) bool {
+        const at = self.metaskCatalogNext() orelse return false;
+        return now_ms >= at;
+    }
+
+    /// Starts the one catalog request, when Models finds it due or the
+    /// person asks. Without content it is the load someone waits for; with
+    /// content nobody sees it unless the person asked.
+    pub fn beginMetaskCatalogRequest(self: *Runtime, kind: contract.CatalogRequestKind, credential: contract.CatalogCredential, now_ms: u64) contract.CatalogRequestStart {
+        self.assertMainThread();
+        if (self.metask.principal.len == 0) return .{ .outcome = .{ .rejected = .authorization_unavailable }, .changed = false };
+        if (self.metask.request != null) return .{ .outcome = .{ .rejected = .operation_in_progress }, .changed = false };
+        if (kind == .due and !self.metaskCatalogDue(now_ms)) return .{ .outcome = .skipped, .changed = false };
+        const before = self.metaskFacts();
+        if (!self.store_healthy) {
+            if (self.metask.catalog == null and self.metask.load == .loading)
+                self.metask.load = .{ .failed = .{ .code = .persistence_unavailable, .generation = 0 } };
+            self.metask.next = .none;
+            return .{ .outcome = .{ .rejected = .persistence_unavailable }, .changed = self.metaskChanged(before) };
+        }
+        const ready = switch (credential) {
+            .ready => |value| if (std.mem.eql(u8, value.principal_ref, self.metask.principal.view())) value else null,
+            .unavailable => null,
+            .exhausted => {
+                if (kind == .user and self.metask.catalog == null) self.metask.load = .{ .loading = .{} };
+                // Nothing to do with the credential: the one of the moment
+                // is as good as tried, so only another one, or the beat,
+                // asks again.
+                self.settleMetaskFailure(self.metask.catalog == null and self.metask.load == .loading, self.metask.followed_generation, false, .{ .code = .local_resource_exhausted, .retryable = false }, now_ms);
+                return .{ .outcome = .{ .rejected = .local_resource_exhausted }, .changed = self.metaskChanged(before) };
+            },
+        } orelse {
+            // Someone may wait for a load; a refresh just skips this beat.
+            self.metask.next = if (self.metask.catalog == null) .credential else .{ .beat = now_ms +| metask_provider.refresh_interval_ms };
+            return .{ .outcome = .{ .rejected = .authorization_unavailable }, .changed = false };
+        };
+        if (self.metask.catalog == null and kind == .user) self.metask.load = .{ .loading = .{} };
+        const id = self.metask.next_request_id;
+        self.metask.next_request_id +%= 1;
+        if (self.metask.next_request_id == 0) self.metask.next_request_id = 1;
+        self.metask.request = .{
+            .id = id,
+            .generation = ready.generation,
+            .followed = self.metask.followed_generation,
+            .visible = self.metask.catalog == null and self.metask.load == .loading,
+            .user = kind == .user,
+        };
+        self.metask.next = .none;
+        return .{ .outcome = .{ .started = id }, .changed = self.metaskChanged(before) };
+    }
+
+    /// The person asked while a request is underway: it becomes theirs, and
+    /// one in the background after a failed load becomes the load they see.
+    pub fn joinMetaskCatalogRequest(self: *Runtime) bool {
+        self.assertMainThread();
+        if (self.metask.request == null) return false;
+        const before = self.metaskFacts();
+        self.metask.request.?.user = true;
+        if (self.metask.catalog == null and self.metask.load == .failed) {
+            self.metask.load = .{ .loading = .{} };
+            self.metask.request.?.visible = true;
+        }
+        return self.metaskChanged(before);
+    }
+
+    pub fn completeMetaskCatalogRequest(self: *Runtime, id: u64, completion_port: *ports.OwnedCatalogCompletion, now_ms: u64) bool {
         self.assertMainThread();
         const completion = metask_provider.fromOwnedPort(completion_port) orelse {
             completion_port.deinit();
-            self.catalog_attempt = null;
-            self.metask_catalog_state = .failed;
-            self.metask_error = .catalog_invalid;
-            return .catalog_invalid;
+            return self.failMetaskCatalogRequest(id, .{ .code = .catalog_invalid, .retryable = false }, now_ms);
         };
         defer completion_port.deinit();
+        const request = self.metask.request orelse return false;
+        if (request.id != id) return false;
+        const before = self.metaskFacts();
+        self.metask.request = null;
         const session = &completion.session;
-        const attempt = self.catalog_attempt orelse return .catalog_invalid;
-        if (attempt.id != attempt_id or
-            attempt.authorization_generation != authorization_generation)
-            return .catalog_invalid;
-        self.catalog_attempt = null;
-        if (!std.mem.eql(u8, attempt.principal_ref.view(), session.ownerAccountId())) {
-            self.metask_catalog_state = .needs_authentication;
-            self.metask_error = .authorization_unavailable;
-            return self.metask_error;
+        const failure: ?contract.ModelsError = failure: {
+            if (!std.mem.eql(u8, session.ownerAccountId(), self.metask.principal.view())) break :failure .catalog_invalid;
+            if (!self.store_healthy) break :failure .persistence_unavailable;
+            if (self.ensureMetaskSource()) |code| break :failure code;
+            if (self.metask.catalog) |*catalog| if (catalog.sameContent(session)) break :failure null;
+            const public_catalog = self.metask_public_catalog orelse break :failure .persistence_unavailable;
+            const generation = self.freshGeneration(self.metask.generation) catch break :failure .local_resource_exhausted;
+            if (self.metask.catalog) |*catalog| catalog.deinit();
+            self.metask.catalog = session.take();
+            public_catalog.replaceFromSession(&self.metask.catalog.?);
+            self.metask.generation = generation;
+            self.metask.load = .none;
+            break :failure null;
+        };
+        if (failure) |code| {
+            self.settleMetaskFailure(request.visible, request.generation, request.followed != self.metask.followed_generation, .{ .code = code, .retryable = false }, now_ms);
+        } else {
+            self.metask.next = .{ .beat = now_ms +| metask_provider.refresh_interval_ms };
         }
-        const public_catalog = self.metask_public_catalog orelse {
-            self.metask_catalog_state = .unavailable;
-            self.metask_error = .persistence_unavailable;
-            return self.metask_error;
-        };
-        const catalog_generation = self.freshGeneration(self.metask_catalog_generation) catch {
-            self.metask_catalog_state = .failed;
-            self.metask_error = .local_resource_exhausted;
-            return self.metask_error;
-        };
-        // The account is the source's whole authority: neither its token, the
-        // catalog's order nor a consumer's choice is part of it.
-        const principal_ref = attempt.principal_ref.view();
-        const keeps_authority = if (self.registry.metaskSource()) |source|
-            std.mem.eql(u8, source.principal_ref, principal_ref)
-        else
-            false;
-        if (!keeps_authority) {
-            var candidate = self.registry.clone() catch {
-                self.metask_catalog_state = .failed;
-                self.metask_error = .local_resource_exhausted;
-                return self.metask_error;
-            };
-            defer candidate.deinit();
-            candidate.configureMetaskSource(principal_ref, registry_impl.metaskSourceGeneration(principal_ref)) catch {
-                self.metask_catalog_state = .failed;
-                self.metask_error = .local_resource_exhausted;
-                return self.metask_error;
-            };
-            if (!self.commitCandidate(&candidate, true).accepted) {
-                self.metask_catalog_state = .failed;
-                self.metask_error = .persistence_unavailable;
-                return self.metask_error;
+        return self.metaskChanged(before);
+    }
+
+    pub fn failMetaskCatalogRequest(self: *Runtime, id: u64, failure: contract.CatalogFailure, now_ms: u64) bool {
+        self.assertMainThread();
+        const request = self.metask.request orelse return false;
+        if (request.id != id) return false;
+        const before = self.metaskFacts();
+        self.metask.request = null;
+        self.settleMetaskFailure(request.visible, request.generation, request.followed != self.metask.followed_generation, failure, now_ms);
+        return self.metaskChanged(before);
+    }
+
+    /// A load gets one more try a moment later when that may help; then it
+    /// ends as failed and the beat takes over, unless Account gave another
+    /// credential while this one was underway: that one is tried at once.
+    /// A failure out of sight changes nothing anyone sees.
+    fn settleMetaskFailure(self: *Runtime, visible: bool, generation: u64, superseded: bool, failure: contract.CatalogFailure, now_ms: u64) void {
+        if (visible and self.metask.load == .loading) {
+            if (failure.retryable and self.metask.load.loading.failures == 0) {
+                self.metask.load.loading.failures = 1;
+                self.metask.next = .{ .soon = now_ms +| metask_provider.retry_delay_ms };
+                return;
             }
-        }
-        self.metask_catalog.deinit();
-        self.metask_catalog = session.take();
-        public_catalog.replaceFromSession(&self.metask_catalog);
-        self.metask_catalog_generation = catalog_generation;
-        self.metask_catalog_authorization_generation = authorization_generation;
-        self.metask_catalog_state = .ready;
-        self.metask_error = if (public_catalog.model_count == 0) .no_models else .none;
-        self.metask_safe_diagnostic.len = 0;
-        return .none;
+            self.metask.load = .{ .failed = .{ .code = if (failure.code == .none) .catalog_invalid else failure.code, .generation = generation } };
+        } else if (self.metask.catalog == null) switch (self.metask.load) {
+            .failed => |*failed| failed.generation = generation,
+            .none, .loading => {},
+        };
+        const again = superseded and self.metask.catalog == null and self.metask.load == .failed;
+        self.metask.next = if (again) .{ .soon = 0 } else .{ .beat = now_ms +| metask_provider.refresh_interval_ms };
     }
 
-    pub fn failMetaskCatalogRefresh(
-        self: *Runtime,
-        attempt_id: u64,
-        authorization_generation: u64,
-        error_code: contract.ModelsError,
-        safe_diagnostic: []const u8,
-    ) void {
-        self.assertMainThread();
-        const attempt = self.catalog_attempt orelse return;
-        if (attempt.id != attempt_id or
-            attempt.authorization_generation != authorization_generation)
-            return;
-        self.catalog_attempt = null;
-        self.metask_catalog_state = if (error_code == .authorization_unavailable)
-            .needs_authentication
-        else
-            .failed;
-        self.metask_error = if (error_code == .none) .catalog_invalid else error_code;
-        if (!self.metask_safe_diagnostic.set(safe_diagnostic))
-            self.metask_safe_diagnostic.len = 0;
+    /// The source identity of the account whose content is installed, in
+    /// models.json. The one place it is written; null when it holds.
+    fn ensureMetaskSource(self: *Runtime) ?contract.ModelsError {
+        const principal_ref = self.metask.principal.view();
+        if (self.registry.metaskSource()) |source| if (std.mem.eql(u8, source.principal_ref, principal_ref)) return null;
+        var candidate = self.registry.clone() catch return .local_resource_exhausted;
+        defer candidate.deinit();
+        candidate.configureMetaskSource(principal_ref, registry_impl.metaskSourceGeneration(principal_ref)) catch return .local_resource_exhausted;
+        if (!self.commitCandidate(&candidate, true).accepted) return .persistence_unavailable;
+        return null;
     }
 
-    pub fn setMetaskAuthorizationUnavailable(self: *Runtime) void {
+    /// Resolve the preferred model or the first eligible catalog entry with
+    /// the credential of this moment. No user selection is persisted.
+    pub fn prepareMediaCandidate(self: *Runtime, kind: contract.MediaKind) contract.MediaPreparation {
         self.assertMainThread();
-        self.clearMetaskRuntime(.needs_authentication, .authorization_unavailable);
+        if (!self.store_healthy) return .{ .rejected = .persistence_unavailable };
+        const catalog = if (self.metask.catalog) |*value| value else return .{ .rejected = .catalog_unavailable };
+        var storage: MetaskCredentialStorage = .{};
+        defer storage.zero();
+        const credential = (self.readMetaskCredential(&storage) catch return .{ .rejected = .local_resource_exhausted }) orelse
+            return .{ .rejected = .authorization_unavailable };
+        const selected = switch (kind) {
+            .image => if (catalog.hasImageModel(contract.metask_default_image_model))
+                contract.metask_default_image_model
+            else
+                catalog.firstImageModelId(),
+            .video => catalog.selectVideoModel(contract.metask_default_video_model),
+        };
+        var candidate = contract.OwnedMediaCandidate.copy(
+            self.allocator,
+            kind,
+            selected orelse return .{ .rejected = .model_not_found },
+            credential.token,
+            self.metask.generation,
+        ) catch |err| return .{ .rejected = if (err == error.OutOfMemory) .local_resource_exhausted else .invalid_provider };
+        candidate.credential_generation = credential.generation;
+        return .{ .ready = candidate };
     }
 
     pub const MetaskAdoption = struct { stored: u64, derived: u64 };
@@ -782,8 +981,8 @@ pub const Runtime = struct {
 
     fn preferenceDisplayName(self: *Runtime, target: contract.ModelRef) []const u8 {
         if (!std.mem.eql(u8, target.source_id, contract.metask_source_id)) return "";
-        if (self.metask_catalog_state != .ready) return "";
-        return self.metask_catalog.preferenceDisplayName(target.model_id);
+        const catalog = if (self.metask.catalog) |*value| value else return "";
+        return catalog.preferenceDisplayName(target.model_id);
     }
 
     fn finishPreferenceCommit(self: *Runtime, candidate: *registry_impl.Registry, outcome: CanonicalCommitOutcome) contract.CommandResult {
@@ -801,12 +1000,11 @@ pub const Runtime = struct {
         model_id: []const u8,
     ) bool {
         self.assertMainThread();
-        if (self.metask_catalog_state != .ready or
-            self.metask_catalog.modelProtocol(model_id) != protocol or
-            !self.metask_catalog.hasModel(model_id))
+        const catalog = if (self.metask.catalog) |*value| value else return false;
+        if (catalog.modelProtocol(model_id) != protocol or !catalog.hasModel(model_id))
             return false;
         if (expected_catalog_generation) |expected|
-            return expected != 0 and expected == self.metask_catalog_generation;
+            return expected != 0 and expected == self.metask.generation;
         return true;
     }
 
@@ -857,7 +1055,8 @@ pub const Runtime = struct {
         if (!self.store_healthy or expected_source_generation == 0 or expected_catalog_generation == 0)
             return null;
         if (std.mem.eql(u8, target.source_id, contract.metask_source_id)) {
-            const protocol = self.metask_catalog.modelProtocol(target.model_id) orelse return null;
+            const catalog = if (self.metask.catalog) |*value| value else return null;
+            const protocol = catalog.modelProtocol(target.model_id) orelse return null;
             return if (self.metaskSourceModelAvailable(
                 target,
                 expected_source_generation,
@@ -999,7 +1198,7 @@ pub const Runtime = struct {
         self.assertMainThread();
         if (self.store == null or self.store_healthy)
             return .rejected(.persistence_unavailable);
-        if (self.catalog_attempt != null)
+        if (self.metask.request != null)
             return .rejected(.operation_in_progress);
         const store = if (self.store) |*value| value else return .rejected(.persistence_unavailable);
         const bytes_optional = store.loadAlloc(self.allocator) catch
@@ -1023,7 +1222,7 @@ pub const Runtime = struct {
             }
             self.registry.replace(&restored);
             self.store_healthy = true;
-            self.clearMetaskRuntime(.needs_authentication, .none);
+            self.reloadMetask();
             self.drainCredentialCleanup();
             return .acceptedResult();
         }
@@ -1052,7 +1251,7 @@ pub const Runtime = struct {
             return .rejected(.persistence_unavailable);
         self.registry.replace(&candidate);
         self.store_healthy = true;
-        self.clearMetaskRuntime(.needs_authentication, .none);
+        self.reloadMetask();
         self.drainCredentialCleanup();
         return .acceptedResult();
     }
@@ -1238,21 +1437,32 @@ pub const Runtime = struct {
         }
     }
 
-    fn clearMetaskRuntime(
-        self: *Runtime,
-        state: contract.CatalogState,
-        error_code: contract.ModelsError,
-    ) void {
-        self.catalog_attempt = null;
-        self.metask_catalog.deinit();
-        self.metask_catalog = metask_provider.CatalogSession.init(self.allocator);
+    /// Empties the Metask catalog and forgets the account; front or back stays.
+    fn clearMetask(self: *Runtime, signed_out: bool) void {
+        self.dropMetaskContent();
+        self.metask.principal = .{};
+        self.metask.followed_generation = 0;
+        self.metask.signed_out = signed_out;
+        self.metask.load = .none;
+        self.metask.request = null;
+        self.metask.next = .none;
+    }
+
+    fn dropMetaskContent(self: *Runtime) void {
+        if (self.metask.catalog) |*catalog| catalog.deinit();
+        self.metask.catalog = null;
+        self.metask.generation = 0;
         if (self.metask_public_catalog) |public_catalog| public_catalog.clear();
-        self.metask_catalog_generation = 0;
-        self.metask_catalog_authorization_generation = 0;
-        self.metask_catalog_attempt_generation = 0;
-        self.metask_catalog_state = state;
-        self.metask_error = error_code;
-        self.metask_safe_diagnostic.len = 0;
+    }
+
+    /// A reset replaced models.json: what the catalog proved about it no
+    /// longer holds, so the account followed loads again at once and its
+    /// source identity is written back when that load lands.
+    fn reloadMetask(self: *Runtime) void {
+        if (self.metask.principal.len == 0) return;
+        self.dropMetaskContent();
+        self.metask.load = .{ .loading = .{} };
+        self.metask.next = .{ .soon = 0 };
     }
 
     pub fn resolveProbeCandidate(
@@ -1283,7 +1493,7 @@ pub const Runtime = struct {
             .model_id = target.model_id,
             .protocol = protocol,
             .base_url = contract.metaskEndpoint(protocol) orelse return null,
-            .image_input = self.metask_catalog.imageInput(target.model_id),
+            .image_input = if (self.metask.catalog) |*catalog| catalog.imageInput(target.model_id) else null,
             .source_generation = expected_source_generation,
         };
         const provider = findProviderView(self.registry.views(), target.source_id) orelse return null;
@@ -1310,12 +1520,16 @@ pub const Runtime = struct {
     ) !?contract.OwnedSourceCandidate {
         const facts = self.targetFacts(target, expected_source_generation, expected_catalog_generation) orelse return null;
         if (std.mem.eql(u8, target.source_id, contract.metask_source_id)) {
-            var candidate = self.metask_catalog.prepareSourceCandidate(target.model_id, expected_source_generation) catch |err| return switch (err) {
+            var storage: MetaskCredentialStorage = .{};
+            defer storage.zero();
+            const credential = (try self.readMetaskCredential(&storage)) orelse return null;
+            const catalog = if (self.metask.catalog) |*value| value else return null;
+            var candidate = catalog.prepareSourceCandidate(target.model_id, expected_source_generation, credential.token) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => error.InvalidProvider,
             };
-            // The catalog and this generation came from one Account lease.
-            candidate.credential_generation = self.metask_catalog_authorization_generation;
+            // The token and its Account generation were taken together.
+            candidate.credential_generation = credential.generation;
             return candidate;
         }
         const provider = findProviderView(self.registry.views(), target.source_id) orelse return null;
@@ -1492,6 +1706,16 @@ pub const Runtime = struct {
             const result = self.commitCandidate(&candidate, false);
             if (!result.accepted and !self.store_healthy) return;
         }
+    }
+
+    /// The Metask credential of this moment, for the account whose catalog
+    /// Models holds. Null when none may be used now or it is another account's.
+    fn readMetaskCredential(self: *const Runtime, storage: *MetaskCredentialStorage) std.mem.Allocator.Error!?ports.MetaskCredential {
+        const source = self.metask_credentials orelse return null;
+        const credential = (try source.read(&storage.account, &storage.token)) orelse return null;
+        if (credential.generation == 0 or credential.token.len == 0 or
+            !std.mem.eql(u8, credential.account, self.metask.principal.view())) return null;
+        return credential;
     }
 
     fn assertMainThread(self: *const Runtime) void {
@@ -2355,27 +2579,8 @@ test "Models owns Metask catalog authority without changing global default" {
         runtime.deinit();
     }
 
-    const prepared = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 5)) {
-        .ready => |value| value,
-        .rejected => return error.TestUnexpectedResult,
-    };
-    var catalog = metask_provider.CatalogSession.init(std.testing.allocator);
-    try metask_provider.TestSupport.replaceOwnedCatalog(
-        &catalog,
-        "principal-1",
-        "model-secret",
-        &.{.{ .id = "model-1", .display_name = "Model One" }},
-    );
-    var completion = metask_provider.OwnedCatalogCompletion.init(&catalog);
-    var completion_port = completion.ownedPort();
-    try std.testing.expectEqual(
-        contract.ModelsError.none,
-        runtime.completeMetaskCatalogRefresh(
-            prepared.attempt_id,
-            prepared.authorization_generation,
-            &completion_port,
-        ),
-    );
+    const models = [_]contract.ModelView{.{ .id = "model-1", .display_name = "Model One" }};
+    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogWithCredential(&runtime, "principal-1", "model-secret", &models));
 
     const first = runtime.view();
     try std.testing.expectEqual(contract.CatalogState.ready, first.providers[0].catalog_state);
@@ -2385,35 +2590,25 @@ test "Models owns Metask catalog authority without changing global default" {
     const first_source_generation = first.providers[0].source_generation;
     const first_catalog_generation = first.providers[0].catalog_generation;
 
-    const refreshed = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 6)) {
-        .ready => |value| value,
-        .rejected => return error.TestUnexpectedResult,
-    };
-    var same_catalog = metask_provider.CatalogSession.init(std.testing.allocator);
-    try metask_provider.TestSupport.replaceOwnedCatalog(
-        &same_catalog,
-        "principal-1",
-        "rotated-model-secret",
-        &.{.{ .id = "model-1", .display_name = "Model One" }},
-    );
-    var refreshed_completion = metask_provider.OwnedCatalogCompletion.init(&same_catalog);
-    var refreshed_completion_port = refreshed_completion.ownedPort();
-    try std.testing.expectEqual(
-        contract.ModelsError.none,
-        runtime.completeMetaskCatalogRefresh(
-            refreshed.attempt_id,
-            refreshed.authorization_generation,
-            &refreshed_completion_port,
-        ),
-    );
+    // The same content again, asked with another token: nothing it stands
+    // for changed, so neither does its generation.
+    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogWithCredential(&runtime, "principal-1", "rotated-model-secret", &models));
     const second = runtime.view();
     try std.testing.expectEqual(first_source_generation, second.providers[0].source_generation);
-    try std.testing.expect(first_catalog_generation != second.providers[0].catalog_generation);
+    try std.testing.expectEqual(first_catalog_generation, second.providers[0].catalog_generation);
 
     try std.testing.expect(runtime.rememberPreference(.{
         .source_id = "metask",
         .model_id = "model-1",
     }).accepted);
+    runtime.metask_credentials = null;
+    // The catalog holds no token: resolution reads the credential of the
+    // moment, and only for the account whose catalog it is.
+    try std.testing.expect((try TestSupport.resolveFixtureSelection(&runtime)) == null);
+    var credentials = TestSupport.FakeMetaskCredentials.init("principal-2", "other-account-secret", 6);
+    runtime.metask_credentials = credentials.port();
+    try std.testing.expect((try TestSupport.resolveFixtureSelection(&runtime)) == null);
+    credentials = TestSupport.FakeMetaskCredentials.init("principal-1", "rotated-model-secret", 6);
     var first_candidate = (try TestSupport.resolveFixtureSelection(&runtime)) orelse
         return error.TestUnexpectedResult;
     defer first_candidate.deinit();
@@ -2443,12 +2638,13 @@ test "Models owns Metask catalog authority without changing global default" {
         second_candidate.input().target.base_url,
     );
 
-    runtime.setMetaskAuthorizationUnavailable();
+    _ = runtime.followMetaskPrincipal(null, 0);
     const unavailable = runtime.view();
     try std.testing.expectEqual(
         contract.CatalogState.needs_authentication,
         unavailable.providers[0].catalog_state,
     );
+    try std.testing.expectEqual(contract.ModelsError.authorization_unavailable, unavailable.providers[0].error_code);
     try std.testing.expectEqual(@as(usize, 0), unavailable.providers[0].models.len);
     try std.testing.expectEqualStrings("model-1", unavailable.default_selection.?.model_id);
     try std.testing.expect(!TestSupport.fixtureSelectionAvailable(&runtime));
@@ -2472,53 +2668,10 @@ test "Metask catalog drift keeps a tracked global default durable" {
             runtime.deinit();
         }
 
-        const initial = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 5)) {
-            .ready => |value| value,
-            .rejected => return error.TestUnexpectedResult,
-        };
-        var initial_catalog = metask_provider.CatalogSession.init(std.testing.allocator);
-        defer initial_catalog.deinit();
-        try metask_provider.TestSupport.replaceOwnedCatalog(
-            &initial_catalog,
-            "principal-1",
-            "initial-secret",
-            &.{.{ .id = "model-1", .display_name = "Model One" }},
-        );
-        var initial_completion = metask_provider.OwnedCatalogCompletion.init(&initial_catalog);
-        var initial_completion_port = initial_completion.ownedPort();
-        try std.testing.expectEqual(
-            contract.ModelsError.none,
-            runtime.completeMetaskCatalogRefresh(
-                initial.attempt_id,
-                initial.authorization_generation,
-                &initial_completion_port,
-            ),
-        );
+        try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogWithCredential(&runtime, "principal-1", "initial-secret", &.{.{ .id = "model-1", .display_name = "Model One" }}));
         try std.testing.expect(runtime.rememberPreference(.{ .source_id = "metask", .model_id = "model-1" }).accepted);
         const previous_selection_revision = runtime.view().selection_revision;
-
-        const refresh = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 6)) {
-            .ready => |value| value,
-            .rejected => return error.TestUnexpectedResult,
-        };
-        var replacement_catalog = metask_provider.CatalogSession.init(std.testing.allocator);
-        defer replacement_catalog.deinit();
-        try metask_provider.TestSupport.replaceOwnedCatalog(
-            &replacement_catalog,
-            "principal-1",
-            "replacement-secret",
-            &.{.{ .id = "model-2", .display_name = "Model Two" }},
-        );
-        var replacement_completion = metask_provider.OwnedCatalogCompletion.init(&replacement_catalog);
-        var replacement_completion_port = replacement_completion.ownedPort();
-        try std.testing.expectEqual(
-            contract.ModelsError.none,
-            runtime.completeMetaskCatalogRefresh(
-                refresh.attempt_id,
-                refresh.authorization_generation,
-                &replacement_completion_port,
-            ),
-        );
+        try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogWithCredential(&runtime, "principal-1", "replacement-secret", &.{.{ .id = "model-2", .display_name = "Model Two" }}));
 
         const drifted = runtime.view();
         try std.testing.expect(runtime.store_healthy);
@@ -2966,20 +3119,22 @@ test "fixed image model resolves without user configuration alongside a Custom d
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal-a", catalog));
     try std.testing.expectEqual(contract.ModelsError.no_models, runtime.view().providers[0].error_code);
     try std.testing.expectEqual(@as(usize, 0), runtime.view().providers[0].models.len);
-    var lease = "fresh-lease".*;
-    const input: contract.MediaPreparationInput = .{ .principal_ref = "principal-a", .authorization_generation = 17, .bearer = &lease };
-    var candidate = runtime.prepareMediaCandidate(input).ready;
+    var credentials = TestSupport.FakeMetaskCredentials.init("principal-a", "fresh-lease", 17);
+    runtime.metask_credentials = credentials.port();
+    var candidate = runtime.prepareMediaCandidate(.image).ready;
     defer candidate.deinit();
-    @memset(&lease, 0);
+    // The candidate owns its copy of the credential of that moment.
+    credentials.set("principal-a", "other-lease");
     try std.testing.expectEqualStrings("fresh-lease", candidate.input().bearer);
+    try std.testing.expectEqual(@as(u64, 17), candidate.credential_generation);
     try std.testing.expectEqualStrings("gemini-3.1-flash-image-preview", candidate.input().selection.model_id);
     try std.testing.expectEqualStrings(contract.metask_images_generations_url, candidate.input().endpoint);
     const bytes = (try runtime.store.?.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(bytes);
     for ([_][]const u8{ "fresh-lease", "refreshed-secret", "custom-secret", "metask_image" }) |secret|
         try std.testing.expect(std.mem.indexOf(u8, bytes, secret) == null);
-    runtime.setMetaskAuthorizationUnavailable();
-    try std.testing.expectEqual(contract.ManagementError.catalog_unavailable, runtime.prepareMediaCandidate(input).rejected);
+    _ = runtime.followMetaskPrincipal(null, 0);
+    try std.testing.expectEqual(contract.ManagementError.catalog_unavailable, runtime.prepareMediaCandidate(.image).rejected);
     try std.testing.expectEqualStrings("fresh-lease", candidate.input().bearer);
     var dialogue = (try TestSupport.resolveFixtureSelection(&runtime)).?;
     defer dialogue.deinit();
@@ -2989,11 +3144,12 @@ test "fixed image model resolves without user configuration alongside a Custom d
     runtime.stop();
     try runtime.start(directory, vault.port());
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal-b", catalog));
-    var current = input;
-    current.bearer = "new-account-lease";
-    try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.prepareMediaCandidate(current).rejected);
-    current.principal_ref = "principal-b";
-    var restarted = runtime.prepareMediaCandidate(current).ready;
+    // Another account's credential does not resolve against this catalog.
+    credentials = TestSupport.FakeMetaskCredentials.init("principal-a", "new-account-lease", 18);
+    runtime.metask_credentials = credentials.port();
+    try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.prepareMediaCandidate(.image).rejected);
+    credentials.set("principal-b", "new-account-lease");
+    var restarted = runtime.prepareMediaCandidate(.image).ready;
     defer restarted.deinit();
     try std.testing.expectEqualStrings(contract.metask_default_image_model, restarted.input().selection.model_id);
     try std.testing.expectEqual(dialogue_revision, runtime.view().selection_revision);
@@ -3013,44 +3169,46 @@ test "image preparation requires current lease and falls back only before sendin
         runtime.stop();
         runtime.deinit();
     }
-    const input: contract.MediaPreparationInput = .{ .principal_ref = "principal", .authorization_generation = 17, .bearer = "fresh-secret" };
-    try std.testing.expectEqual(contract.ManagementError.catalog_unavailable, runtime.prepareMediaCandidate(input).rejected);
+    var credentials = TestSupport.FakeMetaskCredentials.init("principal", "fresh-secret", 17);
+    runtime.metask_credentials = credentials.port();
+    try std.testing.expectEqual(contract.ManagementError.catalog_unavailable, runtime.prepareMediaCandidate(.image).rejected);
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", test_image_catalog));
-    for (0..4) |case| {
-        var wrong = input;
+    // The helper left the port this test installed.
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&credentials)), runtime.metask_credentials.?.context);
+    for (0..3) |case| {
+        var wrong = TestSupport.FakeMetaskCredentials.init("principal", "fresh-secret", 17);
         switch (case) {
-            0 => wrong.principal_ref = "other",
-            1 => wrong.authorization_generation = 0,
-            2 => wrong.authorization_generation = 18,
-            3 => wrong.bearer = "",
+            0 => wrong.set("other", "fresh-secret"),
+            1 => wrong.generation = 0,
+            2 => wrong.set("principal", ""),
             else => unreachable,
         }
-        try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.prepareMediaCandidate(wrong).rejected);
+        runtime.metask_credentials = wrong.port();
+        try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.prepareMediaCandidate(.image).rejected);
     }
-    const preparation = runtime.prepareMetaskCatalogRefresh("principal", 18).ready;
-    try std.testing.expectEqual(contract.ManagementError.catalog_unavailable, runtime.prepareMediaCandidate(input).rejected);
-    var session = metask_provider.CatalogSession.init(std.testing.allocator);
-    defer session.deinit();
-    try metask_provider.TestSupport.loadCatalogResponse(&session, "principal", "catalog-secret", test_image_catalog);
-    var completion = metask_provider.OwnedCatalogCompletion.init(&session);
-    var port = completion.ownedPort();
-    try std.testing.expectEqual(contract.ModelsError.none, runtime.completeMetaskCatalogRefresh(preparation.attempt_id, 18, &port));
-    try std.testing.expectEqual(contract.ManagementError.authorization_unavailable, runtime.prepareMediaCandidate(input).rejected);
-    var refreshed = input;
-    refreshed.authorization_generation = 18;
-    var candidate = runtime.prepareMediaCandidate(refreshed).ready;
+    runtime.metask_credentials = credentials.port();
+    // A request underway and a renewed credential neither stop nor delay a
+    // preparation: it reads the credential of the moment.
+    _ = runtime.beginMetaskCatalogRequest(.user, .{ .ready = .{ .principal_ref = "principal", .generation = 17 } }, 0);
+    credentials.generation = 18;
+    var candidate = runtime.prepareMediaCandidate(.image).ready;
     defer candidate.deinit();
     try std.testing.expectEqualStrings("fresh-secret", candidate.input().bearer);
+    try std.testing.expectEqual(@as(u64, 18), candidate.credential_generation);
+    _ = runtime.failMetaskCatalogRequest(runtime.metask.request.?.id, .{ .code = .catalog_unavailable, .retryable = true }, 0);
     const unsupported = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"" ++ contract.metask_default_image_model ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":false}}}}]}";
     const absent = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"other-image\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
     for ([_][]const u8{ unsupported, "{\"object\":\"list\",\"has_more\":false,\"data\":[]}" }) |body| {
         try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", body));
-        try std.testing.expectEqual(contract.ManagementError.model_not_found, runtime.prepareMediaCandidate(input).rejected);
+        try std.testing.expectEqual(contract.ManagementError.model_not_found, runtime.prepareMediaCandidate(.image).rejected);
     }
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", absent));
-    var fallback = runtime.prepareMediaCandidate(input).ready;
+    // Each preparation reads the credential of its own moment.
+    credentials.set("principal", "later-secret");
+    var fallback = runtime.prepareMediaCandidate(.image).ready;
     defer fallback.deinit();
     try std.testing.expectEqualStrings("other-image", fallback.input().selection.model_id);
+    try std.testing.expectEqualStrings("later-secret", fallback.input().bearer);
     try std.testing.expectEqualStrings("fresh-secret", candidate.input().bearer);
     try std.testing.expectEqualStrings(contract.metask_default_image_model, candidate.input().selection.model_id);
 }
@@ -3093,18 +3251,19 @@ test "stale Metask completion leaves the current catalog attempt intact" {
         3,
         4,
     );
-    const preparation = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 17)) {
-        .ready => |value| value,
-        .rejected => return error.TestUnexpectedResult,
-    };
+    _ = runtime.followMetaskPrincipal("principal-1", 17);
+    const id = runtime.beginMetaskCatalogRequest(.user, .{ .ready = .{ .principal_ref = "principal-1", .generation = 17 } }, 0).outcome.started;
     var session = metask_provider.CatalogSession.init(std.testing.allocator);
-    try metask_provider.TestSupport.replaceOwnedCatalog(&session, "principal-1", "stale-secret", &.{});
+    try metask_provider.TestSupport.replaceOwnedCatalog(&session, "principal-1", &.{});
     var completion = metask_provider.OwnedCatalogCompletion.init(&session);
     var port = completion.ownedPort();
-    try std.testing.expectEqual(contract.ModelsError.catalog_invalid, runtime.completeMetaskCatalogRefresh(preparation.attempt_id, 16, &port));
-    try std.testing.expectEqual(preparation.attempt_id, runtime.catalog_attempt.?.id);
-    try std.testing.expectEqual(contract.CatalogState.loading, runtime.view().providers[0].catalog_state);
+    // Another request's answer is destroyed and changes nothing.
+    try std.testing.expect(!runtime.completeMetaskCatalogRequest(id +% 1, &port, 0));
+    try std.testing.expectEqual(id, runtime.metask.request.?.id);
+    try std.testing.expectEqual(contract.CatalogState.ready, runtime.view().providers[0].catalog_state);
     try std.testing.expectEqual(@as(u64, 4), runtime.view().providers[0].catalog_generation);
+    try std.testing.expect(!runtime.failMetaskCatalogRequest(id +% 1, .{ .code = .catalog_unavailable, .retryable = true }, 0));
+    try std.testing.expectEqual(id, runtime.metask.request.?.id);
 }
 
 test "declared protocol refresh changes default authority and preserves old owned candidates" {
@@ -3176,15 +3335,14 @@ test "image model policy prefers the default and then the first declared generat
     const fallback_catalog = "{\"object\":\"list\",\"has_more\":false,\"data\":[" ++ entries ++ "]}";
     const preferred_catalog = "{\"object\":\"list\",\"has_more\":false,\"data\":[" ++ entries ++ "," ++
         "{\"id\":\"" ++ contract.metask_default_image_model ++ "\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
-    const input: contract.MediaPreparationInput = .{ .principal_ref = "principal", .authorization_generation = 17, .bearer = "fresh-lease" };
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", preferred_catalog));
-    var preferred = runtime.prepareMediaCandidate(input).ready;
+    var preferred = runtime.prepareMediaCandidate(.image).ready;
     defer preferred.deinit();
     try std.testing.expectEqualStrings(contract.metask_default_image_model, preferred.input().selection.model_id);
     try std.testing.expectEqual(@as(usize, 1), runtime.view().providers[0].models.len);
     try std.testing.expectEqualStrings("text", runtime.view().providers[0].models[0].id);
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal", fallback_catalog));
-    var fallback = runtime.prepareMediaCandidate(input).ready;
+    var fallback = runtime.prepareMediaCandidate(.image).ready;
     defer fallback.deinit();
     try std.testing.expectEqualStrings("first-image", fallback.input().selection.model_id);
     try std.testing.expectEqualStrings(contract.metask_default_image_model, preferred.input().selection.model_id);
@@ -3193,16 +3351,18 @@ test "image model policy prefers the default and then the first declared generat
 test "Metask source survives a credential change when the selected model leaves the catalog" {
     const Refresh = struct {
         fn run(runtime: *Runtime, token: []const u8, generation: u64, body: []const u8) !void {
-            const attempt = switch (runtime.prepareMetaskCatalogRefresh("principal", generation)) {
-                .ready => |value| value,
-                .rejected => return error.TestUnexpectedResult,
-            };
             var session = metask_provider.CatalogSession.init(std.testing.allocator);
             defer session.deinit();
             try metask_provider.TestSupport.loadCatalogResponse(&session, "principal", token, body);
+            _ = runtime.followMetaskPrincipal("principal", generation);
+            const id = runtime.beginMetaskCatalogRequest(.user, .{ .ready = .{ .principal_ref = "principal", .generation = generation } }, 0).outcome.started;
+            // What Account lends from now on: this token, of this generation.
+            TestSupport.useSharedCredentials(runtime, "principal", token);
+            TestSupport.shared_credentials.generation = generation;
             var completion = metask_provider.OwnedCatalogCompletion.init(&session);
             var port = completion.ownedPort();
-            try std.testing.expectEqual(contract.ModelsError.none, runtime.completeMetaskCatalogRefresh(attempt.attempt_id, attempt.authorization_generation, &port));
+            _ = runtime.completeMetaskCatalogRequest(id, &port, 0);
+            try std.testing.expect(runtime.metask.catalog != null);
         }
     };
     const initial =
@@ -3466,4 +3626,304 @@ test "a key the sink refuses is not read again until its revision changes or the
     runtime.syncResidentCredentials(sink.port());
     try std.testing.expectEqual(@as(usize, 2), sink.retires);
     try std.testing.expectEqual(@as(usize, 3), sink.admits);
+}
+
+test "every catalog helper starts the shared credential port afresh" {
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    defer runtime.deinit();
+    const models = [_]contract.ModelView{.{ .id = "model-1", .display_name = "Model One" }};
+    for ([_][]const u8{ "secret-a", "secret-b" }) |secret| {
+        // Whatever an earlier test left behind.
+        TestSupport.shared_credentials.generation = 99;
+        TestSupport.shared_credentials.reads = 5;
+        try TestSupport.installMetaskDefault(&runtime, "principal-1", secret, &models, "model-1", 1, 2, 3, 4);
+        try std.testing.expectEqual(TestSupport.FakeMetaskCredentials.default_generation, TestSupport.shared_credentials.generation);
+        try std.testing.expectEqual(@as(usize, 0), TestSupport.shared_credentials.reads);
+        var candidate = (try TestSupport.resolveFixtureSelection(&runtime)).?;
+        defer candidate.deinit();
+        try std.testing.expectEqualStrings(secret, candidate.input().api_key);
+        try std.testing.expectEqual(TestSupport.FakeMetaskCredentials.default_generation, candidate.input().credential_generation);
+        try std.testing.expectEqual(@as(usize, 1), TestSupport.shared_credentials.reads);
+    }
+}
+
+/// A started Models runtime for the Metask catalog tests below.
+const MetaskCatalogFixture = struct {
+    tmp: std.testing.TmpDir,
+    vault: TestVault = .{},
+    runtime: Runtime,
+    credentials: TestSupport.FakeMetaskCredentials,
+
+    fn init(self: *MetaskCatalogFixture) !void {
+        self.* = .{
+            .tmp = std.testing.tmpDir(.{}),
+            .runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId()),
+            .credentials = TestSupport.FakeMetaskCredentials.init("principal", "token-a", 17),
+        };
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const len = try self.tmp.dir.realPath(std.testing.io, &path);
+        try self.runtime.start(path[0..len], self.vault.port());
+        self.runtime.metask_credentials = self.credentials.port();
+    }
+
+    fn deinit(self: *MetaskCatalogFixture) void {
+        self.runtime.stop();
+        self.runtime.deinit();
+        self.tmp.cleanup();
+    }
+
+    fn begin(self: *MetaskCatalogFixture, kind: contract.CatalogRequestKind, generation: u64, now_ms: u64) contract.CatalogRequestStart {
+        return self.runtime.beginMetaskCatalogRequest(kind, .{ .ready = .{ .principal_ref = "principal", .generation = generation } }, now_ms);
+    }
+
+    /// Completes request `id` with these models; whether anything published changed.
+    fn complete(self: *MetaskCatalogFixture, id: u64, models: []const contract.ModelView, now_ms: u64) !bool {
+        var session = metask_provider.CatalogSession.init(std.testing.allocator);
+        defer session.deinit();
+        try metask_provider.TestSupport.replaceOwnedCatalog(&session, "principal", models);
+        var completion = metask_provider.OwnedCatalogCompletion.init(&session);
+        var port = completion.ownedPort();
+        return self.runtime.completeMetaskCatalogRequest(id, &port, now_ms);
+    }
+
+    fn provider(self: *MetaskCatalogFixture) contract.ProviderView {
+        return self.runtime.view().providers[0];
+    }
+};
+
+const catalog_one = [_]contract.ModelView{.{ .id = "model-1", .display_name = "Model One" }};
+const catalog_two = [_]contract.ModelView{ .{ .id = "model-1", .display_name = "Model One" }, .{ .id = "model-2", .display_name = "Model Two" } };
+const catalog_two_reordered = [_]contract.ModelView{ .{ .id = "model-2", .display_name = "Model Two" }, .{ .id = "model-1", .display_name = "Model One" } };
+
+test "the Metask catalog follows its account: a new credential changes nothing, another account empties it" {
+    var fixture: MetaskCatalogFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    // Before any account Models has nothing, and nothing is due.
+    try std.testing.expectEqual(contract.CatalogState.needs_authentication, fixture.provider().catalog_state);
+    try std.testing.expectEqual(contract.ModelsError.none, fixture.provider().error_code);
+    try std.testing.expectEqual(@as(?u64, null), runtime.metaskCatalogNext());
+    // A cold start without an account lost none: no reason to show.
+    try std.testing.expect(!runtime.followMetaskPrincipal(null, 0).changed);
+    try std.testing.expectEqual(contract.CatalogState.needs_authentication, fixture.provider().catalog_state);
+    try std.testing.expectEqual(contract.ModelsError.none, fixture.provider().error_code);
+    const first = runtime.followMetaskPrincipal("principal", 17);
+    try std.testing.expect(first.changed and !first.dropped);
+    try std.testing.expectEqual(contract.CatalogState.loading, fixture.provider().catalog_state);
+    try std.testing.expectEqual(contract.ModelsOperation.refreshing_catalog, runtime.view().operation);
+    try std.testing.expect(runtime.metaskCatalogDue(0));
+    const id = fixture.begin(.due, 17, 0).outcome.started;
+    try std.testing.expect(try fixture.complete(id, &catalog_one, 0));
+    const loaded = fixture.provider();
+    try std.testing.expectEqual(contract.CatalogState.ready, loaded.catalog_state);
+    try std.testing.expectEqual(contract.ModelsOperation.idle, runtime.view().operation);
+    // Renewed: the account is the same, so the catalog, its generation and
+    // its next time stay as they were.
+    const renewed = runtime.followMetaskPrincipal("principal", 18);
+    try std.testing.expect(!renewed.changed and !renewed.dropped);
+    try std.testing.expectEqual(loaded.catalog_generation, fixture.provider().catalog_generation);
+    try std.testing.expect(!runtime.metaskCatalogDue(0));
+    // Another account: the content goes, a request underway with it.
+    const background = fixture.begin(.user, 18, 0).outcome.started;
+    _ = background;
+    const switched = runtime.followMetaskPrincipal("principal-b", 3);
+    try std.testing.expect(switched.changed and switched.dropped);
+    try std.testing.expect(runtime.metask.request == null);
+    try std.testing.expectEqual(contract.CatalogState.loading, fixture.provider().catalog_state);
+    try std.testing.expectEqual(@as(u64, 0), fixture.provider().catalog_generation);
+    try std.testing.expectEqual(@as(usize, 0), fixture.provider().models.len);
+    // Signed out: nothing is left, and the view says why.
+    try std.testing.expect(runtime.followMetaskPrincipal(null, 0).changed);
+    try std.testing.expectEqual(contract.CatalogState.needs_authentication, fixture.provider().catalog_state);
+    try std.testing.expectEqual(contract.ModelsError.authorization_unavailable, fixture.provider().error_code);
+    try std.testing.expectEqual(@as(?u64, null), runtime.metaskCatalogNext());
+}
+
+test "a Metask refresh with content in hand publishes only a change of content" {
+    var fixture: MetaskCatalogFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    try std.testing.expect(try fixture.complete(fixture.begin(.due, 17, 0).outcome.started, &catalog_two, 0));
+    const generation = fixture.provider().catalog_generation;
+    const source = fixture.provider().source_generation;
+    // The beat runs only in front.
+    try std.testing.expectEqual(@as(?u64, null), runtime.metaskCatalogNext());
+    runtime.setMetaskCatalogActive(true);
+    const due = metask_provider.refresh_interval_ms;
+    try std.testing.expectEqual(@as(?u64, due), runtime.metaskCatalogNext());
+    try std.testing.expect(fixture.begin(.due, 17, due - 1).outcome == .skipped);
+    // Out of sight while underway, and when it fails.
+    const failing = fixture.begin(.due, 17, due);
+    try std.testing.expect(!failing.changed);
+    try std.testing.expectEqual(contract.ModelsOperation.idle, runtime.view().operation);
+    try std.testing.expect(!runtime.failMetaskCatalogRequest(failing.outcome.started, .{ .code = .catalog_unavailable, .retryable = true }, due));
+    try std.testing.expectEqual(contract.CatalogState.ready, fixture.provider().catalog_state);
+    try std.testing.expectEqual(@as(?u64, 2 * due), runtime.metaskCatalogNext());
+    // The same content, in another order, is no change.
+    try std.testing.expect(!try fixture.complete(fixture.begin(.due, 17, 2 * due).outcome.started, &catalog_two_reordered, 2 * due));
+    try std.testing.expectEqual(generation, fixture.provider().catalog_generation);
+    try std.testing.expectEqualStrings("model-1", fixture.provider().models[0].id);
+    // A model gone is: the whole catalog is replaced under a new generation,
+    // the source identity untouched.
+    try std.testing.expect(try fixture.complete(fixture.begin(.due, 17, 3 * due).outcome.started, &catalog_one, 3 * due));
+    try std.testing.expect(generation != fixture.provider().catalog_generation);
+    try std.testing.expectEqual(source, fixture.provider().source_generation);
+    try std.testing.expectEqual(@as(usize, 1), fixture.provider().models.len);
+    // The person's own refresh shows while it runs.
+    const own = fixture.begin(.user, 17, 3 * due);
+    try std.testing.expect(own.changed);
+    try std.testing.expectEqual(contract.ModelsOperation.refreshing_catalog, runtime.view().operation);
+    try std.testing.expect(try fixture.complete(own.outcome.started, &catalog_one, 3 * due));
+    try std.testing.expectEqual(contract.ModelsOperation.idle, runtime.view().operation);
+    // In the background nothing comes due, however long it stays there.
+    runtime.setMetaskCatalogActive(false);
+    try std.testing.expectEqual(@as(?u64, null), runtime.metaskCatalogNext());
+    try std.testing.expect(!runtime.metaskCatalogDue(10 * due));
+    // Back in front after its time passed: due at once.
+    runtime.setMetaskCatalogActive(true);
+    try std.testing.expect(runtime.metaskCatalogDue(10 * due));
+}
+
+test "a Metask load tries once more before it fails, and stays lit in between" {
+    var fixture: MetaskCatalogFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    const first = fixture.begin(.due, 17, 0).outcome.started;
+    // The first failure is not the end of the load anyone waits for.
+    try std.testing.expect(!runtime.failMetaskCatalogRequest(first, .{ .code = .catalog_unavailable, .retryable = true }, 0));
+    try std.testing.expectEqual(contract.CatalogState.loading, fixture.provider().catalog_state);
+    try std.testing.expectEqual(contract.ModelsOperation.refreshing_catalog, runtime.view().operation);
+    try std.testing.expectEqual(contract.MetaskCatalogAvailability.loading, runtime.metaskCatalog());
+    try std.testing.expectEqual(@as(?u64, metask_provider.retry_delay_ms), runtime.metaskCatalogNext());
+    try std.testing.expect(!runtime.metaskCatalogDue(metask_provider.retry_delay_ms - 1));
+    // An Account publication in between does not try the same token early.
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    try std.testing.expectEqual(@as(?u64, metask_provider.retry_delay_ms), runtime.metaskCatalogNext());
+    const second = fixture.begin(.due, 17, metask_provider.retry_delay_ms).outcome.started;
+    try std.testing.expect(runtime.failMetaskCatalogRequest(second, .{ .code = .catalog_unavailable, .retryable = true }, metask_provider.retry_delay_ms));
+    try std.testing.expectEqual(contract.CatalogState.failed, fixture.provider().catalog_state);
+    try std.testing.expectEqual(contract.ModelsError.catalog_unavailable, fixture.provider().error_code);
+    try std.testing.expectEqual(contract.ModelsOperation.idle, runtime.view().operation);
+    // A failure nothing changes soon ends the load at once.
+    _ = runtime.followMetaskPrincipal(null, 0);
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    const refused = fixture.begin(.due, 17, 0).outcome.started;
+    try std.testing.expect(runtime.failMetaskCatalogRequest(refused, .{ .code = .catalog_invalid, .retryable = false }, 0));
+    try std.testing.expectEqual(contract.CatalogState.failed, fixture.provider().catalog_state);
+}
+
+test "a failed Metask load tries once with another credential, out of sight, and the person's retry is the load they see" {
+    var fixture: MetaskCatalogFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    _ = runtime.failMetaskCatalogRequest(fixture.begin(.due, 17, 0).outcome.started, .{ .code = .catalog_unavailable, .retryable = true }, 0);
+    _ = runtime.failMetaskCatalogRequest(fixture.begin(.due, 17, 2_000).outcome.started, .{ .code = .catalog_unavailable, .retryable = true }, 2_000);
+    try std.testing.expectEqual(contract.CatalogState.failed, fixture.provider().catalog_state);
+    // The credential it failed with asks for nothing again.
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    try std.testing.expect(!runtime.metaskCatalogDue(2_000));
+    // Another one does, in front or not, and out of sight.
+    _ = runtime.followMetaskPrincipal("principal", 18);
+    try std.testing.expect(runtime.metaskCatalogDue(2_000));
+    const quiet = fixture.begin(.due, 18, 2_000);
+    try std.testing.expect(!quiet.changed);
+    try std.testing.expectEqual(contract.CatalogState.failed, fixture.provider().catalog_state);
+    try std.testing.expectEqual(contract.ModelsOperation.idle, runtime.view().operation);
+    // The person asks meanwhile: that request becomes the load they see.
+    try std.testing.expect(runtime.joinMetaskCatalogRequest());
+    try std.testing.expectEqual(contract.CatalogState.loading, fixture.provider().catalog_state);
+    try std.testing.expectEqual(contract.ModelsOperation.refreshing_catalog, runtime.view().operation);
+    try std.testing.expect(runtime.metask.request.?.visible);
+    try std.testing.expect(try fixture.complete(quiet.outcome.started, &catalog_one, 2_000));
+    try std.testing.expectEqual(contract.CatalogState.ready, fixture.provider().catalog_state);
+    try std.testing.expectEqual(contract.ModelsOperation.idle, runtime.view().operation);
+}
+
+test "a Metask load that fails after Account renewed under it tries the new credential at once" {
+    var fixture: MetaskCatalogFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    const retry = metask_provider.retry_delay_ms;
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    _ = runtime.failMetaskCatalogRequest(fixture.begin(.due, 17, 0).outcome.started, .{ .code = .catalog_unavailable, .retryable = true }, 0);
+    // The second try goes out with 17, and Account renews while it is underway.
+    const second = fixture.begin(.due, 17, retry).outcome.started;
+    _ = runtime.followMetaskPrincipal("principal", 18);
+    try std.testing.expect(runtime.failMetaskCatalogRequest(second, .{ .code = .catalog_unavailable, .retryable = true }, retry));
+    try std.testing.expectEqual(contract.CatalogState.failed, fixture.provider().catalog_state);
+    // Not the beat: 18 has not been tried.
+    try std.testing.expect(runtime.metaskCatalogDue(retry));
+    const third = fixture.begin(.due, 18, retry);
+    try std.testing.expect(!third.changed);
+    try std.testing.expect(!runtime.failMetaskCatalogRequest(third.outcome.started, .{ .code = .catalog_unavailable, .retryable = true }, retry));
+    // 18 failed too: now the beat.
+    try std.testing.expect(!runtime.metaskCatalogDue(retry));
+    try std.testing.expectEqual(@as(?u64, null), runtime.metaskCatalogNext());
+    runtime.setMetaskCatalogActive(true);
+    try std.testing.expectEqual(@as(?u64, retry + metask_provider.refresh_interval_ms), runtime.metaskCatalogNext());
+}
+
+test "a Metask request without a credential waits for Account, and a reset loads the catalog again" {
+    var fixture: MetaskCatalogFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    // No credential to give now: the load waits for Account's next one.
+    const waiting = runtime.beginMetaskCatalogRequest(.due, .unavailable, 0);
+    try std.testing.expectEqual(contract.ModelsError.authorization_unavailable, waiting.outcome.rejected);
+    try std.testing.expectEqual(contract.CatalogState.loading, fixture.provider().catalog_state);
+    try std.testing.expectEqual(@as(?u64, null), runtime.metaskCatalogNext());
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    try std.testing.expect(runtime.metaskCatalogDue(0));
+    try std.testing.expect(try fixture.complete(fixture.begin(.due, 17, 0).outcome.started, &catalog_one, 0));
+    // With content, a beat without a credential just skips.
+    runtime.setMetaskCatalogActive(true);
+    const due = metask_provider.refresh_interval_ms;
+    _ = runtime.beginMetaskCatalogRequest(.due, .unavailable, due);
+    try std.testing.expectEqual(@as(?u64, 2 * due), runtime.metaskCatalogNext());
+    // A store that cannot be trusted asks for nothing and keeps the content.
+    runtime.store_healthy = false;
+    try std.testing.expectEqual(@as(?u64, null), runtime.metaskCatalogNext());
+    try std.testing.expectEqual(contract.ModelsError.persistence_unavailable, fixture.begin(.user, 17, 2 * due).outcome.rejected);
+    try std.testing.expect(runtime.metask.catalog != null);
+    // A reset empties it and loads it again at once; the load writes the
+    // source identity back.
+    try std.testing.expect(runtime.resetStore().accepted);
+    try std.testing.expectEqual(contract.CatalogState.loading, fixture.provider().catalog_state);
+    try std.testing.expect(runtime.metaskCatalogDue(2 * due));
+    try std.testing.expect(try fixture.complete(fixture.begin(.due, 17, 2 * due).outcome.started, &catalog_one, 2 * due));
+    try std.testing.expectEqual(contract.CatalogState.ready, fixture.provider().catalog_state);
+    try std.testing.expectEqualStrings("principal", fixture.provider().principal_ref);
+}
+
+test "Metask resolution reads the credential once, for the catalog's account only" {
+    var fixture: MetaskCatalogFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    try std.testing.expect(try fixture.complete(fixture.begin(.due, 17, 0).outcome.started, &catalog_one, 0));
+    const provider = fixture.provider();
+    const target: contract.ModelRef = .{ .source_id = "metask", .model_id = "model-1" };
+    const reads = fixture.credentials.reads;
+    fixture.credentials.generation = 21;
+    var candidate = (try runtime.resolveModel(target, provider.source_generation, provider.catalog_generation)).?;
+    defer candidate.deinit();
+    try std.testing.expectEqual(reads + 1, fixture.credentials.reads);
+    try std.testing.expectEqualStrings("token-a", candidate.input().api_key);
+    try std.testing.expectEqual(@as(u64, 21), candidate.input().credential_generation);
+    // Another account's credential, or none, resolves nothing.
+    fixture.credentials.set("principal-b", "token-b");
+    try std.testing.expect((try runtime.resolveModel(target, provider.source_generation, provider.catalog_generation)) == null);
+    fixture.credentials.set("principal", "");
+    try std.testing.expect((try runtime.resolveModel(target, provider.source_generation, provider.catalog_generation)) == null);
 }

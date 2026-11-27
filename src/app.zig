@@ -364,6 +364,7 @@ const App = struct {
         // before installing capabilities that initialization would overwrite.
         control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
         control_storage.setImageRunPreparation(models_management.imageRunPreparation());
+        control_storage.setMetaskCredentials(models_management.metaskCredentials());
         control_storage.setVideoRunPreparation(models_management.videoRunPreparation());
         control_storage.setAccountAuthorization(account.authorizationQuery());
         account.setCredentialRenewal(control_storage.metaskCredentialRenewal());
@@ -378,11 +379,14 @@ const App = struct {
             .notify_fn = app_platform.Adapter.notifyRequired,
         });
         const model_timers = self.platform.dispatcherPlatform();
-        models_management.setRetryTimer(.{
+        models_management.setHost(.{
             .context = model_timers.context,
-            .start_fn = model_timers.start_timer_fn,
-            .cancel_fn = model_timers.cancel_timer_fn,
+            .now_ns_fn = model_timers.now_fn,
+            .start_timer_fn = model_timers.start_timer_fn,
+            .cancel_timer_fn = model_timers.cancel_timer_fn,
         });
+        // The catalog beat runs only while MetaWork is in front.
+        models_management.setActive(native_runtime.app_active);
         if (self.automation.active()) {
             const vault = self.automation_models_vault orelse
                 @panic("automation Models vault is not composed");
@@ -651,11 +655,10 @@ const App = struct {
                     if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
                     return;
                 }
-                if (self.models_coordinator) |coordinator| {
-                    if (coordinator.onCatalogRetryTimer(timer.id)) {
-                        if (self.dispatcher) |dispatcher| try dispatcher.emitProductChanged();
-                        return;
-                    }
+                if (timer.id == models_coordinator.timer_id) {
+                    if (self.models_coordinator) |coordinator| coordinator.onTimer();
+                    if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
+                    return;
                 }
                 if (timer.id == app_platform.scheduled_task_timer_id) {
                     if (self.control) |control| {
@@ -701,6 +704,7 @@ const App = struct {
             // The inbox asks MetaTeam only while MetaWork is in front.
             .lifecycle => |phase| if (phase == .activate or phase == .deactivate) {
                 if (self.inbox) |*coordinator| coordinator.setActive(phase == .activate);
+                if (self.models_started) if (self.models_coordinator) |coordinator| coordinator.setActive(phase == .activate);
                 if (phase == .activate) if (self.account_coordinator) |coordinator| coordinator.activate();
                 if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
             },
