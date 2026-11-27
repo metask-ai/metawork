@@ -2316,7 +2316,7 @@ for (const kind of ["manual", "automatic"])
     await screen.findByRole("menuitem", { name: "Add files" });
     assert.deepEqual(
       screen.getAllByRole("menuitem").map((item) => item.textContent),
-      ["Add files", "Add Skill"],
+      ["Add files", "Reference conversation files", "Add Skill"],
     );
   });
 
