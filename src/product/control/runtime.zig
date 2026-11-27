@@ -2304,7 +2304,7 @@ pub const Runtime = struct {
                     inline else => |v| v.task_id,
                 };
                 input.source = .{ .workspace = try file_action.Input.init(self.allocator, .{ .file = .{ .target = file, .action = .check_current } }, location, self.projection_security_epoch) };
-                source = .{ .root = location.root, .relative = location.relative, .display_name = std.fs.path.basename(location.relative), .open_fn = openReferenceSource };
+                source = .{ .root = location.root, .relative = location.relative, .display_name = std.fs.path.basename(location.relative), .in_place = true, .open_fn = openReferenceSource };
             },
             .message => |msg| {
                 const record = self.task_runtime.messageFile(msg.task_id, msg.message, msg.index) orelse return error.UnknownAttachment;
@@ -2321,6 +2321,16 @@ pub const Runtime = struct {
         errdefer input.deinit(self.allocator);
         try self.attachment_lane.beginReference(&self.attachments, completion, id, source);
         slot.* = input;
+    }
+
+    /// The Agent's file tools take absolute paths, so a referenced Workspace
+    /// file is named by its root and relative path joined in the Host's own
+    /// separator.
+    fn bindReferencedWorkspacePath(self: *Runtime, id: u64, location: file_target.Location) !void {
+        const absolute = try std.fs.path.join(self.allocator, &.{ location.root, location.relative });
+        defer self.allocator.free(absolute);
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, absolute, '/', '\\');
+        try self.attachments.bindWorkspacePath(id, absolute);
     }
 
     fn openReferenceSource(io: std.Io, root_path: []const u8, relative: []const u8) !product_attachment.store.Source {
@@ -2369,7 +2379,7 @@ pub const Runtime = struct {
                     if (result == .ready) {
                         const resource = result.ready[0].id;
                         var valid = entry.current(f.control);
-                        if (valid and entry.source == .workspace) f.control.attachments.bindWorkspacePath(resource, entry.source.workspace.location.relative) catch {
+                        if (valid and entry.source == .workspace) f.control.bindReferencedWorkspacePath(resource, entry.source.workspace.location) catch {
                             valid = false;
                         };
                         if (valid) {
@@ -21950,7 +21960,58 @@ test "workspace attachment reference sends visual input and the workspace origin
     const image = input.attachments[0];
     try std.testing.expectEqual(.image, image.kind);
     try std.testing.expectEqualSlices(u8, staged_jpeg, image.bytes);
-    try std.testing.expect(std.mem.indexOf(u8, image.reference, "file_path=\"image.jpg\"") != null);
+    // The Agent's file tools take absolute paths: the reference names the
+    // Workspace file itself, and says the pixels are a snapshot of it.
+    const absolute = try std.fs.path.join(std.testing.allocator, &.{ root, "image.jpg" });
+    defer std.testing.allocator.free(absolute);
+    const quoted = try std.json.Stringify.valueAlloc(std.testing.allocator, absolute, .{});
+    defer std.testing.allocator.free(quoted);
+    try std.testing.expect(std.mem.indexOf(u8, image.reference, quoted) != null);
+    try std.testing.expect(std.mem.indexOf(u8, image.reference, "snapshot taken when the user referenced it") != null);
+    try std.testing.expect(std.mem.indexOf(u8, image.reference, "retained locally") == null);
+}
+
+test "a Workspace attachment reference that is not an image is not copied and is sent by its absolute path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, root);
+    defer store.deinit();
+    const control = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(control);
+    // A file larger than any staged copy may be: only its path is handed on.
+    var limits = testLimits();
+    limits.max_attachment_file_bytes = 16;
+    try initTestRuntimeWithLimits(control, limits, .{
+        .attachment_store = &store,
+        .attachment_images = .{ .prepare_fn = testAttachmentPreview },
+    });
+    defer control.deinit();
+    try bindTestImageWorkspace(control, root);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "notes.txt", .data = "line one\nline two\nline three\nline four\n" });
+    const id = try stageTestConversationReference(control, .{ .file = .{ .workspace = testWorkspacePath(3, 1, "notes.txt") } });
+    try std.testing.expect(id != 0);
+    try std.testing.expectEqual(@as(usize, 0), control.attachments.used_bytes);
+    const command: TaskRunInput = .{ .multimodal = .{ .text = "Summarize", .attachment_ids = &.{id} } };
+    var staged: Runtime.StagedTaskInput = .{};
+    const input = (try control.borrowTaskInput(3, command, &staged, false)).multimodal;
+    defer staged.borrow.?.rollback();
+    const file = input.attachments[0];
+    try std.testing.expectEqual(.file, file.kind);
+    try std.testing.expect(file.referenced);
+    // Nothing was retained, so the message cannot offer it for reference again.
+    try std.testing.expectEqual(@as(?[32]u8, null), file.original_name);
+    const absolute = try std.fs.path.join(std.testing.allocator, &.{ root, "notes.txt" });
+    defer std.testing.allocator.free(absolute);
+    const quoted = try std.json.Stringify.valueAlloc(std.testing.allocator, absolute, .{});
+    defer std.testing.allocator.free(quoted);
+    try std.testing.expect(std.mem.indexOf(u8, file.bytes, quoted) != null);
+    try std.testing.expect(std.mem.indexOf(u8, file.bytes, "current file in the Workspace, not a copy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, file.bytes, "retained locally") == null);
+    // No copy was staged, nor moved into the Task's originals.
+    for ([_][]const u8{ "0", "3" }) |directory|
+        try std.testing.expectError(error.FileNotFound, store.root.openDir(std.testing.io, directory, .{}));
 }
 
 test "a sent image attachment serves both media tiers from the identity its message persisted" {

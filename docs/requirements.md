@@ -435,7 +435,7 @@ Windows 支持 x86_64 与 arm64，统一使用 [AgentCore ABI 合同](agentcore-
 
 ### 7.5 后续产品能力
 
-`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查和明确成果交付记录的持久化、恢复与呈现已进入当前产品；成果检查，以及工作区文件的默认应用打开、打开文件夹、复制路径与另存，按当前授权和文件校验开放；另存保存文件的当前内容，只在系统对话框选择目标，提交后按实际结果呈现。“在对话中引用”把工作区文件或先前上传的原件加入同一 Task 的附件草稿。用户手动发送后，工作区文件保留原相对路径，上传文件使用选定消息的原件，图片同时作为视觉输入交给模型；实际修改仍沿既有 Agent、权限与 Skill 路径验收。文档预览的完整安装与应用纵向及 XLSX 版面检查仍须完成其验收。async pending、更完整的跨重启 execution rebind、strict Workspace security、用户自定义 Host tools、plan progress/approval、custom UI、远程 artifact 发布、自动安装更新和 Linux 接入均未进入当前产品，不能反向伪装成已具备。
+`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查和明确成果交付记录的持久化、恢复与呈现已进入当前产品；成果检查，以及工作区文件的默认应用打开、打开文件夹、复制路径与另存，按当前授权和文件校验开放；另存保存文件的当前内容，只在系统对话框选择目标，提交后按实际结果呈现。“在对话中引用”把工作区文件或先前上传的原件加入同一 Task 的附件草稿。用户手动发送后，工作区文件以原文件的绝对路径交给模型，不复制，上传文件使用选定消息的原件；图片另附选择时的快照作为视觉输入；实际修改仍沿既有 Agent、权限与 Skill 路径验收。文档预览的完整安装与应用纵向及 XLSX 版面检查仍须完成其验收。async pending、更完整的跨重启 execution rebind、strict Workspace security、用户自定义 Host tools、plan progress/approval、custom UI、远程 artifact 发布、自动安装更新和 Linux 接入均未进入当前产品，不能反向伪装成已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 

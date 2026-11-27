@@ -26,6 +26,10 @@ pub const ReferenceSource = struct {
     relative: []const u8,
     display_name: []const u8,
     expected_size: ?u64 = null,
+    /// A file that is not an image stays where it is: only its path is handed
+    /// on, so nothing is copied and the staging byte limits do not apply. An
+    /// image is still copied, because its pixels are the visual input.
+    in_place: bool = false,
     open_fn: *const fn (std.Io, []const u8, []const u8) anyerror!attachment.store.Source,
 };
 pub const Input = struct {
@@ -37,7 +41,7 @@ pub const Input = struct {
     file_store: *attachment.FileStore,
 };
 pub const Phase = enum { probed, copied, initialized, written, validated };
-pub const Completion = struct { completion_id: u64, phase: Phase, rejection: ?Rejection, cancelled: bool, files: []const attachment.ReceiveFile };
+pub const Completion = struct { completion_id: u64, phase: Phase, rejection: ?Rejection, cancelled: bool, files: []const attachment.ReceiveFile, kept_in_place: bool = false };
 pub const Taken = struct { job: *anyopaque, completion: Completion };
 pub const Notifier = struct { context: ?*anyopaque = null, wake_fn: *const fn (?*anyopaque) bool };
 pub const ExecutorJob = struct { identity: *anyopaque, context: *anyopaque, execute_fn: *const fn (*anyopaque) void, cancel_fn: *const fn (*anyopaque) void };
@@ -61,6 +65,9 @@ const Job = struct {
     reference_name: []u8 = &.{},
     expected_size: ?u64 = null,
     open_reference: ?@FieldType(ReferenceSource, "open_fn") = null,
+    in_place: bool = false,
+    /// The probe found an in-place reference is not an image: no copy follows.
+    kept_in_place: bool = false,
     metadata: []attachment.ReceiveFile = &.{},
     sources: []attachment.store.Source = &.{},
     source_count: usize = 0,
@@ -113,6 +120,14 @@ const Job = struct {
                     };
                 }
                 if (split.next() != null) return error.InvalidInput;
+                if (self.in_place) {
+                    var prefix: [12]u8 = undefined;
+                    const count = self.sources[0].handle.readPositionalAll(self.file_store.io, &prefix, 0) catch return error.ReadFailed;
+                    if (attachment.detectFormat(prefix[0..count]) == null) {
+                        self.kept_in_place = true;
+                        self.closeSources();
+                    }
+                }
             },
             .copied => {
                 for (self.targets, self.sources) |file, source| {
@@ -257,6 +272,16 @@ pub const Lane = struct {
                 self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, if (op.cancel_requested or raw.cancelled) .cancelled else .{ .rejected = raw.rejection.? });
                 continue;
             }
+            if (raw.phase == .probed and raw.kept_in_place) {
+                self.operation = null;
+                var descriptors: [1]attachment.Descriptor = undefined;
+                const ready = runtime.publishInPlace(op.product_id, raw.files[0], &descriptors) catch |err| {
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = reject(err) });
+                    continue;
+                };
+                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .ready = ready });
+                continue;
+            }
             if (raw.phase == .probed) {
                 runtime.reservePrepared(op.product_id, raw.files) catch |err| {
                     self.operation = null;
@@ -366,6 +391,7 @@ pub const Lane = struct {
             job.reference_name = try self.allocator.dupe(u8, ref.display_name);
             job.open_reference = ref.open_fn;
             job.expected_size = ref.expected_size;
+            job.in_place = ref.in_place and input.path_count == 1;
         }
         job.paths = try self.allocator.dupe(u8, input.paths);
         job.metadata = try self.allocator.alloc(attachment.ReceiveFile, input.path_count);
@@ -422,7 +448,7 @@ pub const Lane = struct {
         self.completions[self.head] = null;
         self.head = (self.head + 1) % max_in_flight;
         self.completion_count -= 1;
-        return .{ .job = job, .completion = .{ .completion_id = job.completion_id, .phase = job.phase, .rejection = job.rejection, .cancelled = job.cancelled.load(.acquire), .files = job.metadata } };
+        return .{ .job = job, .completion = .{ .completion_id = job.completion_id, .phase = job.phase, .rejection = job.rejection, .cancelled = job.cancelled.load(.acquire), .files = job.metadata, .kept_in_place = job.kept_in_place } };
     }
     fn release(self: *Lane, taken: Taken) void {
         const job: *Job = @ptrCast(@alignCast(taken.job));
