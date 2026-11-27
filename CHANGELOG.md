@@ -9,6 +9,8 @@
 ### Changed
 
 - 重新开放消息入口（MetaTeam 收件箱）。
+- Product 历史库 schema 升到 17，记录上传附件的原件身份；旧版本打开新库会判为不兼容。
+- Renderer 新增直接依赖 `unified` 与 `remark-parse`，用于在对话文件选择器中找出回复提到的文件。
 
 ## [0.3.0] - 2026-11-26
 
