@@ -2310,7 +2310,11 @@ pub const Runtime = struct {
                 const record = self.task_runtime.messageFile(msg.task_id, msg.message, msg.index) orelse return error.UnknownAttachment;
                 if (self.containsKnownCredential(record.display_name)) return error.RestrictedFile;
                 const original = record.retainedOriginal() orelse return error.UnknownAttachment;
-                const format: ?product_attachment.Format = if (record.format) |fmt| @as(product_attachment.Format, @enumFromInt(@intFromEnum(fmt))) else null;
+                const format: ?product_attachment.Format = if (record.format) |fmt| switch (fmt) {
+                    .png => .png,
+                    .jpeg => .jpeg,
+                    .webp => .webp,
+                } else null;
                 const kept = self.attachments.retainedOriginal(original, msg.task_id, format, record.display_name, record.size_bytes, &scratch) orelse return error.UnknownAttachment;
                 input.task_id = msg.task_id;
                 input.source = .{ .message = .{ .target = msg, .original = original } };
@@ -2454,10 +2458,8 @@ pub const Runtime = struct {
         return .queued;
     }
 
-    /// The draft still has to own this exact staged original, at delivery and
-    /// again at every chunk. A batch that was borrowed for a Task in the
-    /// meantime stops resolving, so the grant is released instead of reading a
-    /// file that now belongs to Task ownership.
+    /// A draft that came from a conversation file reference still counts only
+    /// while its source does; any other draft is not asked.
     fn attachmentReferenceCurrent(self: *const Runtime, attachment_id: u64) bool {
         for (self.reference_inputs) |slot| if (slot) |entry| {
             if (entry.attachment_id == attachment_id) return entry.current(self);
@@ -2465,6 +2467,10 @@ pub const Runtime = struct {
         return true;
     }
 
+    /// The draft still has to own this exact staged original, at delivery and
+    /// again at every chunk. A batch that was borrowed for a Task in the
+    /// meantime stops resolving, so the grant is released instead of reading a
+    /// file that now belongs to Task ownership.
     fn attachmentOriginalAuthority(self: *Runtime, attachment_id: u64, location: file_target.Location) FilePreviewState {
         if (!self.attachmentReferenceCurrent(attachment_id)) return .restricted;
         var relative: [product_attachment.max_original_relative_bytes]u8 = undefined;

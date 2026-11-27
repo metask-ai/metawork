@@ -732,14 +732,17 @@ pub const Runtime = struct {
         entry.thumbnail_file = null;
     }
 
-    /// The persisted identity of an accepted image, read while the batch is
-    /// still borrowed. A derivative that could not be written leaves no
-    /// identity at all, so history keeps the plain metadata chip for it.
+    /// The name an accepted original keeps in the Task's store, read while the
+    /// batch is still borrowed, so the message can address it again later. A
+    /// reference kept in place retained nothing and has none.
     pub fn acceptedName(self: *const Runtime, id: u64) ?[store.name_text_bytes]u8 {
         const entry = self.slots[self.findIndex(id) orelse return null].?;
         return if (entry.state == .borrowed and !entry.in_place) entry.file.name else null;
     }
 
+    /// The persisted identity of an accepted image, read while the batch is
+    /// still borrowed. A derivative that could not be written leaves no
+    /// identity at all, so history keeps the plain metadata chip for it.
     pub fn acceptedMedia(self: *const Runtime, id: u64) ?Media {
         const entry = self.slots[self.findIndex(id) orelse return null].?;
         if (entry.state != .borrowed or entry.format == null) return null;
