@@ -2532,6 +2532,9 @@ fn restoreRunInput(
                 null;
             if (media != null and wire_item.original_name != null) return error.TaskStoreCorrupt;
             const original_name = if (wire_item.original_name) |name| task_state.decodeMediaName(name) catch return error.TaskStoreCorrupt else null;
+            // Writing records a reference as true and leaves the field out
+            // otherwise; false is not a form this store ever wrote.
+            if (wire_item.referenced == false) return error.TaskStoreCorrupt;
             item.* = .{
                 .kind = kind,
                 .format = format,
@@ -6158,6 +6161,17 @@ test "accepted image and file attachments keep their original identities across 
     attachments[0].original_name = attachments[1].original_name;
     try std.testing.expectError(error.TaskStoreCorrupt, restoreTestTask(&arena, mediaTestTask(&attachments)));
     try std.testing.expect(!try security.contains(std.testing.allocator, accepted_media_wire, "0123456789abcdef0123456789abcdef"));
+}
+
+test "a stored reference mark is true or absent, never false" {
+    var attachments = [_]AttachmentWire{.{ .kind = "file", .format = null, .display_name = "notes.txt", .size_bytes = 12, .redacted = false, .referenced = true }};
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const restored = try restoreTestTask(&arena, mediaTestTask(&attachments));
+    try std.testing.expect(restored.durable.runs[0].?.input.multimodal.attachments[0].referenced);
+    // Writing leaves the field out for an attachment that was not referenced.
+    attachments[0].referenced = false;
+    try std.testing.expectError(error.TaskStoreCorrupt, restoreTestTask(&arena, mediaTestTask(&attachments)));
 }
 
 test "a stored identity that MetaWork would not mint is a corrupt record" {
