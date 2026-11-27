@@ -2309,14 +2309,13 @@ pub const Runtime = struct {
             .message => |msg| {
                 const record = self.task_runtime.messageFile(msg.task_id, msg.message, msg.index) orelse return error.UnknownAttachment;
                 if (self.containsKnownCredential(record.display_name)) return error.RestrictedFile;
-                const store = self.attachments.file_store orelse return error.UnknownAttachment;
                 const original = record.retainedOriginal() orelse return error.UnknownAttachment;
-                const extension = if (record.format) |fmt| try product_attachment.store.Extension.fromSuffix(product_attachment.originalExtension(@enumFromInt(@intFromEnum(fmt)))) else product_attachment.store.Extension.fromName(record.display_name);
-                const relative = try product_attachment.store.relativePath(.{ .name = original, .task_id = msg.task_id, .size = @intCast(record.size_bytes), .extension = extension }, &scratch);
+                const format: ?product_attachment.Format = if (record.format) |fmt| @as(product_attachment.Format, @enumFromInt(@intFromEnum(fmt))) else null;
+                const kept = self.attachments.retainedOriginal(original, msg.task_id, format, record.display_name, record.size_bytes, &scratch) orelse return error.UnknownAttachment;
                 input.task_id = msg.task_id;
                 input.source = .{ .message = .{ .target = msg, .original = original } };
                 if (msg.message == .submission) input.source.message.target.message = .{ .submission = try self.allocator.dupe(u8, msg.message.submission) };
-                source = .{ .root = store.directory, .relative = relative, .display_name = record.display_name, .expected_size = record.size_bytes, .open_fn = openReferenceSource };
+                source = .{ .root = kept.directory, .relative = kept.relative, .display_name = record.display_name, .expected_size = record.size_bytes, .open_fn = openReferenceSource };
             },
         }
         errdefer input.deinit(self.allocator);

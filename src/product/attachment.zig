@@ -723,6 +723,37 @@ pub const Runtime = struct {
         };
     }
 
+    /// The same for any original a Task retained, image or not, so it can be
+    /// staged again as a new draft. An image keeps its recognized format's
+    /// suffix; another file keeps the safe suffix of the name it was sent
+    /// with, as acceptance stored it.
+    pub fn retainedOriginal(
+        self: *const Runtime,
+        name: [store.name_text_bytes]u8,
+        task_id: u64,
+        format: ?Format,
+        display_name: []const u8,
+        size_bytes: u64,
+        buffer: []u8,
+    ) ?Original {
+        const file_store = self.file_store orelse return null;
+        if (task_id == 0) return null;
+        const file: store.File = .{
+            .name = name,
+            .task_id = task_id,
+            .size = std.math.cast(usize, size_bytes) orelse return null,
+            .extension = if (format) |value|
+                store.Extension.fromSuffix(originalExtension(value)) catch return null
+            else
+                store.Extension.fromName(display_name),
+        };
+        return .{
+            .directory = file_store.directory,
+            .relative = store.relativePath(file, buffer) catch return null,
+            .size_bytes = file.size,
+        };
+    }
+
     /// Bounded read of an accepted chip derivative. One small file, no decode
     /// and no original: the bytes are the ones staging already derived.
     pub fn readAcceptedThumbnail(self: *Runtime, media: Media, task_id: u64, buffer: []u8) ?Thumbnail {
