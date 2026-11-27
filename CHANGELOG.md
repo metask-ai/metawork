@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 重新开放消息入口（MetaTeam 收件箱）。
+
 ## [0.3.0] - 2026-11-26
 
 ### Added

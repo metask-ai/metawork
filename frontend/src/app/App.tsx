@@ -403,12 +403,7 @@ function handoffInput(draft: ComposerDraft, handoff?: HandoffDraft) {
   return result.kind === "prepared" ? result.draft : null;
 }
 
-export default function App({
-  // The message page is not open to users yet. Its navigation entry is the
-  // only way into it, so leaving the entry out keeps the page unreachable.
-  // Default it to true to offer the page again.
-  messageEntry = false,
-}: { messageEntry?: boolean } = {}) {
+export default function App() {
   const { t } = useI18n();
   const inputRetryActions = useRef(new Set<string>());
   const [workbench, dispatchWorkbench] = useReducer(
@@ -5940,18 +5935,16 @@ export default function App({
                 </Tooltip.Positioner>
               </Tooltip.Portal>
             </Tooltip.Root>
-            {messageEntry ? (
-              <MessageNavigationItem
-                active={inboxOpen}
-                unread={inboxUnread(snapshot.inbox)}
-                onOpen={() => {
-                  openWorkbenchPage("inbox");
-                  // A narrow window keeps the drawer open on the conversation
-                  // list; with nothing to list it shows the inbox state instead.
-                  if (snapshot.inbox.state === "unavailable") dismissDrawer();
-                }}
-              />
-            ) : null}
+            <MessageNavigationItem
+              active={inboxOpen}
+              unread={inboxUnread(snapshot.inbox)}
+              onOpen={() => {
+                openWorkbenchPage("inbox");
+                // A narrow window keeps the drawer open on the conversation
+                // list; with nothing to list it shows the inbox state instead.
+                if (snapshot.inbox.state === "unavailable") dismissDrawer();
+              }}
+            />
           </nav>
           <AccountIdentity
             account={snapshot.account}
