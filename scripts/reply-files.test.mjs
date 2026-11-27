@@ -572,6 +572,8 @@ test("an action's answer is said only where it is needed", () => {
     "saved",
     "path_copied",
     "edit_prepared",
+    // The Composer already says why the attachment could not be added.
+    "edit_reported",
     "cancelled",
   ])
     assert.equal(fileMenuOutcome(state), null);

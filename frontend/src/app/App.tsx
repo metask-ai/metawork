@@ -57,6 +57,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type SetStateAction,
 } from "react";
 import { AppShell } from "./AppShell.tsx";
 import {
@@ -584,7 +585,19 @@ export default function App() {
   const attachmentBusy = attachmentView !== null || attachmentRemoving;
   const referenceCheck = useRef<AbortController | null>(null);
   const [checkingReferences, setCheckingReferences] = useState(false);
-  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [attachmentError, setAttachmentErrorState] = useState<string | null>(
+    null,
+  );
+  /// Counts each reason the Composer was given to show, so an action that
+  /// added through it can tell whether its failure was already explained.
+  const attachmentErrorReports = useRef(0);
+  const setAttachmentError = useCallback(
+    (value: SetStateAction<string | null>) => {
+      if (typeof value === "string") attachmentErrorReports.current += 1;
+      setAttachmentErrorState(value);
+    },
+    [],
+  );
   const [attachmentViewer, setAttachmentViewer] =
     useState<MediaViewerTarget | null>(null);
   const attachmentViewerOpener = useRef<HTMLButtonElement | null>(null);
@@ -4927,8 +4940,15 @@ export default function App() {
       })
     )
       return "edit_unavailable";
+    const reports = attachmentErrorReports.current;
     if (!(await addAttachments(file.source, { file, detail }, signal)))
-      return signal?.aborted ? "cancelled" : "edit_unavailable";
+      // One place says why: the Composer, when it has already shown the
+      // reason the attachment could not be added.
+      return signal?.aborted
+        ? "cancelled"
+        : attachmentErrorReports.current !== reports
+          ? "edit_reported"
+          : "edit_unavailable";
     window.requestAnimationFrame(() => {
       if (
         taskDraftActionContext.current.audience === fileReferenceAudience &&

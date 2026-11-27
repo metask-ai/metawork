@@ -3563,6 +3563,7 @@ async function renderReferenceApp(ctx) {
     "/src/bridge/attachment-receive.ts",
   );
   const sources = [];
+  let rejection = null;
   ctx.mock.method(
     BridgeClient.prototype,
     "createAttachmentAdd",
@@ -3571,6 +3572,7 @@ async function renderReferenceApp(ctx) {
         {
           begin: async (source) => {
             sources.push(source);
+            if (rejection) return { status: "rejected", reason: rejection };
             return {
               status: "ready",
               attachments: [
@@ -3610,6 +3612,9 @@ async function renderReferenceApp(ctx) {
     checks,
     answerChecksWith: (value) => {
       check = value;
+    },
+    rejectAddsWith: (reason) => {
+      rejection = reason;
     },
     chips: () => document.querySelectorAll(".composer-attachment").length,
     reference: async () => {
@@ -3674,4 +3679,22 @@ test("App keeps the whole draft when a referenced file fails its check before se
   assert.equal(app.fixture.inputs.length, 0);
   assert.equal(app.fixture.textarea.value, "Summarize the report");
   assert.equal(app.chips(), 1);
+});
+
+test("App explains a file menu reference that cannot be added in one place, with its reason", async (ctx) => {
+  const app = await renderReferenceApp(ctx);
+  app.rejectAddsWith("file_too_large");
+  fireEvent.click(await screen.findByRole("button", { name: "View outputs" }));
+  const row = await screen
+    .findByRole("button", { name: "report.txt" })
+    .catch(() => screen.findByRole("group", { name: "report.txt" }));
+  fireEvent.contextMenu(row, { clientX: 20, clientY: 20 });
+  const menu = await screen.findByRole("menu", { name: "File actions" });
+  fireEvent.click(
+    within(menu).getByRole("menuitem", { name: "Reference in conversation" }),
+  );
+  await screen.findByText(/exceeds the per-file limit/);
+  await waitFor(() => assert.equal(app.sources.length, 1));
+  assert.equal(screen.queryByText(/Cannot reference this file now/), null);
+  assert.equal(app.chips(), 0);
 });

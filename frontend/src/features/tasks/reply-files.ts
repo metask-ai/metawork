@@ -15,8 +15,9 @@ import type {
 } from "../../components/FileMenu.tsx";
 import type { MessageId } from "../../i18n/context.ts";
 import { findRunFileReference } from "../../workbench/run-file-references.ts";
+/** `edit_reported`: it failed, and the Composer already says why. */
 export type FileReferenceResult =
-  "edit_prepared" | "cancelled" | "edit_unavailable";
+  "edit_prepared" | "cancelled" | "edit_reported" | "edit_unavailable";
 
 export type FilePreviewLoader = (
   target: FileTarget,
@@ -80,6 +81,7 @@ export function fileMenuOutcome(
     case "saved":
     case "path_copied":
     case "edit_prepared":
+    case "edit_reported":
     case "cancelled":
       return null;
     case "changed":
