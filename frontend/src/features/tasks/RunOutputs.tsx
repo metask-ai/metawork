@@ -1,4 +1,11 @@
-import { useId, useRef } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import type { DeliveredOutputView } from "../../bridge/contracts.ts";
 import {
   FileMenuScope,
@@ -11,7 +18,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
 import { fileName } from "./FileCard.tsx";
-import { menuFile } from "./reply-files.ts";
+import { menuFile, type FileDescriber } from "./reply-files.ts";
 
 type OutputPreview = (
   taskId: string,
@@ -20,20 +27,104 @@ type OutputPreview = (
 ) => void;
 type Output = DeliveredOutputView & { runId: string };
 
+const none: ReadonlySet<string> = new Set();
+
+/// The rows the file preview shows anything for, by what the Host says each
+/// file holds now. Until it has answered, and for a file it does not preview,
+/// a row is not a preview button, so clicking it does nothing.
+function usePreviewableOutputs(
+  root: RefObject<HTMLUListElement | null>,
+  taskId: string,
+  outputs: readonly Output[],
+  describe: FileDescriber | undefined,
+): ReadonlySet<string> {
+  const [answered, setAnswered] = useState<{
+    identity: string;
+    ids: ReadonlySet<string>;
+  } | null>(null);
+  const focused = useRef<string | null>(null);
+  const identity = JSON.stringify([
+    taskId,
+    outputs
+      .filter((output) => !output.redacted)
+      .map((output) => [
+        output.runId,
+        output.id,
+        output.displayPath,
+        output.sizeBytes,
+        output.updated ?? false,
+      ]),
+  ]);
+  useEffect(() => {
+    if (!describe) return;
+    const ask = describe;
+    const controller = new AbortController();
+    const [task, rows] = JSON.parse(identity) as [string, [string, string][]];
+    void (async () => {
+      const ids = new Set<string>();
+      for (const [runId, outputId] of rows) {
+        const result = await ask(
+          { kind: "output", taskId: task, runId, outputId },
+          { signal: controller.signal, priority: "prefetch" },
+        ).catch(() => null);
+        if (controller.signal.aborted) return;
+        if (
+          result?.state === "ready" &&
+          (result.file.kind === "image" ||
+            (result.file.kind === "file" && result.file.previewable))
+        )
+          ids.add(outputId);
+      }
+      // A row that becomes a button is a new element: keep the focus it held.
+      focused.current =
+        (root.current?.contains(document.activeElement) &&
+          document.activeElement
+            ?.closest("[data-output-id]")
+            ?.getAttribute("data-output-id")) ||
+        null;
+      setAnswered({ identity, ids });
+    })();
+    return () => controller.abort();
+  }, [root, identity, describe]);
+  useLayoutEffect(() => {
+    const id = focused.current;
+    focused.current = null;
+    if (id === null) return;
+    const row = Array.from(
+      root.current?.querySelectorAll<HTMLElement>("[data-output-id]") ?? [],
+    )
+      .find((item) => item.getAttribute("data-output-id") === id)
+      ?.querySelector<HTMLElement>(".run-output-file");
+    if (row && !row.contains(document.activeElement))
+      row.focus({ preventScroll: true });
+  }, [root, answered]);
+  return describe && answered?.identity === identity ? answered.ids : none;
+}
+
 export function RunOutputs({
   outputs,
   taskId,
   disabled = false,
   onPreview,
+  describe,
 }: {
   outputs: readonly Output[];
   taskId: string;
   disabled?: boolean;
   onPreview?: OutputPreview;
+  /** Asks the Host what each file holds now; only a previewable row previews. */
+  describe?: FileDescriber;
 }) {
+  const root = useRef<HTMLUListElement>(null);
+  const previewable = usePreviewableOutputs(
+    root,
+    taskId,
+    outputs,
+    onPreview && !disabled ? describe : undefined,
+  );
   if (!outputs.length) return null;
   return (
-    <ul className="run-outputs-list">
+    <ul ref={root} className="run-outputs-list">
       {outputs.map((output) => (
         <li key={output.id} className="run-output" data-output-id={output.id}>
           <FileMenuScope
@@ -53,7 +144,7 @@ export function RunOutputs({
               output={output}
               taskId={taskId}
               disabled={disabled}
-              onPreview={onPreview}
+              onPreview={previewable.has(output.id) ? onPreview : undefined}
             />
           </FileMenuScope>
         </li>

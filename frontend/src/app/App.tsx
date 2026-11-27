@@ -6297,6 +6297,7 @@ export default function App() {
                       ? openConversationWorkspaceFile
                       : undefined
                   }
+                  describe={describeFile}
                 />
               </div>
             ) : panelTarget.kind === "review" && reviewMatchesTarget ? (

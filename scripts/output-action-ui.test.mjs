@@ -93,6 +93,14 @@ test.after(async () => {
   await vite.close();
   dom.window.close();
 });
+const described = (previewable) => async (target) => {
+  described.asked.push(target);
+  return {
+    state: "ready",
+    file: { kind: "file", sizeBytes: "42", previewable },
+  };
+};
+described.asked = [];
 const row = () => screen.getByRole("listitem");
 const trigger = () => row().querySelector(".run-output-file");
 async function openActions(keyboard = false) {
@@ -105,12 +113,14 @@ async function chooseFileAction(name) {
   await openActions();
   fireEvent.click(screen.getByRole("menuitem", { name }));
 }
-test("a one-line row previews the file on click and opens its scoped menu by pointer or keyboard", async () => {
+test("a one-line row the preview cannot show ignores a click and opens its scoped menu by pointer or keyboard", async () => {
   const previews = [],
     requests = [];
+  described.asked = [];
   render(
     view({
       onPreview: (...args) => previews.push(args),
+      describe: described(false),
       onReference: async () => "edit_prepared",
       onAction: async (...args) => {
         requests.push(args);
@@ -120,8 +130,10 @@ test("a one-line row previews the file on click and opens its scoped menu by poi
   );
   assert.equal(trigger().textContent, "年度报告.docx");
   assert.match(trigger().title, /results\/年度报告.docx.*42 bytes/);
+  await waitFor(() => assert.deepEqual(described.asked, [target]));
   fireEvent.click(trigger());
-  assert.deepEqual(previews, [["3", output.displayPath, trigger()]]);
+  assert.equal(trigger().tagName, "SPAN");
+  assert.deepEqual(previews, []);
   await openActions(true);
   assert.equal(
     screen
@@ -134,8 +146,24 @@ test("a one-line row previews the file on click and opens its scoped menu by poi
   await screen.findByText("Matched delivered content when checked");
   assert.deepEqual(requests[0].slice(0, 2), [target, "check"]);
   await openActions();
-  assert.equal(previews.length, 1);
+  assert.equal(previews.length, 0);
   assert.ok(screen.getByRole("menuitem", { name: "Copy path" }));
+});
+test("a row the preview can show previews the file on click once the Host says so", async () => {
+  const previews = [];
+  const notes = { ...output, displayPath: "results/notes.md" };
+  render(
+    view({
+      outputs: [notes],
+      onPreview: (...args) => previews.push(args),
+      describe: described(true),
+    }),
+  );
+  // Before the Host answers, the row is not a preview button.
+  assert.equal(trigger().tagName, "SPAN");
+  await waitFor(() => assert.equal(trigger().tagName, "BUTTON"));
+  fireEvent.click(trigger());
+  assert.deepEqual(previews, [["3", notes.displayPath, trigger()]]);
 });
 test("delivery checks distinguish changed content and expose a truthful result", async () => {
   let resolve;
@@ -244,6 +272,7 @@ test("references use the current-file check first; the menu respects composition
       });
     },
     onPreview: (...args) => previews.push(args),
+    describe: described(true),
   };
   const mounted = render(view(props));
   await openActions();
@@ -267,6 +296,7 @@ test("references use the current-file check first; the menu respects composition
       },
     }),
   );
+  await waitFor(() => assert.equal(trigger().tagName, "BUTTON"));
   fireEvent.click(screen.getByRole("button", { name: "More file actions" }));
   assert.ok(await screen.findByRole("menuitem", { name: "Open in browser" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "View source" }));
