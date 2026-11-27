@@ -159,3 +159,38 @@ test("endpoint validation rejects inputs that cannot reach a supported Host requ
     issue: null,
   });
 });
+test("a key that empties the current view does not end the edit as uncertain", async () => {
+  const h = harness();
+  let emptied = false;
+  // Saving a key nothing knew advances the security epoch, which empties the
+  // current view until it is read again.
+  const refresh = async () => {
+    if (h.calls.at(-1)?.[0] === "api_key" && !emptied) {
+      emptied = true;
+      return null;
+    }
+    return h.refresh();
+  };
+  const result = await editCustomModel(
+    h.client,
+    structuredClone(h.models),
+    refresh,
+    h.input,
+  );
+  assert.equal(result.accepted, true);
+  assert.deepEqual(result.applied, ["address", "api_key", "model_id"]);
+  // A view that stays away is uncertain, and nothing is written again.
+  const gone = harness();
+  const missing = await editCustomModel(
+    gone.client,
+    structuredClone(gone.models),
+    async () => null,
+    gone.input,
+  );
+  assert.equal(missing.accepted, false);
+  assert.equal(missing.reviewRequired, true);
+  assert.deepEqual(
+    gone.calls.map((c) => c[0]),
+    ["address"],
+  );
+});

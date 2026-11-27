@@ -44,50 +44,7 @@ Inno Setup 只负责把 Native SDK runtime stage 安装和卸载为一个 Window
 
 编译安装器前，runtime stage 必须通过主包资源检查，不混入展开的 Office 资源树、Python、Node 或文档库。完整 Skill/helper/必要 XSD 以压缩内嵌资源随主包发布，解包前接受固定摘要、大小及路径检查；不以压缩规避内容边界。发布失败不阻止应用启动。整包体积不设上限，也不记录基线：打包成功日志输出最终安装器的体积与 SHA-256，不与任何历史版本比较。应用自身代码的合理增长可以接受，主包不携带解释器、文档库和展开资源树才是边界，由 [`scripts/main-package-contents.mjs`](../scripts/main-package-contents.mjs) 的主包资源检查强制执行：命中即抛出，不接受任何体积数字替代，也不以单个 executable 或资源压缩量代替整包测量。已发布产物的权威体积在下载主机上，每个文件的 `content-length` 都可直接查询，仓库不维护副本。
 
-## 发布顺序
-
-正式打包的输入是 tag 指向的 commit，不是工作树，也不是 `main` 的当前尖端：
-
-1. `chore: release` 提交经 PR 合入 `main`；
-2. 在该 commit 上推送 `v<version>` tag，`.github/workflows/release.yml` 校验这个 tag 并建立 Release 草稿；
-3. 检出该 tag 的确切 sha，按本文的固定流程生成两个架构的签名安装器；
-4. 产物上传到下载主机后发布草稿，并在同一步把更新 manifest 指向新版本，见下节。
-
-闸门放在打包之前是因为它廉价：workflow 是秒级，四个产物加公证是小时级。先打包再打 tag 会让 tag 指向一棵没有人构建过的树——打包期间任何合入都会移动 `main` 的尖端。推送 tag 不构成公开声明，workflow 只建立未发布的草稿。
-
-GitHub Release 只记录版本，不承载分发：产物由下载主机提供，不作为附件上传。产物出问题时发下一个 patch 版本，不删除也不移动已经打出的 tag——已经取到该 tag 的人会停留在与 Release 所述不同的树上。
-
-## 更新 manifest
-
-运行中的客户端只读一个文件来发现新版本：[`src/product/update.zig`](../src/product/update.zig) 里的 `https://metawork.metask-ai.com/manifest.json`。发布草稿和把这个文件指向新版本是同一步，因为在产物已上传、草稿已发布而 manifest 仍指向旧版本的那段时间里，没有任何用户会知道新版本存在；反过来，manifest 先指向一个未发布的版本会把用户送到下载不到的产物上。
-
-**这个文件不在本仓库。** 仓库里没有被跟踪的 `manifest.json`，也没有任何站点部署配置，所以它既不随 tag 变化，也不经过 PR——改它是一次仓库之外的手工操作，没有任何自动化会替你做。
-
-它由腾讯云 CloudBase 静态托管提供，回源 COS（响应头 `server: tcbgw`、`x-cloudbase-upstream-type: Tencent-COS`）。改法是在 CloudBase 控制台或用 `tcb` CLI 上传新的 `manifest.json` 覆盖同一路径。
-
-`cache-control: public, max-age=300, s-maxage=600`，即 CDN 最多缓存 10 分钟：上传后不会立刻生效。刚上传完用 `curl` 看到旧版本号是正常的，等缓存过期再确认，不要以为上传失败而重复上传。
-
-0.2.13 发版后这个文件的实际内容：
-
-```json
-{
-  "version": "0.2.13",
-  "downloads": {
-    "macos": {
-      "arm64": "https://downloads.metask-ai.com/metawork/v0.2.13/metawork-0.2.13-macos-arm64.dmg?release=0.2.13&rev=20261116",
-      "x64": "https://downloads.metask-ai.com/metawork/v0.2.13/metawork-0.2.13-macos-x64.dmg?release=0.2.13&rev=20261116"
-    },
-    "windows": {
-      "x64": "https://downloads.metask-ai.com/metawork/v0.2.13/metawork-0.2.13-windows-x64.exe?release=0.2.13&rev=20261116",
-      "arm64": "https://downloads.metask-ai.com/metawork/v0.2.13/metawork-0.2.13-windows-arm64.exe?release=0.2.13&rev=20261116"
-    }
-  }
-}
-```
-
-切版本时要一起改的，除了顶层 `version`，还有四个 URL 里的版本目录 `v<version>`、文件名，以及 `?release=<version>&rev=<yyyymmdd>` 这两个查询参数——`release` 是版本号，`rev` 是上传当天的日期。漏掉任何一个都会让某个平台或架构继续下载上一版。
-
-产物本身在另一台主机上，不和 manifest 在一起：`https://downloads.metask-ai.com/metawork/v<version>/`。客户端的接受边界由 [`src/product/update.zig`](../src/product/update.zig) 固定：manifest 不超过 64 KiB、JSON 嵌套不超过 8 层、重复键直接拒绝，每个下载 URL 必须以 `https://downloads.metask-ai.com/` 开头且不带 user、password、port 或 fragment。任何一项不满足，整份 manifest 被整体拒绝，客户端停留在当前版本且不报告新版本。
+跨平台标签、CI 打包、正式产物上传和更新清单发布见[发布流程](release.md)。
 
 ## 签名边界
 

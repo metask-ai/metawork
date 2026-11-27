@@ -16,7 +16,9 @@ type Client = Pick<
 export async function editCustomModel(
   client: Client,
   models: ModelsView,
-  refreshModels: () => Promise<ModelsView>,
+  /// Null while there is no current view to read, as after a newer security
+  /// epoch emptied it; asked once more before the edit counts as uncertain.
+  refreshModels: () => Promise<ModelsView | null>,
   input: CustomModelEditInput,
 ): Promise<CustomModelEditResult> {
   let source: CustomProviderView | null =
@@ -78,7 +80,8 @@ export async function editCustomModel(
         applied.push(step);
         if (step === "model_id") modelId = input.nextModelId;
       }
-      const next = await refreshModels();
+      const next = (await refreshModels()) ?? (await refreshModels());
+      if (!next) throw Error("No current Models view");
       source =
         next.customProviders.find((item) => item.id === input.providerId) ??
         null;

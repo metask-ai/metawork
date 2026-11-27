@@ -17,8 +17,12 @@ import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
 import {
   accountIdentityInitial,
   accountIdentityLabel,
+  accountUnconfirmed,
 } from "../../workbench/account-identity.ts";
-import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
+import {
+  AccountRecharge,
+  AccountUsageSummary,
+} from "./AccountUsageSummary.tsx";
 import { ArchivedTasks, type ArchivedTasksProps } from "./ArchivedTasks.tsx";
 import {
   CustomModelsSettings,
@@ -29,23 +33,18 @@ import {
   GlobalInstructionsSettings,
   type GlobalInstructionsActions,
 } from "./GlobalInstructionsSettings.tsx";
-export type SettingsFocusTarget =
-  "title" | "account" | "models" | "archived" | "directories";
+export type SettingsFocusTarget = "title" | "account" | "models" | "archived";
 
 type SettingsSection =
-  | "general"
-  | "account"
-  | "models"
-  | "instructions"
-  | "archived"
-  | "directories";
+  "general" | "account" | "models" | "instructions" | "archived" | "about";
 type AutomaticWorkspaceRootAction = "choose" | "reset" | "retry";
 type AutomaticWorkspaceRootMutationOutcome = "applied" | "cancelled" | false;
 export function SettingsPage({
   archiveManagement,
-  directoryManagement,
   globalInstructions,
+  aboutContent,
   account,
+  metaskStopTargets,
   accountFeedback,
   accountDiagnostics,
   models,
@@ -76,9 +75,10 @@ export function SettingsPage({
   onLogout,
 }: {
   archiveManagement?: ArchivedTasksProps;
-  directoryManagement?: ReactNode;
   globalInstructions?: GlobalInstructionsActions;
+  aboutContent: ReactNode;
   account: AccountView;
+  metaskStopTargets: number;
   accountFeedback?: ReactNode;
   accountDiagnostics?: ReactNode;
   models: ModelsView;
@@ -114,6 +114,7 @@ export function SettingsPage({
   onLogout: () => void;
 } & CustomModelActions) {
   const { locale, setLocale, t } = useI18n();
+  const aboutTitle = t("settings.about_product", { product: t("app.name") });
   const customProviderSettingsAvailable = supportsCustomProviders(
     customProviderCapabilities,
   );
@@ -131,22 +132,24 @@ export function SettingsPage({
   const accountHeading = useRef<HTMLHeadingElement>(null);
   const modelsHeading = useRef<HTMLHeadingElement>(null);
   const instructionsHeading = useRef<HTMLHeadingElement>(null);
+  const aboutHeading = useRef<HTMLHeadingElement>(null);
   const automaticRootChooseButton = useRef<HTMLButtonElement>(null);
   const automaticRootResetButton = useRef<HTMLButtonElement>(null);
   const automaticRootRetryButton = useRef<HTMLButtonElement>(null);
   const automaticRootGeneration = useRef(automaticWorkspaceRoot.generation);
   automaticRootGeneration.current = automaticWorkspaceRoot.generation;
   const authenticated = account.state === "authenticated";
+  const unconfirmed = accountUnconfirmed(account);
   const accountIdentityTitle = authenticated
     ? accountIdentityLabel(account, t("account.signed_in"))
     : account.state === "checking"
-      ? t("account.checking.title")
+      ? t(unconfirmed ? "account.unconfirmed.title" : "account.checking.title")
       : account.state === "authorizing"
         ? t("account.authorizing.title")
         : t("account.sign_in_required.title");
   const accountIdentityBody =
     account.state === "checking"
-      ? t("account.checking.body")
+      ? t(unconfirmed ? "account.unconfirmed.body" : "account.checking.body")
       : account.state === "authorizing"
         ? t("account.authorizing.body")
         : t("account.sign_in_required.body");
@@ -161,9 +164,7 @@ export function SettingsPage({
     [t],
   );
   useEffect(() => {
-    if (focusTarget === "directories") {
-      setActiveSection("directories");
-    } else if (focusTarget === "archived") {
+    if (focusTarget === "archived") {
       setActiveSection("archived");
     } else if (focusTarget === "models") {
       setActiveSection("models");
@@ -181,6 +182,8 @@ export function SettingsPage({
         modelsHeading.current?.focus();
       } else if (activeSection === "instructions") {
         instructionsHeading.current?.focus();
+      } else if (activeSection === "about") {
+        aboutHeading.current?.focus();
       }
     });
     return () => window.cancelAnimationFrame(frame);
@@ -344,22 +347,6 @@ export function SettingsPage({
           )}
           <a
             className="focus-ring"
-            href="#settings-directories"
-            aria-current={
-              activeSection === "directories" ? "location" : undefined
-            }
-            onClick={(event) => {
-              event.preventDefault();
-              setActiveSection("directories");
-            }}
-          >
-            <span className="settings-nav-icon" aria-hidden="true">
-              <Icon name="workspace" />
-            </span>
-            <span>{t("settings.working_directories")}</span>
-          </a>
-          <a
-            className="focus-ring"
             href="#settings-archived"
             aria-current={activeSection === "archived" ? "location" : undefined}
             onClick={(event) => {
@@ -371,6 +358,20 @@ export function SettingsPage({
               <Icon name="archive" />
             </span>
             <span>{t("settings.archived_tasks")}</span>
+          </a>
+          <a
+            className="focus-ring"
+            href="#settings-about"
+            aria-current={activeSection === "about" ? "location" : undefined}
+            onClick={(event) => {
+              event.preventDefault();
+              setActiveSection("about");
+            }}
+          >
+            <span className="settings-nav-icon" aria-hidden="true">
+              <Icon name="info" />
+            </span>
+            <span>{t("settings.about")}</span>
           </a>
         </nav>
 
@@ -390,7 +391,6 @@ export function SettingsPage({
           >
             {t("settings.title")}
           </h1>
-          {activeSection === "directories" && directoryManagement}
           {activeSection === "instructions" && globalInstructions && (
             <GlobalInstructionsSettings
               actions={globalInstructions}
@@ -400,6 +400,20 @@ export function SettingsPage({
           )}
           {activeSection === "archived" && archiveManagement && (
             <ArchivedTasks {...archiveManagement} />
+          )}
+          {activeSection === "about" && (
+            <section
+              id="settings-about"
+              className="settings-section"
+              aria-labelledby="settings-about-title"
+            >
+              <div className="settings-section-heading">
+                <h2 id="settings-about-title" ref={aboutHeading} tabIndex={-1}>
+                  {aboutTitle}
+                </h2>
+              </div>
+              {aboutContent}
+            </section>
           )}
           {activeSection === "general" && (
             <section id="settings-general" className="settings-section">
@@ -558,14 +572,6 @@ export function SettingsPage({
                             {account.phoneHint}
                           </span>
                         ) : null}
-                        <span>
-                          {t("settings.account_concurrency_limit", {
-                            value:
-                              account.concurrencyLimit === 0
-                                ? t("settings.account_concurrency_unlimited")
-                                : (account.concurrencyLimit ?? "—"),
-                          })}
-                        </span>
                       </div>
                     ) : (
                       <span>{accountIdentityBody}</span>
@@ -573,13 +579,12 @@ export function SettingsPage({
                   </div>
                   {authenticated &&
                   account.summary.usageEligibility !== "disabled" ? (
-                    <AccountBalance
-                      wallet={account.summary.wallet}
+                    <AccountRecharge
                       disabled={disabled || accountDisabled}
                       onRecharge={onOpenRecharge}
                     />
                   ) : null}
-                  {account.canCancel ? (
+                  {account.actions.cancel ? (
                     <Button
                       className="settings-identity-action"
                       variant="secondary"
@@ -589,27 +594,49 @@ export function SettingsPage({
                     >
                       {t("common.cancel")}
                     </Button>
-                  ) : authenticated &&
-                    account.errorCode === "refresh_schedule_failed" ? (
-                    <Button
-                      className="settings-identity-action"
-                      variant="secondary"
-                      size="sm"
-                      disabled={disabled || accountDisabled}
-                      onClick={onRetryRefresh}
-                    >
-                      {t("account.retry_refresh")}
-                    </Button>
-                  ) : account.state === "signed_out" ? (
-                    <Button
-                      className="settings-identity-action"
-                      variant="secondary"
-                      size="sm"
-                      disabled={disabled || accountDisabled}
-                      onClick={onBeginLogin}
-                    >
-                      {t("account.login")}
-                    </Button>
+                  ) : account.actions.retry ||
+                    account.actions.login ||
+                    account.actions.clear ? (
+                    <div className="settings-identity-action settings-identity-actions">
+                      {account.actions.retry ? (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={disabled || accountDisabled}
+                          onClick={onRetryRefresh}
+                        >
+                          {t(
+                            authenticated
+                              ? "account.retry_refresh"
+                              : "account.retry_now",
+                          )}
+                        </Button>
+                      ) : null}
+                      {account.actions.login ? (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={disabled || accountDisabled}
+                          onClick={onBeginLogin}
+                        >
+                          {t(
+                            account.state === "signed_out"
+                              ? "account.login"
+                              : "account.login_again",
+                          )}
+                        </Button>
+                      ) : null}
+                      {account.actions.clear ? (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={disabled || accountDisabled}
+                          onClick={onLogout}
+                        >
+                          {t("account.clear_residue")}
+                        </Button>
+                      ) : null}
+                    </div>
                   ) : null}
                 </div>
               </div>
@@ -625,7 +652,7 @@ export function SettingsPage({
                 />
               )}
 
-              {authenticated && (
+              {account.actions.logout && (
                 <div className="settings-group">
                   <AlertDialog.Root>
                     <AlertDialog.Trigger
@@ -638,6 +665,7 @@ export function SettingsPage({
                     </AlertDialog.Trigger>
                     <SignOutConfirmation
                       disabled={disabled || accountDisabled}
+                      stopTargets={metaskStopTargets}
                       onLogout={onLogout}
                     />
                   </AlertDialog.Root>

@@ -98,7 +98,7 @@ test "only confirmed interactive Task choices remember a preference without repl
     try std.testing.expectEqual(security, workbench.projectionSecurityEpoch());
     try std.testing.expectEqual(execution, workbench.executionGeneration());
     // A pending refresh cannot veto memory of the already confirmed choice.
-    _ = workbench.prepareMetaskCatalogRefresh("account-1", 17);
+    _ = workbench.beginMetaskCatalogRequest(.user, .{ .ready = .{ .principal_ref = "account-1", .generation = 17 } }, 0);
     try std.testing.expect(workbench.custom_providers.rememberPreference(.{ .source_id = "metask", .model_id = "fixture-model" }).accepted);
     try std.testing.expectEqualStrings("fixture-model", workbench.modelsView().default_selection.?.model_id);
 }
@@ -2180,6 +2180,88 @@ test "new Task model selection uses the full custom connection with or without a
         try std.testing.expectEqual(@as(?u32, wire.OPENAI_PROTOCOL_RESPONSES), fake_core.last_created_protocol_kind_code);
         try std.testing.expectEqualStrings(TaskModelsVault.slot, workbench.modelsView().default_selection.?.source_id);
     }
+}
+
+test "a Custom Provider placeholder key is sent but never masked, refused or scrubbed" {
+    fake_core.reset();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 2 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_workspaces = 1,
+        .max_tasks = 2,
+        .max_runs_per_task = 1,
+    }, productControlConfiguration());
+    defer workbench.deinit();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &path);
+    var vault: TaskModelsVault = .{};
+    defer TaskModelsVault.delete(&vault, TaskModelsVault.slot) catch unreachable;
+    try workbench.startCustomProviders(path[0..length], vault.port());
+    defer workbench.stopCustomProviders();
+    try installControlExecution(&workbench);
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
+    const epoch = try workbench.workspaceEpoch(workspace_id);
+    // Another Task names the word before the provider exists.
+    const other = try workbench.createTaskInWorkspace(workspace_id, epoch, try product_control.TestSupport.fixtureModelSelection(&workbench), null, null, .{ .interactive = null });
+    try workbench.renameTask(other, "ollama notes");
+    const security = workbench.projectionSecurityEpoch();
+    try std.testing.expect(workbench.createCustomProviderWithCredential("ollama", .{
+        .display_name = "Local",
+        .protocol = .openai_chat_completions,
+        .normalized_base_url = "http://127.0.0.1:11434/v1/chat/completions",
+    }).accepted);
+    const created = workbench.modelsView().custom_providers[0];
+    try std.testing.expect(workbench.submitCustomProviderCommand(.{ .add_custom_model = .{
+        .source_id = TaskModelsVault.slot,
+        .expected_provider_revision = created.provider_revision,
+        .expected_catalog_generation = created.catalog_generation,
+        .model = .{ .id = "local-model" },
+    } }).accepted);
+    const configured = workbench.modelsView().custom_providers[0];
+    const probe: models_contract.CustomModelTestCommand = .{
+        .model = .{ .source_id = TaskModelsVault.slot, .model_id = "local-model" },
+        .expected_provider_revision = configured.provider_revision,
+        .expected_source_generation = configured.source_generation,
+        .expected_catalog_generation = configured.catalog_generation,
+    };
+    var preparation = switch (workbench.beginCustomProviderProbe(probe)) {
+        .ready => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    preparation.deinit();
+    try std.testing.expect(workbench.completeCustomModelTest(probe, true).accepted);
+    const ready = workbench.modelsView().custom_providers[0];
+    const task_id = try workbench.createTaskInWorkspace(workspace_id, epoch, .{ .target = probe.model, .expected_source_generation = ready.source_generation, .expected_catalog_generation = ready.catalog_generation }, null, null, .{ .interactive = null });
+    const task = workbench.testTask(task_id).?;
+    // The request sends it; nothing else treats it as a secret.
+    try std.testing.expectEqualStrings("ollama", task.runtime.executionConst().?.input().api_key);
+    try std.testing.expect(!product_control.TestSupport.knowsCredentialText(&workbench, "notes/ollama.md"));
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "Check the ollama setup" });
+    try waitControlSnapshot(&workbench, "Check the ollama setup");
+    for (0..5000) |_| {
+        try workbench.drainAgentEvents();
+        workbench.syncLifecycle();
+        if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.RunDidNotSettle;
+    // Releasing it with the Task scrubs nothing either.
+    try workbench.setTaskArchived(task_id, true);
+    try workbench.deleteTask(task_id);
+    for (0..5000) |_| {
+        workbench.syncLifecycle();
+        if (workbench.task_runtime.taskWorkspaceId(task_id) == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TaskDidNotRelease;
+    try std.testing.expectEqual(security, workbench.projectionSecurityEpoch());
+    try std.testing.expectEqualStrings("ollama notes", workbench.testTaskConst(other).?.durable.title);
+    try std.testing.expect(!product_control.TestSupport.knowsCredentialText(&workbench, "notes/ollama.md"));
 }
 
 fn configureTaskRebindTarget(workbench: *product_control.Runtime) !models_contract.CustomModelTestCommand {
@@ -12342,15 +12424,12 @@ test "image Run duplicate bearer ownership does not revoke the Renderer on admis
         fake_core.releaseControlled();
         try settleInputScenario(scenario);
         const Account = struct {
-            fn generation(_: *anyopaque) u64 {
-                return 1;
-            }
             fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
                 try callback(context, "account-image-token");
             }
         };
         var image: ImageAdmissionProbe = .{ .secret = if (account_owned) "account-image-token" else "fixture-secret" };
-        if (account_owned) scenario.control.setAccountProjectionCredentials(.{ .context = &image, .generation_fn = Account.generation, .visit_fn = Account.visit });
+        if (account_owned) scenario.control.setAccountProjectionCredentials(.{ .context = &image, .visit_fn = Account.visit });
         scenario.control.setImageRunPreparation(.{ .context = &image, .prepare_fn = ImageAdmissionProbe.prepare });
         defer scenario.control.setImageRunPreparation(null);
         const epoch = scenario.control.projectionSecurityEpoch();

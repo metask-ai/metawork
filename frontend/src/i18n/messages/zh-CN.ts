@@ -12,19 +12,8 @@ export const zhCN: Record<MessageId, string> = {
   "task.change_project": "更改项目",
   "task.project_change_failed": "未能更改所属项目，请刷新后重试。",
   "task.draft_preserved": "原项目的草稿已保留，当前显示目标项目的草稿。",
-  "settings.working_directories": "工作目录",
   "workspace.directory_capacity":
-    "已达到工作目录数量上限。请在设置的“工作目录”中撤销不再需要的目录授权。",
-  "workspace.directory_management_body":
-    "管理已授权的本地工作目录。选择目录只登记授权；侧栏项目由“添加项目”创建。",
-  "workspace.choose_directory": "选择工作目录",
-  "workspace.revoke_directory": "撤销目录授权",
-  "workspace.no_directories": "尚未登记工作目录。",
-  "workspace.directory_action_failed": "未能完成目录操作，请刷新后重试。",
-  "workspace.revoke_directory_body":
-    "撤销“{title}”的目录授权，将收口实际在此目录工作的任务。该目录关联 {count} 条会话，历史和本地文件会保留。",
-  "workspace.revoke_project_body":
-    "“{title}”的项目入口将一并移除。在其他目录中的 {count} 条会话仍可从“最近”访问，归档会话保留在归档列表；重新添加此项目后恢复分组。",
+    "已达到工作目录数量上限。请选择已登记的目录。",
   "run.input_history_loading": "正在读取输入历史…",
   "run.input_history_failed": "未能读取输入历史，按 ↑ 重试。",
   "model_setup.preference_not_saved":
@@ -69,6 +58,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.model_error.category.unknown": "模型服务未能完成这次请求。",
   "run.model_error.reason.metask_insufficient_balance":
     "Metask 账户余额和套餐额度不足。",
+  "run.model_error.reason.metask_account_suspended":
+    "Metask 账号已被停用，请到 Metask 官网查看原因。",
   "run.guidance.review_context": "缩短下一条消息，或在可用时整理对话。",
   "run.guidance.revise_instruction": "调整指令或缩小请求范围后继续。",
   "run.guidance.wait": "请稍后再试。",
@@ -113,7 +104,8 @@ export const zhCN: Record<MessageId, string> = {
 
   "settings.archived_tasks": "已归档任务",
   "archive.search": "搜索已归档任务",
-  "archive.count": "{count} 个已归档任务",
+  "archive.count": "共 {count} 项",
+  "archive.filtered_count": "匹配 {matched} 项，共 {count} 项",
   "archive.empty": "归档的任务会显示在这里。",
   "archive.no_results": "没有找到匹配的任务。",
   "archive.sync_unavailable": "任务列表当前不可用，重新连接后可管理归档任务。",
@@ -135,6 +127,11 @@ export const zhCN: Record<MessageId, string> = {
   "model_setup.authorizing": "请在浏览器中完成登录，已输入的内容会保留。",
   "model_setup.cancel_login": "取消登录",
   "model_setup.loading": "正在加载模型…",
+  "model_setup.unconfirmed": "暂时无法确认登录状态，已输入的内容会保留。",
+  "model_setup.recovering":
+    "正在连接 Metask，连上后即可发送，已输入的内容会保留。",
+  "model_setup.unreachable":
+    "暂时连不上 Metask，会自动重试，已输入的内容会保留。",
   "model_setup.preparing": "正在准备模型…",
   "model_setup.choose": "选择可用模型后即可发送。",
   "model_setup.catalog_failed": "模型加载失败，请重试。",
@@ -315,6 +312,7 @@ export const zhCN: Record<MessageId, string> = {
   "common.remove": "删除",
   "common.cancel": "取消",
   "common.close": "关闭",
+  "common.ok": "确定",
   "time.just_now": "刚刚",
   "copy.input": "复制输入",
   "copy.response": "复制回复",
@@ -322,7 +320,11 @@ export const zhCN: Record<MessageId, string> = {
   "copy.copied": "已复制",
   "copy.failed": "复制失败",
   "link.open_failed": "无法打开此链接。",
-  "about.menu_item": "关于",
+  "settings.about": "关于",
+  "settings.about_product": "关于 {product}",
+  "about.current_version": "当前版本",
+  "about.visit_website": "前往官网",
+  "about.contact_us": "联系我们",
   "about.developer": "开发者",
   "about.developer_name": "Metask",
   "about.version": "版本",
@@ -402,6 +404,8 @@ export const zhCN: Record<MessageId, string> = {
   "account.ready": "可执行",
   "account.checking.title": "正在检查登录状态",
   "account.checking.body": "MetaWork 正在确认这台设备是否可以登录。",
+  "account.unconfirmed.title": "暂时无法确认登录状态",
+  "account.unconfirmed.body": "MetaWork 会自动重试，恢复后无需重新登录。",
   "account.sign_in_required.title": "登录 MetaWork",
   "account.sign_in_required.body": "使用 Metask 账号加载你可用的模型。",
   "account.authorizing.title": "正在完成 Metask 登录",
@@ -433,9 +437,16 @@ export const zhCN: Record<MessageId, string> = {
   "account.cancel": "取消当前操作",
   "account.refresh_catalog": "重新同步",
   "account.retry_refresh": "重试登录刷新",
+  "account.retry_now": "立即重试",
+  "account.login_again": "重新登录",
+  "account.clear_residue": "再清一次",
   "account.logout": "退出登录",
   "account.logout_confirm":
-    "退出将清除这台设备上的 Metask 登录凭据。创建使用 Metask 模型的新任务前，需要重新登录。自定义模型、本地任务及历史记录、工作区文件都会保留。",
+    "退出后，重新登录前不能使用 Metask 模型。自定义模型、本地任务和历史记录、工作区文件都会保留。",
+  "account.logout_stops_tasks.one":
+    "有 {count} 个任务正在使用 Metask 模型，退出后会停止。",
+  "account.logout_stops_tasks.other":
+    "有 {count} 个任务正在使用 Metask 模型，退出后会停止。",
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
   "account.command_failed":
@@ -1536,14 +1547,8 @@ export const zhCN: Record<MessageId, string> = {
   "settings.account_usage": "账户用量",
   "settings.account_usage_scope":
     "数据来自整个 Metask 账户，不仅统计 MetaWork 中的使用。",
-  "settings.account_usage_balance": "余额",
-  "settings.account_concurrency_limit": "并发额度 {value}",
-  "settings.account_concurrency_unlimited": "不限",
   "settings.account_recharge": "充值",
   "settings.account_recharge_browser_hint": "在浏览器中打开 Metask 充值页面",
-  "settings.account_usage_total": "累计",
-  "settings.account_usage_tokens": "{value} Token",
-  "settings.account_usage_cost": "{value} U",
   "settings.account_usage_stale": "可能已过期",
   "settings.account_usage_syncing": "正在同步…",
   "settings.account_usage_unavailable": "暂时无法获取",
@@ -1728,6 +1733,7 @@ export const zhCN: Record<MessageId, string> = {
   "outcome.dependency_contract_failure": "任务运行环境失败",
   "cause.user_cancel": "由你停止",
   "cause.approval_mode_change": "为切换审批模式而停止",
+  "cause.account_logout": "为退出登录而停止",
   "cause.edit_and_rerun": "为从编辑后的消息重跑而停止",
   "cause.timeout": "已超时",
   "cause.session_close": "会话已释放",
@@ -1772,7 +1778,7 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.metask_authorization_required":
     "请登录 Metask 后使用此模型。",
   "mutation.reason.metask_authorization_recovering":
-    "正在恢复 Metask 连接，消息会在恢复后执行。",
+    "正在连接 Metask。连上后执行这条消息，这次没连上就标为未执行。",
   "mutation.reason.metask_connection_unavailable":
     "暂时无法连接 Metask，消息未执行。",
   "mutation.reason.session_poisoned": "当前会话已无法继续。",
@@ -2033,11 +2039,18 @@ export const zhCN: Record<MessageId, string> = {
     "上次启动被应用中断，请编辑确认；不会自动重试。",
   "scheduled.reason.permission_required":
     "任务因权限不足停止，请核对内容和权限后编辑确认。",
+  "scheduled.admission.waiting": "等待账号或模型就绪后运行。",
+  "scheduled.admission.signed_out": "登录 Metask 后才会运行。",
+  "scheduled.admission.other_account":
+    "绑定的是另一个 Metask 账号；切回该账号，或编辑换成当前账号的模型。",
+  "scheduled.admission.model_unavailable":
+    "所选模型已不可用，到时不会运行；请编辑换一个模型。",
   "scheduled.notification_unavailable":
     "通知中的任务当前不可用，请刷新并查看任务列表。",
   "notification.schedule.completed": "定时任务已完成",
   "notification.schedule.failed": "定时任务失败",
   "notification.schedule.skipped": "上一次运行仍在进行，本次运行已跳过",
+  "notification.schedule.model_unavailable": "所选模型已不可用，本次运行已跳过",
   "notification.schedule.needs_attention": "定时任务需要处理",
   "notification.run.completed": "任务已完成",
   "notification.run.failed": "任务失败",

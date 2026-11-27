@@ -196,7 +196,7 @@ Project（可空归属；Manual Workspace 提供默认目录）
 
 主窗口使用 `hidden_inset_tall`：Renderer 命令栏承担自定义标题栏的产品视觉，不叠加独立的标准系统标题行。React 绘制产品 header，以 SDK 正式标记声明拖拽区域及交互排除，并绘制带固定 `data-metawork-window-control` 语义的窗口按钮；browser-side Bridge 只把窗口按钮转换为受限 Host command。Native SDK/OS 承担 native hit test、拖动循环、系统菜单、resize、close policy 与真实窗口状态；SDK 缺失的原生输入路径只按[已登记兼容能力](architecture.md#35-native-sdk)补齐。React component 不推断平台、不直接调用 transport，也不持有原生窗口 identity、handle 或执行权。
 
-- 命令栏与一级导航共用背景色。任务列表和中央工作区的上沿由同色细线相接，侧栏与工作区的静态竖分隔线从命令栏下方开始。
+- 命令栏与一级导航共用背景色。品牌标志、左栏开关和搜索图标等距排列。一级导航常驻且系统窗口按钮安全区允许时，品牌标志与下方导航图标居中对齐。左侧按钮组右侧的标题栏空白可拖动窗口。任务列表和中央工作区的上沿由同色细线相接，侧栏与工作区的竖分隔线及其交互高亮均从命令栏下沿开始。
 - macOS 保留系统交通灯；Windows 由 Renderer 绘制最小化、最大化/还原与关闭按钮。Host 只发布 `rendererControls` capability、`maximized` 真值和安全 inset，browser-side Bridge 将它们转换为 document dataset/CSS variables；React 不读取平台名或调用 transport，最大化与还原使用互斥的可访问按钮，由 Host 真值控制显隐；
 - 产品 header 默认视觉基线为 52 px；Windows Renderer header 沿用历史实现的 40 px 高度，每个 window control 使用 46 px 命中宽度并贴齐窗口右缘。关闭 hover/focus 使用系统危险红色，其余按钮保持中性色。macOS 交通灯与可拖动 top band 的真实安全区以 Host geometry 为准；
 - MetaWork 品牌标志位于命令栏左端、左栏开关之前，避开系统窗口按钮的安全区。命令栏另承载当前 Task 名称、全局搜索、只读任务信息、Task Panel 常驻开关和按需异常/审批定位入口；不在 Task 名称前重复 Workspace，`左栏开关` 只控制能力与 Task 导航，不兼任 Task Panel 开关；
@@ -227,7 +227,7 @@ Project（可空归属；Manual Workspace 提供默认目录）
 - Account 的最近错误不代表 Metask 当前健康状态。没有最近结束 attempt 的身份时，不声称某条错误属于本次请求；本 Renderer 的账号命令被接受后开启新的展示周期并重置关闭选择，保留返回的 attempt 身份，并主动请求接受确认之后的可信同步。同步后的已知状态在新周期允许展示和播报一次；仍在处理时保持处理中，旧错误只能表述为当前仍记录的问题，不因未观察到中间清空而吞掉相同错误。需要精确关联异步结果时，由业务 owner 补充事实，本机制不补造关联；
 - 待确认状态不能冻结业务来源的观察。账号错误或安全诊断与进入待确认时的观测不同后，恢复最近结果的正常展示；相同观测的重复同步仍不能证明操作完成。新事实不被认定为该次请求造成，也不触发自动重放；
 - 同一反馈只有一个完整说明位置，其他标记负责导航。账号最近结果靠近账号操作，跨页面连接状况使用全局入口；历史 Run 结果仍归对应 Run，Task、草稿和其他局部操作结果不进入全局反馈集合。同一来源的新操作开启自己的展示周期，成功只撤下该来源的操作说明，不按 Task 或 Workspace 范围清除其他独立问题；
-- 诊断按来源保留低频入口：连接诊断位于根故障页或全局连接入口内，账号诊断位于设置页账号区，Run 诊断绑定对应轮次，目录选择失败在所属草稿的输入框下方说明，更新检查诊断位于关于窗口的版本更新区，必要的诊断在同一处展开。入口与临时说明的关闭独立，仅消费已清洗的安全数据；没有对应事实时不制造诊断。替代入口可达后才撤下原详情按钮，不建立全局诊断集合。展开控件使用可访问 disclosure，声明展开状态和正文关联，位于可卸载正文之外，收起后焦点保留；
+- 诊断按来源保留低频入口：连接诊断位于根故障页或全局连接入口内，账号诊断位于设置页账号区，Run 诊断绑定对应轮次，目录选择失败在所属草稿的输入框下方说明，更新检查诊断位于检查失败的更新弹窗中，必要的诊断在同一处展开。入口与临时说明的关闭独立，仅消费已清洗的安全数据；没有对应事实时不制造诊断。替代入口可达后才撤下原详情按钮，不建立全局诊断集合。展开控件使用可访问 disclosure，声明展开状态和正文关联，位于可卸载正文之外，收起后焦点保留；
 - 目录选择结果绑定发起时的草稿、连接与呈现上下文，迟到的 picker 或读取结果不得迁移其他草稿、强制导航或移动焦点。目录已选择但后续读取失败只归连接来源，保留原草稿；取消或成功不追加常驻说明。附件反馈继续绑定原草稿与操作 identity，由附件区域呈现，清理结果未知不伪装成功；
 - 模型表单、审批回复、改名、归档、删除与定时任务等已有局部结果时，只由所属表单、请求或管理位置解释，不再重复发布全局错误。缺少明确失败事实的命令异常保守表达为结果尚未确认，后续读取失败不能推翻已提交结果。其他 Task 操作按独立来源在当前操作区呈现，不以同一 Task 范围互相覆盖；操作诊断位于该 Task 的任务信息，归档记录也可在其管理行查阅，草稿的目录选择诊断随失败提示展开，目录 Skill 刷新诊断由工作目录控件承接，已有 Task 的目录 Skill 刷新诊断归入任务信息。通知导航无法定位对象时可使用全局提示，但不得把读取失败再归为通知故障；
 - 动作资格取实时业务状态；关闭说明不得移除仍具备资格的恢复入口，持续状况的恢复操作保留在对应业务操作区。历史 Run 的终态摘要不能整条关闭，新轮不清除旧轮事实。关闭、展开与展示周期按对象隔离，仅存于 Renderer 会话，不写入 Bridge 或持久化。安全代次变化清洗旧投影与诊断，账号展示按所属上下文重置；其他来源的在途操作身份、防重复标记及反馈 token 继续有效。generation 更换才清理旧连接的操作身份与展示周期，迟到回执不得释放新操作。可信投影重读期间，暂缺的对象或索引不得解释为对象已删除；
@@ -248,7 +248,7 @@ Project（可空归属；Manual Workspace 提供默认目录）
 - 无项目草稿默认选择 Automatic Workspace，项目草稿默认采用项目关联目录，已有明确目录选择优先。Automatic intent 的工具带按钮显示“选择工作目录”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；用户确认目录后即完成授权并只更新草稿上下文，不得追加 trust 确认、自动创建 Task 或发送已有内容。选定 Manual Workspace 后，按钮显示目录名，悬停可查看完整目录。创建后可在右上角的任务信息查看已选目录。
 - New task 草稿按可空项目身份隔离，目录作为本槽位属性保存默认、明确 Manual 或 Automatic 选择。改目录保留文字与附件；从全局草稿进入项目草稿时，仅在目标没有内容或明确目录选择时迁移，目标已有任一项则保留两份并打开目标，通过轻量提示说明原草稿已保留。项目默认目录在目标槽位解析，已有 Task 草稿仍按 Task identity 保存；
 - Workspace projection 的 `kind` 是 Host 事实；一个 Manual Workspace 可以承载多个 Task，Automatic Workspace 精确归属一个 Task；
-- Composer 的工作目录控件选择、登记或重新授权 New task 路径。目录候选不按项目入口过滤；设置提供已登记 Manual 工作目录的重新授权与撤销。设置作为覆盖整个 主界面内容区的长期 surface 打开，保留窗口壳层和底层内容的挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；
+- Composer 的工作目录控件选择、登记或重新授权 New task 路径。目录候选不按项目入口过滤，目录选择保存在项目草稿内。设置作为覆盖整个 主界面内容区的长期 surface 打开，保留窗口壳层和底层内容的挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；
 - 历史 Manual 目录经 Host 恢复检查仍可用时可直接点选，不显示“需要访问权限”或要求重复目录选择器；真实失效目录才显示“目录不可用”并提供重新选择。再次打开历史 Task 只保证可浏览记录，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
 - MetaWork 重启后，左栏直接使用 Product 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
 - `taskHistoryPersistenceHealth = degraded` 本身不显示常驻提示；`retainedTaskHistoryCount > 0` 时，左栏 Task 列表以一行静态说明告知有多少已保存 Task 无法在当前版本打开且已原样保留，不提供动作、不阻塞任何操作。`history_read_only` Task 正常出现在列表中，Composer 以 placeholder 说明只能查看，菜单中的重命名、归档与删除不可用。`read_failed / corrupt / write_failed / outcome_unknown` 显示非阻塞保存提示，但不得禁用 Composer、Task 操作、Workspace 选择、权限响应或取消。Host 发布 recovery available 时，提示内提供“使用新的存储继续”，并在就地确认中明确当前文件会保留为恢复副本；Renderer 只提交当前 snapshot revision，不选择路径或操作文件。取消不改变状态，失败保留提示，成功等待 Host snapshot 收口；
@@ -316,32 +316,63 @@ Project（可空归属；Manual Workspace 提供默认目录）
 
 ### 5.4 MCP 服务
 
-> Capability：**目标合同**。Renderer 通过 revision 1 strict snapshot 与 transport-discriminated typed command 管理 Product MCP 的 Desired Registry；Runtime/catalog availability、credential submission、OAuth operation 和 Admission Authority 是彼此独立的 Host capability/state。任一能力不可用时页面保持可达并只呈现真实可用动作。
+> Capability：**目标合同**。Renderer 通过 revision 1 strict snapshot 与 transport-discriminated typed command 管理 Product MCP 的 Desired Registry；Runtime/catalog availability、credential submission、OAuth operation 和 Admission Authority 是彼此独立的 Host capability/state。页面始终可达。`capabilities.mcpManagement` 决定是否提供管理动作，`mcp.availability` 描述当前运行时和目录的可用性。其余动作按 Host 发布的资格分别显示。
 
 侧栏入口与页首标题显示「连接器」（英文为 `Connectors`）。配置和诊断使用 MCP 指明协议。连接器页面沿用定时任务的内容底色、有界阅读宽度、标题和低强调搜索。页面默认展示用户现有服务。服务按状态分组，用细分隔线呈现连续列表。窄窗允许页首动作和服务信息换行，保留需要处理的状态、常用操作和启停开关。详情与 Add/Edit 使用定时任务同款居中模态弹窗，窄窗保留视口边距。弹窗正文独立滚动，标题及添加、编辑的底部动作保持可见。弹窗使用统一遮罩、焦点陷阱、Escape、关闭按钮和触发点焦点恢复。
 
-手动添加与编辑中的 HTTP 服务地址使用普通地址输入，不要求用户选择地址凭据属性。已有敏感地址按其保存属性继续使用 password 输入，只显示域名，不回填完整地址；替换连接时明确要求重新填写完整地址，关闭或提交后清除输入。
+#### 服务列表与详情
+
+管理可用时，页首右侧的「手动添加」按钮沿用定时任务页的按钮样式，点击后打开添加弹窗。空列表提示用户可在 Task 中将接入说明链接交给 Agent。已有服务时，在同一行显示带可访问名称和悬停说明的刷新、搜索图标。搜索就地展开，关闭时保留筛选并可重新打开清除。
+
+列表占据完整管理页宽度；每个服务行都为带文字状态的启停 switch 保留固定位置，switch 与打开详情的主点击区是并列交互元素，不能嵌套，切换不自动打开详情。连接配置被遮蔽或 legacy approval 尚未完成时仍显示 switch，但以 disabled 状态配合同行的明确问题状态引导用户进入详情，不能直接移除控制而让启停能力不可发现。停用只收缩后续新 Task authority且可恢复，直接提交并显示已打开 Task 不变的结果；启用在没有已允许工具时同样直接提交，只有恢复非空 tool allowlist 时才确认并明确将重新开放的工具数量。正常服务行省略工具数量和“新任务可用”的重复摘要，右侧提供编辑连接、删除服务图标和启停开关；异常、待授权、正在连接及待选择工具的状态仍在行内显示，已有 Task 引用数继续保留。编辑直接打开该服务的编辑弹窗，删除进入同一确认流程；图标有悬停提示和可访问名称，各操作受该服务和管理层当前状态约束。
+
+点击连接主体打开详情弹窗。Add/Edit 与详情复用弹窗样式，分别呈现对应标题和动作。弹窗关闭时保留列表滚动与筛选并把焦点还给原触发点。目标服务从 authoritative projection 消失时关闭弹窗并恢复到列表上下文。弹窗内正在保存或执行服务管理操作时禁用关闭、取消、遮罩和 Escape 退出。
+
+分组顺序固定为 `Needs attention / Available servers / Disabled`，空分组不渲染；状态同时使用细色轨、文字和语义图标。正常产品状态收敛为 `Connecting / Connected / Needs attention / Disabled`。只有 `applyStatus = applying` 的当前候选行显示 Connecting；全局单步期间冻结冲突动作，健康行仍显示自己的工具可用状态。失败结果按成员保留，即使其他成员随后成功也要继续提示；行内重试只重开该成员，整体重试才重开全部失败。已知失败调用 `metawork.mcp.applyConfiguration`，不要求重启。Core 接管结果未知则单独提示重启确认，并冻结连接、catalog 和授权操作，不能伪装成某一成员网络故障。desired-disabled 服务始终归入 Disabled。被现有 Task 引用的行显示实际版本的引用数；已停用或删除成员的保留总数即使没有 Desired 行也须可见。停用后的编辑只保存配置，详情须说明现有任务保留已应用配置、重新启用后才应用修改。OAuth 删除确认必须说明停止续期、当前授权到期后现有任务不可用。
+
+详情用 `Connection → MCP handshake → Tools` 展示连接进度。详情按当前状态呈现至多一个主要处理动作，相关诊断并入同一提示。其后依次显示 Tool permissions、Connection and authentication、默认折叠的 Advanced settings 和危险操作。连接尚未就绪且没有已知工具时隐藏 Tool permissions；有已知工具时，工具列表用紧凑行显示名称和真实 Checkbox，区域标题汇总已授权数；仅在工具不在当前目录中或已授权但新任务暂不可用时显示逐行提示。长列表限制高度并在列表内部滚动。新发现工具默认关闭。Connection 显示完整 executable/endpoint 与授权状态；秘密值只显示 `Set / Replace / Missing`。测试连接与编辑连接使用紧凑的图标按钮，提供悬停提示和可访问名称，窄窗保持并排。`Test connection` 始终是连接详情内的可选诊断，不是正式 apply gate；测试进度、启动失败和最终结果只在 Connection 区域的同一状态行显示。测试期间禁用测试按钮并隐藏上次结果，完成后以 Host 投影显示本次结果。正式 Runtime 不可用时，顶部恢复动作只能调用正式 apply 或 refresh，不能用候选测试冒充恢复。`Refresh tools` 只刷新当前正式 Runtime catalog。
+
+空 registry 是可管理的正常空状态，显示 Add server；management capability 未接通才显示不可用说明。没有 MetaWork-owned 可信 catalog、签名与 publisher verification 前不显示 marketplace、推荐、publisher trust、Resources、Prompts、Apps、Tasks、Workspace override 或占位入口。交互基线参考 VS Code、Claude、Cursor、Continue 与 Hermes Desktop，但不复制其配置格式、市场数据或信任结论。
+
+#### 添加、编辑与工具授权
 
 用户模型只有两层：连接服务、选择工具。手动添加沿 `继续 → 检测连接 → 确认添加 → 保存并加载服务 → 选择允许的工具 → 新 Task 可用`；Agent 安装沿来源 Task 的安装卡自动完成配置和首次精确工具授权，不要求重复 Add/Choose tools。每次工具调用仍沿既有权限。手动发现工具但 allowlist 为空时，详情提供 Choose tools；已自动授权则呈现当前可用状态。连接测试是详情内的次级诊断，不作为常规成功步骤。
+
+手动添加的 Streamable HTTP 表单仅要求填写显示名称和服务地址，名称在上。输入无效地址时在字段下方说明格式要求。地址按普通连接配置保存，使用默认协议策略和请求超时。点击「继续」在弹窗内检测连接，检测期间可取消。若服务返回可保留请求方法的同源重定向，则按服务指定的地址重新检测一次，进入第二步时展示实际检测的地址。失败保留名称和地址并显示提示。
+
+握手通过或收到认证要求后，在同一弹窗显示名称、地址和认证方式。检测到的选项预选并标注「已检测」，用户可改选或返回修改地址。选 OAuth 时显示可用的客户端注册选项，点击「添加服务」保存待授权配置并进入详情，详情提供「登录」动作。其他方式提供可展开的请求头，值使用 password 输入，在提交、返回或关闭后清除。点击「添加服务」验证当前配置，握手通过才保存并进入详情。
+
+手动添加与编辑中的 HTTP 服务地址使用普通地址输入，不要求用户选择地址凭据属性。已有敏感地址按其保存属性继续使用 password 输入，只显示域名，不回填完整地址；替换连接时明确要求重新填写完整地址，关闭或提交后清除输入。
+
+编辑连接沿用添加表单的宽度、字段和底部动作样式，以显示名称、服务地址、身份认证和 OAuth 客户端选项为主，直接预选已保存的认证及注册方式，不显示不可切换的连接类型卡片。更换已有认证连接的地址或启动程序时，提示需要重新配置密钥或登录。添加和编辑表单均不暴露协议策略和请求超时；首次添加使用默认值，编辑时沿用该服务已有值。
+
+STDIO 服务由 Agent 接入，已有服务可在详情中管理。Edit 的 command 与有序 argv 使用独立字段，无修改保存不经过命令字符串；只有用户明确改为编辑完整启动命令时，才按本机桌面平台成对分词与格式化，保留空参数及字面值，并拒绝管道、重定向和变量或命令替换。cwd、environment slot、auth、协议策略、timeout 与 OAuth 注册和标头保持 typed。OAuth 只适用于 Streamable HTTP。
+
+Add/Edit 的提交按钮分别使用 `Add server` / `Save connection`，其显式提交授权对应的完整 typed connection。首次手动添加在检测通过并点击「添加服务」后保存 connection fingerprint，编辑直接随替换事务保存；按钮不声称默认关闭的工具已经向 Task 开放，也不再让用户重复 `Review connection`。Add 默认 enabled 且 tool allowlist 为空，Edit 在底层仍提交完整 replacement，并对新目标重新生成 approval；提交前不产生 child/network/credential/browser effect。schema 1 迁移留下的 unapproved 配置才显示一次 `Connect and enable` legacy action，Renderer 不自行比较 fingerprint。
+
+Agent 安装以 Host 操作状态卡显示在来源 Task 和连接器页面，普通进度不要求点击，也不自动导航或抢占已打开表单。缺少凭据时只显示专用 password 输入；只有凭据计划跨 origin 传递凭据时使用 Host 确认，OAuth 使用现有授权流。进行中可按精确身份取消；凭据在提交、目标/revision/generation 变化或离页时清除，不回填或重放。安装完成保留完成历史；后续启停与目录有效性由正常服务状态呈现，不显示成仍在连接。
+
+#### 登录、刷新与故障反馈
+
+Connection approval 后按 auth mode 收敛：None 进入 ready-to-enable；Static 的每个 secret slot 与 OAuth pre-registered client secret 使用普通 password input，显示名称、已设置/缺失状态与保存/取消动作，已保存值不回填。输入清理与提交遵守 [Renderer Bridge 合同](renderer-bridge-contract.md)；超过凭据存储 UTF-8 字节上限时，在本地阻止提交并明确提示上限与修改方式，不截断输入；提交期间禁用重复保存，失败显示既有 mutation 反馈。OAuth 先显示 discovery progress，再由 Host-owned consent 展示 canonical resource、exact issuer、requested scopes、redirect 与 registration plan，确认页须事先说明确认会替换现有授权、确认后取消或浏览器失败仍需重新登录；具体 grant 退休边界以 [Product 架构](product-architecture.md#25-mcp-authority) 为准。用户确认后才打开系统浏览器。缺少 DCR 与 pre-registered client 时回到可操作的 `Existing client required`，不泛化成 unreachable。OAuth operation 全局占用时，其他 OAuth action 显示 busy，目标 server 的替换/删除/授权动作禁用；其他 server 管理和普通 Task 不被冻结。新的服务连接等待授权结束，页面必须明确说明；已打开 Task 的工具不变。列表与详情分别显示等待恢复授权和正在更新授权，恢复完成后自动连接，期间不提供重试连接或取消 refresh。ready 但当前未加载目标连接失败时，按 Host `canAuthorize` 保留重新登录出口，同时保留显式连接重试；裸 401/403 不显示为已确认 token 过期。
+
+授权以失败结束时，安装状态卡与连接器详情的授权提示显示失败步骤、原因与 HTTP 状态，并逐字显示服务端返回的 error 与 error_description；新一次授权开始后不再显示旧失败。
 
 仍有效授权上的周期性后台目录刷新保持既有可用状态，不反复切换列表分组或显示全页刷新进度；显式刷新仍呈现其操作进度。真实到期、正式目录收缩及失败按对应事实呈现，不能以后台作业存在推断工具不可用。自动刷新调度失败或持续失败暂停时，提供明确诊断并保留可执行的显式刷新动作，不让页面永久卡在刷新中。
 
 配置应用、整体目录可用性和单服务健康分别呈现。应用失败保留用户配置与仍适用于相同来源的正式健康事实，没有该服务观测时显示未加载，不推断网络不可达；只有正式 Activation 的单服务失败可显示不可达。整体 Activation 失败不能因各行显示未加载而变成全局可用。同 ID 改变连接来源后，旧健康与工具发现不能证明新来源已连接。未接管的配置通过重试连接再次 apply；已接管但缺目录时重试刷新，孤立连接测试不恢复正式准入。
 
-- 管理可用时，页首右侧的「手动添加」按钮沿用定时任务页的按钮样式，点击后打开添加弹窗。空列表提示用户可在 Task 中将接入说明链接交给 Agent。已有服务时，在同一行显示带可访问名称和悬停说明的刷新、搜索图标。搜索就地展开，关闭时保留筛选并可重新打开清除。列表占据完整管理页宽度；每个服务行都为带文字状态的启停 switch 保留固定位置，switch 与打开详情的主点击区是并列交互元素，不能嵌套，切换不自动打开详情。连接配置被遮蔽或 legacy approval 尚未完成时仍显示 switch，但以 disabled 状态配合同行的明确问题状态引导用户进入详情，不能直接移除控制而让启停能力不可发现。停用只收缩后续新 Task authority且可恢复，直接提交并显示已打开 Task 不变的结果；启用在没有已允许工具时同样直接提交，只有恢复非空 tool allowlist 时才确认并明确将重新开放的工具数量。正常服务行省略工具数量和“新任务可用”的重复摘要，右侧提供编辑连接、删除服务图标和启停开关；异常、待授权、正在连接及待选择工具的状态仍在行内显示，已有 Task 引用数继续保留。编辑直接打开该服务的编辑弹窗，删除进入同一确认流程；图标有悬停提示和可访问名称，各操作受该服务和管理层当前状态约束。点击连接主体打开详情弹窗。Add/Edit 与详情复用弹窗样式，分别呈现对应标题和动作。弹窗关闭时保留列表滚动与筛选并把焦点还给原触发点。目标服务从 authoritative projection 消失时关闭弹窗并恢复到列表上下文。弹窗内正在保存或执行服务管理操作时禁用关闭、取消、遮罩和 Escape 退出。手动添加的 Streamable HTTP 表单仅要求填写显示名称和服务地址，名称在上。输入无效地址时在字段下方说明格式要求。地址按普通连接配置保存，使用默认协议策略和请求超时。点击「继续」在弹窗内检测连接，检测期间可取消。若服务返回可保留请求方法的同源重定向，则按服务指定的地址重新检测一次，进入第二步时展示实际检测的地址。失败保留名称和地址并显示提示。握手通过或收到认证要求后，在同一弹窗显示名称、地址和认证方式。检测到的选项预选并标注「已检测」，用户可改选或返回修改地址。选 OAuth 时显示可用的客户端注册选项，点击「添加服务」保存待授权配置并进入详情，详情提供「登录」动作。其他方式提供可展开的请求头，值使用 password 输入，在提交、返回或关闭后清除。点击「添加服务」验证当前配置，握手通过才保存并进入详情。编辑连接沿用添加表单的宽度、字段和底部动作样式，以显示名称、服务地址、身份认证和 OAuth 客户端选项为主，直接预选已保存的认证及注册方式，不显示不可切换的连接类型卡片。更换已有认证连接的地址或启动程序时，提示需要重新配置密钥或登录。添加和编辑表单均不暴露协议策略和请求超时；首次添加使用默认值，编辑时沿用该服务已有值。STDIO 服务由 Agent 接入，已有服务可在详情中管理。Edit 的 command 与有序 argv 使用独立字段，无修改保存不经过命令字符串；只有用户明确改为编辑完整启动命令时，才按本机桌面平台成对分词与格式化，保留空参数及字面值，并拒绝管道、重定向和变量或命令替换。cwd、environment slot、auth、协议策略、timeout 与 OAuth 注册和标头保持 typed。OAuth 只适用于 Streamable HTTP。
-- 授权以失败结束时，安装状态卡与连接器详情的授权提示显示失败步骤、原因与 HTTP 状态，并逐字显示服务端返回的 error 与 error_description；新一次授权开始后不再显示旧失败。
-- Agent 安装以 Host 操作状态卡显示在来源 Task 和连接器页面，普通进度不要求点击，也不自动导航或抢占已打开表单。缺少凭据时只显示专用 password 输入；只有凭据计划跨 origin 传递凭据时使用 Host 确认，OAuth 使用现有授权流。进行中可按精确身份取消；凭据在提交、目标/revision/generation 变化或离页时清除，不回填或重放。安装完成保留完成历史；后续启停与目录有效性由正常服务状态呈现，不显示成仍在连接。
-- Add/Edit 的提交按钮分别使用 `Add server` / `Save connection`，其显式提交授权对应的完整 typed connection。首次手动添加在检测通过并点击「添加服务」后保存 connection fingerprint，编辑直接随替换事务保存；按钮不声称默认关闭的工具已经向 Task 开放，也不再让用户重复 `Review connection`。Add 默认 enabled 且 tool allowlist 为空，Edit 在底层仍提交完整 replacement，并对新目标重新生成 approval；提交前不产生 child/network/credential/browser effect。schema 1 迁移留下的 unapproved 配置才显示一次 `Connect and enable` legacy action，Renderer 不自行比较 fingerprint。
-- Connection approval 后按 auth mode 收敛：None 进入 ready-to-enable；Static 的每个 secret slot 与 OAuth pre-registered client secret 使用普通 password input，显示名称、已设置/缺失状态与保存/取消动作，已保存值不回填。输入清理与提交遵守 [Renderer Bridge 合同](renderer-bridge-contract.md)；超过凭据存储 UTF-8 字节上限时，在本地阻止提交并明确提示上限与修改方式，不截断输入；提交期间禁用重复保存，失败显示既有 mutation 反馈。OAuth 先显示 discovery progress，再由 Host-owned consent 展示 canonical resource、exact issuer、requested scopes、redirect 与 registration plan，确认页须事先说明确认会替换现有授权、确认后取消或浏览器失败仍需重新登录；具体 grant 退休边界以 [Product 架构](product-architecture.md#25-mcp-authority) 为准。用户确认后才打开系统浏览器。缺少 DCR 与 pre-registered client 时回到可操作的 `Existing client required`，不泛化成 unreachable。OAuth operation 全局占用时，其他 OAuth action 显示 busy，目标 server 的替换/删除/授权动作禁用；其他 server 管理和普通 Task 不被冻结。新的服务连接等待授权结束，页面必须明确说明；已打开 Task 的工具不变。列表与详情分别显示等待恢复授权和正在更新授权，恢复完成后自动连接，期间不提供重试连接或取消 refresh。ready 但当前未加载目标连接失败时，按 Host `canAuthorize` 保留重新登录出口，同时保留显式连接重试；裸 401/403 不显示为已确认 token 过期。
-- 分组顺序固定为 `Needs attention / Available servers / Disabled`，空分组不渲染；状态同时使用细色轨、文字和语义图标。正常产品状态收敛为 `Connecting / Connected / Needs attention / Disabled`。只有 `applyStatus = applying` 的当前候选行显示 Connecting；全局单步期间冻结冲突动作，健康行仍显示自己的工具可用状态。失败结果按成员保留，即使其他成员随后成功也要继续提示；行内重试只重开该成员，整体重试才重开全部失败。已知失败调用 `metawork.mcp.applyConfiguration`，不要求重启。Core 接管结果未知则单独提示重启确认，并冻结连接、catalog 和授权操作，不能伪装成某一成员网络故障。desired-disabled 服务始终归入 Disabled。被现有 Task 引用的行显示实际版本的引用数；已停用或删除成员的保留总数即使没有 Desired 行也须可见。停用后的编辑只保存配置，详情须说明现有任务保留已应用配置、重新启用后才应用修改。OAuth 删除确认必须说明停止续期、当前授权到期后现有任务不可用。
-- 详情按当前状态呈现至多一个主要处理动作，相关诊断并入同一提示。其后依次显示 Tool permissions、Connection and authentication、默认折叠的 Advanced settings 和危险操作。连接尚未就绪且没有已知工具时隐藏 Tool permissions；有已知工具时，工具列表用紧凑行显示名称和真实 Checkbox，区域标题汇总已授权数；仅在工具不在当前目录中或已授权但新任务暂不可用时显示逐行提示。长列表限制高度并在列表内部滚动。新发现工具默认关闭。Connection 显示完整 executable/endpoint 与授权状态；秘密值只显示 `Set / Replace / Missing`。测试连接与编辑连接使用紧凑的图标按钮，提供悬停提示和可访问名称，窄窗保持并排。`Test connection` 始终是连接详情内的可选诊断，不是正式 apply gate；测试进度、启动失败和最终结果只在 Connection 区域的同一状态行显示。测试期间禁用测试按钮并隐藏上次结果，完成后以 Host 投影显示本次结果。正式 Runtime 不可用时，顶部恢复动作只能调用正式 apply 或 refresh，不能用候选测试冒充恢复。`Refresh tools` 只刷新当前正式 Runtime catalog。
-- Add/Edit/Enable/Disable/Delete 成功保存后自动 apply；Rename 与 tool-only mutation直接更新对应产品事实。apply 成功才原子安装新 Manifest/Activation/Admission，失败保留已保存 desired 并允许重试。已打开 Task 保持创建时 authority；UI 不暗示即时撤权。Delete、批量放行和恢复非空 tool allowlist 的 Enable 使用 modal confirmation；Disable 与不恢复工具权限的 Enable 直接提交。`runtimeAlignment = unknown` 或 management outcome unknown 时禁用普通编辑并隐藏未经确认的 desired 列表，但恢复文案也不得要求重启。
-- Refresh 只刷新当前 Runtime catalog，不应用 pending connection configuration，也不隐式发起 OAuth。refreshing 时禁用会与 catalog/authority 冲突的动作；失败保持 fail-closed new Task access，不恢复旧 catalog selection。OAuth success/refresh 只有同一 consent epoch 的 token revision 可以原子替换 Runtime HTTP auth snapshot；已开始的请求完成后才释放旧 snapshot，既有 Session 的 tool selection 不变。`reauth_required` 禁止新 Task 获得该 server，但不宣称已撤销既有 Session authority。401/403 scope challenge 进入 `Sign in again`，consent 显示原 scopes 与新 challenge scopes 的 union，不自动循环重试失败 tool call。
-- Host projection 发布完整非敏感 typed connection：STDIO 的 command/ordered argv/cwd/environment name，Streamable HTTP 的完整 endpoint/header name，以及用户选择的 OAuth registration plan、公开 client id 和 token endpoint auth method。environment/header value、credential locator、client secret、token、code、PKCE、动态注册所得内部材料、raw OAuth document、schema、fingerprint 和 AgentCore handle 仍不从 Host 返回 Renderer；手动填写的值仅按上述表单合同短暂存在。`redacted = true` 时明确说明 Host 移除了敏感文本，对应 `connection = null`；该状态优先于 approval/auth/desired presentation，进入只读恢复面，禁用 Connect、Enable、Edit、Test、Rename 与 tool mutation，只保留 Delete 后重新添加，不以摘要或空表单冒充旧配置。
-- STDIO 安全诊断区分未找到程序、权限拒绝、格式无效、其他启动失败、Host 资源不足与启动后 STDIO 关闭，并给出检查 command、安装、路径、参数或依赖的动作。只展示当前连接来源及正式尝试的事实，成功/停用后不继续显示旧失败；不回显原始 stderr，不以 EOF 宣称进程退出或臆造退出码。
-- 连接失败横幅只反映当前目标仍有效的失败；停用、删除或相关配置变化使旧失败失效时立即清除，无关来源成功不得清除其他来源失败。需要重新登录时以对应来源的授权动作引导，不把所有 OAuth 故障统一解释为重试连接。
-- 所有 mutation 使用当前 `expectedDesiredGeneration`，长 OAuth 流程额外使用 opaque server-bound operation id；无关 server mutation 不使 operation stale，Renderer 不参与 rebase。outcome unknown 由顶层 management health 接管，不能盲目重试；启动发现遗留 OAuth operation 时只提供 `Sign in again`，不提供 Resume。Cancel 若发生在 DCR/token request 可能发送之后，结果必须显示 `Sign in again` 而不是 `Cancelled`。DCR outcome unknown 的说明必须明确再次尝试可能在远端创建另一个 client，不能暗示 MetaWork 已撤销或复用了未知 registration。
-- 空 registry 是可管理的正常空状态，显示 Add server；management capability 未接通才显示不可用说明。没有 MetaWork-owned 可信 catalog、签名与 publisher verification 前不显示 marketplace、推荐、publisher trust、Resources、Prompts、Apps、Tasks、Workspace override 或占位入口。交互基线参考 VS Code、Claude、Cursor、Continue 与 Hermes Desktop，但不复制其配置格式、市场数据或信任结论。
+Add/Edit/Enable/Disable/Delete 成功保存后自动 apply；Rename 与 tool-only mutation直接更新对应产品事实。apply 成功才原子安装新 Manifest/Activation/Admission，失败保留已保存 desired 并允许重试。已打开 Task 保持创建时 authority；UI 不暗示即时撤权。Delete、批量放行和恢复非空 tool allowlist 的 Enable 使用 modal confirmation；Disable 与不恢复工具权限的 Enable 直接提交。`runtimeAlignment = unknown` 或 management outcome unknown 时禁用普通编辑并隐藏未经确认的 desired 列表，但恢复文案也不得要求重启。
+
+Refresh 只刷新当前 Runtime catalog，不应用 pending connection configuration，也不隐式发起 OAuth。refreshing 时禁用会与 catalog/authority 冲突的动作；失败保持 fail-closed new Task access，不恢复旧 catalog selection。OAuth success/refresh 只有同一 consent epoch 的 token revision 可以原子替换 Runtime HTTP auth snapshot；已开始的请求完成后才释放旧 snapshot，既有 Session 的 tool selection 不变。`reauth_required` 禁止新 Task 获得该 server，但不宣称已撤销既有 Session authority。401/403 scope challenge 进入 `Sign in again`，consent 显示原 scopes 与新 challenge scopes 的 union，不自动循环重试失败 tool call。
+
+Host projection 发布完整非敏感 typed connection：STDIO 的 command/ordered argv/cwd/environment name，Streamable HTTP 的完整 endpoint/header name，以及用户选择的 OAuth registration plan、公开 client id 和 token endpoint auth method。environment/header value、credential locator、client secret、token、code、PKCE、动态注册所得内部材料、raw OAuth document、schema、fingerprint 和 AgentCore handle 仍不从 Host 返回 Renderer；手动填写的值仅按上述表单合同短暂存在。`redacted = true` 时明确说明 Host 移除了敏感文本，对应 `connection = null`；该状态优先于 approval/auth/desired presentation，进入只读恢复面，禁用 Connect、Enable、Edit、Test、Rename 与 tool mutation，只保留 Delete 后重新添加，不以摘要或空表单冒充旧配置。
+
+STDIO 安全诊断区分未找到程序、权限拒绝、格式无效、其他启动失败、Host 资源不足与启动后 STDIO 关闭，并给出检查 command、安装、路径、参数或依赖的动作。只展示当前连接来源及正式尝试的事实，成功/停用后不继续显示旧失败；不回显原始 stderr，不以 EOF 宣称进程退出或臆造退出码。
+
+连接失败横幅只反映当前目标仍有效的失败；停用、删除或相关配置变化使旧失败失效时立即清除，无关来源成功不得清除其他来源失败。需要重新登录时以对应来源的授权动作引导，不把所有 OAuth 故障统一解释为重试连接。
+
+所有 mutation 使用当前 `expectedDesiredGeneration`，长 OAuth 流程额外使用 opaque server-bound operation id；无关 server mutation 不使 operation stale，Renderer 不参与 rebase。outcome unknown 由顶层 management health 接管，不能盲目重试；启动发现遗留 OAuth operation 时只提供 `Sign in again`，不提供 Resume。Cancel 若发生在 DCR/token request 可能发送之后，结果必须显示 `Sign in again` 而不是 `Cancelled`。DCR outcome unknown 的说明必须明确再次尝试可能在远端创建另一个 client，不能暗示 MetaWork 已撤销或复用了未知 registration。
 
 ### 5.5 定时任务
 
@@ -354,13 +385,13 @@ Project（可空归属；Manual Workspace 提供默认目录）
 - 标题下用一条简短说明合并自动执行、完成通知与后台运行信息；后台运行说明仅在 Host capability 支持时出现，窄窗允许自然换行。
 - 定时任务直接使用自动工作区，不得因为标题或说明提到“项目”“工作区”或某个 Skill 就切换到 Manual Workspace；页面不显示 Workspace 配置；
 - 页面沿用对话页的白色内容底（深色主题使用对应 surface）、居中阅读宽度、无衬线字体和克制的文字层级；搜索框使用中性边框与圆角，列表使用轻分隔线，操作控件使用中性悬停反馈，不使用统计卡、流程画布或常驻左右分栏。每行显示识别图标、名称、自然语言计划摘要、短说明、下一次/最近结果；内容区域不承担点击操作，不显示整行悬停背景和右侧导航箭头；每行右侧直接显示立即运行、编辑、执行历史的纯图标按钮和明确表示启用/停用的 Switch 开关（开启时为绿色），有可访问的最近结果时，在「最近运行」状态旁提供查看入口，不向操作栏插入额外按钮；图标按钮提供完整可访问名称和悬停说明，不使用 `···` 菜单；窄窗将操作换到行下方，键盘和触屏均可直接访问；
-- 完整触发规则放在任务名称下方，任务说明另起一行；相对执行时间放在触发规则这一行的右端，使用低强调的小字号，不单独占据整行高度的列；下方任务说明延伸到倒计时下方，只为操作按钮保留空间。窄窗允许规则与倒计时换行，操作按钮放到行下方。日历规则显示频率、所选星期/日期和固定时分，如「每天 08:00」「每周 周六 10:30」；单次规则显示「单次」和原定日期时间。只有存在真实下次运行时间时才显示「8小时后执行」一类相对时间，悬停可查看绝对时间；按分钟刷新呈现，到期而 Host 尚未推进时显示「等待执行」，Renderer 不因此接纳或推进运行。未启用或已结束的计划不显示倒计时；启用/停用由开关表达，行内不显示状态徽章；最近结果在名称和摘要区域标明“最近运行”，原因说明也在该区域左对齐。计划的启用状态与最近运行结果分别表达，已停用计划也保留最近一次运行结果；没有下次执行时间时不显示空时间占位。窄窗仍保留计划状态和时间，不靠隐藏信息解决拥挤；触屏下操作入口持续可见。
+- 完整触发规则放在任务名称下方，任务说明另起一行；相对执行时间放在触发规则这一行的右端，使用低强调的小字号，不单独占据整行高度的列；下方任务说明延伸到倒计时下方，只为操作按钮保留空间。窄窗允许规则与倒计时换行，操作按钮放到行下方。日历规则显示频率、所选星期/日期和固定时分，如「每天 08:00」「每周 周六 10:30」；单次规则显示「单次」和原定日期时间。只有存在真实下次运行时间时才显示「8小时后执行」一类相对时间，悬停可查看绝对时间；按分钟刷新呈现，到期而 Host 尚未推进时显示「等待执行」，Renderer 不因此接纳或推进运行。Host 发布的 `admission` 表明已启用计划照现在不会运行时（未登录、绑定的是另一个账号、模型已不可用、来源已变，或已过点仍在等账号或模型），在原因位置说明，并替代相对时间与「等待执行」；未过点的等待照常显示相对时间，避免续期后的短暂等待闪烁。未启用或已结束的计划不显示倒计时；启用/停用由开关表达，行内不显示状态徽章；最近结果在名称和摘要区域标明“最近运行”，原因说明也在该区域左对齐。计划的启用状态与最近运行结果分别表达，已停用计划也保留最近一次运行结果；没有下次执行时间时不显示空时间占位。窄窗仍保留计划状态和时间，不靠隐藏信息解决拥挤；触屏下操作入口持续可见。
 - 新建与编辑复用同一套居中模态弹窗与紧凑表单，按钮、焦点与下拉选中态统一使用中性色，不引入紫色强调；窄窗保留安全边距；弹窗限制在可用视口内，表单正文滚动，标题和底部动作保持可见；底部使用加宽且等宽的「取消」「确认」按钮。执行历史图标打开较窄的居中只读历史弹窗，标题与计划名称分层呈现，列表按新到旧展示时间、低强调状态与查看真实 Task 的图标入口；原因和延迟说明放在对应记录下方。空历史直接显示空态，通过右上角关闭或 Escape 返回，不另设底部关闭栏；不重复任务定义或提供编辑、删除等管理动作。任务定义在编辑表单查看，删除入口位于编辑弹窗底部左侧，使用低强调的垃圾桶图标按钮，提供可访问名称和悬停说明，悬停时显示危险色。定时任务模块不保留 Drawer 实现。名称输入位于最上方；任务内容采用对话输入框形式，工具栏复用主页对话栏的布局与控件样式，权限居左、模型居右，模型按内容宽度呈现并使用对应来源图标，权限说明在选择菜单中完整提供；重复方式与开始时间（旧间隔计划另有间隔）使用标签和值同一字号、同一行的紧凑控件，宽窗横排且重复方式与时间等宽、窄窗自然换行，不展示未接通的有效期设置。权限只显示已接通的 profile，新建时采用当前默认值，编辑时显示定义已固定的值；帮助文案明确无人值守运行在权限不足时停止并进入待处理，不提供临时升级或后台审批。任务内容只有一段 Text 指令，不提供 Workspace、Skill 类型切换、Skill 选择器、catalog revision 或参数配置；需要采用某个全局 Skill 时由用户在指令中说明。每次 occurrence 由 MetaWork 分配新的 Automatic Workspace，界面不要求用户理解或选择 Workspace；
 - Host 投影 `automaticWorkspaces = false` 时，已有计划仍可查看，但创建/编辑不可保存；不得静默采用当前或第一个 Manual Workspace；
 - 频率菜单只提供 `单次 / 每天 / 每周 / 每月`；每周、每月分别展开可多选的星期/日期二级菜单，首次选择默认当前星期/日期，最后一项不能取消。选中后保持二级菜单展开，点击外部或 Escape 收起，最终由表单确认保存。收起后显示「每周 周一、周三」「每月 1日、15日」，按升序展示。移除每年新建选项。已有每小时、每年和固定间隔定义不被静默转换。
 - 新建与编辑所有频率使用同一 Foundation 时分选择器，小时、分钟在同一面板并排选择，不提供日期输入框。未修改时间规则时保留原绝对起点和日历选择；明确更改时间、频率或星期/日期时，按保存时刻寻找下一个有效执行点。每月不存在的日期跳过，不自动挪到月末。Renderer 只提交 Host 可验证的结构化 recurrence，不拥有 timer 或 occurrence；
 - 表单不重复展示运行摘要或时区说明；protocol、generation、Unix seconds 和 catalog revision 不进入产品文案；
-- 定时任务新建或明确改选从 Models ready候选选择完整目标，提交expected source/catalog generation，由Host解析protocol；已有定义的其他编辑保留固定绑定；`execution_changed` 的编辑确认按[产品恢复语义](requirements.md#511-定时任务)提交当前目标证明，不要求切换到其他模型再切回，也不重复展示保存确认说明。保存、暂停/恢复、立即运行和删除使用Host typed result与item epoch。 Bridge 可用且定时任务存储就绪时可删除既有定义；后台唤醒能力不参与删除的可用性判断。编辑草稿固定打开时的 epoch，外部更新保留草稿并要求显式重新载入，不能采用实时 snapshot 的新 epoch 覆盖并发修改；timeout后刷新而不重放，起始偏好不参与已保存计划的执行资格。
+- 定时任务新建或明确改选从 Models ready候选选择完整目标，提交expected source/catalog generation，由Host解析protocol；已有定义的其他编辑保留固定绑定；`execution_changed`，以及 `admission` 为模型已不可用、来源已变或另一个账号的计划，编辑确认按[产品恢复语义](requirements.md#511-定时任务)提交当前目标证明，不要求切换到其他模型再切回，也不重复展示保存确认说明。保存、暂停/恢复、立即运行和删除使用Host typed result与item epoch。 Bridge 可用且定时任务存储就绪时可删除既有定义；后台唤醒能力不参与删除的可用性判断。编辑草稿固定打开时的 epoch，外部更新保留草稿并要求显式重新载入，不能采用实时 snapshot 的新 epoch 覆盖并发修改；timeout后刷新而不重放，起始偏好不参与已保存计划的执行资格。
 - 执行历史弹窗只展示有界运行历史。每个 occurrence 链接到其真实 Task，并显示完成、失败、已跳过、延迟或等待处理及 Host 提供的原因；重叠跳过时说明上一次任务仍在运行，链接明确标为“查看上次任务”，不把 blocker 当作本次新建的结果。结果历史不复制 Task timeline；
 - 删除计划不停止或删除已经创建的真实 Task；`立即运行` 也通过同一 occurrence 与 Task admission，不能建立测试/手动专用路径；上一次真实 Task 仍 non-terminal 时显示 `已跳过：上一次仍在运行`；
 - 模型 authority、Workspace authority 或定义固定的非交互 PermissionProfile 不再满足时归入 `已停用`，行内显示具体原因并要求用户编辑确认；立即运行与恢复启用在确认前禁用。occurrence 不得进入同步 Agent permission wait。未覆盖操作使该次运行以 typed 原因停止，通知只定位真实 Task 和处理原因，不提供远程批准、临时升级或继续原 Run；
@@ -386,7 +417,7 @@ Recent
 ```
 
 - 列表不按状态拆分栏目，不显示 `Needs your attention / Running / Queued / Archived` 等状态标题；
-- “项目”区始终提供添加项目入口，即使尚无项目。 添加失败在入口下方提示。项目额度满时提示移除项目入口，工作目录额度满时提供打开“工作目录”设置的按钮。仅有入口的 Manual Workspace 生成分组；目录标题使用文件夹图标与单行名称，文件夹图标和名称分别与上方能力导航的图标、文字对齐；完整安全路径放在 hover title 中，redacted 时不显示路径。项目内任务名称与文件夹名称左对齐，空项目提示沿用同一文字起点；任务行的点击区域、悬停与选中底色占满项目列表可用宽度，不随文字缩进。不在每个任务行重复目录说明；同名目录保留 canonical identity，可通过标题的路径区分；
+- “项目”区始终提供添加项目入口，即使尚无项目。 添加失败在入口下方提示。项目额度满时提示移除项目入口，工作目录额度满时提示选择已登记的目录。仅有入口的 Manual Workspace 生成分组；目录标题使用文件夹图标与单行名称，文件夹图标和名称分别与上方能力导航的图标、文字对齐；完整安全路径放在 hover title 中，redacted 时不显示路径。项目内任务名称与文件夹名称左对齐，空项目提示沿用同一文字起点；任务行的点击区域、悬停与选中底色占满项目列表可用宽度，不随文字缩进。不在每个任务行重复目录说明；同名目录保留 canonical identity，可通过标题的路径区分；
 - 项目任务默认展开。点击目录标题或用 Enter / Space 激活标题可独立展开或收起该项目，标题通过 `aria-expanded` 提供可访问状态。按 Manual Workspace identity 将收起的项目保存在本机界面偏好中，重启后恢复。收起仅隐藏该项目的任务列表及空态提示，不改变当前 Task、工作面或全局“最近”列表。空项目展开时显示无任务说明；全局与项目列表固定隐藏归档任务，不提供归档显示开关；项目只有隐藏的归档任务时说明归档已隐藏，不误称项目没有任务；全局任务计数只计算唯一 Task，不因项目入口重复计数；
 - 当前排序优先级只决定行的位置，不在视觉上形成分组；排序规则后续变化不得重新引入状态栏目；
 - 任务标题使用扣除右侧状态与操作区后的可用宽度，超出时在可见区域末端淡出。悬停或键盘聚焦任务行片刻后，溢出标题在同一区域内横向滚动一次，离开后恢复末端淡出。开启减少动效时保留静态淡出；
@@ -418,7 +449,7 @@ Task 菜单在归档之后提供“移入项目”或“更改项目”，打开
 
 ### 5.8 左下角账号入口
 
-一级导航底部固定显示账户与应用入口。已登录时用头像或首字母作触发器，完整显示名在菜单顶部及触发器的辅助说明中可见。未登录时触发器显示「登录」，菜单同时提供登录、设置和关于。检查中和授权中显示账户图标，状态在辅助说明和菜单中提供。
+一级导航底部固定显示账户与应用入口。已登录时用头像或首字母作触发器，完整显示名在菜单顶部及触发器的辅助说明中可见。未登录时触发器显示「登录」，菜单同时提供登录、设置和检查更新。检查中和授权中显示账户图标，状态在辅助说明和菜单中提供。
 
 点击后从入口右侧朝上展开最宽 224 px 的轻量菜单，位置随视口空间调整，视觉复用 [Foundation 菜单规则](#165-foundation-组件)：
 
@@ -426,18 +457,18 @@ Task 菜单在归档之后提供“移入项目”或“更改项目”，打开
 张三
 
 设置
-关于
+检查更新              v<当前版本>
 ─────────────────────────
 退出登录
 ```
 
-- “关于”是本地产品级动作，位于设置之后、退出登录之前；菜单项不重复展示产品名或版本，也不新增常驻侧栏行、主界面一级导航或设置分区。点击后打开紧凑模态窗，展示 canonical Logo、产品名、Metask 开发者归属、从 `app.zon` 构建注入的当前版本和版本更新区域；不渲染宣传文案、占位动作或死链接；
+- “检查更新”使用圆形上箭头图标，右侧显示当前版本。点击后收起菜单，在独立的小弹窗中显示检查进度和结果。已是最新版时显示一句提示和“确定”；失败可重试，发现新版时提供下载入口。只有用户选择下载或官网入口时才打开浏览器。关闭弹窗后焦点回到头像入口。
 - 有新版时在账号入口正上方显示独立的圆形上箭头按钮，图标圆形轮廓与头像大小一致。底部账户区与上方导航以留白区分。悬停或键盘聚焦显示「有新版」，可访问名称包括版本号。两者均保持至少 44 × 44 px 命中区和可见键盘焦点。更新入口独立于登录状态；
-- “有新版”打开同一个关于 Dialog，不打开账号菜单或自动下载。关闭后焦点返回原更新按钮；该按钮已经消失时回到账户与应用入口。关于的版本区域呈现未检查、检查中、最新、发现新版、缺本平台包、检查失败及下载交接状态，提供检查/重试、可用时的下载动作，以及始终可见的官网下载。打开 Dialog 本身不触发网络检查；Bridge 不可用时保留静态信息并禁用无法执行的动作，不能虚构最新状态；
+- “有新版”直接打开紧凑的产品信息弹窗，不打开账号菜单或自动下载。关闭后焦点返回原更新按钮；该按钮已经消失时回到账户与应用入口。关于的版本区域呈现未检查、检查中、最新、发现新版、缺本平台包、检查失败及下载交接状态，提供检查/重试、可用时的下载动作，以及始终可见的官网下载。查看产品信息本身不触发网络检查；Bridge 不可用时保留静态信息并禁用无法执行的动作，不能虚构最新状态；
 - 下载按钮绑定显示的版本，只在用户点击后请求预检与系统浏览器交接。检查与命令在途防重复提交；交接成功只写“已交给浏览器，请在浏览器中查看下载”，保留角落提醒，不展示虚假的下载进度或完成。失效链接明确提示“下载链接暂不可用，请前往官网下载”，临时失败、缺包与版本漂移使用对应可操作原因；官网仅由用户点击打开。检查失败允许显示上次确认版本并标明本次未刷新，不报最新；
-- 更新状态由 Host 发布，局部 command busy/error 只属于当前 Dialog 和 connection generation；关闭、卸载或连接变化后的迟到回执不得恢复旧反馈。检查/下载结果原位呈现，普通后台失败不抢焦点；状态使用可访问的 live region，错误有可读文字。窄窗操作行可换行，沿用既有深浅主题与 Foundation 组件。领域与下载失败语义以[Product 架构](product-architecture.md#28-版本提醒与下载交接)为准；
-- About 不依赖 Account、Models 或登录状态，在主界面的账户与应用菜单中始终可用；菜单与触发器的无障碍名称必须表达“账户与应用”，不能继续声称只包含账号动作；
-- 账号菜单中的退出登录使用退出图标和与其他菜单项一致的中性颜色，不在尚未执行的导航层提前使用危险色；点击后在当前界面上直接打开危险操作确认框，不先导航到设置，最终确认按钮才使用危险样式。确认按钮只写“退出登录”；确认文案说明仅退出本机 Metask 账号、本地 Task 与历史记录会保留，不使用范围不明的“清除设备信息”。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
+- 更新状态由 Host 发布，局部 command busy/error 只属于发起操作的设置分区或弹窗及当前 connection generation；关闭、卸载或连接变化后的迟到回执不得恢复旧反馈。检查/下载结果在发起操作的位置呈现，普通后台失败不抢焦点；状态使用可访问的 live region，错误有可读文字。窄窗操作行可换行，沿用既有深浅主题与 Foundation 组件。领域与下载失败语义以[Product 架构](product-architecture.md#28-版本提醒与下载交接)为准；
+- 菜单与触发器的无障碍名称必须表达“账户与应用”；
+- 账号菜单中的退出登录使用退出图标和与其他菜单项一致的中性颜色，不在尚未执行的导航层提前使用危险色；点击后在当前界面上直接打开危险操作确认框，不先导航到设置，最终确认按钮才使用危险样式。确认按钮只写“退出登录”；确认文案与账号设置的退出确认相同：“退出后，重新登录前不能使用 Metask 模型。自定义模型、本地任务和历史记录、工作区文件都会保留。”，不使用范围不明的“清除设备信息”。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
 - 账号菜单只负责身份和导航；Metask API/model目录与用户管理的服务都进入 Models设置，不成为 Account字段；
 - 未登录时保留本地 Task 历史，并把左栏账号入口切换成登录动作。
 
@@ -685,7 +716,7 @@ ProductDelivery 可以合并短窗口 revision；Renderer 原子接纳当前页�
 ### 7.5 当前状态、请求与结果
 
 - 已确认未执行的消息在原条目显示 Host 的失败原因。有保留输入时在同一条目提供「重发原消息」与次要的「放弃重发」。重发进入正常阅读顺序并保留原失败条目。接收前拒绝可恢复原草稿及仍有效的附件；目标已有新内容时保留原提交的恢复入口。
-- 已有 Task 的 Composer 按 Host 提供的原因显示 Metask 目录等待、目录刷新失败或授权变化。目录失败时可从当前 Task 重试刷新；历史失败条目仍说明当时的结果。
+- 已有 Task 的 Composer 按 Host 提供的原因显示 Metask 目录等待、目录加载失败或授权变化。目录失败时可从当前 Task 重试刷新；历史失败条目仍说明当时的结果。
 - 当前 Task 的 Session 关闭失败且可重试时，在 Composer 附近提供「重试关闭会话」。关闭成功后按普通发送恢复会话，已失败的提交仍由用户显式重发。
 - active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。工具数量、单工具分类与未知状态的文案遵守 [Activity 与 Tool presentation](#activity-与-tool-presentation)，不在主状态中暴露原始 Tool 名称、参数或命令；
 - Tool 摘要属于次要 technical work evidence，active Run 内与唯一 live status 共用默认折叠的 process surface；展开内容遵守本节 Tool 证据规则，不带入 usage 或 Run ID。一轮的 Tool 调用数不设上限：展开后才按页读取 Tool 记录，已读的页按 activity order 连续显示；还有未读记录时在列表末尾提供“显示更多调用（剩余 {count} 条）”，不做虚拟化或自动续读。收起后保留已读页，重新展开直接显示；任务页的 Tool 版本推进时只重读仍在运行的记录及之后的已读部分，Run 结束后把活动期间读过的部分再读一次；已读页按 Task 与安全代次区分，切换 Task 不复用。读取中与读取失败在列表内原位说明，失败提供“重试”，不影响 live status 或正文。Run terminal 后 live status 消失；既没有 Tool 也没有已自动允许记录时整个 surface 卸载，有任一类记录时保留默认折叠的“执行详情”摘要，并在 Host 最终耗时可用时于右侧显示“本轮用时 {duration}”。普通 Tool 可以在所属行下方查看完整 input/result；Edit 与 Write 不显示协议 JSON、不提供 disclosure，当其唯一 `fileRefs.displayPath` 与同 Run typed File Changes 的一个文件分组精确相等时，路径显示为审计链接并打开该 Run Review、展开且聚焦对应文件，否则保持只读摘要。该匹配只建立导航，不生成或补造 File Change。Work 与逐 Tool disclosure choice 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态；
@@ -820,7 +851,7 @@ ready 附件按选择顺序显示可换行的紧凑 chip，包含经过 Host 校
 
 带所选 Skill 的已发送消息先显示与 Composer 相同的 Skill 标签，再是正文和附件行。已发送消息的附件行使用同一个 chip 方框：Host 还能提供媒体的图片在原本显示格式徽标的位置显示同尺寸缩略图，并共用同一个灯箱；多张图片时打开用户点选的那一张。非图片附件、已脱敏的记录，以及登记标识之前发送的图片保持既有元数据 chip，不出现点了没有反应的入口，也不按名称或大小猜测标识。历史 chip 仍不提供下载或重新发送。
 
-缩略图在原件可被查看器档读取时是键盘可达的预览入口，点击在当前窗口内以就地灯箱显示 Host 交付的原图，标题只用附件显示名，不提供下载、另存、复制或重新发送。关闭灯箱保留原草稿、文字与全部附件（从历史打开时保留阅读位置与草稿），焦点回到原 chip。原件超过[查看器档单图上限](renderer-bridge-contract.md#attachment-media-commands)时不提供点击入口，只显示缩略图——一个点了必然失败的入口不如不给；像素、动图等只能在读取后判定的限制仍按既有预览状态在灯箱内说明原因。附件灯箱不进入 §12.1 的 Task Panel 对象标签体系：附件原件不可变、没有用户可见路径可作标题、没有刷新语义，New Task 也没有 Task identity；生成媒体的预览入口不受本节影响。
+缩略图在原件可被查看器档读取时是键盘可达的预览入口，入口只看原件，不看缩略图：缩略图还没到或加载失败时 chip 显示格式角标，入口照样在，灯箱打开后说明原件的真实状态；点击在当前窗口内以就地灯箱显示 Host 交付的原图，标题只用附件显示名，不提供下载、另存、复制或重新发送。关闭灯箱保留原草稿、文字与全部附件（从历史打开时保留阅读位置与草稿），焦点回到原 chip。原件超过[查看器档单图上限](renderer-bridge-contract.md#attachment-media-commands)时不提供点击入口，只显示缩略图——一个点了必然失败的入口不如不给；像素、动图等只能在读取后判定的限制仍按既有预览状态在灯箱内说明原因。附件灯箱不进入 §12.1 的 Task Panel 对象标签体系：附件原件不可变、没有用户可见路径可作标题、没有刷新语义，New Task 也没有 Task identity；生成媒体的预览入口不受本节影响。
 
 逐项移除在开始时同步更新所属草稿，保留最新文字和其他附件；Host 回包只结算原操作，不能覆盖草稿或将结果写到其他 Task。移除等待期间文字编辑和 Task 切换仍可用，添加、重复移除和发送保持互斥，并以“正在移除文件”区别于添加/取消添加。操作及反馈绑定草稿 scope、连接 generation 和操作 identity，切走再返回也不接纳旧反馈；旧操作收尾不能解除新操作的互斥，焦点不能迁移到其他草稿。release=false 遵守既有幂等语义，不恢复旧 token；无法确认清理结果时明确提示，并复用连接恢复、清除旧连接未发送附件和保留文字/重选提示的规则，不能猜测删除成功或恢复可能已撤销的 token。
 
@@ -1055,7 +1086,7 @@ Workspace 只作为 Task 与 New task 的路径上下文，不生成独立搜索
 
 首次启动不设置独立登录页面。Renderer 直接挂载主界面；可信根 Snapshot 到达前全部 mutation 保持关闭，确认根连接失败后使用独立连接恢复表面，只表达连接事实、重试和安全诊断，不显示任何登录文案。
 
-Account 状态在主界面的账号入口、Account 设置及新任务输入区中表达，开始弹层只提供统一登录入口：`checking` 显示检查状态，`signed_out` 提供统一登录动作，`authorizing` 显示等待并仅在 `can_cancel` 为真时允许取消，`authenticated` 显示已验证 identity。Account 状态不得自动打开设置、替换主界面、隐藏 durable Task，或重新解释 Product Control 发布的 New task admission。OAuth 成功后由 Host 把 Account 授权交给独立 Models continuation 加载目录；目录完成不自动选择模型，也不覆盖起始偏好或 Task 意图。任何 live Task 始终可查看和停止。
+Account 状态在主界面的账号入口、Account 设置及新任务输入区中表达，开始弹层只提供统一登录入口：动作只按 Host 的 `actions` 提供，为假的不显示：“立即重试”（`retry`）、登录或“重新登录”（`login`）、“再清一次”（`clear`）、取消（`cancel`）与退出登录（`logout`）。`checking` 没有错误时显示检查状态，带错误时显示“暂时无法确认登录状态”，再试在途时“立即重试”不出现、文字不变；`signed_out` 提供统一登录动作，读不到凭据库时还有“立即重试”，退出没删干净时有“再清一次”；`authorizing` 显示等待；`authenticated` 显示已验证 identity，续期失败后等着重试时有“重试登录刷新”。Account 状态不得自动打开设置、替换主界面、隐藏 durable Task，或重新解释 Product Control 发布的 New task admission。OAuth 成功后由 Host 把 Account 授权交给独立 Models continuation 加载目录；目录完成不自动选择模型，也不覆盖起始偏好或 Task 意图。任何 live Task 始终可查看和停止。
 
 新任务的首次模型准备引导使用紧凑的“开始使用 MetaWork”弹层，主动作“登录 Metask”、次动作“配置自己的模型”，并提供“暂时跳过”。次动作与 Models 页的自定义模型管理复用同一运行时能力 gate，能力未开放时隐藏并使用仅登录的说明；弹层不承载 credential 表单，不承诺模型安装或下载。
 
@@ -1063,9 +1094,9 @@ Account 状态在主界面的账号入口、Account 设置及新任务输入区�
 
 本机轻量 UI 偏好记住引导已处理，不保存账号、模型或 credential：用户选择任一入口、跳过或关闭后记为已处理；首次确认已有可用模型也视为已处理。记录跨 reload/重启保留，不随退出登录或模型失效重置；存储失败不阻止使用，当前 Renderer 会话仍抑制重复自动展示。关闭按钮、Esc 和遮罩关闭等同跳过。输入区“开始使用”可主动重新打开弹层。
 
-点击登录后关闭开始弹层并调用既有 beginLogin；输入区显示“请在浏览器中完成登录”，取消只在 Host canCancel 为真时提供。点击配置后关闭弹层并打开 Models 的自定义模型分组，通过“添加模型”同时准备连接与模型，添加和测试在 Models 完成，选择在任务输入区完成；不复制配置向导、不自动设置默认值、不因后台配置成功强制关闭设置。两条路径均保留原草稿、Workspace 与审批模式，不自动创建 Task 或发送。
+点击登录后关闭开始弹层并调用既有 beginLogin；输入区显示“请在浏览器中完成登录”，取消只在 Host `actions.cancel` 为真时提供。点击配置后关闭弹层并打开 Models 的自定义模型分组，通过“添加模型”同时准备连接与模型，添加和测试在 Models 完成，选择在任务输入区完成；不复制配置向导、不自动设置默认值、不因后台配置成功强制关闭设置。两条路径均保留原草稿、Workspace 与审批模式，不自动创建 Task 或发送。
 
-跳过后输入框继续可编辑，模型尚未配置时显示“登录或配置模型后即可发送”及“开始使用”；已有模型事实仍保留。Metask 所选模型需要授权时直接提供登录，自己的模型配置入口开放时同时提供“其他方式”重开开始弹层，其他来源已有可用模型不应自动关闭用户主动打开的选择面；已有候选但缺少选择时直接打开输入区模型列表；目录失败或无模型时提供重试；自定义服务缺少凭据或被禁用时进入 Models 的自定义模型分组，服务已保存但模型尚未就绪时进入 Models 添加或测试；模型存储异常进入 Models，实际credential清洗所需的定时任务存储不可用时说明对应操作原因，并仅在管理或恢复能力开放时进入定时任务页；本机资源不足如实说明，不提供无效的模型设置恢复承诺。检查、加载与准备状态不提供伪恢复动作；输入区只显示一份主要模型提示，模型恢复后移除，其他发送条件保持独立。按钮和 Enter 保持发送语义，不隐式改为登录或配置。
+跳过后输入框继续可编辑，模型尚未配置时显示“登录或配置模型后即可发送”及“开始使用”；已有模型事实仍保留。Metask 所选模型需要授权时直接提供登录，自己的模型配置入口开放时同时提供“其他方式”重开开始弹层，其他来源已有可用模型不应自动关闭用户主动打开的选择面；已有候选但缺少选择时直接打开输入区模型列表；目录失败或无模型时提供重试；自定义服务缺少凭据或被禁用时进入 Models 的自定义模型分组，服务已保存但模型尚未就绪时进入 Models 添加或测试；模型存储异常进入 Models，实际credential清洗所需的定时任务存储不可用时说明对应操作原因，并仅在管理或恢复能力开放时进入定时任务页；本机资源不足如实说明，不提供无效的模型设置恢复承诺。检查、加载与准备状态不提供伪恢复动作；没能确认登录时输入区说明并提供“立即重试”，Host 的 `actions.retry` 为假时不可用；Host 说明 Metask 连接挡住新任务时，选中 Metask 模型的草稿不可发送，输入区说明正在连接或暂时连不上，不提供动作，定时任务新选 Metask 模型时用同一句话说明并不可保存；输入区只显示一份主要模型提示，模型恢复后移除，其他发送条件保持独立。按钮和 Enter 保持发送语义，不隐式改为登录或配置。
 
 弹层复用 Foundation Dialog，具备可见标题、描述、焦点限制、关闭及焦点返回；初始焦点落在登录主动作，手动关闭回到原触发位置，自动展示关闭回到 Composer。跳往设置时焦点交给设置页。窄窗正文和动作可换行，不截断阻塞原因。
 
@@ -1073,7 +1104,7 @@ Account 状态在主界面的账号入口、Account 设置及新任务输入区�
 
 ```text
 General
-├── Language
+└── Language
 
 Account
 ├── Account information（authenticated identity and balance; sign-in state when unauthenticated）
@@ -1098,11 +1129,15 @@ Archived tasks
 ├── Search by task name
 └── View history / Change project / Restore / Delete
 
+About
+
 ```
 
 设置是覆盖整个 主界面内容区的正式全局 surface，不用狭窄 popover 承载目录选择、错误恢复和危险退出。它保留窗口壳层，底层内容继续挂载但不可操作；进入后不重复显示或操作 Task 左栏，也不改变离开前的 Task、草稿、滚动和焦点状态。窗口标题栏保持一致，页面内 `返回主界面` 是返回入口；左下角用户菜单只负责打开该 surface 和少量直接动作。
 
-“已归档任务”作为设置末尾的平级分区，即使为空仍可访问。列表消费 Host task index 的归档记录，按名称搜索、按 recentOrder 倒序，显示名称、独立的项目归属、实际目录说明和更改项目/恢复/删除；不显示推断的归档时间、不提供 Workspace 管理或新的全文索引。加载、失败、无归档和搜索无结果分别呈现；historyReadOnly 只允许阅读。项目候选共用当前项目入口，入口移除时显示“项目已移除”。恢复/删除中按 Task 禁用动作，失败就地显示和显式重试，不能因目录当前不可执行就丢弃已发布历史。已投影的归档 Task 可在 owning Workspace 不参与活动导航时显式打开只读历史；不因此恢复 Workspace 授权或开放执行。
+“关于”是设置导航的最后一项，紧随“已归档任务”。右侧内容区采用两行布局：第一行并列显示“当前版本”和随构建注入的版本号，右侧的“检查更新”打开与头像菜单共用的检查结果弹窗；第二行显示“关于 MetaWork”，右侧依次提供“前往官网”和“联系我们”，点击后分别通过系统浏览器打开产品官网首页和联系页。空间不足时按钮可换行。未登录或连接异常时仍可查看当前版本。
+
+“已归档任务”作为独立设置分区，即使为空仍可访问。列表消费 Host task index 的归档记录，按名称搜索、按 recentOrder 倒序，显示名称、独立的项目归属、实际目录说明和更改项目/恢复/删除；不显示推断的归档时间、不提供 Workspace 管理或新的全文索引。无归档时显示一条空状态提示。有归档时在列表上方提供搜索和归档总数，搜索无结果时保留搜索框。加载与失败各自呈现；historyReadOnly 只允许阅读。项目候选共用当前项目入口，入口移除时显示“项目已移除”。恢复/删除中按 Task 禁用动作，失败就地显示和显式重试，不能因目录当前不可执行就丢弃已发布历史。已投影的归档 Task 可在 owning Workspace 不参与活动导航时显式打开只读历史；不因此恢复 Workspace 授权或开放执行。
 
 点击归档历史显式离开设置，复用现有 Task 工作面；返回归档列表保留搜索、滚动和合理焦点。列表恢复留在设置，工作面恢复留在原 Task；恢复不新建 Task、不自动发送、不复活旧完成提醒，继续执行仍受 Host gate。已有搜索命中归档任务应标明归档且不自动恢复。普通设置开关仍保持原工作面与草稿；只有显式查看归档历史才导航 Task。
 
@@ -1114,8 +1149,6 @@ Archived tasks
 
 `Models / 模型` 只管理用户自行添加的模型与对应服务配置，不再提供平级 `Providers` 导航。模型服务管理分组只有在 management、API Key 写入系统 credential storage、模型测试和已开放 protocol admission 共同可用时才显示；该组隐藏不影响配置恢复入口。不能显示不可完成的空壳或“能力不可用”配置表单。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
 
-“工作目录”分区列出已登记的 Manual Workspace，可选择新目录、通过原生 picker 重新授权、撤销目录授权。在此处选择目录只登记授权。撤销确认默认聚焦取消，说明实际使用目录的 Task 将被收口；有项目入口时说明入口一并移除，以及在其他目录工作的 N 条日常会话仍保留在“最近”，重新添加项目恢复分组。归档记录保留。只在 Host 收口成功并从 Snapshot 移除目录后更新列表，失败保留事实并提示重试；等待期间禁止重复提交。目录额度满时说明原因并指向此分区。Automatic Workspace 仍随 owning Task 管理；本页不提供磁盘迁移或清理。Renderer 的目录选择保存在项目草稿内，不维护 `activeWorkspaceId` 或全局活动 Workspace 镜像。
-
 `Global instructions / 全局指令` 是“模型”之后的平级分区，编辑 `~/.metawork/AGENTS.md`，也就是每个 Task 都会带上的全局指令；读取与注入规则见 [产品需求](requirements.md#54-agent-交互)。进入分区才向 Host 读取一次，页面显示 Host 给出的文件路径与说明：冲突时项目指令优先，指令不改变安全、权限和审批规则。文件不存在时编辑框为空，并说明保存时才创建；Renderer 不提交路径，只通过 Host 命令读和存。编辑框下方显示按 UTF-8 计的字节数和 32 KiB 上限，超限时就地说明并禁用保存；没有改动或正在保存时也不能保存。保存成功后以 Host 返回的 revision 为准，并说明之后开始的轮次使用新指令；不做乐观更新。文件在载入后被外部修改时，Host 返回冲突，页面保留草稿并提供“重新载入”（换成外部版本）和“覆盖保存”（确认后按 Host 报告的新 revision 保存），不直接覆盖。文件含 MetaWork 保存的凭据时不显示正文，提示用外部编辑器打开上面的路径修改；文件太大（超过 128 KiB）、不能作为文本读取或没有用户主目录时同样不提供编辑框，只给出路径和原因。保存被拒（超限、无效文本、含凭据）或写入失败时保留草稿并就地说明。
 
 `General / 常规` 中提供一行“Automatic Workspace 位置”，它只设置未来随机子目录的直接上级目录，不关闭随机目录、不改名、不迁移也不删除既有 Workspace。主值始终显示 Host 发布的 effective canonical path；system default 只在路径旁显示为“默认”状态标签，不能用“系统默认位置”等抽象文案替代真实路径。辅助文案明确“仅影响新建任务”；动作为“选择文件夹”与仅在非默认或需要显式恢复时出现的“恢复默认”。Choose 只打开 Host 原生 picker，并在 Host 拥有 canonical path 时以当前路径作为初始目录；没有可信路径时不猜测目录。取消后保持页面和焦点；命令完成前禁用该行动作，成功后等待 canonical Snapshot 刷新，不乐观替换路径。
@@ -1125,14 +1158,14 @@ Archived tasks
 `Account`规则：
 
 - 只显示 Metask identity、授权状态、登录/取消、token refresh恢复、账户用量摘要和退出；不得把 API/model catalog、默认模型、Models错误或连接状态显示成 Account字段；
-- authenticated时，“账户信息”组显示已认证用户名、Host生成的邮箱脱敏提示与并发额度，不重复显示“Metask 已连接”或成功状态点；邮箱缺失时省略该项。组内放置唯一智能紫主动作“充值”并配外链图标，点击后由Host通过系统浏览器打开固定Metask充值页；按钮可触区域不小于44px，不显示当前 OAuth 合同无法取得的余额。非 authenticated 状态仍显示检查、授权或登录说明及其有效动作。随后在现有设置 group/list语法中增加一个克制的“账户用量”分组，直接显示“Token 使用记录”日历热力图。热力图默认选择范围结束日，以完整日期、总量、输入、输出、缓存创建、缓存读取和已记录费用承担当日明细；组尾显示最近同步时间与唯一刷新动作。必须注明这些数字属于整个 Metask账户，不是 MetaWork单应用统计；金额单位统一为 U；
+- authenticated时，“账户信息”组显示已认证用户名与Host生成的邮箱、手机号脱敏提示，不重复显示“Metask 已连接”或成功状态点；邮箱缺失时省略该项。组内放置唯一智能紫主动作“充值”并配外链图标，点击后由Host通过系统浏览器打开固定Metask充值页；按钮可触区域不小于44px，不显示当前 OAuth 合同无法取得的余额。非 authenticated 状态仍显示检查、授权或登录说明及其有效动作。随后在现有设置 group/list语法中增加一个克制的“账户用量”分组，直接显示“Token 使用记录”日历热力图。热力图默认选择范围结束日，以完整日期、总量、输入、输出、缓存创建、缓存读取和已记录费用承担当日明细；组尾显示最近同步时间与唯一刷新动作。必须注明这些数字属于整个 Metask账户，不是 MetaWork单应用统计；金额单位统一为 U；
 - 热力图按每日 total Token 使用紫色五级强度呈现，日历语义固定为 `Asia/Shanghai`。宽窗显示最近53个周列，小于620px时显示最近13个周列且不产生水平滚动；每个视图均从周一开始，截至当天，因此当前周尚未发生的日期保持范围外占位。月份标签锚定该月在当前可见范围内首次出现的周列；两个相邻月份的标签锚定同一周列时只显示后一个月份，不移动标签或移除日期格。范围外占位与成功响应中的零使用日必须视觉可区分；颜色不能作为唯一信息，图例必须同时给出“少/多”文本和强度格。焦点日下方持续显示完整日期、总量、输入、输出、缓存创建、缓存读取和已记录费用；鼠标悬停、点击以及键盘方向键移动都能选择日期，并有可见focus样式；
 - history 按 unavailable/loading/ready/stale显示。已有值刷新失败时继续显示并标注“可能已过期”，不得清空成0；初次不可用只给局部、可操作说明，不把Account伪装成未登录。只有整个history范围成功且通过严格验证时，范围内缺失日期才显示为0；失败不能生成零值热力图。刷新只由用户点击或authenticated/generation建立后的Host自动同步触发；进入设置、Renderer reload、snapshot update和本地timer都不能触发；
 - authenticated 后用量分组直接展示 history，不读取或推断旧 `run_mode`。不得显示当前 OAuth 合同无法取得的余额、今日或累计摘要，也不得显示完整email、account id、标准费用、请求数、RPM/TPM、响应时间、API Key数量、订阅额度、模型分布、按模型趋势、最近请求、任意外部管理链接或其他装饰性图表；固定充值页是账户区唯一允许的外部动作；账户区之外只有 Product 识别为 Metask 余额/额度不足的 Run 失败提示可以复用同一充值命令（见 [当前状态、请求与结果](#75-当前状态请求与结果)），Renderer不得取得或拼接其URL；
-- 请求或配置错误、网络失败与刷新结果不确定不得被描述为“凭据过期”“后端撤销”或“已从设备移除”。Account 错误可以保留 authenticated identity；此时错误只在账户 feedback 中说明，账户信息和账号菜单不提供登录动作。登录动作只在 `signed_out` 时提供；不能安全重试的续期结果，由 Host 转为 `signed_out`。Renderer 不从错误码推断需要重新登录。刷新阻断由Host校验，不从错误文字反推权限、不自动重试旧token、不增加保存恢复页面或公开状态；
-- 已验证 identity 的 refresh timer 或 wall clock 无法安排时继续显示 `authenticated`，在 Account 设置错误区说明自动刷新未安排并提供唯一 `重试登录刷新`；该动作调用 Host `retryRefresh`，不得由 Renderer timer、reload 或普通 snapshot update 自动重放；hard expiry 后 Metask 新目录/解析由 Host fail closed。access token 到 hard expiry 时，由 Host 自动恢复连接，输入区按 Host 给出的原因显示“正在恢复 Metask 连接”。恢复期间发出的消息保持等待；所等的那次恢复失败后，消息以“暂时无法连接 Metask”显示未执行，并保留重发入口；
-- 重新登录或退出登录不得因 Models、Task、Session、Run、job、worker或 Task-owned credential的运行时引用而被阻止，也不得静默终止或改写这些引用；既有 Task按创建时取得的 ExecutionConfig继续收口；
-- 已登录时，账号设置在账户用量下方显示一个通栏的危险样式“退出登录”按钮。设置和账号菜单共用确认弹窗，打开时聚焦“取消”，点击确认才提交退出。弹窗说明本机 Metask 登录凭据会清理，创建使用 Metask 模型的新 Task 需要重新登录，自定义模型、本地 Task 及历史记录和 Workspace 文件会保留。
+- 请求或配置错误、网络失败与刷新结果不确定不得被描述为“凭据过期”“后端撤销”或“已从设备移除”。Account 错误可以保留 authenticated identity；此时错误只在账户 feedback 中说明，账户信息和账号菜单不提供登录动作。登录动作在 `signed_out` 时提供，没能确认登录（`checking` 带错误）时以“重新登录”提供；不能安全重试的续期结果，由 Host 转为 `signed_out`。Renderer 不从错误码推断需要重新登录。刷新阻断由Host校验，不从错误文字反推权限、不自动重试旧token、不增加保存恢复页面或公开状态；
+- 已验证 identity 的续期节拍无法启动时继续显示 `authenticated`，在 Account 设置错误区说明自动刷新未安排，并在 Host 的 `actions.retry` 为真时提供唯一 `重试登录刷新`；该动作调用 Host `retryRefresh`，不得由 Renderer timer、reload 或普通 snapshot update 自动重放；hard expiry 后 Metask 新目录/解析由 Host fail closed。access token 到 hard expiry 时，由 Host 自动恢复连接，输入区按 Host 给出的原因显示“正在连接 Metask”，并说明连上后执行、这次没连上就标为未执行；启动后确认登录时显示同一句。期间发出的消息保持等待；所等的那次没有连上时，消息以“暂时无法连接 Metask，消息未执行”显示，并保留重发入口；
+- 重新登录或退出登录不得因 Models、Task、Session、Run、job、worker或 Task-owned credential的运行时引用而被阻止；退出登录停掉用 Metask 模型的 Task 正在跑的 Run 和整理，并在确认弹窗里事先说明，Run 与整理记为“为退出登录而停止”，后面排队的消息在推进时以“需要登录”失败，内容保留，重新登录后可以重发；其余既有 Task按创建时取得的 ExecutionConfig继续收口；
+- 已登录时，账号设置在账户用量下方显示一个通栏的危险样式“退出登录”按钮。设置和账号菜单共用确认弹窗，打开时聚焦“取消”，点击确认才提交退出。弹窗正文为“退出后，重新登录前不能使用 Metask 模型。自定义模型、本地任务和历史记录、工作区文件都会保留。”；此刻有使用 Metask 模型的 Task 正在运行时，再加一句“有 N 个任务正在使用 Metask 模型，退出后会停止。”
 
 `Models / 模型`规则：
 
@@ -1166,7 +1199,7 @@ Archived tasks
 - 管理页的添加、编辑、测试和删除分别消费 Host typed command 与 canonical Snapshot；页面不通过本地选中态或默认模型 mutation 准备任务。任务模型选择的接纳和绑定以对应 Task 合同为准；
 - 常规桌面宽度下左侧分区导航切换独立的设置分区页面，右侧一次只渲染当前分区；页面标题和左侧分区导航保持稳定，当前分区内容列可独立滚动。窄窗口改为顶部横向分区导航，标签保持单行，必要时仅导航自身横向滚动，仍不让导航与内容共享滚动层；
 - 浮层只在打开时使用克制的透明度与位置过渡；loading 指示只出现在真实运行的配置项，`prefers-reduced-motion` 下移除非必要动画；
-- 当前分区导航必须有持续可见的选中态和 `aria-current`，不能只在 hover 时出现；focus ring、菜单选中勾选、状态色和文字共同表达状态。
+- 「返回主界面」与设置分区共用图标列和文字起点，沿用主界面左栏的常规字重与中性悬停底色。当前分区通过常驻底色和 `aria-current` 标识，键盘焦点另有清晰轮廓。菜单选中勾选、状态色和文字共同表达相应状态。
 - 桌面壳注册标准 `primary + ,` 设置快捷键，直接打开正式设置 route；快捷键只负责页面导航，不建立绕过 Account/Bridge gate 的第二命令面。
 
 Account与 Models状态在设置中分别投影：Account按 `checking | signed_out | authorizing | authenticated`显示 identity action，并在authenticated时直接消费Host发布的summary子投影；Models独立按 `needs_authentication | loading | choosing | ready | failed | unavailable`显示provider配置。Account authenticated不能被summary或Models失败伪装成未登录，Account signed_out也不能隐藏Custom Provider。Renderer不从任一公开状态恢复内部operation，也不区分或展示credential persistence子步骤。
@@ -1183,7 +1216,7 @@ Account与 Models状态在设置中分别投影：Account按 `checking | signed_
 - 编辑模型使用完整 `ModelRef`、expected provider revision 与 catalog generation。内置厂商编辑只提供模型与 API Key，自定义服务才提供地址与协议编辑；新模型的连接与凭据独立管理；既有共享配置只有在同源存在多个模型时才说明共同影响。弹窗使用一个“保存”动作，按地址、非空 API Key、模型 ID 的实际变化顺序提交现有 revision-bound mutation；每步须重新读取 canonical Models 并核对 revision、catalog 与目标模型后才继续，不假装为原子事务。明确失败时说明已保存的字段，保留其余非 secret 草稿并更新 revision；结果未知或配置发生冲突时停止，清除临时 secret，并提示重新打开确认，不自动重放。API Key 留空表示保留已有凭据。已保存地址保持原事实，若与模板不同，替换 Key 时必须披露真实目标 host，不静默改用官方地址。API Key 使用空的 password input，可粘贴、禁用自动填充，永不回填；成功、失败、取消、离页、失去 capability 或来源 revision 变化后清除临时 secret；
 - endpoint、protocol 或 credential authority 变化推进 source generation 并使同源全部模型回到待验证状态；普通模型 add/replace/remove 只推进对应 revision/catalog generation。Provider 可在模型集合为空时持久处于 configuring，不把模型伪装成 Provider identity 的一部分；
 - `Test model` 只通过 Host/Agent Completion 发起有界请求，不创建 Task、历史 Run 或持久 Conversation；generation readiness 与最新测试状态分别显示。ready 模型失败重测不撤销已验证 generation、默认选择或既有 owned binding；
-- 管理页不提供默认模型设置；Account 只影响 Metask 授权，自定义模型独立可用。后台同步只更新目录与状态，不隐式选择其他来源或改写草稿、既有 Task 或定时任务绑定；
+- 管理页不提供默认模型设置；Account 只影响 Metask 授权，自定义模型独立可用。后台同步只更新目录与状态，不隐式选择其他来源或改写草稿、既有 Task 或定时任务绑定；有目录时的后台更新不显示加载、不清空或重排模型菜单，只有目录内容真变了菜单才变；
 - 编辑和删除不因来源正被 Task/Session/Run 使用而禁用，也不查询 consumer usage。若 mutation 使 desired default 不可解析，Product Control 独立关闭新 admission 并进入 reconciliation；既有消费者保持 owned binding，历史不改写。该分组不扩展到 Workspace、权限策略或 AgentCore 内部状态。
 
 Skill 中心、MCP 与定时任务按 §5.2–§5.5 进入工作台工具区。MCP 使用稳定入口，并分别消费 Host-owned management health、Runtime/catalog availability 与 new Task access。空 registry 是可管理空状态，management capability 未接通或 outcome unknown 才进入对应不可用/恢复面；Renderer 不从 Runtime ready 推导管理动作。其他连接器和 IM 频道仍只有在真实接通并形成清晰产品 owner 后才进入导航，不照搬其他 Agent 产品的信息架构。

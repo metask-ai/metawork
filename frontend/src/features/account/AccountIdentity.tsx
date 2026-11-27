@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { productVersion } from "../../app/product-identity.ts";
 import type { AccountView, UpdateView } from "../../bridge/contracts.ts";
 import { SignOutConfirmation } from "../../components/SignOutConfirmation.tsx";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
@@ -10,30 +11,34 @@ import { useI18n } from "../../i18n/context.ts";
 import {
   accountIdentityInitial,
   accountIdentityLabel,
+  accountUnconfirmed,
 } from "../../workbench/account-identity.ts";
-import {
-  AboutMetaWorkDialog,
-  type UpdateControls,
-} from "./AboutMetaWorkDialog.tsx";
+import { AboutMetaWorkDialog } from "./AboutMetaWorkDialog.tsx";
+import { CheckForUpdatesDialog } from "./CheckForUpdatesDialog.tsx";
+import { type UpdateControls, useUpdateActions } from "./update-actions.ts";
 
 export function AccountIdentity({
   account,
+  metaskStopTargets,
   active,
   disabled,
   cancelDisabled,
   onOpenSettings,
   onBeginLogin,
+  onRetryRefresh,
   onCancel,
   onLogout,
   updates,
   updateControls,
 }: {
   account: AccountView;
+  metaskStopTargets: number;
   active: boolean;
   disabled: boolean;
   cancelDisabled: boolean;
   onOpenSettings: () => void;
   onBeginLogin: () => void;
+  onRetryRefresh: () => void;
   onCancel: () => void;
   onLogout: () => void;
   updates: UpdateView;
@@ -45,13 +50,15 @@ export function AccountIdentity({
   const [aboutOpen, setAboutOpen] = useState(false);
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const aboutReturnFocus = useRef<HTMLButtonElement | null>(null);
+  const manualUpdate = useUpdateActions(updates, updateControls);
   const authenticated = account.state === "authenticated";
   const identityName = authenticated
     ? accountIdentityLabel(account, t("account.signed_in"))
     : t("account.provider");
+  const unconfirmed = accountUnconfirmed(account);
   const identityStatus =
     account.state === "checking"
-      ? t("account.checking.title")
+      ? t(unconfirmed ? "account.unconfirmed.title" : "account.checking.title")
       : account.state === "authorizing"
         ? t("account.authorizing.title")
         : account.state === "signed_out"
@@ -60,10 +67,13 @@ export function AccountIdentity({
   const pending =
     account.state === "checking" || account.state === "authorizing";
   const initial = accountIdentityInitial(account);
+  const { actions } = account;
+  const recovery =
+    actions.retry || actions.login || actions.clear || actions.cancel;
 
   useEffect(() => {
-    if (!authenticated) setConfirmSignOut(false);
-  }, [authenticated]);
+    if (!actions.logout) setConfirmSignOut(false);
+  }, [actions.logout]);
 
   function choose(action: () => void) {
     setOpen(false);
@@ -90,16 +100,38 @@ export function AccountIdentity({
                     <Menu.Separator />
                   </>
                 )}
-                {account.state === "signed_out" && (
+                {actions.retry && (
+                  <Menu.Item
+                    disabled={disabled}
+                    onClick={() => choose(onRetryRefresh)}
+                  >
+                    <Icon name="refresh" />
+                    {t("account.retry_now")}
+                  </Menu.Item>
+                )}
+                {actions.login && (
                   <Menu.Item
                     disabled={disabled}
                     onClick={() => choose(onBeginLogin)}
                   >
                     <Icon name="account" />
-                    {t("account.login")}
+                    {t(
+                      account.state === "signed_out"
+                        ? "account.login"
+                        : "account.login_again",
+                    )}
                   </Menu.Item>
                 )}
-                {account.state === "authorizing" && account.canCancel && (
+                {actions.clear && (
+                  <Menu.Item
+                    disabled={disabled}
+                    onClick={() => choose(onLogout)}
+                  >
+                    <Icon name="logout" />
+                    {t("account.clear_residue")}
+                  </Menu.Item>
+                )}
+                {actions.cancel && (
                   <Menu.Item
                     disabled={cancelDisabled}
                     onClick={() => choose(onCancel)}
@@ -108,26 +140,22 @@ export function AccountIdentity({
                     {t("account.cancel")}
                   </Menu.Item>
                 )}
-                {(account.state === "signed_out" ||
-                  (account.state === "authorizing" && account.canCancel)) && (
-                  <Menu.Separator />
-                )}
+                {recovery && <Menu.Separator />}
                 <Menu.Item onClick={() => choose(onOpenSettings)}>
                   <Icon name="settings" />
                   {t("settings.title")}
                 </Menu.Item>
                 <Menu.Item
-                  onClick={() =>
-                    choose(() => {
-                      aboutReturnFocus.current = trigger.current;
-                      setAboutOpen(true);
-                    })
-                  }
+                  disabled={manualUpdate.checkDisabled}
+                  onClick={() => choose(() => void manualUpdate.act("check"))}
                 >
-                  <Icon name="info" />
-                  {t("about.menu_item")}
+                  <Icon name="update-available" />
+                  {t("updates.check")}
+                  <span className="ml-auto text-(--ui-content-muted)">
+                    v{productVersion}
+                  </span>
                 </Menu.Item>
-                {authenticated && (
+                {actions.logout && (
                   <>
                     <Menu.Separator />
                     <Menu.Item
@@ -191,13 +219,18 @@ export function AccountIdentity({
         </div>
       </Menu.Root>
 
+      <CheckForUpdatesDialog
+        updates={updates}
+        actions={manualUpdate}
+        returnFocus={trigger}
+      />
       <AboutMetaWorkDialog
         updates={updates}
         updateControls={updateControls}
         open={aboutOpen}
         onOpenChange={(nextOpen) => {
           setAboutOpen(nextOpen);
-          if (!nextOpen)
+          if (!nextOpen) {
             window.requestAnimationFrame(() => {
               const target = aboutReturnFocus.current;
               (target?.isConnected && !target.disabled
@@ -205,14 +238,19 @@ export function AccountIdentity({
                 : trigger.current
               )?.focus();
             });
+          }
         }}
       />
 
       <AlertDialog.Root
-        open={authenticated && confirmSignOut}
+        open={actions.logout && confirmSignOut}
         onOpenChange={setConfirmSignOut}
       >
-        <SignOutConfirmation disabled={disabled} onLogout={onLogout} />
+        <SignOutConfirmation
+          disabled={disabled}
+          stopTargets={metaskStopTargets}
+          onLogout={onLogout}
+        />
       </AlertDialog.Root>
     </>
   );

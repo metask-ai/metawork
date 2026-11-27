@@ -1,17 +1,21 @@
 import { useRef } from "react";
 
 import { useI18n } from "../i18n/context.ts";
+import { signOutStopsMessageId } from "../i18n/formatters.ts";
 import { AlertDialog } from "./ui/alert-dialog.tsx";
 import { Button } from "./ui/button.tsx";
 
 export function SignOutConfirmation({
   disabled,
+  stopTargets,
   onLogout,
 }: {
   disabled: boolean;
+  /** Tasks whose Metask Run signing out stops. */
+  stopTargets: number;
   onLogout: () => void;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const cancel = useRef<HTMLButtonElement>(null);
 
   return (
@@ -21,6 +25,8 @@ export function SignOutConfirmation({
         <AlertDialog.Title>{t("account.logout")}</AlertDialog.Title>
         <AlertDialog.Description>
           {t("account.logout_confirm")}
+          {stopTargets > 0 &&
+            ` ${t(signOutStopsMessageId(locale, stopTargets), { count: String(stopTargets) })}`}
         </AlertDialog.Description>
         <div className="flex justify-end gap-2">
           <AlertDialog.Close

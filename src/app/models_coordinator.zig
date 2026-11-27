@@ -1,6 +1,5 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
-const account_api = @import("metawork_account");
 const account_contract = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
@@ -137,14 +136,14 @@ const CatalogJob = struct {
     io: std.Io,
     transport: metask_transport.Transport,
     notifier: ProbeNotifier,
-    attempt_id: u64,
+    request_id: u64,
     authorization_generation: u64,
     lease: account_contract.OwnedAuthorizationLease,
     lease_active: bool = true,
     cancellation: metask_transport.Cancellation,
     completion: ?models_metask.OwnedCatalogCompletion = null,
-    error_code: models_contract.ModelsError = .none,
-    retryable_failure: bool = false,
+    failure: models_contract.CatalogFailure = .{ .code = .catalog_invalid, .retryable = false },
+    unauthorized: ?account_contract.UnauthorizedReport = null,
     finished: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
 
@@ -153,11 +152,9 @@ const CatalogJob = struct {
         io: std.Io,
         transport: metask_transport.Transport,
         notifier: ProbeNotifier,
-        preparation: models_contract.CatalogRefreshPreparation,
+        request_id: u64,
         lease: *account_contract.OwnedAuthorizationLease,
     ) std.mem.Allocator.Error!*CatalogJob {
-        std.debug.assert(std.mem.eql(u8, preparation.principal_ref, lease.principal_ref));
-        std.debug.assert(preparation.authorization_generation == lease.authorization_generation);
         const self = try allocator.create(CatalogJob);
         errdefer allocator.destroy(self);
         self.* = .{
@@ -165,8 +162,8 @@ const CatalogJob = struct {
             .io = io,
             .transport = transport,
             .notifier = notifier,
-            .attempt_id = preparation.attempt_id,
-            .authorization_generation = preparation.authorization_generation,
+            .request_id = request_id,
+            .authorization_generation = lease.authorization_generation,
             .lease = lease.take(),
             .cancellation = metask_transport.Cancellation.init(io),
         };
@@ -200,8 +197,10 @@ const CatalogJob = struct {
             self.lease.principal_ref,
             control,
         ) catch |err| {
-            self.error_code = models_metask.errorCode(err);
-            self.retryable_failure = err == error.ServiceUnavailable or err == error.DeadlineExceeded;
+            // What it means for the next try is Models' to say.
+            self.failure = models_metask.failure(err);
+            // The gateway's reason is not parsed: Account asks Metask itself.
+            if (err == error.Unauthorized) if (self.unauthorized) |report| report.report(self.authorization_generation, .other);
             return;
         };
         self.completion = models_metask.OwnedCatalogCompletion.init(&session);
@@ -227,18 +226,24 @@ const CatalogJob = struct {
     }
 };
 
-/// Application binder for Account credential delivery and Models effects.
-/// Product Control owns consumer scope and registry/default-selection policy;
-/// credential delivery uses a separate port before catalog work.
+/// The one platform timer the catalog uses.
+pub const timer_id: u64 = 0x4d57_4d44;
+
+/// Application binder for Models effects. Product Control owns consumer scope
+/// and registry/default-selection policy; Account is one borrowed credential
+/// per operation and the authorization each of its commits leaves. When to
+/// ask for the Metask catalog, whether to retry and what anyone sees are
+/// Models' own: this binder runs the timer and the request it is told to.
 pub const Coordinator = struct {
-    pub const RetryTimer = struct {
+    pub const Host = struct {
         context: ?*anyopaque,
-        start_fn: *const fn (?*anyopaque, u64, u64, bool) anyerror!void,
-        cancel_fn: *const fn (?*anyopaque, u64) anyerror!void,
+        now_ns_fn: *const fn (?*anyopaque) u64,
+        start_timer_fn: *const fn (?*anyopaque, u64, u64, bool) anyerror!void,
+        cancel_timer_fn: *const fn (?*anyopaque, u64) anyerror!void,
     };
 
     io: std.Io,
-    account: *account_api.Runtime,
+    credentials: account_contract.CredentialSource,
     metask_transport: metask_transport.Transport,
     management: control_ports.ModelsManagement,
     main_thread_id: std.Thread.Id,
@@ -246,15 +251,12 @@ pub const Coordinator = struct {
     completion_transport: ?agent.CompletionTransport = null,
     probe_job: ?*ProbeJob = null,
     catalog_job: ?*CatalogJob = null,
-    observed_authorization_generation: u64 = 0,
-    retry_timer: ?RetryTimer = null,
-    catalog_retry: ?struct { id: u64, generation: u64 } = null,
-    next_retry_timer_id: u64 = 0x4d57_4d44_0000_0001,
-    retry_used_generation: u64 = 0,
-    credential_renewal: ?control_ports.MetaskCredentialRenewal = null,
+    host: ?Host = null,
+    /// Where a 401 on the Account token goes.
+    unauthorized: ?account_contract.UnauthorizedReport = null,
 
     pub fn init(
-        account: *account_api.Runtime,
+        credentials: account_contract.CredentialSource,
         transport: metask_transport.Transport,
         management: control_ports.ModelsManagement,
         main_thread_id: std.Thread.Id,
@@ -262,7 +264,7 @@ pub const Coordinator = struct {
     ) Coordinator {
         return .{
             .io = io,
-            .account = account,
+            .credentials = credentials,
             .metask_transport = transport,
             .management = management,
             .main_thread_id = main_thread_id,
@@ -273,8 +275,19 @@ pub const Coordinator = struct {
         self.probe_notifier = notifier;
     }
 
-    pub fn setRetryTimer(self: *Coordinator, timer: RetryTimer) void {
-        self.retry_timer = timer;
+    pub fn setUnauthorizedReport(self: *Coordinator, report: account_contract.UnauthorizedReport) void {
+        self.unauthorized = report;
+    }
+
+    pub fn setHost(self: *Coordinator, host: Host) void {
+        self.host = host;
+    }
+
+    /// MetaWork came to the front or left it; the beat runs only in front.
+    pub fn setActive(self: *Coordinator, active: bool) void {
+        self.assertMainThread();
+        self.management.setMetaskCatalogActive(active);
+        self.reconcile();
     }
 
     pub fn setCompletionTransport(
@@ -288,19 +301,25 @@ pub const Coordinator = struct {
         return .{ .context = self, .submit_fn = submitCommand };
     }
 
-    pub fn metaskAuthorizationCheck(self: *Coordinator) control_ports.MetaskAuthorizationCheck {
-        return .{ .context = self, .status_fn = metaskAuthorizationStatus };
+    /// Models' Metask credential port over Account's one way out for the
+    /// current credential: each read takes one lease, copies it into the
+    /// reader's storage and zeroes it at once.
+    pub fn metaskCredentials(self: *Coordinator) models_ports.MetaskCredentials {
+        return .{ .context = self, .read_fn = readMetaskCredential };
     }
 
-    /// Every Product query passes through Account's status, which also
-    /// re-arms a refresh whose timer is overdue.
-    fn metaskAuthorizationStatus(context: *anyopaque) control_ports.MetaskAuthorizationStatus {
+    fn readMetaskCredential(context: *anyopaque, account_storage: []u8, token_storage: []u8) std.mem.Allocator.Error!?models_ports.MetaskCredential {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
-        return switch (self.account.authorizationStatus()) {
-            .unavailable => .unavailable,
-            .available => |generation| .{ .available = .{ .generation = generation } },
-            .recovering => |epoch| .{ .recovering = epoch },
+        var lease = (try self.credentials.take()) orelse return null;
+        defer lease.deinit();
+        if (lease.principal_ref.len > account_storage.len or lease.access_token.len > token_storage.len) return null;
+        @memcpy(account_storage[0..lease.principal_ref.len], lease.principal_ref);
+        @memcpy(token_storage[0..lease.access_token.len], lease.access_token);
+        return .{
+            .account = account_storage[0..lease.principal_ref.len],
+            .token = token_storage[0..lease.access_token.len],
+            .generation = lease.authorization_generation,
         };
     }
 
@@ -319,21 +338,83 @@ pub const Coordinator = struct {
 
     fn prepareMedia(self: *Coordinator, kind: models_contract.MediaKind) ?PreparedMedia {
         self.assertMainThread();
-        const generation = self.account.authorizationGeneration() orelse return null;
-        var lease = (self.account.authorizationLease() catch return null) orelse return null;
-        defer lease.deinit();
-        if (generation != lease.authorization_generation) return null;
-        const candidate = switch (self.management.prepareMediaCandidate(.{
-            .kind = kind,
-            .principal_ref = lease.principal_ref,
-            .authorization_generation = lease.authorization_generation,
-            .bearer = lease.access_token,
-        })) {
+        // Models takes the credential of this moment through its port, as
+        // it does for dialogue; the candidate carries its generation.
+        const candidate = switch (self.management.prepareMediaCandidate(kind)) {
             .ready => |value| value,
             .rejected => return null,
         };
-        return .{ .candidate = candidate, .generation = generation };
+        return .{ .candidate = candidate, .generation = candidate.credential_generation };
     }
+
+    /// A media execution's output and the transport it sends through, which
+    /// tells Account of a 401 on the token it sends now: a renewal of the
+    /// Run replaces it, and its generation with it.
+    fn MediaOwner(comptime Output: type) type {
+        return struct {
+            output: Output,
+            inner: agent.CompletionTransport,
+            unauthorized: ?account_contract.UnauthorizedReport,
+            generation: ?product_task.MediaCredentialGeneration = null,
+
+            const Owner = @This();
+
+            fn create(coordinator: *Coordinator, workspace: product_workspace.TaskAuthority, inner: agent.CompletionTransport) ?*Owner {
+                const allocator = std.heap.c_allocator;
+                const owner = allocator.create(Owner) catch return null;
+                owner.* = .{
+                    .output = Output.init(allocator, coordinator.io, coordinator.main_thread_id, workspace) catch {
+                        allocator.destroy(owner);
+                        return null;
+                    },
+                    .inner = inner,
+                    .unauthorized = coordinator.unauthorized,
+                };
+                return owner;
+            }
+
+            fn follow(self: *Owner, credentials: *const product_task.MediaCredentials) void {
+                self.generation = credentials.watchGeneration();
+            }
+
+            fn transport(self: *Owner) agent.CompletionTransport {
+                return .{
+                    .context = self,
+                    .perform_fn = perform,
+                    .signal_cancellation_fn = if (self.inner.signal_cancellation_fn != null) signal else null,
+                };
+            }
+
+            fn perform(context: ?*anyopaque, request: agent.CompletionHttpRequest, cancellation: *const agent.CompletionCancellation, buffer: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
+                const self: *Owner = @ptrCast(@alignCast(context.?));
+                const response = try self.inner.perform(request, cancellation, buffer);
+                if (response.status == 401) if (self.unauthorized) |report| if (self.generation) |generation|
+                    report.report(generation.current(), .other);
+                return response;
+            }
+
+            fn signal(context: ?*anyopaque, cancellation: *agent.CompletionCancellation) void {
+                const self: *Owner = @ptrCast(@alignCast(context.?));
+                self.inner.signal_cancellation_fn.?(self.inner.context, cancellation);
+            }
+
+            fn release(context: *anyopaque) void {
+                const self: *Owner = @ptrCast(@alignCast(context));
+                if (self.generation) |*generation| generation.deinit();
+                self.output.deinit();
+                std.heap.c_allocator.destroy(self);
+            }
+
+            /// For an execution that releases what its output port points at.
+            fn releaseOutput(context: *anyopaque) void {
+                const output: *Output = @ptrCast(@alignCast(context));
+                release(@as(*Owner, @fieldParentPtr("output", output)));
+            }
+        };
+    }
+
+    const ImageOwner = MediaOwner(image_output.Output);
+    const VideoOwner = MediaOwner(video_output.Output);
 
     fn prepareImageRun(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
         const self: *Coordinator = @ptrCast(@alignCast(context));
@@ -341,22 +422,19 @@ pub const Coordinator = struct {
         var prepared = self.prepareMedia(.image) orelse return null;
         defer prepared.candidate.deinit();
         const allocator = std.heap.c_allocator;
-        const output = allocator.create(image_output.Output) catch return null;
-        output.* = image_output.Output.init(allocator, self.io, self.main_thread_id, workspace) catch {
-            allocator.destroy(output);
-            return null;
-        };
+        const owner = ImageOwner.create(self, workspace, transport) orelse return null;
         var result: product_task.OwnedImageExecution = .{
             .candidate = prepared.candidate.take(),
-            .transport = transport,
-            .output = output.port(),
-            .output_owner = output,
-            .release_output_fn = releaseImageOutput,
+            .transport = owner.transport(),
+            .output = owner.output.port(),
+            .output_owner = owner,
+            .release_output_fn = ImageOwner.release,
         };
         result.enableCredentialRenewal(allocator, self.io, prepared.generation) catch {
             result.deinit();
             return null;
         };
+        owner.follow(&result.authorization);
         return result;
     }
 
@@ -366,36 +444,19 @@ pub const Coordinator = struct {
         var prepared = self.prepareMedia(.video) orelse return null;
         defer prepared.candidate.deinit();
         const allocator = std.heap.c_allocator;
-        const output = allocator.create(video_output.Output) catch return null;
-        output.* = video_output.Output.init(allocator, self.io, self.main_thread_id, workspace) catch {
-            allocator.destroy(output);
-            return null;
-        };
+        const owner = VideoOwner.create(self, workspace, transport) orelse return null;
         var result: product_task.OwnedVideoExecution = .{
             .candidate = prepared.candidate.take(),
-            .transport = transport,
-            .output = output.port(),
-            .release_output_fn = releaseVideoOutput,
+            .transport = owner.transport(),
+            .output = owner.output.port(),
+            .release_output_fn = VideoOwner.releaseOutput,
         };
         result.authorization.enable(allocator, self.io, result.candidate.input().bearer, prepared.generation) catch {
             result.deinit();
             return null;
         };
+        owner.follow(&result.authorization);
         return result;
-    }
-
-    fn releaseVideoOutput(context: *anyopaque) void {
-        const output: *video_output.Output = @ptrCast(@alignCast(context));
-        const allocator = output.allocator;
-        output.deinit();
-        allocator.destroy(output);
-    }
-
-    fn releaseImageOutput(context: *anyopaque) void {
-        const output: *image_output.Output = @ptrCast(@alignCast(context));
-        const allocator = output.allocator;
-        output.deinit();
-        allocator.destroy(output);
     }
 
     fn submitCommand(
@@ -460,85 +521,42 @@ pub const Coordinator = struct {
         self.management.startCustomProvidersUnavailable();
     }
 
-    pub fn setCredentialRenewal(self: *Coordinator, renewal: control_ports.MetaskCredentialRenewal) void {
-        self.credential_renewal = renewal;
-    }
-
-    fn renewDeferredCredential(self: *Coordinator) void {
-        const renewal = self.credential_renewal orelse return;
-        const authority: control_ports.MetaskAuthorization = .{ .generation = self.account.authorizationGeneration() orelse return };
-        if (!renewal.needs(authority)) return;
-        var lease = (self.account.authorizationLease() catch {
-            renewal.renew(authority, null);
-            return;
-        }) orelse return;
-        defer lease.deinit();
-        if (lease.authorization_generation != authority.generation) return;
-        renewal.renew(authority, lease.access_token);
-    }
-
     fn cancelCatalog(self: *Coordinator) void {
         const job = self.catalog_job orelse return;
         job.cancel();
         job.join();
-        self.management.failMetaskCatalogRefresh(job.attempt_id, job.authorization_generation, .authorization_unavailable, "");
         job.deinit();
         self.catalog_job = null;
     }
 
-    pub fn authorizationChanged(self: *Coordinator) void {
+    fn nowMs(self: *const Coordinator) u64 {
+        const host = self.host orelse return 0;
+        return host.now_ns_fn(host.context) / std.time.ns_per_ms;
+    }
+
+    /// Follows the authorization an Account publication leaves. Models
+    /// keeps the catalog for the account and decides whether anything is
+    /// due; a new credential for the same account asks for nothing here.
+    pub fn follow(self: *Coordinator, authorization: account_contract.Authorization) void {
         self.assertMainThread();
-        // Existing executions renew before any catalog work, using Account
-        // authority alone. Catalog failure cannot roll this handoff back.
-        var lease = (self.account.authorizationLease() catch {
-            self.cancelCatalogRetry();
-            if (self.account.authorizationGeneration()) |generation| if (self.credential_renewal) |renewal| {
-                renewal.renew(.{ .generation = generation }, null);
-            };
-            self.cancelCatalog();
-            self.management.setMetaskAuthorizationUnavailable();
-            self.observed_authorization_generation = 0;
-            return;
-        }) orelse {
-            self.cancelCatalogRetry();
-            self.cancelCatalog();
-            if (self.observed_authorization_generation != 0)
-                self.management.setMetaskAuthorizationUnavailable();
-            self.observed_authorization_generation = 0;
-            return;
-        };
-        defer lease.deinit();
-        if (lease.authorization_generation == self.observed_authorization_generation) return;
-        self.cancelCatalogRetry();
-        if (self.account.authorizationGeneration()) |generation| if (self.credential_renewal) |renewal| {
-            if (generation == lease.authorization_generation)
-                renewal.renew(.{ .generation = generation }, lease.access_token);
-        };
-        self.cancelCatalog();
-        self.observed_authorization_generation = lease.authorization_generation;
-        _ = self.startCatalogJob(&lease);
+        switch (authorization) {
+            .checking, .recovering => {},
+            .signed_out => if (self.management.followMetaskPrincipal(null, 0).dropped) self.cancelCatalog(),
+            .available => |current| if (self.management.followMetaskPrincipal(current.account_id, current.generation).dropped) self.cancelCatalog(),
+        }
+        self.reconcile();
     }
 
     pub fn refreshCatalog(self: *Coordinator) models_contract.CommandResult {
         self.assertMainThread();
-        if (self.catalog_job != null)
-            return .rejected(.operation_in_progress);
-        self.cancelCatalogRetry();
-        var lease = (self.account.authorizationLease() catch
-            return .rejected(.local_resource_exhausted)) orelse {
-            self.management.setMetaskAuthorizationUnavailable();
-            self.observed_authorization_generation = 0;
-            return .rejected(.authorization_unavailable);
-        };
-        defer lease.deinit();
-        self.observed_authorization_generation = lease.authorization_generation;
-        return self.startCatalogJob(&lease);
+        const result = self.requestCatalog(.user);
+        self.reconcile();
+        return result;
     }
 
-    /// Resets Product-owned Models state through the snapshot CAS boundary,
-    /// then lets the normal authorization change path repopulate Metask
-    /// catalog data when an account is available. Acceptance only confirms
-    /// the durable reset; catalog readiness is observed asynchronously.
+    /// Resets Product-owned Models state through the snapshot CAS boundary.
+    /// Models then loads the followed account's catalog again by itself;
+    /// acceptance only confirms the durable reset.
     pub fn resetModelsStore(
         self: *Coordinator,
         expected_revision: u64,
@@ -547,52 +565,42 @@ pub const Coordinator = struct {
         if (self.catalog_job != null)
             return .rejected(.operation_in_progress);
         const result = self.management.resetModelStore(expected_revision);
-        if (!result.accepted) return result;
-        self.cancelCatalogRetry();
-        self.observed_authorization_generation = 0;
-        self.authorizationChanged();
+        if (result.accepted) self.reconcile();
         return result;
     }
 
-    fn startCatalogJob(
-        self: *Coordinator,
-        lease: *account_contract.OwnedAuthorizationLease,
-    ) models_contract.CommandResult {
-        const notifier = self.probe_notifier orelse {
-            self.management.setMetaskAuthorizationUnavailable();
-            return .rejected(.catalog_unavailable);
-        };
-        const preparation = switch (self.management.prepareMetaskCatalogRefresh(
-            lease.principal_ref,
-            lease.authorization_generation,
-        )) {
-            .ready => |value| value,
-            // The Models owner already exposes the precise rejection.
+    /// One catalog request, when Models finds it due or the person asks.
+    /// The person asking while one is underway makes it theirs.
+    fn requestCatalog(self: *Coordinator, kind: models_contract.CatalogRequestKind) models_contract.CommandResult {
+        if (self.catalog_job != null) {
+            if (kind == .due) return .rejected(.operation_in_progress);
+            _ = self.management.joinMetaskCatalogRequest();
+            return .acceptedResult();
+        }
+        const now = self.nowMs();
+        var lease: ?account_contract.OwnedAuthorizationLease = null;
+        defer if (lease) |*value| value.deinit();
+        const credential: models_contract.CatalogCredential = if (self.credentials.take()) |taken| credential: {
+            lease = taken;
+            const value = if (lease) |*held| held else break :credential .unavailable;
+            break :credential .{ .ready = .{ .principal_ref = value.principal_ref, .generation = value.authorization_generation } };
+        } else |_| .exhausted;
+        const id = switch (self.management.beginMetaskCatalogRequest(kind, credential, now).outcome) {
+            .started => |value| value,
+            .skipped => return .acceptedResult(),
             .rejected => |error_code| return .rejected(managementError(error_code)),
         };
-        const job = CatalogJob.create(
-            std.heap.c_allocator,
-            self.io,
-            self.metask_transport,
-            notifier,
-            preparation,
-            lease,
-        ) catch {
-            self.management.failMetaskCatalogRefresh(
-                preparation.attempt_id,
-                preparation.authorization_generation,
-                .local_resource_exhausted,
-                "",
-            );
+        const notifier = self.probe_notifier orelse {
+            _ = self.management.failMetaskCatalogRequest(id, .{ .code = .catalog_unavailable, .retryable = false }, now);
+            return .rejected(.catalog_unavailable);
+        };
+        const job = CatalogJob.create(std.heap.c_allocator, self.io, self.metask_transport, notifier, id, &lease.?) catch {
+            _ = self.management.failMetaskCatalogRequest(id, .{ .code = .local_resource_exhausted, .retryable = false }, now);
             return .rejected(.local_resource_exhausted);
         };
+        job.unauthorized = self.unauthorized;
         job.start() catch {
-            self.management.failMetaskCatalogRefresh(
-                preparation.attempt_id,
-                preparation.authorization_generation,
-                .local_resource_exhausted,
-                "",
-            );
+            _ = self.management.failMetaskCatalogRequest(id, .{ .code = .local_resource_exhausted, .retryable = false }, now);
             job.deinit();
             return .rejected(.local_resource_exhausted);
         };
@@ -600,37 +608,44 @@ pub const Coordinator = struct {
         return .acceptedResult();
     }
 
+    /// Sends what Models finds due, then arms the one timer for the next
+    /// time Models names. Any wake passes here, so a timer that ran late or
+    /// slept through a suspend changes only when, never whether.
+    fn reconcile(self: *Coordinator) void {
+        // Without a timer only what is due at once is sent: a load, never a
+        // retry or a beat.
+        if (self.catalog_job == null and self.management.metaskCatalogDue(self.nowMs())) _ = self.requestCatalog(.due);
+        const host = self.host orelse return;
+        // A request underway wakes the drain when it lands.
+        if (self.catalog_job != null) return host.cancel_timer_fn(host.context, timer_id) catch {};
+        const at = self.management.metaskCatalogNext() orelse return host.cancel_timer_fn(host.context, timer_id) catch {};
+        const wait_ms = @max(1, at -| self.nowMs());
+        host.start_timer_fn(host.context, timer_id, wait_ms *| std.time.ns_per_ms, false) catch {};
+    }
+
+    pub fn onTimer(self: *Coordinator) void {
+        self.assertMainThread();
+        self.reconcile();
+    }
+
     pub fn drain(self: *Coordinator) void {
         self.assertMainThread();
-        self.renewDeferredCredential();
         if (self.catalog_job) |job| {
             if (job.finished.load(.acquire)) {
                 job.join();
-                if (self.account.acceptsAuthorizationGeneration(
-                    job.authorization_generation,
-                )) {
-                    if (job.completion) |*completion| {
-                        var completion_port = completion.ownedPort();
-                        _ = self.management.completeMetaskCatalogRefresh(
-                            job.attempt_id,
-                            job.authorization_generation,
-                            &completion_port,
-                        );
-                        job.completion = null;
-                    } else {
-                        self.management.failMetaskCatalogRefresh(
-                            job.attempt_id,
-                            job.authorization_generation,
-                            job.error_code,
-                            "",
-                        );
-                        if (job.retryable_failure) self.armCatalogRetry(job.authorization_generation);
-                    }
+                const now = self.nowMs();
+                // A job another account superseded was cancelled when that
+                // commit was followed.
+                if (job.completion) |*completion| {
+                    var completion_port = completion.ownedPort();
+                    _ = self.management.completeMetaskCatalogRequest(job.request_id, &completion_port, now);
+                    job.completion = null;
                 } else {
-                    self.management.setMetaskAuthorizationUnavailable();
+                    _ = self.management.failMetaskCatalogRequest(job.request_id, job.failure, now);
                 }
                 self.catalog_job = null;
                 job.deinit();
+                self.reconcile();
             }
         }
         if (self.probe_job) |job| {
@@ -647,7 +662,8 @@ pub const Coordinator = struct {
 
     pub fn shutdown(self: *Coordinator) void {
         self.assertMainThread();
-        self.cancelCatalogRetry();
+        if (self.host) |host| host.cancel_timer_fn(host.context, timer_id) catch {};
+        self.host = null;
         if (self.catalog_job) |job| {
             job.cancel();
             job.join();
@@ -660,33 +676,6 @@ pub const Coordinator = struct {
             self.drain();
         }
         self.management.stopCustomProviders();
-    }
-
-    fn armCatalogRetry(self: *Coordinator, generation: u64) void {
-        const timer = self.retry_timer orelse return;
-        if (self.retry_used_generation == generation or self.catalog_retry != null) return;
-        const id = self.next_retry_timer_id;
-        self.next_retry_timer_id += 1;
-        timer.start_fn(timer.context, id, 2 * std.time.ns_per_s, false) catch return;
-        self.retry_used_generation = generation;
-        self.catalog_retry = .{ .id = id, .generation = generation };
-    }
-
-    fn cancelCatalogRetry(self: *Coordinator) void {
-        const pending = self.catalog_retry orelse return;
-        self.catalog_retry = null;
-        const timer = self.retry_timer.?;
-        timer.cancel_fn(timer.context, pending.id) catch {};
-    }
-
-    pub fn onCatalogRetryTimer(self: *Coordinator, id: u64) bool {
-        self.assertMainThread();
-        const pending = self.catalog_retry orelse return false;
-        if (pending.id != id) return false;
-        self.catalog_retry = null;
-        if (self.catalog_job != null or !self.account.acceptsAuthorizationGeneration(pending.generation)) return true;
-        _ = self.refreshCatalog();
-        return true;
     }
 
     fn assertMainThread(self: *const Coordinator) void {
@@ -709,30 +698,327 @@ fn managementError(error_code: models_contract.ModelsError) models_contract.Mana
     };
 }
 
-test "image Run preparation borrows a fresh Account lease and freezes owned output authority" {
+test "a catalog refused for its token is worth a second try, one refused for the account is not" {
+    const Fixture = struct {
+        status: u16,
+        failed: ?models_contract.CatalogFailure = null,
+        reported: ?u64 = null,
+
+        fn take(_: *anyopaque) std.mem.Allocator.Error!?account_contract.OwnedAuthorizationLease {
+            return account_contract.OwnedAuthorizationLease.init(std.testing.allocator, "account-catalog", "catalog-access", 3) catch |err| switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => unreachable,
+            };
+        }
+        fn begin(_: *anyopaque, kind: models_contract.CatalogRequestKind, credential: models_contract.CatalogCredential, _: u64) models_contract.CatalogRequestStart {
+            std.debug.assert(kind == .user);
+            std.testing.expectEqualStrings("account-catalog", credential.ready.principal_ref) catch unreachable;
+            std.testing.expectEqual(@as(u64, 3), credential.ready.generation) catch unreachable;
+            return .{ .outcome = .{ .started = 1 }, .changed = true };
+        }
+        fn fail(context: *anyopaque, id: u64, failure: models_contract.CatalogFailure, _: u64) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(id == 1);
+            self.failed = failure;
+            return true;
+        }
+        fn modelsHttp(context: *anyopaque, _: metask_transport.Request, _: []u8) metask_transport.TransportError!metask_transport.Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return .{ .status = self.status, .body = "" };
+        }
+        fn notDue(_: *anyopaque, _: u64) bool {
+            return false;
+        }
+        fn notify(_: *anyopaque) void {}
+        fn report(context: *anyopaque, generation: u64, kind: account_contract.Unauthorized) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(kind == .other);
+            self.reported = generation;
+        }
+    };
+    for ([_]u16{ 401, 403 }) |status| {
+        var fixture: Fixture = .{ .status = status };
+        var management: control_ports.ModelsManagement = undefined;
+        management.context = &fixture;
+        management.begin_metask_catalog_request_fn = Fixture.begin;
+        management.fail_metask_catalog_request_fn = Fixture.fail;
+        management.metask_catalog_due_fn = Fixture.notDue;
+        var coordinator = Coordinator.init(.{ .context = &fixture, .take_fn = Fixture.take }, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
+        coordinator.setProbeNotifier(.{ .context = &fixture, .notify_fn = Fixture.notify });
+        coordinator.setUnauthorizedReport(.{ .context = &fixture, .report_fn = Fixture.report });
+        try std.testing.expect(coordinator.refreshCatalog().accepted);
+        while (!coordinator.catalog_job.?.finished.load(.acquire)) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        coordinator.drain();
+        // Neither ends the login here; only Account may. Whether and when
+        // to try again is Models' to decide from its classification.
+        try std.testing.expectEqual(models_contract.ModelsError.catalog_unavailable, fixture.failed.?.code);
+        try std.testing.expectEqual(status == 401, fixture.failed.?.retryable);
+        // Account hears of the refused token, with the generation it was.
+        try std.testing.expectEqual(@as(?u64, if (status == 401) 3 else null), fixture.reported);
+    }
+}
+
+test "the catalog timer runs only when Models names a time, and a renewal asks for nothing" {
+    const Fixture = struct {
+        now_ms: u64 = 1_000,
+        next: ?u64 = null,
+        followed: usize = 0,
+        begun: usize = 0,
+        joined: usize = 0,
+        settled: usize = 0,
+        armed_ms: ?u64 = null,
+        hold: std.atomic.Value(bool) = .init(true),
+
+        fn take(_: *anyopaque) std.mem.Allocator.Error!?account_contract.OwnedAuthorizationLease {
+            return account_contract.OwnedAuthorizationLease.init(std.testing.allocator, "account-timer", "timer-access", 4) catch |err| switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => unreachable,
+            };
+        }
+        fn follow(context: *anyopaque, principal: ?[]const u8, generation: u64) models_contract.MetaskFollow {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.testing.expectEqualStrings("account-timer", principal.?) catch unreachable;
+            std.debug.assert(generation == 5);
+            self.followed += 1;
+            return .{ .changed = false, .dropped = false };
+        }
+        fn nextFn(context: *anyopaque) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.next;
+        }
+        fn due(context: *anyopaque, now_ms: u64) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return now_ms >= (self.next orelse return false);
+        }
+        fn begin(context: *anyopaque, kind: models_contract.CatalogRequestKind, _: models_contract.CatalogCredential, _: u64) models_contract.CatalogRequestStart {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(kind == .due);
+            self.begun += 1;
+            self.next = null;
+            return .{ .outcome = .{ .started = 1 }, .changed = false };
+        }
+        fn join(context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.joined += 1;
+            return true;
+        }
+        fn complete(context: *anyopaque, id: u64, completion: *models_ports.OwnedCatalogCompletion, now_ms: u64) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(id == 1);
+            completion.deinit();
+            self.settled += 1;
+            self.next = now_ms + models_metask.refresh_interval_ms;
+            return false;
+        }
+        fn modelsHttp(context: *anyopaque, _: metask_transport.Request, output: []u8) metask_transport.TransportError!metask_transport.Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            while (self.hold.load(.acquire)) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch return error.NetworkFailed;
+            const body = "{\"object\":\"list\",\"has_more\":false,\"data\":[]}";
+            @memcpy(output[0..body.len], body);
+            return .{ .status = 200, .body = output[0..body.len] };
+        }
+        fn notify(_: *anyopaque) void {}
+        fn now(context: ?*anyopaque) u64 {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.now_ms * std.time.ns_per_ms;
+        }
+        fn start(context: ?*anyopaque, id: u64, ns: u64, repeats: bool) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            std.debug.assert(id == timer_id and !repeats);
+            self.armed_ms = ns / std.time.ns_per_ms;
+        }
+        fn cancel(context: ?*anyopaque, id: u64) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            std.debug.assert(id == timer_id);
+            self.armed_ms = null;
+        }
+    };
+    var fixture: Fixture = .{ .next = 6_000 };
+    var management: control_ports.ModelsManagement = undefined;
+    management.context = &fixture;
+    management.follow_metask_principal_fn = Fixture.follow;
+    management.metask_catalog_next_fn = Fixture.nextFn;
+    management.metask_catalog_due_fn = Fixture.due;
+    management.begin_metask_catalog_request_fn = Fixture.begin;
+    management.join_metask_catalog_request_fn = Fixture.join;
+    management.complete_metask_catalog_request_fn = Fixture.complete;
+    var coordinator = Coordinator.init(.{ .context = &fixture, .take_fn = Fixture.take }, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
+    coordinator.setProbeNotifier(.{ .context = &fixture, .notify_fn = Fixture.notify });
+    coordinator.setHost(.{ .context = &fixture, .now_ns_fn = Fixture.now, .start_timer_fn = Fixture.start, .cancel_timer_fn = Fixture.cancel });
+    // A renewal is followed, and asks for nothing: Models names no time
+    // before its own, so the timer waits for that.
+    coordinator.follow(.{ .available = .{ .account_id = "account-timer", .generation = 5 } });
+    try std.testing.expectEqual(@as(usize, 1), fixture.followed);
+    try std.testing.expectEqual(@as(usize, 0), fixture.begun);
+    try std.testing.expectEqual(@as(?u64, 5_000), fixture.armed_ms);
+    // Early, a timer sends nothing; at the time Models named, it sends once.
+    fixture.now_ms = 5_999;
+    coordinator.onTimer();
+    try std.testing.expectEqual(@as(usize, 0), fixture.begun);
+    fixture.now_ms = 6_000;
+    coordinator.onTimer();
+    try std.testing.expectEqual(@as(usize, 1), fixture.begun);
+    // No timer runs while the request does.
+    try std.testing.expectEqual(@as(?u64, null), fixture.armed_ms);
+    // The person asking meanwhile makes that request theirs; there is
+    // still one.
+    try std.testing.expect(coordinator.refreshCatalog().accepted);
+    try std.testing.expectEqual(@as(usize, 1), fixture.joined);
+    try std.testing.expectEqual(@as(usize, 1), fixture.begun);
+    fixture.hold.store(false, .release);
+    while (!coordinator.catalog_job.?.finished.load(.acquire)) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    coordinator.drain();
+    try std.testing.expectEqual(@as(usize, 1), fixture.settled);
+    try std.testing.expect(coordinator.catalog_job == null);
+    try std.testing.expectEqual(@as(?u64, models_metask.refresh_interval_ms), fixture.armed_ms);
+}
+
+test "a catalog request takes a credential only when due, and goes with the account it was for" {
+    const Fixture = struct {
+        due_now: bool = false,
+        dropped: bool = false,
+        taken: usize = 0,
+        begun: usize = 0,
+        cancelled: std.atomic.Value(bool) = .init(false),
+
+        fn take(context: *anyopaque) std.mem.Allocator.Error!?account_contract.OwnedAuthorizationLease {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.taken += 1;
+            return account_contract.OwnedAuthorizationLease.init(std.testing.allocator, "account-drop", "drop-access", 4) catch |err| switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => unreachable,
+            };
+        }
+        fn follow(context: *anyopaque, _: ?[]const u8, _: u64) models_contract.MetaskFollow {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return .{ .changed = self.dropped, .dropped = self.dropped };
+        }
+        fn due(context: *anyopaque, _: u64) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.due_now;
+        }
+        fn begin(context: *anyopaque, _: models_contract.CatalogRequestKind, _: models_contract.CatalogCredential, _: u64) models_contract.CatalogRequestStart {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.begun += 1;
+            self.due_now = false;
+            return .{ .outcome = .{ .started = 1 }, .changed = false };
+        }
+        /// Underway until cancelled.
+        fn modelsHttp(context: *anyopaque, request: metask_transport.Request, _: []u8) metask_transport.TransportError!metask_transport.Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            request.control.?.cancellation.wait();
+            self.cancelled.store(true, .release);
+            return error.Cancelled;
+        }
+        fn notify(_: *anyopaque) void {}
+    };
+    var fixture: Fixture = .{};
+    var management: control_ports.ModelsManagement = undefined;
+    management.context = &fixture;
+    management.follow_metask_principal_fn = Fixture.follow;
+    management.metask_catalog_due_fn = Fixture.due;
+    management.begin_metask_catalog_request_fn = Fixture.begin;
+    var coordinator = Coordinator.init(.{ .context = &fixture, .take_fn = Fixture.take }, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
+    coordinator.setProbeNotifier(.{ .context = &fixture, .notify_fn = Fixture.notify });
+    const available: account_contract.Authorization = .{ .available = .{ .account_id = "account-drop", .generation = 4 } };
+    // Nothing due: no credential is taken, on a publication or a wake.
+    coordinator.follow(available);
+    coordinator.onTimer();
+    try std.testing.expectEqual(@as(usize, 0), fixture.taken);
+    try std.testing.expectEqual(@as(usize, 0), fixture.begun);
+    fixture.due_now = true;
+    coordinator.onTimer();
+    try std.testing.expectEqual(@as(usize, 1), fixture.taken);
+    try std.testing.expectEqual(@as(usize, 1), fixture.begun);
+    // A publication that keeps the account leaves the request alone.
+    coordinator.follow(available);
+    try std.testing.expect(coordinator.catalog_job != null);
+    try std.testing.expect(!fixture.cancelled.load(.acquire));
+    // One that drops it cancels, joins and frees the request, its
+    // credential copy included.
+    fixture.dropped = true;
+    coordinator.follow(.signed_out);
+    try std.testing.expect(coordinator.catalog_job == null);
+    try std.testing.expect(fixture.cancelled.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), fixture.taken);
+}
+
+test "a media request refused for its token tells Account the generation it sends" {
+    const Fixture = struct {
+        status: u16 = 401,
+        reported: ?u64 = null,
+        const Stub = struct {
+            fn init(_: std.mem.Allocator, _: std.Io, _: std.Thread.Id, _: product_workspace.TaskAuthority) !Stub {
+                return .{};
+            }
+            fn deinit(_: *Stub) void {}
+        };
+        fn take(_: *anyopaque) std.mem.Allocator.Error!?account_contract.OwnedAuthorizationLease {
+            return null;
+        }
+        fn modelsHttp(_: *anyopaque, _: metask_transport.Request, _: []u8) metask_transport.TransportError!metask_transport.Response {
+            return error.ProtocolFailed;
+        }
+        fn media(context: ?*anyopaque, _: agent.CompletionHttpRequest, _: *const agent.CompletionCancellation, _: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return .{ .status = self.status, .body = "" };
+        }
+        fn report(context: *anyopaque, generation: u64, kind: account_contract.Unauthorized) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(kind == .other);
+            self.reported = generation;
+        }
+    };
+    var fixture: Fixture = .{};
+    var management: control_ports.ModelsManagement = undefined;
+    management.context = &fixture;
+    var coordinator = Coordinator.init(.{ .context = &fixture, .take_fn = Fixture.take }, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
+    coordinator.setUnauthorizedReport(.{ .context = &fixture, .report_fn = Fixture.report });
+    const Owner = Coordinator.MediaOwner(Fixture.Stub);
+    const authority: product_workspace.TaskAuthority = .{ .id = 5, .epoch = 2, .kind = .manual, .canonical_root = "", .trust = .explicitly_trusted };
+    const owner = Owner.create(&coordinator, authority, .{ .context = &fixture, .perform_fn = Fixture.media }).?;
+    defer Owner.release(owner);
+    var credentials: product_task.MediaCredentials = .{};
+    try credentials.enable(std.testing.allocator, std.testing.io, "token-a", 7);
+    defer credentials.source.?.release();
+    owner.follow(&credentials);
+    var cancellation: agent.CompletionCancellation = .{};
+    var buffer: [8]u8 = undefined;
+    for ([_]u16{ 200, 401 }) |status| {
+        fixture.status = status;
+        const response = try owner.transport().perform(.{ .url = "https://www.metask-ai.com/v1/images/generations", .headers = &.{}, .body = "", .connect_timeout_ms = 1000, .source = "metask" }, &cancellation, &buffer);
+        // The answer itself goes on unchanged.
+        try std.testing.expectEqual(status, response.status);
+        try std.testing.expectEqual(@as(?u64, if (status == 401) 7 else null), fixture.reported);
+    }
+    // Renewed, the Run sends the next generation's token, and that is the
+    // generation refused.
+    credentials.source.?.replaceAt("token-b", 8);
+    _ = try owner.transport().perform(.{ .url = "https://www.metask-ai.com/v1/images/generations", .headers = &.{}, .body = "", .connect_timeout_ms = 1000, .source = "metask" }, &cancellation, &buffer);
+    try std.testing.expectEqual(@as(?u64, 8), fixture.reported);
+}
+
+test "image Run preparation renews from the candidate's own generation and freezes owned output authority" {
     const Fixture = struct {
         available: bool = false,
         reject: bool = false,
         calls: usize = 0,
-        expected_generation: u64 = 0,
-        expected_token: []const u8 = "image-access-a",
+        token: []const u8 = "image-access-a",
+        generation: u64 = 3,
         model: []const u8 = "image-model-a",
 
-        fn prepare(context: *anyopaque, input: models_contract.MediaPreparationInput) models_contract.MediaPreparation {
+        fn take(_: *anyopaque) std.mem.Allocator.Error!?account_contract.OwnedAuthorizationLease {
+            @panic("Models reads the credential for an image itself");
+        }
+        fn prepare(context: *anyopaque, kind: models_contract.MediaKind) models_contract.MediaPreparation {
             const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(kind == .image);
             if (!self.available) return .{ .rejected = .model_not_found };
             self.calls += 1;
-            std.testing.expectEqualStrings("account-image", input.principal_ref) catch unreachable;
-            std.testing.expectEqual(self.expected_generation, input.authorization_generation) catch unreachable;
-            std.testing.expectEqualStrings(self.expected_token, input.bearer) catch unreachable;
             if (self.reject) return .{ .rejected = .generation_mismatch };
-            return .{ .ready = models_contract.OwnedMediaCandidate.copy(std.testing.allocator, .image, self.model, input.bearer, 7) catch unreachable };
-        }
-        fn accountHttp(_: *anyopaque, request: account_api.TransportRequest, output: []u8) account_api.TransportError!account_api.TransportResponse {
-            if (request.kind != .refresh_token) return error.ProtocolFailed;
-            const body = "{\"access_token\":\"image-access-b\",\"refresh_token\":\"synthetic-refresh-b\",\"token_type\":\"Bearer\",\"expires_in\":3600}";
-            @memcpy(output[0..body.len], body);
-            return .{ .status = 200, .body = output[0..body.len] };
+            var candidate = models_contract.OwnedMediaCandidate.copy(std.testing.allocator, .image, self.model, self.token, 7) catch unreachable;
+            candidate.credential_generation = self.generation;
+            return .{ .ready = candidate };
         }
         fn modelsHttp(_: *anyopaque, _: metask_transport.Request, _: []u8) metask_transport.TransportError!metask_transport.Response {
             @panic("image preparation must not refresh the catalog");
@@ -740,28 +1026,14 @@ test "image Run preparation borrows a fresh Account lease and freezes owned outp
         fn imageHttp(_: ?*anyopaque, _: agent.CompletionHttpRequest, _: *const agent.CompletionCancellation, _: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
             @panic("image preparation must not generate or reserve a file");
         }
-        fn wake(_: *anyopaque) void {}
     };
     var fixture: Fixture = .{};
-    var account = account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &fixture, .perform_fn = Fixture.accountHttp, .retire_fn = account_api.retireNothing }, account_api.TestSupport.loopbackEndpoint(), .{ .context = &fixture, .notify_fn = Fixture.wake });
-    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
-    account_api.TestSupport.attachPlatform(&account, &platform);
-    defer {
-        account_api.TestSupport.detachPlatform(&account);
-        account.deinit();
-    }
-    var authenticated = try account_api.TestSupport.prepareAuthenticated(&account, "account-image", "Image User", fixture.expected_token, "synthetic-refresh", 200);
-    defer authenticated.deinit();
-    account.commit(&authenticated);
-    var lease = (try account.authorizationLease()).?;
-    fixture.expected_generation = lease.authorization_generation;
-    lease.deinit();
-    // This unit observes only the two image management methods; catalog and
-    // selection behavior are independently tested against the real Models owner.
+    // This unit observes only the image management method; catalog and
+    // selection behavior are tested against the real Models owner.
     var management: control_ports.ModelsManagement = undefined;
     management.context = &fixture;
     management.prepare_media_candidate_fn = Fixture.prepare;
-    var coordinator = Coordinator.init(&account, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
+    var coordinator = Coordinator.init(.{ .context = &fixture, .take_fn = Fixture.take }, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
     coordinator.setCompletionTransport(.{ .perform_fn = Fixture.imageHttp });
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -770,61 +1042,30 @@ test "image Run preparation borrows a fresh Account lease and freezes owned outp
     const authority: product_workspace.TaskAuthority = .{ .id = 5, .epoch = 2, .kind = .manual, .canonical_root = root[0..root_len], .trust = .explicitly_trusted };
     const port = coordinator.imageRunPreparation();
     try std.testing.expect(port.prepare(authority) == null);
-    try std.testing.expectEqual(@as(usize, 0), fixture.calls);
     fixture.available = true;
     var first = port.prepare(authority).?;
     defer first.deinit();
     try std.testing.expectEqualStrings(models_contract.metask_images_generations_url, first.input().binding.endpoint);
     try std.testing.expectEqualStrings("image-model-a", first.input().binding.model);
     try std.testing.expectEqualStrings("image-access-a", first.input().binding.credential);
-    const output: *image_output.Output = @ptrCast(@alignCast(first.output_owner));
+    // Renewal starts from the generation the candidate's credential has.
+    try std.testing.expectEqual(@as(u64, 3), first.authorization.generation);
+    const owner: *Coordinator.ImageOwner = @ptrCast(@alignCast(first.output_owner));
     @memset(root[0..root_len], 'x');
-    try std.testing.expect(!std.mem.eql(u8, root[0..root_len], output.root));
-    // Hard expiry requires no Account notification or cached-view change.
-    platform.now_unix_seconds = 200;
-    try std.testing.expect(port.prepare(authority) == null);
-    platform.now_unix_seconds = null;
-    try std.testing.expect(port.prepare(authority) == null);
-    try std.testing.expectEqual(@as(usize, 1), fixture.calls);
-    platform.now_unix_seconds = 150;
-    fixture.expected_token = "image-access-b";
+    try std.testing.expect(!std.mem.eql(u8, root[0..root_len], owner.output.root));
+    fixture.token = "image-access-b";
+    fixture.generation = 4;
     fixture.model = "image-model-b";
-    // Drive the real Account refresh transition with a synthetic in-process
-    // transport. Image preparation itself never dispatches Account work.
-    var refresh = switch (account.prepareTokenRefresh()) {
-        .prepared => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    defer refresh.deinit();
-    try std.testing.expect(account.admitEffect(&refresh));
-    account.commit(&refresh);
-    try std.testing.expect(account.dispatchCommitted(&refresh) == null);
-    account_api.TestSupport.joinNetwork(&account);
-    var rotated = switch (account.prepareNextCompletion().?) {
-        .prepared => |value| value,
-        else => return error.TestUnexpectedResult,
-    };
-    defer rotated.deinit();
-    account.commit(&rotated);
-    lease = (try account.authorizationLease()).?;
-    fixture.expected_generation = lease.authorization_generation;
-    lease.deinit();
     _ = try tmp.dir.realPath(std.testing.io, &root);
     var second = port.prepare(authority).?;
     defer second.deinit();
     try std.testing.expectEqualStrings("image-access-b", second.input().binding.credential);
     try std.testing.expectEqualStrings("image-model-b", second.input().binding.model);
+    try std.testing.expectEqual(@as(u64, 4), second.authorization.generation);
     try std.testing.expectEqualStrings("image-access-a", first.input().binding.credential);
     fixture.reject = true;
     try std.testing.expect(port.prepare(authority) == null);
     fixture.available = false;
     try std.testing.expect(port.prepare(authority) == null);
     try std.testing.expectEqual(@as(usize, 3), fixture.calls);
-    var logged_out = account_api.TestSupport.prepareLoggedOutAfterExternalCommit(&account);
-    defer logged_out.deinit();
-    account.commit(&logged_out);
-    fixture.available = true;
-    try std.testing.expect(port.prepare(authority) == null);
-    try std.testing.expectEqual(@as(usize, 3), fixture.calls);
-    try std.testing.expectEqualStrings("image-access-a", first.input().binding.credential);
 }

@@ -24,7 +24,15 @@ function snapshot(revision, tasks = []) {
     account: {
       state: "signed_out",
       catalogState: "unavailable",
-      canCancel: false,
+      actions: {
+        cancel: false,
+        retry: false,
+        login: false,
+        logout: false,
+        clear: false,
+      },
+      unreachable: false,
+      attempt: null,
       accountId: "",
       displayName: "",
       apiKeys: [],
@@ -38,7 +46,11 @@ function snapshot(revision, tasks = []) {
       safeDiagnostic: "",
       catalogGeneration: "0",
     },
-    newTaskAdmission: { available: false, reason: "workspace_unavailable" },
+    newTaskAdmission: {
+      available: false,
+      reason: "workspace_unavailable",
+      metask: "none",
+    },
     capabilities: {
       taskHistoryPersistence: false,
       conversationRecovery: false,

@@ -15,20 +15,8 @@ export const enUS = {
     "Could not change the project. Refresh and try again.",
   "task.draft_preserved":
     "Your original draft was kept. You are viewing the destination project’s draft.",
-  "settings.working_directories": "Working directories",
   "workspace.directory_capacity":
-    "The working directory limit is reached. Revoke an unused directory in Settings → Working directories.",
-  "workspace.directory_management_body":
-    "Manage authorized local working directories. Choosing a directory registers access; Add project creates its sidebar entry.",
-  "workspace.choose_directory": "Choose working directory",
-  "workspace.revoke_directory": "Revoke directory access",
-  "workspace.no_directories": "No working directories registered.",
-  "workspace.directory_action_failed":
-    "Could not complete the directory action. Refresh and try again.",
-  "workspace.revoke_directory_body":
-    "Revoke access to “{title}” and close tasks actually working in it. Associated chats: {count}. History and local files are kept.",
-  "workspace.revoke_project_body":
-    "The “{title}” project entry will also be removed. Chats working in other directories: {count}. They remain in Recent; archived chats stay in the archive. Adding the project again restores its group.",
+    "The working directory limit is reached. Choose a previously registered directory.",
   "model_setup.preference_not_saved":
     "Your model preference could not be saved. Confirmed task choices are unchanged.",
   "mutation.reason.schedule_persistence_unavailable":
@@ -90,6 +78,8 @@ export const enUS = {
     "The model service could not complete this request.",
   "run.model_error.reason.metask_insufficient_balance":
     "Your Metask balance and plan quota are insufficient.",
+  "run.model_error.reason.metask_account_suspended":
+    "Your Metask account is suspended. See the Metask website for details.",
   "run.guidance.review_context":
     "Shorten your next message or compact the conversation when available.",
   "run.guidance.revise_instruction":
@@ -144,7 +134,8 @@ export const enUS = {
 
   "settings.archived_tasks": "Archived tasks",
   "archive.search": "Search archived tasks",
-  "archive.count": "{count} archived tasks",
+  "archive.count": "Total: {count}",
+  "archive.filtered_count": "{matched} of {count}",
   "archive.empty": "Archived tasks will appear here.",
   "archive.no_results": "No matching tasks.",
   "archive.sync_unavailable":
@@ -171,6 +162,12 @@ export const enUS = {
     "Complete sign-in in your browser. Your draft will be kept.",
   "model_setup.cancel_login": "Cancel sign-in",
   "model_setup.loading": "Loading models…",
+  "model_setup.unconfirmed":
+    "Can't confirm your sign-in yet. Your text is kept.",
+  "model_setup.recovering":
+    "Connecting to Metask. You can send once it's connected; your text is kept.",
+  "model_setup.unreachable":
+    "Can't reach Metask right now. MetaWork keeps retrying; your text is kept.",
   "model_setup.preparing": "Preparing the model…",
   "model_setup.choose": "Choose an available model before sending.",
   "model_setup.catalog_failed":
@@ -366,6 +363,7 @@ export const enUS = {
   "common.remove": "Remove",
   "common.cancel": "Cancel",
   "common.close": "Close",
+  "common.ok": "OK",
   "time.just_now": "Just now",
   "copy.input": "Copy input",
   "copy.response": "Copy response",
@@ -373,7 +371,11 @@ export const enUS = {
   "copy.copied": "Copied",
   "copy.failed": "Copy failed",
   "link.open_failed": "Couldn’t open this link.",
-  "about.menu_item": "About",
+  "settings.about": "About",
+  "settings.about_product": "About {product}",
+  "about.current_version": "Current version",
+  "about.visit_website": "Visit website",
+  "about.contact_us": "Contact us",
   "about.developer": "Developer",
   "about.developer_name": "Metask",
   "about.version": "Version",
@@ -464,6 +466,9 @@ export const enUS = {
   "account.checking.title": "Checking sign-in",
   "account.checking.body":
     "MetaWork is checking whether this device can sign in.",
+  "account.unconfirmed.title": "Can't confirm your sign-in yet",
+  "account.unconfirmed.body":
+    "MetaWork keeps retrying. You won't need to sign in again once it's back.",
   "account.sign_in_required.title": "Sign in to MetaWork",
   "account.sign_in_required.body":
     "Use your Metask account to load the models available to you.",
@@ -504,9 +509,16 @@ export const enUS = {
   "account.cancel": "Cancel current action",
   "account.refresh_catalog": "Sync again",
   "account.retry_refresh": "Retry sign-in refresh",
+  "account.retry_now": "Try again now",
+  "account.login_again": "Sign in again",
+  "account.clear_residue": "Clear sign-in again",
   "account.logout": "Sign out",
   "account.logout_confirm":
-    "Signing out removes your Metask sign-in credentials from this device. Sign in again to create new tasks using Metask models. Your custom models, local tasks and history, and workspace files will remain.",
+    "After you sign out, you can't use Metask models until you sign in again. Your custom models, local tasks and history, and workspace files will remain.",
+  "account.logout_stops_tasks.one":
+    "{count} task is using Metask models and will stop when you sign out.",
+  "account.logout_stops_tasks.other":
+    "{count} tasks are using Metask models and will stop when you sign out.",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.command_failed":
@@ -1766,15 +1778,9 @@ export const enUS = {
   "settings.account_usage": "Account usage",
   "settings.account_usage_scope":
     "These figures cover your whole Metask account, not only activity in MetaWork.",
-  "settings.account_usage_balance": "Balance",
-  "settings.account_concurrency_limit": "Concurrency allowance {value}",
-  "settings.account_concurrency_unlimited": "Unlimited",
   "settings.account_recharge": "Recharge",
   "settings.account_recharge_browser_hint":
     "Open the Metask recharge page in your browser",
-  "settings.account_usage_total": "All time",
-  "settings.account_usage_tokens": "{value} Token",
-  "settings.account_usage_cost": "{value} U",
   "settings.account_usage_stale": "May be out of date",
   "settings.account_usage_syncing": "Syncing…",
   "settings.account_usage_unavailable": "Temporarily unavailable",
@@ -1977,6 +1983,7 @@ export const enUS = {
   "outcome.dependency_contract_failure": "Task runtime failed",
   "cause.user_cancel": "Stopped by you",
   "cause.approval_mode_change": "Stopped to change the approval mode",
+  "cause.account_logout": "Stopped to sign out",
   "cause.edit_and_rerun": "Stopped to rerun from an edited message",
   "cause.timeout": "Timed out",
   "cause.session_close": "Session released",
@@ -2039,7 +2046,7 @@ export const enUS = {
   "mutation.reason.metask_authorization_required":
     "Sign in to Metask to use this model.",
   "mutation.reason.metask_authorization_recovering":
-    "Reconnecting to Metask. Messages run once the connection is back.",
+    "Connecting to Metask. This message runs once connected, or is marked not run if this attempt fails.",
   "mutation.reason.metask_connection_unavailable":
     "Can't reach Metask right now. The message was not run.",
   "mutation.reason.session_poisoned":
@@ -2344,12 +2351,20 @@ export const enUS = {
     "The app interrupted the previous start. Edit and confirm; it will not retry automatically.",
   "scheduled.reason.permission_required":
     "The task stopped because permission was required. Review the instruction and permissions, then edit and confirm.",
+  "scheduled.admission.waiting": "Runs once your account or model is ready.",
+  "scheduled.admission.signed_out": "Runs after you sign in to Metask.",
+  "scheduled.admission.other_account":
+    "Bound to another Metask account. Switch back to it, or edit it to use a model from this account.",
+  "scheduled.admission.model_unavailable":
+    "The selected model is no longer available, so it will not run. Edit it to choose another model.",
   "scheduled.notification_unavailable":
     "The task from this notification is unavailable. Refresh and check your tasks.",
   "notification.schedule.completed": "Scheduled task completed",
   "notification.schedule.failed": "Scheduled task failed",
   "notification.schedule.skipped":
     "A run was skipped because the previous run is still active",
+  "notification.schedule.model_unavailable":
+    "A run was skipped because its model is no longer available",
   "notification.schedule.needs_attention": "Scheduled task needs attention",
   "notification.run.completed": "Task finished",
   "notification.run.failed": "Task failed",

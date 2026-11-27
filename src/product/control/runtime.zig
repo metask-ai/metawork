@@ -1412,9 +1412,6 @@ test "Task model credential collection carries more than 128 known values and re
     const Harness = struct {
         count: usize = 0,
         complete: bool = false,
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
         fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             var bytes: [32]u8 = undefined;
             for (0..140) |index| try callback(context, std.fmt.bufPrint(&bytes, "renewal-fixture-{d}", .{index}) catch unreachable);
@@ -1440,7 +1437,7 @@ test "Task model credential collection carries more than 128 known values and re
             for (values.values.items) |value| try callback(target, value);
         }
     };
-    control.account_credentials = .{ .context = &owned, .generation_fn = Harness.generation, .visit_fn = Source.visit };
+    control.account_credentials = .{ .context = &owned, .visit_fn = Source.visit };
     defer control.account_credentials = null;
     control.task_persistence = .{ .context = &harness, .credentials_fn = Harness.credentials };
     control.syncHistoryCredentials(null, null);
@@ -1522,8 +1519,6 @@ pub const Runtime = struct {
     assembling_snapshot: if (builtin.is_test) bool else void = if (builtin.is_test) false else {},
     projection_history_epoch: u64 = 1,
     account_credentials: ?account_contract.AccessTokenProjection = null,
-    account_credential_generation: u64 = 0,
-    learned_renewal: ?control_ports.MetaskAuthorization = null,
     default_approval_mode: ApprovalMode = .auto_review,
     account_projection: account_projection.Projection,
     execution_generations: execution_state.Generations = .{},
@@ -1533,7 +1528,8 @@ pub const Runtime = struct {
     completion_factory: CompletionFactory,
     image_run_preparation: ?control_ports.ImageRunPreparation = null,
     video_run_preparation: ?control_ports.VideoRunPreparation = null,
-    metask_authorization_check: ?control_ports.MetaskAuthorizationCheck = null,
+    account_authorization: ?account_contract.AuthorizationQuery = null,
+    account_unauthorized: ?account_contract.UnauthorizedReport = null,
     file_delivery_preparation: ?control_ports.FileDeliveryPreparation = null,
     file_actions: file_action.Lane = .{},
     reference_inputs: [product_attachment.record_capacity]?ReferenceInput = @splat(null),
@@ -2455,10 +2451,10 @@ pub const Runtime = struct {
 
     /// An accepted original does not change hands again: it stays under its
     /// Task until the Task is deleted, so the re-check is that the Task is
-    /// still readable. The record that names it is immutable history, and a
-    /// record that became redacted, or a credential installed since, advances
-    /// the projection security epoch, which the existing delivery and chunk
-    /// checks already refuse on. A file that is gone fails the read as
+    /// still readable. The record that names it is immutable history. A scrub
+    /// that rewrites what is shown, or an unknown credential learned since,
+    /// advances the projection security epoch, which the existing delivery and
+    /// chunk checks already refuse on. A file that is gone fails the read as
     /// `missing` without this having to predict it.
     fn taskAttachmentOriginalAuthority(self: *Runtime, task_id: u64) FilePreviewState {
         return if (self.task_runtime.mediaReadable(task_id)) .ready else .missing;
@@ -2733,7 +2729,7 @@ pub const Runtime = struct {
             }
         };
         var value: Max = .{};
-        if (self.account_credentials) |source| try source.visit(&value, Max.visit);
+        try self.visitOwnerCredentials(&value, Max.visit);
         try self.task_runtime.visitExecutionCredentials(&value, Max.visit);
         if (value.length > projection_step_bytes) return error.CredentialCapacity;
         return value.length -| 1;
@@ -3001,7 +2997,7 @@ pub const Runtime = struct {
     ) bool {
         const codepoint_len = credential_match.codepointLen(value, codepoint_start);
         for (0..codepoint_len) |offset| {
-            if (self.accountCredentialQuery(.{ .value = value[codepoint_start + offset ..], .kind = .continuation }).matched != 0) return true;
+            if (self.ownerCredentialQuery(.{ .value = value[codepoint_start + offset ..], .kind = .continuation }).matched != 0) return true;
             if (self.task_runtime.executionCredentialMayContinue(
                 value[codepoint_start + offset ..],
             )) return true;
@@ -3013,9 +3009,10 @@ pub const Runtime = struct {
         self: *Runtime,
         available: bool,
     ) void {
+        const authority = self.scheduleAuthority();
         _ = self.schedule.setBackgroundAvailable(
             available,
-            self.scheduleExecutionBinding(),
+            authority.binding(),
             self.scheduleRedaction(),
         );
         self.publishScheduleChangesNoFail();
@@ -3240,7 +3237,6 @@ pub const Runtime = struct {
         self: *Runtime,
         fact: account_contract.AccountFact,
     ) void {
-        self.syncAccountProjectionCredentialNoFail();
         self.account_projection.commitNoFail(fact);
     }
 
@@ -3249,16 +3245,74 @@ pub const Runtime = struct {
         commit: control_ports.AccountCommit,
     ) void {
         commit.assertValid();
+        if (commit.token_changed) self.inspectAccountTokensNoFail();
         self.commitAccountFactNoFail(commit.fact);
-        self.publishAdmissionChangesNoFail();
+        if (commit.logged_out) self.stopMetaskWorkNoFail();
     }
 
-    /// Reconcile independent Schedule sources after Models or Account facts change.
+    /// Signing out stops what runs on that Metask login: a Run as Stop would,
+    /// for its own reason, and a compaction. A Session that ends on its own
+    /// is left to do so.
+    fn stopMetaskWorkNoFail(self: *Runtime) void {
+        var cursor: task_runtime.Runtime.OperationCursor = .{};
+        while (self.task_runtime.nextActiveOperation(&cursor)) |active| {
+            const task_id = active.task_id;
+            const facts = self.task_runtime.modelFacts(task_id) orelse continue;
+            if (!runsOnMetask(facts)) continue;
+            switch (active.operation) {
+                .run => |run_id| self.stopRun(task_id, run_id, .account_logout) catch {},
+                .compact => |operation_id| self.stopCompact(task_id, operation_id, .account_logout) catch {},
+                .none, .restore => {},
+            }
+        }
+    }
+
+    /// What the Task is running on now. A model chosen for its next turn
+    /// does not move the Run or the compaction underway.
+    fn runsOnMetask(facts: task_runtime.Runtime.ModelFacts) bool {
+        return if (facts.installed) |installed| installed.is_metask else false;
+    }
+
+    /// The Tasks signing out would stop now, for the sign-out confirmation.
+    pub fn metaskStopTargets(self: *Runtime) usize {
+        var count: usize = 0;
+        var cursor: task_runtime.Runtime.OperationCursor = .{};
+        while (self.task_runtime.nextActiveOperation(&cursor)) |active| {
+            const facts = self.task_runtime.modelFacts(active.task_id) orelse continue;
+            if (!runsOnMetask(facts)) continue;
+            switch (active.operation) {
+                .run, .compact => count += 1,
+                .none, .restore => {},
+            }
+        }
+        return count;
+    }
+
+    /// Models or Account facts changed. Schedule rearms on them and judges
+    /// nothing: no observation stops or records a definition.
     fn publishAdmissionChangesNoFail(self: *Runtime) void {
-        _ = self.schedule.refreshBindingNoFail(self.scheduleExecutionBinding(), self.scheduleRedaction());
-        _ = self.schedule.rearmNoFail(self.scheduleExecutionBinding(), self.scheduleRedaction());
+        const authority = self.scheduleAuthority();
+        self.publishAdmission(&authority);
+    }
+
+    fn publishAdmission(self: *Runtime, authority: *const ScheduleAuthority) void {
+        // Every Models change passes here, so a stored key is known before
+        // anything is published.
+        self.syncProviderCredentialsNoFail();
+        _ = self.schedule.refreshAdmissionNoFail(authority.binding(), self.scheduleRedaction());
+        _ = self.schedule.rearmNoFail(authority.binding(), self.scheduleRedaction());
         _ = self.schedule.takeChanged();
         self.bumpRevision();
+    }
+
+    /// A user's Models command may have replaced or removed a source identity
+    /// (`source_id`), or reset the store (null). Definitions on it that can
+    /// never run again stop now, before the change is published, on the same
+    /// Account sample.
+    fn finishModelsCommandNoFail(self: *Runtime, source_id: ?[]const u8) void {
+        const authority = self.scheduleAuthority();
+        _ = self.schedule.stopGoneSourceNoFail(source_id, authority.binding(), self.scheduleRedaction());
+        self.publishAdmission(&authority);
     }
 
     pub fn accountView(self: *Runtime) account_contract.AccountView {
@@ -3266,7 +3320,19 @@ pub const Runtime = struct {
     }
 
     pub fn newTaskAdmissionView(self: *Runtime) NewTaskAdmissionView {
-        return .{ .available = self.canCreateTask(), .reason = if (self.shutting_down) .shutting_down else if (!self.skill.identitySourceTrusted()) .workspace_unavailable else .none };
+        return .{
+            .available = self.canCreateTask(),
+            .reason = if (self.shutting_down) .shutting_down else if (!self.skill.identitySourceTrusted()) .workspace_unavailable else .none,
+            .metask = self.newTaskMetask(self.metaskUse()),
+        };
+    }
+
+    fn newTaskMetask(self: *Runtime, use: ?account_contract.Authorization.Use) execution_state.MetaskAdmission {
+        return switch (use orelse return .none) {
+            .ready => .none,
+            .wait => if (self.account_projection.view().cannot_reach) .@"unreachable" else .recovering,
+            .stop => .none,
+        };
     }
 
     pub fn modelsView(self: *Runtime) models_contract.ModelsView {
@@ -3300,6 +3366,7 @@ pub const Runtime = struct {
 
     pub fn stopCustomProviders(self: *Runtime) void {
         self.custom_providers.stop();
+        self.syncProviderCredentialsNoFail();
     }
 
     /// Hard-resets the Models canonical store after an explicit user
@@ -3320,7 +3387,7 @@ pub const Runtime = struct {
         if (!result.accepted) return result;
 
         self.adoptMetaskSourceNoFail();
-        self.finishModelsCommitNoFail();
+        self.finishModelsCommandNoFail(null);
         return result;
     }
 
@@ -3331,9 +3398,12 @@ pub const Runtime = struct {
         if (command == .test_model)
             return .rejected(.test_unavailable);
         const result = self.custom_providers.submitCommand(command);
-        if (result.accepted) {
-            self.finishModelsCommitNoFail();
-        }
+        if (result.accepted) switch (command) {
+            // Only these can change a source's identity.
+            .update => |value| self.finishModelsCommandNoFail(value.selection.source_id),
+            .remove => |value| self.finishModelsCommandNoFail(value.source_id),
+            else => self.finishModelsCommitNoFail(),
+        };
         return result;
     }
 
@@ -3372,54 +3442,49 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn prepareMetaskCatalogRefresh(
-        self: *Runtime,
-        principal_ref: []const u8,
-        authorization_generation: u64,
-    ) models_contract.CatalogRefreshPrepareResult {
-        const result = self.custom_providers.prepareMetaskCatalogRefresh(
-            principal_ref,
-            authorization_generation,
-        );
-        if (result == .ready) self.bumpRevision();
+    /// Models follows the account an Account publication leaves.
+    pub fn followMetaskPrincipal(self: *Runtime, principal_ref: ?[]const u8, generation: u64) models_contract.MetaskFollow {
+        const result = self.custom_providers.followMetaskPrincipal(principal_ref, generation);
+        if (result.changed) self.finishModelsCommitNoFail();
         return result;
     }
 
-    pub fn completeMetaskCatalogRefresh(
-        self: *Runtime,
-        attempt_id: u64,
-        authorization_generation: u64,
-        completion: *models_ports.OwnedCatalogCompletion,
-    ) models_contract.ModelsError {
-        const result = self.custom_providers.completeMetaskCatalogRefresh(
-            attempt_id,
-            authorization_generation,
-            completion,
-        );
-        self.finishModelsCommitNoFail();
+    pub fn setMetaskCatalogActive(self: *Runtime, active: bool) void {
+        self.custom_providers.setMetaskCatalogActive(active);
+    }
+
+    pub fn metaskCatalogNext(self: *Runtime) ?u64 {
+        return self.custom_providers.metaskCatalogNext();
+    }
+
+    pub fn metaskCatalogDue(self: *Runtime, now_ms: u64) bool {
+        return self.custom_providers.metaskCatalogDue(now_ms);
+    }
+
+    /// A catalog request publishes only what anyone can see: a load, or the
+    /// person's own request. One in the background changes nothing here.
+    pub fn beginMetaskCatalogRequest(self: *Runtime, kind: models_contract.CatalogRequestKind, credential: models_contract.CatalogCredential, now_ms: u64) models_contract.CatalogRequestStart {
+        const result = self.custom_providers.beginMetaskCatalogRequest(kind, credential, now_ms);
+        if (result.changed) self.finishModelsCommitNoFail();
         return result;
     }
 
-    pub fn failMetaskCatalogRefresh(
-        self: *Runtime,
-        attempt_id: u64,
-        authorization_generation: u64,
-        error_code: models_contract.ModelsError,
-        safe_diagnostic: []const u8,
-    ) void {
-        self.custom_providers.failMetaskCatalogRefresh(
-            attempt_id,
-            authorization_generation,
-            error_code,
-            safe_diagnostic,
-        );
-        self.finishModelsCommitNoFail();
+    pub fn joinMetaskCatalogRequest(self: *Runtime) bool {
+        const changed = self.custom_providers.joinMetaskCatalogRequest();
+        if (changed) self.finishModelsCommitNoFail();
+        return changed;
     }
 
-    pub fn setMetaskAuthorizationUnavailable(self: *Runtime) void {
-        self.custom_providers.setMetaskAuthorizationUnavailable();
+    pub fn completeMetaskCatalogRequest(self: *Runtime, id: u64, completion: *models_ports.OwnedCatalogCompletion, now_ms: u64) bool {
+        const changed = self.custom_providers.completeMetaskCatalogRequest(id, completion, now_ms);
+        if (changed) self.finishModelsCommitNoFail();
+        return changed;
+    }
 
-        self.finishModelsCommitNoFail();
+    pub fn failMetaskCatalogRequest(self: *Runtime, id: u64, failure: models_contract.CatalogFailure, now_ms: u64) bool {
+        const changed = self.custom_providers.failMetaskCatalogRequest(id, failure, now_ms);
+        if (changed) self.finishModelsCommitNoFail();
+        return changed;
     }
 
     pub fn createCustomProviderWithCredential(
@@ -3459,7 +3524,7 @@ pub const Runtime = struct {
     ) models_contract.CommandResult {
         const result = self.custom_providers.updateBuiltinBaseUrl(selection, base_url);
         if (result.accepted) {
-            self.finishModelsCommitNoFail();
+            self.finishModelsCommandNoFail(selection.source_id);
         }
         return result;
     }
@@ -3471,9 +3536,9 @@ pub const Runtime = struct {
     ) models_contract.CommandResult {
         const result = self.custom_providers.replaceCredential(secret, selection);
         // The fail-closed first phase may revoke stale readiness even when the
-        // subsequent credential write or final commit fails.
-
-        self.finishModelsCommitNoFail();
+        // subsequent credential write or final commit fails. Only a new key's
+        // generation stops anything; a revoked one still waits.
+        self.finishModelsCommandNoFail(selection.source_id);
         return result;
     }
 
@@ -4405,7 +4470,7 @@ pub const Runtime = struct {
         var execution = source.intoConfig(generation) catch return error.ExecutionUnavailable;
         defer execution.deinit();
         const execution_input = execution.input();
-        try self.prepareTaskCredential(execution_input.api_key);
+        try self.prepareTaskCredential(execution_input.projectedKey());
         const permission_profile: PermissionProfile = switch (permission) {
             .interactive => |mode| (mode orelse self.default_approval_mode).profile(),
             .noninteractive => |profile| profile,
@@ -4550,7 +4615,9 @@ pub const Runtime = struct {
         var automatic_live = true;
         errdefer if (automatic_live) automatic.rollback(self);
         const workspace = automatic.facts(self);
-        const selection = try self.scheduledSelection(.{ .model_ref = input.model_ref, .source_generation = input.source_generation, .protocol = input.protocol });
+        // The catalog generation the due-time judgment admitted, under the
+        // Task's own admission.
+        const selection: NewTaskModelSelectionInput = .{ .target = input.model_ref, .expected_source_generation = input.source_generation, .expected_catalog_generation = input.catalog_generation };
         var task = try self.prepareTaskInWorkspaceInternal(workspace.id, workspace.epoch, selection, null, null, .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) }, true);
         var task_live = true;
         errdefer if (task_live) task.rollback(self);
@@ -4681,7 +4748,7 @@ pub const Runtime = struct {
         if (!facts.has_model_intent) return error.RecoveryUnavailable;
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
         try self.validateTaskMetaskAuthorization(task_id);
-        try self.prepareTaskCredential(target.input().api_key);
+        try self.prepareTaskCredential(target.input().projectedKey());
         var capabilities: ?task_runtime.RestoreCapabilities = null;
         defer if (capabilities) |*value| value.deinit() catch {};
         if (try self.task_runtime.captureModelRebindInputs(task_id)) |captured| {
@@ -5630,11 +5697,16 @@ pub const Runtime = struct {
         task_id: u64,
         operation_id: u64,
     ) Error!void {
+        try self.stopCompact(task_id, operation_id, .user_cancel);
+    }
+
+    /// Stops a compaction as Stop does, for `origin`.
+    fn stopCompact(self: *Runtime, task_id: u64, operation_id: u64, origin: product_task.PendingInterruption) Error!void {
         self.syncLifecycle();
         _ = try self.task_runtime.cancelCompact(
             task_id,
             operation_id,
-            .user_cancel,
+            origin,
             self.taskRuntimeOperationEffects(),
         );
         self.commitTaskStateNoFail();
@@ -5670,6 +5742,12 @@ pub const Runtime = struct {
     }
 
     pub fn cancel(self: *Runtime, task_id: u64, run_id: u64) Error!void {
+        try self.stopRun(task_id, run_id, .user_cancel);
+    }
+
+    /// Stops a Run as Stop does, for `origin`: with the MCP installation it
+    /// asked for, and the lifecycle facts around it.
+    fn stopRun(self: *Runtime, task_id: u64, run_id: u64, origin: product_task.PendingInterruption) Error!void {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         if (self.observeMcpInstallation(null)) |observation| {
@@ -5680,7 +5758,7 @@ pub const Runtime = struct {
         if (try self.task_runtime.cancelRun(
             task_id,
             run_id,
-            .user_cancel,
+            origin,
             self.taskRuntimeOperationEffects(),
         )) {
             self.commitTaskStateNoFail();
@@ -5786,9 +5864,10 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         const definition = try self.scheduledTaskDefinition(input, null, null);
+        const authority = self.scheduleAuthority();
         const id = try self.schedule.create(
             definition,
-            self.scheduleExecutionBinding(),
+            authority.binding(),
             self.scheduleRedaction(),
         );
         return id;
@@ -5804,11 +5883,12 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         const definition = try self.scheduledTaskDefinition(input, try self.schedule.bindingAt(id, expected_epoch), id);
+        const authority = self.scheduleAuthority();
         try self.schedule.update(
             id,
             expected_epoch,
             definition,
-            self.scheduleExecutionBinding(),
+            authority.binding(),
             self.scheduleRedaction(),
         );
     }
@@ -5822,11 +5902,12 @@ pub const Runtime = struct {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        const authority = self.scheduleAuthority();
         return self.schedule.setEnabled(
             id,
             expected_epoch,
             enabled,
-            self.scheduleExecutionBinding(),
+            authority.binding(),
             self.scheduleRedaction(),
         );
     }
@@ -5838,10 +5919,11 @@ pub const Runtime = struct {
     ) Error!void {
         defer self.publishScheduleChangesNoFail();
         self.syncLifecycle();
+        const authority = self.scheduleAuthority();
         try self.schedule.delete(
             id,
             expected_epoch,
-            self.scheduleExecutionBinding(),
+            authority.binding(),
             self.scheduleRedaction(),
         );
     }
@@ -5861,13 +5943,17 @@ pub const Runtime = struct {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        const authority = self.scheduleAuthority();
         return self.schedule.runNow(
             id,
             expected_epoch,
+            authority.binding(),
             self.scheduleRedaction(),
             self.scheduleTaskEffects(),
         ) catch |err| switch (err) {
             error.PreviousTaskActive, error.ScheduleAdmissionWaiting => error.TaskBusy,
+            error.ScheduledTaskBindingWaiting => error.ExecutionUnavailable,
+            error.ScheduledTaskBindingGone => error.ExecutionGenerationMismatch,
             else => return @errorCast(err),
         };
     }
@@ -6018,6 +6104,8 @@ pub const Runtime = struct {
         };
         return switch (self.schedule.recoverPersistence(self.scheduleRedaction())) {
             .recovered => recovered: {
+                // A configured key Schedule could not scrub is tried again.
+                self.custom_providers.retryRefusedResidentCredentials();
                 self.publishAdmissionChangesNoFail();
                 break :recovered .recovered;
             },
@@ -6260,8 +6348,10 @@ pub const Runtime = struct {
             durable_changed = true;
         }
         self.task_runtime.gateScheduledContinuations(&self.schedule, scheduleHasPendingContinuation);
+        // One Account sample serves this settle's reconcile and timer alike.
+        const schedule_authority = self.scheduleAuthority();
         if (self.schedule.reconcileNoFail(
-            self.scheduleExecutionBinding(),
+            schedule_authority.binding(),
             self.scheduleRedaction(),
             self.scheduleTaskEffects(),
         )) changed = true;
@@ -6275,7 +6365,7 @@ pub const Runtime = struct {
             !self.requiredHistoryBlocked() and self.schedule.releaseTaskHistoryWaits();
         if (!self.shutting_down and (timer_elapsed or schedule_was_waiting)) {
             self.schedule.onTimer(
-                self.scheduleExecutionBinding(),
+                schedule_authority.binding(),
                 self.scheduleRedaction(),
                 self.scheduleTaskEffects(),
             );
@@ -7357,6 +7447,8 @@ pub const Runtime = struct {
         try self.writeModels(writer, text);
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
         try self.writeNewTaskAdmission(writer);
+        writer.print(",\"metaskStopTargets\":{d}", .{self.metaskStopTargets()}) catch
+            return error.SnapshotTooLarge;
         writer.writeAll(",\"automaticWorkspaceRoot\":") catch
             return error.SnapshotTooLarge;
         try self.writeAutomaticWorkspaceRootConfiguration(writer, text);
@@ -7379,7 +7471,7 @@ pub const Runtime = struct {
         const storage = self.snapshotStorage();
         const request = try self.snapshot.begin(self.allocator, request_input, self.projection_security_epoch);
         const credentials = self.snapshot.credentialCollector();
-        if (self.account_credentials) |source| try source.visit(credentials, ProjectionCredentials.visit);
+        try self.visitOwnerCredentials(credentials, ProjectionCredentials.visit);
         try self.task_runtime.visitExecutionCredentials(credentials, ProjectionCredentials.visit);
         const text = self.snapshot.rootText(storage);
         if (builtin.is_test) self.assembling_snapshot = true;
@@ -7464,7 +7556,10 @@ pub const Runtime = struct {
                     .none => writer.writeAll("null") catch return error.SnapshotTooLarge,
                     .skills => try self.writeSkillManagement(writer, text),
                     .mcp => try self.writeMcpProjection(writer, text),
-                    .schedules => self.schedule.writeProjection(writer, .{ .context = text, .write_json_fn = view_read.Text.writeCallback }) catch return error.SnapshotTooLarge,
+                    .schedules => {
+                        const authority = self.scheduleAuthority();
+                        self.schedule.writeProjection(writer, .{ .context = text, .write_json_fn = view_read.Text.writeCallback }, authority.binding()) catch return error.SnapshotTooLarge;
+                    },
                 }
                 writer.writeByte('}') catch return error.SnapshotTooLarge;
             },
@@ -7566,13 +7661,24 @@ pub const Runtime = struct {
         text: *const view_read.Text,
     ) Error!void {
         const view = self.accountView();
+        const actions = view.actions;
         writer.print(
-            "{{\"state\":\"{s}\",\"canCancel\":{},\"accountId\":",
-            .{
-                @tagName(view.state),
-                view.can_cancel,
-            },
+            "{{\"state\":\"{s}\",\"actions\":{{\"cancel\":{},\"retry\":{},\"login\":{},\"logout\":{},\"clear\":{}}},\"unreachable\":{},\"attempt\":",
+            .{ @tagName(view.state), actions.cancel, actions.retry, actions.login, actions.logout, actions.clear, view.cannot_reach },
         ) catch return error.SnapshotTooLarge;
+        if (view.attempt) |attempt| {
+            writer.print("{{\"id\":\"{d}\",\"action\":\"{s}\",\"outcome\":", .{ attempt.id, @tagName(attempt.action) }) catch
+                return error.SnapshotTooLarge;
+            if (attempt.outcome) |outcome|
+                writer.print("\"{s}\"", .{@tagName(outcome)}) catch return error.SnapshotTooLarge
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(attempt.error_code)}) catch
+                return error.SnapshotTooLarge;
+            try text.writeJson(writer, attempt.safe_diagnostic);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"accountId\":") catch return error.SnapshotTooLarge;
         try text.writeJson(writer, view.account_id);
         writer.writeAll(",\"displayName\":") catch
             return error.SnapshotTooLarge;
@@ -7583,60 +7689,16 @@ pub const Runtime = struct {
         writer.writeAll(",\"phoneHint\":") catch
             return error.SnapshotTooLarge;
         try text.writeJson(writer, view.phone_hint);
-        writer.writeAll(",\"concurrencyLimit\":") catch
-            return error.SnapshotTooLarge;
-        if (view.concurrency_limit) |limit|
-            writer.print("{d}", .{limit}) catch return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
             @tagName(view.error_code),
         }) catch return error.SnapshotTooLarge;
         try text.writeJson(writer, view.safe_diagnostic);
         const summary = view.summary;
-        writer.print(",\"summary\":{{\"operation\":\"{s}\",\"usageEligibility\":\"{s}\",\"wallet\":{{\"availability\":\"{s}\",\"balanceU\":", .{
+        writer.print(",\"summary\":{{\"operation\":\"{s}\",\"usageEligibility\":\"{s}\",\"history\":{{\"availability\":\"{s}\",\"startDate\":", .{
             @tagName(summary.operation),
             @tagName(summary.usage_eligibility),
-            @tagName(summary.wallet.availability),
+            @tagName(summary.history.availability),
         }) catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(writer, summary.wallet.balance_u, text);
-        writer.writeAll(",\"syncedAt\":") catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(writer, summary.wallet.synced_at_unix_ms, text);
-        writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.wallet.error_code)}) catch
-            return error.SnapshotTooLarge;
-        try text.writeJson(writer, summary.wallet.safe_diagnostic);
-        writer.print("}},\"usage\":{{\"availability\":\"{s}\",\"today\":", .{@tagName(summary.usage.availability)}) catch
-            return error.SnapshotTooLarge;
-        if (summary.usage.today) |today| {
-            writer.writeAll("{\"inputTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.input_tokens);
-            writer.writeAll(",\"outputTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.output_tokens);
-            writer.writeAll(",\"cacheCreationTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.cache_creation_tokens);
-            writer.writeAll(",\"cacheReadTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.cache_read_tokens);
-            writer.writeAll(",\"totalTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.total_tokens);
-            writer.writeAll(",\"actualCostU\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, today.actual_cost_u);
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"total\":") catch return error.SnapshotTooLarge;
-        if (summary.usage.total) |total| {
-            writer.writeAll("{\"totalTokens\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, total.total_tokens);
-            writer.writeAll(",\"actualCostU\":") catch return error.SnapshotTooLarge;
-            try text.writeJson(writer, total.actual_cost_u);
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"syncedAt\":") catch return error.SnapshotTooLarge;
-        try writeNullableProjectedJsonValue(writer, summary.usage.synced_at_unix_ms, text);
-        writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.usage.error_code)}) catch
-            return error.SnapshotTooLarge;
-        try text.writeJson(writer, summary.usage.safe_diagnostic);
-        writer.print("}},\"history\":{{\"availability\":\"{s}\",\"startDate\":", .{@tagName(summary.history.availability)}) catch
-            return error.SnapshotTooLarge;
         try writeNullableProjectedJsonValue(writer, summary.history.start_date, text);
         writer.writeAll(",\"endDate\":") catch return error.SnapshotTooLarge;
         try writeNullableProjectedJsonValue(writer, summary.history.end_date, text);
@@ -7822,7 +7884,7 @@ pub const Runtime = struct {
 
     fn writeNewTaskAdmission(self: *Runtime, writer: *std.Io.Writer) Error!void {
         const value = self.newTaskAdmissionView();
-        writer.print("{{\"available\":{},\"reason\":\"{s}\"}}", .{ value.available, @tagName(value.reason) }) catch return error.SnapshotTooLarge;
+        writer.print("{{\"available\":{},\"reason\":\"{s}\",\"metask\":\"{s}\"}}", .{ value.available, @tagName(value.reason), @tagName(value.metask) }) catch return error.SnapshotTooLarge;
     }
 
     const WorkspaceViewContext = struct {
@@ -8099,10 +8161,12 @@ pub const Runtime = struct {
             query.workspace_root,
             query.task_id,
         );
-        const binding = self.taskBindingPlan(query.task_id);
+        // One Account sample answers both, so a projection cannot disagree.
+        const metask_use = self.metaskUse();
+        const binding = self.taskBindingPlan(query.task_id, metask_use);
         const model_rebind_required = binding == .rebind;
         const releasing_route_id = if (model_rebind_required) self.task_runtime.recoveryReleaseRoute(query.task_id) else null;
-        const metask_input = self.taskMetaskInput(query.task_id);
+        const metask_input = self.taskMetaskInput(query.task_id, metask_use);
         return .{
             .shutting_down = self.shutting_down,
             .task_persistence_ready = self.task_persistence_health.operational(),
@@ -8147,9 +8211,9 @@ pub const Runtime = struct {
     }
 
     /// Reads no credential, so a projection answers as an admission would.
-    fn taskBindingPlan(self: *Runtime, task_id: u64) task_runtime.Runtime.BindingPlan {
+    fn taskBindingPlan(self: *Runtime, task_id: u64, use: ?account_contract.Authorization.Use) task_runtime.Runtime.BindingPlan {
         const facts = self.task_runtime.modelFacts(task_id) orelse return .{ .blocked = .unknown_task };
-        const credential_generation = if (usesMetask(facts)) self.admittedMetaskGeneration() orelse
+        const credential_generation = if (usesMetask(facts)) self.admittedMetaskGeneration(use) orelse
             return self.task_runtime.bindingPlan(task_id, .{ .authorized = false }) else 0;
         const target = if (facts.intent) |intent| self.custom_providers.currentTarget(intent.target) else null;
         return self.task_runtime.bindingPlan(task_id, .{
@@ -8203,7 +8267,7 @@ pub const Runtime = struct {
     };
 
     fn prepareTaskBinding(self: *Runtime, task_id: u64) Error!PreparedBinding {
-        const plan = self.taskBindingPlan(task_id);
+        const plan = self.taskBindingPlan(task_id, self.metaskUse());
         const renew = switch (plan) {
             .blocked => |reason| return switch (reason) {
                 .unknown_task => error.UnknownTask,
@@ -8223,7 +8287,7 @@ pub const Runtime = struct {
         }) orelse return error.ExecutionUnavailable;
         errdefer candidate.deinit();
         const input = candidate.input();
-        try self.prepareTaskCredential(input.api_key);
+        try self.prepareTaskCredential(input.projectedKey());
         if (renew) {
             const renewal = self.task_runtime.renewMetaskCredential(task_id, input.credential_generation, input.api_key, .admission) catch |err| {
                 self.task_runtime.failMetaskCredentialUpdate(task_id, input.credential_generation, err, self.taskRuntimeOperationEffects());
@@ -8342,43 +8406,76 @@ pub const Runtime = struct {
     fn validateNewTaskModelAdmission(self: *Runtime, selection: NewTaskModelSelectionInput) Error!void {
         if (!self.canCreateTask()) return error.ExecutionUnavailable;
         if (!self.newTaskModelSelectionAuthorized(selection)) return error.ModelSelectionChanged;
-        try self.checkMetaskAuthorization(selection.target.source_id);
+        if (!std.mem.eql(u8, selection.target.source_id, models_contract.metask_source_id)) return;
+        // One Account sample answers as the projection that offered it did.
+        const use = self.metaskUse();
+        if (self.newTaskMetask(use) != .none or self.admittedMetaskGeneration(use) == null)
+            return error.ExecutionUnavailable;
     }
 
-    fn scheduleExecutionBinding(self: *Runtime) product_schedule.ExecutionBinding {
-        return .{
-            .available = !self.shutting_down and self.skill.identitySourceTrusted(),
-            .automatic_workspace_available = self.automaticWorkspacesAvailable(),
-            .context = self,
-            .validate_fn = scheduleBindingAvailability,
+    /// One Account sample for one Schedule call: every definition it judges,
+    /// the timer it arms and the projection it writes see the same
+    /// authorization. A run then meets the Task's own admission, which reads
+    /// the Account again.
+    const ScheduleAuthority = struct {
+        control: *Runtime,
+        use: ?account_contract.Authorization.Use,
+
+        fn binding(self: *const ScheduleAuthority) product_schedule.ExecutionBinding {
+            return .{
+                .available = !self.control.shutting_down and self.control.skill.identitySourceTrusted(),
+                .automatic_workspace_available = self.control.automaticWorkspacesAvailable(),
+                .context = self,
+                .admit_fn = admit,
+            };
+        }
+
+        fn admit(context: ?*const anyopaque, binding_value: product_schedule.ModelBinding) product_schedule.Admission {
+            const self: *const ScheduleAuthority = @ptrCast(@alignCast(context.?));
+            return self.control.scheduleAdmission(self.use, binding_value);
+        }
+    };
+
+    fn scheduleAuthority(self: *Runtime) ScheduleAuthority {
+        return .{ .control = self, .use = self.metaskUse() };
+    }
+
+    /// What one Scheduled Task binding allows now. Reads only `Use`, so the
+    /// Account states behind it are mapped in one place, `Authorization.use`.
+    fn scheduleAdmission(self: *Runtime, use: ?account_contract.Authorization.Use, binding: product_schedule.ModelBinding) product_schedule.Admission {
+        const metask = std.mem.eql(u8, binding.model_ref.source_id, models_contract.metask_source_id);
+        if (metask) {
+            switch (use orelse account_contract.Authorization.Use{ .ready = 0 }) {
+                .stop => return .{ .hold = .signed_out },
+                .wait => return .wait,
+                .ready => {},
+            }
+            // Without a catalog for this account its content says nothing
+            // yet; a renewal leaves the catalog as it is.
+            _ = self.admittedMetaskGeneration(use) orelse return .wait;
+        }
+        return switch (self.custom_providers.boundModel(binding.model_ref, binding.source_generation)) {
+            .unavailable => .wait,
+            // A Metask source is one account: another account's catalog is
+            // current. A Custom Provider's new key or endpoint never returns.
+            .source_changed => if (metask) .{ .hold = .other_account } else .stop,
+            .missing => .skip,
+            .present => |model| if (model.protocol != binding.protocol)
+                .skip
+            else
+                .{ .run = model.catalog_generation },
         };
     }
 
-    fn scheduledModelBinding(self: *Runtime, binding: product_schedule.ModelBinding) models_aggregate.Runtime.BoundModelAvailability {
-        const availability = self.custom_providers.boundModelAvailability(binding.model_ref, binding.source_generation, binding.protocol);
-        if (availability == .ready) self.checkMetaskAuthorization(binding.model_ref.source_id) catch return .unavailable;
-        return availability;
-    }
-
-    fn scheduleBindingAvailability(context: ?*anyopaque, binding: product_schedule.ModelBinding) product_schedule.BindingAvailability {
-        const self: *Runtime = @ptrCast(@alignCast(context.?));
-        return switch (self.scheduledModelBinding(binding)) {
-            .ready => .ready,
-            .unavailable => .unavailable,
-            .invalid => .invalid,
-        };
-    }
-
-    fn scheduledSelection(self: *Runtime, binding: ScheduledTaskBindingInput) Error!NewTaskModelSelectionInput {
-        if (self.shutting_down or !self.skill.identitySourceTrusted()) return error.ExecutionUnavailable;
-        return switch (self.scheduledModelBinding(binding)) {
-            .ready => |catalog_generation| .{
-                .target = binding.model_ref,
-                .expected_source_generation = binding.source_generation,
-                .expected_catalog_generation = catalog_generation,
-            },
-            .invalid, .unavailable => error.ExecutionGenerationMismatch,
-        };
+    /// The launch resolves what the due-time judgment admitted, without
+    /// judging again.
+    fn validateScheduledLaunch(self: *Runtime, input: product_schedule.TaskLaunch) Error!void {
+        var candidate = (self.custom_providers.resolveModel(input.model_ref, input.source_generation, input.catalog_generation) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.ExecutionUnavailable,
+        }) orelse return error.ExecutionUnavailable;
+        defer candidate.deinit();
+        if (candidate.input().target.protocol != input.protocol) return error.ExecutionGenerationMismatch;
     }
 
     fn scheduleTaskEffects(self: *Runtime) product_schedule.TaskEffects {
@@ -8399,11 +8496,8 @@ pub const Runtime = struct {
     fn scheduleTaskPreflight(context: *anyopaque, input: product_schedule.TaskLaunch) product_schedule.TaskPreflight {
         const self: *Runtime = @ptrCast(@alignCast(context));
         if (self.requiredHistoryBlocked()) return .wait;
-        self.validateScheduledBinding(.{
-            .model_ref = input.model_ref,
-            .source_generation = input.source_generation,
-            .protocol = input.protocol,
-        }) catch |err| return switch (err) {
+        if (self.shutting_down or !self.skill.identitySourceTrusted()) return .{ .retry = error.ExecutionUnavailable };
+        self.validateScheduledLaunch(input) catch |err| return switch (err) {
             error.ExecutionUnavailable, error.ExecutionInUse, error.ExecutionGenerationMismatch => .{ .retry = err },
             else => .{ .rejected = err },
         };
@@ -8545,16 +8639,6 @@ pub const Runtime = struct {
         try recurrence.validate();
         const instruction = try product_schedule.Definition.normalizedInstruction(input.input, self.limits.max_user_message_bytes);
         return .{ .title = title, .binding = binding, .permission_profile = scheduledPermissionProfile(input.permission_profile), .input = instruction, .recurrence = recurrence, .timezone = input.timezone };
-    }
-
-    fn validateScheduledBinding(self: *Runtime, expected: ScheduledTaskBindingInput) Error!void {
-        const selection = try self.scheduledSelection(expected);
-        var candidate = (self.custom_providers.resolveModel(selection.target, selection.expected_source_generation, selection.expected_catalog_generation) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.ExecutionUnavailable,
-        }) orelse return error.ExecutionUnavailable;
-        defer candidate.deinit();
-        if (candidate.input().target.protocol != expected.protocol) return error.ExecutionGenerationMismatch;
     }
 
     fn taskPersistenceLimits(self: *const Runtime) task_persistence.Limits {
@@ -9489,44 +9573,101 @@ pub const Runtime = struct {
     fn redactWorkspaceProjectionsNoFail(
         self: *Runtime,
         credential: []const u8,
-    ) void {
-        self.workspace.redactNoFail(credential, self.workspaceStorage());
+    ) bool {
+        return self.workspace.redactNoFail(credential, self.workspaceStorage());
     }
 
     pub fn setAccountProjectionCredentials(self: *Runtime, source: account_contract.AccessTokenProjection) void {
         std.debug.assert(self.account_credentials == null);
         self.account_credentials = source;
-        self.syncAccountProjectionCredentialNoFail();
+        self.inspectAccountTokensNoFail();
     }
 
     pub fn clearAccountProjectionCredentials(self: *Runtime) void {
         const source = self.account_credentials orelse return;
-        source.visit(self, scrubAccountCredential) catch unreachable;
+        _ = self.scrubAccountTokens(source);
         self.account_credentials = null;
-        self.account_credential_generation = 0;
         self.syncHistoryCredentials(null, null);
         self.invalidateProjectionSecurity();
     }
 
-    fn syncAccountProjectionCredentialNoFail(self: *Runtime) void {
+    /// Account's own token was in nothing shown before it was installed, and a
+    /// token it replaced or ended is still inspected, so neither revokes what
+    /// was shown unless the scrub finds it there after all.
+    fn inspectAccountTokensNoFail(self: *Runtime) void {
         const source = self.account_credentials orelse return;
-        const generation = source.generation();
-        if (generation == self.account_credential_generation) return;
-        self.account_credential_generation = generation;
-        self.invalidateProjectionSecurity();
+        if (self.scrubAccountTokens(source)) self.invalidateProjectionSecurity();
         self.reconcileMcpInstallation(null);
-        source.visit(self, scrubAccountCredential) catch unreachable;
         self.syncHistoryCredentials(null, null);
     }
 
-    fn scrubAccountCredential(context: *anyopaque, credential: []const u8) std.mem.Allocator.Error!void {
-        const self: *Runtime = @ptrCast(@alignCast(context));
-        self.redactAllProductProjectionsNoFail(credential);
+    fn scrubAccountTokens(self: *Runtime, source: account_contract.AccessTokenProjection) bool {
+        const Scrub = struct {
+            control: *Runtime,
+            rewrote: bool = false,
+            fn visit(context: *anyopaque, token: []const u8) std.mem.Allocator.Error!void {
+                const scrub: *@This() = @ptrCast(@alignCast(context));
+                scrub.rewrote = scrub.control.redactAllProductProjectionsNoFail(token) or scrub.rewrote;
+            }
+        };
+        var scrub: Scrub = .{ .control = self };
+        source.visit(&scrub, Scrub.visit) catch unreachable;
+        return scrub.rewrote;
     }
 
-    const AccountCredentialQuery = struct {
+    /// The credentials Host owners hold, which the projection masks and
+    /// refuses on; a Task reports its own through the Task runtime. Each value
+    /// is borrowed for the duration of its callback only.
+    fn visitOwnerCredentials(
+        self: *const Runtime,
+        context: *anyopaque,
+        visit_fn: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void,
+    ) std.mem.Allocator.Error!void {
+        if (self.account_credentials) |source| try source.visit(context, visit_fn);
+        try self.custom_providers.visitResidentCredentials(context, visit_fn);
+    }
+
+    /// Brings the Custom Provider keys Models holds into what the projection
+    /// knows. A key joining is a credential acquired, as a Task's would be:
+    /// one nothing knew may already have been shown in the clear, so the
+    /// security epoch advances, once however many join together. One leaving
+    /// is a release, unless a Task still holds it.
+    fn syncProviderCredentialsNoFail(self: *Runtime) void {
+        const Batch = struct {
+            control: *Runtime,
+            admitted: bool = false,
+            unknown: bool = false,
+
+            fn admit(context: *anyopaque, value: []const u8) bool {
+                const batch: *@This() = @ptrCast(@alignCast(context));
+                const control = batch.control;
+                _ = control.schedule.prepareCredentialRedaction(value, control.scheduleRedaction()) catch return false;
+                if (!control.retainsProjectionCredential(value)) batch.unknown = true;
+                control.reconcileMcpInstallation(value);
+                _ = control.redactAllProductProjectionsNoFail(value);
+                batch.admitted = true;
+                return true;
+            }
+
+            fn retire(context: *anyopaque, value: []const u8) bool {
+                const control = @as(*@This(), @ptrCast(@alignCast(context))).control;
+                // Nothing is shown after shutdown; a Task's copy is released
+                // with the Task.
+                if (control.shutting_down or control.task_runtime.retainsCredential(value)) return true;
+                if (!control.schedule.prepareCredentialRelease(value, control.scheduleRedaction())) return false;
+                control.retireProjectionCredential(value);
+                return true;
+            }
+        };
+        var batch: Batch = .{ .control = self };
+        self.custom_providers.syncResidentCredentials(.{ .context = &batch, .admit_fn = Batch.admit, .retire_fn = Batch.retire });
+        if (!batch.admitted) return;
+        if (batch.unknown) self.invalidateProjectionSecurity();
+        self.syncHistoryCredentials(null, null);
+    }
+
+    const OwnerCredentialQuery = struct {
         value: []const u8,
-        releasing: ?[*]const u8 = null,
         kind: enum { retained, contains, prefix, continuation },
         matched: usize = 0,
 
@@ -9534,7 +9675,7 @@ pub const Runtime = struct {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (credential.len == 0) return;
             const matches = switch (self.kind) {
-                .retained => (self.releasing == null or self.releasing.? != credential.ptr) and std.mem.eql(u8, self.value, credential),
+                .retained => std.mem.eql(u8, self.value, credential),
                 .contains => std.mem.indexOf(u8, self.value, credential) != null,
                 .prefix => std.mem.startsWith(u8, self.value, credential),
                 .continuation => self.value.len < credential.len and std.mem.startsWith(u8, credential, self.value),
@@ -9543,13 +9684,13 @@ pub const Runtime = struct {
         }
     };
 
-    fn accountCredentialQuery(self: *const Runtime, query: AccountCredentialQuery) AccountCredentialQuery {
+    fn ownerCredentialQuery(self: *const Runtime, query: OwnerCredentialQuery) OwnerCredentialQuery {
         var result = query;
-        if (self.account_credentials) |source| source.visit(&result, AccountCredentialQuery.visit) catch unreachable;
+        self.visitOwnerCredentials(&result, OwnerCredentialQuery.visit) catch unreachable;
         return result;
     }
 
-    const AccountCredentialRedaction = struct {
+    const OwnerCredentialRedaction = struct {
         value: []u8,
         changed: bool = false,
 
@@ -9559,26 +9700,28 @@ pub const Runtime = struct {
         }
     };
 
-    fn retainsProjectionCredential(self: *const Runtime, credential: []const u8, releasing: ?[*]const u8) bool {
+    fn retainsProjectionCredential(self: *const Runtime, credential: []const u8) bool {
         if (credential.len == 0) return false;
-        if (self.accountCredentialQuery(.{ .value = credential, .releasing = releasing, .kind = .retained }).matched != 0) return true;
-        return self.task_runtime.retainsCredential(credential, releasing);
+        if (self.ownerCredentialQuery(.{ .value = credential, .kind = .retained }).matched != 0) return true;
+        return self.task_runtime.retainsCredential(credential);
     }
 
+    /// A value not known until now may have been shown in the clear. One that
+    /// was known has been masked wherever it showed, so rewriting it now
+    /// revokes nothing.
     fn learnProjectionCredential(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
-        if (!self.retainsProjectionCredential(credential, null)) self.invalidateProjectionSecurity();
+        if (!self.retainsProjectionCredential(credential)) self.invalidateProjectionSecurity();
         self.reconcileMcpInstallation(credential);
-        self.redactAllProductProjectionsNoFail(credential);
+        _ = self.redactAllProductProjectionsNoFail(credential);
         self.syncHistoryCredentials(credential, null);
     }
 
+    /// What was shown was masked by more than will be known from here on, so
+    /// only rewritten content is revoked.
     fn retireProjectionCredential(self: *Runtime, credential: []const u8) void {
         if (credential.len == 0) return;
-        // All aliases into the retiring owner disappear together. Other owned
-        // copies of the exact value still protect the same projection boundary.
-        if (!self.retainsProjectionCredential(credential, credential.ptr)) self.invalidateProjectionSecurity();
-        self.redactAllProductProjectionsNoFail(credential);
+        if (self.redactAllProductProjectionsNoFail(credential)) self.invalidateProjectionSecurity();
         self.syncHistoryCredentials(null, credential.ptr);
     }
 
@@ -9601,7 +9744,7 @@ pub const Runtime = struct {
         if (extra) |value| Collection.visit(&collected, value) catch {
             complete = false;
         };
-        if (self.account_credentials) |source| source.visit(&collected, Collection.visit) catch {
+        self.visitOwnerCredentials(&collected, Collection.visit) catch {
             complete = false;
         };
         self.task_runtime.visitExecutionCredentials(&collected, Collection.visit) catch {
@@ -9626,27 +9769,29 @@ pub const Runtime = struct {
 
     /// Scrubbing is required at every acquisition/release; it is not itself a
     /// change of security authority and must not revoke unrelated UI state.
-    fn redactAllProductProjectionsNoFail(self: *Runtime, credential: []const u8) void {
-        if (credential.len == 0) return;
+    /// True when it rewrote or dropped anything shown. Preserved originals are
+    /// not shown.
+    fn redactAllProductProjectionsNoFail(self: *Runtime, credential: []const u8) bool {
+        if (credential.len == 0) return false;
         self.task_runtime.redactPreservedHistory(credential) catch self.markTaskPersistenceWriteFailed();
-        self.redactWorkspaceProjectionsNoFail(credential);
-        self.redactCatalogProjectionsNoFail(credential);
-        _ = self.schedule.redactInMemoryNoFail(
+        var rewrote = self.redactWorkspaceProjectionsNoFail(credential);
+        rewrote = self.redactCatalogProjectionsNoFail(credential) or rewrote;
+        rewrote = self.schedule.redactInMemoryNoFail(
             credential,
             self.scheduleRedaction(),
-        );
-        self.task_runtime.redactProjectionsNoFail(credential, .{
+        ) or rewrote;
+        return self.task_runtime.redactProjectionsNoFail(credential, .{
             .context = self,
             .redact_fn = redactFixedWidthNoFail,
             .release_projection_bytes_fn = releaseTaskRuntimeProjectionBytes,
-        });
+        }) or rewrote;
     }
 
     fn redactCatalogProjectionsNoFail(
         self: *Runtime,
         credential: []const u8,
-    ) void {
-        self.skill.redactCatalogsNoFail(
+    ) bool {
+        return self.skill.redactCatalogsNoFail(
             credential,
             self.skillProjectionBudget(),
         );
@@ -9899,7 +10044,7 @@ pub const Runtime = struct {
         var known: Collection = .{ .allocator = self.allocator };
         defer known.values.deinit(self.allocator);
         for (credentials) |secret| try Collection.visit(&known, secret);
-        if (self.account_credentials) |source| try source.visit(&known, Collection.visit);
+        try self.visitOwnerCredentials(&known, Collection.visit);
         try self.task_runtime.visitExecutionCredentials(&known, Collection.visit);
         const capacity = @min(value.len, max);
         const scratch = try self.allocator.alloc(u8, capacity);
@@ -10009,7 +10154,7 @@ pub const Runtime = struct {
 
     fn containsKnownCredential(self: *const Runtime, value: []const u8) bool {
         if (builtin.is_test and self.assembling_snapshot) @panic("snapshot assembly used live text projection");
-        if (self.accountCredentialQuery(.{ .value = value, .kind = .contains }).matched != 0) return true;
+        if (self.ownerCredentialQuery(.{ .value = value, .kind = .contains }).matched != 0) return true;
         return self.task_runtime.containsExecutionCredential(value);
     }
 
@@ -10022,7 +10167,7 @@ pub const Runtime = struct {
     fn containsKnownHistoryCredential(self: *Runtime, state: task_persistence.StateWire, preserved: task_persistence.PreservedFrames) bool {
         var credentials: ProjectionCredentials = .{ .allocator = self.allocator };
         defer credentials.deinit();
-        if (self.account_credentials) |source| source.visit(&credentials, ProjectionCredentials.visit) catch return true;
+        self.visitOwnerCredentials(&credentials, ProjectionCredentials.visit) catch return true;
         self.task_runtime.visitExecutionCredentials(&credentials, ProjectionCredentials.visit) catch return true;
         for (credentials.values.items) |secret| {
             if ((task_persistence.security.contains(self.allocator, state, secret) catch true) or
@@ -10039,9 +10184,9 @@ pub const Runtime = struct {
             value,
             redactFixedWidthNoFail,
         );
-        var account_redaction: AccountCredentialRedaction = .{ .value = value };
-        if (self.account_credentials) |source| source.visit(&account_redaction, AccountCredentialRedaction.visit) catch unreachable;
-        return account_redaction.changed or changed;
+        var owner_redaction: OwnerCredentialRedaction = .{ .value = value };
+        self.visitOwnerCredentials(&owner_redaction, OwnerCredentialRedaction.visit) catch unreachable;
+        return owner_redaction.changed or changed;
     }
 
     fn matchedKnownCredentialLen(
@@ -10050,7 +10195,7 @@ pub const Runtime = struct {
     ) usize {
         var longest: usize = 0;
         if (builtin.is_test and self.assembling_snapshot) @panic("snapshot assembly used live text projection");
-        longest = @max(longest, self.accountCredentialQuery(.{ .value = value, .kind = .prefix }).matched);
+        longest = @max(longest, self.ownerCredentialQuery(.{ .value = value, .kind = .prefix }).matched);
         longest = @max(longest, self.task_runtime.matchedExecutionCredentialPrefix(value));
         return longest;
     }
@@ -10236,46 +10381,72 @@ pub const Runtime = struct {
         return .{
             .context = self,
             .commit_fn = controlCommitAccountChange,
+            .settle_fn = controlSettleAccountChange,
         };
     }
 
-    pub fn setMetaskAuthorizationCheck(self: *Runtime, check: control_ports.MetaskAuthorizationCheck) void {
-        self.metask_authorization_check = check;
+    pub fn setAccountAuthorization(self: *Runtime, query: account_contract.AuthorizationQuery) void {
+        self.account_authorization = query;
+    }
+
+    /// A Run's Metask 401 goes to Account, which alone may judge it.
+    pub fn setAccountUnauthorizedReport(self: *Runtime, report: account_contract.UnauthorizedReport) void {
+        self.account_unauthorized = report;
+        self.task_runtime.metask_unauthorized = .{ .context = self, .report_fn = reportRunUnauthorized };
+    }
+
+    fn reportRunUnauthorized(context: *anyopaque, generation: u64, code: ?[]const u8) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const report = self.account_unauthorized orelse return;
+        report.report(generation, account_contract.Unauthorized.fromCode(code));
     }
 
     pub fn metaskCredentialRenewal(self: *Runtime) control_ports.MetaskCredentialRenewal {
-        return .{ .context = self, .renew_fn = renewMetaskExecutionCredentials, .needs_fn = needsDeferredMetaskCredential };
+        return .{
+            .context = self,
+            .renew_fn = renewMetaskExecutionCredentials,
+            .needs_fn = needsDeferredMetaskCredential,
+            .waits_fn = waitsForMetask,
+            .holds_fn = holdsMetaskCredential,
+            .retire_fn = retireAccountToken,
+        };
     }
 
-    fn currentRenewalAuthority(self: *Runtime, authority: control_ports.MetaskAuthorization) bool {
-        if (self.shutting_down or authority.generation == 0) return false;
-        const check = self.metask_authorization_check orelse return false;
-        const current = check.current() orelse return false;
-        return current.generation == authority.generation;
+    fn currentCredentialGeneration(self: *Runtime, generation: u64) bool {
+        if (self.shutting_down or generation == 0) return false;
+        const query = self.account_authorization orelse return false;
+        return switch (query.status().use()) {
+            .ready => |current| current == generation,
+            .wait, .stop => false,
+        };
     }
 
-    fn needsDeferredMetaskCredential(context: *anyopaque, authority: control_ports.MetaskAuthorization) bool {
+    fn needsDeferredMetaskCredential(context: *anyopaque, generation: u64) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        return self.currentRenewalAuthority(authority) and self.task_runtime.needsDeferredMetaskCredential();
+        return self.currentCredentialGeneration(generation) and self.task_runtime.needsDeferredMetaskCredential();
     }
 
-    fn renewMetaskExecutionCredentials(context: *anyopaque, authority: control_ports.MetaskAuthorization, credential: ?[]const u8) void {
+    fn waitsForMetask(context: *anyopaque, epoch: u64) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        if (!self.currentRenewalAuthority(authority)) return;
-        if (credential) |value| {
-            const previous = self.learned_renewal;
-            if (previous == null or previous.?.generation != authority.generation) {
-                self.prepareTaskCredential(value) catch {
-                    self.task_runtime.deferMetaskCredentialRenewals();
-                    self.bumpRevision();
-                    return;
-                };
-                self.learned_renewal = authority;
-            }
-        }
-        const changed = self.task_runtime.renewMetaskExecutions(authority.generation, credential, self.taskRuntimeOperationEffects());
+        return self.task_runtime.waitsForMetask(epoch);
+    }
+
+    fn holdsMetaskCredential(context: *anyopaque) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.task_runtime.holdsMetaskCredential();
+    }
+
+    fn renewMetaskExecutionCredentials(context: *anyopaque, generation: u64, credential: []const u8) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (!self.currentCredentialGeneration(generation)) return;
+        const changed = self.task_runtime.renewMetaskExecutions(generation, credential, self.taskRuntimeOperationEffects());
         self.retireQuiescentCredentials();
         if (changed) self.bumpRevision();
+    }
+
+    fn retireAccountToken(context: *anyopaque, token: []const u8) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.retireProjectionCredential(token);
     }
 
     fn retireQuiescentCredentials(self: *Runtime) void {
@@ -10290,21 +10461,54 @@ pub const Runtime = struct {
         return false;
     }
 
-    fn checkMetaskAuthorization(self: *Runtime, provider_id: []const u8) Error!void {
-        if (!std.mem.eql(u8, provider_id, models_contract.metask_source_id)) return;
-        _ = self.admittedMetaskGeneration() orelse return error.ExecutionUnavailable;
+    /// What a Metask use may do now: one Account sample and the Models
+    /// answer for the account it follows, judged in one place.
+    const MetaskGate = union(enum) {
+        ready: u64,
+        account_wait: u64,
+        catalog_loading,
+        catalog_failed,
+        stop,
+        /// Models follows no account although Account has one: only for the
+        /// instant between an Account commit and the Models follow.
+        absent,
+    };
+
+    /// Null only when no Account governs the use.
+    fn metaskGate(self: *Runtime, use: ?account_contract.Authorization.Use) ?MetaskGate {
+        return switch (use orelse return null) {
+            .wait => |epoch| .{ .account_wait = epoch },
+            .stop => .stop,
+            .ready => |generation| switch (self.custom_providers.metaskCatalog()) {
+                .ready => .{ .ready = generation },
+                .loading => .catalog_loading,
+                .failed => .catalog_failed,
+                .absent => .absent,
+            },
+        };
     }
 
-    /// The Account generation a Metask use may run on now. Isolated Product
-    /// tests have no Account composition and read zero; desktop admission
-    /// fails closed if that capability is absent.
-    fn admittedMetaskGeneration(self: *Runtime) ?u64 {
+    fn checkMetaskAuthorization(self: *Runtime, provider_id: []const u8) Error!void {
+        if (!std.mem.eql(u8, provider_id, models_contract.metask_source_id)) return;
+        _ = self.admittedMetaskGeneration(self.metaskUse()) orelse return error.ExecutionUnavailable;
+    }
+
+    /// What a Metask use may do now. Null only in isolated Product tests,
+    /// which compose no Account; without that capability the desktop stops.
+    fn metaskUse(self: *Runtime) ?account_contract.Authorization.Use {
+        const query = self.account_authorization orelse
+            return if (builtin.is_test) null else .stop;
+        return query.status().use();
+    }
+
+    /// The Account generation a Metask use may run on now; zero when no
+    /// Account governs it.
+    fn admittedMetaskGeneration(self: *Runtime, use: ?account_contract.Authorization.Use) ?u64 {
         if (self.shutting_down) return null;
-        const check = self.metask_authorization_check orelse return if (builtin.is_test) 0 else null;
-        const current = check.current() orelse return null;
-        if (current.generation == 0 or
-            !self.custom_providers.acceptsMetaskAuthorization(current.generation)) return null;
-        return current.generation;
+        return switch (self.metaskGate(use) orelse return 0) {
+            .ready => |generation| generation,
+            .account_wait, .catalog_loading, .catalog_failed, .stop, .absent => null,
+        };
     }
 
     /// A Task is not bound to a login: any current login admits it.
@@ -10314,39 +10518,34 @@ pub const Runtime = struct {
     }
 
     fn taskMetaskInputBlocker(self: *Runtime, task_id: u64) ?task_runtime.SendInputReason {
-        return self.taskMetaskInput(task_id).blocker;
+        return self.taskMetaskInput(task_id, self.metaskUse()).blocker;
     }
 
     const MetaskInput = struct {
         blocker: ?task_runtime.SendInputReason = null,
-        /// Account's renewal epoch while the blocker is a recovery.
+        /// The renewal epoch a message waits out while Account connects.
         recovery_epoch: ?u64 = null,
     };
 
-    /// One Account status read yields both the blocker and its recovery
-    /// epoch, so a projection and an admission never see two facts.
-    fn taskMetaskInput(self: *Runtime, task_id: u64) MetaskInput {
+    fn taskMetaskInput(self: *Runtime, task_id: u64, use: ?account_contract.Authorization.Use) MetaskInput {
         const facts = self.task_runtime.modelFacts(task_id) orelse return .{};
         if (!usesMetask(facts)) return .{};
-        const check = self.metask_authorization_check orelse
-            return .{ .blocker = if (builtin.is_test) null else .metask_authorization_required };
-        const current = switch (check.status()) {
-            .unavailable => return .{ .blocker = .metask_authorization_required },
-            .recovering => |epoch| return .{ .blocker = .metask_authorization_recovering, .recovery_epoch = epoch },
-            .available => |authorization| authorization,
+        return switch (self.metaskGate(use) orelse return .{}) {
+            .account_wait => |epoch| .{ .blocker = .metask_authorization_recovering, .recovery_epoch = epoch },
+            .stop, .absent => .{ .blocker = .metask_authorization_required },
+            .ready => .{},
+            .catalog_loading => .{ .blocker = .models_catalog_loading },
+            .catalog_failed => .{ .blocker = .models_catalog_failed },
         };
-        if (current.generation == 0) return .{ .blocker = .metask_authorization_required };
-        return .{ .blocker = switch (self.custom_providers.metaskInputCatalogState(current.generation)) {
-            .ready => null,
-            .loading => .models_catalog_loading,
-            .failed => .models_catalog_failed,
-            .needs_authentication => .metask_authorization_required,
-            else => .binding_unavailable,
-        } };
     }
 
     pub fn setImageRunPreparation(self: *Runtime, preparation: ?control_ports.ImageRunPreparation) void {
         self.image_run_preparation = preparation;
+    }
+
+    /// Where Models reads the Metask credential of the moment when it resolves.
+    pub fn setMetaskCredentials(self: *Runtime, credentials: ?models_ports.MetaskCredentials) void {
+        self.custom_providers.metask_credentials = credentials;
     }
 
     pub fn setVideoRunPreparation(self: *Runtime, preparation: ?control_ports.VideoRunPreparation) void {
@@ -10383,10 +10582,14 @@ pub const Runtime = struct {
             .submit_custom_provider_fn = controlSubmitCustomProvider,
             .begin_custom_provider_probe_fn = controlBeginCustomProviderProbe,
             .complete_custom_model_test_fn = controlCompleteCustomModelTest,
-            .prepare_metask_catalog_refresh_fn = controlPrepareMetaskCatalogRefresh,
-            .complete_metask_catalog_refresh_fn = controlCompleteMetaskCatalogRefresh,
-            .fail_metask_catalog_refresh_fn = controlFailMetaskCatalogRefresh,
-            .metask_authorization_unavailable_fn = controlMetaskAuthorizationUnavailable,
+            .follow_metask_principal_fn = controlFollowMetaskPrincipal,
+            .set_metask_catalog_active_fn = controlSetMetaskCatalogActive,
+            .metask_catalog_next_fn = controlMetaskCatalogNext,
+            .metask_catalog_due_fn = controlMetaskCatalogDue,
+            .begin_metask_catalog_request_fn = controlBeginMetaskCatalogRequest,
+            .join_metask_catalog_request_fn = controlJoinMetaskCatalogRequest,
+            .complete_metask_catalog_request_fn = controlCompleteMetaskCatalogRequest,
+            .fail_metask_catalog_request_fn = controlFailMetaskCatalogRequest,
         };
     }
 
@@ -10670,7 +10873,7 @@ pub const Runtime = struct {
         // The same credential set a snapshot read collects at begin.
         var credentials: ProjectionCredentials = .{ .allocator = self.allocator };
         defer credentials.deinit();
-        if (self.account_credentials) |source| try source.visit(&credentials, ProjectionCredentials.visit);
+        try self.visitOwnerCredentials(&credentials, ProjectionCredentials.visit);
         try self.task_runtime.visitExecutionCredentials(&credentials, ProjectionCredentials.visit);
         const text = credentials.text(self.allocator);
         return self.task_runtime.writeToolPage(self.allocator, output, text.task(), task_id, run_id, after_order, tool_page_source_bytes) catch |err| return @errorCast(err);
@@ -10805,6 +11008,11 @@ pub const TestSupport = if (builtin.is_test) struct {
         try testAttachmentMediaRuntime(control, store);
     }
 
+    /// Whether the projection would mask, or refuse on, `text`.
+    pub fn knowsCredentialText(control: *const Runtime, text: []const u8) bool {
+        return control.containsKnownCredential(text);
+    }
+
     pub fn invalidatePreviewSecurity(control: *Runtime) void {
         control.invalidateProjectionSecurity();
     }
@@ -10904,10 +11112,11 @@ pub const TestSupport = if (builtin.is_test) struct {
             Runtime.workspaceViewProvider(&context),
         ) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"scheduledTasks\":") catch return error.SnapshotTooLarge;
+        const authority = self.scheduleAuthority();
         self.schedule.writeProjection(&writer, .{
             .context = &text,
             .write_json_fn = view_read.Text.writeCallback,
-        }) catch return error.SnapshotTooLarge;
+        }, authority.binding()) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"tasks\":[") catch
             return error.SnapshotTooLarge;
         self.task_runtime.writeProjectionList(
@@ -10945,6 +11154,18 @@ pub const TestSupport = if (builtin.is_test) struct {
         const execution = fixtureExecution(control);
         const owned = try execution.prepareCredential(value);
         execution.installCredential(owned, execution.credential_generation + 1);
+    }
+
+    /// The selection a user would submit for this binding today.
+    pub fn scheduledSelection(control: *Runtime, binding: ScheduledTaskBindingInput) !NewTaskModelSelectionInput {
+        return switch (control.scheduleAdmission(null, binding)) {
+            .run => |catalog_generation| .{
+                .target = binding.model_ref,
+                .expected_source_generation = binding.source_generation,
+                .expected_catalog_generation = catalog_generation,
+            },
+            else => error.ExecutionGenerationMismatch,
+        };
     }
 
     pub fn fixtureModelSelection(owner: anytype) !NewTaskModelSelectionInput {
@@ -11060,14 +11281,12 @@ pub const TestSupport = if (builtin.is_test) struct {
             generation + 3,
         );
         control.commitAccountFactNoFail(.{
-            .kind = .session_changed,
             .view = .{
                 .state = .authenticated,
                 .account_id = "account-1",
                 .display_name = "Fixture User",
                 .email_hint = "f***@example.com",
                 .phone_hint = "138****8000",
-                .concurrency_limit = 5,
             },
         });
 
@@ -11089,6 +11308,9 @@ fn controlCommitAccountChange(
 ) void {
     controlOwner(context).commitAccountChangeNoFail(commit);
 }
+fn controlSettleAccountChange(context: *anyopaque) void {
+    controlOwner(context).publishAdmissionChangesNoFail();
+}
 fn controlStartCustomProviders(context: *anyopaque, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
     try controlOwner(context).startCustomProviders(directory, vault);
 }
@@ -11101,8 +11323,8 @@ fn controlStopCustomProviders(context: *anyopaque) void {
 fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
     return controlOwner(context).resetModelsStore(expected_revision);
 }
-fn controlPrepareMediaCandidate(context: *anyopaque, input: models_contract.MediaPreparationInput) models_contract.MediaPreparation {
-    return controlOwner(context).custom_providers.prepareMediaCandidate(input);
+fn controlPrepareMediaCandidate(context: *anyopaque, kind: models_contract.MediaKind) models_contract.MediaPreparation {
+    return controlOwner(context).custom_providers.prepareMediaCandidate(kind);
 }
 fn controlCreateCustomProvider(context: *anyopaque, secret: []const u8, spec: models_contract.CustomProviderSpec) models_contract.CommandResult {
     return controlOwner(context).createCustomProviderWithCredential(secret, spec);
@@ -11125,17 +11347,29 @@ fn controlBeginCustomProviderProbe(context: *anyopaque, command: models_contract
 fn controlCompleteCustomModelTest(context: *anyopaque, command: models_contract.CustomModelTestCommand, succeeded: bool) models_contract.CommandResult {
     return controlOwner(context).completeCustomModelTest(command, succeeded);
 }
-fn controlPrepareMetaskCatalogRefresh(context: *anyopaque, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
-    return controlOwner(context).prepareMetaskCatalogRefresh(principal_ref, authorization_generation);
+fn controlFollowMetaskPrincipal(context: *anyopaque, principal_ref: ?[]const u8, generation: u64) models_contract.MetaskFollow {
+    return controlOwner(context).followMetaskPrincipal(principal_ref, generation);
 }
-fn controlCompleteMetaskCatalogRefresh(context: *anyopaque, attempt_id: u64, authorization_generation: u64, completion: *models_ports.OwnedCatalogCompletion) models_contract.ModelsError {
-    return controlOwner(context).completeMetaskCatalogRefresh(attempt_id, authorization_generation, completion);
+fn controlSetMetaskCatalogActive(context: *anyopaque, active: bool) void {
+    controlOwner(context).setMetaskCatalogActive(active);
 }
-fn controlFailMetaskCatalogRefresh(context: *anyopaque, attempt_id: u64, authorization_generation: u64, error_code: models_contract.ModelsError, safe_diagnostic: []const u8) void {
-    controlOwner(context).failMetaskCatalogRefresh(attempt_id, authorization_generation, error_code, safe_diagnostic);
+fn controlMetaskCatalogNext(context: *anyopaque) ?u64 {
+    return controlOwner(context).metaskCatalogNext();
 }
-fn controlMetaskAuthorizationUnavailable(context: *anyopaque) void {
-    controlOwner(context).setMetaskAuthorizationUnavailable();
+fn controlMetaskCatalogDue(context: *anyopaque, now_ms: u64) bool {
+    return controlOwner(context).metaskCatalogDue(now_ms);
+}
+fn controlBeginMetaskCatalogRequest(context: *anyopaque, kind: models_contract.CatalogRequestKind, credential: models_contract.CatalogCredential, now_ms: u64) models_contract.CatalogRequestStart {
+    return controlOwner(context).beginMetaskCatalogRequest(kind, credential, now_ms);
+}
+fn controlJoinMetaskCatalogRequest(context: *anyopaque) bool {
+    return controlOwner(context).joinMetaskCatalogRequest();
+}
+fn controlCompleteMetaskCatalogRequest(context: *anyopaque, id: u64, completion: *models_ports.OwnedCatalogCompletion, now_ms: u64) bool {
+    return controlOwner(context).completeMetaskCatalogRequest(id, completion, now_ms);
+}
+fn controlFailMetaskCatalogRequest(context: *anyopaque, id: u64, failure: models_contract.CatalogFailure, now_ms: u64) bool {
+    return controlOwner(context).failMetaskCatalogRequest(id, failure, now_ms);
 }
 fn controlDrainAgentEvents(context: *anyopaque) anyerror!void {
     return controlOwner(context).drainAgentEvents();
@@ -12325,6 +12559,31 @@ fn initTestRuntimeWithLimits(control: *Runtime, limits: Limits, configuration: C
     };
 }
 
+/// A stand-in Account that counts its reads. Its states are built only here,
+/// so a change to `Authorization` is followed in one place.
+const TestAccount = struct {
+    value: account_contract.Authorization,
+    reads: usize = 0,
+
+    fn checking() account_contract.Authorization {
+        return .{ .checking = 1 };
+    }
+
+    fn available(generation: u64) account_contract.Authorization {
+        return .{ .available = .{ .account_id = "account-1", .generation = generation } };
+    }
+
+    fn query(self: *TestAccount) account_contract.AuthorizationQuery {
+        return .{ .context = self, .status_fn = status };
+    }
+
+    fn status(context: *anyopaque) account_contract.Authorization {
+        const self: *TestAccount = @ptrCast(@alignCast(context));
+        self.reads += 1;
+        return self.value;
+    }
+};
+
 const TestScheduleClock = struct {
     now: u64,
     armed_at: ?u64 = null,
@@ -13406,10 +13665,11 @@ test "Schedule blocker projection matches the shared Renderer fixture" {
     try control.schedule.store.markSkipped(item, 9200, 9201, 0);
     var storage: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
+    const authority = control.scheduleAuthority();
     try control.schedule.writeProjection(&writer, .{
         .context = &control.liveViewText(),
         .write_json_fn = view_read.Text.writeCallback,
-    });
+    }, authority.binding());
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
     defer parsed.deinit();
     const history = try std.json.Stringify.valueAlloc(std.testing.allocator, parsed.value.array.items[0].object.get("occurrences").?, .{});
@@ -13493,34 +13753,14 @@ test "Product Control snapshot serializer preserves complete Account summary his
         .actual_cost_u = "0.25",
     }};
     control.commitAccountFactNoFail(.{
-        .kind = .summary_changed,
         .view = .{
             .state = .authenticated,
             .account_id = "account-1",
             .display_name = "Fixture User",
             .email_hint = "f***@example.com",
             .phone_hint = "138****8000",
-            .concurrency_limit = 5,
             .summary = .{
                 .usage_eligibility = .enabled,
-                .wallet = .{
-                    .availability = .ready,
-                    .balance_u = "-1.25",
-                    .synced_at_unix_ms = "1720000000000",
-                },
-                .usage = .{
-                    .availability = .ready,
-                    .today = .{
-                        .input_tokens = "10",
-                        .output_tokens = "20",
-                        .cache_creation_tokens = "3",
-                        .cache_read_tokens = "4",
-                        .total_tokens = "37",
-                        .actual_cost_u = "0.125",
-                    },
-                    .total = .{ .total_tokens = "300", .actual_cost_u = "2.5" },
-                    .synced_at_unix_ms = "1720000000000",
-                },
                 .history = .{
                     .availability = .ready,
                     .start_date = "2025-09-15",
@@ -13536,12 +13776,8 @@ test "Product Control snapshot serializer preserves complete Account summary his
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
     const summary = parsed.value.object.get("account").?.object.get("summary").?.object;
-    const wallet = summary.get("wallet").?.object;
-    const usage = summary.get("usage").?.object;
+    try std.testing.expect(summary.get("wallet") == null and summary.get("usage") == null);
     const history = summary.get("history").?.object;
-    try std.testing.expectEqualStrings("-1.25", wallet.get("balanceU").?.string);
-    try std.testing.expectEqualStrings("37", usage.get("today").?.object.get("totalTokens").?.string);
-    try std.testing.expectEqualStrings("2.5", usage.get("total").?.object.get("actualCostU").?.string);
     try std.testing.expectEqualStrings("2025-09-15", history.get("startDate").?.string);
     try std.testing.expectEqualStrings("10", history.get("days").?.array.items[0].object.get("totalTokens").?.string);
 }
@@ -14596,11 +14832,10 @@ test "Product Control snapshot serializer keeps durable Metask intent after auth
     const binding_epoch = try control.taskBindingEpoch(task_id);
 
     control.commitAccountFactNoFail(.{
-        .kind = .signed_out,
         .view = .{ .state = .signed_out },
     });
     control.publishAdmissionChangesNoFail();
-    control.setMetaskAuthorizationUnavailable();
+    _ = control.followMetaskPrincipal(null, 0);
 
     try std.testing.expectEqual(account_contract.AccountState.signed_out, control.accountView().state);
     const after = control.modelsView();
@@ -14648,19 +14883,22 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
 
     const binding = TestSupport.scheduledBinding(&control);
     try std.testing.expectEqual(models_contract.Protocol.openai_responses, binding.protocol);
-    try control.validateScheduledBinding(binding);
+    try std.testing.expect(control.scheduleAdmission(null, binding) == .run);
+    // A source that no longer exists, or answers under another identity,
+    // never returns; a model it stopped listing, or lists under another
+    // protocol, might.
     var stale = binding;
     stale.model_ref.source_id = "another-provider";
-    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    try std.testing.expect(control.scheduleAdmission(null, stale) == .stop);
     stale = binding;
     stale.model_ref.model_id = "another-model";
-    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    try std.testing.expect(control.scheduleAdmission(null, stale) == .skip);
     stale = binding;
     stale.source_generation += 1;
-    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    try std.testing.expect(control.scheduleAdmission(null, stale) == .stop);
     stale = binding;
     stale.protocol = .anthropic_messages;
-    try std.testing.expectError(error.ExecutionGenerationMismatch, control.validateScheduledBinding(stale));
+    try std.testing.expect(control.scheduleAdmission(null, stale) == .skip);
 
     var automatic_root = try product_workspace.AutomaticRoot.open(std.testing.io, std.testing.allocator, directory_storage[0..directory_len]);
     defer automatic_root.deinit();
@@ -14673,7 +14911,7 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     defer product_schedule.testing.configure(&control.schedule, .{}, .{}, .unavailable);
     const id = try control.createScheduledTask(.{
         .title = "Replacement",
-        .model_selection = try control.scheduledSelection(binding),
+        .model_selection = try TestSupport.scheduledSelection(&control, binding),
         .permission_profile = .approval_required,
         .input = "Inspect",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2000 } },
@@ -14705,7 +14943,7 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     control.task_persistence_health = .ready;
     const readback_id = try control.createScheduledTask(.{
         .title = "Wait for history readback",
-        .model_selection = try control.scheduledSelection(binding),
+        .model_selection = try TestSupport.scheduledSelection(&control, binding),
         .permission_profile = .approval_required,
         .input = "Inspect",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2500 } },
@@ -14739,7 +14977,7 @@ test "Scheduled Task custom binding validates source identity and rejects stale 
     control.task_persistence_health = .ready;
     const waiting_id = try control.createScheduledTask(.{
         .title = "Wait for history",
-        .model_selection = try control.scheduledSelection(binding),
+        .model_selection = try TestSupport.scheduledSelection(&control, binding),
         .permission_profile = .approval_required,
         .input = "Inspect",
         .recurrence = .{ .once = .{ .at_unix_seconds = 3000 } },
@@ -14814,7 +15052,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         error.WorkspaceUnavailable,
         control.createScheduledTask(.{
             .title = "Independent review",
-            .model_selection = try control.scheduledSelection(TestSupport.scheduledBinding(&control)),
+            .model_selection = try TestSupport.scheduledSelection(&control, TestSupport.scheduledBinding(&control)),
             .permission_profile = .approval_required,
             .input = "Review current work",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -14827,7 +15065,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     );
     const id = try control.createScheduledTask(.{
         .title = "Review SECRET-KEY",
-        .model_selection = try control.scheduledSelection(TestSupport.scheduledBinding(&control)),
+        .model_selection = try TestSupport.scheduledSelection(&control, TestSupport.scheduledBinding(&control)),
         .permission_profile = .full_access,
         .input = "Inspect SECRET-KEY usage",
         .recurrence = .{ .interval = .{
@@ -14927,7 +15165,7 @@ test "Scheduled Task ignores Product binding generation drift for stable source 
     control.setScheduleBackgroundAvailableNoFail(true);
     const id = try control.createScheduledTask(.{
         .title = "Review current work",
-        .model_selection = try control.scheduledSelection(TestSupport.scheduledBinding(&control)),
+        .model_selection = try TestSupport.scheduledSelection(&control, TestSupport.scheduledBinding(&control)),
         .permission_profile = .approval_required,
         .input = "Review current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -14935,8 +15173,9 @@ test "Scheduled Task ignores Product binding generation drift for stable source 
     try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
 
     control.execution_generations.last = 2;
-    try std.testing.expect(!control.schedule.refreshBindingNoFail(
-        control.scheduleExecutionBinding(),
+    const authority = control.scheduleAuthority();
+    try std.testing.expect(!control.schedule.refreshAdmissionNoFail(
+        authority.binding(),
         control.scheduleRedaction(),
     ));
 
@@ -14985,19 +15224,45 @@ const MetaskScheduleFixture = struct {
     }
 
     fn loadCatalog(self: *@This(), credential: []const u8) !void {
-        const models = [_]models_contract.ModelView{.{ .id = "fixture-model", .display_name = "Fixture model" }};
-        try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogWithCredential(&self.control.custom_providers, "account-1", credential, &models));
+        try self.loadAccountCatalog("account-1", credential, "fixture-model");
+    }
+
+    fn loadAccountCatalog(self: *@This(), account: []const u8, credential: []const u8, model: []const u8) !void {
+        const models = [_]models_contract.ModelView{.{ .id = model, .display_name = "Fixture model" }};
+        try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogWithCredential(&self.control.custom_providers, account, credential, &models));
         self.control.finishModelsCommitNoFail();
     }
 
     fn schedule(self: *@This()) !u64 {
+        return self.scheduleAt(.{ .once = .{ .at_unix_seconds = 2_000 } });
+    }
+
+    fn scheduleAt(self: *@This(), recurrence: product_schedule.Recurrence) !u64 {
         return self.control.createScheduledTask(.{
             .title = "Review current work",
             .model_selection = try TestSupport.fixtureModelSelection(&self.control),
             .permission_profile = .approval_required,
             .input = "Review current work",
-            .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+            .recurrence = recurrence,
         });
+    }
+
+    fn stored(self: *@This(), id: u64) product_schedule.testing.Item {
+        return product_schedule.testing.item(&self.control.schedule, id).?;
+    }
+
+    /// The Host publishes `expected` as this definition's admission.
+    fn expectProjected(self: *@This(), id: u64, expected: []const u8) !void {
+        var storage: [16 * 1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&storage);
+        const authority = self.control.scheduleAuthority();
+        try self.control.schedule.writeProjection(&writer, .{ .context = &self.control.liveViewText(), .write_json_fn = view_read.Text.writeCallback }, authority.binding());
+        const projected = writer.buffered();
+        var key: [48]u8 = undefined;
+        const item = std.mem.indexOf(u8, projected, try std.fmt.bufPrint(&key, "{{\"id\":\"{d}\",", .{id})) orelse return error.TestUnexpectedResult;
+        const field = "\"admission\":\"";
+        const start = (std.mem.indexOfPos(u8, projected, item, field) orelse return error.TestUnexpectedResult) + field.len;
+        try std.testing.expectEqualStrings(expected, projected[start .. std.mem.indexOfScalarPos(u8, projected, start, '"') orelse return error.TestUnexpectedResult]);
     }
 
     /// The task still runs on its own binding, which names `generation`.
@@ -15006,7 +15271,7 @@ const MetaskScheduleFixture = struct {
         try std.testing.expect(item.enabled and item.health == .ready);
         try std.testing.expectEqual(generation, item.binding.source_generation);
         try std.testing.expectEqual(generation, self.control.modelsView().providers[0].source_generation);
-        try std.testing.expect(self.control.scheduledModelBinding(item.binding) == .ready);
+        try std.testing.expect(self.control.scheduleAdmission(null, item.binding) == .run);
     }
 };
 
@@ -15020,7 +15285,7 @@ test "Scheduled Task keeps its Metask model across renewals, logins and restarts
     const commits = fixture.persistence.commits;
     try fixture.loadCatalog("token-b");
     // A login passes through no authorization at all.
-    fixture.control.setMetaskAuthorizationUnavailable();
+    _ = fixture.control.followMetaskPrincipal(null, 0);
     try fixture.loadCatalog("token-c");
     try fixture.restartModels();
     try fixture.loadCatalog("token-d");
@@ -15061,6 +15326,113 @@ test "Scheduled Task follows its account's generation out of an older version's 
         try fixture.loadCatalog("token-c");
         try fixture.expectRunnable(id, derived);
     }
+}
+
+test "Scheduled Task holds while another account's catalog is current and runs once it is back" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const id = try fixture.schedule();
+    const commits = fixture.persistence.commits;
+    try fixture.loadAccountCatalog("account-2", "token-b", "fixture-model");
+    try std.testing.expectEqual(@as(?u64, null), fixture.clock.armed_at);
+    fixture.clock.now = 2_100;
+    fixture.control.onScheduledTaskTimer();
+    try std.testing.expect(fixture.stored(id).enabled and fixture.stored(id).health == .ready);
+    try std.testing.expect(fixture.stored(id).last_occurrence == null);
+    try std.testing.expectEqual(commits, fixture.persistence.commits);
+    // Back on its own account it is due at once, for the point it missed.
+    try fixture.loadCatalog("token-c");
+    try std.testing.expectEqual(@as(?u64, 2_000), fixture.clock.armed_at);
+    fixture.control.onScheduledTaskTimer();
+    try std.testing.expectEqual(@as(u64, 2_000), fixture.stored(id).last_occurrence.?.planned_at_unix_seconds);
+}
+
+test "a Metask catalog that drops the bound model disables nothing until a plan is due" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const once = try fixture.schedule();
+    const hourly = try fixture.scheduleAt(.{ .interval = .{ .start_at_unix_seconds = 2_000, .every_seconds = 3_600 } });
+    const commits = fixture.persistence.commits;
+    try fixture.loadAccountCatalog("account-1", "token-b", "another-model");
+    try std.testing.expect(fixture.stored(once).enabled and fixture.stored(hourly).enabled);
+    try std.testing.expectEqual(commits, fixture.persistence.commits);
+    fixture.clock.now = 2_000;
+    fixture.control.onScheduledTaskTimer();
+    fixture.control.onScheduledTaskTimer();
+    // The one-time plan stops unspent; the hourly one skips and goes on.
+    try std.testing.expectEqual(product_schedule.Health.needs_attention, fixture.stored(once).health);
+    try std.testing.expect(fixture.stored(once).last_occurrence == null);
+    const skipped = fixture.stored(hourly);
+    try std.testing.expect(skipped.enabled);
+    try std.testing.expectEqual(product_schedule.FailureReason.execution_changed, skipped.last_occurrence.?.reason.?);
+    try std.testing.expectEqual(@as(?u64, 5_600), skipped.next_run_at_unix_seconds);
+    try fixture.expectProjected(hourly, "model_unavailable");
+}
+
+test "replacing a Custom Provider key stops its schedules at once and no others" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const metask = try fixture.schedule();
+    const selection = try createReadyTestCustomProvider(&fixture.control);
+    try std.testing.expect(fixture.control.custom_providers.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }).accepted);
+    const custom = try fixture.schedule();
+    try std.testing.expect(fixture.control.replaceCustomProviderCredential("replacement-secret", .{
+        .source_id = selection.source_id,
+        .expected_provider_revision = fixture.control.custom_providers.views()[0].provider_revision,
+    }).accepted);
+    try std.testing.expectEqual(product_schedule.Health.needs_attention, fixture.stored(custom).health);
+    try std.testing.expectEqual(product_schedule.FailureReason.execution_changed, fixture.stored(custom).failure_reason.?);
+    try std.testing.expectEqual(product_schedule.Health.ready, fixture.stored(metask).health);
+    try std.testing.expectError(error.ScheduledTaskNeedsAttention, fixture.control.runScheduledTaskNow(custom, fixture.stored(custom).epoch));
+    try fixture.expectProjected(custom, "source_changed");
+    try fixture.expectProjected(metask, "runnable");
+}
+
+test "resetting the Models store stops the plans on the Custom Providers it removed" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const metask = try fixture.schedule();
+    const selection = try createReadyTestCustomProvider(&fixture.control);
+    try std.testing.expect(fixture.control.custom_providers.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }).accepted);
+    const custom = try fixture.schedule();
+    // An unreadable store is reset to empty, without the Custom Provider.
+    try fixture.models_tmp.dir.writeFile(std.testing.io, .{ .sub_path = "models.json", .data = "unreadable" });
+    fixture.control.custom_providers.store_healthy = false;
+    try std.testing.expect(fixture.control.resetModelsStore(fixture.control.currentRevision()).accepted);
+    try std.testing.expectEqual(product_schedule.Health.needs_attention, fixture.stored(custom).health);
+    try std.testing.expectEqual(product_schedule.Health.ready, fixture.stored(metask).health);
+}
+
+test "a due Metask schedule reads the Account once and waits while it is confirmed" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const id = try fixture.schedule();
+    var account: TestAccount = .{ .value = TestAccount.checking() };
+    fixture.control.setAccountAuthorization(account.query());
+    const commits = fixture.persistence.commits;
+    fixture.clock.now = 2_000;
+    fixture.control.onScheduledTaskTimer();
+    try std.testing.expectEqual(@as(usize, 1), account.reads);
+    try std.testing.expect(fixture.stored(id).health == .ready and fixture.stored(id).last_occurrence == null);
+    try std.testing.expectEqual(@as(?u64, 2_060), fixture.clock.armed_at);
+    try std.testing.expectEqual(commits, fixture.persistence.commits);
+    // Confirmed with a credential renewed since the catalog was loaded: the
+    // catalog is the account's, not the token's, so the plan runs at once.
+    account.value = TestAccount.available(18);
+    models_aggregate.TestSupport.shared_credentials.generation = 18;
+    fixture.clock.now = 2_060;
+    fixture.control.onScheduledTaskTimer();
+    try std.testing.expectEqual(@as(u64, 2_000), fixture.stored(id).last_occurrence.?.planned_at_unix_seconds);
 }
 
 test "Skill catalog snapshot reports redaction without exposing credential bytes" {
@@ -15755,7 +16127,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
     );
     run.input = history_input;
 
-    control.redactAllProductProjectionsNoFail("SECRET-KEY");
+    _ = control.redactAllProductProjectionsNoFail("SECRET-KEY");
     var detached = task.runtime.detach(.cold_start);
     var detached_execution = detached.execution;
     detached_execution.deinit();
@@ -16219,6 +16591,153 @@ fn createReadyTestCustomProvider(
     return selection;
 }
 
+/// Two credential slots, so two providers can hold different keys.
+const TwoSlotTestVault = struct {
+    const slots = [2][]const u8{ "custom-provider-00000000000000000000000000000001", "custom-provider-00000000000000000000000000000002" };
+
+    secrets: [2][64]u8 = undefined,
+    lengths: [2]usize = @splat(0),
+    next: usize = 0,
+    reads: usize = 0,
+    read_fails: bool = false,
+
+    fn port(self: *@This()) models_ports.CredentialVault {
+        return .{ .context = self, .generate_slot_fn = generate, .store_fn = store, .get_fn = get, .delete_fn = delete };
+    }
+    fn index(slot: []const u8) usize {
+        return @intFromBool(std.mem.eql(u8, slot, slots[1]));
+    }
+    fn generate(context: *anyopaque, output: *[models_ports.credential_slot_bytes]u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        @memcpy(output, slots[self.next]);
+        self.next += 1;
+    }
+    fn store(context: *anyopaque, slot: []const u8, secret: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        @memcpy(self.secrets[index(slot)][0..secret.len], secret);
+        self.lengths[index(slot)] = secret.len;
+    }
+    fn get(context: *anyopaque, slot: []const u8, output: []u8) anyerror!?[]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.reads += 1;
+        if (self.read_fails) return error.ReadFailed;
+        const length = self.lengths[index(slot)];
+        if (length == 0) return null;
+        @memcpy(output[0..length], self.secrets[index(slot)][0..length]);
+        return output[0..length];
+    }
+    fn delete(context: *anyopaque, slot: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.lengths[index(slot)] = 0;
+    }
+};
+
+const configured_provider_spec: models_contract.CustomProviderSpec = .{
+    .display_name = "Local",
+    .protocol = .openai_chat_completions,
+    .normalized_base_url = "http://127.0.0.1:11434/v1/chat/completions",
+};
+
+fn startTwoSlotModels(control: *Runtime, tmp: *std.testing.TmpDir, vault: *TwoSlotTestVault) !void {
+    var storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    control.stopCustomProviders();
+    try control.startCustomProviders(storage[0..try tmp.dir.realPath(std.testing.io, &storage)], vault.port());
+}
+
+test "a configured Custom Provider key is known from the moment it is stored" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var vault: TwoSlotTestVault = .{};
+    try startTwoSlotModels(&control, &tmp, &vault);
+    defer control.stopCustomProviders();
+    const shown = "KEY=first-configured-key-0001 and KEY=second-configured-key-02";
+    // Saving a key nothing knew: what was shown may hold it.
+    var epoch = control.projection_security_epoch;
+    try std.testing.expect(control.createCustomProviderWithCredential("first-configured-key-0001", configured_provider_spec).accepted);
+    try std.testing.expectEqual(epoch + 1, control.projection_security_epoch);
+    try std.testing.expect(control.containsKnownCredential(shown));
+    // Its first use is not news, nor is saving the same bytes again.
+    epoch = control.projection_security_epoch;
+    try control.prepareTaskCredential("first-configured-key-0001");
+    try std.testing.expectEqual(epoch, control.projection_security_epoch);
+    // A placeholder key is never held, masked or refused on.
+    try std.testing.expect(control.createCustomProviderWithCredential("ollama", configured_provider_spec).accepted);
+    try std.testing.expectEqual(epoch, control.projection_security_epoch);
+    try std.testing.expect(!control.containsKnownCredential("notes/ollama.md"));
+    // Replacing a key drops the old one and learns the new one.
+    const view = control.custom_providers.views()[1];
+    _ = control.replaceCustomProviderCredential("second-configured-key-02", .{ .source_id = view.id, .expected_provider_revision = view.provider_revision });
+    try std.testing.expectEqual(epoch + 1, control.projection_security_epoch);
+    try std.testing.expect(control.containsKnownCredential("second-configured-key-02"));
+    // A restart reads both stored keys in one sync and advances once.
+    control.stopCustomProviders();
+    try std.testing.expect(!control.containsKnownCredential(shown));
+    epoch = control.projection_security_epoch;
+    const reads = vault.reads;
+    try startTwoSlotModels(&control, &tmp, &vault);
+    try std.testing.expectEqual(epoch + 1, control.projection_security_epoch);
+    try std.testing.expectEqual(reads + 2, vault.reads);
+    try std.testing.expect(control.containsKnownCredential("first-configured-key-0001"));
+    try std.testing.expect(control.containsKnownCredential("second-configured-key-02"));
+    // Removing a provider drops its key.
+    const removed = control.custom_providers.views()[0];
+    try std.testing.expect(control.submitCustomProviderCommand(.{ .remove = .{ .source_id = removed.id, .expected_provider_revision = removed.provider_revision } }).accepted);
+    try std.testing.expect(!control.containsKnownCredential("first-configured-key-0001"));
+    try std.testing.expect(control.containsKnownCredential("second-configured-key-02"));
+}
+
+test "a configured key joining scrubs the durable Schedule store" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.loadCatalog("token-a");
+    const id = try fixture.control.createScheduledTask(.{
+        .title = "Review current work",
+        .model_selection = try TestSupport.fixtureModelSelection(&fixture.control),
+        .permission_profile = .approval_required,
+        .input = "Use first-configured-key-0001 then second-configured-key-02",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    // Saving a key nothing knew scrubs the durable definition at once.
+    const commits = fixture.persistence.commits;
+    try std.testing.expect(fixture.control.createCustomProviderWithCredential("first-configured-key-0001", configured_provider_spec).accepted);
+    try std.testing.expect(fixture.persistence.commits > commits);
+    try std.testing.expect(std.mem.indexOf(u8, fixture.stored(id).input, "first-configured-key-0001") == null);
+    try std.testing.expect(std.mem.indexOf(u8, fixture.stored(id).input, "second-configured-key-02") != null);
+    // A replacement scrubs the new key too, and the old one is released.
+    const view = fixture.control.custom_providers.views()[0];
+    _ = fixture.control.replaceCustomProviderCredential("second-configured-key-02", .{ .source_id = view.id, .expected_provider_revision = view.provider_revision });
+    try std.testing.expect(std.mem.indexOf(u8, fixture.stored(id).input, "second-configured-key-02") == null);
+    try std.testing.expect(!fixture.control.containsKnownCredential("first-configured-key-0001"));
+    try std.testing.expect(fixture.control.containsKnownCredential("second-configured-key-02"));
+}
+
+test "a configured key that cannot be read is not read again until it changes" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var vault: TwoSlotTestVault = .{};
+    try startTwoSlotModels(&control, &tmp, &vault);
+    defer control.stopCustomProviders();
+    try std.testing.expect(control.createCustomProviderWithCredential("unreadable-configured-key", configured_provider_spec).accepted);
+    control.stopCustomProviders();
+    vault.read_fails = true;
+    const epoch = control.projection_security_epoch;
+    try startTwoSlotModels(&control, &tmp, &vault);
+    const reads = vault.reads;
+    control.finishModelsCommitNoFail();
+    control.finishModelsCommitNoFail();
+    try std.testing.expectEqual(reads, vault.reads);
+    try std.testing.expectEqual(epoch, control.projection_security_epoch);
+    // Unknown until a Task first uses it, as before.
+    try std.testing.expect(!control.containsKnownCredential("unreadable-configured-key"));
+    try control.prepareTaskCredential("unreadable-configured-key");
+    try std.testing.expectEqual(epoch + 1, control.projection_security_epoch);
+}
+
 test "Account identity and Models execution publish through separate projections" {
     var control = try Runtime.init(
         std.testing.allocator,
@@ -16302,8 +16821,8 @@ test "identity replacement does not disturb live Task runtime references" {
     const task = control.testTaskSlots()[0].?;
     const route_id = task.runtime.routeId();
     const execution = task.runtime.executionConst().?;
-    control.commitAccountFactNoFail(.{ .kind = .signed_out, .view = .{ .state = .signed_out } });
-    control.setMetaskAuthorizationUnavailable();
+    control.commitAccountFactNoFail(.{ .view = .{ .state = .signed_out } });
+    _ = control.followMetaskPrincipal(null, 0);
     try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
 
@@ -16320,7 +16839,7 @@ test "identity replacement does not disturb live Task runtime references" {
     run.event_stream_finalized = true;
     task.runtime.active_run_id = 0;
     var replacement_lease = try task.runtime.worker_leases.acquire();
-    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .checking } });
+    control.commitAccountFactNoFail(.{ .view = .{ .state = .checking } });
     try std.testing.expectEqual(@as(usize, 1), task.runtime.worker_leases.liveCount());
     try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
@@ -16419,11 +16938,17 @@ test "Product Control publishes Task model selection availability from cross-own
         control.taskModelSelectionAvailability(query),
     );
 
-    const refresh = control.prepareMetaskCatalogRefresh("account-1", 17);
-    const preparation = switch (refresh) {
-        .ready => |value| value,
-        .rejected => return error.TestUnexpectedResult,
-    };
+    // A request with content in hand is out of sight; only a load is seen.
+    const background = control.beginMetaskCatalogRequest(.user, .{ .ready = .{ .principal_ref = "account-1", .generation = 17 } }, 0).outcome.started;
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.available,
+        control.taskModelSelectionAvailability(query),
+    );
+    _ = control.failMetaskCatalogRequest(background, .{ .code = .catalog_unavailable, .retryable = true }, 0);
+    // Without content the account's load is what a selection waits for.
+    _ = control.followMetaskPrincipal(null, 0);
+    _ = control.followMetaskPrincipal("account-1", 17);
+    const load = control.beginMetaskCatalogRequest(.due, .{ .ready = .{ .principal_ref = "account-1", .generation = 17 } }, 0).outcome.started;
     try std.testing.expectEqual(
         product_task.ModelSelectionAvailability.catalog_loading,
         control.taskModelSelectionAvailability(query),
@@ -16431,12 +16956,7 @@ test "Product Control publishes Task model selection availability from cross-own
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeAggregateFixture(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"modelSelectionAvailability\":\"catalog_loading\"") != null);
-    control.failMetaskCatalogRefresh(
-        preparation.attempt_id,
-        preparation.authorization_generation,
-        .catalog_unavailable,
-        "fixture unavailable",
-    );
+    _ = control.failMetaskCatalogRequest(load, .{ .code = .catalog_unavailable, .retryable = false }, 0);
     try std.testing.expectEqual(
         product_task.ModelSelectionAvailability.catalog_unavailable,
         control.taskModelSelectionAvailability(query),
@@ -16584,17 +17104,21 @@ test "unchanged Task binding skips candidate allocation and credential publicati
     _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
     var failing = std.testing.FailingAllocator.init(control.allocator, .{ .fail_index = 0 });
-    const original = control.custom_providers.metask_catalog.allocator;
-    control.custom_providers.metask_catalog.allocator = failing.allocator();
-    defer control.custom_providers.metask_catalog.allocator = original;
+    const original = control.custom_providers.metask.catalog.?.allocator;
+    control.custom_providers.metask.catalog.?.allocator = failing.allocator();
+    defer control.custom_providers.metask.catalog.?.allocator = original;
     const revision = control.currentRevision();
     const security_epoch = control.projection_security_epoch;
+    const credential_reads = models_aggregate.TestSupport.shared_credentials.reads;
     try std.testing.expectEqualDeep(Runtime.PreparedBinding{ .plan = .keep }, try control.prepareTaskBinding(3));
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    // Nothing was resolved, so no credential was even read.
+    try std.testing.expectEqual(credential_reads, models_aggregate.TestSupport.shared_credentials.reads);
     try std.testing.expectEqual(revision, control.currentRevision());
     try std.testing.expectEqual(security_epoch, control.projection_security_epoch);
     task.runtime.execution().?.model_intent_revision = 0;
     try std.testing.expectError(error.OutOfMemory, control.prepareTaskBinding(3));
+    try std.testing.expectEqual(credential_reads + 1, models_aggregate.TestSupport.shared_credentials.reads);
 }
 
 test "Task model installed intent does not borrow a catalog refresh as new execution authority" {
@@ -16603,12 +17127,11 @@ test "Task model installed intent does not borrow a catalog refresh as new execu
     const task = control.testTask(3).?;
     _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
-    const refresh = control.prepareMetaskCatalogRefresh("account-1", 17);
-    const preparation = switch (refresh) {
-        .ready => |value| value,
-        .rejected => return error.TestUnexpectedResult,
-    };
-    control.failMetaskCatalogRefresh(preparation.attempt_id, preparation.authorization_generation, .catalog_unavailable, "unavailable catalog");
+    // The account's catalog is gone and loading it again failed.
+    _ = control.followMetaskPrincipal(null, 0);
+    _ = control.followMetaskPrincipal("account-1", 17);
+    const load = control.beginMetaskCatalogRequest(.due, .{ .ready = .{ .principal_ref = "account-1", .generation = 17 } }, 0).outcome.started;
+    _ = control.failMetaskCatalogRequest(load, .{ .code = .catalog_unavailable, .retryable = false }, 0);
     try std.testing.expectEqualDeep(Runtime.PreparedBinding{ .plan = .keep }, try control.prepareTaskBinding(3));
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     // An uninstalled/newly selected revision still needs exact current source
@@ -16618,23 +17141,19 @@ test "Task model installed intent does not borrow a catalog refresh as new execu
 }
 
 test "Task model projection reads its binding plan without resolving a credential" {
-    const Account = struct {
-        fn status(_: *anyopaque) control_ports.MetaskAuthorizationStatus {
-            return .{ .available = .{ .generation = 17 } };
-        }
-    };
     var control = try testRuntime();
     defer control.deinit();
     const task = control.testTask(3).?;
     _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
     task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
-    var account: u8 = 0;
-    control.setMetaskAuthorizationCheck(.{ .context = &account, .status_fn = Account.status });
-    try std.testing.expectEqualDeep(task_runtime.Runtime.BindingPlan.renew, control.taskBindingPlan(3));
+    var account: TestAccount = .{ .value = TestAccount.available(17) };
+    control.setAccountAuthorization(account.query());
+    try std.testing.expectEqualDeep(task_runtime.Runtime.BindingPlan.renew, control.taskBindingPlan(3, control.metaskUse()));
     var failing = std.testing.FailingAllocator.init(control.allocator, .{ .fail_index = 0 });
-    const original = control.custom_providers.metask_catalog.allocator;
-    control.custom_providers.metask_catalog.allocator = failing.allocator();
-    defer control.custom_providers.metask_catalog.allocator = original;
+    const original = control.custom_providers.metask.catalog.?.allocator;
+    control.custom_providers.metask.catalog.?.allocator = failing.allocator();
+    defer control.custom_providers.metask.catalog.?.allocator = original;
+    const credential_reads = models_aggregate.TestSupport.shared_credentials.reads;
     const projected = control.observeTaskRecoveryAuthority(.{
         .task_id = 3,
         .workspace_id = task.durable.workspace_id,
@@ -16648,8 +17167,11 @@ test "Task model projection reads its binding plan without resolving a credentia
     try std.testing.expect(!projected.model_rebind_required);
     try std.testing.expectEqual(.available, projected.execution_admission);
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    // A projection never reads the credential.
+    try std.testing.expectEqual(credential_reads, models_aggregate.TestSupport.shared_credentials.reads);
     // Only an admission resolves the candidate the plan asks for.
     try std.testing.expectError(error.OutOfMemory, control.prepareTaskBinding(3));
+    try std.testing.expectEqual(credential_reads + 1, models_aggregate.TestSupport.shared_credentials.reads);
 }
 
 test "Task model selection does not depend on a starting preference" {
@@ -16803,7 +17325,7 @@ test "released Task credential is permanently scrubbed from every product projec
     );
     @constCast(compactTerminalPayload(compact).?).diagnostic_len =
         "compact SECRET-KEY".len;
-    control.redactAllProductProjectionsNoFail("SECRET-KEY");
+    _ = control.redactAllProductProjectionsNoFail("SECRET-KEY");
     try std.testing.expect(run.execution.?.automatic_title.generated_redacted);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -16858,13 +17380,13 @@ test "known credential matching chooses the longest overlapping secret" {
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "***-KEY") == null);
 }
 
-test "Product view security epoch invalidates learned and retiring credentials" {
+test "Product view security epoch invalidates learned credentials and fails closed once exhausted" {
     var control = try testRuntime();
     defer control.deinit();
     const epoch = control.projectionSecurityEpoch();
     control.learnProjectionCredential("future-credential");
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
-    control.redactAllProductProjectionsNoFail("");
+    _ = control.redactAllProductProjectionsNoFail("");
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
     var storage: [96 * 1024]u8 = undefined;
     const view = try control.writeViewFixture(&storage, .{});
@@ -16872,7 +17394,7 @@ test "Product view security epoch invalidates learned and retiring credentials" 
     defer parsed.deinit();
     try std.testing.expectEqual(control.projectionSecurityEpoch(), try std.fmt.parseInt(u64, parsed.value.object.get("securityEpoch").?.string, 10));
     control.projection_security_epoch = std.math.maxInt(u64);
-    control.retireProjectionCredential("retiring-credential");
+    control.learnProjectionCredential("last-credential");
     try std.testing.expectEqual(@as(u64, 0), control.projectionSecurityEpoch());
     try std.testing.expectError(error.InvalidViewRequest, control.writeViewFixture(&storage, .{}));
 }
@@ -18576,9 +19098,6 @@ test "canonical prompt title and terminal diagnostic never retain the registered
 
 test "published model errors are scrubbed against Account credentials before terminal drain" {
     const Account = struct {
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
         fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             try callback(context, "LATE-SECRET");
         }
@@ -18586,7 +19105,7 @@ test "published model errors are scrubbed against Account credentials before ter
     var control = try testRuntime();
     defer control.deinit();
     var account: u8 = 0;
-    control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    control.setAccountProjectionCredentials(.{ .context = &account, .visit_fn = Account.visit });
     const run = &control.testTaskSlots()[0].?.durable.runs[0].?;
     try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
     const storage = try control.allocator.create(task_test_state.RunModelError);
@@ -18706,6 +19225,71 @@ test "Metask balance failure projects the first-party reason to the shared Rende
             try std.testing.expectEqualStrings(expected_feedback.get(field).?.string, feedback.get(field).?.string);
         try std.testing.expectEqual(expected_feedback.get("offerInputPreparation").?.bool, feedback.get("offerInputPreparation").?.bool);
     }
+}
+
+test "a Metask Run that ended with 401 tells Account what Metask said" {
+    const Recorder = struct {
+        calls: usize = 0,
+        generation: u64 = 0,
+        kind: account_contract.Unauthorized = .other,
+        fn report(context: *anyopaque, generation: u64, kind: account_contract.Unauthorized) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.generation = generation;
+            self.kind = kind;
+        }
+    };
+    const Case = struct { status: u16, code: []const u8, kind: ?account_contract.Unauthorized };
+    for ([_]Case{
+        .{ .status = 401, .code = "token_expired", .kind = .token },
+        .{ .status = 401, .code = "authorization_revoked", .kind = .other },
+        // A suspended account is no credential failure.
+        .{ .status = 403, .code = "account_suspended", .kind = null },
+    }) |case| {
+        var control = try testRuntime();
+        defer control.deinit();
+        var recorder: Recorder = .{};
+        control.setAccountUnauthorizedReport(.{ .context = &recorder, .report_fn = Recorder.report });
+        const task = control.testTask(3).?;
+        const run = &task.durable.runs[0].?;
+        const storage = try control.allocator.create(task_test_state.RunModelError);
+        run.model_error_storage = storage;
+        storage.* = .{ .source = .metask, .detail = try lifecycle.ModelError.init(.{
+            .run_id = 77,
+            .category = .authentication,
+            .message = "refused",
+            .code = case.code,
+            .http_status = case.status,
+            .retry = .not_retryable,
+            .attempts = 1,
+        }) };
+        try std.testing.expect(commitTerminal(run, .failed, .failed, .provider_failure, .reusable, "", false));
+        run.terminal_payload.model_error = storage;
+        const generation = task.runtime.executionConst().?.credential_generation;
+        finalizeTestTerminalEvents(&control);
+        try std.testing.expectEqual(@as(usize, if (case.kind != null) 1 else 0), recorder.calls);
+        if (case.kind) |kind| {
+            try std.testing.expectEqual(kind, recorder.kind);
+            try std.testing.expectEqual(generation, recorder.generation);
+        }
+    }
+}
+
+test "the sign-out confirmation counts the Tasks a sign-out would stop" {
+    var control = try testRuntime();
+    defer control.deinit();
+    // The fixture Task runs on Metask. What stops, and what does not, is
+    // the sign-out lifecycle's to show with a Run that is running.
+    try std.testing.expectEqual(@as(usize, 1), control.metaskStopTargets());
+    // What the Run runs on decides, not the model chosen for the next turn.
+    const task = control.testTask(3).?;
+    const chosen = task.durable.model_intent;
+    task.durable.model_intent = try .init(control.allocator, .{ .source_id = "custom_provider:fixture", .model_id = "model" }, 9);
+    defer {
+        task.durable.model_intent.?.deinit(control.allocator);
+        task.durable.model_intent = chosen;
+    }
+    try std.testing.expectEqual(@as(usize, 1), control.metaskStopTargets());
 }
 
 test "Renderer transport failures never own Agent Run termination" {
@@ -18847,14 +19431,12 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
     const diagnostic: [account_contract.Limits.safe_diagnostic_bytes]u8 =
         @splat('x');
     control.commitAccountFactNoFail(.{
-        .kind = .session_changed,
         .view = .{
             .state = .authenticated,
             .account_id = &account_id,
             .display_name = &display_name,
             .email_hint = &email_hint,
             .phone_hint = &phone_hint,
-            .concurrency_limit = std.math.maxInt(u32),
             .error_code = .invalid_state,
             .safe_diagnostic = &diagnostic,
         },
@@ -19833,9 +20415,6 @@ test "a Tool record whose references or name cannot fit is still sent, so later 
 
 test "Tool pages hide credentials learned after the record was kept" {
     const Account = struct {
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
         fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             try callback(context, "page-account-key");
         }
@@ -19844,7 +20423,7 @@ test "Tool pages hide credentials learned after the record was kept" {
     defer control.deinit();
     try applyTestToolResult(&control, "secret", "before page-account-key after");
     var owner: u8 = 0;
-    control.setAccountProjectionCredentials(.{ .context = &owner, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    control.setAccountProjectionCredentials(.{ .context = &owner, .visit_fn = Account.visit });
     var output: [16 * 1024]u8 = undefined;
     const text = control.liveViewText();
     const page = try control.task_runtime.writeToolPage(std.testing.allocator, &output, text.task(), 3, 7, 0, tool_page_source_bytes);
@@ -20449,7 +21028,7 @@ test "Runtime re-scrubs file change diffs with credentials learned after write" 
     // intentionally left untouched; the read boundary must protect it using
     // the complete set of credentials that is live at read time.
     try TestSupport.installFixtureCredential(&control, late_credential);
-    control.redactAllProductProjectionsNoFail(late_credential);
+    _ = control.redactAllProductProjectionsNoFail(late_credential);
 
     const Capture = struct {
         calls: usize = 0,
@@ -22994,14 +23573,11 @@ test "empty MCP startup commits a proven manageable runtime" {
     ) != null);
     // The same Host-known credential predicate protects every write path.
     const Credential = struct {
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
         fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             try callback(context, "SYNTHETIC-MCP-CREDENTIAL");
         }
     };
-    const credentials: account_contract.AccessTokenProjection = .{ .context = &control, .generation_fn = Credential.generation, .visit_fn = Credential.visit };
+    const credentials: account_contract.AccessTokenProjection = .{ .context = &control, .visit_fn = Credential.visit };
     control.account_credentials = credentials;
     const leaking_http = try control.createMcpHttpServer(0, .{ .display_name = "Bad", .url = "https://example.test/k/SYNTHETIC-MCP-CREDENTIAL" });
     try std.testing.expectEqual(.rejected, leaking_http.outcome);
@@ -23913,7 +24489,8 @@ test "empty catalog rejects its explicit model without closing generic admission
     try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogWithCredential(&control.custom_providers, "account-1", "SECRET-KEY", &.{}));
     control.finishModelsCommitNoFail();
     try std.testing.expect(control.newTaskAdmissionView().available);
-    try std.testing.expect(control.scheduleExecutionBinding().available);
+    const schedule_authority = control.scheduleAuthority();
+    try std.testing.expect(schedule_authority.binding().available);
     try std.testing.expectError(error.ModelSelectionChanged, control.createTask(.{
         .workspace_root = "/must-not-be-opened",
         .trust = .explicitly_trusted,
@@ -24119,7 +24696,7 @@ test "Product view duplicate credential ownership preserves reads while exact ne
     defer control.allocator.free(duplicate);
     control.learnProjectionCredential(duplicate);
     control.retireProjectionCredential(duplicate);
-    control.redactAllProductProjectionsNoFail(duplicate);
+    _ = control.redactAllProductProjectionsNoFail(duplicate);
     try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
     try std.testing.expectEqual(wakes, host.wakes.load(.monotonic));
     try control.writeSnapshotRange(read.id, &output, 0, 64);
@@ -24128,14 +24705,62 @@ test "Product view duplicate credential ownership preserves reads while exact ne
     try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
     try std.testing.expectEqual(wakes + 1, host.wakes.load(.monotonic));
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
-    const next = try control.writeSnapshot(&output, .{});
-    // The separately owned duplicate above preserved the live credential set;
-    // retiring the remaining Task owner must invalidate captured reads.
+    // The last owner leaves nothing to rewrite, so neither the captured read
+    // nor anything shown is revoked.
+    var next = try control.writeSnapshot(&output, .{ .task_id = 3 });
     const task_credential = (try control.task_runtime.testExecutionInput(3)).api_key;
     control.retireProjectionCredential(task_credential);
+    control.retireProjectionCredential("SECRET");
+    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    try std.testing.expectEqual(wakes + 1, host.wakes.load(.monotonic));
+    while (next.bytes == 0) next = try control.continueSnapshot(next.id, &output);
+    try control.writeSnapshotRange(next.id, &output, 0, 64);
+    // Learning a released value is learning an unknown one.
+    control.learnProjectionCredential("SECRET");
     try std.testing.expectEqual(epoch + 2, control.projectionSecurityEpoch());
-    try std.testing.expectEqual(wakes + 2, host.wakes.load(.monotonic));
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(next.id, &output, 0, 64));
+}
+
+test "Product view release revokes what its scrub rewrote or dropped and nothing else" {
+    const Owner = enum { task, workspace, pinned_text, pinned_identity, catalog_text, catalog_identity };
+    for (std.enums.values(Owner)) |owner| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const task = control.testTaskSlots()[0].?;
+        switch (owner) {
+            .task => try control.replaceTracked(&task.durable.title, "title late-secret", control.limits.max_task_title_bytes),
+            .workspace => product_workspace.testing.overwriteProjectedRoot(&control.workspace, 1, "late-secret"),
+            .pinned_text, .pinned_identity => {
+                const pinned = try testCommittedSkillCatalog(&control);
+                control.projection_bytes += pinned.projected_bytes;
+                task.runtime.attached().?.pinned_catalog = pinned;
+            },
+            .catalog_text, .catalog_identity => try installTestCommittedSkillAuthorities(&control),
+        }
+        const credential = switch (owner) {
+            .task, .workspace => "late-secret",
+            .pinned_text, .catalog_text => "Review changes",
+            .pinned_identity, .catalog_identity => "builtin.review",
+        };
+        var output: [96 * 1024]u8 = undefined;
+        const read = try control.writeSnapshot(&output, .{ .task_id = 3 });
+        const epoch = control.projectionSecurityEpoch();
+        control.retireProjectionCredential(credential);
+        try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+        try std.testing.expectError(error.StaleSnapshot, control.continueSnapshot(read.id, &output));
+        control.retireProjectionCredential(credential);
+        try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    }
+
+    // A known value showed only masked, so finding it again revokes nothing.
+    var control = try testRuntime();
+    defer control.deinit();
+    const title = &control.testTaskSlots()[0].?.durable.title;
+    try control.replaceTracked(title, "title SECRET-KEY", control.limits.max_task_title_bytes);
+    const epoch = control.projectionSecurityEpoch();
+    control.learnProjectionCredential("SECRET-KEY");
+    try std.testing.expectEqualStrings("title **********", title.*);
+    try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
 }
 
 test "Product view history versions ignore unrelated revisions and observe terminal artifact completion" {
@@ -24215,9 +24840,6 @@ test "Product view failed preparation step releases its source and credentials" 
 test "the global instructions editor works under the home only and never carries a known credential" {
     const Account = struct {
         token: []const u8 = "account-instructions-token",
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
         fn visit(context: *anyopaque, visitor_context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             const self: *@This() = @ptrCast(@alignCast(context));
             try callback(visitor_context, self.token);
@@ -24226,7 +24848,7 @@ test "the global instructions editor works under the home only and never carries
     var control = try testRuntime();
     defer control.deinit();
     var account: Account = .{};
-    control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    control.setAccountProjectionCredentials(.{ .context = &account, .visit_fn = Account.visit });
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
@@ -24262,24 +24884,21 @@ test "the global instructions editor works under the home only and never carries
     try std.testing.expect(guarded.loaded.text == null);
 }
 
-test "Account image token protects Task views between Runs and rotation revokes reads" {
+test "Account token protects Task views and revokes reads only where it was shown" {
     const Account = struct {
         token: []const u8 = "account-image-token",
-        epoch: u64 = 1,
-        fn generation(context: *anyopaque) u64 {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            return self.epoch;
-        }
+        replaced: ?[]const u8 = null,
         fn visit(context: *anyopaque, visitor_context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             const self: *@This() = @ptrCast(@alignCast(context));
             try callback(visitor_context, self.token);
+            if (self.replaced) |token| try callback(visitor_context, token);
         }
     };
     var control = try testRuntime();
     defer control.deinit();
     try TestSupport.installFixtureCredential(&control, "custom-api-key");
     var account: Account = .{};
-    control.setAccountProjectionCredentials(.{ .context = &account, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    control.setAccountProjectionCredentials(.{ .context = &account, .visit_fn = Account.visit });
     try std.testing.expect(!std.mem.eql(u8, account.token, TestSupport.fixtureExecution(&control).input().api_key));
     var event = try testEnvelope(3, 7, "{\"tool_result\":{\"id\":\"account-tool\",\"name\":\"Bash\",\"input\":\"{\\\"command\\\":\\\"echo account\\\\u002dimage-token\\\"}\",\"content\":\"done\",\"is_error\":false,\"elapsed_ms\":1}}");
     defer event.deinit();
@@ -24311,13 +24930,36 @@ test "Account image token protects Task views between Runs and rotation revokes 
     var writer = std.Io.Writer.fixed(&output);
     try control.liveViewText().writeJson(&writer, "account-image-token");
     try std.testing.expectEqualStrings("\"***\"", writer.buffered());
-    account.token = "rotated-account-image-token";
-    account.epoch += 1;
-    control.syncAccountProjectionCredentialNoFail();
-    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    // A token from Account was in nothing shown before: a read goes on, whether
+    // it continues another or, as after a login, none was held.
+    const sink = control.accountCommitSink();
+    const changed: control_ports.AccountCommit = .{ .fact = .{ .view = .{ .state = .checking } }, .token_changed = true };
+    account = .{ .token = "renewed-account-token", .replaced = "account-image-token" };
+    sink.commitNoFail(changed);
+    try std.testing.expectEqual(epoch, control.projectionSecurityEpoch());
+    try control.writeSnapshotRange(read.id, &output, 0, 64);
+    try std.testing.expect(control.containsKnownCredential("prefix renewed-account-token suffix"));
+    try std.testing.expect(control.containsKnownCredential("prefix account-image-token suffix"));
+    // Found where it is shown, the one held or the one replaced was not hidden
+    // everywhere after all.
+    for ([_][]const u8{ "renewed-account-token", "account-image-token" }) |shown| {
+        const title = &control.testTaskSlots()[0].?.durable.title;
+        try control.replaceTracked(title, shown, control.limits.max_task_title_bytes);
+        const before = control.projectionSecurityEpoch();
+        sink.commitNoFail(changed);
+        try std.testing.expectEqual(before + 1, control.projectionSecurityEpoch());
+        sink.commitNoFail(changed);
+        try std.testing.expectEqual(before + 1, control.projectionSecurityEpoch());
+    }
     try std.testing.expectError(error.StaleSnapshot, control.writeSnapshotRange(read.id, &output, 0, 64));
-    control.syncAccountProjectionCredentialNoFail();
-    try std.testing.expectEqual(epoch + 1, control.projectionSecurityEpoch());
+    // Leaving, it revokes what it was found in, and nothing else.
+    const renewal = control.metaskCredentialRenewal();
+    const left = control.projectionSecurityEpoch();
+    renewal.retire(account.replaced.?);
+    try std.testing.expectEqual(left, control.projectionSecurityEpoch());
+    try control.replaceTracked(&control.testTaskSlots()[0].?.durable.title, account.replaced.?, control.limits.max_task_title_bytes);
+    renewal.retire(account.replaced.?);
+    try std.testing.expectEqual(left + 1, control.projectionSecurityEpoch());
 }
 
 test "history import degradation survives normalized startup metadata" {
@@ -24332,9 +24974,6 @@ test "history import degradation survives normalized startup metadata" {
 
 test "rejected credential-bearing history frees the encoded candidate on every attempt" {
     const Account = struct {
-        fn generation(_: *anyopaque) u64 {
-            return 1;
-        }
         fn visit(_: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque, []const u8) std.mem.Allocator.Error!void) std.mem.Allocator.Error!void {
             try callback(context, "unredacted-history-key");
         }
@@ -24344,7 +24983,7 @@ test "rejected credential-bearing history frees the encoded candidate on every a
     var history: TestTaskPersistence = .{ .storage = &storage };
     var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
     defer control.deinit();
-    control.setAccountProjectionCredentials(.{ .context = &owner, .generation_fn = Account.generation, .visit_fn = Account.visit });
+    control.setAccountProjectionCredentials(.{ .context = &owner, .visit_fn = Account.visit });
     try control.replaceTracked(&control.testTask(3).?.durable.title, "unredacted-history-key", control.limits.max_task_title_bytes);
     const before = history.commits;
     for (0..8) |_| try std.testing.expectError(error.TaskStoreEncodeFailed, control.commitTaskState());
@@ -24362,12 +25001,12 @@ test "learned short credentials scrub Runtime retained and readonly originals wi
     const readonly = try std.fmt.allocPrint(control.allocator, "{s},\"future\":\"none\"}}", .{original[0 .. original.len - 1]});
     control.testTask(record.id).?.read_only_history = .{ .recent_order = record.recent_order, .payload = readonly };
     try control.task_runtime.retainRecord(.{ .kind = .task, .id = 93, .order = 93, .payload = "{\"checkpoint_anchor\":\"none\",\"future\":\"n\\u006fne\"}" });
-    control.redactAllProductProjectionsNoFail("none");
+    _ = control.redactAllProductProjectionsNoFail("none");
     const payload = control.testTask(record.id).?.read_only_history.?.payload;
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"checkpoint_anchor\":\"none\"") != null);
     try std.testing.expect(!try task_persistence.security.contains(control.allocator, task_persistence.ReadOnlyPayload{ .task_id = record.id, .recent_order = record.recent_order, .payload = payload }, "none"));
     try std.testing.expect(!try task_persistence.security.contains(control.allocator, control.task_runtime.retained.items, "none"));
-    control.redactAllProductProjectionsNoFail("none");
+    _ = control.redactAllProductProjectionsNoFail("none");
     try std.testing.expectEqual(@as(usize, 1), control.task_runtime.retained.items.len);
 }
 
@@ -24744,7 +25383,7 @@ test "late credential discovery revokes Output locators in current and durable p
     const task = control.testTaskSlots()[0].?;
     const run = &task.durable.runs[0].?;
     try std.testing.expect(!run.outputs[0].?.redacted);
-    control.redactAllProductProjectionsNoFail("late-secret");
+    _ = control.redactAllProductProjectionsNoFail("late-secret");
     try std.testing.expect(run.outputs[0].?.redacted);
     try TestSupport.commitTaskHistory(&control);
     var decoded = try task_persistence.decode(std.testing.allocator, storage[0..history.len], testTaskPersistenceLimits());

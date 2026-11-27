@@ -27,6 +27,7 @@ import {
 import {
   historyProgress,
   earlierHistoryGoal,
+  narrowHistoryGoals,
   type HistoryGoal,
 } from "../workbench/history.ts";
 import { Message } from "../components/ai/Message.tsx";
@@ -99,6 +100,8 @@ import { Dialog } from "../components/ui/dialog.tsx";
 import { Input } from "../components/ui/input.tsx";
 import { Tooltip } from "../components/ui/tooltip.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
+import { AboutSettingsContent } from "../features/account/AboutSettingsContent.tsx";
+import type { UpdateControls } from "../features/account/update-actions.ts";
 import { ConnectionFailureScreen } from "../features/connection/ConnectionFailureScreen.tsx";
 import { accountFeedback } from "../features/account/account-feedback.ts";
 import { persistenceRecoveryErrorMessageId } from "../i18n/persistence-recovery.ts";
@@ -170,7 +173,6 @@ import {
   MediaLightbox,
   type MediaViewerTarget,
 } from "../features/media/MediaLightbox.tsx";
-import { WorkingDirectoriesSettings } from "../features/settings/WorkingDirectoriesSettings.tsx";
 import { ProjectSelector } from "../features/tasks/ProjectSelector.tsx";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { TaskWorkspace } from "../features/tasks/NewTaskView.tsx";
@@ -283,6 +285,7 @@ import {
 } from "./task-model-selection.ts";
 import { AttachmentRemovalCoordinator } from "./attachment-removal.ts";
 import {
+  metaskAdmission,
   modelSetupNotice,
   supportsCustomProviders,
   type ModelSetupAction,
@@ -972,10 +975,27 @@ export default function App() {
     force = false,
   ) {
     if (accountFeedbackRequest.current.awaitingSync) return;
-    const observation = JSON.stringify([
-      account.errorCode,
-      account.safeDiagnostic,
-    ]);
+    // The person's own command answers through the attempt its receipt
+    // names: nothing is its result until that attempt ends, and once it has
+    // ended its result is reported even when it is the failure shown before.
+    let shown = account;
+    const requested = accountFeedbackRequest.current.attemptId;
+    if (requested !== null) {
+      const attempt =
+        account.attempt?.id === requested ? account.attempt : null;
+      if (!attempt?.outcome) {
+        if (announce) return;
+      } else {
+        accountFeedbackRequest.current.attemptId = null;
+        shown = {
+          ...account,
+          errorCode: attempt.errorCode,
+          safeDiagnostic: attempt.safeDiagnostic,
+        };
+        force = true;
+      }
+    }
+    const observation = JSON.stringify([shown.errorCode, shown.safeDiagnostic]);
     const unknown = accountFeedbackRequest.current.unknown;
     if (unknown) {
       if (unknown.observation === null) {
@@ -993,7 +1013,7 @@ export default function App() {
     )
       return;
     accountFeedbackRequest.current.lastObservation = observation;
-    const result = accountFeedback(account);
+    const result = accountFeedback(shown);
     updateFeedbackState((current) =>
       observeFeedback(
         current,
@@ -1076,6 +1096,9 @@ export default function App() {
   const [taskReadingMemory] = useState(createTaskReadingMemory);
   const [inputHistoryReader] = useState(createTaskInputHistoryReader);
   useEffect(() => {
+    // A security epoch leaves no snapshot until the next read; reading
+    // positions are ids and offsets, kept for it, not reclaimed.
+    if (!snapshotLoaded) return;
     // Reclaim after TaskContent's unmount cleanup has saved its last position.
     taskReadingMemory.prune(
       new Set(snapshot.taskIndex.map((task) => task.id)),
@@ -1086,7 +1109,12 @@ export default function App() {
           }
         : undefined,
     );
-  }, [snapshot.taskIndex, snapshot.taskPage, taskReadingMemory]);
+  }, [
+    snapshot.taskIndex,
+    snapshot.taskPage,
+    snapshotLoaded,
+    taskReadingMemory,
+  ]);
   function retainTaskHistory(taskId: string, runId: string) {
     setHistoryRequests((goals) => {
       const previous = goals[taskId];
@@ -1998,7 +2026,11 @@ export default function App() {
   const canCreateTask =
     snapshot.newTaskAdmission.available &&
     newTaskWorkspaceReady &&
-    newTaskModelState.valid;
+    newTaskModelState.valid &&
+    !metaskAdmission(
+      snapshot.newTaskAdmission,
+      newTaskModelState.intent?.targetModelRef,
+    );
   const handoffBlocksSubmission =
     newTaskDraftActive &&
     handoffId !== null &&
@@ -2064,7 +2096,10 @@ export default function App() {
           account: snapshot.account,
           models: snapshot.models,
           admission: snapshot.newTaskAdmission,
-          selected: newTaskRequestedModel ?? snapshot.models.defaultSelection,
+          selected:
+            newTaskModelState.intent?.targetModelRef ??
+            newTaskRequestedModel ??
+            snapshot.models.defaultSelection,
           valid: newTaskModelState.valid,
           hasReadyModels,
           customProvidersAvailable,
@@ -2166,6 +2201,9 @@ export default function App() {
         break;
       case "cancel":
         void cancelAccountOperation();
+        break;
+      case "confirm":
+        void runAccountCommand(() => client.retryAccountRefresh());
         break;
       case "refresh":
         {
@@ -2302,7 +2340,9 @@ export default function App() {
             latestSnapshotRef.current &&
             latestSnapshotRef.current.securityEpoch !== next.securityEpoch
           )
-            setHistoryRequests({});
+            setHistoryRequests((goals) =>
+              narrowHistoryGoals(goals, taskReadingMemory.reading),
+            );
           if (
             latestSnapshotRef.current &&
             (latestSnapshotRef.current.securityEpoch !== next.securityEpoch ||
@@ -2445,10 +2485,11 @@ export default function App() {
         inputHistoryReader.clear();
         invalidateFeedbackSecurity();
         latestSnapshotRef.current = null;
-        setHistoryRequests({});
-        taskReadingMemory.reading.clear();
-        taskReadingMemory.processDisclosure.clear();
-        taskReadingMemory.toolDisclosure.clear();
+        // Where each Task was read holds no Host content: keep it, and ask
+        // again only for the history it needs.
+        setHistoryRequests((goals) =>
+          narrowHistoryGoals(goals, taskReadingMemory.reading),
+        );
         filePreviewTabs.clear();
         clearFileChanges();
         dispatchWorkbench({
@@ -2841,6 +2882,7 @@ export default function App() {
       epoch === feedbackRef.current.epoch;
     accountFeedbackRequest.current.awaitingSync = true;
     accountFeedbackRequest.current.unknown = null;
+    accountFeedbackRequest.current.attemptId = null;
     let token: FeedbackToken;
     function startCycle(id: ShellStatus["id"]) {
       const started = beginFeedback(
@@ -3150,7 +3192,7 @@ export default function App() {
       viewSyncFailed ||
       !bridgeReady ||
       accountCancelBusyRef.current ||
-      !snapshot.account.canCancel
+      !snapshot.account.actions.cancel
     )
       return;
     await runAccountCommand(() => client.cancelAccountOperation(), true);
@@ -3250,26 +3292,16 @@ export default function App() {
     });
     window.requestAnimationFrame(() => composer.current?.focus());
   }
-  async function registerWorkingDirectory(addProject: boolean) {
-    if (workbenchMutationDisabled || workspaceBusyRef.current) return;
-    workspaceBusyRef.current = true;
-    setWorkspaceBusy(true);
-    try {
-      await (addProject ? client.addProject() : client.chooseWorkspace());
-    } finally {
-      await refreshSnapshot().catch(() => undefined);
-      workspaceBusyRef.current = false;
-      setWorkspaceBusy(false);
-    }
-  }
   async function addProject() {
     if (workbenchMutationDisabled || workspaceBusyRef.current) return;
     const token = beginOperationFeedback("workspace:add-project", {
       scope: "workspace",
       workspaceId: null,
     });
+    workspaceBusyRef.current = true;
+    setWorkspaceBusy(true);
     try {
-      await registerWorkingDirectory(true);
+      await client.addProject();
       settleOperationFeedback(token, null);
     } catch (error) {
       settleOperationFeedback(
@@ -3283,6 +3315,10 @@ export default function App() {
           { scope: "workspace", workspaceId: null },
         ),
       );
+    } finally {
+      await refreshSnapshot().catch(() => undefined);
+      workspaceBusyRef.current = false;
+      setWorkspaceBusy(false);
     }
   }
   async function changeTaskProject(
@@ -5526,16 +5562,6 @@ export default function App() {
                   workspaceSelectionFeedback.values,
                 )}
               </p>
-              {workspaceSelectionFeedback.id ===
-                "workspace.directory_capacity" && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => openSettings("directories")}
-                >
-                  {t("settings.working_directories")}
-                </Button>
-              )}
               {workspaceSelectionFeedback.id !==
                 "workspace.selection_capacity" &&
                 workspaceSelectionFeedback.id !==
@@ -5642,7 +5668,9 @@ export default function App() {
                   bridgeUnavailable ||
                   accountBusy ||
                   executionBusy ||
-                  accountCancelBusy
+                  accountCancelBusy ||
+                  (setupNotice.action === "confirm" &&
+                    !snapshot.account.actions.retry)
                 }
                 onAction={runModelSetupAction}
                 onChooseSetup={
@@ -5697,6 +5725,7 @@ export default function App() {
         }
         onRemoveAttachment={(token) => void removeAttachment(token)}
         loadAttachmentThumbnail={loadAttachmentThumbnail}
+        securityEpoch={snapshot.securityEpoch}
         onOpenAttachment={(attachment, opener) => {
           attachmentViewerOpener.current = opener;
           setAttachmentViewer({
@@ -5791,6 +5820,22 @@ export default function App() {
           : previewMatchesTarget && filePreviewViewState
             ? filePreviewViewState.selected.displayPath
             : t("file_preview.title");
+  const updateControls: UpdateControls = {
+    disabled: bridgeUnavailable,
+    generation: bridgeGeneration,
+    check: async () => {
+      const result = await client.checkUpdates();
+      await refreshSnapshot();
+      return result.outcome === "accepted";
+    },
+    download: async (version) => {
+      const result = await client.openUpdateDownload(version);
+      await refreshSnapshot();
+      return result.outcome === "accepted";
+    },
+    website: async () =>
+      (await client.openUpdateWebsite()).outcome === "opened",
+  };
   const shell = (
     <AppShell
       taskTitle={
@@ -5992,29 +6037,18 @@ export default function App() {
           </nav>
           <AccountIdentity
             account={snapshot.account}
+            metaskStopTargets={snapshot.metaskStopTargets}
             updates={snapshot.updates}
-            updateControls={{
-              disabled: bridgeUnavailable,
-              generation: bridgeGeneration,
-              check: async () => {
-                const result = await client.checkUpdates();
-                await refreshSnapshot();
-                return result.outcome === "accepted";
-              },
-              download: async (version) => {
-                const result = await client.openUpdateDownload(version);
-                await refreshSnapshot();
-                return result.outcome === "accepted";
-              },
-              website: async () =>
-                (await client.openUpdateWebsite()).outcome === "opened",
-            }}
+            updateControls={updateControls}
             active={settingsOpen}
             disabled={bridgeUnavailable || accountBusy}
             cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
             onOpenSettings={openSettings}
             onBeginLogin={() =>
               void runAccountCommand(() => client.beginLogin())
+            }
+            onRetryRefresh={() =>
+              void runAccountCommand(() => client.retryAccountRefresh())
             }
             onCancel={() => void cancelAccountOperation()}
             onLogout={() => void runAccountCommand(() => client.logout())}
@@ -6129,21 +6163,9 @@ export default function App() {
                 onAddProject={() => void addProject()}
                 addProjectNotice={
                   addProjectFeedback?.tone === "attention" ? (
-                    <div className="task-list-empty">
-                      <p role="status">
-                        {t(addProjectFeedback.id, addProjectFeedback.values)}
-                      </p>
-                      {addProjectFeedback.id ===
-                        "workspace.directory_capacity" && (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => openSettings("directories")}
-                        >
-                          {t("settings.working_directories")}
-                        </Button>
-                      )}
-                    </div>
+                    <p className="task-list-empty" role="status">
+                      {t(addProjectFeedback.id, addProjectFeedback.values)}
+                    </p>
                   ) : undefined
                 }
                 renderWorkspaceHeading={(workspace, heading) => (
@@ -6329,28 +6351,17 @@ export default function App() {
       overlay={
         settingsOpen ? (
           <SettingsPage
-            globalInstructions={globalInstructions}
-            directoryManagement={
-              <WorkingDirectoriesSettings
-                workspaces={snapshot.workspaces}
-                tasks={snapshot.taskIndex}
-                disabled={workbenchMutationDisabled}
-                onChoose={() => registerWorkingDirectory(false)}
-                onRevoke={async (workspace) => {
-                  try {
-                    return (
-                      await client.removeWorkspace(
-                        workspace.id,
-                        workspace.epoch,
-                      )
-                    ).accepted;
-                  } finally {
-                    await refreshSnapshot();
-                  }
-                }}
+            aboutContent={
+              <AboutSettingsContent
+                updates={snapshot.updates}
+                updateControls={updateControls}
+                onOpenExternalLink={openExternalLink}
               />
             }
-            modelContext={`${bridgeGeneration}:${snapshot.securityEpoch}`}
+            globalInstructions={globalInstructions}
+            // The model settings hold only what the person typed; a security
+            // epoch replaces the Host facts they are shown with, not the form.
+            modelContext={bridgeGeneration}
             archiveManagement={{
               tasks: snapshot.taskIndex,
               workspaces: snapshot.workspaces,
@@ -6403,6 +6414,7 @@ export default function App() {
               onDelete: requestTaskDeletion,
             }}
             account={snapshot.account}
+            metaskStopTargets={snapshot.metaskStopTargets}
             accountFeedback={accountFeedbackEntries.map((entry) => (
               <FeedbackNotice
                 key={`${statuses.epoch}:${entry.key}:${entry.cycle}`}
@@ -6495,7 +6507,7 @@ export default function App() {
                   snapshot.models,
                   async () => {
                     await refreshSnapshot();
-                    return latestSnapshotRef.current!.models;
+                    return latestSnapshotRef.current?.models ?? null;
                   },
                   input,
                 );
@@ -7192,6 +7204,7 @@ export default function App() {
       <MediaLightbox
         target={attachmentViewer}
         load={loadAttachmentPreview}
+        securityEpoch={snapshot.securityEpoch}
         onClose={() => {
           setAttachmentViewer(null);
           const opener = attachmentViewerOpener.current;

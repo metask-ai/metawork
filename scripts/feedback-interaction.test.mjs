@@ -105,20 +105,32 @@ test.after(async () => {
   dom.window.close();
 });
 
-async function setup(ctx, errorCode = "metask_service_unavailable") {
+async function setup(
+  ctx,
+  errorCode = "metask_service_unavailable",
+  account = {},
+) {
   window.localStorage.setItem("metawork.model-setup-handled", "true");
   const snapshot = structuredClone(fixture);
   snapshot.tasks = [];
   Object.assign(snapshot.account, {
     state: "signed_out",
-    canCancel: false,
+    actions: {
+      cancel: false,
+      retry: false,
+      login: true,
+      logout: false,
+      clear: false,
+    },
+    unreachable: false,
+    attempt: null,
     accountId: "",
     displayName: "",
     emailHint: "",
     phoneHint: "",
-    concurrencyLimit: null,
     errorCode,
     safeDiagnostic: "request-id: example-safe-id\n<plain text>",
+    ...account,
   });
   let revision;
   const controls = {
@@ -127,6 +139,19 @@ async function setup(ctx, errorCode = "metask_service_unavailable") {
     reads: 0,
     invoke: null,
     generation: "1",
+  };
+  // The attempt a receipt names ends as the account it leaves.
+  const ended = (action) => {
+    const attemptId = String(controls.attempts);
+    const failed = snapshot.account.errorCode !== "none";
+    snapshot.account.attempt = {
+      id: attemptId,
+      action,
+      outcome: failed ? "failed" : "succeeded",
+      errorCode: snapshot.account.errorCode,
+      safeDiagnostic: snapshot.account.safeDiagnostic,
+    };
+    return { accepted: true, errorCode: "none", attemptId };
   };
   for (const [name, fn] of Object.entries({
     available: () => true,
@@ -150,20 +175,12 @@ async function setup(ctx, errorCode = "metask_service_unavailable") {
       if (controls.invoke) return controls.invoke();
       // The intermediate errorCode=none commit was coalesced: same error remains.
       snapshot.revision = String(BigInt(snapshot.revision) + 2n);
-      return {
-        accepted: true,
-        errorCode: "none",
-        attemptId: String(controls.attempts),
-      };
+      return ended("begin_login");
     },
     retryAccountRefresh: async () => {
       controls.attempts++;
       if (controls.invoke) return controls.invoke();
-      return {
-        accepted: true,
-        errorCode: "none",
-        attemptId: String(controls.attempts),
-      };
+      return ended("retry_refresh");
     },
   }))
     ctx.mock.method(BridgeClient.prototype, name, fn);
@@ -226,6 +243,12 @@ test("dismissing a refresh scheduling failure keeps its live recovery action ava
   const app = await setup(ctx, "refresh_schedule_failed");
   Object.assign(app.snapshot.account, {
     state: "authenticated",
+    actions: {
+      ...app.snapshot.account.actions,
+      retry: true,
+      login: false,
+      logout: true,
+    },
     accountId: "1",
     displayName: "Fixture account",
   });
@@ -239,15 +262,79 @@ test("dismissing a refresh scheduling failure keeps its live recovery action ava
     "recovery belongs to the permanent Account action area",
   );
   app.controls.invoke = () => {
+    app.snapshot.account.actions.retry = false;
     app.snapshot.account.errorCode = "none";
     app.snapshot.account.safeDiagnostic = "";
-    return { accepted: true, errorCode: "none", attemptId: "retry-refresh" };
+    app.snapshot.account.attempt = {
+      id: "5",
+      action: "retry_refresh",
+      outcome: "succeeded",
+      errorCode: "none",
+      safeDiagnostic: "",
+    };
+    return { accepted: true, errorCode: "none", attemptId: "5" };
   };
   await user.click(retry);
   await waitFor(() => assert.equal(app.controls.attempts, 1));
   await waitFor(() =>
     assert.ok(!screen.queryByRole("button", { name: "Retry sign-in refresh" })),
   );
+});
+
+test("retrying an unconfirmed login reports only its own outcome, once", async (ctx) => {
+  const app = await setup(ctx, "metask_service_unavailable", {
+    state: "checking",
+    actions: {
+      cancel: false,
+      retry: true,
+      login: true,
+      logout: true,
+      clear: false,
+    },
+  });
+  const user = await app.openAccount();
+  const attempt = {
+    id: "9",
+    action: "retry_refresh",
+    outcome: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  };
+  app.controls.invoke = () => {
+    app.snapshot.account.actions.retry = false;
+    app.snapshot.account.attempt = { ...attempt };
+    return { accepted: true, errorCode: "none", attemptId: "9" };
+  };
+  await user.click(screen.getByRole("button", { name: "Try again now" }));
+  const notice = () =>
+    document.querySelector(".settings-page .feedback-notice")?.textContent;
+  await waitFor(() => assert.match(notice(), /request received/));
+  const live = document.querySelector(".commandbar-alert-slot > [role=status]");
+  await app.publish();
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  assert.match(notice(), /request received/);
+  assert.doesNotMatch(live.textContent, /at the time/);
+
+  // It ends as the attempt before it did, and is reported all the same.
+  app.snapshot.account.actions.retry = true;
+  app.snapshot.account.attempt = {
+    ...attempt,
+    outcome: "failed",
+    errorCode: app.snapshot.account.errorCode,
+    safeDiagnostic: app.snapshot.account.safeDiagnostic,
+  };
+  await app.publish();
+  await waitFor(() => assert.match(notice(), /at the time/));
+  assert.match(live.textContent, /at the time/);
+  const announced = live.firstElementChild;
+
+  // Attempts nobody asked for say nothing new.
+  for (const retry of [false, true]) {
+    app.snapshot.account.actions.retry = retry;
+    await app.publish();
+    await new Promise((resolve) => setTimeout(resolve, 75));
+  }
+  assert.ok(live.firstElementChild === announced);
 });
 
 test("restored account result is local and silent; details collapse keeps focus and dismissal survives repeated snapshots", async (ctx) => {
@@ -343,6 +430,13 @@ test("an accepted command with failed sync has only connection sync feedback; re
   await app.openAccount();
   app.controls.invoke = () => {
     app.snapshot.account.errorCode = "metask_service_unavailable";
+    app.snapshot.account.attempt = {
+      id: "71",
+      action: "begin_login",
+      outcome: "failed",
+      errorCode: "metask_service_unavailable",
+      safeDiagnostic: app.snapshot.account.safeDiagnostic,
+    };
     app.controls.failRead = true;
     return { accepted: true, errorCode: "none", attemptId: "71" };
   };

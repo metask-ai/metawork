@@ -15,7 +15,15 @@ const requestB = { taskId: "4", runId: "8", requestId: "12" };
 const account = {
   state: "signed_out",
   catalogState: "unavailable",
-  canCancel: false,
+  actions: {
+    cancel: false,
+    retry: false,
+    login: false,
+    logout: false,
+    clear: false,
+  },
+  unreachable: false,
+  attempt: null,
   accountId: "",
   displayName: "",
   apiKeys: [],
@@ -29,7 +37,11 @@ const account = {
   safeDiagnostic: "",
   catalogGeneration: "0",
 };
-const newTaskAdmission = { available: false, reason: "workspace_unavailable" };
+const newTaskAdmission = {
+  available: false,
+  reason: "workspace_unavailable",
+  metask: "none",
+};
 
 function pending(identity) {
   return {

@@ -450,7 +450,7 @@ pub fn cancelCompact(context: *anyopaque) void {
         job.projector,
         compact,
         .aborted,
-        policy.compactCauseForInterruption(interruption),
+        policy.productCompactCause(compact, policy.compactCauseForInterruption(interruption)),
         if (interruption == .user_cancel) .reusable else .closing,
         .{},
         0,
@@ -519,15 +519,59 @@ fn generateAutomaticTitle(job: *RunJob) void {
     if (result.stop_reason != .end_turn or
         result.text.len > automatic_title_result_capacity)
         return;
-    const initial = run.initialRedactionSecrets();
-    const projected = job.projector.project(
-        &run.execution.?.automatic_title.result,
+    storeAutomaticTitle(
+        job.projector,
+        &run.execution.?.automatic_title,
+        run.initialRedactionSecrets(),
+        execution,
+        credential.bytes,
         result.text,
-        &.{ initial[0], initial[1], credential.bytes },
     );
-    run.execution.?.automatic_title.result_len = projected.len;
-    run.execution.?.automatic_title.generated_redacted = projected.redacted;
-    run.execution.?.automatic_title.generated = true;
+}
+
+/// Keeps a generated title, masked with the Run's initial credentials and the
+/// title request's own key. The request sends that key either way; it masks
+/// the title only where it is a secret, not where it is a Custom Provider
+/// placeholder.
+fn storeAutomaticTitle(
+    projector: TextProjector,
+    title: *state.AutomaticTitle,
+    initial: [3][]const u8,
+    execution: *const execution_binding.OwnedTaskExecution,
+    credential: []const u8,
+    text: []const u8,
+) void {
+    const projected = projector.project(
+        &title.result,
+        text,
+        &.{ initial[0], initial[1], execution.projectedCredential(credential) },
+    );
+    title.result_len = projected.len;
+    title.generated_redacted = projected.redacted;
+    title.generated = true;
+}
+
+test "an automatic title keeps a word that is only a Custom Provider placeholder key" {
+    const projector: TextProjector = .{ .project_fn = projectSanitized };
+    for ([_]struct { key: []const u8, kept: bool }{
+        .{ .key = "ollama", .kept = true },
+        .{ .key = "local-service-key-0001", .kept = false },
+    }) |case| {
+        var execution = try execution_binding.OwnedTaskExecution.cloneTarget(std.testing.allocator, .{
+            .provider_id = "custom_provider:local",
+            .protocol = .openai_chat_completions,
+            .model = "model",
+            .base_url = "http://127.0.0.1:11434/v1/chat/completions",
+        }, 7);
+        defer execution.deinit();
+        var title: state.AutomaticTitle = .{};
+        var storage: [64]u8 = undefined;
+        const text = try std.fmt.bufPrint(&storage, "Fix the {s} setup", .{case.key});
+        storeAutomaticTitle(projector, &title, .{ "", "", "" }, &execution, case.key, text);
+        try std.testing.expect(title.generated);
+        try std.testing.expectEqual(!case.kept, title.generated_redacted);
+        try std.testing.expectEqual(case.kept, std.mem.eql(u8, title.result[0..title.result_len], text));
+    }
 }
 
 fn automaticTitleCompletionInput(input: *const state.RunInputRecord) ?[]const u8 {
@@ -692,7 +736,7 @@ fn commitCompactTerminal(
         projector,
         compact,
         decision.phase,
-        decision.cause,
+        policy.productCompactCause(compact, decision.cause),
         result.session_disposition_at_completion,
         .{
             .input_tokens = result.input_tokens,

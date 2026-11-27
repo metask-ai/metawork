@@ -202,16 +202,45 @@ pub const ModelsView = struct {
     custom_providers: []const CustomProviderView = &.{},
 };
 
-pub const CatalogRefreshPreparation = struct {
-    attempt_id: u64,
-    principal_ref: []const u8,
-    authorization_generation: u64,
+/// What following the account changed: whether anything published did, and
+/// whether the catalog request underway belonged to another account and is
+/// no longer wanted.
+pub const MetaskFollow = struct {
+    changed: bool,
+    dropped: bool,
 };
 
-pub const CatalogRefreshPrepareResult = union(enum) {
-    ready: CatalogRefreshPreparation,
-    rejected: ModelsError,
+/// Who asks for a Metask catalog request: its time came, or the person.
+pub const CatalogRequestKind = enum { due, user };
+
+/// The credential a catalog request would use, as the Application found it.
+pub const CatalogCredential = union(enum) {
+    ready: struct { principal_ref: []const u8, generation: u64 },
+    /// None may be used now.
+    unavailable,
+    /// There was no memory to take it.
+    exhausted,
 };
+
+pub const CatalogRequestStart = struct {
+    outcome: union(enum) {
+        started: u64,
+        /// Not due yet; nothing was asked.
+        skipped,
+        rejected: ModelsError,
+    },
+    changed: bool,
+};
+
+/// How one catalog request failed, by Models' own classification.
+pub const CatalogFailure = struct {
+    code: ModelsError,
+    /// Worth a second try a moment later.
+    retryable: bool,
+};
+
+/// Whether the Metask source can resolve now, for the account it follows.
+pub const MetaskCatalogAvailability = enum { ready, loading, failed, absent };
 
 /// Route-scoped declarations frozen with an execution binding. Unknown models
 /// are omitted; an explicit false remains an authoritative declaration.
@@ -275,6 +304,11 @@ pub const ConfigInput = struct {
     target: Target,
     api_key: []const u8,
     execution_generation: u64,
+
+    /// The key as the projection knows it; see `projectedCredential`.
+    pub fn projectedKey(self: ConfigInput) []const u8 {
+        return projectedCredential(self.target.provider_id, self.api_key);
+    }
 };
 
 /// Credential-bearing input produced by a source owner before Product Control
@@ -288,6 +322,11 @@ pub const SourceCandidateInput = struct {
     /// The Account generation a Metask credential was leased at. Zero for a
     /// Custom Provider, whose credential is part of its source generation.
     credential_generation: u64 = 0,
+
+    /// The key as the projection knows it; see `projectedCredential`.
+    pub fn projectedKey(self: SourceCandidateInput) []const u8 {
+        return projectedCredential(self.target.provider_id, self.api_key);
+    }
 
     pub fn facts(self: SourceCandidateInput) TargetFacts {
         return .{
@@ -313,6 +352,29 @@ pub const TargetFacts = struct {
 };
 
 const custom_provider_prefix = @tagName(Source.custom_provider) ++ ":";
+
+/// The shortest Custom Provider key Product treats as a secret, in Unicode
+/// characters. A local service that ignores the key is commonly given a
+/// placeholder such as `ollama` or `EMPTY`; masking that would hide the word
+/// everywhere and refuse every path, model id and MCP setting containing it.
+/// Metask credentials are far longer, so the rule only ever spares
+/// placeholders.
+pub const min_custom_provider_secret_characters: usize = 16;
+
+/// What Product masks and refuses on for a source's credential: the value
+/// itself, or nothing for a Custom Provider placeholder. Requests still send
+/// the value; only the projection ignores it.
+pub fn projectedCredential(provider_id: []const u8, credential: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, provider_id, custom_provider_prefix)) return credential;
+    return if (customProviderKeyIsSecret(credential)) credential else &.{};
+}
+
+/// Whether a Custom Provider key is long enough to be a secret; bytes that
+/// are not UTF-8 count one character each.
+pub fn customProviderKeyIsSecret(credential: []const u8) bool {
+    const characters = std.unicode.utf8CountCodepoints(credential) catch credential.len;
+    return characters >= min_custom_provider_secret_characters;
+}
 
 /// The source a resolved provider identity names.
 pub fn providerSourceId(provider_id: []const u8) ?[]const u8 {
@@ -428,15 +490,8 @@ pub const CustomModelRemoveCommand = struct {
     expected_catalog_generation: u64,
 };
 
-/// Borrowed only during preparation, from the Host's current authorization
-/// lease. Models does not acquire, cache, refresh or persist this authorization.
-pub const MediaPreparationInput = struct {
-    kind: MediaKind = .image,
-    principal_ref: []const u8,
-    authorization_generation: u64,
-    bearer: []const u8,
-};
-
+/// A prepared media target. Its bearer was read through Models' Metask
+/// credential port for this preparation; Models keeps no copy of it.
 pub const MediaCandidateInput = struct {
     selection: ModelRef,
     endpoint: []const u8,
@@ -518,12 +573,13 @@ pub const ValidationError = error{
     UnsupportedProtocol,
 };
 
-const SecretBuffer = struct {
+/// Heap secret bytes with one owner, zeroed when released.
+pub const SecretBuffer = struct {
     allocator: std.mem.Allocator = undefined,
     bytes: []u8 = &.{},
     owned: bool = false,
 
-    fn initOwned(allocator: std.mem.Allocator, bytes: []u8) SecretBuffer {
+    pub fn initOwned(allocator: std.mem.Allocator, bytes: []u8) SecretBuffer {
         std.debug.assert(bytes.len > 0);
         return .{ .allocator = allocator, .bytes = bytes, .owned = true };
     }
@@ -535,12 +591,12 @@ const SecretBuffer = struct {
         return result;
     }
 
-    fn view(self: *const SecretBuffer) []const u8 {
+    pub fn view(self: *const SecretBuffer) []const u8 {
         std.debug.assert(self.owned);
         return self.bytes;
     }
 
-    fn deinit(self: *SecretBuffer) void {
+    pub fn deinit(self: *SecretBuffer) void {
         if (!self.owned) return;
         secureFree(self.allocator, self.bytes);
         self.* = .{};
@@ -576,13 +632,16 @@ const OwnedBuffer = struct {
     }
 };
 
-/// Linear image input with one Models-owned target. No dialogue protocol,
-/// principal or authorization generation is transferred to the executor.
+/// Linear image input with one Models-owned target. No dialogue protocol or
+/// principal is transferred to the executor. It carries the Account
+/// generation of its credential, for renewing it in place and for telling
+/// Account of a 401.
 pub const OwnedMediaCandidate = struct {
     kind: MediaKind,
     model: OwnedBuffer,
     secret: SecretBuffer,
     catalog_generation: u64,
+    credential_generation: u64 = 0,
 
     pub fn copy(
         allocator: std.mem.Allocator,
@@ -624,6 +683,7 @@ pub const OwnedMediaCandidate = struct {
             .model = self.model.take(),
             .secret = self.secret.take(),
             .catalog_generation = self.catalog_generation,
+            .credential_generation = self.credential_generation,
         };
     }
 
@@ -631,6 +691,7 @@ pub const OwnedMediaCandidate = struct {
         self.secret.deinit();
         self.model.deinit();
         self.catalog_generation = 0;
+        self.credential_generation = 0;
     }
 };
 
@@ -1259,11 +1320,14 @@ test "image candidate owns borrowed inputs and zeroes moved credentials" {
     var model = "image-model".*;
     var bearer = "lease-secret".*;
     var candidate = try OwnedMediaCandidate.copy(observing.allocator(), .image, &model, &bearer, 7);
+    candidate.credential_generation = 9;
     observing.observe(candidate.secret.bytes);
     @memset(&model, 'x');
     @memset(&bearer, 0);
     var moved = candidate.take();
     candidate.deinit();
+    // The credential's Account generation moves with it.
+    try std.testing.expectEqual(@as(u64, 9), moved.credential_generation);
     try std.testing.expectEqualStrings("image-model", moved.input().selection.model_id);
     try std.testing.expectEqualStrings(metask_source_id, moved.input().selection.source_id);
     try std.testing.expectEqualStrings(metask_images_generations_url, moved.input().endpoint);
@@ -1515,4 +1579,27 @@ test "image capability ownership survives transfer and allocation failure" {
     try std.testing.expectError(error.InvalidMetadata, validateImageCapabilities(&duplicate));
     const excessive = [_]ModelImageCapability{.{ .model = "m", .supported = true }} ** (max_model_image_capabilities + 1);
     try std.testing.expectError(error.CollectionTooLarge, validateImageCapabilities(&excessive));
+}
+
+test "a Custom Provider placeholder key is not projected as a secret" {
+    const custom = custom_provider_prefix ++ "local";
+    // Requests still send these; the projection neither masks nor refuses on them.
+    try std.testing.expectEqualStrings("", projectedCredential(custom, "ollama"));
+    try std.testing.expectEqualStrings("", projectedCredential(custom, "EMPTY"));
+    try std.testing.expectEqualStrings("", projectedCredential(custom, "fifteen-chars-x"));
+    try std.testing.expectEqualStrings("sixteen-chars-xx", projectedCredential(custom, "sixteen-chars-xx"));
+    // Characters, not bytes: fifteen three-byte characters are still short.
+    try std.testing.expectEqualStrings("", projectedCredential(custom, "密" ** 15));
+    try std.testing.expectEqualStrings("密" ** 16, projectedCredential(custom, "密" ** 16));
+    // Bytes that are not UTF-8 count one each.
+    try std.testing.expectEqualStrings("\xff" ** 16, projectedCredential(custom, "\xff" ** 16));
+    // Only Custom Providers have placeholders.
+    try std.testing.expectEqualStrings("ollama", projectedCredential(metask_source_id, "ollama"));
+    const input: ConfigInput = .{
+        .target = .{ .provider_id = custom, .protocol = .openai_chat_completions, .model = "m", .base_url = "http://127.0.0.1:11434/v1/chat/completions" },
+        .api_key = "ollama",
+        .execution_generation = 1,
+    };
+    try std.testing.expectEqualStrings("", input.projectedKey());
+    try std.testing.expectEqualStrings("ollama", input.api_key);
 }

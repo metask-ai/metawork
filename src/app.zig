@@ -14,7 +14,8 @@ const account_api = @import("metawork_account");
 const product_identity = @import("metawork_product_identity");
 const mcp_platform = @import("metawork_mcp_platform");
 const mcp_oauth = @import("metawork_mcp_oauth");
-const account_coordinator = @import("app/account_coordinator.zig");
+const account_coordinator = @import("account_coordinator");
+const account_contract = @import("metawork_account_contract");
 const account_platform_binding = @import("app/account_platform_binding.zig");
 const models_coordinator = @import("models_coordinator");
 const models_automation_vault = @import("app/models_automation_vault.zig");
@@ -363,9 +364,13 @@ const App = struct {
         // before installing capabilities that initialization would overwrite.
         control_storage.setAccountProjectionCredentials(account.runtime.accessTokenProjection());
         control_storage.setImageRunPreparation(models_management.imageRunPreparation());
+        control_storage.setMetaskCredentials(models_management.metaskCredentials());
         control_storage.setVideoRunPreparation(models_management.videoRunPreparation());
-        control_storage.setMetaskAuthorizationCheck(models_management.metaskAuthorizationCheck());
-        models_management.setCredentialRenewal(control_storage.metaskCredentialRenewal());
+        control_storage.setAccountAuthorization(account.authorizationQuery());
+        account.setCredentialRenewal(control_storage.metaskCredentialRenewal());
+        // Every Metask 401 on the Account token is Account's to judge.
+        control_storage.setAccountUnauthorizedReport(account.unauthorizedReport());
+        models_management.setUnauthorizedReport(account.unauthorizedReport());
         control_storage.setFileDeliveryPreparation(.{ .context = self, .prepare_fn = prepareFileDelivery, .validate_path_fn = output_file.validatePath });
         control_storage.setFileEffects(self.platform.fileEffects());
         control_storage.setFileSave(self.platform.fileSave());
@@ -374,11 +379,14 @@ const App = struct {
             .notify_fn = app_platform.Adapter.notifyRequired,
         });
         const model_timers = self.platform.dispatcherPlatform();
-        models_management.setRetryTimer(.{
+        models_management.setHost(.{
             .context = model_timers.context,
-            .start_fn = model_timers.start_timer_fn,
-            .cancel_fn = model_timers.cancel_timer_fn,
+            .now_ns_fn = model_timers.now_fn,
+            .start_timer_fn = model_timers.start_timer_fn,
+            .cancel_timer_fn = model_timers.cancel_timer_fn,
         });
+        // The catalog beat runs only while MetaWork is in front.
+        models_management.setActive(native_runtime.app_active);
         if (self.automation.active()) {
             const vault = self.automation_models_vault orelse
                 @panic("automation Models vault is not composed");
@@ -515,14 +523,16 @@ const App = struct {
 
     fn stop(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
+        // Account starts nothing more from here; what it gives up it gives up
+        // now, and it closes last, after the execution process.
+        if (self.account_started) if (self.account_coordinator) |coordinator|
+            coordinator.beginShutdown();
         if (self.control) |control| control.beginShutdown();
         if (self.updates) |*coordinator| coordinator.shutdown();
         // Settles every pending inbox read before the Bridge proves quiescence.
         if (self.inbox) |*coordinator| coordinator.shutdown();
         if (self.single_instance) |coordinator| coordinator.stopIngress();
         if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
-        if (self.account_started) if (self.account_coordinator) |coordinator|
-            coordinator.beginShutdown();
         if (self.control) |control| {
             control.shutdownAttachmentStagingExecutor();
             control.stopFilePreviewAdmission();
@@ -556,13 +566,6 @@ const App = struct {
             coordinator.shutdown();
             coordinator.drain();
         };
-        if (self.account_started) if (self.account_coordinator) |coordinator| {
-            coordinator.shutdown();
-            coordinator.drain();
-        };
-        if (self.account_platform_binding) |*binding| binding.deinit();
-        self.account_platform_binding = null;
-        self.models_platform_binding = null;
         if (self.control) |control| control.shutdownExecutor();
         // Required-wake producers are joined above. Release the relay and
         // platform references even if Agent shutdown reports an error.
@@ -579,6 +582,15 @@ const App = struct {
             control.syncLifecycle();
             control.relinquishAgentSessionsAfterRuntimeShutdown();
         }
+        // Tasks have stopped, so none waits on a renewal while Account gives
+        // one underway its own close wait.
+        if (self.account_started) if (self.account_coordinator) |coordinator| {
+            coordinator.shutdown();
+            coordinator.drain();
+        };
+        if (self.account_platform_binding) |*binding| binding.deinit();
+        self.account_platform_binding = null;
+        self.models_platform_binding = null;
         self.control = null;
         self.account_started = false;
         self.models_started = false;
@@ -604,6 +616,8 @@ const App = struct {
                 // Product consumes catalog completion before management can
                 // observe the shared boundary and decide whether to advance.
                 self.drainAgentEvents();
+                // Product may only now have made a message wait for Account.
+                if (self.account_coordinator) |coordinator| _ = coordinator.tick();
                 if (self.mcp_oauth_refresh) |*coordinator| _ = coordinator.drain();
                 self.advanceMcp();
                 if (self.control) |control|
@@ -624,6 +638,13 @@ const App = struct {
                 };
             },
             .timer => |timer| {
+                // Any timer may find a renewal due: the Account beat can be
+                // late, and what this timer asks for may need the result.
+                if (self.account_coordinator) |coordinator| {
+                    if (coordinator.tick()) if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null)
+                        try dispatcher.emitProductChanged();
+                    if (coordinator.ownsTimer(timer.id)) return;
+                }
                 if (timer.id == update_coordinator.timer_id) {
                     if (self.updates) |*coordinator| coordinator.onTimer();
                     if (self.dispatcher) |dispatcher| try dispatcher.emitProductChanged();
@@ -634,14 +655,10 @@ const App = struct {
                     if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
                     return;
                 }
-                if (self.account_coordinator) |coordinator|
-                    if (coordinator.onTimer(timer.id))
-                        return;
-                if (self.models_coordinator) |coordinator| {
-                    if (coordinator.onCatalogRetryTimer(timer.id)) {
-                        if (self.dispatcher) |dispatcher| try dispatcher.emitProductChanged();
-                        return;
-                    }
+                if (timer.id == models_coordinator.timer_id) {
+                    if (self.models_coordinator) |coordinator| coordinator.onTimer();
+                    if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
+                    return;
                 }
                 if (timer.id == app_platform.scheduled_task_timer_id) {
                     if (self.control) |control| {
@@ -687,6 +704,8 @@ const App = struct {
             // The inbox asks MetaTeam only while MetaWork is in front.
             .lifecycle => |phase| if (phase == .activate or phase == .deactivate) {
                 if (self.inbox) |*coordinator| coordinator.setActive(phase == .activate);
+                if (self.models_started) if (self.models_coordinator) |coordinator| coordinator.setActive(phase == .activate);
+                if (phase == .activate) if (self.account_coordinator) |coordinator| coordinator.activate();
                 if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) try dispatcher.emitProductChanged();
             },
             else => {},
@@ -879,9 +898,19 @@ pub fn run(init: std.process.Init) !void {
     // the Native SDK runner is entered, because a process that reaches the
     // runner has a window, and this one must never have one.
     if (execution_host.requested(init.minimal.args, init.gpa)) runExecutionHalf(init);
-    var http_engine: @import("metawork_http_transport").Engine = undefined;
+    // Closing may leave an Account request running that no cancel reaches.
+    // What it uses lives on the heap and is not freed then, and once every
+    // other part of closing has run the process ends here: returning would
+    // wait for that thread, which may still touch what this frame held.
+    var account_detached = false;
+    defer if (account_detached) std.process.exit(0);
+    errdefer if (account_detached) std.process.exit(1);
+    const http_engine = try std.heap.c_allocator.create(@import("metawork_http_transport").Engine);
     http_engine.init(std.heap.c_allocator, init.io);
-    defer http_engine.deinit();
+    defer if (!account_detached) {
+        http_engine.deinit();
+        std.heap.c_allocator.destroy(http_engine);
+    };
     var app = App{
         .env_map = init.environ_map,
         .io = init.io,
@@ -890,7 +919,7 @@ pub fn run(init: std.process.Init) !void {
         .automation = app_automation.Adapter.init(init.environ_map),
         .platform = app_platform.Adapter.init(init.io, std.Thread.getCurrentId()),
         .completion_transport = .{
-            .http = &http_engine,
+            .http = http_engine,
         },
     };
     app.platform.setProductDeliveryTrace(app.automation.productDeliveryTraceEnabled());
@@ -1149,10 +1178,13 @@ pub fn run(init: std.process.Init) !void {
         }
     }
 
-    var account_http = metask_http_transport.Adapter{ .http = &http_engine };
+    const account_http = try std.heap.c_allocator.create(metask_http_transport.Adapter);
+    account_http.* = .{ .http = http_engine };
+    defer if (!account_detached) std.heap.c_allocator.destroy(account_http);
     var account_loopback = oauth_loopback_transport.Adapter.init(init.io);
     defer account_loopback.deinit();
-    var account_runtime = account_api.Runtime.init(
+    const account_runtime = try std.heap.c_allocator.create(account_api.Runtime);
+    account_runtime.* = account_api.Runtime.init(
         std.heap.c_allocator,
         init.io,
         app.main_thread_id,
@@ -1164,12 +1196,12 @@ pub fn run(init: std.process.Init) !void {
         },
     );
     var account_coordinator_state = account_coordinator.Coordinator.init(
-        &account_runtime,
+        account_runtime,
         control.accountCommitSink(),
         app.main_thread_id,
     );
     var models_coordinator_state = models_coordinator.Coordinator.init(
-        &account_runtime,
+        account_coordinator_state.credentialSource(),
         account_http.modelsTransport(),
         control.modelsManagement(),
         app.main_thread_id,
@@ -1191,9 +1223,9 @@ pub fn run(init: std.process.Init) !void {
     models_coordinator_state.setCompletionTransport(
         app.completion_transport.transport(),
     );
-    account_coordinator_state.setCommitObserver(.{
+    account_coordinator_state.setFollower(.{
         .context = &models_coordinator_state,
-        .notify_fn = notifyModelsAuthorizationChanged,
+        .follow_fn = followAuthorization,
     });
     app.account_coordinator = &account_coordinator_state;
     app.models_coordinator = &models_coordinator_state;
@@ -1201,7 +1233,11 @@ pub fn run(init: std.process.Init) !void {
         app.models_coordinator = null;
         app.account_coordinator = null;
         if (app.control_initialized) control.clearAccountProjectionCredentials();
-        account_runtime.deinit();
+        account_detached = account_runtime.detached();
+        if (!account_detached) {
+            account_runtime.deinit();
+            std.heap.c_allocator.destroy(account_runtime);
+        }
     }
 
     var dispatcher = try bridge_api.Dispatcher.init(
@@ -1236,9 +1272,9 @@ pub fn run(init: std.process.Init) !void {
     }, init);
 }
 
-fn notifyModelsAuthorizationChanged(context: *anyopaque) void {
+fn followAuthorization(context: *anyopaque, authorization: account_contract.Authorization) void {
     const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
-    coordinator.authorizationChanged();
+    coordinator.follow(authorization);
 }
 
 fn refreshModelsCatalog(context: *anyopaque) models_contract.CommandResult {
@@ -1457,6 +1493,7 @@ test "notification activation follows SDK command routing into the real Task Bri
         .scheduleCompleted = "completed",
         .scheduleFailed = "failed",
         .scheduleSkipped = "skipped",
+        .scheduleModelUnavailable = "model unavailable",
         .scheduleNeedsAttention = "needs attention",
         .runCompleted = "run completed",
         .runFailed = "run failed",

@@ -2105,6 +2105,7 @@ test("Account authorization and Models provider state remain separate owners", (
   const accountState = read("src/product/account/state.zig");
   const accountContract = read("src/product/account/contract.zig");
   const modelsRuntime = read("src/product/models/runtime.zig");
+  const modelsMetask = read("src/product/models/metask.zig");
 
   assert.match(ports, /pub const AccountCommitSink = struct/);
   assert.doesNotMatch(
@@ -2115,25 +2116,57 @@ test("Account authorization and Models provider state remain separate owners", (
   const nextMethod = control.indexOf("\n    }", commitStart + 1);
   const accountCommit = control.slice(commitStart, nextMethod);
   assert.match(accountCommit, /self\.commitAccountFactNoFail\(commit\.fact\)/);
-  assert.doesNotMatch(accountCommit, /model|Model|source|Source|credential/);
+  assert.doesNotMatch(accountCommit, /model|Model|source|Source/);
+  // Product learns that a token changed and inspects it through its visitor;
+  // the commit itself carries no bytes of one.
+  const accountCommitFields = ports.match(
+    /pub const AccountCommit = struct \{([\s\S]*?)\n    pub fn /,
+  )?.[1];
+  assert.match(accountCommitFields, /token_changed: bool/);
+  assert.doesNotMatch(accountCommitFields, /\[\](?:const )?u8/);
 
-  const accountCommitAt = accountCoordinator.indexOf(
-    "self.runtime.commit(&prepared);",
-  );
-  const productCommitAt = accountCoordinator.indexOf(
-    "self.control.commitNoFail",
-  );
-  assert.ok(accountCommitAt >= 0 && productCommitAt > accountCommitAt);
-  const observerAt = accountCoordinator.indexOf("observer.notify();");
-  assert.ok(observerAt > productCommitAt);
-  assert.match(accountRuntime, /pub fn authorizationLease/);
-  assert.match(modelsCoordinator, /self\.account\.authorizationLease\(\)/);
+  for (const [start, end, steps] of [
+    [
+      "fn commitPrepared(",
+      "fn publish(self: *Coordinator)",
+      [
+        "self.runtime.commit(&prepared);",
+        "self.control.commitNoFail",
+        "self.publish();",
+      ],
+    ],
+    [
+      "fn publish(self: *Coordinator)",
+      "pub fn beginShutdown(",
+      [
+        "self.deliverCredential();",
+        "follower.follow(self.runtime.authorization());",
+        "self.control.settleNoFail();",
+      ],
+    ],
+  ]) {
+    const body = accountCoordinator.slice(
+      accountCoordinator.indexOf(start),
+      accountCoordinator.indexOf(end),
+    );
+    const found = steps.map((step) => body.indexOf(step));
+    assert.ok(found[0] >= 0);
+    for (let step = 1; step < found.length; step++)
+      assert.ok(found[step] > found[step - 1]);
+  }
+  assert.match(accountRuntime, /pub fn credential\(/);
+  assert.match(modelsCoordinator, /self\.credentials\.take\(\)/);
+  assert.doesNotMatch(modelsCoordinator, /@import\("metawork_account"\)/);
+  // Models follows the account Account publishes; signing out empties it.
   assert.match(
     modelsCoordinator,
-    /self\.management\.setMetaskAuthorizationUnavailable\(\)/,
+    /self\.management\.followMetaskPrincipal\(null, 0\)/,
   );
-  assert.match(modelsRuntime, /pub fn setMetaskAuthorizationUnavailable/);
-  assert.match(modelsRuntime, /clearMetaskRuntime\(\.needs_authentication/);
+  assert.match(modelsRuntime, /pub fn followMetaskPrincipal/);
+  assert.match(modelsRuntime, /self\.clearMetask\(true\)/);
+  // The Metask catalog keeps no token: whoever resolves brings the
+  // credential of the moment.
+  assert.doesNotMatch(modelsMetask, /Secret = struct/);
   assert.doesNotMatch(
     [accountContract, accountRuntime, accountState].join("\n"),
     /ModelView|ModelMetadata|CatalogState|source_resolution|selected_model|OwnedSourceCandidate|execution_generation/,

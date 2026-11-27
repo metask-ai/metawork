@@ -111,6 +111,9 @@ const { useNewTaskDrafts, useTaskDrafts } = await vite.ssrLoadModule(
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
+const { MediaLightbox } = await vite.ssrLoadModule(
+  "/src/features/media/MediaLightbox.tsx",
+);
 const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
 const { ModelSetupNotice } = await vite.ssrLoadModule(
   "/src/features/models/ModelSetup.tsx",
@@ -413,32 +416,24 @@ test("SelectionMenu exposes a visible busy state without a false chevron", () =>
 
 const readySettingsAccount = {
   state: "authenticated",
-  canCancel: false,
+  actions: {
+    cancel: false,
+    retry: false,
+    login: false,
+    logout: true,
+    clear: false,
+  },
+  unreachable: false,
+  attempt: null,
   accountId: "account-1",
   displayName: "Metask User",
   emailHint: "m***@example.com",
   phoneHint: "",
-  concurrencyLimit: 5,
   errorCode: "none",
   safeDiagnostic: "",
   summary: {
     operation: "idle",
     usageEligibility: "unknown",
-    wallet: {
-      availability: "unavailable",
-      balanceU: null,
-      syncedAt: null,
-      errorCode: "none",
-      safeDiagnostic: "",
-    },
-    usage: {
-      availability: "unavailable",
-      today: null,
-      total: null,
-      syncedAt: null,
-      errorCode: "none",
-      safeDiagnostic: "",
-    },
     history: {
       availability: "unavailable",
       startDate: null,
@@ -2039,6 +2034,23 @@ test("Models adds a model independently without listing or reusing legacy provid
   assert.deepEqual(removals, [["provider-multi", "3", "7", "model-a"]]);
 });
 
+test("the sign-out confirmation says how many Tasks it stops, in the right number", async () => {
+  for (const [count, sentence] of [
+    [1, /1 task is using Metask models and will stop when you sign out./],
+    [2, /2 tasks are using Metask models and will stop when you sign out./],
+  ]) {
+    const user = userEvent.setup({ document: dom.window.document });
+    renderSettings(readySettingsAccount, {
+      initialSection: "account",
+      metaskStopTargets: count,
+    });
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Sign out" });
+    assert.match(dialog.textContent, sentence);
+    cleanup();
+  }
+});
+
 test("Settings signs out only after confirming in a modal", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   let logoutCalls = 0;
@@ -2057,13 +2069,19 @@ test("Settings signs out only after confirming in a modal", async () => {
   await waitFor(() => assert.ok(document.activeElement === heading));
   const trigger = screen.getByRole("button", { name: "Sign out" });
   assert.equal(screen.queryByRole("heading", { name: "Security" }), null);
-  assert.equal(screen.queryByText(/Sign in again to create new tasks/), null);
+  assert.equal(
+    screen.queryByText(/can't use Metask models until you sign in again/),
+    null,
+  );
   await user.click(trigger);
 
   const dialog = await screen.findByRole("alertdialog", { name: "Sign out" });
   const cancel = within(dialog).getByRole("button", { name: "Cancel" });
   await waitFor(() => assert.ok(document.activeElement === cancel));
-  assert.match(dialog.textContent, /Sign in again to create new tasks/);
+  assert.match(
+    dialog.textContent,
+    /After you sign out, you can't use Metask models until you sign in again\./,
+  );
   assert.equal(logoutCalls, 0);
 
   await user.keyboard("{Escape}");
@@ -2087,7 +2105,11 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
   const user = userEvent.setup({ document: dom.window.document });
   let cancellations = 0;
   renderSettings(
-    { ...readySettingsAccount, state: "authorizing", canCancel: true },
+    {
+      ...readySettingsAccount,
+      state: "authorizing",
+      actions: { ...readySettingsAccount.actions, cancel: true },
+    },
     {
       models: settingsModels(
         { catalogState: "loading", models: [] },
@@ -2236,6 +2258,7 @@ function renderComposer(overrides = {}, afterDraftCommit) {
   let setHistoryAvailableFromTest;
   let setSlashCommandsFromTest;
   let setStopStateFromTest;
+  let setSecurityEpochFromTest;
   function ComposerHarness() {
     const [localDraft, setDraft] = useState(initialDraft);
     const owner = overrides.taskDraftId
@@ -2254,6 +2277,8 @@ function renderComposer(overrides = {}, afterDraftCommit) {
       disabled: overrides.stopDisabled ?? false,
     });
     setStopStateFromTest = setStopState;
+    const [securityEpoch, setSecurityEpoch] = useState(overrides.securityEpoch);
+    setSecurityEpochFromTest = setSecurityEpoch;
     setHistoryAvailableFromTest = setHistoryAvailable;
     setScopeFromTest = setScope;
     setDraftFromTest = setDraft;
@@ -2319,6 +2344,7 @@ function renderComposer(overrides = {}, afterDraftCommit) {
       stopDisabled: stopState.disabled,
       draft,
       draftScope: scope,
+      securityEpoch,
       inputHistory:
         overrides.inputHistory && historyAvailable
           ? {
@@ -2367,9 +2393,131 @@ function renderComposer(overrides = {}, afterDraftCommit) {
     setStopState(value) {
       setStopStateFromTest(value);
     },
+    setSecurityEpoch(value) {
+      setSecurityEpochFromTest(value);
+    },
     currentDraft: () => latestDraft,
   };
 }
+
+/// A thumbnail or original loader that hands out a ready image each time and
+/// counts what was asked for and what was given back.
+function countingImageLoader() {
+  const calls = { loads: 0, releases: 0 };
+  const load = () => {
+    calls.loads += 1;
+    const image = {
+      id: `image-${calls.loads}`,
+      width: 192,
+      height: 128,
+      src: "data:image/png;base64,AA==",
+      valid: () => true,
+      current: () => true,
+      subscribe: () => () => {},
+      beginDecode: () => new Promise(() => {}),
+    };
+    return Promise.resolve({
+      state: "ready",
+      content: "",
+      truncated: false,
+      redacted: false,
+      image,
+      release: () => {
+        calls.releases += 1;
+      },
+    });
+  };
+  return { calls, load };
+}
+
+test("a staged image asks for its thumbnail again in place under a newer security epoch", async () => {
+  const { calls, load } = countingImageLoader();
+  const composer = renderComposer({
+    draft: {
+      kind: "multimodal",
+      text: "",
+      attachments: [
+        {
+          kind: "image",
+          format: "png",
+          token: "a".repeat(48),
+          displayName: "shot.png",
+          sizeBytes: "900",
+        },
+      ],
+    },
+    attachmentsEnabled: true,
+    loadAttachmentThumbnail: load,
+    securityEpoch: "1",
+  });
+  await waitFor(() => assert.equal(calls.loads, 1));
+  act(() => composer.setSecurityEpoch("2"));
+  // What the older epoch delivered goes back, and the chip asks once again
+  // instead of settling on its format label.
+  await waitFor(() => assert.equal(calls.loads, 2));
+  assert.equal(calls.releases, 1);
+});
+
+test("a staged image whose thumbnail failed still opens the viewer", async () => {
+  let opened = 0;
+  let loads = 0;
+  renderComposer({
+    draft: {
+      kind: "multimodal",
+      text: "",
+      attachments: [
+        {
+          kind: "image",
+          format: "png",
+          token: "c".repeat(48),
+          displayName: "shot.png",
+          sizeBytes: "900",
+        },
+      ],
+    },
+    attachmentsEnabled: true,
+    loadAttachmentThumbnail: () => {
+      loads += 1;
+      return Promise.resolve({ state: "error" });
+    },
+    onOpenAttachment() {
+      opened += 1;
+    },
+  });
+  await waitFor(() => assert.equal(loads, 1));
+  fireEvent.click(screen.getByRole("button", { name: "Preview shot.png" }));
+  assert.equal(opened, 1);
+});
+
+test("the open viewer reads the original again under a newer security epoch", async () => {
+  const { calls, load } = countingImageLoader();
+  const target = {
+    media: { kind: "draftAttachment", token: "b".repeat(48) },
+    name: "shot.png",
+  };
+  const viewer = (securityEpoch) =>
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(MediaLightbox, {
+        target,
+        load,
+        securityEpoch,
+        onClose() {},
+      }),
+    );
+  const view = render(viewer("1"));
+  await waitFor(() => assert.equal(calls.loads, 1));
+  view.rerender(viewer("2"));
+  await waitFor(() => assert.equal(calls.loads, 2));
+  assert.equal(calls.releases, 1);
+});
 
 test("Composer browses a frozen multiline input history and restores the empty draft", async () => {
   const entries = ["A", "B\nsecond line", "C"];

@@ -65,7 +65,7 @@ const vite = await createServer({
 const { ConversationRail } = await vite.ssrLoadModule(
   "/src/features/tasks/ConversationRail.tsx",
 );
-const { TaskContent } = await vite.ssrLoadModule(
+const { TaskContent, createTaskReadingMemory } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
@@ -687,4 +687,39 @@ test("a sent image keeps one address from waiting through its Run", () => {
   // Only a Run nothing was accepted for is addressed by itself.
   view.rerender(executed(["12"], null));
   assert.deepEqual(loaded.at(-1), address({ kind: "run", runId: "12" }));
+});
+
+test("a security epoch keeps where a Task was read and the Run it is anchored in", () => {
+  const ids = ["5", "6", "7", "8"];
+  const manifest = ids.map((id) => manifestEntry(id));
+  const { history } = historyRecorder();
+  const memory = createTaskReadingMemory();
+  memory.reading.set("1", {
+    scrollTop: 40,
+    followingLatest: false,
+    anchor: { runId: "6", offset: 0 },
+  });
+  memory.toolDisclosure.set("1:6", new Set(["tool-1"]));
+  const content = (task, key) =>
+    withI18n(
+      createElement(TaskContent, {
+        key,
+        memory,
+        ...contentProps(task, task ? manifest : [], history),
+      }),
+    );
+  const current = () =>
+    screen
+      .getAllByRole("option")
+      .findIndex((option) => option.hasAttribute("data-current"));
+  const view = render(content(taskView("1", ids), "epoch-1"));
+  assert.equal(current(), 1);
+  // As the App does on a newer epoch: the transcript is remounted and shows
+  // nothing until the next snapshot, while the reading memory is kept.
+  view.rerender(content(undefined, "epoch-2"));
+  view.rerender(content(taskView("1", ids), "epoch-2"));
+  assert.equal(memory.reading.get("1").anchor.runId, "6");
+  assert.equal(memory.reading.get("1").followingLatest, false);
+  assert.ok(memory.toolDisclosure.get("1:6").has("tool-1"));
+  assert.equal(current(), 1);
 });

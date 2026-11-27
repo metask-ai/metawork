@@ -919,6 +919,14 @@ test("archive hides Task from Recent and Projects and settings manages the same 
   );
   assert.equal(screen.queryByRole("button", { name: "Archive target" }), null);
   assert.ok(screen.getByRole("button", { name: "Earlier archive" }));
+  const search = screen.getByRole("searchbox", {
+    name: "Search archived tasks",
+  });
+  await app.user.type(search, " missing");
+  await screen.findByText("No matching tasks.");
+  assert.ok(screen.getByText("0 of 2"));
+  await app.user.clear(search);
+  assert.ok(screen.getByRole("button", { name: "Archive target" }));
 });
 
 test("settings restore keeps its page and returns the same Task to navigation", async (ctx) => {
@@ -937,6 +945,7 @@ test("settings restore keeps its page and returns the same Task to navigation", 
   );
   await app.settle({ archived: false });
   await screen.findByText("Archived tasks will appear here.");
+  assert.equal(screen.queryByRole("searchbox"), null);
   assert.ok(screen.getByRole("heading", { name: "Archived tasks" }));
   assert.equal(taskRows("4").length, 2);
 });
@@ -2476,9 +2485,9 @@ test("internal Task drag moves membership and ignores external files or forged d
   assert.equal(fixture.snapshot.tasks[0].workspaceId, "1");
 });
 
-test("revoking a project directory explains the retained chats and leaves them in Recent", async (ctx) => {
+test("a chat in another directory stays in Recent after its project directory is revoked", async (ctx) => {
   const fixture = await renderApp(ctx);
-  const { user, snapshot } = fixture;
+  const { snapshot } = fixture;
   const directory = {
     ...structuredClone(snapshot.workspaces[0]),
     id: "2",
@@ -2495,41 +2504,8 @@ test("revoking a project directory explains the retained chats and leaves them i
     projectId: "1",
   });
   await fixture.publishTask("3", {});
-  const revoked = [];
-  ctx.mock.method(
-    BridgeClient.prototype,
-    "removeWorkspace",
-    async (workspaceId, expectedWorkspaceEpoch) => {
-      revoked.push([workspaceId, expectedWorkspaceEpoch]);
-      snapshot.workspaces = snapshot.workspaces.filter(
-        (workspace) => workspace.id !== workspaceId,
-      );
-      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
-      return { accepted: true, workspaceId, reason: null };
-    },
-  );
-  await fixture.openArchives();
-  await user.click(screen.getByRole("link", { name: "Working directories" }));
-  const section = (
-    await screen.findByRole("heading", { name: "Working directories" })
-  ).closest("section");
-  const row = within(section)
-    .getByText("metawork-test", { exact: true })
-    .closest("li");
-  await user.click(
-    within(row).getByRole("button", { name: "Revoke directory access" }),
-  );
-  const dialog = await screen.findByRole("alertdialog", {
-    name: "Revoke directory access",
-  });
-  assert.match(dialog.textContent, /project entry will also be removed/);
-  assert.match(dialog.textContent, /Chats working in other directories: 1/);
-  await user.click(
-    within(dialog).getByRole("button", { name: "Revoke directory access" }),
-  );
-  await waitFor(() => assert.equal(screen.queryByRole("alertdialog"), null));
-  assert.deepEqual(revoked, [["1", snapshot.workspaces[0].epoch]]);
-  await user.click(screen.getByRole("button", { name: "Back to main view" }));
+  snapshot.workspaces = [directory];
+  await fixture.publishTask("8", {});
   await waitFor(() => assert.equal(taskRows("8").length, 1));
   assert.equal(document.querySelector('[data-workspace-id="1"]'), null);
   assert.equal(snapshot.tasks.find((task) => task.id === "8").projectId, "1");
@@ -2677,35 +2653,32 @@ for (const applied of [true, false]) {
   });
 }
 
-test("working directory settings reports its independent quota", async (ctx) => {
+test("working directories are selectable in a new task and have no settings section", async (ctx) => {
   const fixture = await renderApp(ctx);
   const { user } = fixture;
-  ctx.mock.method(BridgeClient.prototype, "chooseWorkspace", async () => {
-    throw new Error("WorkspaceDirectoryCapacity");
-  });
   await fixture.openArchives();
-  await user.click(screen.getByRole("link", { name: "Working directories" }));
+  assert.equal(
+    screen.queryByRole("link", { name: "Working directories" }),
+    null,
+  );
+  await user.click(screen.getByRole("button", { name: "Back to main view" }));
   await user.click(
-    screen.getByRole("button", {
-      name: "Choose working directory",
-      exact: true,
-    }),
+    screen.getByRole("button", { name: "New task", exact: true }),
   );
-  await screen.findByText(
-    "The working directory limit is reached. Revoke an unused directory in Settings → Working directories.",
+  await user.click(
+    screen.getByRole("combobox", { name: "Choose working directory" }),
   );
+  await screen.findByRole("option", { name: "Open local folder" });
 });
 
-for (const [reason, message, opensSettings] of [
+for (const [reason, message] of [
   [
     "WorkspaceCapacity",
     "The project limit has been reached. Remove a project entry to add another.",
-    false,
   ],
   [
     "WorkspaceDirectoryCapacity",
-    "The working directory limit is reached. Revoke an unused directory in Settings → Working directories.",
-    true,
+    "The working directory limit is reached. Choose a previously registered directory.",
   ],
 ]) {
   test(`Add project explains ${reason} in the sidebar`, async (ctx) => {
@@ -2716,13 +2689,9 @@ for (const [reason, message, opensSettings] of [
     const projects = within(screen.getByRole("region", { name: "Projects" }));
     await user.click(projects.getByRole("button", { name: "Add project" }));
     await projects.findByText(message);
-    const settings = projects.queryByRole("button", {
-      name: "Working directories",
-    });
-    assert.equal(Boolean(settings), opensSettings);
-    if (settings) {
-      await user.click(settings);
-      await screen.findByRole("heading", { name: "Working directories" });
-    }
+    assert.equal(
+      projects.queryByRole("button", { name: "Working directories" }),
+      null,
+    );
   });
 }

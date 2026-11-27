@@ -15,6 +15,7 @@ pub const RequestKind = enum {
     refresh_token,
     userinfo,
     usage_stats,
+    revoke,
 };
 
 pub const Request = struct {
@@ -65,16 +66,14 @@ pub const Transport = struct {
 /// For transports that hold no pooled connections, such as test fakes.
 pub fn retireNothing(_: *anyopaque, _: []const u8) void {}
 
-/// The principal bound to a token set, or null before identity binding.
-pub fn principalOf(tokens: *const oauth.TokenSet) ?[]const u8 {
-    const account_id = tokens.accountId();
-    return if (account_id.len == 0) null else account_id;
-}
-
 pub const ClientError = error{
     OAuthExchangeFailed,
     TokenRefreshFailed,
     Unauthorized,
+    /// 403: the account may not do this, whatever its token.
+    Forbidden,
+    /// Userinfo refused the access token itself; the refresh token may hold.
+    TokenInvalid,
     RateLimited,
     ServiceUnavailable,
     ProtocolInvalid,
@@ -82,13 +81,13 @@ pub const ClientError = error{
     DeadlineExceeded,
 };
 
-pub const AuthorizationResult = oauth.TokenSet;
-
 pub fn errorCode(client_error: ClientError) contract.ErrorCode {
     return switch (client_error) {
         error.OAuthExchangeFailed => .oauth_exchange_failed,
         error.TokenRefreshFailed => .token_refresh_failed,
         error.Unauthorized => .metask_unauthorized,
+        error.Forbidden => .account_operation_failed,
+        error.TokenInvalid => .metask_token_invalid,
         error.RateLimited => .metask_rate_limited,
         error.ServiceUnavailable => .metask_service_unavailable,
         error.ProtocolInvalid => .metask_protocol_invalid,
@@ -129,23 +128,6 @@ pub fn exchangeAuthorizationCode(
     ) catch return error.ProtocolInvalid;
 }
 
-pub fn refresh(
-    allocator: std.mem.Allocator,
-    transport: Transport,
-    previous: *const oauth.TokenSet,
-    now_unix_seconds: i64,
-    control: ?RequestControl,
-) ClientError!oauth.TokenSet {
-    return refreshWithToken(
-        allocator,
-        transport,
-        &previous.refresh_token,
-        principalOf(previous),
-        now_unix_seconds,
-        control,
-    );
-}
-
 pub fn refreshWithToken(
     allocator: std.mem.Allocator,
     transport: Transport,
@@ -180,9 +162,29 @@ pub fn refreshWithToken(
     return tokens.take();
 }
 
+/// Asks Metask to end the authorization a refresh token belongs to. 200 is
+/// the only success; Metask answers it for any token it does not know too.
+pub fn revokeRefreshToken(
+    transport: Transport,
+    refresh_token: *const oauth.Secret,
+    control: ?RequestControl,
+) ClientError!void {
+    var request_body: [oauth.Limits.token_body_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &request_body);
+    const body = oauth.buildRevokeBody(&request_body, refresh_token) catch return error.ProtocolInvalid;
+    var response_storage: [512]u8 = undefined;
+    const response = transport.perform(
+        .{ .kind = .revoke, .principal = null, .body = body, .control = control },
+        &response_storage,
+    ) catch |err| return transportFailure(err);
+    if (response.status != 200) return nonCredentialFailure(response.status);
+}
+
+/// The identity an access token belongs to. Until it is known the request
+/// acts for no principal.
 pub fn fetchIdentity(
     transport: Transport,
-    tokens: *const oauth.TokenSet,
+    access_token: []const u8,
     control: ?RequestControl,
 ) ClientError!state.AccountIdentity {
     var userinfo_storage: [oauth.Limits.current_user_body_bytes]u8 = undefined;
@@ -190,8 +192,8 @@ pub fn fetchIdentity(
     const response = transport.perform(
         .{
             .kind = .userinfo,
-            .principal = principalOf(tokens),
-            .bearer = tokens.access_token.view(),
+            .principal = null,
+            .bearer = access_token,
             .control = control,
         },
         &userinfo_storage,
@@ -205,7 +207,6 @@ pub fn fetchIdentity(
         userinfo.usernameView(),
         userinfo.emailHintView(),
         userinfo.phoneHintView(),
-        userinfo.concurrency_limit,
     ) catch return error.ProtocolInvalid;
 }
 
@@ -254,7 +255,7 @@ fn oauthError(response: Response) ?[]const u8 {
     return mechanics.errorCode(
         .{ .body_bytes = oauth.Limits.token_body_bytes },
         response.body,
-        &.{ "invalid_grant", "invalid_request", "invalid_client", "unauthorized_client", "unsupported_grant_type", "invalid_scope", "authorization_revoked", "user_not_found" },
+        &.{ "invalid_grant", "invalid_request", "invalid_client", "unauthorized_client", "unsupported_grant_type", "invalid_scope", "authorization_revoked", "user_not_found", "invalid_token" },
     );
 }
 
@@ -272,6 +273,7 @@ fn classifyIdentityFailure(response: Response) ClientError {
     if (response.status == 401) {
         if (oauthError(response)) |code| {
             if (std.mem.eql(u8, code, "authorization_revoked") or std.mem.eql(u8, code, "user_not_found")) return error.Unauthorized;
+            if (std.mem.eql(u8, code, "invalid_token")) return error.TokenInvalid;
         }
     }
     return nonCredentialFailure(response.status);
@@ -288,19 +290,17 @@ fn nonCredentialFailure(status: u16) ClientError {
 fn classifyStatus(status: u16, exchange: bool) ClientError {
     return switch (status) {
         400 => if (exchange) error.OAuthExchangeFailed else error.ProtocolInvalid,
-        401, 403 => if (exchange)
-            error.OAuthExchangeFailed
-        else
-            error.Unauthorized,
+        401 => if (exchange) error.OAuthExchangeFailed else error.Unauthorized,
+        403 => if (exchange) error.OAuthExchangeFailed else error.Forbidden,
         429 => error.RateLimited,
         500...599 => error.ServiceUnavailable,
         else => error.ProtocolInvalid,
     };
 }
 
-test "401 and 403 invalidate retained credentials outside code exchange" {
+test "outside code exchange 401 refuses the token and 403 the account" {
     try std.testing.expectEqual(error.Unauthorized, classifyStatus(401, false));
-    try std.testing.expectEqual(error.Unauthorized, classifyStatus(403, false));
+    try std.testing.expectEqual(error.Forbidden, classifyStatus(403, false));
     try std.testing.expectEqual(error.OAuthExchangeFailed, classifyStatus(401, true));
     try std.testing.expectEqual(error.OAuthExchangeFailed, classifyStatus(403, true));
 }
@@ -372,7 +372,7 @@ test "login exchanges tokens before resolving a strict identity" {
     defer tokens.deinit();
     try std.testing.expectEqualStrings("access", tokens.access_token.view());
     try std.testing.expectEqual(@as(usize, 1), fake.step);
-    const identity = try fetchIdentity(fake.transport(), &tokens, null);
+    const identity = try fetchIdentity(fake.transport(), tokens.access_token.view(), null);
     try std.testing.expectEqualStrings(
         "1",
         identity.accountId(),
@@ -386,19 +386,10 @@ test "login exchanges tokens before resolving a strict identity" {
         identity.emailHint(),
     );
     try std.testing.expectEqualStrings("138****8000", identity.phoneHint());
-    try std.testing.expectEqual(@as(?u32, null), identity.concurrency_limit);
     try std.testing.expectEqual(@as(usize, 2), fake.step);
 }
 
 test "userinfo failure never infers a principal from the token" {
-    var tokens = try oauth.TokenSet.fromStored(
-        std.testing.allocator,
-        "access",
-        "refresh",
-        100,
-        "1",
-    );
-    defer tokens.deinit();
     var failing = struct {
         fn perform(
             _: *anyopaque,
@@ -415,19 +406,14 @@ test "userinfo failure never infers a principal from the token" {
         error.ServiceUnavailable,
         fetchIdentity(
             .{ .context = &failing, .perform_fn = @TypeOf(failing).perform, .retire_fn = retireNothing },
-            &tokens,
+            "access",
             null,
         ),
     );
 }
 
 test "refresh requires and installs the rotated refresh token" {
-    var previous = try oauth.parseTokenResponse(
-        std.testing.allocator,
-        \\{"access_token":"old-access","refresh_token":"old-refresh","token_type":"Bearer","expires_in":20,"scope":"read model:invoke"}
-    ,
-        0,
-    );
+    var previous = try oauth.Secret.init(std.testing.allocator, "old-refresh");
     defer previous.deinit();
     var fake = struct {
         fn perform(
@@ -449,10 +435,11 @@ test "refresh requires and installs the rotated refresh token" {
             return .{ .status = 200, .body = response_buffer[0..body.len] };
         }
     }{};
-    var tokens = try refresh(
+    var tokens = try refreshWithToken(
         std.testing.allocator,
         .{ .context = &fake, .perform_fn = @TypeOf(fake).perform, .retire_fn = retireNothing },
         &previous,
+        null,
         20,
         null,
     );
@@ -509,10 +496,10 @@ test "refresh and identity invalidate only exact endpoint error pairs" {
     try std.testing.expectEqual(error.ProtocolInvalid, classifyRefreshFailure(.{ .status = 401, .body = "{\"error\":\"invalid_grant\"}" }));
     try std.testing.expectEqual(error.ProtocolInvalid, classifyRefreshFailure(.{ .status = 403, .body = "{}" }));
     try std.testing.expectEqual(error.ServiceUnavailable, classifyRefreshFailure(.{ .status = 503, .body = "{\"error\":\"invalid_grant\"}" }));
-    try std.testing.expectEqual(error.ProtocolInvalid, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"invalid_token\"}" }));
     try std.testing.expectEqual(error.ProtocolInvalid, classifyIdentityFailure(.{ .status = 403, .body = "{\"error\":\"authorization_revoked\"}" }));
     try std.testing.expectEqual(error.Unauthorized, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"authorization_revoked\"}" }));
     try std.testing.expectEqual(error.Unauthorized, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"user_not_found\"}" }));
+    try std.testing.expectEqual(error.TokenInvalid, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"invalid_token\"}" }));
 }
 
 test {

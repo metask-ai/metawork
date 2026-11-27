@@ -18,7 +18,8 @@ pub const migrations: []const sql.Migration = &.{
     .{ .version = 13, .name = "multimodal_skill_selection", .sql = @embedFile("migrations/0013_multimodal_skill_selection.sql") },
     .{ .version = 14, .name = "unbounded_run_tools", .sql = @embedFile("migrations/0014_unbounded_run_tools.sql") },
     .{ .version = 15, .name = "task_handoff", .sql = @embedFile("migrations/0015_task_handoff.sql") },
-    .{ .version = 16, .name = "attachment_original_identity", .sql = @embedFile("migrations/0016_attachment_original_identity.sql") },
+    .{ .version = 16, .name = "run_cause_account_logout", .sql = @embedFile("migrations/0016_run_cause_account_logout.sql") },
+    .{ .version = 17, .name = "attachment_original_identity", .sql = @embedFile("migrations/0017_attachment_original_identity.sql") },
 };
 
 pub const codec = @import("codec.zig");

@@ -60,10 +60,14 @@ export function ImageLightboxPopup({
 export function MediaLightbox({
   target,
   load,
+  securityEpoch,
   onClose,
 }: {
   target: MediaViewerTarget | null;
   load?: MediaViewerLoader;
+  /// The security epoch the original is shown under. A newer one revokes it,
+  /// so the viewer asks for it again in place.
+  securityEpoch?: string;
   onClose: () => void;
 }) {
   const { t } = useI18n();
@@ -110,7 +114,7 @@ export function MediaLightbox({
       controller.abort();
       owned?.release?.();
     };
-  }, [key, load]);
+  }, [key, load, securityEpoch]);
 
   const image = preview?.state === "ready" ? preview.image : undefined;
   const failure = preview?.state === "ready" ? undefined : preview?.state;

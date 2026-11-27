@@ -1062,9 +1062,13 @@ pub const RedactionEffects = struct {
     redact_fn: *const fn ([]u8, []const u8) bool,
     release_projection_bytes_fn: *const fn (*anyopaque, usize) void,
     context: *anyopaque,
+    /// Set once any value was rewritten.
+    rewrote: ?*bool = null,
 
     fn redact(self: RedactionEffects, value: []u8, credential: []const u8) bool {
-        return self.redact_fn(value, credential);
+        if (!self.redact_fn(value, credential)) return false;
+        if (self.rewrote) |rewrote| rewrote.* = true;
+        return true;
     }
 
     fn releaseProjectionBytes(self: RedactionEffects, bytes: usize) void {
@@ -1377,6 +1381,13 @@ pub const FailureRecord = struct {
     reason: []u8,
 };
 
+/// Main thread: a Metask model call ended with 401 on the credential of
+/// this generation, with Metask's error code.
+pub const MetaskUnauthorizedSink = struct {
+    context: *anyopaque,
+    report_fn: *const fn (*anyopaque, u64, ?[]const u8) void,
+};
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     tasks: []?*task_state.Task,
@@ -1405,6 +1416,9 @@ pub const Runtime = struct {
     approval_cleanup_leases: worker_lease.WorkerLeaseSet = .{},
     approval_jobs: [approval_job.max_operations]?struct { recipient: ApprovalJobRecipient, job: *approval_job.Job } = @splat(null),
     pending_model_intent: ?PreparedModelIntent = null,
+    /// Told of a Metask model call that ended with 401, which only Account
+    /// may judge.
+    metask_unauthorized: ?MetaskUnauthorizedSink = null,
     held_create: ?struct { slot: usize, task: *task_state.Task } = null,
 
     pub const testing = if (@import("builtin").is_test) struct {
@@ -2331,7 +2345,7 @@ pub const Runtime = struct {
         const projected_workspace = try input.text.project(
             input.workspace_root,
             input.max_workspace_bytes,
-            &.{input.execution.api_key},
+            &.{input.execution.projectedKey()},
             0,
         );
         var workspace_live = true;
@@ -2574,7 +2588,7 @@ pub const Runtime = struct {
         const selection = if (input.skillReference() != null) try selectSkillInput(input, effects.input_catalog orelse (if (task.runtime.pinnedCatalogConst()) |pinned| pinned.view() else return error.CatalogUnavailable)) else null;
         var payload = try task_state.OwnedRunInput.cloneSelected(self.allocator, input, agent.max_submitted_input_bytes - self.pending_input_bytes, selection);
         errdefer payload.deinit(self.allocator);
-        const credential = if (task.runtime.executionConst()) |execution| execution.secret else &.{};
+        const credential = if (task.runtime.executionConst()) |execution| execution.projectedSecret() else &.{};
         var credentials: []const []const u8 = &.{credential};
         if (task.runtime.active_operation == .run) {
             if (task_state.findRun(task.durable.runs, task.runtime.active_operation.run)) |run|
@@ -3760,7 +3774,7 @@ pub const Runtime = struct {
             run_record,
             effects.limits.max_task_title_bytes,
             effects.text,
-            execution.api_key,
+            execution.projectedKey(),
         );
         run_record.execution.?.automatic_title.provisional_applied = provisional_title_applied;
         const previous_active_run_id = task.runtime.active_run_id;
@@ -3823,7 +3837,7 @@ pub const Runtime = struct {
             .id = operation_id,
             .after_run_id = after_run_id,
             .terminal_diagnostic = diagnostic,
-            .redaction_secret = execution.api_key,
+            .redaction_secret = execution.projectedKey(),
         };
         var record_owned = true;
         errdefer if (record_owned)
@@ -3880,6 +3894,26 @@ pub const Runtime = struct {
         };
     }
 
+    /// Walks every Task with an operation underway, once each; stopping the
+    /// one it gave does not move it.
+    pub const OperationCursor = struct { slot: usize = 0 };
+
+    pub const TaskOperation = struct {
+        task_id: u64,
+        operation: task_state.ActiveOperation,
+    };
+
+    pub fn nextActiveOperation(self: *const Runtime, cursor: *OperationCursor) ?TaskOperation {
+        while (cursor.slot < self.tasks.len) {
+            const slot = cursor.slot;
+            cursor.slot += 1;
+            const task = self.tasks[slot] orelse continue;
+            if (task.runtime.active_operation == .none) continue;
+            return .{ .task_id = task.durable.id, .operation = task.runtime.active_operation };
+        }
+        return null;
+    }
+
     /// The Run this Task is executing, if it is executing one. A caller that
     /// only needs the Run stopped reads this instead of `stopOperation`,
     /// which would also cancel a compaction or a restore the user asked for.
@@ -3910,7 +3944,7 @@ pub const Runtime = struct {
         self: *Runtime,
         task_id: u64,
         operation_id: u64,
-        interruption: agent.ExternalInterruption,
+        origin: task_state.PendingInterruption,
         effects: OperationEffects,
     ) ControlError!task_state.CompactTerminationDispatch {
         const task = self.find(task_id) orelse return error.UnknownTask;
@@ -3924,7 +3958,7 @@ pub const Runtime = struct {
             task.durable.compacts,
             operation_id,
         ) orelse return error.NoSuchCompact;
-        return cancelCompactRecord(self, task, compact, interruption, effects);
+        return cancelCompactRecord(self, task, compact, origin, effects);
     }
 
     pub fn cancelRun(
@@ -4442,7 +4476,7 @@ pub const Runtime = struct {
                 )) |run_record|
                     run_record.redactionSecrets()
                 else if (task.runtime.execution()) |execution|
-                    &.{execution.input().api_key}
+                    &.{execution.projectedSecret()}
                 else
                     &.{},
             )
@@ -4687,7 +4721,8 @@ pub const Runtime = struct {
 
     /// Account authority is checked by Product Control. This owner owns the
     /// Session/Host atomic handoff; any current login renews the installed
-    /// credential in place. `value` and `generation` come from one lease.
+    /// credential in place. `value` is the token of `generation`, lent for the
+    /// call.
     pub fn renewMetaskCredential(self: *Runtime, task_id: u64, generation: u64, value: []const u8, origin: CredentialOrigin) !CredentialRenewal {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.restore_job != null) return .unrelated;
@@ -4757,25 +4792,36 @@ pub const Runtime = struct {
         return false;
     }
 
-    pub fn deferMetaskCredentialRenewals(self: *Runtime) void {
+    pub fn waitsForMetask(self: *const Runtime, epoch: u64) bool {
         for (self.tasks) |entry| if (entry) |task| {
-            if (self.renewsMetaskCredential(task.durable.id))
-                task.runtime.credential_renewal_deferred = true;
+            for (task.input_submissions.items) |record| {
+                const waited = record.metask_recovery_epoch orelse continue;
+                if (record.state == .waiting and waited == epoch) return true;
+            }
         };
+        return false;
     }
 
-    pub fn renewMetaskExecutions(self: *Runtime, generation: u64, credential: ?[]const u8, effects: OperationEffects) bool {
+    /// A Run uses a Metask credential now: its model, or an image or a video
+    /// it makes.
+    pub fn holdsMetaskCredential(self: *const Runtime) bool {
+        for (self.tasks) |entry| if (entry) |task| {
+            if (task.runtime.active_operation == .run and self.renewsMetaskCredential(task.durable.id)) return true;
+            for (task.durable.runs) |*slot| if (slot.*) |*run| {
+                if (run.image_execution) |*image| if (image.authorization.source != null) return true;
+                if (run.video_execution) |*video| if (video.authorization.source != null) return true;
+            };
+        };
+        return false;
+    }
+
+    pub fn renewMetaskExecutions(self: *Runtime, generation: u64, credential: []const u8, effects: OperationEffects) bool {
         var changed = false;
         for (self.tasks) |entry| if (entry) |task| {
             const id = task.durable.id;
             changed = self.renewMetaskMedia(id, generation, credential) or changed;
             if (!self.renewsMetaskCredential(id)) continue;
-            const value = credential orelse {
-                self.failCredentialRenewal(id, generation, true, false);
-                changed = true;
-                continue;
-            };
-            const outcome = self.renewMetaskCredential(id, generation, value, .delivery) catch |err| {
+            const outcome = self.renewMetaskCredential(id, generation, credential, .delivery) catch |err| {
                 self.failMetaskCredentialUpdate(id, generation, err, effects);
                 changed = true;
                 continue;
@@ -4804,7 +4850,7 @@ pub const Runtime = struct {
         access.requestTermination(task.runtime.active_run_id, .{ .credential_update_failure = if (contract) .dependency_contract else if (resource) .resource_limit else .rejected }) catch {};
     }
 
-    fn renewMetaskMedia(self: *Runtime, task_id: u64, generation: u64, value: ?[]const u8) bool {
+    fn renewMetaskMedia(self: *Runtime, task_id: u64, generation: u64, value: []const u8) bool {
         const task = self.find(task_id) orelse return false;
         var changed = false;
         for (task.durable.runs) |*entry| if (entry.*) |*run| {
@@ -4816,13 +4862,11 @@ pub const Runtime = struct {
         return changed;
     }
 
-    fn renewMediaCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, authorization: *task_state.MediaCredentials, generation: u64, value: ?[]const u8) bool {
+    fn renewMediaCredential(allocator: std.mem.Allocator, run: *task_state.RunRecord, authorization: *task_state.MediaCredentials, generation: u64, value: []const u8) bool {
         if (authorization.generation == generation) return false;
         const source = authorization.source orelse return false;
         authorization.generation = generation;
-        if (value) |key| {
-            installMediaCredential(allocator, run, authorization, key) catch source.invalidate();
-        } else source.invalidate();
+        installMediaCredential(allocator, run, authorization, value) catch source.invalidate();
         return true;
     }
 
@@ -4836,7 +4880,7 @@ pub const Runtime = struct {
             if (run.credential_views.items.len == 0) run.credential_views.appendSliceAssumeCapacity(run.initialCredentialViews());
             run.credential_views.appendAssumeCapacity(owned);
         }
-        source.replace(value);
+        source.replaceAt(value, authorization.generation);
     }
 
     /// Returns one retired value only after every operation and worker that
@@ -5267,7 +5311,7 @@ pub const Runtime = struct {
         for (trimmed) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
 
         const sensitive = if (task.runtime.execution()) |execution|
-            execution.input().api_key
+            execution.projectedSecret()
         else
             &.{};
         const previous_title = task.durable.title;
@@ -6822,15 +6866,14 @@ pub const Runtime = struct {
         return false;
     }
 
-    /// Exact value membership, excluding aliases of an owner about to release.
-    /// The caller borrows bytes synchronously; this creates no secret registry.
-    pub fn retainsCredential(self: *const Runtime, value: []const u8, releasing: ?[*]const u8) bool {
+    /// Exact value membership. The caller borrows bytes synchronously; this
+    /// creates no secret registry.
+    pub fn retainsCredential(self: *const Runtime, value: []const u8) bool {
         if (value.len == 0) return false;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             var credentials = RetainedCredentials{ .task = task };
             while (credentials.next()) |credential| {
-                if (releasing != null and credential.ptr == releasing.?) continue;
                 if (std.mem.eql(u8, credential, value)) return true;
             }
         }
@@ -6904,12 +6947,16 @@ pub const Runtime = struct {
         return false;
     }
 
+    /// True when anything it covers was rewritten or dropped.
     pub fn redactProjectionsNoFail(
         self: *Runtime,
         credential: []const u8,
         effects: RedactionEffects,
-    ) void {
-        if (credential.len == 0) return;
+    ) bool {
+        if (credential.len == 0) return false;
+        var rewrote = false;
+        var observed = effects;
+        observed.rewrote = &rewrote;
         for (self.tasks) |*entry| {
             const task = entry.* orelse continue;
             if (task.runtime.pinnedCatalog()) |snapshot| {
@@ -6917,8 +6964,9 @@ pub const Runtime = struct {
                     effects.releaseProjectionBytes(snapshot.projected_bytes);
                     snapshot.deinit();
                     task.runtime.live().?.pinned_catalog = null;
+                    rewrote = true;
                 } else {
-                    snapshot.redactPresentationNoFail(credential);
+                    rewrote = snapshot.redactPresentationNoFail(credential) or rewrote;
                 }
             }
             if (task.runtime.restore_catalog) |*snapshot| {
@@ -6926,10 +6974,12 @@ pub const Runtime = struct {
                     effects.releaseProjectionBytes(snapshot.projected_bytes);
                     snapshot.deinit();
                     task.runtime.restore_catalog = null;
-                } else snapshot.redactPresentationNoFail(credential);
+                    rewrote = true;
+                } else rewrote = snapshot.redactPresentationNoFail(credential) or rewrote;
             }
-            redactTaskProjection(task, credential, effects);
+            redactTaskProjection(task, credential, observed);
         }
+        return rewrote;
     }
 
     pub fn writeProjectionList(
@@ -7588,7 +7638,7 @@ pub const Runtime = struct {
             },
         };
         job.continuation_source_id = input.continuation_source_id;
-        job.credential = job.attempt.execution.secret;
+        job.credential = job.attempt.execution.projectedSecret();
         restore_lease_owned = false;
         job_initialized = true;
         checkpoint_live = false;
@@ -7611,7 +7661,7 @@ pub const Runtime = struct {
             errdefer if (original_model) |value| self.allocator.free(value);
             const source_id = try self.allocator.dupe(u8, rebind_input.source_id);
             errdefer self.allocator.free(source_id);
-            const projected = try rebind_input.text.project(model, models_contract.Limits.model_id_bytes, &.{input.execution.api_key}, 0);
+            const projected = try rebind_input.text.project(model, models_contract.Limits.model_id_bytes, &.{input.execution.projectedKey()}, 0);
             errdefer rebind_input.text.discardCandidate(projected.value);
             var access = if (attached_rebind) try task.runtime.acquireAccess() else null;
             errdefer if (access) |*value| value.deinit();
@@ -7634,7 +7684,7 @@ pub const Runtime = struct {
                 .store_health = input.checkpoint_store_health,
             };
             if (rebind_input.capabilities) |owner| owner.* = null;
-            if (job.rebind.?.original_execution) |value| job.rebind.?.original_credential = value.secret;
+            if (job.rebind.?.original_execution) |value| job.rebind.?.original_credential = value.projectedSecret();
             job.export_checkpoint_fn = exportRecoveryCheckpoint;
             if (capabilities) |value| {
                 job.attempt.permission_mode = value.original.permission_mode;
@@ -7930,8 +7980,12 @@ pub const Runtime = struct {
             changed = true;
         }
         if (!run.terminal_observed) {
+            self.reportMetaskUnauthorized(task, run);
             const stopped_batch = run.input_stop_requested and (terminal.outcome == .stopped or terminal.outcome == .cancelled);
-            if (terminal.outcome != .completed and !stopped_batch) {
+            // Signing out stops the Run but not the messages behind it: they
+            // wait for a login and fail, keeping their text, when none comes.
+            const signed_out = terminal.cause == .account_logout;
+            if (terminal.outcome != .completed and !stopped_batch and !signed_out) {
                 // A Run this Task stopped to make room for an edited message
                 // does not retire that message: it is the reason the Run
                 // stopped, and it is still waiting for the rewind it carries.
@@ -7971,6 +8025,15 @@ pub const Runtime = struct {
             changed = true;
         }
         return changed;
+    }
+
+    fn reportMetaskUnauthorized(self: *Runtime, task: *const task_state.Task, run: *const task_state.RunRecord) void {
+        const sink = self.metask_unauthorized orelse return;
+        const detail = (task_state.terminalPayload(run) orelse return).model_error orelse return;
+        if (detail.source != .metask or detail.detail.http_status != 401) return;
+        // The token the Run held last; one renewed meanwhile is the newer.
+        const execution = task.runtime.executionConst() orelse return;
+        sink.report_fn(sink.context, execution.credential_generation, detail.detail.view().code);
     }
 
     /// Turns the Agent-owned noninteractive permission stop observation into
@@ -8043,7 +8106,7 @@ pub const Runtime = struct {
         std.debug.assert(task.runtime.hasClosingSession());
         if (completion == .closed) {
             const execution = task.runtime.executionConst().?;
-            if (!effects.prepareCredentialRelease(execution.input().api_key)) return result;
+            if (!effects.prepareCredentialRelease(execution.projectedSecret())) return result;
             for (execution.retired_credentials.items) |credential|
                 if (!effects.prepareCredentialRelease(credential)) return result;
         }
@@ -8232,7 +8295,7 @@ pub const Runtime = struct {
         job.credential = &.{};
         job.attempt.execution.deinit();
         job.attempt.execution = rebind.original_execution.?.take();
-        job.credential = job.attempt.execution.secret;
+        job.credential = job.attempt.execution.projectedSecret();
         self.allocator.free(job.attempt.task_model);
         job.attempt.task_model = rebind.original_model.?;
         rebind.original_model = null;
@@ -8674,7 +8737,7 @@ pub const Runtime = struct {
                     task.runtime.last_restore_failure = if (job.rebind) |rebind| if (rebind.phase == .restoring_original) rebind.failure else null else null;
                 } else {
                     std.debug.assert(task.runtime.attachment == .detached);
-                    release.redactAll(candidate.execution.input().api_key);
+                    release.redactAll(candidate.execution.projectedSecret());
                     job.credential = &.{};
                     if (job.rebind) |*rebind| if (rebind.original_credential.ptr == candidate.execution.secret.ptr) {
                         rebind.original_credential = &.{};
@@ -10007,7 +10070,7 @@ fn releaseExecutionValueNoFail(
     execution: anytype,
     effects: ReleaseEffects,
 ) void {
-    const credential = execution.input().api_key;
+    const credential = execution.projectedSecret();
     effects.redactAll(credential);
     for (execution.retired_credentials.items) |value| effects.redactAll(value);
     for (task.durable.runs) |*entry| {
@@ -10080,7 +10143,7 @@ fn deinitCreateCandidate(
             candidate.binding.abandonForRuntimeDeinit(),
         .released, .relinquished, .moved, .fixture, .abandoned => {},
     }
-    const credential = candidate.execution.input().api_key;
+    const credential = candidate.execution.projectedSecret();
     effects.redactAll(credential);
     candidate.execution.deinit();
     if (candidate.model_intent) |*intent| intent.deinit(self.allocator);
@@ -10637,7 +10700,7 @@ fn reserveRun(
     // Keep one no-allocation cancellation receipt beyond the next decision.
     try ensureUiHistory(self.allocator, task);
     const initial_credentials = [3][]const u8{
-        execution.api_key,
+        execution.projectedKey(),
         if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{},
         if (effects.video_execution) |owned| if (owned.*) |*video| video.candidate.input().bearer else &.{} else &.{},
     };
@@ -10869,7 +10932,7 @@ fn applyModelIntent(
     const owned_model = try self.allocator.dupe(u8, intent.model_id);
     errdefer self.allocator.free(owned_model);
     const previous = task.durable.execution_model;
-    const replacement = try effects.text.project(intent.model_id, effects.limits.max_model_id_bytes, &.{installed.secret}, previous.len);
+    const replacement = try effects.text.project(intent.model_id, effects.limits.max_model_id_bytes, &.{installed.projectedSecret()}, previous.len);
     errdefer {
         effects.text.discardCandidate(replacement.value);
         effects.text.restorePrevious(previous.len);
@@ -10994,7 +11057,7 @@ const RetainedCredentials = struct {
             const index = self.index;
             self.index += 1;
             if (index == 0) {
-                if (self.task.runtime.executionConst()) |execution| return execution.secret;
+                if (self.task.runtime.executionConst()) |execution| return execution.projectedSecret();
             } else if (index == 1) {
                 if (self.task.runtime.restore_job) |job| return job.credential;
             } else {
@@ -11272,12 +11335,12 @@ fn cancelCompactRecord(
     self: *Runtime,
     task: *task_state.Task,
     compact: *task_state.CompactRecord,
-    interruption: agent.ExternalInterruption,
+    pending: task_state.PendingInterruption,
     effects: OperationEffects,
 ) ControlError!task_state.CompactTerminationDispatch {
+    std.debug.assert(pending != .none and pending != .approval_mode_change);
     if (task_state.compactTerminalPayload(compact) != null)
         return .already_terminal;
-    const pending = task_policy.pendingInterruption(interruption);
     const prior = compact.pending_interruption.cmpxchgStrong(
         .none,
         pending,
@@ -11976,6 +12039,44 @@ test "Task execution owns the service reference and protocol across clone and tr
     try std.testing.expectEqualStrings("custom_provider:service-a", resolved.target.provider_id);
     try std.testing.expectEqual(models_contract.Protocol.openai_chat_completions, resolved.target.protocol);
     try std.testing.expectEqual(@as(u64, 7), resolved.execution_generation);
+}
+
+test "a Task holding a Custom Provider placeholder key does not project it" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    for ([_]struct { key: []const u8, projected: bool }{
+        .{ .key = "ollama", .projected = false },
+        .{ .key = "local-service-key-0001", .projected = true },
+    }) |case| {
+        var task = testModelIntentTask();
+        runtime.tasks[0] = &task;
+        defer runtime.tasks[0] = null;
+        task.runtime.attachment = .{ .attached = .{
+            .binding = task_agent_session.Binding.testFixture(1),
+            .pinned_catalog = null,
+            .execution = try owned_task_execution.OwnedTaskExecution.clone(std.testing.allocator, .{
+                .execution_generation = 7,
+                .target = .{ .provider_id = "custom_provider:local", .protocol = .openai_chat_completions, .model = "installed-model", .base_url = "http://127.0.0.1:11434/v1/chat/completions" },
+                .api_key = case.key,
+            }),
+        } };
+        const execution = task.runtime.execution().?;
+        defer execution.deinit();
+        // The request still sends it.
+        try std.testing.expectEqualStrings(case.key, execution.input().api_key);
+        try std.testing.expectEqual(case.projected, runtime.retainsCredential(case.key));
+        var mentions: [64]u8 = undefined;
+        const text = try std.fmt.bufPrint(&mentions, "notes/{s}.md", .{case.key});
+        try std.testing.expectEqual(case.projected, runtime.containsExecutionCredential(text));
+        var seen: usize = 0;
+        try runtime.visitExecutionCredentials(&seen, struct {
+            fn visit(context: *anyopaque, _: []const u8) std.mem.Allocator.Error!void {
+                const count: *usize = @ptrCast(@alignCast(context));
+                count.* += 1;
+            }
+        }.visit);
+        try std.testing.expectEqual(@as(usize, @intFromBool(case.projected)), seen);
+    }
 }
 
 fn testModelIntentTask() task_state.Task {

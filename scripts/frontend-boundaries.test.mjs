@@ -186,20 +186,14 @@ test("Account states never replace or reinterpret the Workbench", async () => {
   assert.doesNotMatch(app, /accountSurfacePolicy|accountSetupRedirected/);
   assert.doesNotMatch(app, /newTaskSetup|task\.setup\./);
   assert.match(newTask, /\{composer\}/);
-  assert.match(
-    accountIdentity,
-    /account\.state === "signed_out"[\s\S]*?onBeginLogin/,
-  );
-  assert.match(
-    accountIdentity,
-    /account\.state === "authorizing" && account\.canCancel[\s\S]*?onCancel/,
-  );
+  assert.match(accountIdentity, /actions\.login &&[\s\S]*?onBeginLogin/);
+  assert.match(accountIdentity, /actions\.cancel &&[\s\S]*?onCancel/);
   assert.doesNotMatch(app, /workbenchEntered|setWorkbenchEntered/);
   // New object admission still uses its actual model/Workspace authority.
   // Once identity acquisition began, continuous delivery uses that same Task.
   assert.match(
     app,
-    /const canCreateTask =\s*snapshot\.newTaskAdmission\.available &&\s*newTaskWorkspaceReady &&\s*newTaskModelState\.valid;/,
+    /const canCreateTask =\s*snapshot\.newTaskAdmission\.available &&\s*newTaskWorkspaceReady &&\s*newTaskModelState\.valid &&\s*!metaskAdmission\(/,
   );
   assert.match(
     app,
@@ -528,8 +522,13 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   );
   assert.match(
     css,
-    /\.workspace-resize-handle::after \{[\s\S]*?position: fixed;[\s\S]*?top: 0;[\s\S]*?bottom: 0;[\s\S]*?left: calc\(var\(--left-column\) - 1px\);/,
-    "left resize feedback must remain one continuous full-window divider",
+    /\.commandbar-leading-actions\s*\{[^}]*justify-self: start;/,
+    "the leading controls leave the rest of their titlebar column draggable",
+  );
+  assert.match(
+    css,
+    /\.workspace-resize-handle::after\s*\{[^}]*position: absolute;[^}]*top: 0;[^}]*bottom: 0;/,
+    "left resize feedback spans its handle below the titlebar",
   );
   assert.match(
     css,

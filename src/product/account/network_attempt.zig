@@ -7,16 +7,58 @@ const metask = @import("metask_client");
 const credentials = @import("account_credentials_runtime");
 const login_attempt = @import("account_login_attempt");
 
+/// What one request is sent with and answered into, never the session's own
+/// credential. The attempt owns it from `start` on, whether or not the thread
+/// starts; only an answered grant leaves it.
+pub const Work = union(enum) {
+    login_exchange: struct { input: login_attempt.CallbackExchangeInput, grant: ?*credentials.Grant },
+    refresh: struct { token: oauth.Secret, principal: Principal, grant: ?*credentials.Grant },
+    load_identity: oauth.Secret,
+    none,
+
+    pub fn deinit(self: *Work) void {
+        switch (self.*) {
+            .login_exchange => |*exchange| {
+                exchange.input.deinit();
+                if (exchange.grant) |grant| grant.destroy();
+            },
+            .refresh => |*refresh| {
+                refresh.token.deinit();
+                if (refresh.grant) |grant| grant.destroy();
+            },
+            .load_identity => |*token| token.deinit(),
+            .none => {},
+        }
+        self.* = .none;
+    }
+};
+
+/// The account a request acts for; empty while a stored login is unconfirmed.
+pub const Principal = struct {
+    bytes: [contract.Limits.account_id_bytes]u8 = undefined,
+    len: usize = 0,
+
+    pub fn init(account_id: []const u8) Principal {
+        var result: Principal = .{ .len = account_id.len };
+        @memcpy(result.bytes[0..account_id.len], account_id);
+        return result;
+    }
+
+    fn view(self: *const Principal) ?[]const u8 {
+        return if (self.len == 0) null else self.bytes[0..self.len];
+    }
+};
+
 pub const Result = union(enum) {
-    login: oauth.TokenSet,
-    refresh: credentials.CredentialRotation,
+    login: *credentials.Grant,
+    refresh: *credentials.Grant,
     completion: state.WorkerCompletion,
     consumed,
 
     pub fn take(self: *Result) Result {
         const result: Result = switch (self.*) {
-            .login => |*tokens| .{ .login = tokens.take() },
-            .refresh => |*rotation| .{ .refresh = rotation.take() },
+            .login => |grant| .{ .login = grant },
+            .refresh => |grant| .{ .refresh = grant },
             .completion => |*completion| result: {
                 const value = completion.*;
                 completion.payload = .{ .failed = .fromCode(
@@ -32,8 +74,7 @@ pub const Result = union(enum) {
 
     pub fn deinit(self: *Result) void {
         switch (self.*) {
-            .login => |*tokens| tokens.deinit(),
-            .refresh => |*rotation| rotation.deinit(),
+            .login, .refresh => |grant| grant.destroy(),
             .completion => |*completion| completion.deinit(),
             .consumed => {},
         }
@@ -68,94 +109,22 @@ pub const NetworkAttempt = struct {
         .clock = .boot,
     };
 
-    const Kind = enum {
-        login_exchange,
-        refresh,
-        load_identity,
-    };
-
-    allocator: std.mem.Allocator = undefined,
     io: std.Io = undefined,
     attempt_id: u64 = 0,
-    kind: Kind = undefined,
     transport: metask.Transport = undefined,
-    credential_owner: ?*const credentials.CredentialOwner = null,
-    login_exchange: ?login_attempt.CallbackExchangeInput = null,
+    work: Work = .none,
     now_unix_seconds: i64 = 0,
     sink: ResultSink = undefined,
     cancellation: metask.Cancellation = undefined,
     deadline: std.Io.Clock.Timestamp = undefined,
+    /// 1 once the worker has published its result and is returning.
+    done: std.atomic.Value(u32) = .init(0),
+    /// The next one its owner gave up on; the owner links them, so giving
+    /// one up never allocates.
+    next_abandoned: ?*NetworkAttempt = null,
     thread: ?std.Thread = null,
     started: bool = false,
     joined: bool = false,
-
-    pub fn startRefresh(
-        self: *NetworkAttempt,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        attempt_id: u64,
-        transport: metask.Transport,
-        credential_owner: *const credentials.CredentialOwner,
-        sink: ResultSink,
-        now_unix_seconds: i64,
-    ) !void {
-        try self.start(
-            allocator,
-            io,
-            attempt_id,
-            .refresh,
-            transport,
-            credential_owner,
-            sink,
-            now_unix_seconds,
-            null,
-        );
-    }
-
-    pub fn startLoginExchange(
-        self: *NetworkAttempt,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        attempt_id: u64,
-        transport: metask.Transport,
-        input: *login_attempt.CallbackExchangeInput,
-        sink: ResultSink,
-        now_unix_seconds: i64,
-    ) !void {
-        try self.start(
-            allocator,
-            io,
-            attempt_id,
-            .login_exchange,
-            transport,
-            null,
-            sink,
-            now_unix_seconds,
-            input,
-        );
-    }
-
-    pub fn startLoadIdentity(
-        self: *NetworkAttempt,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        attempt_id: u64,
-        transport: metask.Transport,
-        credential_owner: *const credentials.CredentialOwner,
-        sink: ResultSink,
-    ) !void {
-        try self.start(
-            allocator,
-            io,
-            attempt_id,
-            .load_identity,
-            transport,
-            credential_owner,
-            sink,
-            0,
-            null,
-        );
-    }
 
     pub fn cancel(self: *NetworkAttempt) void {
         if (!self.started or self.joined) return;
@@ -171,13 +140,26 @@ pub const NetworkAttempt = struct {
         self.joined = true;
     }
 
+    /// Waits at most `limit` of awake time for the worker to finish. True
+    /// once it has; it is still to be joined.
+    pub fn waitDone(self: *NetworkAttempt, limit: std.Io.Duration) bool {
+        if (!self.started or self.joined) return true;
+        const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = limit, .clock = .awake });
+        while (self.done.load(.acquire) == 0) {
+            if (deadline.raw.nanoseconds <= deadline.clock.now(self.io).nanoseconds) return false;
+            self.io.futexWaitTimeout(u32, &self.done.raw, 0, .{ .deadline = deadline }) catch
+                return self.done.load(.acquire) != 0;
+        }
+        return true;
+    }
+
     pub fn deinit(self: *NetworkAttempt) void {
         if (!self.started) {
             self.* = .{};
             return;
         }
         std.debug.assert(self.joined);
-        if (self.login_exchange) |*input| input.deinit();
+        self.work.deinit();
         self.* = .{};
     }
 
@@ -185,61 +167,64 @@ pub const NetworkAttempt = struct {
         return self.started and self.attempt_id == attempt_id;
     }
 
-    fn start(
+    pub fn start(
         self: *NetworkAttempt,
-        allocator: std.mem.Allocator,
         io: std.Io,
         attempt_id: u64,
-        kind: Kind,
         transport: metask.Transport,
-        credential_owner: ?*const credentials.CredentialOwner,
+        work_value: Work,
         sink: ResultSink,
         now_unix_seconds: i64,
-        login_exchange: ?*login_attempt.CallbackExchangeInput,
     ) !void {
+        var work = work_value;
+        errdefer work.deinit();
         if (self.started) return error.AlreadyStarted;
         if (attempt_id == 0 or now_unix_seconds < 0)
             return error.InvalidArgument;
         const deadline_cap = std.Io.Clock.Timestamp.fromNow(io, timeout);
-        const login_deadline = if (login_exchange) |input|
-            input.attempt_deadline
-        else
-            null;
         self.* = .{
-            .allocator = allocator,
             .io = io,
             .attempt_id = attempt_id,
-            .kind = kind,
             .transport = transport,
-            .credential_owner = credential_owner,
-            .login_exchange = if (login_exchange) |input| input.take() else null,
+            .work = work,
             .now_unix_seconds = now_unix_seconds,
             .sink = sink,
             .cancellation = .init(io),
-            .deadline = if (login_deadline) |attempt_deadline|
-                earlierDeadline(attempt_deadline, deadline_cap)
-            else
-                deadline_cap,
+            .deadline = switch (work) {
+                .login_exchange => |*exchange| earlierDeadline(exchange.input.attempt_deadline, deadline_cap),
+                .refresh, .load_identity, .none => deadline_cap,
+            },
             .started = true,
         };
+        work = .none;
         errdefer {
-            if (self.login_exchange) |*input| input.deinit();
+            self.work.deinit();
             self.* = .{};
         }
         self.thread = std.Thread.spawn(.{}, workerMain, .{self}) catch
             return error.ThreadSpawnFailed;
     }
 
+    pub fn refreshing(self: *const NetworkAttempt) bool {
+        return self.started and self.work == .refresh;
+    }
+
     fn workerMain(self: *NetworkAttempt) void {
+        // Joined before it is destroyed, so the wake cannot outlive it.
+        defer {
+            self.done.store(1, .release);
+            self.io.futexWake(u32, &self.done.raw, 1);
+        }
         const control: metask.RequestControl = .{
             .cancellation = &self.cancellation,
             .deadline = self.deadline,
         };
-        switch (self.kind) {
-            .login_exchange => {
-                const input = &self.login_exchange.?;
+        switch (self.work) {
+            .login_exchange => |*exchange| {
+                const input = &exchange.input;
+                const grant = exchange.grant.?;
                 var tokens = metask.exchangeAuthorizationCode(
-                    self.allocator,
+                    grant.secretAllocator(),
                     self.transport,
                     &input.code,
                     &input.verifier,
@@ -250,15 +235,18 @@ pub const NetworkAttempt = struct {
                     self.publishFailure(metask.errorCode(err));
                     return;
                 };
-                defer tokens.deinit();
-                var result: Result = .{ .login = tokens.take() };
+                grant.issue(&tokens);
+                var result: Result = .{ .login = credentials.Grant.take(&exchange.grant) };
                 self.sink.publish(self.attempt_id, &result);
             },
-            .refresh => {
+            .refresh => |*refresh| {
+                const grant = refresh.grant.?;
                 var tracked: RefreshTransportEvidence = .{ .transport = self.transport };
-                var refreshed = self.credential_owner.?.refresh(
-                    self.allocator,
+                var tokens = metask.refreshWithToken(
+                    grant.secretAllocator(),
                     .{ .context = &tracked, .perform_fn = RefreshTransportEvidence.perform, .retire_fn = RefreshTransportEvidence.retire },
+                    &refresh.token,
+                    refresh.principal.view(),
                     self.now_unix_seconds,
                     control,
                 ) catch |err| {
@@ -268,13 +256,14 @@ pub const NetworkAttempt = struct {
                     } });
                     return;
                 };
-                defer refreshed.deinit();
-                var result: Result = .{ .refresh = refreshed.take() };
+                grant.issue(&tokens);
+                var result: Result = .{ .refresh = credentials.Grant.take(&refresh.grant) };
                 self.sink.publish(self.attempt_id, &result);
             },
-            .load_identity => {
-                const identity = self.credential_owner.?.fetchIdentity(
+            .load_identity => |*token| {
+                const identity = metask.fetchIdentity(
                     self.transport,
+                    token.view(),
                     control,
                 ) catch |err| {
                     self.publishFailure(metask.errorCode(err));
@@ -282,6 +271,7 @@ pub const NetworkAttempt = struct {
                 };
                 self.publishCompletion(.{ .identity_loaded = identity });
             },
+            .none => unreachable,
         }
     }
 
@@ -460,12 +450,11 @@ test "login exchange uses the remaining login deadline capped at thirty seconds"
     );
     defer input.deinit();
     var attempt: NetworkAttempt = .{};
-    try attempt.startLoginExchange(
-        std.testing.allocator,
+    try attempt.start(
         std.testing.io,
         7,
         transport.transport(),
-        &input,
+        try testExchange(&input),
         capture.sink(),
         100,
     );
@@ -476,7 +465,7 @@ test "login exchange uses the remaining login deadline capped at thirty seconds"
     attempt.deinit();
     var result = capture.result orelse return error.TestUnexpectedResult;
     defer result.deinit();
-    try std.testing.expectEqualStrings("", result.login.accountId());
+    try std.testing.expect(result.login.accessToken() != null);
 
     var blocking: LoginTransport = .{ .blocking = true };
     var cancelled_capture: CaptureSink = .{};
@@ -488,12 +477,11 @@ test "login exchange uses the remaining login deadline capped at thirty seconds"
     );
     defer short_input.deinit();
     const total_deadline = short_input.attempt_deadline;
-    try attempt.startLoginExchange(
-        std.testing.allocator,
+    try attempt.start(
         std.testing.io,
         8,
         blocking.transport(),
-        &short_input,
+        try testExchange(&short_input),
         cancelled_capture.sink(),
         100,
     );
@@ -513,25 +501,32 @@ test "login exchange uses the remaining login deadline capped at thirty seconds"
     );
 }
 
-test "refresh attempt transfers one opaque generation and cancels cleanly" {
-    var credential_owner: credentials.CredentialOwner = .{};
-    defer credential_owner.deinit();
-    try credential_owner.installStored(
-        std.testing.allocator,
-        "old-access",
-        "old-refresh",
-        10,
-        "acct-1",
-    );
+fn testExchange(input: *login_attempt.CallbackExchangeInput) !Work {
+    return .{ .login_exchange = .{
+        .input = input.take(),
+        .grant = try credentials.Grant.create(std.testing.allocator),
+    } };
+}
+
+fn testRefresh(refresh_token: []const u8) !Work {
+    var token = try oauth.Secret.init(std.testing.allocator, refresh_token);
+    errdefer token.deinit();
+    return .{ .refresh = .{
+        .token = token,
+        .principal = .init(""),
+        .grant = try credentials.Grant.create(std.testing.allocator),
+    } };
+}
+
+test "a refresh attempt answers into its own grant and cancels cleanly" {
     var transport: RefreshTransport = .{};
     var capture: CaptureSink = .{};
     var attempt: NetworkAttempt = .{};
-    try attempt.startRefresh(
-        std.testing.allocator,
+    try attempt.start(
         std.testing.io,
         9,
         transport.transport(),
-        &credential_owner,
+        try testRefresh("old-refresh"),
         capture.sink(),
         100,
     );
@@ -541,20 +536,27 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
         return error.TestUnexpectedResult;
     defer refreshed.deinit();
     try std.testing.expectEqual(@as(u64, 9), capture.attempt_id);
-    try std.testing.expectEqualStrings(
-        "",
-        refreshed.refresh.accountId(),
-    );
-    try std.testing.expectEqual(@as(?i64, 10), credential_owner.expiresAt());
+    try std.testing.expectEqualStrings("fresh-access", refreshed.refresh.accessToken().?);
+    try std.testing.expectEqualStrings("fresh-refresh", refreshed.refresh.refresh_token.view());
+
+    // A refused start keeps nothing of what it was given.
+    try std.testing.expectError(error.InvalidArgument, attempt.start(
+        std.testing.io,
+        0,
+        transport.transport(),
+        try testRefresh("old-refresh"),
+        capture.sink(),
+        100,
+    ));
+    try std.testing.expect(!attempt.started);
 
     var blocking: RefreshTransport = .{ .blocking = true };
     var cancelled_capture: CaptureSink = .{};
-    try attempt.startRefresh(
-        std.testing.allocator,
+    try attempt.start(
         std.testing.io,
         10,
         blocking.transport(),
-        &credential_owner,
+        try testRefresh("old-refresh"),
         cancelled_capture.sink(),
         100,
     );
@@ -572,23 +574,14 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
 }
 
 test "refresh-only restore accepts an identity with incomplete profile data" {
-    var refresh = try oauth.Secret.init(
-        std.testing.allocator,
-        "old-refresh",
-    );
-    defer refresh.deinit();
-    var credential_owner: credentials.CredentialOwner = .{};
-    defer credential_owner.deinit();
-    credential_owner.installRefreshToken(&refresh);
     var transport: RefreshTransport = .{ .incomplete_profile = true };
     var capture: CaptureSink = .{};
     var attempt: NetworkAttempt = .{};
-    try attempt.startRefresh(
-        std.testing.allocator,
+    try attempt.start(
         std.testing.io,
         11,
         transport.transport(),
-        &credential_owner,
+        try testRefresh("old-refresh"),
         capture.sink(),
         100,
     );
@@ -598,15 +591,14 @@ test "refresh-only restore accepts an identity with incomplete profile data" {
         return error.TestUnexpectedResult;
     capture.result = null;
     defer refreshed.deinit();
-    credential_owner.replaceRotation(&refreshed.refresh);
 
-    try attempt.startLoadIdentity(
-        std.testing.allocator,
+    try attempt.start(
         std.testing.io,
         12,
         transport.transport(),
-        &credential_owner,
+        .{ .load_identity = try oauth.Secret.init(std.testing.allocator, refreshed.refresh.accessToken().?) },
         capture.sink(),
+        0,
     );
     attempt.join();
     attempt.deinit();
@@ -617,5 +609,4 @@ test "refresh-only restore accepts an identity with incomplete profile data" {
     try std.testing.expectEqualStrings("1", identity.accountId());
     try std.testing.expectEqualStrings("", identity.displayName());
     try std.testing.expectEqualStrings("", identity.emailHint());
-    try std.testing.expectEqual(@as(?u32, null), identity.concurrency_limit);
 }

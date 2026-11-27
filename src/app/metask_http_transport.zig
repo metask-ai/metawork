@@ -16,6 +16,8 @@ pub const Adapter = struct {
         .raw = .fromSeconds(30),
         .clock = .boot,
     };
+    const renewal_connect_timeout: std.Io.Duration = .fromSeconds(15);
+    const renewal_response_timeout: std.Io.Duration = .fromSeconds(15);
 
     const FetchResult = http.Error!struct { status: u16, body_len: usize };
 
@@ -57,6 +59,7 @@ pub const Adapter = struct {
                     .refresh_token => .refresh_token,
                     .userinfo => .userinfo,
                     .usage_stats => .usage_stats,
+                    .revoke => .revoke,
                 },
                 .principal = request.principal,
                 .body = request.body,
@@ -88,7 +91,7 @@ pub const Adapter = struct {
         const result = self.http.run(.{
             .consumer = .metask,
             .isolation = isolation(request.principal),
-            .budget = .{ .deadline = if (request.control) |control| control.deadline else .fromNow(self.http.io, default_request_timeout) },
+            .budget = budgetFor(self.http.io, request),
             .cancellation = if (request.control) |control| http.Cancellation.atomic(&control.cancellation.state) else null,
         }, fetch, .{ request, response_buffer });
         const send_started = result.send == .may_have_been_sent;
@@ -96,6 +99,14 @@ pub const Adapter = struct {
             .completed => |response| selectedFetch(request, response, response_buffer, send_started),
             .failed => |err| mapError(err, send_started),
         };
+    }
+
+    /// A renewal spends its refresh token: its connection is new, and once
+    /// it is sent its answer, not its admission, sets its end.
+    fn budgetFor(io: std.Io, request: metask_transport.Request) http.Budget {
+        if (request.kind == .refresh_token)
+            return .{ .phased = .{ .connect = renewal_connect_timeout, .response = renewal_response_timeout } };
+        return .{ .deadline = if (request.control) |control| control.deadline else .fromNow(io, default_request_timeout) };
     }
 
     fn mapError(err: http.Error, send_started: bool) metask_transport.TransportError {
@@ -142,6 +153,7 @@ pub const Adapter = struct {
         var endpoint_storage: [384]u8 = undefined;
         const endpoint, const method: std.http.Method = switch (request.kind) {
             .exchange_code, .refresh_token => .{ oauth.token_url, .POST },
+            .revoke => .{ oauth.revoke_url, .POST },
             .userinfo => .{ account_metask.userinfo_url, .GET },
             .usage_stats => blk: {
                 const range = request.usage_stats_range orelse
@@ -188,7 +200,15 @@ pub const Adapter = struct {
 
     fn fetchHttp(operation: *http.Operation, endpoint: []const u8, method: std.http.Method, headers: []const std.http.Header, body: []const u8, output: []u8) FetchResult {
         const uri = std.Uri.parse(endpoint) catch return operation.fail(error.InvalidRequest);
-        var request = try operation.open(method, uri, .{ .headers = headers });
+        var request = try operation.open(method, uri, .{
+            .headers = headers,
+            // Only token requests POST, and a rotation must be readable without
+            // allocating. An absent header would accept any encoding.
+            .standard_headers = if (method == .POST) .{ .accept_encoding = .{ .override = "identity" } } else .{},
+            // A renewal (the one phased request) never sends over a connection
+            // that may have died while idle: its one write could be lost.
+            .fresh = operation.control.budget == .phased,
+        });
         defer request.deinit();
         try request.send(if (method == .POST) body else null);
         var response = try request.receiveHead();
@@ -265,7 +285,9 @@ test "Account deadline and cancellation during connection prove refresh was not 
         .cancellation = &cancellation,
         .deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{ .raw = .fromMilliseconds(20), .clock = .boot }),
     };
-    try std.testing.expectError(error.DeadlineExceededNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .principal = null, .control = control }, &buffer));
+    // A renewal is bounded in phases of its own; every other request by the
+    // caller's deadline.
+    try std.testing.expectError(error.DeadlineExceededNotSent, adapter.accountTransport().perform(.{ .kind = .exchange_code, .principal = null, .control = control }, &buffer));
     cancellation.cancel();
     control.deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{ .raw = .fromSeconds(30), .clock = .boot });
     try std.testing.expectError(error.CancelledNotSent, adapter.accountTransport().perform(.{ .kind = .refresh_token, .principal = null, .control = control }, &buffer));
@@ -300,6 +322,7 @@ test "Account HTTP send boundary preserves lost-response blocking and bounded re
         listener: *std.Io.net.Server,
         mode: Mode,
         received_body: bool = false,
+        identity_only: bool = false,
         failure: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -325,6 +348,10 @@ test "Account HTTP send boundary preserves lost-response blocking and bounded re
             }
             var server: std.http.Server = .init(&reader.interface, &writer.interface);
             var request = try server.receiveHead();
+            var request_headers = request.iterateHeaders();
+            while (request_headers.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "accept-encoding")) {
+                self.identity_only = std.mem.eql(u8, header.value, "identity");
+            };
             const body = request.readerExpectNone(&.{});
             var bytes: [9]u8 = undefined;
             try body.readSliceAll(&bytes);
@@ -361,6 +388,7 @@ test "Account HTTP send boundary preserves lost-response blocking and bounded re
         try std.testing.expectEqual(@as(?anyerror, null), server.failure);
         try std.testing.expectEqual(mode != .tls_failure, send_started);
         try std.testing.expectEqual(mode != .tls_failure, server.received_body);
+        try std.testing.expectEqual(mode != .tls_failure, server.identity_only);
         switch (mode) {
             .tls_failure => try std.testing.expectError(error.NetworkNotSent, Adapter.selectedFetch(.{ .kind = .refresh_token, .principal = null }, result, &buffer, send_started)),
             .lost_response => try std.testing.expectError(error.NetworkFailed, Adapter.selectedFetch(.{ .kind = .refresh_token, .principal = null }, result, &buffer, send_started)),
@@ -372,6 +400,54 @@ test "Account HTTP send boundary preserves lost-response blocking and bounded re
             },
         }
     }
+}
+
+test "Account renewal goes out over a connection of its own, bounded in phases" {
+    const KeepAlive = struct {
+        listener: *std.Io.net.Server,
+        accepted: std.atomic.Value(usize) = .init(0),
+        fn run(self: *@This()) void {
+            var connection = self.listener.accept(std.testing.io) catch return;
+            defer connection.close(std.testing.io);
+            _ = self.accepted.fetchAdd(1, .acq_rel);
+            var reads: [4096]u8 = undefined;
+            var writes: [4096]u8 = undefined;
+            var reader = connection.reader(std.testing.io, &reads);
+            var writer = connection.writer(std.testing.io, &writes);
+            var server: std.http.Server = .init(&reader.interface, &writer.interface);
+            var request = server.receiveHead() catch return;
+            request.respond("{}", .{ .keep_alive = true }) catch return;
+            _ = server.receiveHead() catch {};
+        }
+    };
+    // Only a renewal is bounded in phases.
+    for ([_]metask_transport.RequestKind{ .exchange_code, .userinfo, .usage_stats, .models }) |kind|
+        try std.testing.expect(Adapter.budgetFor(std.testing.io, .{ .kind = kind, .principal = null }) == .deadline);
+    const budget = Adapter.budgetFor(std.testing.io, .{ .kind = .refresh_token, .principal = null });
+    try std.testing.expect(budget == .phased);
+
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(std.testing.io, .{});
+    var server: KeepAlive = .{ .listener = &listener };
+    var threads: [2]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, KeepAlive.run, .{&server});
+    defer {
+        listener.deinit(std.testing.io);
+        for (threads) |thread| thread.join();
+    }
+    const endpoint = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/token", .{listener.socket.address.getPort()});
+    defer std.testing.allocator.free(endpoint);
+    var engine: http.Engine = undefined;
+    engine.init(std.testing.allocator, std.testing.io);
+    defer engine.deinit();
+    var buffer: [8]u8 = undefined;
+    // A connection left idle in the pool, which a renewal must not take.
+    const pooled = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = .{ .deadline = .fromNow(engine.io, .{ .raw = .fromSeconds(5), .clock = .awake }) } }, Adapter.fetchHttp, .{ endpoint, std.http.Method.GET, &.{}, "", &buffer });
+    try std.testing.expectEqual(@as(u16, 200), (try pooled.outcome.completed).status);
+    const renewal = engine.run(.{ .consumer = .metask, .isolation = .public, .budget = budget }, Adapter.fetchHttp, .{ endpoint, std.http.Method.POST, &.{}, "grant", &buffer });
+    try std.testing.expectEqual(@as(u16, 200), (try renewal.outcome.completed).status);
+    try std.testing.expect(!renewal.reused);
+    try std.testing.expectEqual(@as(usize, 2), server.accepted.load(.acquire));
 }
 
 test "Account retire closes the principal's pooled connection only" {

@@ -64,6 +64,10 @@ pub const Adapter = struct {
                 .context = self,
                 .now_unix_seconds_fn = nowUnixSeconds,
             },
+            .boot_clock = .{
+                .context = self,
+                .now_seconds_fn = nowBootSeconds,
+            },
         };
     }
 
@@ -109,6 +113,11 @@ pub const Adapter = struct {
         const seconds = @divFloor(nanoseconds, std.time.ns_per_s);
         if (seconds > std.math.maxInt(i64)) return null;
         return @intCast(seconds);
+    }
+
+    fn nowBootSeconds(context: *anyopaque) i64 {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        return @intCast(@divFloor(std.Io.Timestamp.now(self.io, .boot).nanoseconds, std.time.ns_per_s));
     }
 
     fn setRefreshToken(
@@ -241,6 +250,7 @@ test "SDK consumption Account timer propagates errors and rejects wrong thread" 
     var binding = try Adapter.init(&harness.runtime, std.testing.io, std.Thread.getCurrentId());
     defer binding.deinit();
     const timer = binding.ports().timer;
+    try std.testing.expect(binding.ports().boot_clock.nowSeconds() > 0);
     try std.testing.expectError(error.InjectedTimerFailure, timer.start(42, 123, false));
     try std.testing.expectError(error.InjectedTimerFailure, timer.cancel(42));
     binding.main_thread_id +%= 1;

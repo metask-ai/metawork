@@ -6,6 +6,43 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 重新开放消息入口（MetaTeam 收件箱）。
+
+## [0.3.0] - 2026-11-26
+
+### Added
+
+- 消息模块（MetaTeam 收件箱）已实现，入口暂时隐藏，不对外开放。
+- 新增对话轮次导航栏，可跳到更早的轮次。
+- 支持全局与项目 `AGENTS.md` 长期指令；项目指令只在明确信任的工作目录读取。
+- Composer 可在一条消息里同时发送 Skill 与附件。
+
+### Changed
+
+- AgentCore 在所有构建中运行于独立执行进程，进程级故障不再带垮窗口；删除未接入的旧转发层。
+- AgentCore 改从 `@zogien/agent-sdk` 获取，版本与 bundle 不变。
+- Account 按完整合同重做登录、续期、退出与撤销；续期不再推进安全代次，退出会撤销服务端授权。
+- 定时任务改为到点时判断能否运行：续期、登录、换账号或目录短暂漏列不再停用计划，只有自定义来源换 Key、改地址或协议、被删除时才停住。
+- 会话成果改为显示在回复正文之后，移除单独的成果栏。
+- 模型会主动交付用户需要打开的结果文件。
+- 一轮 Run 保留全部工具记录，移除 32 条上限。
+- 降低长历史每次保存的比对成本。
+- 新增工作台导航栏，“关于”移入设置，账号菜单加入检查更新。
+- 移除已落地的临时文档，重新组织契约文档。
+
+### Removed
+
+- 移除设置中的“工作目录”分区。
+
+### Fixed
+
+- 自定义模型 Key 从保存起即受遮蔽保护，不再触发安全代次推进；代次推进后图片与附件能恢复。
+- MCP OAuth 按规范选择 scope 并说明失败原因；可按安装页的 http 地址安装 MCP。
+- 非法 UTF-8 诊断不再使历史提交一直失败；会话关闭时不再因审批写入而断言崩溃。
+- “另存为”不再在期限前提前失败。
+
 ## [0.2.14] - 2026-11-20
 
 ### Added
@@ -615,7 +652,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.14...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/metask-ai/metawork/compare/v0.2.14...v0.3.0
 [0.2.14]: https://github.com/metask-ai/metawork/compare/v0.2.13...v0.2.14
 [0.2.13]: https://github.com/metask-ai/metawork/compare/v0.2.12...v0.2.13
 [0.2.12]: https://github.com/metask-ai/metawork/compare/v0.2.11...v0.2.12

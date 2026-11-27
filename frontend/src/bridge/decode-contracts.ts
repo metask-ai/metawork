@@ -13,6 +13,8 @@ import {
   modelErrorCategories,
   runGuidances,
   runProviderReasons,
+  accountAttemptActions,
+  accountAttemptOutcomes,
   taskActionBlockers,
   taskNavigationSignals,
   type RunModelError,
@@ -301,18 +303,17 @@ const modelsCatalogStates = [
 ] as const;
 const accountErrorCodes = [
   "none",
-  "invalid_command",
   "invalid_state",
   "operation_in_progress",
   "oauth_bind_failed",
   "oauth_browser_open_failed",
   "oauth_callback_rejected",
-  "oauth_state_mismatch",
   "oauth_exchange_failed",
   "user_cancelled",
   "deadline_exceeded",
   "token_refresh_failed",
   "metask_unauthorized",
+  "metask_token_invalid",
   "metask_rate_limited",
   "metask_service_unavailable",
   "metask_protocol_invalid",
@@ -367,6 +368,7 @@ const newTaskAdmissionReasons = [
   "shutting_down",
   "workspace_unavailable",
 ] as const;
+const newTaskMetaskAdmissions = ["none", "recovering", "unreachable"] as const;
 const customProviderProtocols = [
   "openai_responses",
   "anthropic_messages",
@@ -429,6 +431,14 @@ const scheduledTaskFailureReasons = [
   "persistence_failed",
   "host_interrupted",
   "permission_required",
+] as const;
+const scheduledTaskAdmissions = [
+  "runnable",
+  "waiting",
+  "signed_out",
+  "other_account",
+  "model_unavailable",
+  "source_changed",
 ] as const;
 const taskCreateReasons = [
   "handoff_changed",
@@ -1289,29 +1299,83 @@ function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
     },
   };
 }
+function decodeAccountAttempt(value: unknown, path: string) {
+  if (value === null) return null;
+  const item = object(value, path, [
+    "id",
+    "action",
+    "outcome",
+    "errorCode",
+    "safeDiagnostic",
+  ]);
+  const outcome =
+    item.outcome === null
+      ? null
+      : enumValue(item.outcome, `${path}.outcome`, accountAttemptOutcomes);
+  const errorCode = enumValue(
+    item.errorCode,
+    `${path}.errorCode`,
+    accountErrorCodes,
+  );
+  const safeDiagnostic = stringValue(
+    item.safeDiagnostic,
+    `${path}.safeDiagnostic`,
+  );
+  if (errorCode === "none" && safeDiagnostic.length !== 0)
+    fail(path, "safe diagnostic requires an Account error");
+  if (outcome === null && errorCode !== "none")
+    fail(path, "an attempt underway has no result yet");
+  if (
+    outcome === "failed" &&
+    (errorCode === "none" || errorCode === "user_cancelled")
+  )
+    fail(path, "a failed attempt names its failure");
+  if (outcome === "succeeded" && errorCode !== "none")
+    fail(path, "a successful attempt has no error");
+  return {
+    id: positiveU64WireId(item.id, `${path}.id`),
+    action: enumValue(item.action, `${path}.action`, accountAttemptActions),
+    outcome,
+    errorCode,
+    safeDiagnostic,
+  };
+}
 function decodeAccount(value: unknown, path: string): AccountView {
   const item = object(value, path, [
     "state",
-    "canCancel",
+    "actions",
+    "unreachable",
+    "attempt",
     "accountId",
     "displayName",
     "emailHint",
     "phoneHint",
-    "concurrencyLimit",
     "errorCode",
     "safeDiagnostic",
     "summary",
   ]);
   const state = enumValue(item.state, `${path}.state`, accountStates);
-  const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
+  const actionsPath = `${path}.actions`;
+  const actionItem = object(item.actions, actionsPath, [
+    "cancel",
+    "retry",
+    "login",
+    "logout",
+    "clear",
+  ]);
+  const actions = {
+    cancel: booleanValue(actionItem.cancel, `${actionsPath}.cancel`),
+    retry: booleanValue(actionItem.retry, `${actionsPath}.retry`),
+    login: booleanValue(actionItem.login, `${actionsPath}.login`),
+    logout: booleanValue(actionItem.logout, `${actionsPath}.logout`),
+    clear: booleanValue(actionItem.clear, `${actionsPath}.clear`),
+  };
+  const unreachable = booleanValue(item.unreachable, `${path}.unreachable`);
+  const attempt = decodeAccountAttempt(item.attempt, `${path}.attempt`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
   const emailHint = stringValue(item.emailHint, `${path}.emailHint`);
   const phoneHint = stringValue(item.phoneHint, `${path}.phoneHint`);
-  const concurrencyLimit =
-    item.concurrencyLimit === null
-      ? null
-      : nonNegativeNumber(item.concurrencyLimit, `${path}.concurrencyLimit`);
   const errorCode = enumValue(
     item.errorCode,
     `${path}.errorCode`,
@@ -1325,8 +1389,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
   const summaryItem = object(item.summary, summaryPath, [
     "operation",
     "usageEligibility",
-    "wallet",
-    "usage",
     "history",
   ]);
   const operation = enumValue(
@@ -1339,115 +1401,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
     `${summaryPath}.usageEligibility`,
     accountUsageEligibilities,
   );
-  const walletPath = `${summaryPath}.wallet`;
-  const walletItem = object(summaryItem.wallet, walletPath, [
-    "availability",
-    "balanceU",
-    "syncedAt",
-    "errorCode",
-    "safeDiagnostic",
-  ]);
-  const wallet = {
-    availability: enumValue(
-      walletItem.availability,
-      `${walletPath}.availability`,
-      accountSummaryAvailabilities,
-    ),
-    balanceU: nullableDecimalString(
-      walletItem.balanceU,
-      `${walletPath}.balanceU`,
-      true,
-    ),
-    syncedAt: nullableWireId(walletItem.syncedAt, `${walletPath}.syncedAt`),
-    errorCode: enumValue(
-      walletItem.errorCode,
-      `${walletPath}.errorCode`,
-      accountErrorCodes,
-    ),
-    safeDiagnostic: stringValue(
-      walletItem.safeDiagnostic,
-      `${walletPath}.safeDiagnostic`,
-    ),
-  };
-  const usagePath = `${summaryPath}.usage`;
-  const usageItem = object(summaryItem.usage, usagePath, [
-    "availability",
-    "today",
-    "total",
-    "syncedAt",
-    "errorCode",
-    "safeDiagnostic",
-  ]);
-  const todayPath = `${usagePath}.today`;
-  const today = nullableObject(usageItem.today, todayPath, (value) => {
-    const todayItem = object(value, todayPath, [
-      "inputTokens",
-      "outputTokens",
-      "cacheCreationTokens",
-      "cacheReadTokens",
-      "totalTokens",
-      "actualCostU",
-    ]);
-    return {
-      inputTokens: decimalString(
-        todayItem.inputTokens,
-        `${todayPath}.inputTokens`,
-      ),
-      outputTokens: decimalString(
-        todayItem.outputTokens,
-        `${todayPath}.outputTokens`,
-      ),
-      cacheCreationTokens: decimalString(
-        todayItem.cacheCreationTokens,
-        `${todayPath}.cacheCreationTokens`,
-      ),
-      cacheReadTokens: decimalString(
-        todayItem.cacheReadTokens,
-        `${todayPath}.cacheReadTokens`,
-      ),
-      totalTokens: decimalString(
-        todayItem.totalTokens,
-        `${todayPath}.totalTokens`,
-      ),
-      actualCostU: decimalString(
-        todayItem.actualCostU,
-        `${todayPath}.actualCostU`,
-      ),
-    };
-  });
-  const totalPath = `${usagePath}.total`;
-  const total = nullableObject(usageItem.total, totalPath, (value) => {
-    const totalItem = object(value, totalPath, ["totalTokens", "actualCostU"]);
-    return {
-      totalTokens: decimalString(
-        totalItem.totalTokens,
-        `${totalPath}.totalTokens`,
-      ),
-      actualCostU: decimalString(
-        totalItem.actualCostU,
-        `${totalPath}.actualCostU`,
-      ),
-    };
-  });
-  const usage = {
-    availability: enumValue(
-      usageItem.availability,
-      `${usagePath}.availability`,
-      accountSummaryAvailabilities,
-    ),
-    today,
-    total,
-    syncedAt: nullableWireId(usageItem.syncedAt, `${usagePath}.syncedAt`),
-    errorCode: enumValue(
-      usageItem.errorCode,
-      `${usagePath}.errorCode`,
-      accountErrorCodes,
-    ),
-    safeDiagnostic: stringValue(
-      usageItem.safeDiagnostic,
-      `${usagePath}.safeDiagnostic`,
-    ),
-  };
   const historyPath = `${summaryPath}.history`;
   const historyItem = object(summaryItem.history, historyPath, [
     "availability",
@@ -1544,32 +1497,27 @@ function decodeAccount(value: unknown, path: string): AccountView {
     (accountId.length !== 0 ||
       displayName.length !== 0 ||
       emailHint.length !== 0 ||
-      phoneHint.length !== 0 ||
-      concurrencyLimit !== null)
+      phoneHint.length !== 0)
   )
     fail(path, "a non-authenticated Account must hide identity");
   if (state === "authenticated" && accountId.length === 0)
     fail(path, "an authenticated Account requires identity");
-  if (canCancel && state !== "authorizing")
+  if (actions.retry && (errorCode === "none" || state === "authorizing"))
+    fail(path, "only a failure may be retried");
+  if (actions.cancel && state !== "authorizing")
     fail(path, "cancellation requires active authorization");
+  if (actions.login && state !== "signed_out" && state !== "checking")
+    fail(path, "only a login that is not verified may sign in again");
+  if (actions.logout && state === "signed_out")
+    fail(path, "a signed-out Account cannot sign out");
+  if (actions.clear && state !== "signed_out")
+    fail(path, "only a signed-out Account clears what was left");
+  if (unreachable && state !== "checking" && state !== "authenticated")
+    fail(path, "only a held or verified login waits to reach Metask");
   if (errorCode === "none" && safeDiagnostic.length !== 0)
     fail(path, "safe diagnostic requires an Account error");
-  if (wallet.errorCode === "none" && wallet.safeDiagnostic.length !== 0)
-    fail(walletPath, "safe diagnostic requires an Account error");
-  if (usage.errorCode === "none" && usage.safeDiagnostic.length !== 0)
-    fail(usagePath, "safe diagnostic requires an Account error");
   if (history.errorCode === "none" && history.safeDiagnostic.length !== 0)
     fail(historyPath, "safe diagnostic requires an Account error");
-  if (
-    (wallet.availability === "ready" || wallet.availability === "stale") !==
-    (wallet.balanceU !== null && wallet.syncedAt !== null)
-  )
-    fail(walletPath, "summary data must match availability");
-  if (
-    (usage.availability === "ready" || usage.availability === "stale") !==
-    (usage.today !== null && usage.total !== null && usage.syncedAt !== null)
-  )
-    fail(usagePath, "summary data must match availability");
   const historyCarriesData =
     history.availability === "ready" || history.availability === "stale";
   if (historyCarriesData) {
@@ -1589,35 +1537,29 @@ function decodeAccount(value: unknown, path: string): AccountView {
   }
   if (
     usageEligibility === "disabled" &&
-    (usage.availability !== "unavailable" ||
-      usage.errorCode !== "none" ||
-      history.availability !== "unavailable" ||
-      history.errorCode !== "none")
+    (history.availability !== "unavailable" || history.errorCode !== "none")
   )
-    fail(usagePath, "disabled usage must remain unavailable");
+    fail(historyPath, "disabled usage must remain unavailable");
   if (
     state !== "authenticated" &&
     (operation !== "idle" ||
       usageEligibility !== "unknown" ||
-      wallet.availability !== "unavailable" ||
-      wallet.errorCode !== "none" ||
-      usage.availability !== "unavailable" ||
-      usage.errorCode !== "none" ||
       history.availability !== "unavailable" ||
       history.errorCode !== "none")
   )
     fail(summaryPath, "a non-authenticated Account must hide its summary");
   return {
     state,
-    canCancel,
+    actions,
+    unreachable,
+    attempt,
     accountId,
     displayName,
     emailHint,
     phoneHint,
-    concurrencyLimit,
     errorCode,
     safeDiagnostic,
-    summary: { operation, usageEligibility, wallet, usage, history },
+    summary: { operation, usageEligibility, history },
   };
 }
 function decodeModelRef(value: unknown, path: string) {
@@ -1965,7 +1907,7 @@ function decodeNewTaskAdmission(
   value: unknown,
   path: string,
 ): NewTaskAdmissionView {
-  const item = object(value, path, ["available", "reason"]);
+  const item = object(value, path, ["available", "reason", "metask"]);
   const available = booleanValue(item.available, `${path}.available`);
   const reason = enumValue(
     item.reason,
@@ -1974,7 +1916,12 @@ function decodeNewTaskAdmission(
   );
   if (available !== (reason === "none"))
     fail(path, "available admission must have no blocking reason");
-  return { available, reason };
+  const metask = enumValue(
+    item.metask,
+    `${path}.metask`,
+    newTaskMetaskAdmissions,
+  );
+  return { available, reason, metask };
 }
 function decodePresentationAnchor(value: unknown, path: string) {
   const item = object(value, path, ["afterOutputCount", "presentationOrder"]);
@@ -4841,6 +4788,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     "enabled",
     "health",
     "failureReason",
+    "admission",
     "binding",
     "input",
     "recurrence",
@@ -5135,6 +5083,11 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     enabled,
     health,
     failureReason,
+    admission: enumValue(
+      item.admission,
+      `${path}.admission`,
+      scheduledTaskAdmissions,
+    ),
     binding,
     input,
     recurrence,
@@ -6146,10 +6099,18 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "inbox",
     "models",
     "newTaskAdmission",
+    "metaskStopTargets",
     "automaticWorkspaceRoot",
     "skillCatalog",
     "mcpInstallation",
   ]);
+  const metaskStopTargets = root.metaskStopTargets;
+  if (
+    typeof metaskStopTargets !== "number" ||
+    !Number.isSafeInteger(metaskStopTargets) ||
+    metaskStopTargets < 0
+  )
+    fail("$.context.metaskStopTargets", "must be a non-negative integer");
   const management = object(view.management, "$.management", ["kind", "value"]);
   if (
     management.kind !== scope.management ||
@@ -6886,6 +6847,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       root.newTaskAdmission,
       "$.newTaskAdmission",
     ),
+    metaskStopTargets,
     mcpInstallation: decodeMcpInstallation(
       root.mcpInstallation,
       "$.context.mcpInstallation",

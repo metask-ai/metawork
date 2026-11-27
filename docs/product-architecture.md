@@ -7,13 +7,13 @@
 Product 由两个 named owner 组成，跨 owner 用例由对应的 Application coordinator 编排：
 
 - Account 只拥有 Metask OAuth identity、access/refresh credential、authorization generation 及其内部事务与恢复；
-- Product Control 拥有 Models aggregate、执行 generation 分配、Task-owned binding、实际 credential 的 Schedule scrub、Workspace、Task、Skill、MCP、共享 Executor、跨 aggregate admission、canonical projection、revision、历史与关闭顺序；Models 拥有来源、目录、纯起始偏好与精确配置解析，不持有进程级 active default execution。
+- Product Control 拥有 Models aggregate、执行 generation 分配、Task-owned binding、实际 credential 的 Schedule scrub、Workspace、Task、Skill、MCP、共享 Executor、跨 aggregate admission、canonical projection、revision、历史与关闭顺序；Models 拥有模型来源（内置 Metask 来源的身份与目录、用户的 Custom Provider 及其 Key）、起始偏好，以及把明确目标解析成候选；目录何时更新、失败怎样重试、什么变化让人看见，是 Models 的 policy。Metask 凭据归 Account，Models 只在解析时经端口取当次凭据，不保存。Models 不持有进程级 active default execution。
 
 Agent 位于 Product 之外，拥有 MetaWork 对 AgentCore Runtime、Session、Conversation、callback、event pump 与 terminal execution fact 的集成生命周期。Product Control 只调用 Agent 的公共执行能力，不管理 Agent Runtime 生命周期、不读取其内部状态，也不借 Agent 获取通用 I/O。Application 创建和关闭 Agent、安排主线程 wake，并协调 Account 与 Product Control；它不持有领域运行状态，也不独立决定这些 owner 的 policy。
 
-Application 必须分别组装 Account coordinator 与 Models coordinator。前者只编排 Account Runtime terminal commit；后者只取得 Account 的窄 authorization lease，并绑定 Models Metask catalog worker、credential vault、Agent-owned model probe 与 Models 管理生命周期。Account commit 后，Application 先发布 Account fact，再通知 Models observer；observer 只能请求当次 lease、查询无 secret 的三值授权状态（查询会让 Account 立即重新安排已逾期的刷新），或声明授权不可用，不能读取 Account 内部 token owner或把 Models 结果写回 Account。用户在桌面 Renderer 中显式填写的 Custom Provider API Key 只经专用 create/replace typed command 调用期转交 Models credential mutation；Bridge 不保留副本，Models 立即将其写入 credential vault，canonical metadata、projection、result、event、日志和历史均不得包含该值。Models 来源提交、实际 credential 的 Schedule scrub 和 Task-owned execution 安装属于 Product Control 内部事务，不得由 Application coordinator 重新拼装。
+Application 必须分别组装 Account coordinator 与 Models coordinator。前者编排 Account Runtime terminal commit，并拥有授权查询、当次 credential 的唯一出口与已接纳执行的换凭据交付。后者是 Models 的效应执行者：发目录请求（一份当次凭据、一个线程）、按 Models 给的时刻排定时器、转交前台切换与 Account 的授权发布，并把 Account 的当次凭据出口适配成 Models 的凭据端口，另外绑定 credential vault、Agent-owned model probe 与 Models 管理生命周期；它只用授权发布、当次凭据与 401 上报（`UnauthorizedReport`：只说某一代凭据被网关拒绝，怎么处理由 Account 判断）这三个 Account 出口，不读 Account 内部状态，不把 Models 结果写回 Account，也不决定何时请求、是否重试、结果是否可见。Account commit 后，Application 先把 Account fact 交给 Product Control，再交付换凭据，再把授权状态交给 Models coordinator，最后重排定时任务并发布；这个跨 owner 顺序只在此处定义。用户在桌面 Renderer 中显式填写的 Custom Provider API Key 只经专用 create/replace typed command 调用期转交 Models credential mutation；Bridge 不保留副本，Models 立即将其写入 credential vault，canonical metadata、projection、result、event、日志和历史均不得包含该值。Models 来源提交、实际 credential 的 Schedule scrub 和 Task-owned execution 安装属于 Product Control 内部事务，不得由 Application coordinator 重新拼装。
 
-Models、Workspace、Task、Schedule、Skill、MCP、Update 与 Inbox 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
+Models、Workspace、Task、Schedule、Skill、MCP、Update 与 Inbox 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量。组合层——Product Control 与 Application coordinator——都不能吸收局部 policy；coordinator 只执行 aggregate 给出的 effect（线程、定时器、HTTP、平台信号）。
 
 Product 事务只使用三种机制：
 
@@ -27,16 +27,19 @@ Product 不建立统一事务引擎、通用 command bus 或 Product event bus�
 
 ### 2.1 Models aggregate 与 Account handoff
 
-Account 和 Product Control 是同级 owner，彼此不导入对方 Runtime。Models 是 Product Control 持有的 aggregate，不是第三个顶层 owner；它发布不依赖 Account、Application、Bridge、Agent 或消费方的纯 `Protocol`、`ModelRef`、`ExecutionTarget`、`OwnedSourceCandidate`、`ExecutionConfig`、Models command/view 和线性 owned config 合同。Task 与 Schedule 只能消费这份纯合同，不能导入 Models runtime/root/ports；Account 不消费 Models 的任何 module，也不定义或转发模型类型。
+Account 和 Product Control 是同级 owner，彼此不导入对方 Runtime。Models 是 Product Control 持有的 aggregate，不是第三个顶层 owner；它发布不依赖 Account、Application、Bridge、Agent 或消费方的纯值合同：模型身份 `ModelRef`、协议、Models command/view、已解析候选（不含 Product 代次）与线性 owned 执行配置（含 Product 代次）；具体类型名由代码决定。Task 与 Schedule 只能消费这份纯合同，不能导入 Models runtime/root/ports；Account 不消费 Models 的任何 module，也不定义或转发模型类型。
 
 Metask provider 的运行时数据流为：
 
 ```text
-Account authenticated authorization
-→ Application takes one bounded authorization lease
-→ Models Metask catalog worker
-→ Models commits provider catalog and source authority
-→ explicit Task/Schedule target resolves one owned execution candidate
+Account publishes its authorization
+→ Models follows the account and decides when to ask
+→ Models coordinator loads `/v1/models` with one credential of that moment
+→ Models accepts the content by request id and account (no token kept)
+
+explicit Task/Schedule target
+→ Models resolves it, reading the credential of that moment through its port
+→ Product Control installs one owned execution
 → Agent Session consumption
 ```
 
@@ -51,7 +54,7 @@ Renderer password form → typed Bridge create/replace → Models credential mut
 → Agent Session consumption
 ```
 
-两条来源最终都必须形成同一份显式 protocol、endpoint、model、credential、source generation 与 Product binding generation。Models 解析 source 时产生不含 Product generation 的 `OwnedSourceCandidate`；只有 Product Control 可以分配 binding generation 并将其转成 `ExecutionConfig`。Metask source id 固定为 `metask`；Models 按目标模型 `capabilities.endpoints` 中明确 `supported = true` 的端点选择 protocol，固定优先级为 `messages → anthropic_messages`、`responses → openai_responses`、`chat_completions → openai_chat_completions`。缺失、null、false 或只有 status 声明的端点不参与选择；端点内部 input/output 不作为第二套能力判定。所选 protocol 分别绑定固定的 `https://www.metask-ai.com/v1/messages`、`/v1/responses`、`/v1/chat/completions` URL；不按模型名猜测、不因执行失败自动换协议重发。目录与调用 credential 均来自当前 OAuth authorization lease；Custom Provider source id 为稳定 Provider id。`ModelRef = source_id + model_id` 是模型身份，display name 永远不是 identity。source generation、selection revision、catalog generation、provider revision 与 Product binding generation是不同轴，不能互相替代或假设有序。
+两条来源最终都必须形成同一份显式 protocol、endpoint、model、credential、source generation 与 Product binding generation。Models 解析 source 时产生不含 Product generation 的 `OwnedSourceCandidate`；只有 Product Control 可以分配 binding generation 并将其转成 `ExecutionConfig`。Metask source id 固定为 `metask`；Models 按目标模型 `capabilities.endpoints` 中明确 `supported = true` 的端点选择 protocol，固定优先级为 `messages → anthropic_messages`、`responses → openai_responses`、`chat_completions → openai_chat_completions`。缺失、null、false 或只有 status 声明的端点不参与选择；端点内部 input/output 不作为第二套能力判定。所选 protocol 分别绑定固定的 `https://www.metask-ai.com/v1/messages`、`/v1/responses`、`/v1/chat/completions` URL；不按模型名猜测、不因执行失败自动换协议重发。目录请求与执行解析各自在发出或解析的那一刻取当次 OAuth 凭据；Custom Provider source id 为稳定 Provider id。`ModelRef = source_id + model_id` 是模型身份，display name 永远不是 identity。source generation、selection revision、catalog generation、provider revision、Account 凭据代次与 Product binding generation是不同轴，不能互相替代或假设有序。
 
 同一 Metask catalog 请求和有界解析同时分类对话、生图与生视频，共享目录 owner、快照和刷新生命周期。对话候选排除明确支持 `images_generations` 或 `videos` 的成员。生图和生视频分别要求对应 `capabilities.endpoints` 条目显式 `supported == true`，同一模型可以具备两种生成资格并计为一个目录成员。缺失、null、false、名称、旧 alias 或 `output` 都不能补授资格。生成候选无需对话 protocol，各用途共用总量上限和严格已知字段校验。Renderer 只取得对话候选；目录声明表示服务能力。
 
@@ -63,28 +66,15 @@ Custom Provider 使用显式的 `openai_responses | openai_chat_completions | an
 
 Models registry 与 Account identity 独立。不同 Provider 即使 credential 相同也保持不同 Provider id；更新名称、endpoint、protocol、credential 或模型保留 Provider id，但影响 source authority 的变化产生新的 source generation。首次成功的 Agent-owned one-shot Completion test 使当前 generation ready；失败重测只更新 latest test status，不撤销已 ready generation或已交付 binding。Models 的 Provider edit/delete 不查询 Task/Session/Run 等消费者，也不以 `execution_in_use` 拒绝；后续执行按自身显式目标重新校验来源，既有消费者保持自己的 owned binding；来源编辑或删除不安装全局默认执行。
 
-Metask catalog completion 只交付 owned 目录与 transient credential，不选择模型。Models 独立维护 principal、来源与目录 generation；每个目标 protocol 从当前目录精确解析，目录刷新不改写起始偏好或 Task 意图。
+Metask catalog completion 只交付 owned 目录，不选择模型。Models 独立维护 principal、来源与目录 generation；目录 generation 只随目录内容变化。每个目标 protocol 从当前目录精确解析，目录更新不改写起始偏好或 Task 意图。
 
 Metask 的输入能力仅来自 `capabilities.input.{text,image,pdf,audio,video}.supported`，输出能力仅来自 `capabilities.output.{text,image,audio,video,embedding}.supported`；只有 boolean true 表示支持，缺失、null、false 均投影为不支持，非法已知字段类型使整个目录响应无效。旧 `*_input/*_output`、`input.document` 与端点内部 input/output 不解析、不回退；PDF 支持只由 `input.pdf.supported` 声明，格式列表不能授予能力。Models 有界持有全部已知声明并随目录复制和替换，下游 metadata 保存这些事实；图片输入声明随已解析执行配置冻结并交给 Agent，Session 创建、恢复与模型切换的消费合同见 [AgentCore 集成契约](agentcore-integration.md)。声明不增加第二套模型用途 gate，也不自动开放 MetaWork 尚未实现的附件或输出功能。
 
 Metask 当前只消费模型根级 `max_input_tokens` 与 `max_tokens`，分别保存为 metadata 的输入与输出 token 上限；暂不解析或应用 `capabilities.limits`，也不从其中回退、补齐或推断根级字段。Token 值只接纳十进制非负 JSON integer，零、缺失、null 表示未知；负数、字符串、浮点、指数或 u64 溢出使整个目录无效。所有已知字段校验在模型筛选之前完成。其他限制的字段校对与消费另行确定。Custom Provider 的声明仍允许 null 表示未知，已有持久数据省略新增能力字段时保持其原有声明；本地配置中的已退役 `metadata.limits` 只在读取时丢弃，不能覆盖 token 或能力，后续写出不再包含它，其他未知持久字段仍拒绝。
 
-Account authorization 与 Models catalog 的 committed-state 路径为：
+Models 的目录失败只改变 Models 自己的状态：不调用 Account abort、不改变登录状态，也不补写 Account error；catalog worker 不拥有 committed state，陈旧 completion 只能销毁。
 
-```text
-Account commits verified identity/credential generation
-→ Product Control copies the secret-free Account fact
-→ Application notifies Models coordinator
-→ coordinator takes one owned authorization lease
-→ Models prepares catalog attempt bound to principal + authorization generation
-→ Application worker uses the OAuth access token to load `/v1/models`
-→ Models rejects stale generation or commits catalog/source generation
-→ later explicit target admission independently resolves current authority
-```
-
-authorization lease 由 Account 构造，Application 负责在主线程交付或单个 catalog job 的相应生命周期内持有并清零。刷新时先向已接纳消费者交付所需 owned copy，再替换目录 job。Models 只接收 attempt、principal、authorization generation 与 owned catalog completion；Models module 不导入 Account，也不持久化 OAuth token。成功 completion 把 access token 的 owned copy 作为当前 Metask source 的 transient execution credential，下一次 authorization generation 变化会重新加载目录并替换该 copy。Metask 的 source generation 由 principal 派生：同一账号在续期、重启和再次登录后不变，换账号随之改变，换回得到同一个值。credential 的新旧由随 candidate 交付的 Account authorization generation 表示，不由 source generation 表示。已选模型失格或合法空目录时仍接收新 credential，保留的模型意图仍不可执行，其他合格模型按新 credential 解析。纯 credential 轮换不改变用户的模型 selection revision。Application 另向 Product Control 提供主线程、无 secret 的当次授权校验 capability，返回 Account-owned authorization generation；每次 Metask 新执行接纳及恢复候选发布前重新查询，匹配 Models 已接纳目录的 authorization generation，不能由 cached authenticated view、目录仍存在或 Task model intent revision 相同推断授权有效；catalog worker 不拥有 committed state，陈旧 completion 只能销毁。Models 的失败不调用 Account abort、不改变登录状态，也不补写 Account error。
-
-authorization loss 时 Application cancel/join Metask catalog job并销毁 lease；Models 清除可解析目录及 transient credential并发布 needs_authentication，保留无 secret 起始偏好。只关闭 Metask 新解析与执行资格，custom 来源及既有 owned binding 不被全局暂停；再次登录后既有 Task 按下文规则采用当前授权。
+授权丢失时 Application cancel/join 在途的目录请求并销毁其凭据；Models 清除可解析目录并发布 needs_authentication，保留无 secret 起始偏好。目录内容归账号；换账号前必经退出，清空就是换号的全部处理。只关闭 Metask 新解析与执行资格，custom 来源及既有 owned binding 不被全局暂停；再次登录后既有 Task 按下文规则采用当前授权。
 
 Task 与 Schedule 的显式模型目标通过 Models 精确解析；起始偏好独立保存，不产生 execution authority：
 
@@ -97,11 +87,11 @@ User submits explicit ModelRef and source/catalog generations
 → interactive confirmed choice may independently persist the starting preference
 ```
 
-Metask 只保留 principal、授权、source generation 与目录 authority；protocol 由每个具体模型的当前目录解析，不依赖 Provider-local 选择。`defaultSelection` 仅为起始偏好，更新不解析 credential、不安装配置、不触发执行替换或 Schedule timer。仅偏好变化的提交未确认时拒绝该次记忆、保留旧内存偏好并独立诊断；两种可能 canonical 的来源 authority 相同，不撤销执行或冻结其他 Task。普通来源 mutation 的未知结果仍关闭其 canonical mutation 资格。
+Models 为 Metask 来源只保留跟随的 principal、由它派生的 source generation（持久）与这个 principal 的目录（内存）。Metask 的 source generation 由 principal 派生：同一账号在续期、重启和再次登录后不变，换账号随之改变，换回得到同一个值。protocol 由每个具体模型的当前目录解析，不依赖 Provider-local 选择。`defaultSelection` 仅为起始偏好，更新不解析 credential、不安装配置、不触发执行替换或 Schedule timer。仅偏好变化的提交未确认时拒绝该次记忆、保留旧内存偏好并独立诊断；两种可能 canonical 的来源 authority 相同，不撤销执行或冻结其他 Task。普通来源 mutation 的未知结果仍关闭其 canonical mutation 资格。
 
 Models 配置与纯偏好事务不等待 Task 或 Schedule 消费者。Task 与 Schedule 显式解析后分别取得 owned candidate；后续安装或持久化失败只进入对应 owner 的恢复，不回滚 Models 或 Account。
 
-Account prepared transition 在主线程单一 turn 内提交。目录由 attempt 与 authorization generation 接纳；每个实际消费者在创建、恢复或 rebind 时解析自己的候选，不安装全局默认配置。
+目录 completion 只在请求号是当前的、内容属于跟随的 principal 时采纳；有目录时的更新只在内容不同时整体替换并换目录 generation，只换顺序不算内容变化。每个实际消费者在创建、恢复或 rebind 时解析自己的候选，不安装全局默认配置。
 
 Product Control 协调 Task-owned execution 安装与恢复，已有 Session/Run 按其 owned binding 收口。起始偏好及其 revision 不参与执行 generation、Task admission 或 credential ownership；execution generation 由执行 owner 分配，不随偏好变化推进。
 
@@ -109,21 +99,23 @@ New task 创建只接受完整 `ModelRef + source generation + catalog generatio
 
 既有 Task 的模型选择由 Task owner 准备完整 ModelRef 与独立 revision 的 history overlay，Product Control 验证目标来源并完成 confirmed commit；选择不调用忙碌的 Session，不改变当前 Run 或实际 binding。明确失败回滚 overlay；未知结果保留精确历史候选与原意图，复用既有 history worker 读回，确认前禁止该 Task 新 Run 和再次选择。确认提交后保留新意图，确认未提交则恢复原意图；不能用后来状态重写未知候选来推断原结果。尚未安装的新意图在执行接纳前重新解析目标；已安装的同一意图保持自己的模型，不借用目录刷新或全局默认改变用户意图。Custom Provider 的 protocol、endpoint 与 credential 保持到用户再次选择；Metask 模型自己的 protocol、endpoint 或图片声明与已安装会话不同时，下一次接纳按当前目录重建一次会话，同来源其他模型的变化不影响它。
 
-Metask 的凭据续期与新执行接纳分开：Account 刷新或任意一次登录后，Application 在目录刷新前通过独立 capability 交付当前 lease；Product Control 以该凭据更新已接纳的 Metask 执行，不经过 Models catalog gate。idle、queued、在飞或等待审批的 Session 使用官方原位更新，同步替换 attachment 的当前凭据；单纯轮换不改变 Task binding epoch、execution generation、模型意图、对话或权限，也不重建 Session、重放 Run 或工具。新的 Run 接纳仍校验 Account 与当前目录；Task 已安装的凭据代次与 Account 当前代次不同，或上次原位更新失败，才算凭据旧；代次随解析出的候选带入，安装时不读取 Account 现值，因此恢复期间的续期不会把旧凭据记为当前凭据，下一次接纳原位更新。投影与接纳共用同一个绑定判断（保持、换凭据、setModel、重建、恢复、阻塞），投影不解析 credential。恢复候选沿用既有接纳校验，过时的配置、来源或目录代次拒绝发布，不新增候选热更新或自动重试路径。
+Metask 的凭据续期与新执行接纳分开：Account 刷新或任意一次登录后，Application 通过独立 capability 借出当前 access token；Product Control 以该凭据更新已接纳的 Metask 执行，不经过 Models catalog gate。credential 的新旧由随 candidate 交付的 Account 凭据代次表示，不由 source generation 表示；已选模型失格或合法空目录时仍接收新 credential，保留的模型意图仍不可执行，其他合格模型按新 credential 解析；纯 credential 轮换不改变用户的模型 selection revision。idle、queued、在飞或等待审批的 Session 使用官方原位更新，同步替换 attachment 的当前凭据；单纯轮换不改变 Task binding epoch、execution generation、模型意图、对话或权限，也不重建 Session、重放 Run 或工具。新的 Run 接纳仍校验 Account 与当前目录；Task 已安装的凭据代次与 Account 当前代次不同，或上次原位更新失败，才算凭据旧；代次随解析出的候选带入，安装时不读取 Account 现值，因此恢复期间的续期不会把旧凭据记为当前凭据，下一次接纳原位更新。投影与接纳共用同一个绑定判断（保持、换凭据、setModel、重建、恢复、阻塞），投影不解析 credential。恢复候选沿用既有接纳校验，过时的配置、来源或目录代次拒绝发布，不新增候选热更新或自动重试路径。
 
 自动审批仍在主线程准备后立即派发，准备时复制 attachment 当前凭据；已发出的独立请求保留自己的副本。自动标题与生图在每次请求准备时读取当前凭据，目标、模型、可用性和 effect 生命周期保持冻结；读取失败使用各自既有失败语义，不回退到初始 token。生图的 Metask 授权独立于主对话来源，不能把 Metask token 注入 Custom Provider Session。旧凭据仍参与全局脱敏，不能仅因过期或进入 waiting_ui 而删除；相关 operation 返回并经过 canonical event drain、Host 请求静止且历史维护完成后，才释放最后的保留副本。单个长 operation 的保留量及扫描成本可以随刷新次数增长，不以刷新次数上限终止 Run。
 
-Task 不与登录或账号绑定。新登录（相同或不同 principal）与正常刷新一样，已接纳的 Run 及 Session 仍在的 Task 原位采用当前凭据，binding 保持不变；Session 已释放的 Task 沿既有恢复路径以当前凭据重建。退出登录或凭据清除不撤销在飞 Run 已持有的凭据，也不伪造热撤权。hard expiry 本身不阻止发送：此时 Account 处于恢复中，新消息先被 Task 接收，只等待下一次续期的结果，续期成功后按当前授权执行。下一次续期失败、clock 不可用、目录失败或候选失去授权，仍阻止新的执行。准入、各 Task 的阻塞原因与 Schedule 预检，读的都是同一个 Account 授权状态。目标模型自己的 provider、protocol、endpoint 或图片声明与已安装会话不同时，走既有 checkpoint 与 binding 事务；仅改选模型且这些一致时使用 setModel。比较不含账号、凭据和其他模型的声明；Custom Provider 改选时另比 source generation。排队和未采用的追加输入保留精确一次语义，失败或取消明确收口，不能重放已采用输入或复活已取消批次。
+Task 不与登录或账号绑定。新登录（相同或不同 principal）与正常刷新一样，已接纳的 Run 及 Session 仍在的 Task 原位采用当前凭据，binding 保持不变；退出登录停掉用 Metask 模型的 Run（`account_logout`）和整理，后面排队的消息在推进时以“需要登录”失败，内容保留，重新登录后可以重发；Session 已释放的 Task 沿既有恢复路径以当前凭据重建。退出登录或凭据清除不撤销在飞 Run 已持有的凭据，也不伪造热撤权。hard expiry 本身不阻止发送：此时 Account 处于恢复中，新消息先被 Task 接收，只等待下一次续期的结果，续期成功后按当前授权执行；冷启动正在确认登录时同样先接收，只等待这一次确认的结果。等待的那次结果失败、目录失败或候选失去授权，仍阻止新的执行。准入、各 Task 的阻塞原因与 Schedule 预检，读的是同一次 Account 采样与同一份 Models 目录答复，在 Product Control 的一处判断里合成。目标模型自己的 provider、protocol、endpoint 或图片声明与已安装会话不同时，走既有 checkpoint 与 binding 事务；仅改选模型且这些一致时使用 setModel。比较不含账号、凭据和其他模型的声明；Custom Provider 改选时另比 source generation。排队和未采用的追加输入保留精确一次语义，失败或取消明确收口，不能重放已采用输入或复活已取消批次。
 
-普通 Task 已接收的队首消息在当前授权与代次有效、且匹配代次的 Metask 目录刷新仍在运行时等待新 Run 准入或恢复。目录完成事件经 Application 的常规生命周期唤醒推进队列。目录失败或授权失效按当时事实结算。Application 对网络、超时和 5xx 的目录失败在同授权代次最多延迟重试一次，重试重新取得当次 lease；旧 timer 和 completion 不得跨代次采纳。目录重试只恢复目录资格，失败的用户提交由用户显式重发。
+普通 Task 已接收的队首消息只在当前账号还没有目录、而它的加载仍在进行时等待新 Run 准入或恢复。目录完成事件经 Application 的常规生命周期唤醒推进队列。加载中可重试的失败（服务不可用、超时、401）由 Models 在 2 秒后再试一次，再失败才按失败结算；授权失效按当时事实结算。有目录时的更新不形成等待，也不让等待提前结算。目录重试只恢复目录资格，失败的用户提交由用户显式重发。
 
-Account identity/token rotation与 Models registry是独立 durable authority；任一方的提交、恢复或 outcome unknown 不得由另一方解释或回滚。Account 只回答当前授权能否产生 lease 或无 secret 的执行接纳证明，Models 只回答 provider/source 能否解析，Product Control 只回答具体 Task/Schedule 目标是否满足安装与执行接纳。
+Models 在前台每 5 分钟更新一次目录，回到前台时距上次请求结束满 5 分钟立即更新，后台不更新；没有目录且加载失败时，Account 换代后再试一次，这次不可见，成功才可用。有目录时更新的进行、失败与内容不变都不发布；用户自己发起的刷新只在进行中亮起操作状态。时机、间隔、重试与可见性都是 Models 的 policy，Application 只执行定时器与请求，并把前台切换与 Account 的授权发布转给 Models。
+
+Account identity/token rotation与 Models registry是独立 durable authority；任一方的提交、恢复或 outcome unknown 不得由另一方解释或回滚。Account 只回答当前授权——可用（带代次）、等一次结果或必须登录——并提供当次凭据；Models 只回答某个来源现在能否解析出目标（有没有目录、模型在不在、什么协议）；Product Control 把两者合成具体 Task、定时任务与新建的准入。
 
 Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取消 Host 中的 deadline、mutation 或 terminal completion。Renderer Account command 只涉及登录、取消和退出；Models command 使用 source-qualified identifier 与对应 expected revision。除用户显式提交 Custom Provider create/replace 或 MCP captureSecret 时一次性转交手动凭据外，Renderer 不参与 prepare、commit、authorization lease 或 credential transfer；该表单值不属于可恢复 UI 状态。
 
 Identity transition、Task-owned execution 安装/释放与 durable Task history 是不同边界。history 保存实际 protocol/model、execution generation、binding facts 及独立 Task model intent，不保存 Account identity、credential locator 或可重建 secret。
 
-Canonical snapshot 保持 owner 边界：Account 发布身份与授权事实，Models 发布来源、目录、起始偏好及健康，newTaskAdmission 只发布通用创建资格。Task modelIntent 是后续选择，binding/Run 是安装与历史事实；模型候选不以全局偏好或 attachment 已恢复为前提。无 intent Task 允许全部 ready 来源明确选模，不猜测旧来源。
+Canonical snapshot 保持 owner 边界：Account 发布身份与授权事实，Models 发布来源、目录、起始偏好及健康，newTaskAdmission 只发布通用创建资格，以及以 Metask 模型新建任务是否被连接挡住。Task modelIntent 是后续选择，binding/Run 是安装与历史事实；模型候选不以全局偏好或 attachment 已恢复为前提。无 intent Task 允许全部 ready 来源明确选模，不猜测旧来源。
 
 Models 每次 resolve 只产生精确 `ModelRef + source_generation + protocol` 的调用方 owned candidate。Product Control 在 Task 创建、恢复/rebind 安装、凭据续期及释放边界执行产品文本与 Schedule durable scrub；完成必要持久提交后才安装、转移或 secure-zero 对应 credential。失败保留所需 owner 与诊断，不建立 default desired/active mismatch。
 
@@ -132,9 +124,9 @@ Models 每次 resolve 只产生精确 `ModelRef + source_generation + protocol` 
 Models 退役格式硬切前只提取可验证的 Custom Provider id 和已有待删除 id，合并去重后持久写入当前空 registry 的 credential deletion 队列；canonical 提交确认后才删除系统凭据，删除失败保留 tombstone 并跨重启重试。该过程不恢复旧 Provider、模型、偏好或执行 authority；无法完整保全清理义务时保留原文件并报告恢复失败。
 
 
-生图与生视频的默认模型和正式服务 target 由 [Models 值合同](../src/product/models/contract.zig)拥有。每次 Run preparation 优先采用当前目录中具备对应资格的默认模型，缺失或不合格时按目录顺序采用第一个具备对应资格的成员。没有合格成员时返回不可用。模型解析仅在请求发送前发生。
+生图与生视频的默认模型和正式服务 target 由 [Models 值合同](../src/product/models/contract.zig)拥有。每次 Run preparation 优先采用当前目录中具备对应资格的默认模型，缺失或不合格时按已发布目录的顺序采用第一个具备对应资格的成员。没有合格成员时返回不可用。模型解析仅在请求发送前发生。
 
-生成执行 candidate 只在 Models 接收当次 Host authorization lease 的借用输入后构造。principal、authorization generation 必须与已接纳目录匹配，目录加载中或授权不可用时拒绝新解析。Models 在同一主线程调用内解析模型并复制该次 lease 的有界 credential，不借用 catalog 缓存的执行 token，也不获取、刷新或持久化授权。owned model、固定 Metask target、catalog generation 与 credential 构成生成配置，不包含对话 protocol、Product execution generation、principal 或授权代次。消费者不提交或覆盖模型与 URL。已接纳 Run 冻结目标、模型与可用性，credential 按上述续期规则消费，执行 owner 静止后清零释放。
+生成执行 candidate 由 Models 在解析时经凭据端口取当次凭据构造：凭据的账号须与目录的 principal 一致，没有目录时拒绝。Models 在同一主线程调用内解析模型并复制这份有界 credential，不保存它，也不获取、刷新或持久化授权。owned model、固定 Metask target、catalog generation 与 credential 构成生成配置，并带上取凭据时的 Account 代次，供之后原位续期与 401 报告；不包含对话 protocol、Product execution generation 或 principal。消费者不提交或覆盖模型与 URL。已接纳 Run 冻结目标、模型与可用性，credential 按上述续期规则消费，执行 owner 静止后清零释放。
 
 Bootstrap 只严格读取当前 canonical 格式。退休 schema 1/2 先保留 exact bytes quarantine，再以原子提交安装空的当前 store 并继续，不迁移、不双读、不重放旧记录。quarantine 或安装失败必须发布真实 persistence health，旧 bytes 不丢失；quarantine 不进入任何 active decoder。canonical 缺失时初始化空 store；`preferences.json` 与 `custom-providers.json` 不参与读取、恢复或 fallback。
 
@@ -153,7 +145,7 @@ Task owner 独立持有 nullable `project_id`，非空时引用 Manual record，
 
 Manual Workspace 与 Automatic Workspace 共用一个 registry 和 Task 引用关系，`kind` 在 record 生命周期内不可改变。Manual intent 必须重新校验 Workspace identity、epoch 与 authorization；Automatic intent 必须取得 Workspace Runtime 当前已安装的 automatic-root capability。Renderer 不提交物理路径、automatic root 或目录授权 token。已严格恢复的可见 Manual record 保留用户先前的目录选择：Workspace owner 重新解析精确 canonical root 并打开目录验证实际可用性，成功恢复为 available，失败保留 record 为不可用供重新选择；不把重启本身视为撤销选择，不恢复已移除记录的可见性、不改变 epoch，也不接受路径已重定向的目录。此检查不代表后续文件访问永久成功，执行仍遵循既有准入和实际 I/O 结果。
 
-Manual、Scheduled 首次创建及后续 Run、自动 follow-up 共用图片准备规则：Product 在 admission 中取得当前 Workspace authority，Application Models coordinator 借用 Account 当次 authorization lease，将 principal、授权代次与 bearer 交给 Models 解析默认或目录回退模型。准备不发起登录、刷新、目录请求或生成，也不创建文件；主线程 handoff 不需要第二份选择快照或 CAS。没有合格模型、授权过期、解析拒绝或 Application 图片准备资源不足时，本 Run 的图片配置为空，文本接纳继续；同一 Run 不因后续授权或目录变化而升级、替换配置或自动重发，下一 Run 重新准备。effect capability 只提供执行输入，不改变 Host Tool 注册集合。
+Manual、Scheduled 首次创建及后续 Run、自动 follow-up 共用图片准备规则：Product 在 admission 中取得当前 Workspace authority，Models 经凭据端口取当次凭据，解析默认或目录回退模型。准备不发起登录、刷新、目录请求或生成，也不创建文件；主线程 handoff 不需要第二份选择快照或 CAS。没有合格模型、授权过期、解析拒绝或 Application 图片准备资源不足时，本 Run 的图片配置为空，文本接纳继续；同一 Run 不因后续授权或目录变化而升级、替换配置或自动重发，下一 Run 重新准备。effect capability 只提供执行输入，不改变 Host Tool 注册集合。
 
 Product 的每 Run owned 图片 candidate 与输出 effect 在准备失败、回滚或执行结束后按所有权释放。Agent 的执行副本在 callback/I/O 静止后清零；Product 的独立投影清理副本须等该 Task 的 worker 静止且该 Run canonical event drain 已完成，先清洗已知产品投影再清零释放。增量文本、工具字段、权限记录、review、标题及终态诊断同时覆盖对话和图片 credential；未决文本后缀不能因新增凭据类型而提前公开。上述图片配置、secret 和 effect owner 都是临时执行数据，不进入历史或 checkpoint；恢复后的新 Run 重新取得当前配置。
 
@@ -226,7 +218,7 @@ Schedule definition 固定自己的 PermissionProfile；每个 occurrence 在 la
 
 Schedule 只持久化已提交的 occurrence 与 Task identity，不持有 Product Control capability、可变 Task 指针、API credential 或 live Session。Task launch 的明确失败按 occurrence transaction 收口；结果不确定时不得重放可能已经创建 Task 的 launch。 已确认持久化的启动拒绝只影响该定义，其他到期计划继续由共享 timer 调度。真实 Task 一旦已经创建，其 identity 必须先保留在 Schedule 的 live candidate；后续 Schedule commit 失败时保留该 candidate 并关闭 timer，显式 recovery 可提交当前真相，进程重启则由 durable `claimed` fact 收口为 `host_interrupted`，两条路径都不得重复 launch。Task 仍存在但未 terminal 时跳过，Task 已永久不可用时把该 occurrence 收口为 `unavailable`；单条不可用记录不得阻塞后续 occurrence reconciliation，也不得伪装成 Task 执行失败并发送失败通知。系统通知只消费已提交的 occurrence/Task terminal fact，通知失败不能回滚产品事实或伪造 Run cause。
 
-Schedule 的可执行定义保存 `ModelRef + source_generation + protocol`。Product Control 在每次 mutation 的明确改选及 occurrence 前按该项来源、模型、source generation、目录 membership、授权与 protocol 校验并 resolve；不比较起始偏好、不保存 Product execution generation。更新请求的 modelSelection 必填但可为 null，null 精确表示保留该 item epoch 下的原绑定；创建必须为非空目标。timer readiness与绑定reconciliation按每项计算，失效项不阻塞其他项。
+Schedule 的可执行定义保存 `ModelRef + source_generation + protocol`。Product Control 在每次 mutation 的明确改选及 occurrence 前按该项来源、模型、source generation、目录 membership、授权与 protocol 校验并 resolve；不比较起始偏好、不保存 Product execution generation。更新请求的 modelSelection 必填但可为 null，null 精确表示保留该 item epoch 下的原绑定；创建必须为非空目标。绑定由 Product Control 的一个判断回答：一次 Account 采样（只读 `Use`）加当前目录，给出 `run{目录代次} | wait | hold{signed_out | other_account} | skip | stop`；Models 只报目录事实（不可用、来源已变、模型不在、在且带协议），Metask 来源已变即账号不符，Custom Provider 来源已变即永久失效。Schedule 只在到点、立即运行或用户命令点名某项时按结论转换；Models 与 Account 的提交只重排定时器（hold 不排），不写盘。改变 Custom Provider 来源身份的命令（换 Key、改地址或协议、删除、重置 Models 库）提交时只对该来源判 stop，`update`/`setEnabled` 只判本项。认领后的启动按判断给出的目录代次解析，不再判第二次；Task 自己的准入照旧读 Account。同一结论按项投影给 Renderer，不落盘。timer readiness 按每项计算，失效项不阻塞其他项。
 
 完整 resolve 的瞬态拒绝只为该计划设置进程内重试时间，既不推进游标、写入 occurrence 或使定义失效，也不阻塞其他计划。Host timer 自动重试仍符合准入条件的计划，恢复后按既有规则仅接纳最新的到期点。来源或授权事实刷新、明确编辑可清除重试等待。共享 Task 历史 writer 暂不可写时，自动触发在 claim 前等待 writer 恢复，不消费到期点或重置其他准入退避；立即运行返回暂忙，由用户显式重试。claim 提交前必须完成启动后结果收口所需的内存预留。occurrence 结果只观察它创建的 Task 的初始 Run；后续用户 Run 不得替换待提交的结果。中断恢复必须处理全部未收口 claim；恢复准备失败也不得重新开放 timer。
 
@@ -294,19 +286,45 @@ macOS 首次新建 Node 需要已准备的固定私有 Python，通过其标准�
 
 ### 2.5 MCP authority
 
-Product MCP 拥有容量一的进程内安装提议信箱与主线程待处理提议；Run admission 冻结窄 capability，Task owner 校验来源 Task/Run 有效性。Agent 在锁外解码有界公开草稿，callback 只 try-lock 转移 owner 并保留名额，解锁后 RequiredWake，不等待主线程。主线程取走仍占名额；已知凭据检查在接管及每次投影前执行，拒绝时释放并发布安全提示。用户 Add 在同一主线程事务内先核对可选 proposal id，确定保存后原子消费并返回 server id；失败不复活或自动重放。完成 Run 可保留建议，取消、删除和关闭清理；关闭先关 ingress，再取消/join Executor 和 Session，callback 静止后释放 owner，锁不跨唤醒或 join。提议不持久化，不依赖 Tool 展示槽，snapshot 容量独立预留其公开上限及结构开销。
-
 Product Control 拥有 MCP Desired Registry、connection approval、OAuth consent、credential locator、Runtime Manifest、Admission Authority、mutation/recovery 与 Task admission。Agent 拥有 connector/backend 生命周期、AgentCore descriptor、declarative Runtime apply、Activation、catalog 与 Selection。Application 只执行 child、network、系统 credential、OAuth、HTTP auth snapshot 与跨 owner coordination，不拥有 MCP JSON-RPC、产品状态或 admission policy。Account 与 MCP 不共享 ownership、credential service 或 persistence。
+
+#### 安装请求与首次工具授权
+
+Product MCP 拥有容量一的进程内安装提议信箱与主线程待处理提议；Run admission 冻结窄 capability，Task owner 校验来源 Task/Run 有效性。Agent 在锁外解码有界安装请求，callback 只 try-lock 转移 owner 并保留名额，解锁后 RequiredWake，不等待主线程。主线程取走仍占名额；已知凭据检查在接管及每次投影前执行，拒绝时释放并发布安全提示。协调器按请求 ID 领取安装请求，等待占用事务的目录刷新结束，匹配唯一可修正的目标，再启动持久安装。主线程发布有界状态与回执，原始请求不进入快照。关闭先关 ingress，再取消/join Executor 和 Session，callback 静止后释放 owner，锁不跨唤醒或 join。信箱条目不持久化，不依赖 Tool 展示槽，snapshot 容量独立预留其公开上限及结构开销。
+
+自动安装的 durable operation 绑定精确 server、来源 Task/Run 与其输入消息引用；原始请求只按系统凭据容量分块保存，metadata 保留 origin、引用、revision 和阶段。先提交 disabled 目标，再取得凭据、认证并连接。首次工具集合与一次性授权标记在同一凭据事务中保存，先准备 Admission 再提交，恢复只复用已经保存的精确集合。ready 的首次发布还必须证明当前正式成员、目录和新 Task Admission 有效；完成后保留安装历史，当前可用性独立取正常 Admission，不因停用或过期把完成历史改成连接中。Stop 的取消 marker 可在 Core apply 未结束时独立提交，不等待 worker；它立刻否决新加载和新准入，后续再对账停用配置。marker 不改变 descriptor 或 credential 引用、不推进 desired generation；正常 target 变更仍推进 generation，取消与完成都按 operation revision 拒绝迟到结果。
+
+安装授权取自该 Task 的 `InstallMcpServer` 工具调用；Host 校验来源 Task/Run 仍有效。仅凭据计划的跨来源传递需要额外的安装确认，服务的 OAuth 同意单独处理。唯一失败目标按同 Task 与完整来源匹配，修复保留 server identity，不能按显示名或域名猜测。首次发现为空且允许列表仍为空的 `no_tools` 目标，在用户显式重试安装时可重新完成首次工具授权；重试时仍非空的允许列表保持原边界，目录刷新不得自动扩权。目录刷新占用 mutation 边界时保留已接纳的安装请求，由刷新完成事件继续推进；阶段提交后需继续结算的安装必须主动唤醒主线程，不能依赖来源 Run 或其他无关事件。OAuth 授权取消或未授权结束将本次安装结算为取消或失败，不自动重新打开浏览器；网络阶段消耗执行预算，人工确认和浏览器等待不消耗。
+
+#### 连接配置、凭据与持久化
+
+STDIO 配置只接受可执行文件、argv、可选 cwd、environment name 与对应 secret slot；不提供 shell string、命令替换、credential argv 或整个进程环境继承。Host 只从启动环境复制非敏感 executable search path，并在绝对 command 前置其所在目录，以支持 `/usr/bin/env` shebang 和 bare executable lookup；该 `PATH` 与 Windows `SystemRoot` 是不可由用户 environment slot 覆盖的受控基线，其他变量一律不继承。Streamable HTTP 配置只接受 endpoint、auth mode 和有界 header name；endpoint 只允许原始 authority 被完整、无歧义解析的 HTTP 或 HTTPS 地址，任何主机均可使用 HTTP，允许原样保留 query，禁止 userinfo、fragment、authority percent encoding、空白、控制字符和反斜杠。
+
+Renderer 可以提交公开配置，并通过普通 password input 临时采集用户显式填写的 static secret 与 OAuth client secret，经专用 typed command 交给 Host 写入独立系统 credential service；输入生命周期与提交边界遵守 [Renderer Bridge 合同](renderer-bridge-contract.md#mcp-服务与安装)。
 
 敏感 HTTP endpoint 的有序地址片段只进入系统 credential storage；Desired 保存 origin、稳定 identity 和片段引用，公开投影只有 origin。OAuth 的授权 resource 与 endpoint 分开绑定：Host 在确认前暂存私有 resource 引用，授权事务将其转为 consent 的私有绑定，DCR 与恢复使用同一事务；公开 resource 行为保持不变。连接、授权、code exchange 和 refresh 只在 Host 中解析完整地址，临时 owned copy 在释放前清零；指纹只消费公开绑定与引用，不包含秘密或秘密 hash。
 
-自动安装的 durable operation 绑定精确 server、来源 Task/Run 与真实用户消息引用；原始请求只按系统凭据容量分块保存，metadata 保留 origin、引用、revision 和阶段。先提交 disabled 目标，再取得凭据、认证并连接。首次工具集合与一次性授权标记在同一凭据事务中保存，先准备 Admission 再提交，恢复只复用已经保存的精确集合。ready 的首次发布还必须证明当前正式成员、目录和新 Task Admission 有效；完成后保留安装历史，当前可用性独立取正常 Admission，不因停用或过期把完成历史改成连接中。Stop 的取消 marker 可在 Core apply 未结束时独立提交，不等待 worker；它立刻否决新加载和新准入，后续再对账停用配置。marker 不改变 descriptor 或 credential 引用、不推进 desired generation；正常 target 变更仍推进 generation，取消与完成都按 operation revision 拒绝迟到结果。
+未知 URL path/query 凭据没有可靠通用识别，不建立站点或名称猜测规则来决定哪些部分是凭据。
 
-安装来源只从同一 Task 的真实用户消息取证，支持跨 Run 的明确同意；后续撤销使旧请求失效，多个候选或不明确意图必须经 Host 确认。唯一失败目标按同 Task 与完整来源匹配，修复保留 server identity，不能按显示名或域名猜测。首次发现为空且允许列表仍为空的 `no_tools` 目标，在用户显式重试安装时可重新完成首次工具授权；重试时仍非空的允许列表保持原边界，目录刷新不得自动扩权。目录刷新占用 mutation 边界时保留已接纳的安装请求，由刷新完成事件继续推进；阶段提交后需继续结算的安装必须主动唤醒主线程，不能依赖来源 Run 或其他无关事件。OAuth 授权取消或未授权结束将本次安装结算为取消或失败，不自动重新打开浏览器；网络阶段消耗执行预算，人工确认和浏览器等待不消耗。
+Host 从 `<MetaWork data dir>/mcp/registry.json` schema 3 恢复稳定 identity/namespace、transport、auth mode、connection approval、OAuth consent/registration/grant 的非 secret 事实、credential locator、启停、timeout、协商策略、显式 tool allowlist，以及 nullable 顶层 `oauth_operation` marker；marker kind 只允许 `dynamic_registration | code_exchange | refresh`。
+
+Host 分别生成外部稳定 server identity 与 AgentCore namespace：identity 使用 `mcp-<20 位小写 hex>`，namespace 使用 `mcp_<20 位小写 hex>`，namespace 必须以 ASCII 字母开头且其余字符只允许 ASCII 字母、数字或 `_`，不能把 identity 直接复用为 namespace。
+
+旧 registry 中结构可恢复但不满足运行时语法的 namespace 只使对应 server 进入 `invalid_catalog`，不得污染整个 registry 或进入 Agent Runtime；用户删除后重新创建服务即可获得新 namespace。schema 1 只迁移既有 identity/config/allowlist/locator，并统一落为 disabled + unapproved；schema 2 单向迁移保留既有批准、工具选择和凭据引用，不因升级自动扩权。
+
+Registry 保持单一全局 desired generation、单一 credential transaction journal 和全 registry locator 引用差分，不保存 secret、token、authorization code 或 PKCE verifier。写入/清除 operation marker 是同一 registry 文件上的 operation-state commit，不推进 desired generation；只有 server target 变化才推进 generation。
+
+连接 timeout 表达单次请求等待时限；连接和目录管理按 Host 公布的有效上限执行，工具调用保留用户配置的 timeout。较大的历史保存值保留，界面说明上限只适用于管理操作。
+
+每次配置修改绑定 `expectedDesiredGeneration`。工具授权变更先准备新的 Selection，按 journal、凭据、registry 的既有顺序提交。明确成功后安装新配置与 Selection；明确失败沿用旧配置与授权。`saved_recovery_required` 安装已知目标后冻结后续修改，`outcome_unknown` 停止发布未经确认的 generation，并阻止新 Task 取得 MCP 授权。
+
+Static credential locator 只在接收目标未改变时按同名 slot 沿用：STDIO 目标由 command、ordered argv 与 cwd 共同确定，HTTP 目标由 endpoint 确定；目标、auth mode 或 slot 变化使不再引用的 locator 经同一事务退休，display name、timeout 与协议策略变化不移动 credential。OAuth 编辑在 endpoint 与 registration plan 不变时保留 consent epoch、client identity、有效 grant、token revision 和 credential 引用；派生 fingerprint 按当前配置重算，目标或注册计划变化才重新授权。
 
 Product Control 在 MCP 全部创建和替换连接入口复用 Host 已知凭据 predicate，在持久化与 effect 前拒绝敏感公开字段；不以名称、熵值或全部 env 值扩展凭据集合，也不改写既有记录。创建回执在 preparation 释放前持有确认 target 的稳定 identity，只有确定保存结果可以返回它；后续凭据捕获仍由当前 generation、server、auth mode 与 slot 校验，不通过 snapshot 猜测 identity。
 
 STDIO 启动诊断由 Application 的具体 transport owner 发布有界安全事实，绑定公开 server id、连接来源指纹与本次正式 apply attempt；引用计数保护其跨 worker/transport 生命周期，callback 只写原子事实并非阻塞唤醒，不持有或修改 Product。主线程通过窄 MCP port 接纳，与当前 Desired source 和已开始的 attempt 不符的晚到事实拒绝，隔离测试不进入正式诊断。Product 按成员保留事实，配置变化使旧事实失效；不把原始 stderr、系统错误文本或未确认退出码写入 snapshot、历史或 registry。EOF 仅证明 STDIO 关闭，不为取得诊断等待仍运行的 child；既有 Core failure ABI 与进程关闭协议不变。
+
+#### 配置应用、工具目录与新 Task 准入
 
 Desired Registry、Runtime Manifest 和 Admission Authority 是三个不同事实：
 
@@ -326,6 +344,13 @@ Task 在 Session 创建前取得进程内 MCP 引用，引用保存原工具 cap
 
 Disable/Delete 排除该来源的新 Task authority；有 Task 引用时保留实际成员，最后引用释放后自动收敛移除。disabled Edit 只更新 Desired，已有引用继续使用已应用版本，重新启用后才尝试替换。恢复按该 Task 原 cap、checkpoint、当前显式撤权、可信来源和仍有效的 catalog 取交集；不以其他来源的 pending/删除状态作全局拒绝。Delete 保留删除前最后提交的工具授权上限，不能复活先前撤销项；enabled 来源变化仍须在关闭原 Session 前拒绝旧来源恢复。原本 null/空 authority 保持 null，进程引用不写入持久化格式，也不在冷启动重建已删除来源。OAuth grant 恢复必须证明 Desired 仍存在、连接获批且当前授权绑定有效；enabled 来源不以 Runtime 已加载为前提，disabled 来源仍须与实际版本一致且有 Task 引用。未加载目标使用当前授权连接失败后停止该绑定的自动 grant 恢复；该失败跨其他成员移除/替换触发的收敛轮次保持有效，不能在重新准备候选时丢失；相关配置或显式用户重试才能重开，无关成员变更、目录刷新、唤醒或再次到期不得重开。已知 expiry 只阻止新增或替换候选在授权恢复前执行，不改变成员资格、指纹或移除规则；等待授权是已处理的等待结果，由授权 completion、退避 timer 或显式用户操作重新推进。只有该 id 不存在实际已加载成员时，无法刷新且已过期的 grant 才因本地 expiry 进入重新授权；同 id 旧成员仍在线时，不因该时钟事实退休 grant 或调度移除。若待替换目标使用此类 grant，则记为可重试且可重新登录的失败，不宣称存在自动恢复。Delete 不续期，按现有事务立即退休凭据，已有执行副本只使用现存 access token 到自然到期。refresh 开始时固定未加载、当前 descriptor 匹配或同 id 旧 descriptor 仍在线的进程内 Product 证明，持久 marker 与 apply 串行化边界保证其交接。未加载目标可以独立提交新 grant；当前 descriptor 匹配时必须预备 HTTP snapshot rotation，slot 缺失或版本不匹配必须 recover。仅有同 id 旧 descriptor 时仍尝试轮换兼容 slot；slot 缺失或 consent epoch 不同则保留旧成员并独立提交新 grant，不能让旧成员的认证方式或旧 consent 退休当前授权；token revision 冲突仍必须 recover。主循环先结算已完成的目录工作再调度 MCP；已加载连接的到期维护优先，未加载授权恢复与普通候选交替，timer 只唤醒同一调度入口。浏览器交互授权期间保留全局 apply 限制，由页面明确说明等待状态。目录不可用不应与 OAuth 续期互相等待：可先持久提交 blocked/reduced Admission 后开始操作；不能证明已收缩授权、准备失败或接管结果未知时不产生外部 effect。
 
+成功接管零个服务时提交零 entry 的 Runtime Manifest。配置应用结果 `configurationApply = idle | applying | failed` 与目录可用性分别发布。`runtimeAlignment = restart_required` 表示已保存的目标与已接管的连接仍有差异。界面根据实际进度显示正在连接或可重试的应用失败，用户可以在当前进程内完成恢复。同一 OAuth consent epoch 内的 token revision 仍通过 CAS 原子替换 ref-counted HTTP auth snapshot。tool-only mutation 可以直接更新后续新 Task authority，不重建 transport。
+
+故障独立于普通 Task。首次手动 HTTP 添加可由用户发起无凭据的草稿探测，探测不会建立正式成员。已保存服务的隔离连接测试只发布进程内结果、工具数与问题数。正式加载、工具授权和 Task 准入分别由相应事务提交。
+
+#### Registry 与凭据恢复
+
+MCP 启动遇到可读取但无法按已支持格式解码的配置时，保留原始字节并隔离，在安全完成关联事务隔离后安装当前空配置继续运行；合法旧格式沿现有迁移政策处理，未知格式保留原位并报告不可用。读取、资源耗尽或隔离失败保留真实诊断，不显示为正常空配置。隔离内容及可能遗留的系统凭据保留供人工排查和恢复，不据此自动使用或删除凭据；诊断不展示 locator，也不推断或报告遗留凭据的精确数量。
 
 credential journal 的恢复资格必须同时来自可信 canonical registry 和 journal：generation 必须对应 base 或 target，candidate 与 retired locator 的当前引用关系也必须分别符合该阶段。任何 credential 删除前先完成整组关联检查；不从无法解码、未知格式或读取失败的 registry 推导删除资格，OOM 也不得被重分类为损坏。
 
@@ -333,7 +358,31 @@ credential journal 的恢复资格必须同时来自可信 canonical registry �
 
 Application 启动时只创建一次 canonical empty Agent Runtime；恢复出的 Desired 必须在 Product Control 与 coordinator 就绪后沿与后续 mutation 相同的 apply 路径安装。empty create 后 apply 是正常启动协议，不是失败 fallback 或第二条 Runtime path。Agent Runtime create 失败终止启动；外部 MCP child、network、handshake 或 catalog failure 只能使相关 MCP authority unavailable，不能关闭普通 Text Task admission。
 
+#### OAuth 发现、同意与事务恢复
+
+本版 registration plan 明确为用户提供 client id 与 `none | client_secret_basic | client_secret_post` token endpoint auth method 的 `pre_registered`，或 authorization server metadata 明确提供 endpoint 时的 `dynamic_registration`，前者需要的 client secret 由专用 password 表单提交。DCR confidential result 只有在 `client_secret_expires_at` 缺失或为 `0` 时才能进入现有 client-credential revision；非零 expiry 在没有 secret renewal owner 的本期必须按已可能产生远端 client 的 outcome unknown 收口。
+
+OAuth discovery 以发现性和鲁棒性为准：只校验格式的偏差予以容忍，保护安全的检查不放宽。protected resource metadata 依次尝试 challenge 的 `resource_metadata`、RFC 9728 path-specific 与根 well-known 文档，某个失败只转向下一个；GET 未取得 challenge 时再以不带凭据的 `initialize` POST 探测一次，无法解析的 challenge 只丢失其提示。metadata 不要求 JSON Content-Type，接受可选成员的显式 null，重复参数取第一个，不可用或重复的 `authorization_servers` 与 scope 被跳过，缺省 `response_types_supported` 视为 `code`，不可用的 `registration_endpoint` 视为不存在；列出多个 authorization server 时按序取第一个可用者。
+
+声明的 `resource` 只要与端点同 scheme、host 与 port，且去掉末尾 `/` 后按路径段边界是端点路径的前缀（根路径覆盖全部，`/mc` 不覆盖 `/mcp`，带 query 的只覆盖其自身）即视为覆盖该端点；authorization 与 token 请求、consent 均使用声明的 resource，与端点不同时 consent 同时显示 MCP server 地址，未声明时使用端点。issuer 身份只容忍末尾 `/` 差异；HTTPS、PKCE S256、state、redirect identity、callback `iss` 与 DCR 结果中的 redirect URI 保持严格。DCR 结果改用 authorization server 支持的其他 token endpoint auth method 时按结果接受；同时省略 method 与 secret 且服务器支持 `none` 时视为 public client。仍被拒绝的情况按授权失败事实报告原因。
+
+requested scopes 按 MCP scope selection 顺序取得：Bearer challenge 的 `scope`，否则 protected resource metadata 的全部 `scopes_supported`，两者都没有时授权请求不带 scope；重新登录仍取既有 requested scopes 与新 challenge scopes 的 union。refresh 只要求 challenge 明确要求的 scope 被既有 consent 覆盖，资源新增声明的 supported scope 不使已有 grant 失效。DCR 请求的 `grant_types` 固定为 `authorization_code` 与 `refresh_token`；服务端登记的 grant 少于请求时只要求含 `authorization_code`。OAuth Consent 绑定 connection approval、canonical resource、exact issuer、requested scopes、redirect identity、registration kind、client identity 与 client-credential revision；callback 必须校验 state、PKCE S256、redirect identity，并按 2026-07-28 规则对出现的 `iss` 做 exact comparison。
+
+授权操作以失败结束时，Host 向 Product 交付失败步骤、分类、HTTP 状态与远端 OAuth error/error_description，Product 只作为进程内事实保存并投影，不写入 Registry；用户取消不产生失败事实。
+
+`oauth_operation` 活跃时拒绝同 server 的编辑/删除/授权 mutation；其他 server mutation 可以提交，但必须原样保留 marker。外部结果返回后不要求起始 global generation 仍相同，而是先按 operation id 和 server-bound fingerprints 校验当前 canonical registry，再从当前 generation 构建 target，确保无关 server 变更不会丢失或把已成功的远端 effect 误判为 stale。
+
+DCR、authorization-code exchange 与 refresh 都是不可回滚外部操作，统一使用持久 `oauth_operation`。操作开始前若目标 server 当前进入 Admission Authority，Product MCP 必须先基于 current catalog 预构建排除该 server 的 owned selection；marker 落盘后 no-fail 安装 reduced authority，再允许发送请求，无法构建时不得产生外部 effect。
+
+每次 marker 绑定 kind、server、connection approval、consent draft/epoch 和适用 token revision；DCR success 构造 issued client identity 和可选 fresh client-secret locator，token success 构造 fresh token locators、当前 registry target、HTTP auth snapshot 与恢复目标 server 的 Admission candidate，再经既有事务提交并 no-fail 安装。
+
+明确收到未创建 client 的 DCR rejection 可以清除 marker 并进入 `client_registration_required`；`invalid_grant`、响应丢失、成功后落盘失败、结果不确定或启动发现遗留 marker 都进入 `reauth_required` 并保持 reduced authority，不得重放、回滚到旧 active token 或猜测成功。DCR outcome unknown 可能遗留一个远端 registration，UI 必须说明再次尝试可能新建 client，本期不声称远端 revoke。
+
+能够可靠证明 non-idempotent request 尚未发送时，可以按当前 operation 清除 marker 并保留原授权事实，由 Product 决定后续重试；取消、超时和网络错误本身不构成未发送证明。用户 Cancel 在请求可能已发送后只能停止本地等待并提交 `reauth_required`，不能把 socket cancel 当作远端未执行。已经选中的完整响应不因清理阶段的取消失去已知结果，其采纳仍须通过当前绑定校验。
+
 MCP apply、catalog refresh、durable OAuth mutation 与运行时 reauthorization 共享 Product Control 的串行化边界；浏览器授权等待不占用该边界，只携带 server-bound operation identity。浏览器等待期间，其他 server 的 OAuth refresh 和 reduced-authority catalog refresh 仍可运行；进入单一 durable `oauth_operation` 后才按事务串行。所有 completion 必须按 operation、server/connection fingerprint、consent epoch 与当前 generation 重新授权，stale 结果只清理自身资源。目标 server 进入 OAuth 或 reauthorization 时必须先提交排除它的 reduced authority，不能无关地冻结其他 server。
+
+#### Task 恢复、目录刷新与关闭
 
 普通 Text Task admission 不属于 MCP 边界：MCP 未就绪、refresh/apply/OAuth 在途或 freshness failure 都不得拒绝 Task 创建。创建时只复制当刻安全可用的 Selection；不可用时以 null Selection 创建，并在 Task 的进程期 immutable authority fact 中区分 `ready(selected)`、`ready(none)` 与 `unavailable`。该事实进入 Snapshot 和 create result，不进入 Task persistence，冷启动恢复的历史 Task 为 `unavailable`，Renderer 不得据此热附加 MCP。freshness failure 必须使旧 MCP Admission fail closed 并触发现有异步 refresh；原 restore 或 mutation 不自动重放。边界忙时必须保留 runtime authorization failure 与 refresh pending 事实；refresh enqueue 失败必须由 owner timer 有界重试。关闭时先停止 MCP management、OAuth/refresh timer 与新 MCP admission，再 settle/join worker，释放 Admission 与 Activation，最后由 Agent owner 释放 transport 与 Runtime。
 
@@ -379,13 +428,15 @@ Product Task identity、Agent Session route identity、execution generation、Wo
 
 Credential redaction 是 owner 释放协议，而不是 snapshot 时的偶然过滤：
 
-1. Task 创建、恢复/rebind 安装或凭据续期取得新 credential 前，先清洗所有可能包含它的既有产品文本，包括 Schedule durable candidate；
+1. Task 创建、恢复/rebind 安装取得新 credential 前，先清洗所有可能包含它的既有产品文本，包括 Schedule durable candidate；
 2. 实际 credential 替换或释放前，清洗 Workspace、Task、Run、Tool、UI 与 Schedule 的相关 durable candidate；不依赖全局默认 execution；
 3. 释放 quiescent Task-owned ExecutionConfig 前，再用即将释放的 credential 清洗该 Task 的全部产品历史；
-4. durable commit 成功后才能转移或 secure-zero 对应 credential ownership；
+4. durable commit 成功后才能转移或 secure-zero 对应的 Task credential ownership；
 5. 新构建的投影块在交付前继续扫描所有 live credential，作为提交前的第二道防线；仅在内容版本和安全代次均未改变时，才允许复用已经检查过的编码块。
 
-Schedule 脱敏只在已加载计划内容命中待接纳或释放的 credential 时建立持久化前置条件；未命中时不得读取健康度或执行 I/O，也不得阻塞无关 Task。Schedule 脱敏由实际 credential 安装、续期及释放边界触发，覆盖新 credential 可能命中的既有计划文本及即将释放 credential 的历史；清洗失败或提交结果不确定时保留必要 owned credential 与恢复证据，禁止该次未完成保护的安装或释放。Models 纯偏好提交与该过程无关。
+Account 的 access token 单列：它在装入之前不可能出现在任何产品文本里，每次提交和离开检查之前都按正在检查的 token 清洗内存中的产品文本，没有落盘前置条件；续期只把已经在检查的 token 借给已接纳的执行，之后每次 Schedule 写入照常按全部在用 credential 清洗并检查。
+
+Schedule 的落盘前置条件只对 Task 取得和释放的 credential 成立：已加载计划内容命中它时才建立；未命中时不得读取健康度或执行 I/O，也不得阻塞无关 Task。它由实际 credential 安装及释放边界触发，覆盖新 credential 可能命中的既有计划文本及即将释放 credential 的历史；清洗失败或提交结果不确定时保留必要 owned credential 与恢复证据，禁止该次未完成保护的安装或释放。Models 纯偏好提交与该过程无关。
 
 Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 codepoint 边界；多个 credential 前缀重叠时采用最长匹配，不能因替换 secret 产生非法 UTF-8 产品事实。除 Custom Provider create/replace 与 MCP captureSecret command 的调用期手动凭据外，credential 不进入 Bridge 或 Renderer；credential、locator、Authorization header 和可重建 secret 的 metadata 永远不进入 projection、result、event、日志、产品历史或 checkpoint record。
 
@@ -471,7 +522,7 @@ Application 关闭 Product 路径时必须遵守以下顺序：
 3. 取消 queued/running Product jobs，join Executor，并等待 Task access、worker reference 与 aggregate completion quiescent；join 期间主线程持续按最终屏障的同一方式消费 Agent 事件，因为跨进程的 Run terminal 排在其 Session 已入队事件之后，靠消费者让出的空间才能送达；
 4. 停止 Product 对 Agent 的新调用，再结束与执行进程的链路：执行进程据此执行完整的 Agent Runtime shutdown 后退出，宿主的宽限期限界住不退出的进程；宽限期从开始停止时计，覆盖写完已排队消息、等子进程退出和等读线程三段，到期结束子进程；
 5. 完成最终 event drain 与 lifecycle sync，才释放残留 attachment、execution authority、aggregate 和 Product Control；
-6. Models 停止新管理命令，cancel/join Metask catalog与模型测试 worker并释放 credential vault port；Account committed shutdown effect取消自身 timer、join attempt worker并清空 Account 平台 port；随后 Application 才释放两个彼此独立的平台 binding。
+6. Models 停止新管理命令，取消目录定时器，cancel/join Metask catalog与模型测试 worker并释放 credential vault port；Metask 凭据端口在停止后不再被读，不另行释放；Account committed shutdown effect取消自身 timer、join attempt worker并清空 Account 平台 port；随后 Application 才释放两个彼此独立的平台 binding。
 
 Agent Session、callback、UI request、event pump、close race、错误映射和 Agent Runtime 内部销毁顺序只由[AgentCore 集成契约](agentcore-integration.md)定义；Product/Application 不得拆开或替代 Agent-owned shutdown fence。
 
@@ -491,7 +542,7 @@ Product aggregate 独占产品事实、局部事务和执行资格。Product Con
 
 大视图读取使用 Product-owned 的单个有界冻结计划。begin 冻结同一提交的 owned 事实；有界准备步逐块比较版本，不能推进业务或重新采样 aggregate。Tool 记录不进入大视图：Run 只带 Tool 摘要与文件引用，记录由按页读取命令在主线程同步格式化，每页源文本至多 256 KiB 且至少一条，与大视图使用同一 credential 集合。准备期的 credential 副本仅在 Host 临时 owner 内存在，完成或取消即清除；原始工具 JSON 与 credential 不得进入缓存、Bridge payload 或 worker。ready 计划只持已脱敏的 owned 内容、结构和内容版本，按编码预算逐步写入调用期借用的运输 buffer。工具展示只有一个 formatter；解析、脱敏、JSON 编码和缓存回填仍由 Product 拥有，Bridge 只承运准备状态、读取 identity 和 bytes，Renderer 只等待并渲染。版本比较基于精确的脱敏源内容，不能为取得长度或确认稳定版本而先同步编码完整正文；缓存只接纳源内容仍有效的结果。普通业务更新可以使当前缓存失效，但不会把已冻结读取拼接成多个提交；安全失效、读取替换和关闭则直接撤销计划。
 
-安全代次归 Product Control。安装、替换或释放 credential 仍须遵守原地清洗与 durable commit 协议；清洗本身不推进代次。已知凭据按精确字节值及现有 Host owner 判定，包含与对话来源独立的 Account access token；Account 仅通过主线程调用期 visitor 提供脱敏检查或有界冻结读取副本，Product 不长期保留其 token，Account 授权代次提交时撤销旧安全投影。重复取得或释放仍有其他 owner 持有的同值副本不改变安全边界，不额外建立长期凭据副本。真实凭据集合或执行安全 authority 变化使旧代次缓存和在途展示结果失效；即使外围 command 随后失败，也必须主动发布安全失效。缓存命中只在内容版本和安全代次均匹配时成立，新构建内容继续执行交付前的完整检查。Renderer 接收安全代次并清除过期缓存；它不持有 credential，也不执行脱敏。
+安全代次归 Product Control。安装、替换或释放 credential 仍须遵守原地清洗与 durable commit 协议；清洗没有改写展示内容时不推进代次。已知凭据按精确字节值及现有 Host owner 判定，包含与对话来源独立的 Account access token，以及 Models 从保存起常驻的已配置 Custom Provider Key（Models 与历史库各留一份）；Account 仅通过主线程调用期 visitor 提供脱敏检查或有界冻结读取副本，Product 不长期保留其 token。Account 签发给自己的 access token 在装入之前没有出口，任何展示都不可能带着它，被换下或结束的那一份继续检查到最迟失效之后；因此装入、续期、登录、退出和会话结束都不推进代次，只在 token 变化时按全部正在检查的 token 清洗一遍，到期离开之前再清洗一遍，清洗改写或丢弃了展示内容才推进。取得一个此前不是已知凭据的值时推进，因为它在此之前可能已被明文展示；再次取得已知值不推进，Task 也不为它额外建立长期凭据副本。Models 载入或保存一个 Key 就是取得（含 Schedule 持久清洗），同一次加入的多个 Key 只推进一次，之后 Task 第一次使用它不再推进；凭据库读不到的 Key 退回到 Task 首次使用时取得，同一 provider revision 不再重读；Schedule 一时写不进去、没能取得或放下的 Key 也不重读，等 revision 变化或 Schedule 恢复后再试。Custom Provider 短于 16 个 Unicode 字符的 Key 不算秘密，不进已知集合，既不遮也不拦，请求照常发送：已知集合还用来拒绝路径、MCP 配置、模型 id 和预览字节，本地服务常拿 `ollama`、`EMPTY` 这类占位值当 Key，当作秘密会让带这个词的文件都打不开。Metask credential 远长于此；MCP 的秘密不在已知集合内。释放只使已知集合变小，已展示的内容只会遮得更多，因此只在清洗改写或丢弃了展示内容时推进。执行安全 authority 变化同样推进。推进使旧代次缓存和在途展示结果失效；即使外围 command 随后失败，也必须主动发布安全失效。缓存命中只在内容版本和安全代次均匹配时成立，新构建内容继续执行交付前的完整检查。Renderer 接收安全代次并清除过期缓存；它不持有 credential，也不执行脱敏。
 
 主线程上的展示构建、编码、复制和分块处理必须满足[验证规范](validation.md#产品视图与执行隔离验收)的连续时间预算。首先使用有界范围与稳定块复用；只有测量表明仍超预算时，才引入有界分片或独立执行容量。异步投影不能持有 credential、Product Runtime 或可变 aggregate 指针，只接受 owned 数据或不可变输入；接纳结果前重新校验对象、连接、内容版本和安全代次。不能以编码已经移出主线程为由接受仍然超预算的脱敏操作。
 
@@ -553,7 +604,7 @@ Run 接纳执行时可以保留 runtime-only 单调起点；Product 在完整 te
 
 Task 删除是跨持久化、checkpoint、event、Session 和 worker reference 的独立 Product 生命周期用例，不占用 active-operation 槽；其 `idle | deleting | failed` 状态只存在于当前 Runtime，不进入 durable Task record。删除无需归档，受理不改变原 archived；受理时取消等待输入与接续并失效待决审批，Product Control 通过既有 operation owner 请求停止，禁止新 admission。删除意图可以先进入 `deleting`，但只有相关 active operation、checkpoint、terminal event、Session access 和 worker reference 全部收口且 durable history commit 成功后才能物理移除 record。明确失败或结果不确定只使本次删除进入可诊断失败；用户可以重试删除。Task 已回到 open 且安全时，恢复归档或未归档 Task 的显式新消息、归档在接纳同一 mutation 中清除 failed，拒绝不清除；仍 closing 或结果未知不得借此绕过原事务 gate。删除意图不持久化，重启不自动继续；Task 的其他可用操作与整个应用 不得因此冻结。
 
-### 4.3 `workbench-history.store`
+### 4.3 Workbench 历史存储
 
 可信成果元数据和可省略的展示详情分开保留。交付回执与 Host 生图引用受既有每 Run 数量、路径及字段长度、历史存储和 Bridge 块边界约束，复制仍经过同一 Host 全量凭据清洗；它们不消耗可淘汰的普通文本详情额度，也不建立新的全局预留或准入机制。生图引用归属于不可淘汰的最小 Tool 记录，占用自己的记录位置，不省略或挤占普通 Tool 记录；一轮的 Tool 记录没有条数上限，只受单字段上限与全局历史额度约束；Tool 名称和产品身份的运行时计费标记不进入持久化格式，冷恢复由可信生图引用重建同一所有权。allocator failure 仍是 Host 失败，不伪装成普通容量缺口。
 

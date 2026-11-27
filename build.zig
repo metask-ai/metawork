@@ -316,6 +316,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-runtime", .root_module = test_modules.account_runtime },
         .{ .name = "metawork-account", .root_module = test_modules.account },
         .{ .name = "metawork-app", .root_module = test_modules.app },
+        .{ .name = "metawork-app-account-coordinator", .root_module = test_modules.account_coordinator },
         .{ .name = "metawork-app-models-coordinator", .root_module = test_modules.models_coordinator },
         .{ .name = "metawork-automation-enabled", .root_module = test_modules.automation_enabled },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
@@ -415,6 +416,8 @@ pub fn build(b: *std.Build) void {
             b.step("test-product-task-persistence", "Run Product Task history codec and restore tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_task_runtime)
             b.step("test-product-task-runtime", "Run Product Task runtime kernel tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_task_policy)
+            b.step("test-product-task-policy", "Run Product Task outcome and feedback policy tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_task_execution)
             b.step("test-product-task-execution", "Run Product Task executor and terminal publication tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_control_runtime)
@@ -500,6 +503,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"image Run"},
         })).step);
     }
+    b.step("test-models-coordinator", "Run Models coordinator catalog and media preparation tests")
+        .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.models_coordinator })).step);
     const model_metadata_step = b.step("test-model-metadata", "Run Models declarations, resolution and Host/Renderer contract tests");
     for ([_]*std.Build.Module{ test_modules.models_contract, test_modules.models_metask, test_modules.models_providers, test_modules.models_runtime }) |module| {
         model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
@@ -629,6 +634,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-state-focused", .root_module = test_modules.account_state },
         .{ .name = "metawork-account-runtime-focused", .root_module = test_modules.account_runtime },
         .{ .name = "metawork-account-focused", .root_module = test_modules.account },
+        .{ .name = "metawork-metask-http-transport-focused", .root_module = test_modules.metask_http_transport },
     };
     for (account_focused_modules) |spec| {
         const tests = b.addTest(.{
@@ -639,8 +645,7 @@ pub fn build(b: *std.Build) void {
     }
     const account_coordinator_tests = b.addTest(.{
         .name = "metawork-account-coordinator-focused",
-        .root_module = test_modules.app,
-        .filters = &.{"Account"},
+        .root_module = test_modules.account_coordinator,
     });
     account_test_step.dependOn(&b.addRunArtifact(account_coordinator_tests).step);
     const account_bridge_tests = b.addTest(.{
@@ -1092,6 +1097,8 @@ const WiredModules = struct {
     image_output: *std.Build.Module,
     video_output: *std.Build.Module,
     output_file: *std.Build.Module,
+    account_coordinator: *std.Build.Module,
+    metask_http_transport: *std.Build.Module,
     models_coordinator: *std.Build.Module,
     product_workspace_view: *std.Build.Module,
     product_schedule: *std.Build.Module,
@@ -1162,6 +1169,7 @@ fn createLifecycleFixture(
     fixture.addImport("metawork_product_workspace", modules.product_workspace);
     fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("metawork_account", modules.account);
+    fixture.addImport("account_coordinator", modules.account_coordinator);
     fixture.addImport("models_coordinator", modules.models_coordinator);
     fixture.addImport("metask_transport", modules.metask_transport);
     fixture.addImport("metawork_product_models_contract", modules.models_contract);
@@ -1452,6 +1460,7 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     cases.addImport("image_output", modules.image_output);
     cases.addImport("video_output", modules.video_output);
     cases.addImport("app_output_file", modules.output_file);
+    cases.addImport("account_coordinator", modules.account_coordinator);
     cases.addImport("models_coordinator", modules.models_coordinator);
     cases.addImport("metawork_account", modules.account);
     cases.addImport("product_models_metask", modules.models_metask);
@@ -2067,10 +2076,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    account_credentials_runtime.addImport("account_state", account_state);
     account_credentials_runtime.addImport("account_oauth", account_oauth);
-    account_credentials_runtime.addImport("metawork_account_contract", account_contract);
-    account_credentials_runtime.addImport("metask_client", metask_client);
     const models_providers = b.createModule(.{
         .root_source_file = b.path("src/product/models/providers.zig"),
         .target = target,
@@ -2136,6 +2142,7 @@ fn wireAgentCore(
     });
     account_runtime.addImport("metawork_account_contract", account_contract);
     account_runtime.addImport("account_state", account_state);
+    account_runtime.addImport("account_oauth", account_oauth);
     account_runtime.addImport("metask_client", metask_client);
     account_runtime.addImport("account_credential_store", account_credential_store);
     account_runtime.addImport("account_ports", account_ports);
@@ -2918,13 +2925,31 @@ fn wireAgentCore(
     mcp_oauth.addImport("metawork_oauth_loopback_transport", metawork_oauth_loopback_transport);
     mcp_platform.addImport("metawork_mcp_oauth", mcp_oauth);
 
+    const account_coordinator = b.createModule(.{
+        .root_source_file = b.path("src/app/account_coordinator.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_coordinator.addImport("metawork_account", account);
+    account_coordinator.addImport("metawork_account_contract", account_contract);
+    account_coordinator.addImport("metawork_product_control_ports", product_control_ports);
+    // Compiled into the app; a module of its own so test-account runs its tests.
+    const metask_http_transport = b.createModule(.{
+        .root_source_file = b.path("src/app/metask_http_transport.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    metask_http_transport.addImport("metawork_http_transport", metawork_http_transport);
+    metask_http_transport.addImport("account_oauth", account_oauth);
+    metask_http_transport.addImport("metask_client", metask_client);
+    metask_http_transport.addImport("metask_transport", metask_transport);
+    metask_http_transport.addImport("product_models_metask", models_metask);
     const models_coordinator = b.createModule(.{
         .root_source_file = b.path("src/app/models_coordinator.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     models_coordinator.addImport("metawork_agent", agent);
-    models_coordinator.addImport("metawork_account", account);
     models_coordinator.addImport("metawork_account_contract", account_contract);
     models_coordinator.addImport("metawork_product_models_contract", models_contract);
     models_coordinator.addImport("product_models_ports", models_ports);
@@ -2970,6 +2995,7 @@ fn wireAgentCore(
     );
     app.addImport("metawork_product_mcp", product_mcp);
     app.addImport("metawork_product_control_ports", product_control_ports);
+    app.addImport("account_coordinator", account_coordinator);
     app.addImport("models_coordinator", models_coordinator);
     app.addImport("metawork_product_skill", product_skill);
     app.addImport("metawork_product_task", product_task);
@@ -3091,6 +3117,8 @@ fn wireAgentCore(
         .image_output = image_output,
         .video_output = video_output,
         .output_file = output_file,
+        .account_coordinator = account_coordinator,
+        .metask_http_transport = metask_http_transport,
         .models_coordinator = models_coordinator,
         .product_workspace_view = product_workspace_view,
         .product_schedule = product_schedule,

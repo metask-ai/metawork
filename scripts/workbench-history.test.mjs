@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import {
   historyProgress,
   earlierHistoryGoal,
+  narrowHistoryGoals,
 } from "../frontend/src/workbench/history.ts";
 import {
   initialWorkbenchState,
@@ -141,4 +142,26 @@ test("changed historical content is re-fetched without presenting a gap or retai
     s.ids(),
     Array.from({ length: 12 }, (_, i) => String(i + 1)),
   );
+});
+test("a security epoch keeps only the history each reading position needs", () => {
+  const goals = {
+    1: { taskId: "1", oldestRunId: "2" },
+    2: { taskId: "2", oldestRunId: "4" },
+    3: { taskId: "3", oldestRunId: "1" },
+    4: { taskId: "4", oldestRunId: "6" },
+  };
+  const reading = new Map([
+    ["1", { followingLatest: false, anchor: { runId: "7" } }],
+    ["2", { followingLatest: true, anchor: { runId: "5" } }],
+    ["3", { followingLatest: false }],
+    ["4", { followingLatest: false, anchor: { runId: "3" } }],
+    ["5", { followingLatest: false, anchor: { runId: "9" } }],
+  ]);
+  // Back to the anchor's Run and no further; never older than was asked;
+  // nothing for a Task that follows its latest Run, has no anchor or never
+  // read history.
+  assert.deepEqual(narrowHistoryGoals(goals, reading), {
+    1: { taskId: "1", oldestRunId: "7" },
+    4: { taskId: "4", oldestRunId: "6" },
+  });
 });

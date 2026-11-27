@@ -10,7 +10,7 @@ const catalog_api = @import("product_models_metask");
 const models_contract = @import("metawork_product_models_contract");
 const protocol_adapter = @import("product_agent_protocol_adapter");
 const evaluation = @import("permission_review_evaluation");
-const Coordinator = @import("account_coordinator.zig").Coordinator;
+const Coordinator = @import("account_coordinator").Coordinator;
 const Platform = @import("account_platform_binding.zig").Adapter;
 const Http = @import("metask_http_transport.zig").Adapter;
 const CompletionHttp = @import("completion_http_transport.zig").Backend;
@@ -57,6 +57,8 @@ const Host = struct {
         value.assertValid();
     }
 
+    fn settle(_: *anyopaque) void {}
+
     fn start(context: *anyopaque, runtime: *native.Runtime) !void {
         const self: *Host = @ptrCast(@alignCast(context));
         try line(self.init, .{ .kind = "account_evaluation_stage", .stage = "runtime_started" });
@@ -85,7 +87,7 @@ const Host = struct {
             .effects_wake => self.coordinator.drain(),
             .timer => |timer| {
                 if (timer.id != poll_timer) {
-                    _ = self.coordinator.onTimer(timer.id);
+                    _ = self.coordinator.tick();
                     return;
                 }
                 self.coordinator.drain();
@@ -127,7 +129,7 @@ const Host = struct {
     }
 
     fn beginEvaluation(self: *Host) !void {
-        self.lease = (try self.account_runtime.authorizationLease()) orelse return error.AuthorizationUnavailable;
+        self.lease = (try self.account_runtime.credential()) orelse return error.AuthorizationUnavailable;
         errdefer {
             self.lease.?.deinit();
             self.lease = null;
@@ -152,7 +154,7 @@ const Host = struct {
         var catalog = catalog_api.CatalogSession.init(self.init.gpa);
         defer catalog.deinit();
         try catalog.loadModels(self.http.modelsTransport(), lease.access_token, lease.principal_ref, null);
-        var candidate = try catalog.prepareSourceCandidate(self.model, 1);
+        var candidate = try catalog.prepareSourceCandidate(self.model, 1, lease.access_token);
         defer candidate.deinit();
         const input = candidate.input();
         var model_views: [models_contract.Limits.model_entries]models_contract.ModelView = undefined;
@@ -237,7 +239,7 @@ pub fn run(init: std.process.Init) !void {
     var host = Host{ .init = init, .account_runtime = &account_runtime, .coordinator = &coordinator, .http = &http, .model = model, .revision = revision, .repeats = repeats, .phase_start = std.Io.Clock.Timestamp.now(init.io, .awake) };
     account_runtime = account.Runtime.init(init.gpa, init.io, std.Thread.getCurrentId(), http.accountTransport(), loopback.endpoint(), .{ .context = &host, .notify_fn = Host.wake });
     defer account_runtime.deinit();
-    coordinator = Coordinator.init(&account_runtime, .{ .context = &host, .commit_fn = Host.commit }, std.Thread.getCurrentId());
+    coordinator = Coordinator.init(&account_runtime, .{ .context = &host, .commit_fn = Host.commit, .settle_fn = Host.settle }, std.Thread.getCurrentId());
     try runner.runWithOptions(.{ .context = &host, .name = "MetaWork approval evaluation", .start_fn = Host.start, .event_fn = Host.event, .stop_fn = Host.stop }, .{
         .app_name = "MetaWork approval evaluation",
         .window_title = "MetaWork approval evaluation",

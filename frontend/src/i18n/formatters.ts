@@ -49,6 +49,16 @@ export function taskCountMessageId(
     : "task.count.other";
 }
 
+export function signOutStopsMessageId(
+  locale: Locale,
+  count: number,
+): "account.logout_stops_tasks.one" | "account.logout_stops_tasks.other" {
+  const rulesLocale = locale === "pseudo" ? "en-US" : locale;
+  return new Intl.PluralRules(rulesLocale).select(count) === "one"
+    ? "account.logout_stops_tasks.one"
+    : "account.logout_stops_tasks.other";
+}
+
 export function formatMilliseconds(locale: string, milliseconds: bigint) {
   return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(
     milliseconds,

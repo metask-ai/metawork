@@ -183,7 +183,6 @@ test "Account token response acceptance" {
                 try std.testing.expectEqualStrings(expected.access, tokens.access_token.view());
                 try std.testing.expectEqualStrings(expected.refresh, tokens.refresh_token.view());
                 try std.testing.expectEqual(expected.expires_at, tokens.expires_at);
-                try std.testing.expectEqualStrings("", tokens.accountId());
             },
             .reject => |expected| try std.testing.expectError(
                 expected,
@@ -263,11 +262,9 @@ test "Account OAuth error classification" {
             null,
         ));
     }
-    var tokens = try oauth.TokenSet.fromStored(std.testing.allocator, "access", "refresh", 100, "1");
-    defer tokens.deinit();
     for (identity_error_cases, 0..) |case, index| {
         errdefer std.debug.print("identity error case {d}\n", .{index});
         var fake: ErrorTransport = .{ .status = case.status, .body = case.body };
-        try std.testing.expectError(case.expected, client.fetchIdentity(fake.transport(), &tokens, null));
+        try std.testing.expectError(case.expected, client.fetchIdentity(fake.transport(), "access", null));
     }
 }

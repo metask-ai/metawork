@@ -4,9 +4,9 @@ MetaWork 是一款面向本地工作区的桌面 Agent 应用。用户可以围�
 
 ## 当前状态
 
-当前版本已经形成可运行的同进程桌面基线，覆盖 Account 登录与执行准备、Workspace/Task、Text/Skill Run、同步 permission、取消、Renderer reload、产品历史和正常重启后的 Conversation attachment 恢复。
+桌面应用支持 Account 登录、Workspace 与 Task 管理、Agent 执行、工具审批、取消与会话历史恢复。窗口和 AgentCore 分属两个进程；应用按需以 `--execution-host` 启动同一可执行文件的执行实例。执行进程中断后，后续对话可以从最近的 checkpoint 继续，正在执行的 Run 会中断。
 
-当前仍是同进程 prototype，不宣称具备 AgentCore 进程隔离、crash recovery、跨进程 in-flight Run 恢复、strict Workspace security 或自动更新。精确产品范围见[产品需求](docs/requirements.md)，系统边界见[高层架构](docs/architecture.md)，平台证据和未验证能力见[验证规范](docs/validation.md)。
+产品范围见[产品需求](docs/requirements.md)，进程生命周期见[高层架构](docs/architecture.md#5-部署状态与故障域)，已验收的平台与待验证能力见[验证规范](docs/validation.md#未闭合验证缺口)。
 
 ## 参与贡献
 
@@ -111,6 +111,7 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle node scripts/run-agentcore-restor
 
 ### 平台与执行规则
 
+- [发布流程](docs/release.md)：版本标签、正式产物与更新清单发布
 - [macOS 分发](docs/macos-distribution.md)：本地签名、Developer ID、DMG 与公证
 - [Windows 分发](docs/windows-distribution.md)：Inno Setup、Authenticode 与安装验证
 - [Agent 工作约束](AGENTS.md)：仓库内执行规则和不可绕过的 Gate

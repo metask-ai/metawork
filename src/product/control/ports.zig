@@ -13,30 +13,39 @@ const workspace = @import("metawork_product_workspace");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
 
-/// One committed Account revision delivered to Product Control. Attempt
-/// identity remains explicit for Account command lifecycle observation; model
+/// One committed Account revision delivered to Product Control. Model
 /// availability is owned and delivered independently by Models.
 pub const AccountCommit = struct {
     fact: account.AccountFact,
-    attempt_id: ?u64,
-    attempt_terminal: bool,
+    /// An access token was installed or ended. Product inspects what its
+    /// visitor lends from now on; no token is handed over here.
+    token_changed: bool = false,
+    /// The person signed out: what runs on their Metask login stops.
+    logged_out: bool = false,
 
     pub fn assertValid(self: AccountCommit) void {
         account.validateFact(self.fact) catch
             @panic("Account commit sink received an invalid Account fact");
-        std.debug.assert(!self.attempt_terminal or self.attempt_id != null);
     }
 };
 
 /// Narrow no-fail sink for a committed Account revision. No model catalog,
 /// selection, source candidate, or credential crosses this identity boundary.
+/// The coordinator settles after everything that follows the commit did.
 pub const AccountCommitSink = struct {
     context: *anyopaque,
     commit_fn: *const fn (*anyopaque, AccountCommit) void,
+    settle_fn: *const fn (*anyopaque) void,
 
     pub fn commitNoFail(self: AccountCommitSink, commit: AccountCommit) void {
         commit.assertValid();
         self.commit_fn(self.context, commit);
+    }
+
+    /// Rearms scheduled work against the new facts and publishes them: after a
+    /// commit, or when only time changed what Account answers.
+    pub fn settleNoFail(self: AccountCommitSink) void {
+        self.settle_fn(self.context);
     }
 };
 
@@ -44,7 +53,7 @@ pub const AccountCommitSink = struct {
 /// Control keeps registry/default-selection transactions behind these calls.
 pub const ModelsManagement = struct {
     context: *anyopaque,
-    prepare_media_candidate_fn: *const fn (*anyopaque, models_contract.MediaPreparationInput) models_contract.MediaPreparation,
+    prepare_media_candidate_fn: *const fn (*anyopaque, models_contract.MediaKind) models_contract.MediaPreparation,
     start_custom_providers_fn: *const fn (*anyopaque, []const u8, models_ports.CredentialVault) anyerror!void,
     start_custom_providers_unavailable_fn: *const fn (*anyopaque) void,
     stop_custom_providers_fn: *const fn (*anyopaque) void,
@@ -56,12 +65,16 @@ pub const ModelsManagement = struct {
     submit_custom_provider_fn: *const fn (*anyopaque, models_contract.CustomProviderCommand) models_contract.CommandResult,
     begin_custom_provider_probe_fn: *const fn (*anyopaque, models_contract.CustomModelTestCommand) models_contract.Preparation,
     complete_custom_model_test_fn: *const fn (*anyopaque, models_contract.CustomModelTestCommand, bool) models_contract.CommandResult,
-    prepare_metask_catalog_refresh_fn: *const fn (*anyopaque, []const u8, u64) models_contract.CatalogRefreshPrepareResult,
-    complete_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, *models_ports.OwnedCatalogCompletion) models_contract.ModelsError,
-    fail_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, models_contract.ModelsError, []const u8) void,
-    metask_authorization_unavailable_fn: *const fn (*anyopaque) void,
-    pub fn prepareMediaCandidate(self: ModelsManagement, input: models_contract.MediaPreparationInput) models_contract.MediaPreparation {
-        return self.prepare_media_candidate_fn(self.context, input);
+    follow_metask_principal_fn: *const fn (*anyopaque, ?[]const u8, u64) models_contract.MetaskFollow,
+    set_metask_catalog_active_fn: *const fn (*anyopaque, bool) void,
+    metask_catalog_next_fn: *const fn (*anyopaque) ?u64,
+    metask_catalog_due_fn: *const fn (*anyopaque, u64) bool,
+    begin_metask_catalog_request_fn: *const fn (*anyopaque, models_contract.CatalogRequestKind, models_contract.CatalogCredential, u64) models_contract.CatalogRequestStart,
+    join_metask_catalog_request_fn: *const fn (*anyopaque) bool,
+    complete_metask_catalog_request_fn: *const fn (*anyopaque, u64, *models_ports.OwnedCatalogCompletion, u64) bool,
+    fail_metask_catalog_request_fn: *const fn (*anyopaque, u64, models_contract.CatalogFailure, u64) bool,
+    pub fn prepareMediaCandidate(self: ModelsManagement, kind: models_contract.MediaKind) models_contract.MediaPreparation {
+        return self.prepare_media_candidate_fn(self.context, kind);
     }
     pub fn startCustomProviders(self: ModelsManagement, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
         try self.start_custom_providers_fn(self.context, directory, vault);
@@ -96,65 +109,69 @@ pub const ModelsManagement = struct {
     pub fn completeCustomModelTest(self: ModelsManagement, command: models_contract.CustomModelTestCommand, succeeded: bool) models_contract.CommandResult {
         return self.complete_custom_model_test_fn(self.context, command, succeeded);
     }
-    pub fn prepareMetaskCatalogRefresh(self: ModelsManagement, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
-        return self.prepare_metask_catalog_refresh_fn(self.context, principal_ref, authorization_generation);
+    /// The account an Account publication leaves, by its principal; null
+    /// when none is signed in.
+    pub fn followMetaskPrincipal(self: ModelsManagement, principal_ref: ?[]const u8, generation: u64) models_contract.MetaskFollow {
+        return self.follow_metask_principal_fn(self.context, principal_ref, generation);
     }
-    pub fn completeMetaskCatalogRefresh(self: ModelsManagement, attempt_id: u64, authorization_generation: u64, completion: *models_ports.OwnedCatalogCompletion) models_contract.ModelsError {
-        return self.complete_metask_catalog_refresh_fn(self.context, attempt_id, authorization_generation, completion);
+    pub fn setMetaskCatalogActive(self: ModelsManagement, active: bool) void {
+        self.set_metask_catalog_active_fn(self.context, active);
     }
-    pub fn failMetaskCatalogRefresh(self: ModelsManagement, attempt_id: u64, authorization_generation: u64, error_code: models_contract.ModelsError, safe_diagnostic: []const u8) void {
-        self.fail_metask_catalog_refresh_fn(self.context, attempt_id, authorization_generation, error_code, safe_diagnostic);
+    /// When Models wants the next catalog request; the Application only
+    /// arms a timer for it.
+    pub fn metaskCatalogNext(self: ModelsManagement) ?u64 {
+        return self.metask_catalog_next_fn(self.context);
     }
-    pub fn setMetaskAuthorizationUnavailable(self: ModelsManagement) void {
-        self.metask_authorization_unavailable_fn(self.context);
+    pub fn metaskCatalogDue(self: ModelsManagement, now_ms: u64) bool {
+        return self.metask_catalog_due_fn(self.context, now_ms);
     }
-};
-
-/// Main-thread, secret-free proof supplied by the Application Account owner.
-/// The generation changes on every token refresh, login and credential loss.
-pub const MetaskAuthorization = struct {
-    generation: u64,
-};
-
-/// Account's one Metask authorization fact. A verified identity is never
-/// `unavailable`: once its token expires it is `recovering`.
-pub const MetaskAuthorizationStatus = union(enum) {
-    unavailable,
-    available: MetaskAuthorization,
-    /// Account's renewal epoch, which advances when a refresh attempt ends.
-    recovering: u64,
-};
-
-pub const MetaskAuthorizationCheck = struct {
-    context: *anyopaque,
-    status_fn: *const fn (*anyopaque) MetaskAuthorizationStatus,
-
-    pub fn status(self: MetaskAuthorizationCheck) MetaskAuthorizationStatus {
-        return self.status_fn(self.context);
+    pub fn beginMetaskCatalogRequest(self: ModelsManagement, kind: models_contract.CatalogRequestKind, credential: models_contract.CatalogCredential, now_ms: u64) models_contract.CatalogRequestStart {
+        return self.begin_metask_catalog_request_fn(self.context, kind, credential, now_ms);
     }
-
-    /// The authorization an admission may use now, if any.
-    pub fn current(self: MetaskAuthorizationCheck) ?MetaskAuthorization {
-        return switch (self.status()) {
-            .available => |authorization| authorization,
-            .unavailable, .recovering => null,
-        };
+    pub fn joinMetaskCatalogRequest(self: ModelsManagement) bool {
+        return self.join_metask_catalog_request_fn(self.context);
+    }
+    pub fn completeMetaskCatalogRequest(self: ModelsManagement, id: u64, completion: *models_ports.OwnedCatalogCompletion, now_ms: u64) bool {
+        return self.complete_metask_catalog_request_fn(self.context, id, completion, now_ms);
+    }
+    pub fn failMetaskCatalogRequest(self: ModelsManagement, id: u64, failure: models_contract.CatalogFailure, now_ms: u64) bool {
+        return self.fail_metask_catalog_request_fn(self.context, id, failure, now_ms);
     }
 };
 
-/// Account-only handoff for an already admitted execution. A null credential
-/// reports lease allocation failure, never logout or a catalog rejection.
+/// Account-only handoff to what was admitted before: the current token by its
+/// generation, and later its end. Both are lent for the call.
 pub const MetaskCredentialRenewal = struct {
     context: *anyopaque,
-    renew_fn: *const fn (*anyopaque, MetaskAuthorization, ?[]const u8) void,
-    needs_fn: *const fn (*anyopaque, MetaskAuthorization) bool,
+    renew_fn: *const fn (*anyopaque, u64, []const u8) void,
+    needs_fn: *const fn (*anyopaque, u64) bool,
+    waits_fn: *const fn (*anyopaque, u64) bool,
+    holds_fn: *const fn (*anyopaque) bool,
+    retire_fn: *const fn (*anyopaque, []const u8) void,
 
-    pub fn renew(self: MetaskCredentialRenewal, authority: MetaskAuthorization, credential: ?[]const u8) void {
-        self.renew_fn(self.context, authority, credential);
+    pub fn renew(self: MetaskCredentialRenewal, generation: u64, credential: []const u8) void {
+        self.renew_fn(self.context, generation, credential);
     }
 
-    pub fn needs(self: MetaskCredentialRenewal, authority: MetaskAuthorization) bool {
-        return self.needs_fn(self.context, authority);
+    /// Nothing accepts this token any more, and nothing inspects it once this
+    /// returns.
+    pub fn retire(self: MetaskCredentialRenewal, credential: []const u8) void {
+        self.retire_fn(self.context, credential);
+    }
+
+    pub fn needs(self: MetaskCredentialRenewal, generation: u64) bool {
+        return self.needs_fn(self.context, generation);
+    }
+
+    /// A message waits for the attempt that ends this epoch.
+    pub fn waits(self: MetaskCredentialRenewal, epoch: u64) bool {
+        return self.waits_fn(self.context, epoch);
+    }
+
+    /// A Run uses a Metask credential now: its model, or an image or a video
+    /// it makes.
+    pub fn holds(self: MetaskCredentialRenewal) bool {
+        return self.holds_fn(self.context);
     }
 };
 

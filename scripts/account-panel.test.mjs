@@ -61,21 +61,6 @@ test.after(async () => vite.close());
 const emptyAccountSummary = {
   operation: "idle",
   usageEligibility: "unknown",
-  wallet: {
-    availability: "unavailable",
-    balanceU: null,
-    syncedAt: null,
-    errorCode: "none",
-    safeDiagnostic: "",
-  },
-  usage: {
-    availability: "unavailable",
-    today: null,
-    total: null,
-    syncedAt: null,
-    errorCode: "none",
-    safeDiagnostic: "",
-  },
   history: {
     availability: "unavailable",
     startDate: null,
@@ -89,12 +74,19 @@ const emptyAccountSummary = {
 
 const signedOut = {
   state: "signed_out",
-  canCancel: false,
+  actions: {
+    cancel: false,
+    retry: false,
+    login: true,
+    logout: false,
+    clear: false,
+  },
+  unreachable: false,
+  attempt: null,
   accountId: "",
   displayName: "",
   emailHint: "",
   phoneHint: "",
-  concurrencyLimit: null,
   errorCode: "none",
   safeDiagnostic: "",
   summary: emptyAccountSummary,
@@ -129,11 +121,11 @@ const unavailableModels = {
 const readyAccount = {
   ...signedOut,
   state: "authenticated",
+  actions: { ...signedOut.actions, login: false, logout: true },
   accountId: "account-1",
   displayName: "Metask User",
   emailHint: "m***@example.com",
   phoneHint: "",
-  concurrencyLimit: 5,
 };
 
 const readyModels = {
@@ -260,15 +252,80 @@ function renderConnectionFailure() {
 
 test("Account settings render each public session state with only its valid action", () => {
   const checkingMarkup = renderSettings(
-    { ...signedOut, state: "checking" },
+    {
+      ...signedOut,
+      state: "checking",
+      actions: { ...signedOut.actions, login: false },
+    },
     unavailableModels,
     { initialSection: "account" },
   );
   assert.match(checkingMarkup, /Checking sign-in/);
-  assert.doesNotMatch(checkingMarkup, />Sign in</);
+  assert.doesNotMatch(
+    checkingMarkup,
+    />Sign in<|>Try again now<|>Sign in again</,
+  );
+
+  // A login that could not be confirmed offers a new sign-in and, unless a
+  // check is already underway, trying again now.
+  for (const retry of [true, false]) {
+    const markup = renderSettings(
+      {
+        ...signedOut,
+        state: "checking",
+        errorCode: "metask_service_unavailable",
+        actions: { ...signedOut.actions, retry, logout: true },
+      },
+      unavailableModels,
+      { initialSection: "account" },
+    );
+    assert.match(markup, /Can&#x27;t confirm your sign-in yet/);
+    assert.match(markup, /MetaWork keeps retrying/);
+    for (const [label, offered] of [
+      ["Try again now", retry],
+      ["Sign in again", true],
+    ]) {
+      const button = markup.match(
+        new RegExp(`<button[^>]*>${label}</button>`),
+      )?.[0];
+      assert.equal(button !== undefined, offered, label);
+      if (button) assert.doesNotMatch(button, / disabled=""/);
+    }
+    assert.match(markup, />Sign out</);
+    assert.doesNotMatch(markup, /Checking sign-in/);
+  }
+
+  // A store that could not be read is read again; what a sign-out could not
+  // delete is cleared again.
+  const unreadMarkup = renderSettings(
+    {
+      ...signedOut,
+      errorCode: "credential_store_read_failed",
+      actions: { ...signedOut.actions, retry: true },
+    },
+    unavailableModels,
+    { initialSection: "account" },
+  );
+  assert.match(unreadMarkup, />Try again now</);
+  assert.match(unreadMarkup, />Sign in with Metask</);
+  const residueMarkup = renderSettings(
+    {
+      ...signedOut,
+      errorCode: "credential_store_delete_failed",
+      actions: { ...signedOut.actions, clear: true },
+    },
+    unavailableModels,
+    { initialSection: "account" },
+  );
+  assert.match(residueMarkup, />Clear sign-in again</);
+  assert.doesNotMatch(residueMarkup, />Sign out</);
 
   const callbackMarkup = renderSettings(
-    { ...signedOut, state: "authorizing", canCancel: true },
+    {
+      ...signedOut,
+      state: "authorizing",
+      actions: { ...signedOut.actions, cancel: true, login: false },
+    },
     unavailableModels,
     { initialSection: "account" },
   );
@@ -277,7 +334,11 @@ test("Account settings render each public session state with only its valid acti
   assert.doesNotMatch(callbackMarkup, />Sign in</);
 
   const exchangeMarkup = renderSettings(
-    { ...signedOut, state: "authorizing", canCancel: false },
+    {
+      ...signedOut,
+      state: "authorizing",
+      actions: { ...signedOut.actions, login: false },
+    },
     unavailableModels,
     { initialSection: "account" },
   );
@@ -308,12 +369,22 @@ test("refresh scheduling failure exposes the explicit Account retry", () => {
     {
       ...readyAccount,
       errorCode: "refresh_schedule_failed",
+      actions: { ...readyAccount.actions, retry: true },
     },
     readyModels,
     { initialSection: "account" },
   );
   assert.match(markup, /Automatic sign-in refresh could not be scheduled/);
   assert.match(markup, />Retry sign-in refresh</);
+  // Host says when it may be retried; the error code alone does not.
+  assert.doesNotMatch(
+    renderSettings(
+      { ...readyAccount, errorCode: "refresh_schedule_failed" },
+      readyModels,
+      { initialSection: "account" },
+    ),
+    />Retry sign-in refresh</,
+  );
 });
 
 test("Account settings render gateway usage history without legacy summaries", () => {
@@ -323,21 +394,6 @@ test("Account settings render gateway usage history without legacy summaries", (
       summary: {
         operation: "idle",
         usageEligibility: "enabled",
-        wallet: {
-          availability: "unavailable",
-          balanceU: null,
-          syncedAt: null,
-          errorCode: "none",
-          safeDiagnostic: "",
-        },
-        usage: {
-          availability: "unavailable",
-          today: null,
-          total: null,
-          syncedAt: null,
-          errorCode: "none",
-          safeDiagnostic: "",
-        },
         history: {
           availability: "ready",
           startDate: "2025-09-15",
@@ -366,7 +422,8 @@ test("Account settings render gateway usage history without legacy summaries", (
   assert.doesNotMatch(markup, /Metask connected/);
   assert.match(markup, /whole Metask account, not only activity in MetaWork/);
   assert.match(markup, /m\*\*\*@example\.com/);
-  assert.match(markup, /Concurrency allowance 5/);
+  // Nothing publishes a concurrency allowance; none is shown.
+  assert.doesNotMatch(markup, /Concurrency/);
   assert.match(markup, /title="Open the Metask recharge page in your browser"/);
   assert.match(markup, />Recharge</);
   assert.doesNotMatch(markup, /settings-identity-balance|>Balance</);
@@ -388,21 +445,6 @@ test("Account summary failure stays local and legacy disabled projection hides u
     summary: {
       operation: "idle",
       usageEligibility: "enabled",
-      wallet: {
-        availability: "ready",
-        balanceU: "12",
-        syncedAt: "1789344000000",
-        errorCode: "none",
-        safeDiagnostic: "",
-      },
-      usage: {
-        availability: "unavailable",
-        today: null,
-        total: null,
-        syncedAt: null,
-        errorCode: "metask_service_unavailable",
-        safeDiagnostic: "",
-      },
       history: {
         availability: "unavailable",
         startDate: null,
@@ -417,7 +459,6 @@ test("Account summary failure stays local and legacy disabled projection hides u
   const partialMarkup = renderSettings(partial, readyModels, {
     initialSection: "account",
   });
-  assert.match(partialMarkup, /12 U/);
   assert.match(partialMarkup, /Metask is temporarily unavailable/);
   assert.match(partialMarkup, /Metask User/);
 
@@ -439,21 +480,6 @@ test("Account summary failure stays local and legacy disabled projection hides u
   );
 
   const stale = structuredClone(partial);
-  stale.summary.usage = {
-    availability: "stale",
-    today: {
-      inputTokens: "1",
-      outputTokens: "2",
-      cacheCreationTokens: "3",
-      cacheReadTokens: "4",
-      totalTokens: "10",
-      actualCostU: "0.5",
-    },
-    total: { totalTokens: "20", actualCostU: "1" },
-    syncedAt: "1789343000000",
-    errorCode: "metask_service_unavailable",
-    safeDiagnostic: "",
-  };
   stale.summary.history = {
     availability: "stale",
     startDate: "2025-09-15",
@@ -528,14 +554,6 @@ test("pre-sync Account usage remains actionable without a legacy balance", () =>
   assert.match(markup, />Recharge</);
 });
 
-test("an unlimited Account concurrency value stays visible", () => {
-  const unlimited = { ...readyAccount, concurrencyLimit: 0 };
-  const markup = renderSettings(unlimited, readyModels, {
-    initialSection: "account",
-  });
-  assert.match(markup, /Concurrency allowance Unlimited/);
-});
-
 test("Account usage formatting preserves decimal precision without number coercion", () => {
   assert.equal(
     formatAccountDecimal("12042000000000001.125"),
@@ -600,7 +618,11 @@ test("opening Account settings has no hidden catalog mutation", () => {
 
 test("authorization has one cancel path and no reopen or reauthenticate branch", () => {
   const markup = renderSettings(
-    { ...signedOut, state: "authorizing", canCancel: true },
+    {
+      ...signedOut,
+      state: "authorizing",
+      actions: { ...signedOut.actions, cancel: true, login: false },
+    },
     unavailableModels,
     { initialSection: "account" },
   );

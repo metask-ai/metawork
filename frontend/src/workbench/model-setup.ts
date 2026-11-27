@@ -4,6 +4,7 @@ import type {
   NewTaskAdmissionView,
   ModelRef,
 } from "../bridge/contracts.ts";
+import { accountUnconfirmed } from "./account-identity.ts";
 
 export function supportsCustomProviders(capabilities: {
   management: boolean;
@@ -24,14 +25,18 @@ export type ModelSetupAction =
   | "models"
   | "choose_model"
   | "refresh"
-  | "schedules";
+  | "schedules"
+  | "confirm";
 export type ModelSetupReason =
   | "persistence"
   | "preparing"
   | "execution_unavailable"
   | "checking"
+  | "unconfirmed"
   | "authorizing"
   | "loading"
+  | "recovering"
+  | "unreachable"
   | "sign_in"
   | "no_models"
   | "catalog_failed"
@@ -47,6 +52,16 @@ export type ModelSetupNotice = {
   reason: ModelSetupReason;
   action: ModelSetupAction | null;
 };
+
+/** Why Metask's connection holds this model back; other sources ignore it. */
+export function metaskAdmission(
+  admission: NewTaskAdmissionView,
+  model: ModelRef | null | undefined,
+): "recovering" | "unreachable" | null {
+  return model?.sourceId === "metask" && admission.metask !== "none"
+    ? admission.metask
+    : null;
+}
 
 // Presentation only. Task admission and source-qualified selection stay with
 // their existing owners; discovering another source never selects it.
@@ -69,7 +84,10 @@ export function modelSetupNotice({
   customProvidersAvailable: boolean;
   schedulesAvailable: boolean;
 }): ModelSetupNotice | null {
-  if (valid) return null;
+  if (valid) {
+    const reason = metaskAdmission(admission, selected);
+    return reason && { reason, action: null };
+  }
   if (models.persistenceHealth !== "ready")
     return { reason: "persistence", action: "models" };
   if (admission.reason === "shutting_down")
@@ -79,12 +97,14 @@ export function modelSetupNotice({
   const needsMetask =
     selected?.sourceId === "metask" ||
     (!selected && !hasReadyModels && models.customProviders.length === 0);
+  if (needsMetask && accountUnconfirmed(account))
+    return { reason: "unconfirmed", action: "confirm" };
   if (needsMetask && account.state === "checking")
     return { reason: "checking", action: null };
   if (needsMetask && account.state === "authorizing")
     return {
       reason: "authorizing",
-      action: account.canCancel ? "cancel" : null,
+      action: account.actions.cancel ? "cancel" : null,
     };
   if (
     models.availability === "loading" ||
