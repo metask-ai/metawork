@@ -202,16 +202,45 @@ pub const ModelsView = struct {
     custom_providers: []const CustomProviderView = &.{},
 };
 
-pub const CatalogRefreshPreparation = struct {
-    attempt_id: u64,
-    principal_ref: []const u8,
-    authorization_generation: u64,
+/// What following the account changed: whether anything published did, and
+/// whether the catalog request underway belonged to another account and is
+/// no longer wanted.
+pub const MetaskFollow = struct {
+    changed: bool,
+    dropped: bool,
 };
 
-pub const CatalogRefreshPrepareResult = union(enum) {
-    ready: CatalogRefreshPreparation,
-    rejected: ModelsError,
+/// Who asks for a Metask catalog request: its time came, or the person.
+pub const CatalogRequestKind = enum { due, user };
+
+/// The credential a catalog request would use, as the Application found it.
+pub const CatalogCredential = union(enum) {
+    ready: struct { principal_ref: []const u8, generation: u64 },
+    /// None may be used now.
+    unavailable,
+    /// There was no memory to take it.
+    exhausted,
 };
+
+pub const CatalogRequestStart = struct {
+    outcome: union(enum) {
+        started: u64,
+        /// Not due yet; nothing was asked.
+        skipped,
+        rejected: ModelsError,
+    },
+    changed: bool,
+};
+
+/// How one catalog request failed, by Models' own classification.
+pub const CatalogFailure = struct {
+    code: ModelsError,
+    /// Worth a second try a moment later.
+    retryable: bool,
+};
+
+/// Whether the Metask source can resolve now, for the account it follows.
+pub const MetaskCatalogAvailability = enum { ready, loading, failed, absent };
 
 /// Route-scoped declarations frozen with an execution binding. Unknown models
 /// are omitted; an explicit false remains an authoritative declaration.
@@ -461,15 +490,8 @@ pub const CustomModelRemoveCommand = struct {
     expected_catalog_generation: u64,
 };
 
-/// Borrowed only during preparation, from the Host's current authorization
-/// lease. Models does not acquire, cache, refresh or persist this authorization.
-pub const MediaPreparationInput = struct {
-    kind: MediaKind = .image,
-    principal_ref: []const u8,
-    authorization_generation: u64,
-    bearer: []const u8,
-};
-
+/// A prepared media target. Its bearer was read through Models' Metask
+/// credential port for this preparation; Models keeps no copy of it.
 pub const MediaCandidateInput = struct {
     selection: ModelRef,
     endpoint: []const u8,
@@ -610,13 +632,16 @@ const OwnedBuffer = struct {
     }
 };
 
-/// Linear image input with one Models-owned target. No dialogue protocol,
-/// principal or authorization generation is transferred to the executor.
+/// Linear image input with one Models-owned target. No dialogue protocol or
+/// principal is transferred to the executor. It carries the Account
+/// generation of its credential, for renewing it in place and for telling
+/// Account of a 401.
 pub const OwnedMediaCandidate = struct {
     kind: MediaKind,
     model: OwnedBuffer,
     secret: SecretBuffer,
     catalog_generation: u64,
+    credential_generation: u64 = 0,
 
     pub fn copy(
         allocator: std.mem.Allocator,
@@ -658,6 +683,7 @@ pub const OwnedMediaCandidate = struct {
             .model = self.model.take(),
             .secret = self.secret.take(),
             .catalog_generation = self.catalog_generation,
+            .credential_generation = self.credential_generation,
         };
     }
 
@@ -665,6 +691,7 @@ pub const OwnedMediaCandidate = struct {
         self.secret.deinit();
         self.model.deinit();
         self.catalog_generation = 0;
+        self.credential_generation = 0;
     }
 };
 
@@ -1293,11 +1320,14 @@ test "image candidate owns borrowed inputs and zeroes moved credentials" {
     var model = "image-model".*;
     var bearer = "lease-secret".*;
     var candidate = try OwnedMediaCandidate.copy(observing.allocator(), .image, &model, &bearer, 7);
+    candidate.credential_generation = 9;
     observing.observe(candidate.secret.bytes);
     @memset(&model, 'x');
     @memset(&bearer, 0);
     var moved = candidate.take();
     candidate.deinit();
+    // The credential's Account generation moves with it.
+    try std.testing.expectEqual(@as(u64, 9), moved.credential_generation);
     try std.testing.expectEqualStrings("image-model", moved.input().selection.model_id);
     try std.testing.expectEqualStrings(metask_source_id, moved.input().selection.source_id);
     try std.testing.expectEqualStrings(metask_images_generations_url, moved.input().endpoint);

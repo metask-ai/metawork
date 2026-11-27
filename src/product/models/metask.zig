@@ -50,6 +50,21 @@ pub fn errorCode(err: Error) contract.ModelsError {
     };
 }
 
+/// How often a catalog in hand is asked for again while MetaWork is in front.
+pub const refresh_interval_ms: u64 = 5 * 60 * 1000;
+/// How long a load nobody has content for waits before its one second try.
+pub const retry_delay_ms: u64 = 2 * 1000;
+
+/// What one failed request means for the next: a refused token may be
+/// renewed meanwhile, and a service or a deadline may recover in a moment.
+/// A refused account, a limit or a malformed answer does not change soon.
+pub fn failure(err: Error) contract.CatalogFailure {
+    return .{
+        .code = errorCode(err),
+        .retryable = err == error.ServiceUnavailable or err == error.DeadlineExceeded or err == error.Unauthorized,
+    };
+}
+
 fn BoundedString(comptime capacity: usize) type {
     return struct {
         bytes: [capacity]u8 = undefined,
@@ -291,6 +306,31 @@ pub const CatalogSession = struct {
 
     pub fn ownerAccountId(self: *const CatalogSession) []const u8 {
         return self.owner_account_id.view();
+    }
+
+    /// The same models with the same declarations, in any order. Order alone
+    /// is no change: the order already published stays.
+    pub fn sameContent(self: *const CatalogSession, other: *const CatalogSession) bool {
+        if (self.models.items.len != other.models.items.len) return false;
+        for (other.models.items) |*entry| {
+            const index = self.findModel(entry.id.view()) orelse return false;
+            if (!sameEntry(&self.models.items[index], entry)) return false;
+        }
+        return true;
+    }
+
+    /// Every parsed field takes part, so a field added later does too.
+    fn sameEntry(a: *const ModelEntry, b: *const ModelEntry) bool {
+        inline for (std.meta.fields(ModelEntry)) |field| {
+            const left = &@field(a, field.name);
+            const right = &@field(b, field.name);
+            const same = if (comptime @typeInfo(field.type) == .@"struct" and @hasDecl(field.type, "view"))
+                std.mem.eql(u8, left.view(), right.view())
+            else
+                std.meta.eql(left.*, right.*);
+            if (!same) return false;
+        }
+        return true;
     }
 
     fn findModel(self: *const CatalogSession, id: []const u8) ?usize {
@@ -1403,4 +1443,70 @@ test "a display name carrying the token it was loaded with is dropped at load" {
     var views: [contract.Limits.model_entries]contract.ModelView = undefined;
     for (session.writeModelViews(&views)) |view|
         try std.testing.expect(std.mem.indexOf(u8, view.display_name, "synthetic-token-1234") == null);
+}
+
+test "catalog content is the same models with the same declarations, in any order" {
+    const base =
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":10,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}},
+        \\{"id":"b","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}}
+        \\]}
+    ;
+    const reordered =
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"b","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}},
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":10,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}}
+        \\]}
+    ;
+    const changes = [_][]const u8{
+        // A display name.
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A2","max_tokens":10,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}},
+        \\{"id":"b","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}}
+        \\]}
+        ,
+        // A token limit.
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":11,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}},
+        \\{"id":"b","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}}
+        \\]}
+        ,
+        // A capability.
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":10,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":false}}}},
+        \\{"id":"b","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}}
+        \\]}
+        ,
+        // A protocol.
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":10,"capabilities":{"endpoints":{"responses":{"supported":true}},"input":{"image":{"supported":true}}}},
+        \\{"id":"b","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}}
+        \\]}
+        ,
+        // A model gone.
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":10,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}}
+        \\]}
+        ,
+        // A model in its place.
+        \\{"object":"list","has_more":false,"data":[
+        \\{"id":"a","object":"model","type":"model","display_name":"A","max_tokens":10,"capabilities":{"endpoints":{"messages":{"supported":true}},"input":{"image":{"supported":true}}}},
+        \\{"id":"c","object":"model","type":"model","display_name":"B","capabilities":{"endpoints":{"images_generations":{"supported":true}}}}
+        \\]}
+        ,
+    };
+    var current = CatalogSession.init(std.testing.allocator);
+    defer current.deinit();
+    try TestSupport.loadCatalogResponse(&current, "principal", "token", base);
+    var other = CatalogSession.init(std.testing.allocator);
+    defer other.deinit();
+    try TestSupport.loadCatalogResponse(&other, "principal", "token", base);
+    try std.testing.expect(current.sameContent(&other));
+    try TestSupport.loadCatalogResponse(&other, "principal", "token", reordered);
+    try std.testing.expect(current.sameContent(&other));
+    for (changes) |body| {
+        try TestSupport.loadCatalogResponse(&other, "principal", "token", body);
+        try std.testing.expect(!current.sameContent(&other));
+        try std.testing.expect(!other.sameContent(&current));
+    }
 }

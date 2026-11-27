@@ -98,7 +98,7 @@ test "only confirmed interactive Task choices remember a preference without repl
     try std.testing.expectEqual(security, workbench.projectionSecurityEpoch());
     try std.testing.expectEqual(execution, workbench.executionGeneration());
     // A pending refresh cannot veto memory of the already confirmed choice.
-    _ = workbench.prepareMetaskCatalogRefresh("account-1", 17);
+    _ = workbench.beginMetaskCatalogRequest(.user, .{ .ready = .{ .principal_ref = "account-1", .generation = 17 } }, 0);
     try std.testing.expect(workbench.custom_providers.rememberPreference(.{ .source_id = "metask", .model_id = "fixture-model" }).accepted);
     try std.testing.expectEqualStrings("fixture-model", workbench.modelsView().default_selection.?.model_id);
 }

@@ -53,7 +53,7 @@ pub const AccountCommitSink = struct {
 /// Control keeps registry/default-selection transactions behind these calls.
 pub const ModelsManagement = struct {
     context: *anyopaque,
-    prepare_media_candidate_fn: *const fn (*anyopaque, models_contract.MediaPreparationInput) models_contract.MediaPreparation,
+    prepare_media_candidate_fn: *const fn (*anyopaque, models_contract.MediaKind) models_contract.MediaPreparation,
     start_custom_providers_fn: *const fn (*anyopaque, []const u8, models_ports.CredentialVault) anyerror!void,
     start_custom_providers_unavailable_fn: *const fn (*anyopaque) void,
     stop_custom_providers_fn: *const fn (*anyopaque) void,
@@ -65,12 +65,16 @@ pub const ModelsManagement = struct {
     submit_custom_provider_fn: *const fn (*anyopaque, models_contract.CustomProviderCommand) models_contract.CommandResult,
     begin_custom_provider_probe_fn: *const fn (*anyopaque, models_contract.CustomModelTestCommand) models_contract.Preparation,
     complete_custom_model_test_fn: *const fn (*anyopaque, models_contract.CustomModelTestCommand, bool) models_contract.CommandResult,
-    prepare_metask_catalog_refresh_fn: *const fn (*anyopaque, []const u8, u64) models_contract.CatalogRefreshPrepareResult,
-    complete_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, *models_ports.OwnedCatalogCompletion) models_contract.ModelsError,
-    fail_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, models_contract.ModelsError, []const u8) void,
-    metask_authorization_unavailable_fn: *const fn (*anyopaque) void,
-    pub fn prepareMediaCandidate(self: ModelsManagement, input: models_contract.MediaPreparationInput) models_contract.MediaPreparation {
-        return self.prepare_media_candidate_fn(self.context, input);
+    follow_metask_principal_fn: *const fn (*anyopaque, ?[]const u8, u64) models_contract.MetaskFollow,
+    set_metask_catalog_active_fn: *const fn (*anyopaque, bool) void,
+    metask_catalog_next_fn: *const fn (*anyopaque) ?u64,
+    metask_catalog_due_fn: *const fn (*anyopaque, u64) bool,
+    begin_metask_catalog_request_fn: *const fn (*anyopaque, models_contract.CatalogRequestKind, models_contract.CatalogCredential, u64) models_contract.CatalogRequestStart,
+    join_metask_catalog_request_fn: *const fn (*anyopaque) bool,
+    complete_metask_catalog_request_fn: *const fn (*anyopaque, u64, *models_ports.OwnedCatalogCompletion, u64) bool,
+    fail_metask_catalog_request_fn: *const fn (*anyopaque, u64, models_contract.CatalogFailure, u64) bool,
+    pub fn prepareMediaCandidate(self: ModelsManagement, kind: models_contract.MediaKind) models_contract.MediaPreparation {
+        return self.prepare_media_candidate_fn(self.context, kind);
     }
     pub fn startCustomProviders(self: ModelsManagement, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
         try self.start_custom_providers_fn(self.context, directory, vault);
@@ -105,17 +109,33 @@ pub const ModelsManagement = struct {
     pub fn completeCustomModelTest(self: ModelsManagement, command: models_contract.CustomModelTestCommand, succeeded: bool) models_contract.CommandResult {
         return self.complete_custom_model_test_fn(self.context, command, succeeded);
     }
-    pub fn prepareMetaskCatalogRefresh(self: ModelsManagement, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
-        return self.prepare_metask_catalog_refresh_fn(self.context, principal_ref, authorization_generation);
+    /// The account an Account publication leaves, by its principal; null
+    /// when none is signed in.
+    pub fn followMetaskPrincipal(self: ModelsManagement, principal_ref: ?[]const u8, generation: u64) models_contract.MetaskFollow {
+        return self.follow_metask_principal_fn(self.context, principal_ref, generation);
     }
-    pub fn completeMetaskCatalogRefresh(self: ModelsManagement, attempt_id: u64, authorization_generation: u64, completion: *models_ports.OwnedCatalogCompletion) models_contract.ModelsError {
-        return self.complete_metask_catalog_refresh_fn(self.context, attempt_id, authorization_generation, completion);
+    pub fn setMetaskCatalogActive(self: ModelsManagement, active: bool) void {
+        self.set_metask_catalog_active_fn(self.context, active);
     }
-    pub fn failMetaskCatalogRefresh(self: ModelsManagement, attempt_id: u64, authorization_generation: u64, error_code: models_contract.ModelsError, safe_diagnostic: []const u8) void {
-        self.fail_metask_catalog_refresh_fn(self.context, attempt_id, authorization_generation, error_code, safe_diagnostic);
+    /// When Models wants the next catalog request; the Application only
+    /// arms a timer for it.
+    pub fn metaskCatalogNext(self: ModelsManagement) ?u64 {
+        return self.metask_catalog_next_fn(self.context);
     }
-    pub fn setMetaskAuthorizationUnavailable(self: ModelsManagement) void {
-        self.metask_authorization_unavailable_fn(self.context);
+    pub fn metaskCatalogDue(self: ModelsManagement, now_ms: u64) bool {
+        return self.metask_catalog_due_fn(self.context, now_ms);
+    }
+    pub fn beginMetaskCatalogRequest(self: ModelsManagement, kind: models_contract.CatalogRequestKind, credential: models_contract.CatalogCredential, now_ms: u64) models_contract.CatalogRequestStart {
+        return self.begin_metask_catalog_request_fn(self.context, kind, credential, now_ms);
+    }
+    pub fn joinMetaskCatalogRequest(self: ModelsManagement) bool {
+        return self.join_metask_catalog_request_fn(self.context);
+    }
+    pub fn completeMetaskCatalogRequest(self: ModelsManagement, id: u64, completion: *models_ports.OwnedCatalogCompletion, now_ms: u64) bool {
+        return self.complete_metask_catalog_request_fn(self.context, id, completion, now_ms);
+    }
+    pub fn failMetaskCatalogRequest(self: ModelsManagement, id: u64, failure: models_contract.CatalogFailure, now_ms: u64) bool {
+        return self.fail_metask_catalog_request_fn(self.context, id, failure, now_ms);
     }
 };
 
