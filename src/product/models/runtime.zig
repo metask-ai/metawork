@@ -15,6 +15,57 @@ pub const StartError = error{
 pub const ModelBinding = registry_impl.Registry.ModelBinding;
 
 pub const TestSupport = if (builtin.is_test) struct {
+    /// A Metask credential port for tests, as `TestVault` is for keys. A
+    /// test that needs its own values or counts holds its own instance.
+    pub const FakeMetaskCredentials = struct {
+        account_bytes: [contract.Limits.principal_ref_bytes]u8 = undefined,
+        account_len: usize = 0,
+        token_bytes: [contract.Limits.credential_bytes]u8 = undefined,
+        token_len: usize = 0,
+        generation: u64 = default_generation,
+        /// How many times Models read it.
+        reads: usize = 0,
+
+        /// The generation fixtures have always paired with their catalog.
+        pub const default_generation: u64 = 17;
+
+        pub fn init(account: []const u8, token: []const u8, generation: u64) FakeMetaskCredentials {
+            var result: FakeMetaskCredentials = .{ .generation = generation };
+            result.set(account, token);
+            return result;
+        }
+
+        pub fn set(self: *FakeMetaskCredentials, account: []const u8, token: []const u8) void {
+            @memcpy(self.account_bytes[0..account.len], account);
+            self.account_len = account.len;
+            @memcpy(self.token_bytes[0..token.len], token);
+            self.token_len = token.len;
+        }
+
+        pub fn port(self: *FakeMetaskCredentials) ports.MetaskCredentials {
+            return .{ .context = self, .read_fn = read };
+        }
+
+        fn read(context: *anyopaque, account_storage: []u8, token_storage: []u8) std.mem.Allocator.Error!?ports.MetaskCredential {
+            const self: *FakeMetaskCredentials = @ptrCast(@alignCast(context));
+            self.reads += 1;
+            if (self.token_len == 0) return null;
+            @memcpy(account_storage[0..self.account_len], self.account_bytes[0..self.account_len]);
+            @memcpy(token_storage[0..self.token_len], self.token_bytes[0..self.token_len]);
+            return .{ .account = account_storage[0..self.account_len], .token = token_storage[0..self.token_len], .generation = self.generation };
+        }
+    };
+
+    /// The one the catalog helpers below install, for the many tests that
+    /// compose Models only through them. Every install starts it afresh, so
+    /// nothing one test left in it reaches the next.
+    pub var shared_credentials: FakeMetaskCredentials = .{};
+
+    pub fn useSharedCredentials(runtime: *Runtime, account: []const u8, token: []const u8) void {
+        shared_credentials = FakeMetaskCredentials.init(account, token, FakeMetaskCredentials.default_generation);
+        runtime.metask_credentials = shared_credentials.port();
+    }
+
     pub fn fixtureSelectionAvailable(runtime: *Runtime) bool {
         const target = runtime.view().default_selection orelse return false;
         const view = runtime.view();
@@ -57,9 +108,9 @@ pub const TestSupport = if (builtin.is_test) struct {
         try metask_provider.TestSupport.replaceOwnedCatalog(
             &session,
             principal_ref,
-            credential,
             models,
         );
+        useSharedCredentials(runtime, principal_ref, credential);
         var completion = metask_provider.OwnedCatalogCompletion.init(&session);
         var port = completion.ownedPort();
         return runtime.completeMetaskCatalogRefresh(
@@ -81,6 +132,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         var session = metask_provider.CatalogSession.init(runtime.allocator);
         defer session.deinit();
         try metask_provider.TestSupport.loadCatalogResponse(&session, principal_ref, "refreshed-secret", response_body);
+        useSharedCredentials(runtime, principal_ref, "refreshed-secret");
         var completion = metask_provider.OwnedCatalogCompletion.init(&session);
         var port = completion.ownedPort();
         return runtime.completeMetaskCatalogRefresh(preparation.attempt_id, preparation.authorization_generation, &port);
@@ -103,9 +155,9 @@ pub const TestSupport = if (builtin.is_test) struct {
         try metask_provider.TestSupport.replaceOwnedCatalog(
             &runtime.metask_catalog,
             principal_ref,
-            secret,
             models,
         );
+        useSharedCredentials(runtime, principal_ref, secret);
         if (!runtime.metask_catalog.hasModel(selected_model))
             return error.InvalidTestModel;
         _ = metask_selection_revision;
@@ -134,6 +186,17 @@ pub const TestSupport = if (builtin.is_test) struct {
         runtime.metask_public_catalog.?.replaceFromSession(&runtime.metask_catalog);
     }
 } else struct {};
+
+/// Where one read of the Metask credential lands; zeroed after the call.
+const MetaskCredentialStorage = struct {
+    account: [contract.Limits.principal_ref_bytes]u8 = undefined,
+    token: [contract.Limits.credential_bytes]u8 = undefined,
+
+    fn zero(self: *MetaskCredentialStorage) void {
+        std.crypto.secureZero(u8, &self.token);
+        std.crypto.secureZero(u8, &self.account);
+    }
+};
 
 fn FixedText(comptime capacity: usize) type {
     return struct {
@@ -221,6 +284,9 @@ pub const Runtime = struct {
     store: ?registry_impl.FileStore = null,
     store_healthy: bool = false,
     credential_vault: ?ports.CredentialVault = null,
+    /// Where the Metask credential of the moment comes from, beside the vault.
+    /// Read once per resolution; Models keeps no Metask token.
+    metask_credentials: ?ports.MetaskCredentials = null,
     metask_catalog: metask_provider.CatalogSession,
     metask_public_catalog: ?*metask_provider.PublicCatalog = null,
     metask_catalog_state: contract.CatalogState = .needs_authentication,
@@ -1310,12 +1376,15 @@ pub const Runtime = struct {
     ) !?contract.OwnedSourceCandidate {
         const facts = self.targetFacts(target, expected_source_generation, expected_catalog_generation) orelse return null;
         if (std.mem.eql(u8, target.source_id, contract.metask_source_id)) {
-            var candidate = self.metask_catalog.prepareSourceCandidate(target.model_id, expected_source_generation) catch |err| return switch (err) {
+            var storage: MetaskCredentialStorage = .{};
+            defer storage.zero();
+            const credential = (try self.readMetaskCredential(&storage)) orelse return null;
+            var candidate = self.metask_catalog.prepareSourceCandidate(target.model_id, expected_source_generation, credential.token) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => error.InvalidProvider,
             };
-            // The catalog and this generation came from one Account lease.
-            candidate.credential_generation = self.metask_catalog_authorization_generation;
+            // The token and its Account generation were taken together.
+            candidate.credential_generation = credential.generation;
             return candidate;
         }
         const provider = findProviderView(self.registry.views(), target.source_id) orelse return null;
@@ -1492,6 +1561,16 @@ pub const Runtime = struct {
             const result = self.commitCandidate(&candidate, false);
             if (!result.accepted and !self.store_healthy) return;
         }
+    }
+
+    /// The Metask credential of this moment, for the account whose catalog
+    /// Models holds. Null when none may be used now or it is another account's.
+    fn readMetaskCredential(self: *const Runtime, storage: *MetaskCredentialStorage) std.mem.Allocator.Error!?ports.MetaskCredential {
+        const source = self.metask_credentials orelse return null;
+        const credential = (try source.read(&storage.account, &storage.token)) orelse return null;
+        if (credential.generation == 0 or credential.token.len == 0 or
+            !std.mem.eql(u8, credential.account, self.metask_catalog.ownerAccountId())) return null;
+        return credential;
     }
 
     fn assertMainThread(self: *const Runtime) void {
@@ -2363,7 +2442,6 @@ test "Models owns Metask catalog authority without changing global default" {
     try metask_provider.TestSupport.replaceOwnedCatalog(
         &catalog,
         "principal-1",
-        "model-secret",
         &.{.{ .id = "model-1", .display_name = "Model One" }},
     );
     var completion = metask_provider.OwnedCatalogCompletion.init(&catalog);
@@ -2393,7 +2471,6 @@ test "Models owns Metask catalog authority without changing global default" {
     try metask_provider.TestSupport.replaceOwnedCatalog(
         &same_catalog,
         "principal-1",
-        "rotated-model-secret",
         &.{.{ .id = "model-1", .display_name = "Model One" }},
     );
     var refreshed_completion = metask_provider.OwnedCatalogCompletion.init(&same_catalog);
@@ -2414,6 +2491,13 @@ test "Models owns Metask catalog authority without changing global default" {
         .source_id = "metask",
         .model_id = "model-1",
     }).accepted);
+    // The catalog holds no token: resolution reads the credential of the
+    // moment, and only for the account whose catalog it is.
+    try std.testing.expect((try TestSupport.resolveFixtureSelection(&runtime)) == null);
+    var credentials = TestSupport.FakeMetaskCredentials.init("principal-2", "other-account-secret", 6);
+    runtime.metask_credentials = credentials.port();
+    try std.testing.expect((try TestSupport.resolveFixtureSelection(&runtime)) == null);
+    credentials = TestSupport.FakeMetaskCredentials.init("principal-1", "rotated-model-secret", 6);
     var first_candidate = (try TestSupport.resolveFixtureSelection(&runtime)) orelse
         return error.TestUnexpectedResult;
     defer first_candidate.deinit();
@@ -2481,7 +2565,6 @@ test "Metask catalog drift keeps a tracked global default durable" {
         try metask_provider.TestSupport.replaceOwnedCatalog(
             &initial_catalog,
             "principal-1",
-            "initial-secret",
             &.{.{ .id = "model-1", .display_name = "Model One" }},
         );
         var initial_completion = metask_provider.OwnedCatalogCompletion.init(&initial_catalog);
@@ -2506,7 +2589,6 @@ test "Metask catalog drift keeps a tracked global default durable" {
         try metask_provider.TestSupport.replaceOwnedCatalog(
             &replacement_catalog,
             "principal-1",
-            "replacement-secret",
             &.{.{ .id = "model-2", .display_name = "Model Two" }},
         );
         var replacement_completion = metask_provider.OwnedCatalogCompletion.init(&replacement_catalog);
@@ -3098,7 +3180,7 @@ test "stale Metask completion leaves the current catalog attempt intact" {
         .rejected => return error.TestUnexpectedResult,
     };
     var session = metask_provider.CatalogSession.init(std.testing.allocator);
-    try metask_provider.TestSupport.replaceOwnedCatalog(&session, "principal-1", "stale-secret", &.{});
+    try metask_provider.TestSupport.replaceOwnedCatalog(&session, "principal-1", &.{});
     var completion = metask_provider.OwnedCatalogCompletion.init(&session);
     var port = completion.ownedPort();
     try std.testing.expectEqual(contract.ModelsError.catalog_invalid, runtime.completeMetaskCatalogRefresh(preparation.attempt_id, 16, &port));
@@ -3200,6 +3282,9 @@ test "Metask source survives a credential change when the selected model leaves 
             var session = metask_provider.CatalogSession.init(std.testing.allocator);
             defer session.deinit();
             try metask_provider.TestSupport.loadCatalogResponse(&session, "principal", token, body);
+            // What Account lends from now on: this token, of this generation.
+            TestSupport.useSharedCredentials(runtime, "principal", token);
+            TestSupport.shared_credentials.generation = generation;
             var completion = metask_provider.OwnedCatalogCompletion.init(&session);
             var port = completion.ownedPort();
             try std.testing.expectEqual(contract.ModelsError.none, runtime.completeMetaskCatalogRefresh(attempt.attempt_id, attempt.authorization_generation, &port));
@@ -3466,4 +3551,23 @@ test "a key the sink refuses is not read again until its revision changes or the
     runtime.syncResidentCredentials(sink.port());
     try std.testing.expectEqual(@as(usize, 2), sink.retires);
     try std.testing.expectEqual(@as(usize, 3), sink.admits);
+}
+
+test "every catalog helper starts the shared credential port afresh" {
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    defer runtime.deinit();
+    const models = [_]contract.ModelView{.{ .id = "model-1", .display_name = "Model One" }};
+    for ([_][]const u8{ "secret-a", "secret-b" }) |secret| {
+        // Whatever an earlier test left behind.
+        TestSupport.shared_credentials.generation = 99;
+        TestSupport.shared_credentials.reads = 5;
+        try TestSupport.installMetaskDefault(&runtime, "principal-1", secret, &models, "model-1", 1, 2, 3, 4);
+        try std.testing.expectEqual(TestSupport.FakeMetaskCredentials.default_generation, TestSupport.shared_credentials.generation);
+        try std.testing.expectEqual(@as(usize, 0), TestSupport.shared_credentials.reads);
+        var candidate = (try TestSupport.resolveFixtureSelection(&runtime)).?;
+        defer candidate.deinit();
+        try std.testing.expectEqualStrings(secret, candidate.input().api_key);
+        try std.testing.expectEqual(TestSupport.FakeMetaskCredentials.default_generation, candidate.input().credential_generation);
+        try std.testing.expectEqual(@as(usize, 1), TestSupport.shared_credentials.reads);
+    }
 }

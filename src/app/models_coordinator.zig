@@ -297,6 +297,28 @@ pub const Coordinator = struct {
         return .{ .context = self, .submit_fn = submitCommand };
     }
 
+    /// Models' Metask credential port over Account's one way out for the
+    /// current credential: each read takes one lease, copies it into the
+    /// reader's storage and zeroes it at once.
+    pub fn metaskCredentials(self: *Coordinator) models_ports.MetaskCredentials {
+        return .{ .context = self, .read_fn = readMetaskCredential };
+    }
+
+    fn readMetaskCredential(context: *anyopaque, account_storage: []u8, token_storage: []u8) std.mem.Allocator.Error!?models_ports.MetaskCredential {
+        const self: *Coordinator = @ptrCast(@alignCast(context));
+        self.assertMainThread();
+        var lease = (try self.credentials.take()) orelse return null;
+        defer lease.deinit();
+        if (lease.principal_ref.len > account_storage.len or lease.access_token.len > token_storage.len) return null;
+        @memcpy(account_storage[0..lease.principal_ref.len], lease.principal_ref);
+        @memcpy(token_storage[0..lease.access_token.len], lease.access_token);
+        return .{
+            .account = account_storage[0..lease.principal_ref.len],
+            .token = token_storage[0..lease.access_token.len],
+            .generation = lease.authorization_generation,
+        };
+    }
+
     pub fn imageRunPreparation(self: *Coordinator) control_ports.ImageRunPreparation {
         return .{ .context = self, .prepare_fn = prepareImageRun };
     }

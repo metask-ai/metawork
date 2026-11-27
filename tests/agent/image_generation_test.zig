@@ -1394,6 +1394,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     try image_product.configureDialogue(&control, h.fixture.provider_endpoint, large_read);
     var accounts = image_product.account_coordinator.Coordinator.init(&account, control.accountCommitSink(), std.Thread.getCurrentId());
     var coordinator = image_product.coordinator_api.Coordinator.init(accounts.credentialSource(), .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
+    control.setMetaskCredentials(coordinator.metaskCredentials());
     coordinator.setProbeNotifier(.{ .context = &effects, .notify_fn = image_product.Effects.notify });
     coordinator.setCompletionTransport(effects.imageTransport());
     control.setAccountAuthorization(accounts.authorizationQuery());
@@ -1529,6 +1530,7 @@ fn expectCanonicalImageProduct(mode: []const u8, fallback: bool, logout_after_ad
     control.setAccountProjectionCredentials(account.accessTokenProjection());
     try control.startCustomProviders(h.root, effects.vault());
     coordinator = image_product.coordinator_api.Coordinator.init(accounts.credentialSource(), .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
+    control.setMetaskCredentials(coordinator.metaskCredentials());
     coordinator.setCompletionTransport(effects.imageTransport());
     coordinator_live = true;
     control.setImageRunPreparation(coordinator.imageRunPreparation());
@@ -2233,6 +2235,7 @@ test "GenerateVideo canonical Product prepares an ordinary Run and delivers its 
     var gateway: VideoGateway = .{ .harness = &h };
     var accounts = image_product.account_coordinator.Coordinator.init(&account, control.accountCommitSink(), std.Thread.getCurrentId());
     var coordinator = image_product.coordinator_api.Coordinator.init(accounts.credentialSource(), .{ .context = &effects, .perform_fn = image_product.Effects.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
+    control.setMetaskCredentials(coordinator.metaskCredentials());
     coordinator.setProbeNotifier(.{ .context = &effects, .notify_fn = image_product.Effects.notify });
     coordinator.setCompletionTransport(gateway.transport());
     control.setAccountAuthorization(accounts.authorizationQuery());

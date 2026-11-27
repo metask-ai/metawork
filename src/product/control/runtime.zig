@@ -10384,6 +10384,11 @@ pub const Runtime = struct {
         self.image_run_preparation = preparation;
     }
 
+    /// Where Models reads the Metask credential of the moment when it resolves.
+    pub fn setMetaskCredentials(self: *Runtime, credentials: ?models_ports.MetaskCredentials) void {
+        self.custom_providers.metask_credentials = credentials;
+    }
+
     pub fn setVideoRunPreparation(self: *Runtime, preparation: ?control_ports.VideoRunPreparation) void {
         self.video_run_preparation = preparation;
     }
@@ -16933,12 +16938,16 @@ test "unchanged Task binding skips candidate allocation and credential publicati
     defer control.custom_providers.metask_catalog.allocator = original;
     const revision = control.currentRevision();
     const security_epoch = control.projection_security_epoch;
+    const credential_reads = models_aggregate.TestSupport.shared_credentials.reads;
     try std.testing.expectEqualDeep(Runtime.PreparedBinding{ .plan = .keep }, try control.prepareTaskBinding(3));
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    // Nothing was resolved, so no credential was even read.
+    try std.testing.expectEqual(credential_reads, models_aggregate.TestSupport.shared_credentials.reads);
     try std.testing.expectEqual(revision, control.currentRevision());
     try std.testing.expectEqual(security_epoch, control.projection_security_epoch);
     task.runtime.execution().?.model_intent_revision = 0;
     try std.testing.expectError(error.OutOfMemory, control.prepareTaskBinding(3));
+    try std.testing.expectEqual(credential_reads + 1, models_aggregate.TestSupport.shared_credentials.reads);
 }
 
 test "Task model installed intent does not borrow a catalog refresh as new execution authority" {
@@ -16974,6 +16983,7 @@ test "Task model projection reads its binding plan without resolving a credentia
     const original = control.custom_providers.metask_catalog.allocator;
     control.custom_providers.metask_catalog.allocator = failing.allocator();
     defer control.custom_providers.metask_catalog.allocator = original;
+    const credential_reads = models_aggregate.TestSupport.shared_credentials.reads;
     const projected = control.observeTaskRecoveryAuthority(.{
         .task_id = 3,
         .workspace_id = task.durable.workspace_id,
@@ -16987,8 +16997,11 @@ test "Task model projection reads its binding plan without resolving a credentia
     try std.testing.expect(!projected.model_rebind_required);
     try std.testing.expectEqual(.available, projected.execution_admission);
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    // A projection never reads the credential.
+    try std.testing.expectEqual(credential_reads, models_aggregate.TestSupport.shared_credentials.reads);
     // Only an admission resolves the candidate the plan asks for.
     try std.testing.expectError(error.OutOfMemory, control.prepareTaskBinding(3));
+    try std.testing.expectEqual(credential_reads + 1, models_aggregate.TestSupport.shared_credentials.reads);
 }
 
 test "Task model selection does not depend on a starting preference" {

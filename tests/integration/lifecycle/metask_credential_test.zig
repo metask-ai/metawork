@@ -457,6 +457,7 @@ fn characterizeCredentialExpiryWithSchedule(scenario: Scenario, corrupt_schedule
     defer control.clearAccountProjectionCredentials();
     var accounts = account_coordinator.Coordinator.init(&account_runtime, control.accountCommitSink(), std.Thread.getCurrentId());
     var coordinator = coordinator_api.Coordinator.init(accounts.credentialSource(), .{ .context = &network, .perform_fn = Network.catalog }, control.modelsManagement(), std.Thread.getCurrentId(), std.testing.io);
+    control.setMetaskCredentials(coordinator.metaskCredentials());
     var catalog_timer: CatalogRetryTimer = .{};
     if (scenario == .catalog_failure) coordinator.setRetryTimer(.{ .context = &catalog_timer, .start_fn = CatalogRetryTimer.start, .cancel_fn = CatalogRetryTimer.cancel });
     coordinator.setProbeNotifier(.{ .context = &wake_loop, .notify_fn = struct {
