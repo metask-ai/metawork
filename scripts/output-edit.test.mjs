@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { appendHandoffQuote } from "../frontend/src/features/composer/drafts.ts";
-import { conversationFiles } from "../frontend/src/features/composer/conversation-files.ts";
+import { conversationFiles } from "../frontend/src/app/conversation-files.ts";
 import {
   composerDraftToRunInput,
   draftWithAttachments,

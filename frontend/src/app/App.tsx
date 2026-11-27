@@ -3,10 +3,10 @@ import {
   type LocalReadingInput,
 } from "../features/tasks/assistant-output.ts";
 import {
-  conversationFiles,
   workspaceConversationFile,
   type ConversationFile,
 } from "../features/composer/conversation-files.ts";
+import { conversationFiles } from "./conversation-files.ts";
 import { editCustomModel } from "./edit-custom-model.ts";
 import { notificationTextRegistration } from "../features/tasks/notification-text.ts";
 import {

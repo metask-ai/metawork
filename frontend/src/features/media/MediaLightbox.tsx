@@ -1,12 +1,11 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import type {
   FilePreview,
   FilePreviewLoadOptions,
   MediaTarget,
 } from "../../bridge/contracts.ts";
 import { Dialog } from "../../components/ui/dialog.tsx";
-import { Icon } from "../../components/ui/Icon.tsx";
-import { Button } from "../../components/ui/button.tsx";
+import { ImageLightboxPopup } from "../../components/ImageLightboxPopup.tsx";
 import { PreviewImageView } from "../../components/PreviewImageView.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
@@ -16,41 +15,6 @@ export type MediaViewerLoader = (
 ) => Promise<FilePreview>;
 
 export type MediaViewerTarget = { media: MediaTarget; name: string };
-
-export function ImageLightboxPopup({
-  name,
-  children,
-}: {
-  name: string;
-  children: ReactNode;
-}) {
-  const { t } = useI18n();
-  return (
-    <Dialog.Portal>
-      <Dialog.Backdrop />
-      <Dialog.Popup className="media-lightbox">
-        <div className="media-lightbox-bar">
-          <Dialog.Title className="media-lightbox-title" dir="auto">
-            {name}
-          </Dialog.Title>
-          <Dialog.Close
-            render={
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label={t("attachment.close_preview")}
-              >
-                <Icon name="close" />
-              </Button>
-            }
-          />
-        </div>
-        <div className="media-lightbox-body">{children}</div>
-      </Dialog.Popup>
-    </Dialog.Portal>
-  );
-}
 
 /// The one viewer surface for an attachment, used from the draft chip and from
 /// a sent message's chip. It is an overlay rather than a Task Panel tab: an

@@ -19,8 +19,7 @@ import { Button } from "../../components/ui/button.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { Tabs } from "../../components/ui/tabs.tsx";
 import { useI18n } from "../../i18n/context.ts";
-import { ImageLightboxPopup } from "../media/MediaLightbox.tsx";
-import { fileName } from "../tasks/FileCard.tsx";
+import { ImageLightboxPopup } from "../../components/ImageLightboxPopup.tsx";
 import { HighlightedSource } from "./HighlightedSource.tsx";
 import type { FilePreviewMode } from "./useTaskPanelViewStates.ts";
 export type FilePreviewViewState = {
@@ -75,7 +74,7 @@ function PreviewedImage({
           />
         </Dialog.Trigger>
       </div>
-      <ImageLightboxPopup name={fileName(displayPath)}>
+      <ImageLightboxPopup name={displayPath.split("/").at(-1) || displayPath}>
         <PreviewImageView image={image} alt={displayPath} />
       </ImageLightboxPopup>
     </Dialog.Root>

@@ -111,6 +111,7 @@ test("AI UI stays above Foundation UI and below product features", async () => {
       "Markdown.tsx",
       "Message.tsx",
       "index.ts",
+      "markdown-file-links.ts",
     ],
     "AI UI keeps one minimal public rendering vocabulary",
   );
