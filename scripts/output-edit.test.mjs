@@ -4,6 +4,7 @@ import { appendHandoffQuote } from "../frontend/src/features/composer/drafts.ts"
 import {
   conversationFileReferable,
   conversationFiles,
+  replyMentions,
 } from "../frontend/src/app/conversation-files.ts";
 import {
   composerDraftToRunInput,
@@ -177,4 +178,31 @@ test("a conversation file joins only the draft of its own Task", () => {
     conversationFileReferable({ ...upload, available: false }, draft),
     false,
   );
+});
+
+test("a reply is parsed for file mentions again only when its text or names change", () => {
+  const reply = (response) => ({
+    id: "7",
+    output: { commentary: [], response, responseKind: "final" },
+  });
+  const aliases = new Map([["reports/q.xlsx", { id: "r" }]]);
+  const first = replyMentions("3", reply("See reports/q.xlsx"), aliases, true);
+  assert.deepEqual(first, [["reference", "reports/q.xlsx"]]);
+  // The next snapshot delivers the same reply as new objects.
+  assert.equal(
+    replyMentions("3", reply("See reports/q.xlsx"), new Map(aliases), true),
+    first,
+  );
+  assert.notEqual(
+    replyMentions("3", reply("See reports/q.xlsx again"), aliases, true),
+    first,
+  );
+  assert.deepEqual(
+    replyMentions("3", reply("See reports/q.xlsx"), new Map(), true),
+    [],
+  );
+  // Another Task starts afresh.
+  const other = replyMentions("4", reply("See reports/q.xlsx"), aliases, true);
+  assert.deepEqual(other, first);
+  assert.notEqual(other, first);
 });

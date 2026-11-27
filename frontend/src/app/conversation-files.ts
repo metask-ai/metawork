@@ -1,6 +1,7 @@
 import type {
   MessageIdentity,
   RunInputView,
+  RunView,
   TaskView,
   WorkspaceView,
 } from "../bridge/contracts.ts";
@@ -51,6 +52,46 @@ const replyParser = unified()
   .use(remarkParse)
   .use(remarkGfm)
   .use(remarkMath, { singleDollarTextMath: false });
+
+type Mention = readonly ["reference" | "workspace", string];
+
+/// What each reply of the Task last read mentions. Every snapshot delivers the
+/// same replies again while the picker is open; a reply is parsed again only
+/// when its text, or the names it can match, changed. Opening another Task
+/// drops the rest, so this never holds more than one Task's replies.
+let mentionTaskId: string | null = null;
+const mentionRuns = new Map<
+  string,
+  { key: string; mentions: readonly Mention[] }
+>();
+
+export function replyMentions(
+  taskId: string,
+  run: RunView,
+  aliases: ReadonlyMap<string, unknown>,
+  localLinks: boolean,
+): readonly Mention[] {
+  if (mentionTaskId !== taskId) {
+    mentionTaskId = taskId;
+    mentionRuns.clear();
+  }
+  const contents = deriveAssistantOutputParts(run.id, run.output).flatMap(
+    (part) =>
+      part.content && (aliases.size || part.content.includes("]"))
+        ? [part.content]
+        : [],
+  );
+  const key = JSON.stringify([localLinks, [...aliases.keys()], contents]);
+  const cached = mentionRuns.get(run.id);
+  if (cached?.key === key) return cached.mentions;
+  const mentions: Mention[] = [];
+  const collect = referencePlugin(aliases, localLinks, (kind, value) =>
+    mentions.push([kind, value]),
+  )();
+  for (const content of contents) collect(replyParser.parse(content));
+  mentionRuns.set(run.id, { key, mentions });
+  return mentions;
+}
 
 /// The files a Task's conversation offers for reference: what was uploaded,
 /// delivered or linked in a reply. It reads Task replies for the Composer's
@@ -128,49 +169,46 @@ export function conversationFiles(
           ),
         );
     const aliases = runFileReferenceLinks(run);
-    const collect = referencePlugin(
+    for (const [kind, value] of replyMentions(
+      task.id,
+      run,
       aliases,
       Boolean(workspace),
-      (kind, value) => {
-        const path =
-          kind === "workspace"
-            ? resolveWorkspaceFileLink(value, workspace?.canonicalRoot ?? null)
-            : null;
-        if (path?.kind === "unavailable") return;
-        const ref = aliases.get(path?.path ?? value);
-        if (ref) {
-          add(
-            workspaceConversationFile(
-              {
-                kind: "reference",
-                taskId: task.id,
-                runId: run.id,
-                fileReferenceId: ref.id,
-              },
-              ref.displayPath,
-              run.submittedAtUnixMs,
-            ),
-          );
-        } else if (workspace && path?.kind === "path") {
-          add(
-            workspaceConversationFile(
-              {
-                kind: "workspace",
-                taskId: task.id,
-                workspaceId: workspace.id,
-                workspaceEpoch: workspace.epoch,
-                path: path.path,
-              },
-              path.path,
-              run.submittedAtUnixMs,
-            ),
-          );
-        }
-      },
-    )();
-    for (const part of deriveAssistantOutputParts(run.id, run.output)) {
-      if (part.content && (aliases.size || part.content.includes("]")))
-        collect(replyParser.parse(part.content));
+    )) {
+      const path =
+        kind === "workspace"
+          ? resolveWorkspaceFileLink(value, workspace?.canonicalRoot ?? null)
+          : null;
+      if (path?.kind === "unavailable") continue;
+      const ref = aliases.get(path?.path ?? value);
+      if (ref) {
+        add(
+          workspaceConversationFile(
+            {
+              kind: "reference",
+              taskId: task.id,
+              runId: run.id,
+              fileReferenceId: ref.id,
+            },
+            ref.displayPath,
+            run.submittedAtUnixMs,
+          ),
+        );
+      } else if (workspace && path?.kind === "path") {
+        add(
+          workspaceConversationFile(
+            {
+              kind: "workspace",
+              taskId: task.id,
+              workspaceId: workspace.id,
+              workspaceEpoch: workspace.epoch,
+              path: path.path,
+            },
+            path.path,
+            run.submittedAtUnixMs,
+          ),
+        );
+      }
     }
     const message: MessageIdentity = run.submission
       ? { kind: "submission", operationId: run.submission.operationId }
