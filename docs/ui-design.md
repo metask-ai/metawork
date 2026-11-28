@@ -1202,7 +1202,7 @@ About
 - 「返回主界面」与设置分区共用图标列和文字起点，沿用主界面左栏的常规字重与中性悬停底色。当前分区通过常驻底色和 `aria-current` 标识，键盘焦点另有清晰轮廓。菜单选中勾选、状态色和文字共同表达相应状态。
 - 桌面壳注册标准 `primary + ,` 设置快捷键，直接打开正式设置 route；快捷键只负责页面导航，不建立绕过 Account/Bridge gate 的第二命令面。
 
-Account与 Models状态在设置中分别投影：Account按 `checking | signed_out | authorizing | authenticated`显示 identity action，并在authenticated时直接消费Host发布的summary子投影；Models独立按 `needs_authentication | loading | choosing | ready | failed | unavailable`显示provider配置。Account authenticated不能被summary或Models失败伪装成未登录，Account signed_out也不能隐藏Custom Provider。Renderer不从任一公开状态恢复内部operation，也不区分或展示credential persistence子步骤。
+Account与 Models状态在设置中分别投影：Account按 `checking | signed_out | authorizing | authenticated`显示 identity action，并在authenticated时直接消费Host发布的summary子投影；Models独立按 `needs_authentication | loading | ready | failed | unavailable`显示provider配置。Account authenticated不能被summary或Models失败伪装成未登录，Account signed_out也不能隐藏Custom Provider。Renderer不从任一公开状态恢复内部operation，也不区分或展示credential persistence子步骤。
 
 本页只展示 Host 发布的用户模型和相应配置状态；即使官方目录非空、为空或失败，也不在本页显示其模型、同步、登录或恢复提示。共享 Models 配置存储需要恢复时保留明确确认入口；任务模型选择和执行资格仍以 Host 事实为准。
 

@@ -51,12 +51,7 @@ export { approvalFailureReasons };
 export type AccountState =
   "checking" | "signed_out" | "authorizing" | "authenticated";
 export type ModelsCatalogState =
-  | "needs_authentication"
-  | "loading"
-  | "choosing"
-  | "ready"
-  | "failed"
-  | "unavailable";
+  "needs_authentication" | "loading" | "ready" | "failed" | "unavailable";
 export type NewTaskAdmissionReason =
   "none" | "shutting_down" | "workspace_unavailable";
 export type NewTaskMetaskAdmission = "none" | "recovering" | "unreachable";

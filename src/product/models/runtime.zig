@@ -14,6 +14,31 @@ pub const StartError = error{
 };
 pub const ModelBinding = registry_impl.Registry.ModelBinding;
 
+/// Which source identity a lookup asks about.
+pub const Expect = union(enum) {
+    /// Whatever the source is now: a Task intent keeps only the model.
+    current,
+    /// The identity a binding or a submitted choice was made against.
+    bound: u64,
+};
+
+/// What Models says about one model now, without a credential.
+pub const Lookup = union(enum) {
+    /// No such source, or `bound` names another identity of it.
+    source_changed,
+    /// The source is there but cannot answer now.
+    not_ready,
+    /// The source answers: this model is not in it.
+    missing,
+    present: Present,
+};
+
+pub const Present = struct {
+    /// Borrowed until the next Models mutation, as TargetFacts always is.
+    target: contract.TargetFacts,
+    catalog_generation: u64,
+};
+
 pub const TestSupport = if (builtin.is_test) struct {
     /// A Metask credential port for tests, as `TestVault` is for keys. A
     /// test that needs its own values or counts holds its own instance.
@@ -72,8 +97,8 @@ pub const TestSupport = if (builtin.is_test) struct {
     pub fn fixtureSelectionAvailable(runtime: *Runtime) bool {
         const target = runtime.view().default_selection orelse return false;
         const view = runtime.view();
-        for (view.providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) return runtime.sourceModelProtocol(target, provider.source_generation, provider.catalog_generation) != null;
-        for (view.custom_providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) return runtime.sourceModelProtocol(target, provider.source_generation, provider.catalog_generation) != null;
+        for (view.providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) return runtime.exact(target, provider.source_generation, provider.catalog_generation) != null;
+        for (view.custom_providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) return runtime.exact(target, provider.source_generation, provider.catalog_generation) != null;
         return false;
     }
     pub fn resolveFixtureSelection(runtime: *Runtime) !?contract.OwnedSourceCandidate {
@@ -86,6 +111,17 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn clearFixturePreference(runtime: *Runtime) void {
         _ = runtime.registry.clearDefault(runtime.registry.selection_revision + 1);
+    }
+
+    /// Clears the starting preference in models.json too, which no product
+    /// path does: a preference is only ever replaced by a confirmed choice.
+    pub fn clearStoredPreference(runtime: *Runtime) !void {
+        if (!runtime.store_healthy) return error.TestUnexpectedResult;
+        var candidate = try runtime.registry.clone();
+        defer candidate.deinit();
+        if (candidate.defaultSelection() == null) return;
+        if (!candidate.clearDefault(try runtime.freshGeneration(candidate.selection_revision))) return error.TestUnexpectedResult;
+        if (!runtime.commitCandidate(&candidate, true).accepted) return error.TestUnexpectedResult;
     }
 
     pub fn refreshMetaskCatalog(
@@ -527,18 +563,6 @@ pub const Runtime = struct {
         };
     }
 
-    pub fn sourceGenerations(self: *const Runtime, source_id: []const u8) ?registry_impl.Registry.SourceGenerations {
-        self.assertMainThread();
-        if (std.mem.eql(u8, source_id, contract.metask_source_id)) {
-            const source = self.registry.metaskSource();
-            return .{
-                .source = if (source) |value| value.source_generation else 0,
-                .catalog = self.metask.generation,
-            };
-        }
-        return self.registry.sourceGenerations(source_id);
-    }
-
     pub fn selectionCatalogAvailability(models: contract.ModelsView, intent_source: ?[]const u8) enum { available, catalog_loading, catalog_unavailable } {
         if (models.availability != .ready or models.persistence_health != .ready) return .catalog_unavailable;
         const source_scope = scope: {
@@ -564,65 +588,77 @@ pub const Runtime = struct {
                 .ready => {
                     if (provider.source_generation != 0 and provider.catalog_generation != 0 and provider.models.len != 0) return .available;
                 },
-                .loading, .choosing => loading = true,
+                .loading => loading = true,
                 else => {},
             }
         }
         return if (loading) .catalog_loading else .catalog_unavailable;
     }
 
-    /// What the current catalog says about one bound model. It reports Models
-    /// facts only; what each answer means is the consumer's to decide.
-    pub const BoundModel = union(enum) {
-        /// Nothing to answer from now: the store, the catalog or the source's
-        /// credential is not ready.
-        unavailable,
-        /// The binding names another identity of this source, or a source
-        /// that no longer exists.
-        source_changed,
-        /// The bound source does not list this model.
-        missing,
-        present: struct { catalog_generation: u64, protocol: contract.Protocol },
-    };
-
-    pub fn boundModel(self: *Runtime, target: contract.ModelRef, source_generation: u64) BoundModel {
-        const models = self.view();
-        if (models.availability != .ready) return .unavailable;
-        for (models.providers) |provider| {
-            if (!std.mem.eql(u8, provider.id, target.source_id)) continue;
-            if (provider.catalog_state != .ready) return .unavailable;
-            if (provider.source_generation != source_generation) return .source_changed;
-            return self.presentModel(target, source_generation, provider.catalog_generation);
+    /// What Models says about one model now, without a credential. It reports
+    /// Models facts only; what each answer means is the consumer's to decide.
+    pub fn lookup(self: *Runtime, target: contract.ModelRef, expect: Expect) Lookup {
+        self.assertMainThread();
+        if (!self.store_healthy) return .not_ready;
+        if (std.mem.eql(u8, target.source_id, contract.metask_source_id)) return self.lookupMetask(target.model_id, expect);
+        const provider = findProviderView(self.registry.views(), target.source_id) orelse return .source_changed;
+        if (!provider.enabled) return .source_changed;
+        switch (expect) {
+            .current => {},
+            .bound => |generation| if (provider.source_generation != generation) return .source_changed,
         }
-        for (models.custom_providers) |provider| {
-            if (!std.mem.eql(u8, provider.id, target.source_id)) continue;
-            if (!provider.enabled or provider.source_generation != source_generation) return .source_changed;
-            // A missing credential keeps its generation until a new key brings
-            // a new one, so it is not yet an answer about this binding.
-            if (provider.credential_status != .ready) return .unavailable;
-            return self.presentModel(target, source_generation, provider.catalog_generation);
-        }
-        return .source_changed;
+        // A missing credential keeps its generation until a new key brings a
+        // new one, so it is not yet an answer about this model.
+        if (provider.credential_status != .ready) return .not_ready;
+        if (provider.state != .ready) return .missing;
+        const model = for (provider.models) |model| {
+            if (std.mem.eql(u8, model.id, target.model_id)) break model;
+        } else return .missing;
+        if (!model.ready) return .missing;
+        return .{ .present = .{
+            .target = .{
+                .source_id = provider.id,
+                .model_id = target.model_id,
+                .protocol = provider.protocol,
+                .base_url = provider.normalized_base_url,
+                .image_input = model.metadata.capabilities.image_input,
+                .source_generation = provider.source_generation,
+            },
+            .catalog_generation = provider.catalog_generation,
+        } };
     }
 
-    fn presentModel(self: *Runtime, target: contract.ModelRef, source_generation: u64, catalog_generation: u64) BoundModel {
-        const protocol = self.sourceModelProtocol(target, source_generation, catalog_generation) orelse return .missing;
-        return .{ .present = .{ .catalog_generation = catalog_generation, .protocol = protocol } };
+    fn lookupMetask(self: *Runtime, model_id: []const u8, expect: Expect) Lookup {
+        const catalog = if (self.metask.catalog) |*value| value else return .not_ready;
+        // Content is installed only after its source identity is written.
+        const source = self.registry.metaskSource() orelse return .not_ready;
+        switch (expect) {
+            .current => {},
+            .bound => |generation| if (source.source_generation != generation) return .source_changed,
+        }
+        const protocol = catalog.modelProtocol(model_id) orelse return .missing;
+        // Metask declares only routes it has an endpoint for.
+        const base_url = contract.metaskEndpoint(protocol) orelse return .missing;
+        return .{ .present = .{
+            .target = .{
+                .source_id = contract.metask_source_id,
+                .model_id = model_id,
+                .protocol = protocol,
+                .base_url = base_url,
+                .image_input = catalog.imageInput(model_id),
+                .source_generation = source.source_generation,
+            },
+            .catalog_generation = self.metask.generation,
+        } };
     }
 
-    pub fn installedModelAvailable(self: *Runtime, target: contract.ModelRef, source_generation: u64, protocol: contract.Protocol) bool {
-        const models = self.view();
-        for (models.providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id)) {
-            if (provider.source_generation != source_generation) return false;
-            // An installed Metask binding can retain its authority while the
-            // catalog refresh is unavailable. Control still checks Account.
-            if (provider.catalog_state == .loading or provider.catalog_state == .failed or provider.catalog_state == .unavailable)
-                return true;
-            return self.sourceModelProtocol(target, source_generation, provider.catalog_generation) == protocol;
+    /// The one exact judgement: this model, at exactly these generations.
+    pub fn exact(self: *Runtime, target: contract.ModelRef, source_generation: u64, catalog_generation: u64) ?Present {
+        if (source_generation == 0 or catalog_generation == 0) return null;
+        return switch (self.lookup(target, .{ .bound = source_generation })) {
+            .present => |found| if (found.catalog_generation == catalog_generation) found else null,
+            .source_changed, .not_ready, .missing => null,
         };
-        for (models.custom_providers) |provider| if (std.mem.eql(u8, provider.id, target.source_id))
-            return self.sourceModelProtocol(target, source_generation, provider.catalog_generation) == protocol;
-        return false;
     }
 
     /// What the Metask source can do now, for the account it follows: the
@@ -993,93 +1029,6 @@ pub const Runtime = struct {
         return .acceptedResult();
     }
 
-    pub fn metaskModelAvailable(
-        self: *const Runtime,
-        expected_catalog_generation: ?u64,
-        protocol: contract.Protocol,
-        model_id: []const u8,
-    ) bool {
-        self.assertMainThread();
-        const catalog = if (self.metask.catalog) |*value| value else return false;
-        if (catalog.modelProtocol(model_id) != protocol or !catalog.hasModel(model_id))
-            return false;
-        if (expected_catalog_generation) |expected|
-            return expected != 0 and expected == self.metask.generation;
-        return true;
-    }
-
-    /// Validates one source-qualified member of the current Metask catalog.
-    /// This is provider state only; callers decide what consumer operation the
-    /// validated model may be used for.
-    pub fn metaskSourceModelAvailable(
-        self: *const Runtime,
-        target: contract.ModelRef,
-        expected_source_generation: u64,
-        expected_catalog_generation: u64,
-        protocol: contract.Protocol,
-    ) bool {
-        self.assertMainThread();
-        const intent = self.registry.metaskSource() orelse return false;
-        if (intent.source_generation == 0 or
-            intent.source_generation != expected_source_generation)
-            return false;
-        return std.mem.eql(u8, target.source_id, contract.metask_source_id) and
-            self.metaskModelAvailable(
-                expected_catalog_generation,
-                protocol,
-                target.model_id,
-            );
-    }
-
-    /// Validates one source-qualified model against the exact current source
-    /// and catalog generations. This does not change the global default.
-    pub fn sourceModelAvailable(
-        self: *Runtime,
-        target: contract.ModelRef,
-        expected_source_generation: u64,
-        expected_catalog_generation: u64,
-        protocol: contract.Protocol,
-    ) bool {
-        return self.sourceModelProtocol(target, expected_source_generation, expected_catalog_generation) == protocol;
-    }
-
-    /// Resolves the protocol declared by an exact ready source/catalog member.
-    /// Consumer selection is independent of the Models global default.
-    pub fn sourceModelProtocol(
-        self: *Runtime,
-        target: contract.ModelRef,
-        expected_source_generation: u64,
-        expected_catalog_generation: u64,
-    ) ?contract.Protocol {
-        self.assertMainThread();
-        if (!self.store_healthy or expected_source_generation == 0 or expected_catalog_generation == 0)
-            return null;
-        if (std.mem.eql(u8, target.source_id, contract.metask_source_id)) {
-            const catalog = if (self.metask.catalog) |*value| value else return null;
-            const protocol = catalog.modelProtocol(target.model_id) orelse return null;
-            return if (self.metaskSourceModelAvailable(
-                target,
-                expected_source_generation,
-                expected_catalog_generation,
-                protocol,
-            )) protocol else null;
-        }
-        for (self.registry.views()) |provider| {
-            if (!std.mem.eql(u8, provider.id, target.source_id)) continue;
-            if (provider.state != .ready or
-                provider.credential_status != .ready or
-                !provider.enabled or
-                provider.source_generation != expected_source_generation or
-                provider.catalog_generation != expected_catalog_generation)
-                return null;
-            for (provider.models) |model|
-                if (model.ready and std.mem.eql(u8, model.id, target.model_id))
-                    return provider.protocol;
-            return null;
-        }
-        return null;
-    }
-
     pub fn submitCommand(self: *Runtime, command: contract.CustomProviderCommand) contract.CommandResult {
         self.assertMainThread();
         contract.validateCustomProviderCommand(command) catch
@@ -1176,18 +1125,6 @@ pub const Runtime = struct {
         defer candidate.deinit();
         candidate.completeTest(command, succeeded) catch |err|
             return .rejected(mapRegistryError(err));
-        return self.commitCandidate(&candidate, true);
-    }
-
-    pub fn clearDefault(self: *Runtime) contract.CommandResult {
-        self.assertMainThread();
-        if (!self.store_healthy) return .rejected(.persistence_unavailable);
-        var candidate = self.registry.clone() catch |err| return .rejected(mapRegistryError(err));
-        defer candidate.deinit();
-        if (candidate.defaultSelection() == null) return .acceptedResult();
-        const selection_revision = self.freshGeneration(candidate.selection_revision) catch
-            return .rejected(.local_resource_exhausted);
-        if (!candidate.clearDefault(selection_revision)) return .acceptedResult();
         return self.commitCandidate(&candidate, true);
     }
 
@@ -1475,41 +1412,6 @@ pub const Runtime = struct {
         );
     }
 
-    /// What resolving this model now would install, without its credential.
-    pub fn currentTarget(self: *Runtime, target: contract.ModelRef) ?contract.TargetFacts {
-        const generations = self.sourceGenerations(target.source_id) orelse return null;
-        return self.targetFacts(target, generations.source, generations.catalog);
-    }
-
-    fn targetFacts(
-        self: *Runtime,
-        target: contract.ModelRef,
-        expected_source_generation: u64,
-        expected_catalog_generation: u64,
-    ) ?contract.TargetFacts {
-        const protocol = self.sourceModelProtocol(target, expected_source_generation, expected_catalog_generation) orelse return null;
-        if (std.mem.eql(u8, target.source_id, contract.metask_source_id)) return .{
-            .source_id = contract.metask_source_id,
-            .model_id = target.model_id,
-            .protocol = protocol,
-            .base_url = contract.metaskEndpoint(protocol) orelse return null,
-            .image_input = if (self.metask.catalog) |*catalog| catalog.imageInput(target.model_id) else null,
-            .source_generation = expected_source_generation,
-        };
-        const provider = findProviderView(self.registry.views(), target.source_id) orelse return null;
-        const image_input = for (provider.models) |model| {
-            if (std.mem.eql(u8, model.id, target.model_id)) break model.metadata.capabilities.image_input;
-        } else null;
-        return .{
-            .source_id = provider.id,
-            .model_id = target.model_id,
-            .protocol = protocol,
-            .base_url = provider.normalized_base_url,
-            .image_input = image_input,
-            .source_generation = provider.source_generation,
-        };
-    }
-
     /// Produces a complete owned execution candidate for an explicit model.
     /// A stale/unavailable target never falls back to the global selection.
     pub fn resolveModel(
@@ -1518,7 +1420,7 @@ pub const Runtime = struct {
         expected_source_generation: u64,
         expected_catalog_generation: u64,
     ) !?contract.OwnedSourceCandidate {
-        const facts = self.targetFacts(target, expected_source_generation, expected_catalog_generation) orelse return null;
+        const facts = (self.exact(target, expected_source_generation, expected_catalog_generation) orelse return null).target;
         if (std.mem.eql(u8, target.source_id, contract.metask_source_id)) {
             var storage: MetaskCredentialStorage = .{};
             defer storage.zero();
@@ -1784,21 +1686,6 @@ fn mapRegistryError(err: anyerror) contract.ManagementError {
     };
 }
 
-fn mapModelsError(error_code: contract.ModelsError) contract.ManagementError {
-    return switch (error_code) {
-        .none => unreachable,
-        .authorization_unavailable => .authorization_unavailable,
-        .persistence_unavailable, .preference_not_saved => .persistence_unavailable,
-        .operation_in_progress => .operation_in_progress,
-        .local_resource_exhausted => .local_resource_exhausted,
-        .catalog_unavailable,
-        .catalog_invalid,
-        .catalog_too_large,
-        .no_models,
-        => .catalog_unavailable,
-    };
-}
-
 fn findProviderView(
     views: []const contract.CustomProviderView,
     provider_id: []const u8,
@@ -1885,7 +1772,7 @@ test "unconfirmed preference commits reject memory without revoking unchanged so
         try std.testing.expectEqualStrings("model-1", runtime.view().default_selection.?.model_id);
         try std.testing.expectEqual(@as(u64, 3), runtime.view().selection_revision);
         try std.testing.expectEqual(contract.PersistenceHealth.ready, runtime.view().persistence_health);
-        try std.testing.expect(runtime.sourceModelProtocol(.{ .source_id = "metask", .model_id = "model-1" }, 1, 4) != null);
+        try std.testing.expect(runtime.exact(.{ .source_id = "metask", .model_id = "model-1" }, 1, 4) != null);
     }
 }
 
@@ -1923,7 +1810,7 @@ test "choosing the retained preference after an unknown commit confirms the cano
     try std.testing.expectEqualStrings("One", restored.default_display_name);
     try std.testing.expectEqualStrings("One", runtime.view().default_selection_display_name.?);
     try std.testing.expectEqual(contract.ModelsError.none, runtime.view().error_code);
-    try std.testing.expect(runtime.sourceModelProtocol(.{ .source_id = "metask", .model_id = "model-1" }, 1, 4) != null);
+    try std.testing.expect(runtime.exact(.{ .source_id = "metask", .model_id = "model-1" }, 1, 4) != null);
 }
 
 const TestVault = struct {
@@ -2181,7 +2068,7 @@ test "Models Runtime durably creates a Provider before its first model" {
         const providers = restored.views();
         try std.testing.expectEqual(@as(usize, 1), providers.len);
         try std.testing.expectEqual(@as(usize, 0), providers[0].models.len);
-        try std.testing.expect(restored.sourceModelProtocol(.{ .source_id = TestVault.slot, .model_id = "gpt-5" }, restored.views()[0].source_generation, restored.views()[0].catalog_generation) == null);
+        try std.testing.expect(restored.exact(.{ .source_id = TestVault.slot, .model_id = "gpt-5" }, restored.views()[0].source_generation, restored.views()[0].catalog_generation) == null);
     }
 }
 
@@ -2292,30 +2179,21 @@ test "Models Runtime owns durable custom providers and source resolution" {
             .expected_catalog_generation = view.catalog_generation,
         }, true).accepted);
         const provider = runtime.views()[0];
-        try std.testing.expect(runtime.sourceModelAvailable(
+        try std.testing.expectEqual(contract.Protocol.openai_responses, runtime.exact(
             .{ .source_id = selection.source_id, .model_id = "gpt-5" },
             provider.source_generation,
             provider.catalog_generation,
-            .openai_responses,
-        ));
-        try std.testing.expect(!runtime.sourceModelAvailable(
+        ).?.target.protocol);
+        try std.testing.expect(runtime.exact(
             .{ .source_id = selection.source_id, .model_id = "missing-model" },
             provider.source_generation,
             provider.catalog_generation,
-            .openai_responses,
-        ));
-        try std.testing.expect(!runtime.sourceModelAvailable(
+        ) == null);
+        try std.testing.expect(runtime.exact(
             .{ .source_id = selection.source_id, .model_id = "gpt-5" },
             provider.source_generation + 1,
             provider.catalog_generation,
-            .openai_responses,
-        ));
-        try std.testing.expect(!runtime.sourceModelAvailable(
-            .{ .source_id = selection.source_id, .model_id = "gpt-5" },
-            provider.source_generation,
-            provider.catalog_generation,
-            .anthropic_messages,
-        ));
+        ) == null);
         try std.testing.expect(runtime.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }).accepted);
         try std.testing.expectEqualStrings(TestVault.slot, runtime.view().default_selection.?.source_id);
         try std.testing.expect(runtime.view().selection_revision != 0);
@@ -2347,7 +2225,7 @@ test "Models Runtime owns durable custom providers and source resolution" {
         try TestVault.delete(&vault, TestVault.slot);
         try std.testing.expect((try TestSupport.resolveFixtureSelection(&restored)) == null);
         try std.testing.expect(restored.store_healthy);
-        try std.testing.expect(restored.sourceModelProtocol(.{ .source_id = TestVault.slot, .model_id = "gpt-5" }, restored.views()[0].source_generation, restored.views()[0].catalog_generation) == null);
+        try std.testing.expect(restored.exact(.{ .source_id = TestVault.slot, .model_id = "gpt-5" }, restored.views()[0].source_generation, restored.views()[0].catalog_generation) == null);
         try std.testing.expect(restored.view().default_selection != null);
         try std.testing.expect(restored.view().selection_revision == previous_selection_revision);
         const missing = restored.views()[0];
@@ -2367,7 +2245,7 @@ test "Models Runtime owns durable custom providers and source resolution" {
         }
         try std.testing.expect(restarted.store_healthy);
         try std.testing.expectEqual(@as(usize, 1), restarted.views().len);
-        try std.testing.expect(restarted.sourceModelProtocol(.{ .source_id = TestVault.slot, .model_id = "gpt-5" }, restarted.views()[0].source_generation, restarted.views()[0].catalog_generation) == null);
+        try std.testing.expect(restarted.exact(.{ .source_id = TestVault.slot, .model_id = "gpt-5" }, restarted.views()[0].source_generation, restarted.views()[0].catalog_generation) == null);
         try std.testing.expect(restarted.view().default_selection != null);
         const missing = restarted.views()[0];
         try std.testing.expectEqual(
@@ -2463,17 +2341,18 @@ test "Models explicit resolution uses the target Metask protocol and rejects sta
     try std.testing.expectEqual(source_generation, candidate.input().source_generation);
     try std.testing.expectEqual(selection_revision, runtime.view().selection_revision);
     try std.testing.expectEqualStrings("default-model", runtime.view().default_selection.?.model_id);
-    try std.testing.expectEqual(contract.Protocol.anthropic_messages, runtime.sourceModelProtocol(.{ .source_id = "metask", .model_id = "default-model" }, source_generation, catalog_generation).?);
+    try std.testing.expectEqual(contract.Protocol.anthropic_messages, runtime.exact(.{ .source_id = "metask", .model_id = "default-model" }, source_generation, catalog_generation).?.target.protocol);
     try std.testing.expect((try runtime.resolveModel(target, source_generation +% 1, catalog_generation)) == null);
     try std.testing.expect((try runtime.resolveModel(target, source_generation, catalog_generation +% 1)) == null);
     try std.testing.expect((try runtime.resolveModel(target, 0, catalog_generation)) == null);
+    runtime.store_healthy = false;
+    try std.testing.expect((try runtime.resolveModel(target, source_generation, catalog_generation)) == null);
+    runtime.store_healthy = true;
 
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalog(&runtime, "principal", &.{}));
     try std.testing.expect((try runtime.resolveModel(target, source_generation, catalog_generation)) == null);
     try std.testing.expectEqualStrings("other-model", candidate.input().target.model);
     try std.testing.expectEqualStrings("refreshed-secret", candidate.input().api_key);
-    runtime.store_healthy = false;
-    try std.testing.expect((try runtime.resolveModel(target, source_generation, catalog_generation)) == null);
 }
 
 test "credential replacement revokes readiness before writing and restores fresh authority" {
@@ -3296,11 +3175,8 @@ test "declared protocol refresh changes default authority and preserves old owne
     try std.testing.expectEqualStrings("model-1", current.default_selection.?.model_id);
     try std.testing.expectEqual(old_selection, current.selection_revision);
     try std.testing.expectEqual(old_source, current.providers[0].source_generation);
-    try std.testing.expectEqual(contract.Protocol.openai_chat_completions, runtime.sourceModelProtocol(.{ .source_id = "metask", .model_id = "model-1" }, current.providers[0].source_generation, current.providers[0].catalog_generation).?);
-    try std.testing.expect(!runtime.metaskSourceModelAvailable(.{ .source_id = "metask", .model_id = "model-1" }, old_source, current.providers[0].catalog_generation, .anthropic_messages));
-    try std.testing.expect(runtime.metaskSourceModelAvailable(.{ .source_id = "metask", .model_id = "model-1" }, current.providers[0].source_generation, current.providers[0].catalog_generation, .openai_chat_completions));
-    try std.testing.expect(!runtime.metaskModelAvailable(null, .openai_chat_completions, "model-2"));
-    try std.testing.expect(runtime.metaskModelAvailable(null, .openai_responses, "model-2"));
+    try std.testing.expectEqual(contract.Protocol.openai_chat_completions, runtime.exact(.{ .source_id = "metask", .model_id = "model-1" }, current.providers[0].source_generation, current.providers[0].catalog_generation).?.target.protocol);
+    try std.testing.expectEqual(contract.Protocol.openai_responses, runtime.lookup(.{ .source_id = "metask", .model_id = "model-2" }, .current).present.target.protocol);
     var new_owned = (try TestSupport.resolveFixtureSelection(&runtime)).?;
     defer new_owned.deinit();
     try std.testing.expectEqual(contract.Protocol.openai_chat_completions, new_owned.input().target.protocol);
@@ -3926,4 +3802,81 @@ test "Metask resolution reads the credential once, for the catalog's account onl
     try std.testing.expect((try runtime.resolveModel(target, provider.source_generation, provider.catalog_generation)) == null);
     fixture.credentials.set("principal", "");
     try std.testing.expect((try runtime.resolveModel(target, provider.source_generation, provider.catalog_generation)) == null);
+}
+
+test "one lookup answers every source state for both identities" {
+    var fixture: MetaskCatalogFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    const metask: contract.ModelRef = .{ .source_id = contract.metask_source_id, .model_id = "model-1" };
+    const custom: contract.ModelRef = .{ .source_id = TestVault.slot, .model_id = "gpt-5" };
+    try std.testing.expect(runtime.lookup(metask, .current) == .not_ready);
+    try std.testing.expect(runtime.lookup(custom, .current) == .source_changed);
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    try std.testing.expect(try fixture.complete(fixture.begin(.due, 17, 0).outcome.started, &catalog_one, 0));
+    try createTestProviderWithModel(runtime, "provider-secret", .{
+        .display_name = "OpenAI",
+        .protocol = .openai_responses,
+        .normalized_base_url = "https://api.openai.com/v1/responses",
+    }, .{ .id = "gpt-5" });
+    // Listed but never tested: the source answers, without this model.
+    try std.testing.expect(runtime.lookup(custom, .current) == .missing);
+    const untested = runtime.views()[0];
+    const probe: contract.CustomModelTestCommand = .{
+        .model = custom,
+        .expected_provider_revision = untested.provider_revision,
+        .expected_source_generation = untested.source_generation,
+        .expected_catalog_generation = untested.catalog_generation,
+    };
+    try std.testing.expect(runtime.submitCommand(.{ .test_model = probe }).accepted);
+    try std.testing.expect(runtime.completeTest(probe, true).accepted);
+
+    const source = fixture.provider();
+    const provider = runtime.views()[0];
+    const Row = struct { target: contract.ModelRef, expect: Expect, answer: std.meta.Tag(Lookup) };
+    for ([_]Row{
+        .{ .target = metask, .expect = .current, .answer = .present },
+        .{ .target = metask, .expect = .{ .bound = source.source_generation }, .answer = .present },
+        .{ .target = metask, .expect = .{ .bound = source.source_generation +% 1 }, .answer = .source_changed },
+        .{ .target = .{ .source_id = contract.metask_source_id, .model_id = "absent" }, .expect = .current, .answer = .missing },
+        .{ .target = custom, .expect = .current, .answer = .present },
+        .{ .target = custom, .expect = .{ .bound = provider.source_generation }, .answer = .present },
+        .{ .target = custom, .expect = .{ .bound = provider.source_generation +% 1 }, .answer = .source_changed },
+        .{ .target = .{ .source_id = TestVault.slot, .model_id = "absent" }, .expect = .current, .answer = .missing },
+        .{ .target = .{ .source_id = "removed", .model_id = "gpt-5" }, .expect = .current, .answer = .source_changed },
+    }) |row| try std.testing.expectEqual(row.answer, std.meta.activeTag(runtime.lookup(row.target, row.expect)));
+    const found = runtime.lookup(custom, .current).present;
+    try std.testing.expectEqual(contract.Protocol.openai_responses, found.target.protocol);
+    try std.testing.expectEqual(provider.catalog_generation, found.catalog_generation);
+    // The one exact judgement holds both generations, and only both.
+    try std.testing.expect(runtime.exact(custom, provider.source_generation, provider.catalog_generation) != null);
+    try std.testing.expect(runtime.exact(custom, provider.source_generation, provider.catalog_generation +% 1) == null);
+    try std.testing.expect(runtime.exact(metask, source.source_generation, source.catalog_generation +% 1) == null);
+    try std.testing.expect(runtime.exact(custom, 0, provider.catalog_generation) == null);
+    // A key gone from the store keeps its generation: no answer yet.
+    fixture.vault.present = false;
+    try std.testing.expect((try runtime.resolveModel(custom, provider.source_generation, provider.catalog_generation)) == null);
+    try std.testing.expect(runtime.lookup(custom, .{ .bound = provider.source_generation }) == .not_ready);
+    runtime.store_healthy = false;
+    try std.testing.expect(runtime.lookup(metask, .current) == .not_ready);
+
+    // A models.json this version cannot decode leaves no provider to find:
+    // the answer must still be "not now", never "gone".
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &path);
+    try writeTestFile(&tmp.dir, registry_impl.store_file_name, "{\"schema\":4}");
+    var vault: TestVault = .{};
+    var unread = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try unread.start(path[0..length], vault.port());
+    defer {
+        unread.stop();
+        unread.deinit();
+    }
+    try std.testing.expect(!unread.store_healthy);
+    try std.testing.expect(unread.lookup(custom, .{ .bound = provider.source_generation }) == .not_ready);
+    unread.store_healthy = true;
+    try std.testing.expect(unread.lookup(custom, .{ .bound = provider.source_generation }) == .source_changed);
 }

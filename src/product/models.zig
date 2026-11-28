@@ -8,6 +8,9 @@ const runtime_module = @import("product_models_runtime");
 pub const Runtime = runtime_module.Runtime;
 pub const StartError = runtime_module.StartError;
 pub const TestSupport = runtime_module.TestSupport;
+pub const Expect = runtime_module.Expect;
+pub const Lookup = runtime_module.Lookup;
+pub const Present = runtime_module.Present;
 
 test {
     _ = runtime_module;

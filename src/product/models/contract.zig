@@ -88,7 +88,6 @@ pub const BuiltinProviderPresetView = struct {
 pub const CatalogState = enum {
     needs_authentication,
     loading,
-    choosing,
     ready,
     failed,
     unavailable,

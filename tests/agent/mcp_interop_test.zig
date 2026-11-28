@@ -3925,7 +3925,7 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     const target_id = try std.testing.allocator.dupe(u8, selected.target.source_id);
     defer std.testing.allocator.free(target_id);
     selected.target.source_id = target_id;
-    try std.testing.expect(control.clearCustomProviderDefault().accepted);
+    try product_control.TestSupport.clearStoredModelPreference(&control);
     const workspace = try control.openWorkspace(.{ .workspace_root = workspace_root, .trust = .explicitly_trusted });
     var catalog = try waitTaskSwitchCatalog(&control, workspace, 2);
     try std.testing.expectEqual(@as(usize, 2), catalog.skills.len);

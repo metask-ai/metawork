@@ -7,7 +7,7 @@
 Product 由两个 named owner 组成，跨 owner 用例由对应的 Application coordinator 编排：
 
 - Account 只拥有 Metask OAuth identity、access/refresh credential、authorization generation 及其内部事务与恢复；
-- Product Control 拥有 Models aggregate、执行 generation 分配、Task-owned binding、实际 credential 的 Schedule scrub、Workspace、Task、Skill、MCP、共享 Executor、跨 aggregate admission、canonical projection、revision、历史与关闭顺序；Models 拥有模型来源（内置 Metask 来源的身份与目录、用户的 Custom Provider 及其 Key）、起始偏好，以及把明确目标解析成候选；目录何时更新、失败怎样重试、什么变化让人看见，是 Models 的 policy。Metask 凭据归 Account，Models 只在解析时经端口取当次凭据，不保存。Models 不持有进程级 active default execution。
+- Product Control 拥有 Models aggregate、执行 generation 分配、Task-owned binding、实际 credential 的 Schedule scrub、Workspace、Task、Skill、MCP、共享 Executor、跨 aggregate admission、canonical projection、revision、历史与关闭顺序；Models 拥有模型来源（内置 Metask 来源的身份与目录、用户的 Custom Provider 及其 Key）、起始偏好，以及把明确目标解析成候选，以及每个模型的声明（协议与端点、接收哪些输入、上下文与输出上限、生图与生视频用途）及其含义：声明支持、声明不支持、或不知道，Metask 只有明确为 true 才算支持；目录何时更新、失败怎样重试、什么变化让人看见，是 Models 的 policy。Metask 凭据归 Account，Models 只在解析时经端口取当次凭据，不保存。Models 不持有进程级 active default execution。
 
 Agent 位于 Product 之外，拥有 MetaWork 对 AgentCore Runtime、Session、Conversation、callback、event pump 与 terminal execution fact 的集成生命周期。Product Control 只调用 Agent 的公共执行能力，不管理 Agent Runtime 生命周期、不读取其内部状态，也不借 Agent 获取通用 I/O。Application 创建和关闭 Agent、安排主线程 wake，并协调 Account 与 Product Control；它不持有领域运行状态，也不独立决定这些 owner 的 policy。
 
@@ -109,7 +109,7 @@ Task 不与登录或账号绑定。新登录（相同或不同 principal）与�
 
 Models 在前台每 5 分钟更新一次目录，回到前台时距上次请求结束满 5 分钟立即更新，后台不更新；没有目录且加载失败时，Account 换代后再试一次，这次不可见，成功才可用。有目录时更新的进行、失败与内容不变都不发布；用户自己发起的刷新只在进行中亮起操作状态。时机、间隔、重试与可见性都是 Models 的 policy，Application 只执行定时器与请求，并把前台切换与 Account 的授权发布转给 Models。
 
-Account identity/token rotation与 Models registry是独立 durable authority；任一方的提交、恢复或 outcome unknown 不得由另一方解释或回滚。Account 只回答当前授权——可用（带代次）、等一次结果或必须登录——并提供当次凭据；Models 只回答某个来源现在能否解析出目标（有没有目录、模型在不在、什么协议）；Product Control 把两者合成具体 Task、定时任务与新建的准入。
+Account identity/token rotation与 Models registry是独立 durable authority；任一方的提交、恢复或 outcome unknown 不得由另一方解释或回滚。Account 只回答当前授权——可用（带代次）、等一次结果或必须登录——并提供当次凭据；Models 只回答某个来源现在能否解析出目标（来源在不在、能不能答、模型在不在、什么协议）和它声明了什么：查询只有 `lookup` 一个入口（按来源的当前身份，或绑定时的身份），精确判定只有 `exact` 一个入口（来源与目录代次都须相同）；Product Control 把两者合成具体 Task、定时任务与新建的准入。
 
 Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取消 Host 中的 deadline、mutation 或 terminal completion。Renderer Account command 只涉及登录、取消和退出；Models command 使用 source-qualified identifier 与对应 expected revision。除用户显式提交 Custom Provider create/replace 或 MCP captureSecret 时一次性转交手动凭据外，Renderer 不参与 prepare、commit、authorization lease 或 credential transfer；该表单值不属于可恢复 UI 状态。
 

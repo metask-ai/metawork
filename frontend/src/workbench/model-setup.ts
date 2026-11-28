@@ -148,7 +148,7 @@ export function modelSetupNotice({
       action: hasReadyModels ? "choose_model" : "models",
     };
   }
-  if (hasReadyModels || models.availability === "choosing")
+  if (hasReadyModels)
     return {
       reason: "choose",
       action: hasReadyModels ? "choose_model" : "models",

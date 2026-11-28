@@ -296,7 +296,6 @@ const accountUsageEligibilities = ["unknown", "disabled", "enabled"] as const;
 const modelsCatalogStates = [
   "needs_authentication",
   "loading",
-  "choosing",
   "ready",
   "failed",
   "unavailable",
