@@ -1255,7 +1255,7 @@ pub const Runtime = struct {
         switch (source) {
             .missing => {},
             .retired => |bytes| {
-                registry_impl.collectCredentialDeletions(&candidate, bytes, .retired) catch |err|
+                registry_impl.collectRetiredCredentialDeletions(&candidate, bytes) catch |err|
                     return .rejected(if (err == error.OutOfMemory) .local_resource_exhausted else .persistence_unavailable);
                 for (candidate.credentialDeletions()) |slot|
                     if (!ports.validCredentialSlot(slot)) return .rejected(.persistence_unavailable);
@@ -1294,25 +1294,22 @@ pub const Runtime = struct {
         return .acceptedResult();
     }
 
-    /// Queues the keys a discarded file names, only when every one of them
-    /// reads as a credential slot and all fit. False: some may stay behind.
+    /// Queues every key a discarded file names that reads as a credential
+    /// slot, one by one. False when not all of them could be: an id that is
+    /// not a slot, one past capacity, or a part that cannot be read.
     fn mergeReadableDeletions(candidate: *registry_impl.Registry, bytes: []const u8) std.mem.Allocator.Error!bool {
-        var scratch = registry_impl.Registry.init(candidate.allocator);
-        defer scratch.deinit();
-        registry_impl.collectCredentialDeletions(&scratch, bytes, .any) catch |err|
-            return if (err == error.OutOfMemory) error.OutOfMemory else false;
-        var added: usize = 0;
-        for (scratch.credentialDeletions()) |slot| {
-            if (!ports.validCredentialSlot(slot)) return false;
-            if (!containsSlot(candidate.credentialDeletions(), slot)) added += 1;
-        }
-        if (candidate.credentialDeletions().len + added > registry_impl.max_pending_credential_deletions) return false;
-        for (scratch.credentialDeletions()) |slot| {
-            if (containsSlot(candidate.credentialDeletions(), slot)) continue;
-            candidate.reserveCredentialDeletion(slot) catch |err|
-                return if (err == error.OutOfMemory) error.OutOfMemory else false;
-        }
-        return true;
+        const Sink = struct {
+            candidate: *registry_impl.Registry,
+
+            pub fn offer(self: @This(), slot: []const u8) std.mem.Allocator.Error!bool {
+                if (!ports.validCredentialSlot(slot)) return false;
+                if (containsSlot(self.candidate.credentialDeletions(), slot)) return true;
+                self.candidate.reserveCredentialDeletion(slot) catch |err|
+                    return if (err == error.OutOfMemory) error.OutOfMemory else false;
+                return true;
+            }
+        };
+        return registry_impl.offerCredentialIds(candidate.allocator, bytes, Sink{ .candidate = candidate });
     }
 
     fn containsSlot(slots: []const []const u8, slot: []const u8) bool {
@@ -4157,6 +4154,8 @@ test "an explicit reset sets the original aside and clears every key it can iden
     for ([_]Row{
         .{ .bytes = newer_store, .deleted = 3, .aside = true, .retained = false },
         .{ .bytes = "{\"schema\":4,\"pending_credential_deletions\":[\"not a slot\"],\"custom_providers\":[]}", .deleted = 0, .aside = true, .retained = true },
+        // Every key that reads as one goes, whatever else the file holds.
+        .{ .bytes = "{\"schema\":4,\"pending_credential_deletions\":[\"not a slot\",\"custom-provider-dddddddddddddddddddddddddddddddd\"],\"custom_providers\":[{\"name\":\"no id\"},{\"id\":\"custom-provider-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}]}", .deleted = 2, .aside = true, .retained = true },
         .{ .bytes = "not-json", .deleted = 0, .aside = true, .retained = true },
         .{ .bytes = &oversized, .deleted = 0, .aside = true, .retained = true },
         .{ .bytes = "", .deleted = 0, .aside = false, .retained = false },

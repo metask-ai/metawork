@@ -1081,22 +1081,15 @@ pub fn isRetiredCanonical(allocator: std.mem.Allocator, bytes: []const u8) bool 
     return schema == .integer and (schema.integer == 1 or schema.integer == 2);
 }
 
-/// Which files may contribute cleanup obligations: only a retired schema when
-/// no one asked, any shape once the person confirmed discarding the file.
-pub const DeletionSource = enum { retired, any };
-
-/// A discarded file contributes cleanup obligations only. No provider, model,
-/// preference or source authority is installed in the replacement registry,
-/// and only the key identities are read, never anything they grant.
-pub fn collectCredentialDeletions(registry: *Registry, bytes: []const u8, source: DeletionSource) !void {
+/// Retired metadata contributes cleanup obligations only. No provider, model,
+/// preference or source authority is installed in the replacement registry.
+pub fn collectRetiredCredentialDeletions(registry: *Registry, bytes: []const u8) !void {
     if (bytes.len == 0 or bytes.len > max_store_bytes) return error.InvalidData;
     const parsed = try std.json.parseFromSlice(std.json.Value, registry.allocator, bytes, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidData;
-    if (source == .retired) {
-        const schema = parsed.value.object.get("schema") orelse return error.InvalidData;
-        if (schema != .integer or (schema.integer != 1 and schema.integer != 2)) return error.InvalidData;
-    }
+    const schema = parsed.value.object.get("schema") orelse return error.InvalidData;
+    if (schema != .integer or (schema.integer != 1 and schema.integer != 2)) return error.InvalidData;
     const pending = parsed.value.object.get("pending_credential_deletions") orelse return error.InvalidData;
     const providers = parsed.value.object.get("custom_providers") orelse return error.InvalidData;
     if (pending != .array or providers != .array) return error.InvalidData;
@@ -1105,6 +1098,44 @@ pub fn collectCredentialDeletions(registry: *Registry, bytes: []const u8, source
         if (provider != .object) return error.InvalidData;
         try reserveRetiredCredentialDeletion(registry, provider.object.get("id") orelse return error.InvalidData);
     }
+}
+
+/// The key identities a file the person discarded names, whatever its shape:
+/// each string where a key's id goes is offered to `sink.offer` as it is
+/// read, and only those ids are read, never anything they grant. False when
+/// a part could not be read or the sink refused an id: keys may stay behind.
+pub fn offerCredentialIds(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    sink: anytype,
+) std.mem.Allocator.Error!bool {
+    if (bytes.len == 0 or bytes.len > max_store_bytes) return false;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch |err|
+        return if (err == error.OutOfMemory) error.OutOfMemory else false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    var complete = true;
+    const pending = parsed.value.object.get("pending_credential_deletions") orelse std.json.Value.null;
+    if (pending == .array) {
+        for (pending.array.items) |id| {
+            if (!try offerCredentialId(id, sink)) complete = false;
+        }
+    } else complete = false;
+    const providers = parsed.value.object.get("custom_providers") orelse std.json.Value.null;
+    if (providers == .array) {
+        for (providers.array.items) |provider| {
+            const id = if (provider == .object) provider.object.get("id") orelse .null else .null;
+            if (!try offerCredentialId(id, sink)) complete = false;
+        }
+    } else complete = false;
+    return complete;
+}
+
+fn offerCredentialId(value: std.json.Value, sink: anytype) std.mem.Allocator.Error!bool {
+    return switch (value) {
+        .string => |id| sink.offer(id),
+        else => false,
+    };
 }
 
 fn reserveRetiredCredentialDeletion(registry: *Registry, value: std.json.Value) !void {
@@ -1118,7 +1149,7 @@ fn reserveRetiredCredentialDeletion(registry: *Registry, value: std.json.Value) 
 test "retired cleanup validates and deduplicates only credential slot identities" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
-    try collectCredentialDeletions(&registry, "{\"schema\":2,\"pending_credential_deletions\":[\"pending\",\"pending\"],\"custom_providers\":[{\"id\":\"pending\"},{\"id\":\"provider\",\"model\":\"must-not-restore\"}]}", .retired);
+    try collectRetiredCredentialDeletions(&registry, "{\"schema\":2,\"pending_credential_deletions\":[\"pending\",\"pending\"],\"custom_providers\":[{\"id\":\"pending\"},{\"id\":\"provider\",\"model\":\"must-not-restore\"}]}");
     try std.testing.expectEqual(@as(usize, 2), registry.credentialDeletions().len);
     try std.testing.expectEqual(@as(usize, 0), registry.views().len);
     try std.testing.expect(registry.defaultSelection() == null);
@@ -1130,7 +1161,7 @@ test "retired cleanup validates and deduplicates only credential slot identities
     }) |bytes| {
         var invalid = Registry.init(std.testing.allocator);
         defer invalid.deinit();
-        try std.testing.expectError(error.InvalidData, collectCredentialDeletions(&invalid, bytes, .retired));
+        try std.testing.expectError(error.InvalidData, collectRetiredCredentialDeletions(&invalid, bytes));
     }
 }
 
