@@ -1171,6 +1171,10 @@ test("Models recovery-required health crosses the strict snapshot decoder", () =
   const retained = clone(fixture);
   retained.models.errorCode = "credentials_retained";
   assert.deepEqual(decodeWorkbenchSnapshot(retained), retained);
+  // Only the whole store has keys a reset left behind.
+  const retainedByProvider = clone(fixture);
+  retainedByProvider.models.providers[0].errorCode = "credentials_retained";
+  assert.throws(() => decodeWorkbenchSnapshot(retainedByProvider), /errorCode/);
   const suspended = clone(fixture);
   suspended.models.providers[0].errorCode = "account_suspended";
   assert.deepEqual(decodeWorkbenchSnapshot(suspended), suspended);

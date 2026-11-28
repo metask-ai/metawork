@@ -340,6 +340,11 @@ const modelsErrorCodes = [
   "local_resource_exhausted",
   "credentials_retained",
 ] as const;
+// An unsaved preference and keys a reset left behind are the whole store's,
+// published only at the top.
+const providerErrorCodes = modelsErrorCodes.filter(
+  (code) => code !== "preference_not_saved" && code !== "credentials_retained",
+);
 const executionCommandErrorCodes = [
   "none",
   "operation_in_progress",
@@ -1840,7 +1845,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
         errorCode: enumValue(
           provider.errorCode,
           `${itemPath}.errorCode`,
-          modelsErrorCodes.filter((code) => code !== "preference_not_saved"),
+          providerErrorCodes,
         ),
         safeDiagnostic: stringValue(
           provider.safeDiagnostic,
