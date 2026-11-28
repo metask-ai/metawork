@@ -4,7 +4,13 @@ import { RadioGroup } from "@base-ui/react/radio-group";
 
 import { Icon } from "./Icon.tsx";
 import { Popover } from "./popover.tsx";
-import { cn, controlBase, controlFocus } from "./utils.ts";
+import {
+  cn,
+  controlBase,
+  controlFocus,
+  pickerCaptionText,
+  pickerControlText,
+} from "./utils.ts";
 
 type TimePickerProps = Pick<
   HTMLAttributes<HTMLDivElement>,
@@ -46,7 +52,10 @@ function TimeColumn({
     <div className="min-w-0">
       <div
         aria-hidden="true"
-        className="pb-1 text-center text-xs text-(--ui-content-muted)"
+        className={cn(
+          "pb-1 text-center text-(--ui-content-muted)",
+          pickerCaptionText,
+        )}
       >
         {label}
       </div>
@@ -66,7 +75,7 @@ function TimeColumn({
               value={part}
               nativeButton
               render={<button type="button" />}
-              className="flex h-8 w-full items-center justify-center rounded-[6px] border-0 bg-transparent text-[length:var(--text-control)] font-normal outline-none hover:bg-(--ui-action-hover-surface) focus-visible:bg-(--ui-action-hover-surface) data-checked:bg-(--ui-surface-panel-2)"
+              className="flex h-8 w-full items-center justify-center rounded-[6px] border-0 bg-transparent outline-none hover:bg-(--ui-action-hover-surface) focus-visible:bg-(--ui-action-hover-surface) data-checked:bg-(--ui-surface-panel-2)"
             >
               {part}
             </Radio.Root>
@@ -93,7 +102,8 @@ export function TimePicker({
       <div
         role="group"
         className={cn(
-          "inline-flex h-9 min-w-0 items-center rounded-[7px] px-2 text-[length:var(--text-control)] data-disabled:opacity-50",
+          "inline-flex h-9 min-w-0 items-center rounded-[7px] px-2 data-disabled:opacity-50",
+          pickerControlText,
           controlBase,
           controlFocus,
           className,
@@ -110,7 +120,7 @@ export function TimePicker({
               : undefined
           }
           className={cn(
-            "flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-[6px] border-0 bg-transparent px-1 text-[length:var(--text-control)] hover:bg-(--ui-action-hover-surface)",
+            "flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-[6px] border-0 bg-transparent px-1 hover:bg-(--ui-action-hover-surface)",
             controlFocus,
           )}
         >
@@ -133,7 +143,7 @@ export function TimePicker({
               ) ?? null
             }
             aria-label={props["aria-label"]}
-            className="grid w-48 grid-cols-2 gap-2 p-2"
+            className={cn("grid w-48 grid-cols-2 gap-2 p-2", pickerControlText)}
           >
             {[hourLabel, minuteLabel].map((label, index) => (
               <TimeColumn
