@@ -39,6 +39,7 @@ export type ModelSetupReason =
   | "unreachable"
   | "sign_in"
   | "no_models"
+  | "account_suspended"
   | "catalog_failed"
   | "model_unavailable"
   | "choose"
@@ -47,11 +48,24 @@ export type ModelSetupReason =
   | "schedule_failed"
   | "schedule_unknown"
   | "resources_unavailable"
+  | "custom_models_unavailable"
   | "required";
 export type ModelSetupNotice = {
   reason: ModelSetupReason;
   action: ModelSetupAction | null;
 };
+
+/**
+ * A note that never holds a choice back: while the Models store cannot be
+ * read, Custom models wait for it and every other source works on.
+ */
+export function customModelsUnavailableNotice(
+  models: ModelsView,
+): ModelSetupNotice | null {
+  return models.persistenceHealth === "recovery_required"
+    ? { reason: "custom_models_unavailable", action: "models" }
+    : null;
+}
 
 /** Why Metask's connection holds this model back; other sources ignore it. */
 export function metaskAdmission(
@@ -88,7 +102,12 @@ export function modelSetupNotice({
     const reason = metaskAdmission(admission, selected);
     return reason && { reason, action: null };
   }
-  if (models.persistenceHealth !== "ready")
+  // Only a Custom Provider stands on the Models store.
+  if (
+    models.persistenceHealth !== "ready" &&
+    selected &&
+    selected.sourceId !== "metask"
+  )
     return { reason: "persistence", action: "models" };
   if (admission.reason === "shutting_down")
     return { reason: "preparing", action: null };
@@ -123,6 +142,9 @@ export function modelSetupNotice({
   if (needsMetask && account.state === "authenticated") {
     if (metask?.errorCode === "no_models")
       return { reason: "no_models", action: "refresh" };
+    // Asking again changes nothing: the Metask website says why.
+    if (metask?.errorCode === "account_suspended")
+      return { reason: "account_suspended", action: null };
     if (
       metask?.catalogState === "failed" ||
       metask?.catalogState === "unavailable"
@@ -148,7 +170,7 @@ export function modelSetupNotice({
       action: hasReadyModels ? "choose_model" : "models",
     };
   }
-  if (hasReadyModels || models.availability === "choosing")
+  if (hasReadyModels)
     return {
       reason: "choose",
       action: hasReadyModels ? "choose_model" : "models",

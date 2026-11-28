@@ -1096,7 +1096,7 @@ Account 状态在主界面的账号入口、Account 设置及新任务输入区�
 
 点击登录后关闭开始弹层并调用既有 beginLogin；输入区显示“请在浏览器中完成登录”，取消只在 Host `actions.cancel` 为真时提供。点击配置后关闭弹层并打开 Models 的自定义模型分组，通过“添加模型”同时准备连接与模型，添加和测试在 Models 完成，选择在任务输入区完成；不复制配置向导、不自动设置默认值、不因后台配置成功强制关闭设置。两条路径均保留原草稿、Workspace 与审批模式，不自动创建 Task 或发送。
 
-跳过后输入框继续可编辑，模型尚未配置时显示“登录或配置模型后即可发送”及“开始使用”；已有模型事实仍保留。Metask 所选模型需要授权时直接提供登录，自己的模型配置入口开放时同时提供“其他方式”重开开始弹层，其他来源已有可用模型不应自动关闭用户主动打开的选择面；已有候选但缺少选择时直接打开输入区模型列表；目录失败或无模型时提供重试；自定义服务缺少凭据或被禁用时进入 Models 的自定义模型分组，服务已保存但模型尚未就绪时进入 Models 添加或测试；模型存储异常进入 Models，实际credential清洗所需的定时任务存储不可用时说明对应操作原因，并仅在管理或恢复能力开放时进入定时任务页；本机资源不足如实说明，不提供无效的模型设置恢复承诺。检查、加载与准备状态不提供伪恢复动作；没能确认登录时输入区说明并提供“立即重试”，Host 的 `actions.retry` 为假时不可用；Host 说明 Metask 连接挡住新任务时，选中 Metask 模型的草稿不可发送，输入区说明正在连接或暂时连不上，不提供动作，定时任务新选 Metask 模型时用同一句话说明并不可保存；输入区只显示一份主要模型提示，模型恢复后移除，其他发送条件保持独立。按钮和 Enter 保持发送语义，不隐式改为登录或配置。
+跳过后输入框继续可编辑，模型尚未配置时显示“登录或配置模型后即可发送”及“开始使用”；已有模型事实仍保留。Metask 所选模型需要授权时直接提供登录，自己的模型配置入口开放时同时提供“其他方式”重开开始弹层，其他来源已有可用模型不应自动关闭用户主动打开的选择面；已有候选但缺少选择时直接打开输入区模型列表；目录失败或无模型时提供重试；自定义服务缺少凭据或被禁用时进入 Models 的自定义模型分组，服务已保存但模型尚未就绪时进入 Models 添加或测试；所选自定义模型因模型存储异常不可用时进入 Models；模型存储不可读期间，输入区在主要模型提示之外另显示一句不挡发送的说明“自定义模型配置无法读取，自定义模型暂不可用；Metask 模型照常可用。”，Metask 模型照常可选、可发送；实际credential清洗所需的定时任务存储不可用时说明对应操作原因，并仅在管理或恢复能力开放时进入定时任务页；本机资源不足如实说明，不提供无效的模型设置恢复承诺。检查、加载与准备状态不提供伪恢复动作；没能确认登录时输入区说明并提供“立即重试”，Host 的 `actions.retry` 为假时不可用；Host 说明 Metask 连接挡住新任务时，选中 Metask 模型的草稿不可发送，输入区说明正在连接或暂时连不上，不提供动作，定时任务新选 Metask 模型时用同一句话说明并不可保存；输入区只显示一份主要模型提示，模型恢复后移除，其他发送条件保持独立。按钮和 Enter 保持发送语义，不隐式改为登录或配置。
 
 弹层复用 Foundation Dialog，具备可见标题、描述、焦点限制、关闭及焦点返回；初始焦点落在登录主动作，手动关闭回到原触发位置，自动展示关闭回到 Composer。跳往设置时焦点交给设置页。窄窗正文和动作可换行，不截断阻塞原因。
 
@@ -1169,7 +1169,8 @@ About
 
 `Models / 模型`规则：
 
-- `persistenceHealth = recovery_required` 显示单一显式恢复确认面；文案必须说明 Host 会先尝试恢复合法配置，只有文件缺失或确认损坏时才清空，不得无条件承诺删除 Provider 或模型配置。操作成功后完全以新 snapshot 为准；失败保留恢复面，不由 Renderer 猜测磁盘结果或自动重放；
+- `persistenceHealth = recovery_required` 显示单一显式恢复确认面；文案必须说明 Host 会先重新读取并原样恢复本版本能读的配置；读不了的（缺失、损坏、另一个版本写的或超出大小上限）才清空自定义模型，清空前先另存原文件，其中能识别的自定义模型 Key 从系统凭据库删除；不得无条件承诺删除 Provider 或模型配置。Metask 模型不受这个状态影响。操作成功后完全以新 snapshot 为准；失败保留恢复面，不由 Renderer 猜测磁盘结果或自动重放；
+- 原文件里有识别不了的 Key 时，恢复成功后 Host 发布 `errorCode = credentials_retained`，设置页在模型分区说明可能仍有凭据未清理、原文件已另存；此后未保存的起始偏好仍优先提示；
 - 进入该设置 route 只渲染 Host 已提交的用户模型与配置持久化事实，不触发同步或隐藏 mutation；Metask 官方模型的目录加载、重试和选择属于任务输入区，不在本页提供官方目录或同步入口；
 - 页面名称固定为“模型”，只列出用户自行添加的模型，包括通过内置厂商预设添加的模型；提供添加、编辑、测试与删除。不展示 Metask 官方模型目录、官方登录/同步/加载/空态或错误，也不提供默认模型设置。任务使用的模型在输入区选择；
 - 管理页与对话 Composer 只呈现对话模型，不设置生图模型选择区域、生成按钮或连接测试。生图模型由 Host 自动解析，Renderer 不渲染图片目录或维护第二份配置。生成可能收费及失败后不自动重试的事实使用既有工具说明和审批详情呈现；结果沿既有工具详情提供真实文件引用或不可用原因，不伪造图片预览、图库或模型已看过图的事实；
@@ -1202,7 +1203,7 @@ About
 - 「返回主界面」与设置分区共用图标列和文字起点，沿用主界面左栏的常规字重与中性悬停底色。当前分区通过常驻底色和 `aria-current` 标识，键盘焦点另有清晰轮廓。菜单选中勾选、状态色和文字共同表达相应状态。
 - 桌面壳注册标准 `primary + ,` 设置快捷键，直接打开正式设置 route；快捷键只负责页面导航，不建立绕过 Account/Bridge gate 的第二命令面。
 
-Account与 Models状态在设置中分别投影：Account按 `checking | signed_out | authorizing | authenticated`显示 identity action，并在authenticated时直接消费Host发布的summary子投影；Models独立按 `needs_authentication | loading | choosing | ready | failed | unavailable`显示provider配置。Account authenticated不能被summary或Models失败伪装成未登录，Account signed_out也不能隐藏Custom Provider。Renderer不从任一公开状态恢复内部operation，也不区分或展示credential persistence子步骤。
+Account与 Models状态在设置中分别投影：Account按 `checking | signed_out | authorizing | authenticated`显示 identity action，并在authenticated时直接消费Host发布的summary子投影；Models独立按 `needs_authentication | loading | ready | failed | unavailable`显示provider配置。Account authenticated不能被summary或Models失败伪装成未登录，Account signed_out也不能隐藏Custom Provider。Renderer不从任一公开状态恢复内部operation，也不区分或展示credential persistence子步骤。
 
 本页只展示 Host 发布的用户模型和相应配置状态；即使官方目录非空、为空或失败，也不在本页显示其模型、同步、登录或恢复提示。共享 Models 配置存储需要恢复时保留明确确认入口；任务模型选择和执行资格仍以 Host 事实为准。
 

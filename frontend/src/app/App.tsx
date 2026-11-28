@@ -288,6 +288,7 @@ import {
 } from "./task-model-selection.ts";
 import { AttachmentRemovalCoordinator } from "./attachment-removal.ts";
 import {
+  customModelsUnavailableNotice,
   metaskAdmission,
   modelSetupNotice,
   supportsCustomProviders,
@@ -2122,6 +2123,12 @@ export default function App() {
             snapshot.capabilities.scheduledTasks ||
             snapshot.capabilities.scheduledTaskRecoveryAvailable,
         });
+  const customModelsNotice =
+    bridgeUnavailable ||
+    !newTaskDraftActive ||
+    setupNotice?.reason === "persistence"
+      ? null
+      : customModelsUnavailableNotice(snapshot.models);
   function rememberModelSetupIntroduction() {
     if (modelSetupHandled) return;
     setModelSetupHandled(true);
@@ -5696,6 +5703,13 @@ export default function App() {
                     ? openModelSetup
                     : undefined
                 }
+              />
+            )}
+            {customModelsNotice && (
+              <ModelSetupNotice
+                notice={customModelsNotice}
+                disabled={bridgeUnavailable || executionBusy}
+                onAction={runModelSetupAction}
               />
             )}
           </>

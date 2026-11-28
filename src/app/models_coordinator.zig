@@ -521,12 +521,13 @@ pub const Coordinator = struct {
         self.management.startCustomProvidersUnavailable();
     }
 
+    /// A request for an account no longer followed is only cancelled:
+    /// waiting for it here would hold the main thread for as long as the
+    /// network does. It keeps the slot until it ends, and `drain` hands
+    /// Models what it brings, which Models discards by its number.
     fn cancelCatalog(self: *Coordinator) void {
         const job = self.catalog_job orelse return;
         job.cancel();
-        job.join();
-        job.deinit();
-        self.catalog_job = null;
     }
 
     fn nowMs(self: *const Coordinator) u64 {
@@ -555,15 +556,13 @@ pub const Coordinator = struct {
     }
 
     /// Resets Product-owned Models state through the snapshot CAS boundary.
-    /// Models then loads the followed account's catalog again by itself;
-    /// acceptance only confirms the durable reset.
+    /// The Metask catalog never stood on models.json, so a request underway
+    /// goes on; acceptance only confirms the durable reset.
     pub fn resetModelsStore(
         self: *Coordinator,
         expected_revision: u64,
     ) models_contract.CommandResult {
         self.assertMainThread();
-        if (self.catalog_job != null)
-            return .rejected(.operation_in_progress);
         const result = self.management.resetModelStore(expected_revision);
         if (result.accepted) self.reconcile();
         return result;
@@ -635,7 +634,7 @@ pub const Coordinator = struct {
                 job.join();
                 const now = self.nowMs();
                 // A job another account superseded was cancelled when that
-                // commit was followed.
+                // commit was followed; Models no longer knows its number.
                 if (job.completion) |*completion| {
                     var completion_port = completion.ownedPort();
                     _ = self.management.completeMetaskCatalogRequest(job.request_id, &completion_port, now);
@@ -687,10 +686,11 @@ fn managementError(error_code: models_contract.ModelsError) models_contract.Mana
     return switch (error_code) {
         .none => unreachable,
         .authorization_unavailable => .authorization_unavailable,
-        .persistence_unavailable, .preference_not_saved => .persistence_unavailable,
+        .persistence_unavailable, .preference_not_saved, .credentials_retained => .persistence_unavailable,
         .operation_in_progress => .operation_in_progress,
         .local_resource_exhausted => .local_resource_exhausted,
         .catalog_unavailable,
+        .account_suspended,
         .catalog_invalid,
         .catalog_too_large,
         .no_models,
@@ -751,7 +751,7 @@ test "a catalog refused for its token is worth a second try, one refused for the
         coordinator.drain();
         // Neither ends the login here; only Account may. Whether and when
         // to try again is Models' to decide from its classification.
-        try std.testing.expectEqual(models_contract.ModelsError.catalog_unavailable, fixture.failed.?.code);
+        try std.testing.expectEqual(@as(models_contract.ModelsError, if (status == 401) .catalog_unavailable else .account_suspended), fixture.failed.?.code);
         try std.testing.expectEqual(status == 401, fixture.failed.?.retryable);
         // Account hears of the refused token, with the generation it was.
         try std.testing.expectEqual(@as(?u64, if (status == 401) 3 else null), fixture.reported);
@@ -877,14 +877,17 @@ test "a catalog request takes a credential only when due, and goes with the acco
     const Fixture = struct {
         due_now: bool = false,
         dropped: bool = false,
+        account: []const u8 = "account-drop",
         taken: usize = 0,
         begun: usize = 0,
+        failed: ?u64 = null,
         cancelled: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
 
         fn take(context: *anyopaque) std.mem.Allocator.Error!?account_contract.OwnedAuthorizationLease {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.taken += 1;
-            return account_contract.OwnedAuthorizationLease.init(std.testing.allocator, "account-drop", "drop-access", 4) catch |err| switch (err) {
+            return account_contract.OwnedAuthorizationLease.init(std.testing.allocator, self.account, "drop-access", 4) catch |err| switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => unreachable,
             };
@@ -901,13 +904,20 @@ test "a catalog request takes a credential only when due, and goes with the acco
             const self: *@This() = @ptrCast(@alignCast(context));
             self.begun += 1;
             self.due_now = false;
-            return .{ .outcome = .{ .started = 1 }, .changed = false };
+            return .{ .outcome = .{ .started = self.begun }, .changed = false };
         }
-        /// Underway until cancelled.
+        fn fail(context: *anyopaque, id: u64, _: models_contract.CatalogFailure, _: u64) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.failed = id;
+            return false;
+        }
+        /// Underway until cancelled, then until let go (at most two seconds).
         fn modelsHttp(context: *anyopaque, request: metask_transport.Request, _: []u8) metask_transport.TransportError!metask_transport.Response {
             const self: *@This() = @ptrCast(@alignCast(context));
             request.control.?.cancellation.wait();
             self.cancelled.store(true, .release);
+            var waited: usize = 0;
+            while (!self.released.load(.acquire) and waited < 2_000) : (waited += 1) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch break;
             return error.Cancelled;
         }
         fn notify(_: *anyopaque) void {}
@@ -918,6 +928,7 @@ test "a catalog request takes a credential only when due, and goes with the acco
     management.follow_metask_principal_fn = Fixture.follow;
     management.metask_catalog_due_fn = Fixture.due;
     management.begin_metask_catalog_request_fn = Fixture.begin;
+    management.fail_metask_catalog_request_fn = Fixture.fail;
     var coordinator = Coordinator.init(.{ .context = &fixture, .take_fn = Fixture.take }, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
     coordinator.setProbeNotifier(.{ .context = &fixture, .notify_fn = Fixture.notify });
     const available: account_contract.Authorization = .{ .available = .{ .account_id = "account-drop", .generation = 4 } };
@@ -934,13 +945,34 @@ test "a catalog request takes a credential only when due, and goes with the acco
     coordinator.follow(available);
     try std.testing.expect(coordinator.catalog_job != null);
     try std.testing.expect(!fixture.cancelled.load(.acquire));
-    // One that drops it cancels, joins and frees the request, its
-    // credential copy included.
+    // One that drops it cancels the request and returns without waiting
+    // for it.
     fixture.dropped = true;
     coordinator.follow(.signed_out);
-    try std.testing.expect(coordinator.catalog_job == null);
+    try std.testing.expect(coordinator.catalog_job != null);
+    try std.testing.expect(!coordinator.catalog_job.?.finished.load(.acquire));
+    // The next account's due request waits while the old one holds the slot.
+    fixture.dropped = false;
+    fixture.account = "account-next";
+    fixture.due_now = true;
+    coordinator.follow(.{ .available = .{ .account_id = "account-next", .generation = 5 } });
+    try std.testing.expectEqual(@as(usize, 1), fixture.begun);
+    // Once it ends, Models hears its number and frees it, its credential
+    // copy included; the due request then goes with the next account.
+    fixture.released.store(true, .release);
+    while (!coordinator.catalog_job.?.finished.load(.acquire)) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     try std.testing.expect(fixture.cancelled.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 1), fixture.taken);
+    coordinator.drain();
+    try std.testing.expectEqual(@as(?u64, 1), fixture.failed);
+    try std.testing.expectEqual(@as(u64, 2), coordinator.catalog_job.?.request_id);
+    try std.testing.expectEqualStrings("account-next", coordinator.catalog_job.?.lease.principal_ref);
+    // That one goes the same way, and leaves the slot empty.
+    fixture.dropped = true;
+    coordinator.follow(.signed_out);
+    while (!coordinator.catalog_job.?.finished.load(.acquire)) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    coordinator.drain();
+    try std.testing.expect(coordinator.catalog_job == null);
+    try std.testing.expectEqual(@as(usize, 2), fixture.taken);
 }
 
 test "a media request refused for its token tells Account the generation it sends" {

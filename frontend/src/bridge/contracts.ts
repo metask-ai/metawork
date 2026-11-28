@@ -51,12 +51,7 @@ export { approvalFailureReasons };
 export type AccountState =
   "checking" | "signed_out" | "authorizing" | "authenticated";
 export type ModelsCatalogState =
-  | "needs_authentication"
-  | "loading"
-  | "choosing"
-  | "ready"
-  | "failed"
-  | "unavailable";
+  "needs_authentication" | "loading" | "ready" | "failed" | "unavailable";
 export type NewTaskAdmissionReason =
   "none" | "shutting_down" | "workspace_unavailable";
 export type NewTaskMetaskAdmission = "none" | "recovering" | "unreachable";
@@ -266,11 +261,13 @@ export type ModelsErrorCode =
   | "authorization_unavailable"
   | "persistence_unavailable"
   | "catalog_unavailable"
+  | "account_suspended"
   | "catalog_invalid"
   | "catalog_too_large"
   | "no_models"
   | "operation_in_progress"
-  | "local_resource_exhausted";
+  | "local_resource_exhausted"
+  | "credentials_retained";
 export type CatalogModelView = {
   id: string;
   displayName: string;
@@ -2403,7 +2400,7 @@ export type TaskModelSelectionReason =
   | "persistence_failed"
   | "persistence_outcome_unknown"
   | "model_changed"
-  | "stale_catalog"
+  | "model_selection_changed"
   | "task_unavailable"
   | "task_busy"
   | "shutting_down"

@@ -121,12 +121,10 @@ export function readyModelOptions(
   models: ModelsView,
   sourceId: string | null,
 ): NewTaskModelOption[] {
-  if (
-    models.availability !== "ready" ||
-    models.persistenceHealth !== "ready" ||
-    sourceId === null
-  )
-    return [];
+  if (sourceId === null) return [];
+  // Only a Custom Provider stands on the Models store; Metask answers by its
+  // own catalog alone.
+  if (sourceId !== "metask" && models.persistenceHealth !== "ready") return [];
   const authority = resolveAuthority(models, sourceId);
   if (!authority) return [];
   const labelCounts = new Map<string, number>();

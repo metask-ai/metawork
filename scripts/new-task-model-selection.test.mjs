@@ -540,6 +540,16 @@ test("all-source discovery keeps Provider authority and per-model readiness chec
       { sourceId: "other", modelId: "ready" },
     ],
   );
+  // Only Custom Providers stand on the Models store.
   models.availability = "unavailable";
-  assert.deepEqual(newTaskModelSelectionState(models, null).options, []);
+  models.persistenceHealth = "recovery_required";
+  assert.deepEqual(
+    newTaskModelSelectionState(models, null).options.map(
+      (option) => option.modelRef,
+    ),
+    [
+      { sourceId: "metask", modelId: "model-1" },
+      { sourceId: "metask", modelId: "model-2" },
+    ],
+  );
 });

@@ -2163,7 +2163,7 @@ test "new Task model selection uses the full custom connection with or without a
     const epoch = try workbench.workspaceEpoch(workspace_id);
     for ([_]bool{ true, false }) |has_default| {
         if (!has_default) {
-            try std.testing.expect(workbench.clearCustomProviderDefault().accepted);
+            try product_control.TestSupport.clearStoredModelPreference(&workbench);
             try std.testing.expect(workbench.modelsView().default_selection == null);
             try std.testing.expect(workbench.newTaskAdmissionView().available);
         }
@@ -2389,7 +2389,7 @@ test "Task source settings stay pinned until an explicit same-model selection in
         }
         const changed = workbench.modelsView().custom_providers[0];
         try std.testing.expect(changed.source_generation != installed_source_generation);
-        try std.testing.expectError(error.StaleCatalog, workbench.selectTaskModel(task_id, .{
+        try std.testing.expectError(error.ModelSelectionChanged, workbench.selectTaskModel(task_id, .{
             .expected_selection_revision = old_revision,
             .target = initial.model,
             .expected_source_generation = changed.source_generation,
@@ -3224,7 +3224,7 @@ test "detached Task restores its committed target across restart without a globa
         try restored.startCustomProviders(home, vault.port());
         defer restored.stopCustomProviders();
         _ = try configureTaskRebindTarget(&restored);
-        try std.testing.expect(restored.clearCustomProviderDefault().accepted);
+        try product_control.TestSupport.clearStoredModelPreference(&restored);
         try std.testing.expect(restored.modelsView().default_selection == null);
         try std.testing.expect(restored.newTaskAdmissionView().available);
         try std.testing.expectEqual(workspace_id, try restored.openWorkspace(input));

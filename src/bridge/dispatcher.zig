@@ -6516,9 +6516,8 @@ fn taskModelSelectionRejection(err: anyerror) ?[]const u8 {
         error.TaskPersistenceUnavailable => "persistence_unavailable",
         error.TaskPersistenceFailed => "persistence_failed",
         error.TaskPersistenceOutcomeUnknown => "persistence_outcome_unknown",
-        error.InvalidTaskModel => "stale_catalog",
+        error.InvalidTaskModel, error.ModelSelectionChanged => "model_selection_changed",
         error.TaskModelMismatch => "model_changed",
-        error.StaleCatalog => "stale_catalog",
         error.UnknownTask, error.TaskClosing => "task_unavailable",
         error.TaskBusy, error.SessionNotIdle => "task_busy",
         error.ExecutorShuttingDown => "shutting_down",
@@ -7987,6 +7986,8 @@ test "Task model selection result acknowledges intent revision and preserves typ
         "{\"accepted\":false,\"taskId\":\"3\",\"selectionRevision\":null,\"reason\":\"persistence_outcome_unknown\"}",
         try encodeTaskModelSelectionResult(&output, false, 3, null, taskModelSelectionRejection(error.TaskPersistenceOutcomeUnknown)),
     );
+    // A choice the model list no longer offers reads as a changed list.
+    for ([_]anyerror{ error.ModelSelectionChanged, error.InvalidTaskModel }) |err| try std.testing.expectEqualStrings("model_selection_changed", taskModelSelectionRejection(err).?);
     try std.testing.expectError(error.InvalidTaskModelSelectionResult, encodeTaskModelSelectionResult(&output, true, 0, 7, null));
     try std.testing.expectError(error.InvalidTaskModelSelectionResult, encodeTaskModelSelectionResult(&output, true, 3, 0, null));
     try std.testing.expectError(error.InvalidTaskModelSelectionResult, encodeTaskModelSelectionResult(&output, false, 3, 7, "persistence_failed"));

@@ -3583,14 +3583,6 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn clearCustomProviderDefault(self: *Runtime) models_contract.CommandResult {
-        const result = self.custom_providers.clearDefault();
-        if (result.accepted) {
-            self.finishModelsCommitNoFail();
-        }
-        return result;
-    }
-
     pub fn nextExecutionGeneration(self: *Runtime, current: u64) !u64 {
         return self.execution_generations.next(current);
     }
@@ -3709,7 +3701,11 @@ pub const Runtime = struct {
             return error.InvalidAutomationExecution;
         const ready = view.custom_providers[0];
         if (ready.source_generation == 0 or !self.canCreateTask() or
-            self.custom_providers.sourceModelProtocol(.{ .source_id = provider_id, .model_id = input.model }, ready.source_generation, ready.catalog_generation) == null) return error.InvalidAutomationExecution;
+            self.exactSelection(.{
+                .target = .{ .source_id = provider_id, .model_id = input.model },
+                .expected_source_generation = ready.source_generation,
+                .expected_catalog_generation = ready.catalog_generation,
+            }) == null) return error.InvalidAutomationExecution;
     }
 
     /// Registers or reauthorizes a manually selected Workspace.
@@ -5390,12 +5386,12 @@ pub const Runtime = struct {
             self.containsKnownCredential(input.target.source_id) or
             self.containsKnownCredential(input.target.model_id))
             return error.InvalidTaskModel;
-        if (!self.newTaskModelSelectionAuthorized(.{
+        if (self.exactSelection(.{
             .target = input.target,
             .expected_source_generation = input.expected_source_generation,
             .expected_catalog_generation = input.expected_catalog_generation,
-        }))
-            return error.StaleCatalog;
+        }) == null)
+            return error.ModelSelectionChanged;
         if (self.approvalHistoryBlocked()) return error.TaskBusy;
         const revision = try self.task_runtime.prepareModelIntent(task_id, input.expected_selection_revision, input.target);
         var rollback = true;
@@ -8258,7 +8254,10 @@ pub const Runtime = struct {
         const facts = self.task_runtime.modelFacts(task_id) orelse return .{ .blocked = .unknown_task };
         const credential_generation = if (usesMetask(facts)) self.admittedMetaskGeneration(use) orelse
             return self.task_runtime.bindingPlan(task_id, .{ .authorized = false }) else 0;
-        const target = if (facts.intent) |intent| self.custom_providers.currentTarget(intent.target) else null;
+        const target = if (facts.intent) |intent| switch (self.custom_providers.lookup(intent.target, .current)) {
+            .present => |found| found.target,
+            .source_changed, .not_ready, .missing => null,
+        } else null;
         return self.task_runtime.bindingPlan(task_id, .{
             .credential_generation = credential_generation,
             .target = target,
@@ -8274,7 +8273,10 @@ pub const Runtime = struct {
     fn installedModelAvailable(self: *Runtime, facts: task_runtime.Runtime.ModelFacts) bool {
         const installed = facts.installed orelse return false;
         const target = installed.target orelse return false;
-        return self.custom_providers.installedModelAvailable(target, installed.source_generation, installed.protocol);
+        return switch (self.custom_providers.lookup(target, .{ .bound = installed.source_generation })) {
+            .present => |found| found.target.protocol == installed.protocol,
+            .source_changed, .not_ready, .missing => false,
+        };
     }
 
     fn taskModelIntentAuthority(self: *Runtime, task_id: u64) ?task_runtime.ModelIntentAuthority {
@@ -8285,12 +8287,15 @@ pub const Runtime = struct {
         if (std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id)) {
             self.validateTaskMetaskAuthorization(task_id) catch return null;
         }
-        const generations = self.custom_providers.sourceGenerations(intent.target.source_id) orelse return null;
+        const found = switch (self.custom_providers.lookup(intent.target, .current)) {
+            .present => |value| value,
+            .source_changed, .not_ready, .missing => return null,
+        };
         return .{
             .source_id = intent.target.source_id,
             .selection_revision = intent.revision,
-            .source_generation = generations.source,
-            .catalog_generation = generations.catalog,
+            .source_generation = found.target.source_generation,
+            .catalog_generation = found.catalog_generation,
         };
     }
 
@@ -8434,21 +8439,16 @@ pub const Runtime = struct {
         return !self.shutting_down and self.skill.identitySourceTrusted();
     }
 
-    fn newTaskModelSelectionAuthorized(
-        self: *Runtime,
-        selection: NewTaskModelSelectionInput,
-    ) bool {
-        if (!selection.target.valid()) return false;
-        return self.custom_providers.sourceModelProtocol(
-            selection.target,
-            selection.expected_source_generation,
-            selection.expected_catalog_generation,
-        ) != null;
+    /// A submitted choice exactly as Models has it now; the generations are
+    /// Models' to judge, the shape of the request is Control's.
+    fn exactSelection(self: *Runtime, selection: NewTaskModelSelectionInput) ?models_aggregate.Present {
+        if (!selection.target.valid()) return null;
+        return self.custom_providers.exact(selection.target, selection.expected_source_generation, selection.expected_catalog_generation);
     }
 
     fn validateNewTaskModelAdmission(self: *Runtime, selection: NewTaskModelSelectionInput) Error!void {
         if (!self.canCreateTask()) return error.ExecutionUnavailable;
-        if (!self.newTaskModelSelectionAuthorized(selection)) return error.ModelSelectionChanged;
+        if (self.exactSelection(selection) == null) return error.ModelSelectionChanged;
         if (!std.mem.eql(u8, selection.target.source_id, models_contract.metask_source_id)) return;
         // One Account sample answers as the projection that offered it did.
         const use = self.metaskUse();
@@ -8497,16 +8497,16 @@ pub const Runtime = struct {
             // yet; a renewal leaves the catalog as it is.
             _ = self.admittedMetaskGeneration(use) orelse return .wait;
         }
-        return switch (self.custom_providers.boundModel(binding.model_ref, binding.source_generation)) {
-            .unavailable => .wait,
+        return switch (self.custom_providers.lookup(binding.model_ref, .{ .bound = binding.source_generation })) {
+            .not_ready => .wait,
             // A Metask source is one account: another account's catalog is
             // current. A Custom Provider's new key or endpoint never returns.
             .source_changed => if (metask) .{ .hold = .other_account } else .stop,
             .missing => .skip,
-            .present => |model| if (model.protocol != binding.protocol)
+            .present => |found| if (found.target.protocol != binding.protocol)
                 .skip
             else
-                .{ .run = model.catalog_generation },
+                .{ .run = found.catalog_generation },
         };
     }
 
@@ -8668,10 +8668,9 @@ pub const Runtime = struct {
         id: ?u64,
     ) Error!product_schedule.Definition {
         const binding: ScheduledTaskBindingInput = if (input.model_selection) |selection| selected: {
-            if (!self.newTaskModelSelectionAuthorized(selection)) return error.ModelSelectionChanged;
-            const protocol = self.custom_providers.sourceModelProtocol(selection.target, selection.expected_source_generation, selection.expected_catalog_generation) orelse return error.ExecutionUnavailable;
+            const found = self.exactSelection(selection) orelse return error.ModelSelectionChanged;
             try self.checkMetaskAuthorization(selection.target.source_id);
-            break :selected .{ .model_ref = selection.target, .source_generation = selection.expected_source_generation, .protocol = protocol };
+            break :selected .{ .model_ref = selection.target, .source_generation = selection.expected_source_generation, .protocol = found.target.protocol };
         } else retained orelse return error.InvalidScheduledTaskInput;
         const title = try product_schedule.Definition.normalizedTitle(input.title, self.limits.max_task_title_bytes);
         if (!self.workspace.automaticRootAvailable()) return error.WorkspaceUnavailable;
@@ -9285,11 +9284,14 @@ pub const Runtime = struct {
         const model_intent_exact = if (query.model_intent) |authority| exact: {
             const facts = self.task_runtime.modelFacts(query.task_id) orelse break :exact false;
             const intent = facts.intent orelse break :exact false;
-            const current = self.taskModelIntentAuthority(query.task_id) orelse break :exact false;
+            // Metask use requires a current Account authorization; `exact`
+            // answers for the generations.
+            if (std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id))
+                self.validateTaskMetaskAuthorization(query.task_id) catch break :exact false;
             if (facts.intent_pending or intent.revision != authority.selection_revision or !std.mem.eql(u8, intent.target.source_id, authority.source_id) or
-                !std.mem.eql(u8, intent.target.model_id, query.task_model) or current.source_generation != authority.source_generation or
-                current.catalog_generation != authority.catalog_generation) break :exact false;
-            break :exact self.custom_providers.sourceModelProtocol(intent.target, authority.source_generation, authority.catalog_generation) == query.protocol and
+                !std.mem.eql(u8, intent.target.model_id, query.task_model)) break :exact false;
+            const found = self.custom_providers.exact(intent.target, authority.source_generation, authority.catalog_generation) orelse break :exact false;
+            break :exact found.target.protocol == query.protocol and
                 self.task_runtime.modelRestoreCapabilitiesExact(query.task_id, self.modelRestoreEffects());
         } else if (query.original_restore) self.task_runtime.modelRestoreCapabilitiesExact(query.task_id, self.modelRestoreEffects()) else false;
         return .{
@@ -10982,6 +10984,10 @@ pub const TestSupport = if (builtin.is_test) struct {
     pub fn clearModelPreference(control: *Runtime) void {
         models_aggregate.TestSupport.clearFixturePreference(&control.custom_providers);
     }
+    pub fn clearStoredModelPreference(control: *Runtime) !void {
+        try models_aggregate.TestSupport.clearStoredPreference(&control.custom_providers);
+        control.finishModelsCommitNoFail();
+    }
     pub fn captureHistoryFixture(control: *Runtime) !task_persistence.OwnedCandidate {
         return control.captureTaskHistoryCandidate(null);
     }
@@ -11231,7 +11237,7 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn scheduledBinding(control: *Runtime) ScheduledTaskBindingInput {
         const selection = fixtureModelSelection(control) catch unreachable;
-        return .{ .model_ref = selection.target, .source_generation = selection.expected_source_generation, .protocol = control.custom_providers.sourceModelProtocol(selection.target, selection.expected_source_generation, selection.expected_catalog_generation).? };
+        return .{ .model_ref = selection.target, .source_generation = selection.expected_source_generation, .protocol = control.custom_providers.exact(selection.target, selection.expected_source_generation, selection.expected_catalog_generation).?.target.protocol };
     }
 
     pub fn replaceMetaskCatalog(
@@ -15452,6 +15458,33 @@ test "resetting the Models store stops the plans on the Custom Providers it remo
     try std.testing.expect(fixture.control.resetModelsStore(fixture.control.currentRevision()).accepted);
     try std.testing.expectEqual(product_schedule.Health.needs_attention, fixture.stored(custom).health);
     try std.testing.expectEqual(product_schedule.Health.ready, fixture.stored(metask).health);
+    // The key Models knew is cleaned; the unreadable file may have named
+    // others, which is said rather than assumed away.
+    try std.testing.expect(!fixture.vault.present);
+    try std.testing.expectEqual(models_contract.ModelsError.credentials_retained, fixture.control.modelsView().error_code);
+}
+
+test "a Custom plan waits, unspent, while another version's models.json is in place" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const selection = try createReadyTestCustomProvider(&fixture.control);
+    try std.testing.expect(fixture.control.custom_providers.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }).accepted);
+    const id = try fixture.schedule();
+    const original = try fixture.models_tmp.dir.readFileAlloc(std.testing.io, "models.json", std.testing.allocator, .limited(64 * 1024));
+    defer std.testing.allocator.free(original);
+    // A newer version wrote models.json: this one lists no provider at all.
+    try fixture.models_tmp.dir.writeFile(std.testing.io, .{ .sub_path = "models.json", .data = "{\"schema\":4}" });
+    try fixture.restartModels();
+    fixture.clock.now = 2_000;
+    fixture.control.onScheduledTaskTimer();
+    const waiting = fixture.stored(id);
+    try std.testing.expect(waiting.enabled and waiting.health == .ready);
+    try std.testing.expect(waiting.last_occurrence == null);
+    // Back on the version that wrote it, everything is there again.
+    try fixture.models_tmp.dir.writeFile(std.testing.io, .{ .sub_path = "models.json", .data = original });
+    try fixture.restartModels();
+    try std.testing.expect(fixture.control.scheduleAdmission(null, fixture.stored(id).binding) == .run);
 }
 
 test "a due Metask schedule reads the Account once and waits while it is confirmed" {
@@ -16911,7 +16944,7 @@ test "busy Task model selection commits the last intent without changing install
     );
     cross_source.target.source_id = "provider-1";
     try std.testing.expectError(
-        error.StaleCatalog,
+        error.ModelSelectionChanged,
         control.selectTaskModel(task.durable.id, cross_source),
     );
     _ = try control.selectTaskModel(
@@ -17037,6 +17070,11 @@ test "Product Control publishes Task model selection availability from cross-own
         .expected_source_generation = provider.source_generation,
         .expected_catalog_generation = provider.catalog_generation,
     });
+    // Its Custom Provider stands on models.json; while that cannot be
+    // trusted the menu waits, and Metask is not this intent's source.
+    control.custom_providers.store_healthy = false;
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.catalog_unavailable, control.taskModelSelectionAvailability(query));
+    control.custom_providers.store_healthy = true;
     try std.testing.expect(control.submitCustomProviderCommand(.{ .update = .{
         .selection = .{ .source_id = custom.source_id, .expected_provider_revision = provider.provider_revision },
         .spec = .{
@@ -17053,8 +17091,10 @@ test "Product Control publishes Task model selection availability from cross-own
         .expected_provider_revision = configuring.provider_revision,
     } }).accepted);
     try std.testing.expectEqual(product_task.ModelSelectionAvailability.available, control.taskModelSelectionAvailability(query));
+    // The removed source scopes nothing, so the menu is every source's, and
+    // Metask has no say from models.json.
     control.custom_providers.store_healthy = false;
-    try std.testing.expectEqual(product_task.ModelSelectionAvailability.catalog_unavailable, control.taskModelSelectionAvailability(query));
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.available, control.taskModelSelectionAvailability(query));
     control.custom_providers.store_healthy = true;
     task.durable.archived = true;
     try std.testing.expectEqual(product_task.ModelSelectionAvailability.task_unavailable, control.taskModelSelectionAvailability(query));
@@ -17175,7 +17215,10 @@ test "Task model installed intent does not borrow a catalog refresh as new execu
     _ = control.followMetaskPrincipal("account-1", 17);
     const load = control.beginMetaskCatalogRequest(.due, .{ .ready = .{ .principal_ref = "account-1", .generation = 17 } }, 0).outcome.started;
     _ = control.failMetaskCatalogRequest(load, .{ .code = .catalog_unavailable, .retryable = false }, 0);
-    try std.testing.expectEqualDeep(Runtime.PreparedBinding{ .plan = .keep }, try control.prepareTaskBinding(3));
+    // Without its account's catalog Models vouches for no Metask binding,
+    // installed or not: it is not left to Control's Account gate to hold.
+    try std.testing.expectEqualDeep(task_runtime.Runtime.BindingPlan{ .blocked = .model_unavailable }, control.taskBindingPlan(3, control.metaskUse()));
+    try std.testing.expectError(error.ExecutionUnavailable, control.prepareTaskBinding(3));
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     // An uninstalled/newly selected revision still needs exact current source
     // authority; a matching model name alone cannot establish that proof.

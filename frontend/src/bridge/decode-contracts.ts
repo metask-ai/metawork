@@ -296,7 +296,6 @@ const accountUsageEligibilities = ["unknown", "disabled", "enabled"] as const;
 const modelsCatalogStates = [
   "needs_authentication",
   "loading",
-  "choosing",
   "ready",
   "failed",
   "unavailable",
@@ -333,12 +332,19 @@ const modelsErrorCodes = [
   "authorization_unavailable",
   "persistence_unavailable",
   "catalog_unavailable",
+  "account_suspended",
   "catalog_invalid",
   "catalog_too_large",
   "no_models",
   "operation_in_progress",
   "local_resource_exhausted",
+  "credentials_retained",
 ] as const;
+// An unsaved preference and keys a reset left behind are the whole store's,
+// published only at the top.
+const providerErrorCodes = modelsErrorCodes.filter(
+  (code) => code !== "preference_not_saved" && code !== "credentials_retained",
+);
 const executionCommandErrorCodes = [
   "none",
   "operation_in_progress",
@@ -486,7 +492,7 @@ const taskModelSelectionReasons = [
   "persistence_failed",
   "persistence_outcome_unknown",
   "model_changed",
-  "stale_catalog",
+  "model_selection_changed",
   "task_unavailable",
   "task_busy",
   "shutting_down",
@@ -1839,7 +1845,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
         errorCode: enumValue(
           provider.errorCode,
           `${itemPath}.errorCode`,
-          modelsErrorCodes.filter((code) => code !== "preference_not_saved"),
+          providerErrorCodes,
         ),
         safeDiagnostic: stringValue(
           provider.safeDiagnostic,

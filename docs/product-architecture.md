@@ -7,7 +7,7 @@
 Product 由两个 named owner 组成，跨 owner 用例由对应的 Application coordinator 编排：
 
 - Account 只拥有 Metask OAuth identity、access/refresh credential、authorization generation 及其内部事务与恢复；
-- Product Control 拥有 Models aggregate、执行 generation 分配、Task-owned binding、实际 credential 的 Schedule scrub、Workspace、Task、Skill、MCP、共享 Executor、跨 aggregate admission、canonical projection、revision、历史与关闭顺序；Models 拥有模型来源（内置 Metask 来源的身份与目录、用户的 Custom Provider 及其 Key）、起始偏好，以及把明确目标解析成候选；目录何时更新、失败怎样重试、什么变化让人看见，是 Models 的 policy。Metask 凭据归 Account，Models 只在解析时经端口取当次凭据，不保存。Models 不持有进程级 active default execution。
+- Product Control 拥有 Models aggregate、执行 generation 分配、Task-owned binding、实际 credential 的 Schedule scrub、Workspace、Task、Skill、MCP、共享 Executor、跨 aggregate admission、canonical projection、revision、历史与关闭顺序；Models 拥有模型来源（内置 Metask 来源的身份与目录、用户的 Custom Provider 及其 Key）、起始偏好，以及把明确目标解析成候选，以及每个模型的声明（协议与端点、接收哪些输入、上下文与输出上限、生图与生视频用途）及其含义：声明支持、声明不支持、或不知道，Metask 只有明确为 true 才算支持；目录何时更新、失败怎样重试、什么变化让人看见，是 Models 的 policy。Metask 凭据归 Account，Models 只在解析时经端口取当次凭据，不保存。Models 不持有进程级 active default execution。
 
 Agent 位于 Product 之外，拥有 MetaWork 对 AgentCore Runtime、Session、Conversation、callback、event pump 与 terminal execution fact 的集成生命周期。Product Control 只调用 Agent 的公共执行能力，不管理 Agent Runtime 生命周期、不读取其内部状态，也不借 Agent 获取通用 I/O。Application 创建和关闭 Agent、安排主线程 wake，并协调 Account 与 Product Control；它不持有领域运行状态，也不独立决定这些 owner 的 policy。
 
@@ -70,11 +70,11 @@ Metask catalog completion 只交付 owned 目录，不选择模型。Models 独�
 
 Metask 的输入能力仅来自 `capabilities.input.{text,image,pdf,audio,video}.supported`，输出能力仅来自 `capabilities.output.{text,image,audio,video,embedding}.supported`；只有 boolean true 表示支持，缺失、null、false 均投影为不支持，非法已知字段类型使整个目录响应无效。旧 `*_input/*_output`、`input.document` 与端点内部 input/output 不解析、不回退；PDF 支持只由 `input.pdf.supported` 声明，格式列表不能授予能力。Models 有界持有全部已知声明并随目录复制和替换，下游 metadata 保存这些事实；图片输入声明随已解析执行配置冻结并交给 Agent，Session 创建、恢复与模型切换的消费合同见 [AgentCore 集成契约](agentcore-integration.md)。声明不增加第二套模型用途 gate，也不自动开放 MetaWork 尚未实现的附件或输出功能。
 
-Metask 当前只消费模型根级 `max_input_tokens` 与 `max_tokens`，分别保存为 metadata 的输入与输出 token 上限；暂不解析或应用 `capabilities.limits`，也不从其中回退、补齐或推断根级字段。Token 值只接纳十进制非负 JSON integer，零、缺失、null 表示未知；负数、字符串、浮点、指数或 u64 溢出使整个目录无效。所有已知字段校验在模型筛选之前完成。其他限制的字段校对与消费另行确定。Custom Provider 的声明仍允许 null 表示未知，已有持久数据省略新增能力字段时保持其原有声明；本地配置中的已退役 `metadata.limits` 只在读取时丢弃，不能覆盖 token 或能力，后续写出不再包含它，其他未知持久字段仍拒绝。
+Metask 当前只消费模型根级 `max_input_tokens` 与 `max_tokens`，分别保存为 metadata 的输入与输出 token 上限；暂不解析或应用 `capabilities.limits`，也不从其中回退、补齐或推断根级字段。Token 值只接纳十进制非负 JSON integer，零、缺失、null 表示未知；负数、字符串、浮点、指数或 u64 溢出使整个目录无效。所有已知字段校验在模型筛选之前完成。其他限制的字段校对与消费另行确定。Custom Provider 的声明仍允许 null 表示未知，已有持久数据省略新增能力字段时保持其原有声明；`models.json` 写出时省略声明里的 null，读时缺省即 null，这是当前格式的写法规则，各版本都能读；本地配置中的已退役 `metadata.limits` 只在读取时丢弃，不能覆盖 token 或能力，后续写出不再包含它，其他未知持久字段仍拒绝。
 
 Models 的目录失败只改变 Models 自己的状态：不调用 Account abort、不改变登录状态，也不补写 Account error；catalog worker 不拥有 committed state，陈旧 completion 只能销毁。
 
-授权丢失时 Application cancel/join 在途的目录请求并销毁其凭据；Models 清除可解析目录并发布 needs_authentication，保留无 secret 起始偏好。目录内容归账号；换账号前必经退出，清空就是换号的全部处理。只关闭 Metask 新解析与执行资格，custom 来源及既有 owned binding 不被全局暂停；再次登录后既有 Task 按下文规则采用当前授权。
+授权丢失时 Application 只取消在途的目录请求，不在主线程等它；请求结束时销毁其凭据，结果交给 Models 按请求号丢弃，结束前不发下一次请求；Models 清除可解析目录并发布 needs_authentication，保留无 secret 起始偏好。目录内容归账号；换账号前必经退出，清空就是换号的全部处理。只关闭 Metask 新解析与执行资格，custom 来源及既有 owned binding 不被全局暂停；再次登录后既有 Task 按下文规则采用当前授权。
 
 Task 与 Schedule 的显式模型目标通过 Models 精确解析；起始偏好独立保存，不产生 execution authority：
 
@@ -109,7 +109,7 @@ Task 不与登录或账号绑定。新登录（相同或不同 principal）与�
 
 Models 在前台每 5 分钟更新一次目录，回到前台时距上次请求结束满 5 分钟立即更新，后台不更新；没有目录且加载失败时，Account 换代后再试一次，这次不可见，成功才可用。有目录时更新的进行、失败与内容不变都不发布；用户自己发起的刷新只在进行中亮起操作状态。时机、间隔、重试与可见性都是 Models 的 policy，Application 只执行定时器与请求，并把前台切换与 Account 的授权发布转给 Models。
 
-Account identity/token rotation与 Models registry是独立 durable authority；任一方的提交、恢复或 outcome unknown 不得由另一方解释或回滚。Account 只回答当前授权——可用（带代次）、等一次结果或必须登录——并提供当次凭据；Models 只回答某个来源现在能否解析出目标（有没有目录、模型在不在、什么协议）；Product Control 把两者合成具体 Task、定时任务与新建的准入。
+Account identity/token rotation与 Models registry是独立 durable authority；任一方的提交、恢复或 outcome unknown 不得由另一方解释或回滚。Account 只回答当前授权——可用（带代次）、等一次结果或必须登录——并提供当次凭据；Models 只回答某个来源现在能否解析出目标（来源在不在、能不能答、模型在不在、什么协议）和它声明了什么：查询只有 `lookup` 一个入口（按来源的当前身份，或绑定时的身份），精确判定只有 `exact` 一个入口（来源与目录代次都须相同）；Product Control 把两者合成具体 Task、定时任务与新建的准入。
 
 Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取消 Host 中的 deadline、mutation 或 terminal completion。Renderer Account command 只涉及登录、取消和退出；Models command 使用 source-qualified identifier 与对应 expected revision。除用户显式提交 Custom Provider create/replace 或 MCP captureSecret 时一次性转交手动凭据外，Renderer 不参与 prepare、commit、authorization lease 或 credential transfer；该表单值不属于可恢复 UI 状态。
 
@@ -119,9 +119,9 @@ Canonical snapshot 保持 owner 边界：Account 发布身份与授权事实，M
 
 Models 每次 resolve 只产生精确 `ModelRef + source_generation + protocol` 的调用方 owned candidate。Product Control 在 Task 创建、恢复/rebind 安装、凭据续期及释放边界执行产品文本与 Schedule durable scrub；完成必要持久提交后才安装、转移或 secure-zero 对应 credential。失败保留所需 owner 与诊断，不建立 default desired/active mismatch。
 
-`models.json` 是 Models aggregate 的唯一 canonical store；当前 schema 3 保存 Metask 无 secret 来源 authority（principal 与 source generation）、source-qualified 起始偏好及其 revision、Metask 起始偏好的可选 `default_selection.display_name`、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone。旧版写入的随机 Metask source generation 在启动或重置 Models 时改写为派生值：先改 Schedule 中等于它的绑定，未写成则两边都保持原值；再写本文件，未写成则文件留着原值；下次启动或重置时重做。它不保存 Provider-local 模型选择、OAuth token、API credential、credential locator 或 Product binding generation；Custom Provider credential 只进入系统安全存储。Metask source id 固定为 `metask`。确认交互选择时，Models 从当时的有效 Metask 目录保存非空显示名。Metask 偏好缺少显示名时，新任务要求用户明确重选。读取偏好和目录刷新均不改写已保存偏好。生图不形成用户选择、独立 revision 或持久化 intent。
+`models.json` 是 Models aggregate 的唯一 canonical store；当前 schema 3 保存 Metask 来源身份的无 secret 记录（principal 与 source generation；身份以 Models 内存为准：装入哪个账号的目录，来源就是那个账号、代次由 principal 派生；记录写不进时只是欠着，每次目录请求成功落地后补写，从不影响 Metask 的回答）、source-qualified 起始偏好及其 revision、Metask 起始偏好的可选 `default_selection.display_name`、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone。旧版写入的随机 Metask source generation 以本文件的记录为准（不看内存里跟随的是哪个账号），在启动或重置 Models 时改写为派生值：先改 Schedule 中等于它的绑定，未写成则两边都保持原值；再写本文件，未写成则文件留着原值；下次启动或重置时重做。改写完成前，记录里的旧值只由这次改写来改：换号后目录落地也不覆盖它，内存里账号的记录先欠着，改写成功时一并写入。它不保存 Provider-local 模型选择、OAuth token、API credential、credential locator 或 Product binding generation；Custom Provider credential 只进入系统安全存储。Metask source id 固定为 `metask`。确认交互选择时，Models 从当时的有效 Metask 目录保存非空显示名。Metask 偏好缺少显示名时，新任务要求用户明确重选。读取偏好和目录刷新均不改写已保存偏好。生图不形成用户选择、独立 revision 或持久化 intent。
 
-Models 退役格式硬切前只提取可验证的 Custom Provider id 和已有待删除 id，合并去重后持久写入当前空 registry 的 credential deletion 队列；canonical 提交确认后才删除系统凭据，删除失败保留 tombstone 并跨重启重试。该过程不恢复旧 Provider、模型、偏好或执行 authority；无法完整保全清理义务时保留原文件并报告恢复失败。
+Models 退役格式硬切前只提取可验证的 Custom Provider id 和已有待删除 id，合并去重后持久写入当前空 registry 的 credential deletion 队列；canonical 提交确认后才删除系统凭据，删除失败保留 tombstone 并跨重启重试。该过程不恢复旧 Provider、模型、偏好或执行 authority；无法完整保全清理义务时保留原文件并报告恢复失败。用户显式重置当前或未知 schema 解不开的文件时：先原样另存（读得了的复制，超出字节上限的不读、直接改名），删除队列为内存里的 Provider id 与 tombstone 加上原文件里能读出且是合法凭据槽的 id；读不全照常重置，并以 `credentials_retained` 说明可能仍有凭据未清理；空文件按缺失处理。
 
 
 生图与生视频的默认模型和正式服务 target 由 [Models 值合同](../src/product/models/contract.zig)拥有。每次 Run preparation 优先采用当前目录中具备对应资格的默认模型，缺失或不合格时按已发布目录的顺序采用第一个具备对应资格的成员。没有合格成员时返回不可用。模型解析仅在请求发送前发生。
@@ -130,7 +130,7 @@ Models 退役格式硬切前只提取可验证的 Custom Provider id 和已有�
 
 Bootstrap 只严格读取当前 canonical 格式。退休 schema 1/2 先保留 exact bytes quarantine，再以原子提交安装空的当前 store 并继续，不迁移、不双读、不重放旧记录。quarantine 或安装失败必须发布真实 persistence health，旧 bytes 不丢失；quarantine 不进入任何 active decoder。canonical 缺失时初始化空 store；`preferences.json` 与 `custom-providers.json` 不参与读取、恢复或 fallback。
 
-Models persistence health 精确区分：当前 canonical 可用为 `ready`；file capability 存在但当前 canonical 读取、严格解码或提交结果不可信为 `recovery_required`；file capability 不存在为 `unavailable`。只有 `recovery_required` 允许显式 reset。恢复重新读取 canonical：当前合法格式非破坏性重装，中断 `testing` 状态收敛为 `failed` 后确认提交；读取失败或资源耗尽拒绝且不写盘；退休格式沿用 exact quarantine 后空 store 的 hard cut，当前格式缺失或损坏按原有 owner 恢复规则处理。commit outcome unknown 通过 exact readback 决议。恢复不得改写 Account、Workspace、Task、Run 或 checkpoint；Task-owned 配置按原生命周期收口。
+Models persistence health 精确区分：当前 canonical 可用为 `ready`；file capability 存在但当前 canonical 读取、严格解码或提交结果不可信为 `recovery_required`；file capability 不存在为 `unavailable`。这三态只约束 Custom Provider 与起始偏好：Metask 的目录加载与完成、解析、生图生视频与来源身份都不读它。不是 `ready` 时不写 `models.json`；每个 Custom 来源都答"现在答不了"，绑定它的 Task 不改持久状态（意图、已装绑定、生命周期、历史），修好后照常可用，期间消息在准入时以 `binding_unavailable` 被拒，定时任务只等待、不停止。只差偏好、Metask 来源记录或凭据删除 tombstone 的提交结果不确定时不降级：两种可能的文件授予的执行资格相同。只有 `recovery_required` 允许显式 reset。恢复重新读取 canonical：当前合法格式非破坏性重装，中断 `testing` 状态收敛为 `failed` 后确认提交；读取失败或资源耗尽拒绝且不写盘；退休格式沿用 exact quarantine 后空 store 的 hard cut，当前或未知格式解不开、或超出字节上限的文件按上文另存后装空 store。恢复不要求没有在途的 Metask 目录请求，也不重新加载目录。commit outcome unknown 通过 exact readback 决议。恢复不得改写 Account、Workspace、Task、Run 或 checkpoint；Task-owned 配置按原生命周期收口。
 
 Provider 删除先提交 credential cleanup tombstone，再删除系统 credential，最后原子清除 tombstone；创建先提交目标 id tombstone，再写 credential，最后一次 registry commit 替换为完整 Provider。credential 替换先持久撤销 readiness，再覆盖同一稳定 credential locator，最后以新的 provider/source generation 恢复为待测试状态；写入或最终提交失败保持 `missing/configuring`。确认 credential 缺失时持久化 `credential_status = missing`，安全存储暂时不可读不能误写为已确认缺失。上述操作不改写起始偏好；失效身份继续可见，执行消费者独立校验来源与具体模型。启动和后续 mutation 排空 tombstone，单个 vault 失败不阻塞其他 ID。
 

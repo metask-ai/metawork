@@ -39,6 +39,8 @@ pub const Error = error{
 pub const FileStoreError = error{
     OpenFailed,
     ReadFailed,
+    /// Larger than this version reads; set aside unread on an explicit reset.
+    TooLarge,
     WriteFailed,
     PersistenceOutcomeUnknown,
 };
@@ -139,6 +141,7 @@ pub const Registry = struct {
     pub fn clone(self: *const Registry) (std.mem.Allocator.Error || Error)!Registry {
         var result = Registry.init(self.allocator);
         errdefer result.deinit();
+        if (self.providers.items.len != 0) try result.reserveViews();
         result.metask_source_generation = self.metask_source_generation;
         result.selection_revision = self.selection_revision;
         try result.pending_credential_deletions.ensureTotalCapacity(
@@ -189,6 +192,17 @@ pub const Registry = struct {
         return self.view_storage.items;
     }
 
+    /// Views are rebuilt on every read and must never fail there, so their
+    /// whole declared capacity is taken where a provider can first arrive:
+    /// creation, cloning and decoding, which can fail already.
+    fn reserveViews(self: *Registry) std.mem.Allocator.Error!void {
+        try self.view_storage.ensureTotalCapacity(self.allocator, contract.Limits.custom_provider_entries);
+        try self.model_view_storage.ensureTotalCapacity(
+            self.allocator,
+            contract.Limits.custom_provider_entries * contract.Limits.custom_provider_model_entries,
+        );
+    }
+
     pub fn create(
         self: *Registry,
         input: contract.CustomProviderCreateCommand,
@@ -209,6 +223,7 @@ pub const Registry = struct {
             !std.mem.eql(u8, input.provider_id, input.credential_slot.id) or
             self.findIndex(input.provider_id) != null)
             return error.InvalidProvider;
+        try self.reserveViews();
         var provider: OwnedProvider = .{
             .id = try self.allocator.dupe(u8, input.provider_id),
             .builtin_provider_id = input.spec.builtin_provider_id,
@@ -548,14 +563,6 @@ pub const Registry = struct {
         return self.providers.items[index].source_generation;
     }
 
-    pub const SourceGenerations = struct { source: u64, catalog: u64 };
-
-    pub fn sourceGenerations(self: *const Registry, provider_id: []const u8) ?SourceGenerations {
-        const index = self.findIndex(provider_id) orelse return null;
-        const provider = &self.providers.items[index];
-        return .{ .source = provider.source_generation, .catalog = provider.catalog_generation };
-    }
-
     /// Called only with a confirmed consumer selection. Catalog membership is
     /// execution authority; remembering an identity does not grant authority.
     pub fn rememberPreference(self: *Registry, target: contract.ModelRef, display_name: []const u8, revision: u64) (std.mem.Allocator.Error || Error)!void {
@@ -747,28 +754,23 @@ pub const Registry = struct {
         return null;
     }
 
+    /// Fills the storage `reserveViews` took; no allocation happens here.
     fn rebuildViews(self: *Registry) void {
         self.view_storage.clearRetainingCapacity();
         self.model_view_storage.clearRetainingCapacity();
-        var model_count: usize = 0;
-        for (self.providers.items) |provider| model_count += provider.models.items.len;
-        self.view_storage.ensureTotalCapacity(self.allocator, self.providers.items.len) catch
-            @panic("custom provider view capacity exhausted");
-        self.model_view_storage.ensureTotalCapacity(self.allocator, model_count) catch
-            @panic("custom provider view capacity exhausted");
         for (self.providers.items) |*provider| {
             const model_start = self.model_view_storage.items.len;
             for (provider.models.items) |model|
-                self.model_view_storage.append(self.allocator, .{
+                self.model_view_storage.appendAssumeCapacity(.{
                     .id = model.id,
                     .display_name = model.display_name,
                     .metadata = model.metadata,
                     .metadata_provenance = model.metadata_provenance,
                     .test_status = model.test_status,
                     .ready = modelReady(provider, model),
-                }) catch @panic("custom provider view capacity exhausted");
+                });
             const model_end = self.model_view_storage.items.len;
-            self.view_storage.append(self.allocator, .{
+            self.view_storage.appendAssumeCapacity(.{
                 .id = provider.id,
                 .builtin_provider_id = provider.builtin_provider_id,
                 .display_name = provider.display_name,
@@ -781,7 +783,7 @@ pub const Registry = struct {
                 .provider_revision = provider.provider_revision,
                 .source_generation = provider.source_generation,
                 .catalog_generation = provider.catalog_generation,
-            }) catch @panic("custom provider view capacity exhausted");
+            });
         }
     }
 };
@@ -866,7 +868,12 @@ const CanonicalModelMetadata = struct {
         } };
     }
 
+    /// A declaration nobody made is left out: every version reads a missing
+    /// one as null, so a full registry fits the file in both directions.
     pub fn jsonStringify(self: CanonicalModelMetadata, writer: anytype) !void {
+        const saved = writer.options.emit_null_optional_fields;
+        writer.options.emit_null_optional_fields = false;
+        defer writer.options.emit_null_optional_fields = saved;
         try writer.write(self.value);
     }
 };
@@ -954,7 +961,8 @@ pub fn encodeAlloc(
     const bytes = try std.json.Stringify.valueAlloc(allocator, wire, .{});
     if (bytes.len == 0 or bytes.len > max_store_bytes) {
         allocator.free(bytes);
-        return error.InvalidData;
+        // More than the file holds: refused for room, never for its content.
+        return if (bytes.len == 0) error.InvalidData else error.Capacity;
     }
     return bytes;
 }
@@ -981,6 +989,7 @@ pub fn decode(
         return error.InvalidData;
     var result = Registry.init(allocator);
     errdefer result.deinit();
+    if (wire.custom_providers.len != 0) try result.reserveViews();
     result.selection_revision = wire.selection_revision;
     if (wire.metask) |metask| try result.configureMetaskSource(metask.principal_ref, metask.source_generation);
     for (wire.pending_credential_deletions, 0..) |provider_id, index| {
@@ -1089,6 +1098,44 @@ pub fn collectRetiredCredentialDeletions(registry: *Registry, bytes: []const u8)
         if (provider != .object) return error.InvalidData;
         try reserveRetiredCredentialDeletion(registry, provider.object.get("id") orelse return error.InvalidData);
     }
+}
+
+/// The key identities a file the person discarded names, whatever its shape:
+/// each string where a key's id goes is offered to `sink.offer` as it is
+/// read, and only those ids are read, never anything they grant. False when
+/// a part could not be read or the sink refused an id: keys may stay behind.
+pub fn offerCredentialIds(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    sink: anytype,
+) std.mem.Allocator.Error!bool {
+    if (bytes.len == 0 or bytes.len > max_store_bytes) return false;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch |err|
+        return if (err == error.OutOfMemory) error.OutOfMemory else false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    var complete = true;
+    const pending = parsed.value.object.get("pending_credential_deletions") orelse std.json.Value.null;
+    if (pending == .array) {
+        for (pending.array.items) |id| {
+            if (!try offerCredentialId(id, sink)) complete = false;
+        }
+    } else complete = false;
+    const providers = parsed.value.object.get("custom_providers") orelse std.json.Value.null;
+    if (providers == .array) {
+        for (providers.array.items) |provider| {
+            const id = if (provider == .object) provider.object.get("id") orelse .null else .null;
+            if (!try offerCredentialId(id, sink)) complete = false;
+        }
+    } else complete = false;
+    return complete;
+}
+
+fn offerCredentialId(value: std.json.Value, sink: anytype) std.mem.Allocator.Error!bool {
+    return switch (value) {
+        .string => |id| sink.offer(id),
+        else => false,
+    };
 }
 
 fn reserveRetiredCredentialDeletion(registry: *Registry, value: std.json.Value) !void {
@@ -1212,9 +1259,17 @@ fn settleTesting(provider: *OwnedProvider) bool {
     return changed;
 }
 
+pub const CommitFault = enum {
+    none,
+    write_failed,
+    outcome_unknown,
+};
+
 pub const FileStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
+    commit_fault: if (builtin.is_test) CommitFault else void =
+        if (builtin.is_test) .none else {},
 
     pub fn init(io: std.Io, absolute_directory: []const u8) FileStoreError!FileStore {
         if (!std.fs.path.isAbsolute(absolute_directory)) return error.OpenFailed;
@@ -1244,8 +1299,10 @@ pub const FileStore = struct {
         if (builtin.os.tag == .windows) file.flags.nonblocking = true;
         defer file.close(self.io);
         const length = file.length(self.io) catch return error.ReadFailed;
-        if (length == 0 or length > max_store_bytes) return error.ReadFailed;
+        if (length > max_store_bytes) return error.TooLarge;
+        // An empty file is read, and decodes as nothing this version knows.
         const bytes = try allocator.alloc(u8, @intCast(length));
+        if (bytes.len == 0) return bytes;
         errdefer allocator.free(bytes);
         const read = file.readPositionalAll(self.io, bytes, 0) catch
             return error.ReadFailed;
@@ -1253,25 +1310,58 @@ pub const FileStore = struct {
         return bytes;
     }
 
-    /// Preserve the exact retired canonical before the normal atomic empty
+    /// Preserve the exact canonical bytes before the normal atomic empty
     /// replacement. Failure leaves the original canonical available to retry.
     pub fn quarantine(self: *FileStore, bytes: []const u8) FileStoreError!void {
-        var random: [16]u8 = undefined;
-        std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
-        const hex = std.fmt.bytesToHex(random, .lower);
         var storage: [80]u8 = undefined;
-        const name = std.fmt.bufPrint(&storage, ".models.{s}.quarantine", .{hex}) catch return error.WriteFailed;
+        const name = try self.quarantineName(&storage);
         const file = self.dir.createFile(self.io, name, .{ .exclusive = true, .permissions = privateFilePermissions(), .resolve_beneath = true }) catch return error.WriteFailed;
         defer file.close(self.io);
         file.writeStreamingAll(self.io, bytes) catch return error.WriteFailed;
         file.sync(self.io) catch return error.WriteFailed;
-        if (builtin.os.tag != .windows) {
-            const directory: std.Io.File = .{ .handle = self.dir.handle, .flags = .{ .nonblocking = false } };
-            directory.sync(self.io) catch return error.WriteFailed;
-        }
+        try self.syncDirectory();
+    }
+
+    /// Sets the canonical file aside unread, for one too large to read here,
+    /// and returns the name it went under. Until the replacement commits
+    /// there is no canonical: `restoreQuarantined` puts it back.
+    pub fn quarantineFile(self: *FileStore, storage: *[80]u8) FileStoreError![]const u8 {
+        const name = try self.quarantineName(storage);
+        std.Io.Dir.rename(self.dir, store_file_name, self.dir, name, self.io) catch return error.WriteFailed;
+        self.syncDirectory() catch |err| {
+            self.restoreQuarantined(name);
+            return err;
+        };
+        return name;
+    }
+
+    /// Best effort: the file `quarantineFile` set aside is the canonical
+    /// again, over whatever a failed replacement left.
+    pub fn restoreQuarantined(self: *FileStore, name: []const u8) void {
+        std.Io.Dir.rename(self.dir, name, self.dir, store_file_name, self.io) catch return;
+        self.syncDirectory() catch {};
+    }
+
+    fn quarantineName(self: *FileStore, storage: *[80]u8) FileStoreError![]const u8 {
+        var random: [16]u8 = undefined;
+        std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
+        const hex = std.fmt.bytesToHex(random, .lower);
+        return std.fmt.bufPrint(storage, ".models.{s}.quarantine", .{hex}) catch error.WriteFailed;
+    }
+
+    fn syncDirectory(self: *FileStore) FileStoreError!void {
+        if (builtin.os.tag == .windows) return;
+        const directory: std.Io.File = .{ .handle = self.dir.handle, .flags = .{ .nonblocking = false } };
+        directory.sync(self.io) catch return error.WriteFailed;
     }
 
     pub fn commit(self: *FileStore, bytes: []const u8) FileStoreError!void {
+        if (builtin.is_test) switch (self.commit_fault) {
+            .none => {},
+            .write_failed => return error.WriteFailed,
+            // Nothing was written, so a readback finds the file as it was.
+            .outcome_unknown => return error.PersistenceOutcomeUnknown,
+        };
         if (bytes.len == 0 or bytes.len > max_store_bytes) return error.WriteFailed;
         var random: [8]u8 = undefined;
         std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
@@ -1353,6 +1443,94 @@ test "registry creates and selects a native custom provider" {
     try std.testing.expectEqual(@as(usize, 1), values.len);
     try std.testing.expectEqualStrings("slot-1", values[0].id);
     try contract.validateCustomProviderView(values[0]);
+}
+
+/// Every provider and model the registry holds at most, each text
+/// `text_bytes` long.
+fn fillTestRegistry(registry: *Registry, text_bytes: usize, base_url: []const u8) !void {
+    var text: [contract.Limits.model_id_bytes]u8 = undefined;
+    for (0..contract.Limits.custom_provider_entries) |provider_index| {
+        var slot_storage: [16]u8 = undefined;
+        const slot = try std.fmt.bufPrint(&slot_storage, "slot-{d}", .{provider_index});
+        @memset(text[0..text_bytes], 'p');
+        try registry.create(.{
+            .provider_id = slot,
+            .spec = .{ .display_name = text[0..text_bytes], .protocol = .openai_responses, .normalized_base_url = base_url },
+            .credential_slot = .{ .id = slot },
+        }, 1, 2, 3);
+        for (0..contract.Limits.custom_provider_model_entries) |model_index| {
+            @memset(text[0..text_bytes], 'm');
+            text[0] = 'a' + @as(u8, @intCast(model_index));
+            const revision: u64 = model_index + 1;
+            try registry.addCustomModel(.{
+                .source_id = slot,
+                .expected_provider_revision = revision,
+                .expected_catalog_generation = revision + 2,
+                .model = .{ .id = text[0..text_bytes], .display_name = text[0..text_bytes] },
+            }, revision + 1, revision + 3);
+        }
+    }
+}
+
+test "a full registry fits models.json because undeclared capabilities are left out" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try fillTestRegistry(&registry, 64, "https://api.example.com/v1/responses");
+    const encoded = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"text_input\"") == null);
+    // Written with every null, the same models would not fit.
+    const declared = try std.json.Stringify.valueAlloc(std.testing.allocator, contract.ModelMetadata{}, .{});
+    defer std.testing.allocator.free(declared);
+    const omitted = try std.json.Stringify.valueAlloc(std.testing.allocator, contract.ModelMetadata{}, .{ .emit_null_optional_fields = false });
+    defer std.testing.allocator.free(omitted);
+    const model_count = contract.Limits.custom_provider_entries * contract.Limits.custom_provider_model_entries;
+    try std.testing.expect(encoded.len + model_count * (declared.len - omitted.len) > max_store_bytes);
+    // Every version reads a missing declaration as unknown.
+    var restored = try decode(std.testing.allocator, encoded);
+    defer restored.deinit();
+    const again = try encodeAlloc(std.testing.allocator, &restored);
+    defer std.testing.allocator.free(again);
+    try std.testing.expectEqualStrings(encoded, again);
+    try std.testing.expect(restored.views()[7].models[15].metadata.capabilities.image_input == null);
+    // At the limit of every text nothing helps: refused for room, not content.
+    var largest = Registry.init(std.testing.allocator);
+    defer largest.deinit();
+    var url: [contract.Limits.base_url_bytes]u8 = undefined;
+    const head = "https://example.com/";
+    const tail = "/v1/responses";
+    @memcpy(url[0..head.len], head);
+    @memset(url[head.len .. url.len - tail.len], 'a');
+    @memcpy(url[url.len - tail.len ..], tail);
+    try fillTestRegistry(&largest, contract.Limits.model_id_bytes, &url);
+    try std.testing.expectError(error.Capacity, encodeAlloc(std.testing.allocator, &largest));
+}
+
+test "views reserve their full capacity before any provider can need it" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    for ([_][]const u8{ "slot-1", "slot-2" }, [_][]const u8{ "gpt-5", "gpt-6" }) |slot, model| try testCreate(&registry, .{
+        .provider_id = slot,
+        .spec = .{ .display_name = "OpenAI", .protocol = .openai_responses, .normalized_base_url = "https://api.openai.com/v1/responses" },
+        .credential_slot = .{ .id = slot },
+        .model = .{ .id = model },
+    });
+    var copy = try registry.clone();
+    defer copy.deinit();
+    const encoded = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(encoded);
+    var decoded = try decode(std.testing.allocator, encoded);
+    defer decoded.deinit();
+    // Every read rebuilds the views, so none of them may allocate.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    for ([_]*Registry{ &registry, &copy, &decoded }) |subject| {
+        subject.allocator = failing.allocator();
+        defer subject.allocator = std.testing.allocator;
+        const values = subject.views();
+        try std.testing.expectEqual(@as(usize, 2), values.len);
+        try std.testing.expectEqualStrings("gpt-6", values[1].models[0].id);
+    }
+    try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
 }
 
 test "model configurations with the same endpoint and vendor remain independent across persistence" {

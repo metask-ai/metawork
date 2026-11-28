@@ -32,6 +32,7 @@ const reasonMessages: Record<ModelSetupReason, MessageId> = {
   unreachable: "model_setup.unreachable",
   sign_in: "model_setup.sign_in",
   no_models: "model_setup.no_models",
+  account_suspended: "model_setup.account_suspended",
   catalog_failed: "model_setup.catalog_failed",
   model_unavailable: "model_setup.model_unavailable",
   choose: "model_setup.choose",
@@ -41,6 +42,7 @@ const reasonMessages: Record<ModelSetupReason, MessageId> = {
   schedule_failed: "model_setup.schedule_failed",
   schedule_unknown: "model_setup.schedule_unknown",
   resources_unavailable: "model_setup.resources_unavailable",
+  custom_models_unavailable: "model_setup.custom_models_unavailable",
 };
 
 export function modelSetupMessage(notice: Notice): MessageId {

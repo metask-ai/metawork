@@ -25,6 +25,7 @@ import {
   decodeTaskCreateResult,
   decodeTaskProjectResult,
   decodeTaskCompactResult,
+  decodeTaskModelSelectionResult,
   decodeTaskRestoreResult,
   decodeTaskRunResult,
   decodeTaskCompletionSeenResult,
@@ -1167,6 +1168,16 @@ test("Models recovery-required health crosses the strict snapshot decoder", () =
   };
 
   assert.deepEqual(decodeWorkbenchSnapshot(recoveryRequired), recoveryRequired);
+  const retained = clone(fixture);
+  retained.models.errorCode = "credentials_retained";
+  assert.deepEqual(decodeWorkbenchSnapshot(retained), retained);
+  // Only the whole store has keys a reset left behind.
+  const retainedByProvider = clone(fixture);
+  retainedByProvider.models.providers[0].errorCode = "credentials_retained";
+  assert.throws(() => decodeWorkbenchSnapshot(retainedByProvider), /errorCode/);
+  const suspended = clone(fixture);
+  suspended.models.providers[0].errorCode = "account_suspended";
+  assert.deepEqual(decodeWorkbenchSnapshot(suspended), suspended);
 });
 
 test("attachment results enforce opaque grants and atomic typed outcomes", () => {
@@ -2423,6 +2434,14 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
       reason: "binding_changed",
     },
   );
+  const choiceReason = (reason) =>
+    decodeTaskModelSelectionResult(
+      { accepted: false, taskId: "3", selectionRevision: null, reason },
+      "3",
+    ).reason;
+  const changed = "model_selection_changed";
+  assert.equal(choiceReason(changed), changed);
+  assert.throws(() => choiceReason("stale_catalog"), /unexpected value/);
   assert.deepEqual(
     decodeTaskCompactResult(
       {

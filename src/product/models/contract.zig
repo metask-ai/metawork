@@ -88,7 +88,6 @@ pub const BuiltinProviderPresetView = struct {
 pub const CatalogState = enum {
     needs_authentication,
     loading,
-    choosing,
     ready,
     failed,
     unavailable,
@@ -111,11 +110,17 @@ pub const ModelsError = enum {
     authorization_unavailable,
     persistence_unavailable,
     catalog_unavailable,
+    /// Metask refused the account itself: not the credential, and not soon
+    /// over. The Metask website says why.
+    account_suspended,
     catalog_invalid,
     catalog_too_large,
     no_models,
     operation_in_progress,
     local_resource_exhausted,
+    /// An explicit reset discarded a file whose keys could not all be read:
+    /// some may still be in the credential store.
+    credentials_retained,
 };
 
 /// Provider declarations, not MetaWork feature gates. null means unknown.

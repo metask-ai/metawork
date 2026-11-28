@@ -702,6 +702,11 @@ export function SettingsPage({
                   }
                 />
               )}
+              {models.errorCode === "credentials_retained" && (
+                <p className="projection-note" role="status">
+                  {t("settings.models_credentials_retained")}
+                </p>
+              )}
               {customProviderSettingsAvailable && (
                 <CustomModelsSettings
                   key={modelContext}

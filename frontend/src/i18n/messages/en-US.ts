@@ -170,6 +170,10 @@ export const enUS = {
     "Can't reach Metask right now. MetaWork keeps retrying; your text is kept.",
   "model_setup.preparing": "Preparing the model…",
   "model_setup.choose": "Choose an available model before sending.",
+  "model_setup.custom_models_unavailable":
+    "Custom model configuration cannot be read, so custom models are unavailable for now. Metask models work as usual.",
+  "model_setup.account_suspended":
+    "Your Metask account is suspended. See the Metask website for details.",
   "model_setup.catalog_failed":
     "Models could not be loaded. Retry loading them.",
   "model_setup.no_models":
@@ -1804,13 +1808,15 @@ export const enUS = {
     "Model requests will send the API key to {host}.",
   "settings.get_api_key": "Get an API key",
   "settings.open_provider_docs": "Open official documentation",
-  "settings.models_reset_message": "Model configuration cannot be read",
+  "settings.models_reset_message": "Custom model configuration cannot be read",
   "settings.models_reset_detail":
-    "Recovery first reloads valid configuration and clears it only when it is missing or confirmed damaged. Your account, Tasks, Workspaces, and conversations are unchanged.",
+    "Metask models work as usual; custom models are unavailable for now. Recovery first reads the configuration again: what this version can read is restored as it is; what it cannot read (written by another version, or damaged) is saved aside and the custom models are cleared. Your account, Tasks, Workspaces, and conversations are unchanged.",
   "settings.models_reset_action": "Recover model configuration",
   "settings.models_reset_dialog_title": "Recover model configuration?",
   "settings.models_reset_dialog_body":
-    "MetaWork first validates and restores the existing configuration. It clears model configuration only when the file is missing or confirmed damaged; your account, Tasks, Workspaces, and conversations stay intact.",
+    "MetaWork first validates and restores the existing configuration. A configuration this version cannot read is saved aside, then the custom models are cleared and the custom model keys it can identify are removed from the system credential store; your account, Tasks, Workspaces, and conversations stay intact.",
+  "settings.models_credentials_retained":
+    "Some credentials may not have been cleaned up: the original configuration named custom model keys this version could not identify, and they may still be in the system credential store. The original file was saved aside.",
   "settings.models_reset_confirm": "Recover and continue",
   "settings.models_reset_pending": "Recovering…",
   "settings.models_reset_failed":
