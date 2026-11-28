@@ -16,8 +16,6 @@ export const zhCN: Record<MessageId, string> = {
     "已达到工作目录数量上限。请选择已登记的目录。",
   "run.input_history_loading": "正在读取输入历史…",
   "run.input_history_failed": "未能读取输入历史，按 ↑ 重试。",
-  "model_setup.preference_not_saved":
-    "未能记住模型偏好，已确认的任务模型选择不受影响。",
   "mutation.reason.schedule_persistence_unavailable":
     "定时任务存储不可用，请先在定时任务页恢复后再重试。",
   "mutation.reason.handoff_changed": "任务或账号已变更，请重新打开任务详情。",

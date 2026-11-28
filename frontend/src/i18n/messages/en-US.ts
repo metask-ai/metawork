@@ -17,8 +17,6 @@ export const enUS = {
     "Your original draft was kept. You are viewing the destination project’s draft.",
   "workspace.directory_capacity":
     "The working directory limit is reached. Choose a previously registered directory.",
-  "model_setup.preference_not_saved":
-    "Your model preference could not be saved. Confirmed task choices are unchanged.",
   "mutation.reason.schedule_persistence_unavailable":
     "Schedule storage is unavailable. Open Scheduled tasks to recover it before trying again.",
   "mutation.reason.handoff_changed":

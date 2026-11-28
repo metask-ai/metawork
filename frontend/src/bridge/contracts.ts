@@ -257,7 +257,6 @@ export type AccountView = {
 };
 export type ModelsErrorCode =
   | "none"
-  | "preference_not_saved"
   | "authorization_unavailable"
   | "persistence_unavailable"
   | "catalog_unavailable"
