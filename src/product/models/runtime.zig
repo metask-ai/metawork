@@ -983,7 +983,16 @@ pub const Runtime = struct {
     /// Writes the record of the Metask source when models.json lags behind
     /// memory and can be written. Whatever happens only leaves the record
     /// owed: the next catalog that lands, or an adoption, writes it again.
+    /// An older version's generation in the record is the only trace of the
+    /// bindings Schedule has yet to move off it, whichever account memory
+    /// follows now: only the adoption that moves them rewrites it.
     fn persistMetaskSource(self: *Runtime) void {
+        if (self.registry.metaskSource()) |record|
+            if (record.source_generation != registry_impl.metaskSourceGeneration(record.principal_ref)) return;
+        self.writeMetaskRecord();
+    }
+
+    fn writeMetaskRecord(self: *Runtime) void {
         const source = if (self.metask_source) |*value| value else return;
         if (!self.store_healthy or source.recorded(self.registry.metaskSource())) return;
         var candidate = self.registry.clone() catch return;
@@ -1041,7 +1050,7 @@ pub const Runtime = struct {
         if (record.source_generation != adoption.stored) return;
         const same_account = if (self.metask_source) |*source| std.mem.eql(u8, source.principal.view(), record.principal_ref) else true;
         if (same_account) self.metask_source = MetaskSource.of(record.principal_ref, adoption.derived);
-        self.persistMetaskSource();
+        self.writeMetaskRecord();
     }
 
     /// Best-effort memory of a confirmed interactive consumer choice. This
@@ -4065,8 +4074,11 @@ test "a switched account's catalog loads whatever models.json can take" {
     }
 }
 
+/// What an older version wrote: a drawn generation, not the derived one.
+const older_record = "{\"schema\":3,\"metask\":{\"principal_ref\":\"principal\",\"source_generation\":1234},\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}";
+
 test "an older version's generation is rewritten from the record, whatever account memory holds" {
-    const recorded = "{\"schema\":3,\"metask\":{\"principal_ref\":\"principal\",\"source_generation\":1234},\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}";
+    const recorded = older_record;
     for ([_][]const u8{ "principal", "other" }) |landed| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -4094,6 +4106,31 @@ test "an older version's generation is rewritten from the record, whatever accou
         try std.testing.expectEqualStrings(landed, runtime.registry.metaskSource().?.principal_ref);
         try std.testing.expect(runtime.pendingMetaskAdoption() == null);
     }
+}
+
+test "an older version's generation outlasts a switch until Schedule has moved its bindings" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &path);
+    try writeTestFile(&tmp.dir, registry_impl.store_file_name, older_record);
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(path[0..length], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    const adoption = runtime.pendingMetaskAdoption() orelse return error.TestExpectedEqual;
+    // Schedule has not moved the bindings yet when another account's
+    // catalog lands: memory follows it, the record keeps what is owed.
+    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalog(&runtime, "other", &catalog_one));
+    try std.testing.expectEqual(registry_impl.metaskSourceGeneration("other"), runtime.view().providers[0].source_generation);
+    try std.testing.expectEqual(adoption, runtime.pendingMetaskAdoption().?);
+    // Once they are moved, the record follows memory.
+    runtime.adoptMetaskGeneration(adoption);
+    try std.testing.expectEqualStrings("other", runtime.registry.metaskSource().?.principal_ref);
+    try std.testing.expect(runtime.pendingMetaskAdoption() == null);
 }
 
 test "a commit that only keeps records stops nothing when its outcome is unknown" {
