@@ -9284,10 +9284,12 @@ pub const Runtime = struct {
         const model_intent_exact = if (query.model_intent) |authority| exact: {
             const facts = self.task_runtime.modelFacts(query.task_id) orelse break :exact false;
             const intent = facts.intent orelse break :exact false;
-            const current = self.taskModelIntentAuthority(query.task_id) orelse break :exact false;
+            // Metask use requires a current Account authorization; `exact`
+            // answers for the generations.
+            if (std.mem.eql(u8, intent.target.source_id, models_contract.metask_source_id))
+                self.validateTaskMetaskAuthorization(query.task_id) catch break :exact false;
             if (facts.intent_pending or intent.revision != authority.selection_revision or !std.mem.eql(u8, intent.target.source_id, authority.source_id) or
-                !std.mem.eql(u8, intent.target.model_id, query.task_model) or current.source_generation != authority.source_generation or
-                current.catalog_generation != authority.catalog_generation) break :exact false;
+                !std.mem.eql(u8, intent.target.model_id, query.task_model)) break :exact false;
             const found = self.custom_providers.exact(intent.target, authority.source_generation, authority.catalog_generation) orelse break :exact false;
             break :exact found.target.protocol == query.protocol and
                 self.task_runtime.modelRestoreCapabilitiesExact(query.task_id, self.modelRestoreEffects());
