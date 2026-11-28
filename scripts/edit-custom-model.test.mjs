@@ -2,6 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { editCustomModel } from "../frontend/src/app/edit-custom-model.ts";
 import { inspectModelEndpoint } from "../frontend/src/features/settings/model-connection.ts";
+import {
+  declareImageInput,
+  emptyModelMetadata,
+} from "../frontend/src/features/settings/model-declaration.ts";
+// Declarations the edit form never shows, which a replace must still carry.
+function declaredMetadata() {
+  const metadata = emptyModelMetadata();
+  metadata.maxInputTokens = "200000";
+  metadata.capabilities.imageInput = true;
+  metadata.capabilities.thinking.supported = true;
+  return metadata;
+}
 function harness(options = {}) {
   const source = {
     id: "model-source",
@@ -13,7 +25,9 @@ function harness(options = {}) {
     catalogGeneration: "11",
     sourceGeneration: "13",
     credentialStatus: "ready",
-    models: [{ id: "old" }],
+    models: [
+      { id: "old", displayName: "Old model", metadata: declaredMetadata() },
+    ],
   };
   const models = { customProviders: [source] };
   const calls = [];
@@ -39,8 +53,11 @@ function harness(options = {}) {
       return accepted;
     },
     async replaceCustomModel(input) {
-      calls.push(["model_id", input]);
-      source.models = [{ id: input.replacement.id }];
+      calls.push(["model", input]);
+      const { metadata } = options.keepDeclaration
+        ? source.models[0]
+        : input.replacement;
+      source.models = [{ ...input.replacement, metadata }];
       increment();
       source.catalogGeneration = "12";
       return accepted;
@@ -52,6 +69,7 @@ function harness(options = {}) {
     expectedCatalogGeneration: "11",
     modelId: "old",
     nextModelId: "new",
+    imageInput: true,
     protocol: "anthropic_messages",
     endpoint: "https://other.example/v1/messages",
     apiKey: "test-key",
@@ -129,8 +147,82 @@ test("a preset edit can keep its credential and change only its model", async ()
   assert.equal(result.accepted, true);
   assert.deepEqual(
     h.calls.map((c) => c[0]),
-    ["model_id"],
+    ["model"],
   );
+});
+test("a renamed model keeps every declaration Host holds for it", async () => {
+  const h = harness();
+  Object.assign(h.input, {
+    protocol: h.source.protocol,
+    endpoint: h.source.normalizedBaseUrl,
+    apiKey: "",
+  });
+  const result = await editCustomModel(
+    h.client,
+    structuredClone(h.models),
+    h.refresh,
+    h.input,
+  );
+  assert.equal(result.accepted, true);
+  assert.deepEqual(h.calls[0][1].replacement, {
+    id: "new",
+    displayName: "Old model",
+    metadata: declaredMetadata(),
+  });
+});
+test("a changed image input alone is one replace of the same model", async () => {
+  const h = harness();
+  Object.assign(h.input, {
+    nextModelId: "old",
+    imageInput: false,
+    protocol: h.source.protocol,
+    endpoint: h.source.normalizedBaseUrl,
+    apiKey: "",
+  });
+  const result = await editCustomModel(
+    h.client,
+    structuredClone(h.models),
+    h.refresh,
+    h.input,
+  );
+  assert.equal(result.accepted, true);
+  assert.deepEqual(result.applied, ["image_input"]);
+  assert.equal(h.calls.length, 1);
+  const expected = declaredMetadata();
+  expected.capabilities.imageInput = false;
+  assert.deepEqual(h.calls[0][1].replacement, {
+    id: "old",
+    displayName: "Old model",
+    metadata: expected,
+  });
+});
+test("a declaration Host did not take is reviewed, not written again", async () => {
+  const h = harness({ keepDeclaration: true });
+  Object.assign(h.input, {
+    imageInput: null,
+    protocol: h.source.protocol,
+    endpoint: h.source.normalizedBaseUrl,
+    apiKey: "",
+  });
+  const result = await editCustomModel(
+    h.client,
+    structuredClone(h.models),
+    h.refresh,
+    h.input,
+  );
+  assert.equal(result.accepted, false);
+  assert.equal(result.reviewRequired, true);
+  assert.equal(h.calls.length, 1);
+});
+test("an image input declaration changes nothing else", () => {
+  const expected = emptyModelMetadata();
+  expected.capabilities.imageInput = true;
+  assert.deepEqual(declareImageInput(undefined, true), expected);
+  const base = declaredMetadata();
+  const declared = declareImageInput(base, null);
+  assert.equal(base.capabilities.imageInput, true);
+  base.capabilities.imageInput = null;
+  assert.deepEqual(declared, base);
 });
 test("endpoint validation rejects inputs that cannot reach a supported Host request path", () => {
   for (const address of [

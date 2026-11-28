@@ -1118,7 +1118,7 @@ export class BridgeClient {
     protocol: Protocol;
     normalizedBaseUrl: string;
     apiKey: string;
-    model?: { id: string };
+    model?: { id: string; displayName?: string; metadata?: ModelMetadata };
   }) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.customProviderCreate, {
@@ -1134,7 +1134,7 @@ export class BridgeClient {
     providerId: string;
     baseUrl: string;
     apiKey: string;
-    model?: { id: string };
+    model?: { id: string; displayName?: string; metadata?: ModelMetadata };
   }) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.builtinProviderCreate, input),

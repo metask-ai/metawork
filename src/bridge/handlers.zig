@@ -1699,6 +1699,13 @@ test "complete model metadata incoming declarations retain capabilities and toke
     try std.testing.expectEqual(@as(?bool, true), parsed.value.capabilities.output.text);
     inline for (.{ "{\"limits\":{}}", "{\"capabilities\":{\"output\":{\"audio\":\"true\"}}}" }) |invalid|
         try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ModelMetadata, invalid));
+
+    // A model edit sends back the declaration Host projected, unchanged.
+    var projected = try parsePayload(ModelMetadata, std.mem.trimEnd(u8, @import("contract_fixture").model_metadata, "\r\n"));
+    defer projected.deinit();
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, projected.value, .{});
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualStrings(std.mem.trimEnd(u8, @import("contract_fixture").model_metadata, "\r\n"), encoded);
 }
 
 test "Product view request is closed and validates stable history identity" {

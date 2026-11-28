@@ -1682,7 +1682,6 @@ export const zhCN: Record<MessageId, string> = {
   "settings.model_form_error.address": "请填写请求地址。",
   "settings.model_form_error.api_key": "请填写 API Key。",
   "settings.model_form_error.model_id": "请填写模型 ID。",
-  "settings.model_form_error.model_choice": "请选择模型 ID。",
   "settings.custom_model_test_start_failed": "尚未确认 {model} 的测试是否开始",
   "settings.custom_model_remove_failed": "模型移除结果尚未确认",
   "settings.model_edit_partial":
@@ -1719,6 +1718,12 @@ export const zhCN: Record<MessageId, string> = {
   "settings.custom_model_add": "添加模型",
   "settings.custom_model_test": "测试模型",
   "settings.custom_model_id": "模型 ID",
+  "settings.custom_model_image_input": "图片输入",
+  "settings.custom_model_image_input.supported": "支持",
+  "settings.custom_model_image_input.unsupported": "不支持",
+  "settings.custom_model_image_input.unknown": "不确定",
+  "settings.custom_model_image_input_help":
+    "选“不确定”时按模型名称自动判断，判断不了的按不支持处理。",
   "settings.custom_model_remove_confirm": "删除模型？",
   "settings.custom_model_remove_description":
     "删除“{model}”后，新任务将无法再选择它。已有任务和历史记录会保留。",
