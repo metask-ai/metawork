@@ -1928,7 +1928,6 @@ export const enUS = {
   "settings.model_form_error.address": "Enter the request URL.",
   "settings.model_form_error.api_key": "Enter an API key.",
   "settings.model_form_error.model_id": "Enter a model ID.",
-  "settings.model_form_error.model_choice": "Choose a model ID.",
   "settings.custom_model_test_start_failed":
     "Test start for {model} not yet confirmed",
   "settings.custom_model_remove_failed":

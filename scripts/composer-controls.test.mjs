@@ -832,6 +832,13 @@ async function chooseModelSource(user, label) {
   );
   return dialog;
 }
+// The official model IDs a preset offers as suggestions for its ID field.
+function presetSuggestions(input) {
+  const list = document.getElementById(input.getAttribute("list") ?? "");
+  return [...(list?.querySelectorAll("option") ?? [])].map(
+    (option) => option.value,
+  );
+}
 function accessibleDescription(element) {
   return (element.getAttribute("aria-describedby") ?? "")
     .split(/\s+/u)
@@ -913,13 +920,9 @@ test("Add model uses the Host recipe and saves the first model with its official
   );
 
   await user.type(within(dialog).getByLabelText("API key"), "official-secret");
-  await user.click(within(dialog).getByRole("combobox", { name: "Model ID" }));
-  await screen.findByRole("option", { name: "hy4", exact: true });
-  assert.deepEqual(
-    screen.getAllByRole("option").map((option) => option.textContent),
-    ["hy4", "hy4-preview", "hy3"],
-  );
-  await user.click(screen.getByRole("option", { name: "hy4", exact: true }));
+  const modelId = within(dialog).getByRole("combobox", { name: "Model ID" });
+  assert.deepEqual(presetSuggestions(modelId), ["hy4", "hy4-preview", "hy3"]);
+  await user.type(modelId, "hy4");
   await user.click(
     within(dialog).getByRole("button", { name: "Save", exact: true }),
   );
@@ -1256,9 +1259,9 @@ test("Editing an official model permits credential replacement without exposing 
   const add = await chooseModelSource(user, "DeepSeek");
   assert.equal(within(add).getByLabelText("API key").value, "");
   await user.type(within(add).getByLabelText("API key"), "independent-key");
-  await user.click(within(add).getByRole("combobox", { name: "Model ID" }));
-  await user.click(
-    await screen.findByRole("option", { name: "deepseek-flash", exact: true }),
+  await user.type(
+    within(add).getByRole("combobox", { name: "Model ID" }),
+    "deepseek-flash",
   );
   await user.click(
     within(add).getByRole("button", { name: "Save", exact: true }),
@@ -1692,15 +1695,12 @@ test("Save names the missing vendor and the missing preset fields", async () => 
   assert.equal(key.getAttribute("aria-invalid"), "true");
   assert.equal(accessibleDescription(key), "Enter an API key.");
   assert.equal(model.getAttribute("aria-invalid"), "true");
-  assert.equal(accessibleDescription(model), "Choose a model ID.");
+  assert.equal(accessibleDescription(model), "Enter a model ID.");
   assert.equal(document.activeElement, key);
   assert.equal(submitted.length, 0);
 
   await user.type(key, "official-secret");
-  await user.click(model);
-  await user.click(
-    await screen.findByRole("option", { name: "deepseek-flash", exact: true }),
-  );
+  await user.type(model, "deepseek-flash");
   assert.equal(model.getAttribute("aria-invalid"), null);
   await user.click(save);
   assert.deepEqual(submitted, [
@@ -1709,6 +1709,35 @@ test("Save names the missing vendor and the missing preset fields", async () => 
       baseUrl: "https://api.deepseek.com",
       apiKey: "official-secret",
       model: { id: "deepseek-flash", metadata: emptyModelMetadata() },
+    },
+  ]);
+});
+
+test("a preset saves a typed model ID it does not suggest", async () => {
+  const user = userEvent.setup({ document });
+  const submitted = [];
+  renderModelSettings({
+    onCreateBuiltinProvider: async (input) => {
+      submitted.push(input);
+      return true;
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const dialog = await chooseModelSource(user, "DeepSeek");
+  const model = within(dialog).getByRole("combobox", { name: "Model ID" });
+  assert.ok(presetSuggestions(model).length > 0);
+  assert.equal(presetSuggestions(model).includes("deepseek-v9-preview"), false);
+  await user.type(within(dialog).getByLabelText("API key"), "official-secret");
+  await user.type(model, "deepseek-v9-preview");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.deepEqual(submitted, [
+    {
+      providerId: "deepseek",
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "official-secret",
+      model: { id: "deepseek-v9-preview", metadata: emptyModelMetadata() },
     },
   ]);
 });

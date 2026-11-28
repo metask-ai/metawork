@@ -1682,7 +1682,6 @@ export const zhCN: Record<MessageId, string> = {
   "settings.model_form_error.address": "请填写请求地址。",
   "settings.model_form_error.api_key": "请填写 API Key。",
   "settings.model_form_error.model_id": "请填写模型 ID。",
-  "settings.model_form_error.model_choice": "请选择模型 ID。",
   "settings.custom_model_test_start_failed": "尚未确认 {model} 的测试是否开始",
   "settings.custom_model_remove_failed": "模型移除结果尚未确认",
   "settings.model_edit_partial":

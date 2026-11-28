@@ -152,6 +152,7 @@ const imageInputChoice = (value: boolean | null): ImageInputChoice =>
 const imageInputValue = (choice: string): boolean | null =>
   choice === "supported" ? true : choice === "unsupported" ? false : null;
 const imageInputFieldId = "model-form-image-input";
+const modelSuggestionsId = "model-form-model-id-suggestions";
 type AddressProblem = EndpointIssue | "required" | "root";
 const fieldIds: Record<FormField, string> = {
   choice: "model-form-vendor",
@@ -933,46 +934,31 @@ export function CustomModelsSettings({
                     )}
                     <label className="settings-model-form-field">
                       <span>{t("settings.custom_model_id")}</span>
-                      {preset && !editing ? (
-                        <SelectionMenu
-                          triggerId={fieldIds.model_id}
-                          triggerClassName="settings-control"
-                          value={draft.modelId}
-                          options={preset.modelIds.map((id) => ({
-                            value: id,
-                            label: id,
-                          }))}
-                          placeholder={t("account.choose_model")}
-                          ariaLabel={t("settings.custom_model_id")}
-                          ariaInvalid={showProblem("model_id")}
-                          ariaDescribedBy={
-                            showProblem("model_id")
-                              ? fieldErrorId("model_id")
-                              : undefined
-                          }
-                          disabled={busy}
-                          onValueChange={(modelId) =>
-                            setDraft({ ...draft, modelId })
-                          }
-                        />
-                      ) : (
-                        <Input
-                          id={fieldIds.model_id}
-                          className="settings-custom-provider-input settings-custom-provider-input-mono"
-                          maxLength={256}
-                          autoComplete="off"
-                          value={draft.modelId}
-                          disabled={busy}
-                          aria-invalid={showProblem("model_id") || undefined}
-                          aria-describedby={
-                            showProblem("model_id")
-                              ? fieldErrorId("model_id")
-                              : undefined
-                          }
-                          onChange={(event) =>
-                            setDraft({ ...draft, modelId: event.target.value })
-                          }
-                        />
+                      {/* A preset's official IDs are suggestions; any ID can be typed. */}
+                      <Input
+                        id={fieldIds.model_id}
+                        className="settings-custom-provider-input settings-custom-provider-input-mono"
+                        maxLength={256}
+                        autoComplete="off"
+                        list={preset ? modelSuggestionsId : undefined}
+                        value={draft.modelId}
+                        disabled={busy}
+                        aria-invalid={showProblem("model_id") || undefined}
+                        aria-describedby={
+                          showProblem("model_id")
+                            ? fieldErrorId("model_id")
+                            : undefined
+                        }
+                        onChange={(event) =>
+                          setDraft({ ...draft, modelId: event.target.value })
+                        }
+                      />
+                      {preset && (
+                        <datalist id={modelSuggestionsId}>
+                          {preset.modelIds.map((id) => (
+                            <option key={id} value={id} />
+                          ))}
+                        </datalist>
                       )}
                     </label>
                     {showProblem("model_id") && (
@@ -980,11 +966,7 @@ export function CustomModelsSettings({
                         id={fieldErrorId("model_id")}
                         className="text-sm text-(--ui-content-error)"
                       >
-                        {t(
-                          preset && !editing
-                            ? "settings.model_form_error.model_choice"
-                            : "settings.model_form_error.model_id",
-                        )}
+                        {t("settings.model_form_error.model_id")}
                       </p>
                     )}
                     <label className="settings-model-form-field">
