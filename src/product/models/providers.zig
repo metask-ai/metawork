@@ -868,7 +868,12 @@ const CanonicalModelMetadata = struct {
         } };
     }
 
+    /// A declaration nobody made is left out: every version reads a missing
+    /// one as null, so a full registry fits the file in both directions.
     pub fn jsonStringify(self: CanonicalModelMetadata, writer: anytype) !void {
+        const saved = writer.options.emit_null_optional_fields;
+        writer.options.emit_null_optional_fields = false;
+        defer writer.options.emit_null_optional_fields = saved;
         try writer.write(self.value);
     }
 };
@@ -956,7 +961,8 @@ pub fn encodeAlloc(
     const bytes = try std.json.Stringify.valueAlloc(allocator, wire, .{});
     if (bytes.len == 0 or bytes.len > max_store_bytes) {
         allocator.free(bytes);
-        return error.InvalidData;
+        // More than the file holds: refused for room, never for its content.
+        return if (bytes.len == 0) error.InvalidData else error.Capacity;
     }
     return bytes;
 }
@@ -1395,6 +1401,67 @@ test "registry creates and selects a native custom provider" {
     try std.testing.expectEqual(@as(usize, 1), values.len);
     try std.testing.expectEqualStrings("slot-1", values[0].id);
     try contract.validateCustomProviderView(values[0]);
+}
+
+/// Every provider and model the registry holds at most, each text
+/// `text_bytes` long.
+fn fillTestRegistry(registry: *Registry, text_bytes: usize, base_url: []const u8) !void {
+    var text: [contract.Limits.model_id_bytes]u8 = undefined;
+    for (0..contract.Limits.custom_provider_entries) |provider_index| {
+        var slot_storage: [16]u8 = undefined;
+        const slot = try std.fmt.bufPrint(&slot_storage, "slot-{d}", .{provider_index});
+        @memset(text[0..text_bytes], 'p');
+        try registry.create(.{
+            .provider_id = slot,
+            .spec = .{ .display_name = text[0..text_bytes], .protocol = .openai_responses, .normalized_base_url = base_url },
+            .credential_slot = .{ .id = slot },
+        }, 1, 2, 3);
+        for (0..contract.Limits.custom_provider_model_entries) |model_index| {
+            @memset(text[0..text_bytes], 'm');
+            text[0] = 'a' + @as(u8, @intCast(model_index));
+            const revision: u64 = model_index + 1;
+            try registry.addCustomModel(.{
+                .source_id = slot,
+                .expected_provider_revision = revision,
+                .expected_catalog_generation = revision + 2,
+                .model = .{ .id = text[0..text_bytes], .display_name = text[0..text_bytes] },
+            }, revision + 1, revision + 3);
+        }
+    }
+}
+
+test "a full registry fits models.json because undeclared capabilities are left out" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try fillTestRegistry(&registry, 64, "https://api.example.com/v1/responses");
+    const encoded = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"text_input\"") == null);
+    // Written with every null, the same models would not fit.
+    const declared = try std.json.Stringify.valueAlloc(std.testing.allocator, contract.ModelMetadata{}, .{});
+    defer std.testing.allocator.free(declared);
+    const omitted = try std.json.Stringify.valueAlloc(std.testing.allocator, contract.ModelMetadata{}, .{ .emit_null_optional_fields = false });
+    defer std.testing.allocator.free(omitted);
+    const model_count = contract.Limits.custom_provider_entries * contract.Limits.custom_provider_model_entries;
+    try std.testing.expect(encoded.len + model_count * (declared.len - omitted.len) > max_store_bytes);
+    // Every version reads a missing declaration as unknown.
+    var restored = try decode(std.testing.allocator, encoded);
+    defer restored.deinit();
+    const again = try encodeAlloc(std.testing.allocator, &restored);
+    defer std.testing.allocator.free(again);
+    try std.testing.expectEqualStrings(encoded, again);
+    try std.testing.expect(restored.views()[7].models[15].metadata.capabilities.image_input == null);
+    // At the limit of every text nothing helps: refused for room, not content.
+    var largest = Registry.init(std.testing.allocator);
+    defer largest.deinit();
+    var url: [contract.Limits.base_url_bytes]u8 = undefined;
+    const head = "https://example.com/";
+    const tail = "/v1/responses";
+    @memcpy(url[0..head.len], head);
+    @memset(url[head.len .. url.len - tail.len], 'a');
+    @memcpy(url[url.len - tail.len ..], tail);
+    try fillTestRegistry(&largest, contract.Limits.model_id_bytes, &url);
+    try std.testing.expectError(error.Capacity, encodeAlloc(std.testing.allocator, &largest));
 }
 
 test "views reserve their full capacity before any provider can need it" {
