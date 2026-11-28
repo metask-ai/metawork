@@ -74,7 +74,7 @@ Metask 当前只消费模型根级 `max_input_tokens` 与 `max_tokens`，分别�
 
 Models 的目录失败只改变 Models 自己的状态：不调用 Account abort、不改变登录状态，也不补写 Account error；catalog worker 不拥有 committed state，陈旧 completion 只能销毁。
 
-授权丢失时 Application cancel/join 在途的目录请求并销毁其凭据；Models 清除可解析目录并发布 needs_authentication，保留无 secret 起始偏好。目录内容归账号；换账号前必经退出，清空就是换号的全部处理。只关闭 Metask 新解析与执行资格，custom 来源及既有 owned binding 不被全局暂停；再次登录后既有 Task 按下文规则采用当前授权。
+授权丢失时 Application 只取消在途的目录请求，不在主线程等它；请求结束时销毁其凭据，结果交给 Models 按请求号丢弃，结束前不发下一次请求；Models 清除可解析目录并发布 needs_authentication，保留无 secret 起始偏好。目录内容归账号；换账号前必经退出，清空就是换号的全部处理。只关闭 Metask 新解析与执行资格，custom 来源及既有 owned binding 不被全局暂停；再次登录后既有 Task 按下文规则采用当前授权。
 
 Task 与 Schedule 的显式模型目标通过 Models 精确解析；起始偏好独立保存，不产生 execution authority：
 
