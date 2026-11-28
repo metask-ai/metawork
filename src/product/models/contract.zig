@@ -106,7 +106,6 @@ pub const ModelsOperation = enum {
 
 pub const ModelsError = enum {
     none,
-    preference_not_saved,
     authorization_unavailable,
     persistence_unavailable,
     catalog_unavailable,

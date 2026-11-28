@@ -325,7 +325,6 @@ pub const Runtime = struct {
     /// of it whenever it can; that record never decides a Metask answer.
     metask_source: ?MetaskSource = null,
     metask_public_catalog: ?*metask_provider.PublicCatalog = null,
-    preference_error: contract.ModelsError = .none,
     /// What the last explicit reset could not do: keys a discarded file named
     /// that could not be read may still be in the credential store. Held
     /// until the next reset or start; nothing is persisted about it.
@@ -602,12 +601,8 @@ pub const Runtime = struct {
             .default_selection_display_name = if (self.registry.default_display_name.len == 0) null else self.registry.default_display_name,
             .selection_revision = self.registry.selection_revision,
             .operation = self.metaskOperation(),
-            // A choice that was not remembered is news now; keys a reset left
-            // behind are from the past and wait their turn.
             .error_code = if (!self.store_healthy)
                 .persistence_unavailable
-            else if (self.preference_error != .none)
-                self.preference_error
             else if (self.reset_notice == .credentials_retained)
                 .credentials_retained
             else
@@ -1054,23 +1049,14 @@ pub const Runtime = struct {
     }
 
     /// Best-effort memory of a confirmed interactive consumer choice. This
-    /// writes metadata only, without resolving credentials or execution.
+    /// writes metadata only, without resolving credentials or execution. A
+    /// write that fails changes nothing confirmed and is not reported.
     pub fn rememberPreference(self: *Runtime, target: contract.ModelRef) contract.CommandResult {
-        const result = self.commitPreference(target);
-        self.preference_error = if (result.accepted) .none else .preference_not_saved;
-        return result;
-    }
-
-    fn commitPreference(self: *Runtime, target: contract.ModelRef) contract.CommandResult {
         self.assertMainThread();
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
         const display_name = self.preferenceDisplayName(target);
         if (self.registry.defaultSelection()) |current| {
-            // After an unconfirmed write, retained memory is not evidence of
-            // the canonical preference. Confirm this choice before clearing
-            // the independent failure diagnostic, even if it matches memory.
-            if (self.preference_error == .none and
-                std.mem.eql(u8, current.source_id, target.source_id) and
+            if (std.mem.eql(u8, current.source_id, target.source_id) and
                 std.mem.eql(u8, current.model_id, target.model_id) and
                 std.mem.eql(u8, self.registry.default_display_name, display_name))
                 return .acceptedResult();
@@ -1903,43 +1889,6 @@ test "unconfirmed preference commits reject memory without revoking unchanged so
         try std.testing.expectEqual(contract.PersistenceHealth.ready, runtime.view().persistence_health);
         try std.testing.expect(runtime.exact(.{ .source_id = "metask", .model_id = "model-1" }, 1, 4) != null);
     }
-}
-
-test "choosing the retained preference after an unknown commit confirms the canonical value" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(root);
-    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
-    defer runtime.deinit();
-    runtime.store = try registry_impl.FileStore.init(std.testing.io, root);
-    try TestSupport.installMetaskDefault(&runtime, "principal", "synthetic-key", &.{
-        .{ .id = "model-1", .display_name = "One" },
-        .{ .id = "model-2", .display_name = "Two" },
-    }, "model-1", 1, 2, 3, 4);
-
-    var candidate = try runtime.registry.clone();
-    defer candidate.deinit();
-    try candidate.rememberPreference(.{ .source_id = "metask", .model_id = "model-2" }, "Two", 5);
-    const encoded = try registry_impl.encodeAlloc(std.testing.allocator, &candidate);
-    defer std.testing.allocator.free(encoded);
-    try runtime.store.?.commit(encoded);
-    // Model an installed candidate whose durability/readback could not be
-    // confirmed. Apply the same failure diagnostic as rememberPreference.
-    const unknown = runtime.finishPreferenceCommit(&candidate, .unresolved);
-    runtime.preference_error = if (unknown.accepted) .none else .preference_not_saved;
-    try std.testing.expectEqualStrings("model-1", runtime.view().default_selection.?.model_id);
-
-    try std.testing.expect(runtime.rememberPreference(.{ .source_id = "metask", .model_id = "model-1" }).accepted);
-    const saved = (try runtime.store.?.loadAlloc(std.testing.allocator)).?;
-    defer std.testing.allocator.free(saved);
-    var restored = try registry_impl.decode(std.testing.allocator, saved);
-    defer restored.deinit();
-    try std.testing.expectEqualStrings("model-1", restored.defaultSelection().?.model_id);
-    try std.testing.expectEqualStrings("One", restored.default_display_name);
-    try std.testing.expectEqualStrings("One", runtime.view().default_selection_display_name.?);
-    try std.testing.expectEqual(contract.ModelsError.none, runtime.view().error_code);
-    try std.testing.expect(runtime.exact(.{ .source_id = "metask", .model_id = "model-1" }, 1, 4) != null);
 }
 
 const TestVault = struct {
@@ -4264,7 +4213,7 @@ test "a reset that cannot commit leaves models.json where it can be read again" 
     }
 }
 
-test "a retained-key notice never hides an unsaved preference" {
+test "a preference that cannot be saved publishes no notice of its own" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -4282,7 +4231,7 @@ test "a retained-key notice never hides an unsaved preference" {
     const choice: contract.ModelRef = .{ .source_id = contract.metask_source_id, .model_id = "model-1" };
     runtime.store.?.commit_fault = .write_failed;
     try std.testing.expect(!runtime.rememberPreference(choice).accepted);
-    try std.testing.expectEqual(contract.ModelsError.preference_not_saved, runtime.view().error_code);
+    try std.testing.expectEqual(contract.ModelsError.credentials_retained, runtime.view().error_code);
     runtime.store.?.commit_fault = .none;
     try std.testing.expect(runtime.rememberPreference(choice).accepted);
     try std.testing.expectEqual(contract.ModelsError.credentials_retained, runtime.view().error_code);
