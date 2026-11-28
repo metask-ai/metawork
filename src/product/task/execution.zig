@@ -214,6 +214,15 @@ pub const CompactJob = struct {
         return if (self.access) |*value| value else unreachable;
     }
 
+    /// The terminal is published while the job still holds its leases, so
+    /// what waits for them to go is decided on the wake that follows release.
+    fn finish(self: *CompactJob) void {
+        // Notifier lifetime extends through every worker join. No job/Task access follows release.
+        const notifier = self.notifier;
+        self.destroy();
+        if (!notifier.notify_fn(notifier.context)) @panic("required compact cleanup wake failed");
+    }
+
     pub fn destroy(self: *CompactJob) void {
         if (self.access) |*access| access.deinit();
         self.access = null;
@@ -401,7 +410,7 @@ pub fn cancelRun(context: *anyopaque) void {
 
 pub fn executeCompact(context: *anyopaque) void {
     const job: *CompactJob = @ptrCast(@alignCast(context));
-    defer job.destroy();
+    defer job.finish();
     const compact = job.compact;
     compact.agent_handoff.store(.starting, .release);
     job.notifier.notify();
@@ -441,7 +450,7 @@ pub fn executeCompact(context: *anyopaque) void {
 
 pub fn cancelCompact(context: *anyopaque) void {
     const job: *CompactJob = @ptrCast(@alignCast(context));
-    defer job.destroy();
+    defer job.finish();
     const compact = job.compact;
     _ = compact.pending_interruption.cmpxchgStrong(.none, .app_shutdown, .acq_rel, .acquire);
     const interruption = policy.pendingExternalInterruption(compact);

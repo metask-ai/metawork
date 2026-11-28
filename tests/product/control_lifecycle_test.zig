@@ -7916,6 +7916,84 @@ test "Product Control manual compact uses the active operation lane and appends 
     ) != null);
 }
 
+/// Records whether a worker woke Control once a Task's leases, taken after
+/// arming, were all released. Wakes from the thread driving Control are not
+/// a worker's and do not count.
+const LeaseQuiescenceWakeProbe = struct {
+    const LeaseSet = @FieldType(@FieldType(task_state.Task, "runtime"), "worker_leases");
+
+    control_thread: std.Thread.Id,
+    leases: std.atomic.Value(?*const LeaseSet) = .init(null),
+    saw_live: std.atomic.Value(bool) = .init(false),
+    woke_quiescent: std.atomic.Value(bool) = .init(false),
+
+    fn wake(context: ?*anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (std.Thread.getCurrentId() == self.control_thread) return true;
+        const leases = self.leases.load(.acquire) orelse return true;
+        if (leases.hasLive()) {
+            self.saw_live.store(true, .release);
+        } else if (self.saw_live.load(.acquire)) {
+            self.woke_quiescent.store(true, .release);
+        }
+        return true;
+    }
+};
+
+test "Product Control manual compact wakes Control after releasing its last worker lease" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var probe: LeaseQuiescenceWakeProbe = .{ .control_thread = std.Thread.getCurrentId() };
+    var configuration = productControlConfiguration();
+    configuration.change_notifier = .{ .context = &probe, .wake = LeaseQuiescenceWakeProbe.wake };
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime.runtimePort(),
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+        },
+        configuration,
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const task_id = try workbench.createTask(productControlTaskInput(), try product_control.TestSupport.fixtureModelSelection(&workbench));
+    _ = try runPreparedTask(&workbench, task_id, .{ .text = "establish conversation" });
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
+    const task = workbench.testTask(task_id).?;
+    for (0..5000) |_| {
+        try workbench.drainAgentEvents();
+        if (!task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.RunDidNotSettle;
+
+    probe.leases.store(&task.runtime.worker_leases, .release);
+    _ = try workbench.compactTaskAtBinding(task_id, 1);
+    try waitControlSnapshot(&workbench, "\"phase\":\"compacted\"");
+    // The compaction publishes `compacted` while it still holds its leases.
+    // What waits for them to go -- compacting into a full history, a queued
+    // message, a poisoned close -- is decided on a lifecycle pass, and only
+    // the worker knows when the last one goes.
+    for (0..5000) |_| {
+        try workbench.drainAgentEvents();
+        if (probe.woke_quiescent.load(.acquire)) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.NoWakeAfterCompactReleasedLeases;
+    try std.testing.expect(!task.runtime.worker_leases.hasLive());
+}
+
 test "compact queue rejection persists a legal terminal record and returns its operation id" {
     fake_core.reset();
     const persistence_storage = try std.testing.allocator.alloc(
