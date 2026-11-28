@@ -139,6 +139,7 @@ pub const Registry = struct {
     pub fn clone(self: *const Registry) (std.mem.Allocator.Error || Error)!Registry {
         var result = Registry.init(self.allocator);
         errdefer result.deinit();
+        if (self.providers.items.len != 0) try result.reserveViews();
         result.metask_source_generation = self.metask_source_generation;
         result.selection_revision = self.selection_revision;
         try result.pending_credential_deletions.ensureTotalCapacity(
@@ -189,6 +190,17 @@ pub const Registry = struct {
         return self.view_storage.items;
     }
 
+    /// Views are rebuilt on every read and must never fail there, so their
+    /// whole declared capacity is taken where a provider can first arrive:
+    /// creation, cloning and decoding, which can fail already.
+    fn reserveViews(self: *Registry) std.mem.Allocator.Error!void {
+        try self.view_storage.ensureTotalCapacity(self.allocator, contract.Limits.custom_provider_entries);
+        try self.model_view_storage.ensureTotalCapacity(
+            self.allocator,
+            contract.Limits.custom_provider_entries * contract.Limits.custom_provider_model_entries,
+        );
+    }
+
     pub fn create(
         self: *Registry,
         input: contract.CustomProviderCreateCommand,
@@ -209,6 +221,7 @@ pub const Registry = struct {
             !std.mem.eql(u8, input.provider_id, input.credential_slot.id) or
             self.findIndex(input.provider_id) != null)
             return error.InvalidProvider;
+        try self.reserveViews();
         var provider: OwnedProvider = .{
             .id = try self.allocator.dupe(u8, input.provider_id),
             .builtin_provider_id = input.spec.builtin_provider_id,
@@ -747,28 +760,23 @@ pub const Registry = struct {
         return null;
     }
 
+    /// Fills the storage `reserveViews` took; no allocation happens here.
     fn rebuildViews(self: *Registry) void {
         self.view_storage.clearRetainingCapacity();
         self.model_view_storage.clearRetainingCapacity();
-        var model_count: usize = 0;
-        for (self.providers.items) |provider| model_count += provider.models.items.len;
-        self.view_storage.ensureTotalCapacity(self.allocator, self.providers.items.len) catch
-            @panic("custom provider view capacity exhausted");
-        self.model_view_storage.ensureTotalCapacity(self.allocator, model_count) catch
-            @panic("custom provider view capacity exhausted");
         for (self.providers.items) |*provider| {
             const model_start = self.model_view_storage.items.len;
             for (provider.models.items) |model|
-                self.model_view_storage.append(self.allocator, .{
+                self.model_view_storage.appendAssumeCapacity(.{
                     .id = model.id,
                     .display_name = model.display_name,
                     .metadata = model.metadata,
                     .metadata_provenance = model.metadata_provenance,
                     .test_status = model.test_status,
                     .ready = modelReady(provider, model),
-                }) catch @panic("custom provider view capacity exhausted");
+                });
             const model_end = self.model_view_storage.items.len;
-            self.view_storage.append(self.allocator, .{
+            self.view_storage.appendAssumeCapacity(.{
                 .id = provider.id,
                 .builtin_provider_id = provider.builtin_provider_id,
                 .display_name = provider.display_name,
@@ -781,7 +789,7 @@ pub const Registry = struct {
                 .provider_revision = provider.provider_revision,
                 .source_generation = provider.source_generation,
                 .catalog_generation = provider.catalog_generation,
-            }) catch @panic("custom provider view capacity exhausted");
+            });
         }
     }
 };
@@ -981,6 +989,7 @@ pub fn decode(
         return error.InvalidData;
     var result = Registry.init(allocator);
     errdefer result.deinit();
+    if (wire.custom_providers.len != 0) try result.reserveViews();
     result.selection_revision = wire.selection_revision;
     if (wire.metask) |metask| try result.configureMetaskSource(metask.principal_ref, metask.source_generation);
     for (wire.pending_credential_deletions, 0..) |provider_id, index| {
@@ -1353,6 +1362,33 @@ test "registry creates and selects a native custom provider" {
     try std.testing.expectEqual(@as(usize, 1), values.len);
     try std.testing.expectEqualStrings("slot-1", values[0].id);
     try contract.validateCustomProviderView(values[0]);
+}
+
+test "views reserve their full capacity before any provider can need it" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    for ([_][]const u8{ "slot-1", "slot-2" }, [_][]const u8{ "gpt-5", "gpt-6" }) |slot, model| try testCreate(&registry, .{
+        .provider_id = slot,
+        .spec = .{ .display_name = "OpenAI", .protocol = .openai_responses, .normalized_base_url = "https://api.openai.com/v1/responses" },
+        .credential_slot = .{ .id = slot },
+        .model = .{ .id = model },
+    });
+    var copy = try registry.clone();
+    defer copy.deinit();
+    const encoded = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(encoded);
+    var decoded = try decode(std.testing.allocator, encoded);
+    defer decoded.deinit();
+    // Every read rebuilds the views, so none of them may allocate.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    for ([_]*Registry{ &registry, &copy, &decoded }) |subject| {
+        subject.allocator = failing.allocator();
+        defer subject.allocator = std.testing.allocator;
+        const values = subject.views();
+        try std.testing.expectEqual(@as(usize, 2), values.len);
+        try std.testing.expectEqualStrings("gpt-6", values[1].models[0].id);
+    }
+    try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
 }
 
 test "model configurations with the same endpoint and vendor remain independent across persistence" {
