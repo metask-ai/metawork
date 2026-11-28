@@ -325,6 +325,9 @@ pub const Runtime = struct {
     /// of it whenever it can; that record never decides a Metask answer.
     metask_source: ?MetaskSource = null,
     metask_public_catalog: ?*metask_provider.PublicCatalog = null,
+    /// The last preference write was not confirmed, so the preference in
+    /// memory is no evidence of what models.json holds. Never published.
+    preference_unconfirmed: bool = false,
     /// What the last explicit reset could not do: keys a discarded file named
     /// that could not be read may still be in the credential store. Held
     /// until the next reset or start; nothing is persisted about it.
@@ -1052,11 +1055,20 @@ pub const Runtime = struct {
     /// writes metadata only, without resolving credentials or execution. A
     /// write that fails changes nothing confirmed and is not reported.
     pub fn rememberPreference(self: *Runtime, target: contract.ModelRef) contract.CommandResult {
+        const result = self.commitPreference(target);
+        self.preference_unconfirmed = !result.accepted;
+        return result;
+    }
+
+    fn commitPreference(self: *Runtime, target: contract.ModelRef) contract.CommandResult {
         self.assertMainThread();
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
         const display_name = self.preferenceDisplayName(target);
         if (self.registry.defaultSelection()) |current| {
-            if (std.mem.eql(u8, current.source_id, target.source_id) and
+            // After an unconfirmed write, retained memory is not evidence of
+            // the canonical preference: the same choice is written again.
+            if (!self.preference_unconfirmed and
+                std.mem.eql(u8, current.source_id, target.source_id) and
                 std.mem.eql(u8, current.model_id, target.model_id) and
                 std.mem.eql(u8, self.registry.default_display_name, display_name))
                 return .acceptedResult();
@@ -1889,6 +1901,44 @@ test "unconfirmed preference commits reject memory without revoking unchanged so
         try std.testing.expectEqual(contract.PersistenceHealth.ready, runtime.view().persistence_health);
         try std.testing.expect(runtime.exact(.{ .source_id = "metask", .model_id = "model-1" }, 1, 4) != null);
     }
+}
+
+test "choosing the retained preference after an unknown commit confirms the canonical value" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    defer runtime.deinit();
+    runtime.store = try registry_impl.FileStore.init(std.testing.io, root);
+    try TestSupport.installMetaskDefault(&runtime, "principal", "synthetic-key", &.{
+        .{ .id = "model-1", .display_name = "One" },
+        .{ .id = "model-2", .display_name = "Two" },
+    }, "model-1", 1, 2, 3, 4);
+
+    var candidate = try runtime.registry.clone();
+    defer candidate.deinit();
+    try candidate.rememberPreference(.{ .source_id = "metask", .model_id = "model-2" }, "Two", 5);
+    const encoded = try registry_impl.encodeAlloc(std.testing.allocator, &candidate);
+    defer std.testing.allocator.free(encoded);
+    try runtime.store.?.commit(encoded);
+    // Model an installed candidate whose durability/readback could not be
+    // confirmed, marked as rememberPreference marks it.
+    const unknown = runtime.finishPreferenceCommit(&candidate, .unresolved);
+    runtime.preference_unconfirmed = !unknown.accepted;
+    try std.testing.expectEqualStrings("model-1", runtime.view().default_selection.?.model_id);
+    try std.testing.expectEqual(contract.ModelsError.none, runtime.view().error_code);
+
+    try std.testing.expect(runtime.rememberPreference(.{ .source_id = "metask", .model_id = "model-1" }).accepted);
+    const saved = (try runtime.store.?.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(saved);
+    var restored = try registry_impl.decode(std.testing.allocator, saved);
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("model-1", restored.defaultSelection().?.model_id);
+    try std.testing.expectEqualStrings("One", restored.default_display_name);
+    try std.testing.expectEqualStrings("One", runtime.view().default_selection_display_name.?);
+    try std.testing.expectEqual(contract.ModelsError.none, runtime.view().error_code);
+    try std.testing.expect(runtime.exact(.{ .source_id = "metask", .model_id = "model-1" }, 1, 4) != null);
 }
 
 const TestVault = struct {
