@@ -6,6 +6,7 @@ import test from "node:test";
 import { JSDOM } from "jsdom";
 import { createElement, createRef, useLayoutEffect, useState } from "react";
 import { createServer } from "vite";
+import { emptyModelMetadata } from "../frontend/src/features/settings/model-declaration.ts";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   pretendToBeVisual: true,
@@ -927,7 +928,7 @@ test("Add model uses the Host recipe and saves the first model with its official
       providerId: "hunyuan",
       baseUrl: "https://tokenhub.tencentmaas.com/v1",
       apiKey: "official-secret",
-      model: { id: "hy4" },
+      model: { id: "hy4", metadata: emptyModelMetadata() },
     },
   ]);
   assert.equal(within(dialog).getByLabelText("API key").value, "");
@@ -980,7 +981,7 @@ test("Custom model form detects its protocol from the complete endpoint without 
       protocol: "anthropic_messages",
       normalizedBaseUrl: "https://custom.example.com/v1/messages",
       apiKey: "custom-secret",
-      model: { id: "custom-model" },
+      model: { id: "custom-model", metadata: emptyModelMetadata() },
     },
   ]);
   assert.equal(within(dialog).getByLabelText("API key").value, "");
@@ -1041,7 +1042,7 @@ test("model editing saves all changes once and clears credentials after a partia
       {
         id: "model-a",
         displayName: "Model A",
-        metadata: {},
+        metadata: emptyModelMetadata(),
         metadataProvenance: "unknown",
         testStatus: "connected",
         ready: true,
@@ -1125,6 +1126,7 @@ test("model editing saves all changes once and clears credentials after a partia
       expectedCatalogGeneration: "13",
       modelId: "model-a",
       nextModelId: "model-b",
+      imageInput: null,
       protocol: "anthropic_messages",
       endpoint: "https://other.example/v1/messages",
       apiKey: "  replacement secret  ",
@@ -1195,6 +1197,7 @@ test("Editing an official model permits credential replacement without exposing 
               ...readySettingsModels.providers[0].models[0],
               id: "deepseek-flash",
               displayName: "deepseek-flash",
+              metadata: emptyModelMetadata(),
               ready: true,
               metadataProvenance: "user_declared",
               testStatus: "connected",
@@ -1265,7 +1268,7 @@ test("Editing an official model permits credential replacement without exposing 
       providerId: "deepseek",
       baseUrl: recipe.defaultBaseUrl,
       apiKey: "independent-key",
-      model: { id: "deepseek-flash" },
+      model: { id: "deepseek-flash", metadata: emptyModelMetadata() },
     },
   ]);
 });
@@ -1355,7 +1358,7 @@ test("custom model addresses are submitted directly for every protocol", async (
         protocol,
         normalizedBaseUrl: endpoint,
         apiKey: "example-key",
-        model: { id: "example-model" },
+        model: { id: "example-model", metadata: emptyModelMetadata() },
       },
     ]);
     view.unmount();
@@ -1519,7 +1522,7 @@ test("Save explains each missing custom model field instead of silently doing no
       protocol: "openai_chat_completions",
       normalizedBaseUrl: "https://example.com/v1/chat/completions",
       apiKey: "example-key",
-      model: { id: "example-model" },
+      model: { id: "example-model", metadata: emptyModelMetadata() },
     },
   ]);
 });
@@ -1585,7 +1588,7 @@ test("a version-suffixed Base URL can be completed to a chat completions endpoin
       protocol: "openai_chat_completions",
       normalizedBaseUrl: "https://api.example.com/v1/chat/completions",
       apiKey: "example-key",
-      model: { id: "example-model" },
+      model: { id: "example-model", metadata: emptyModelMetadata() },
     },
   ]);
 });
@@ -1705,7 +1708,7 @@ test("Save names the missing vendor and the missing preset fields", async () => 
       providerId: "deepseek",
       baseUrl: "https://api.deepseek.com",
       apiKey: "official-secret",
-      model: { id: "deepseek-flash" },
+      model: { id: "deepseek-flash", metadata: emptyModelMetadata() },
     },
   ]);
 });
@@ -1729,7 +1732,7 @@ test("editing keeps Save disabled without changes and explains an emptied model 
       {
         id: "model-a",
         displayName: "Model A",
-        metadata: {},
+        metadata: emptyModelMetadata(),
         metadataProvenance: "unknown",
         testStatus: "connected",
         ready: true,
@@ -1764,6 +1767,97 @@ test("editing keeps Save disabled without changes and explains an emptied model 
   assert.equal(modelId.getAttribute("aria-invalid"), "true");
   assert.equal(accessibleDescription(modelId), "Enter a model ID.");
   assert.equal(document.activeElement, modelId);
+});
+
+test("a model's image input is declared in the form, and changing only it can be saved", async () => {
+  const user = userEvent.setup({ document });
+  const created = [];
+  const changes = [];
+  const declared = emptyModelMetadata();
+  declared.capabilities.imageInput = true;
+  const source = {
+    id: "source-vision",
+    builtinProviderId: null,
+    displayName: "Team",
+    protocol: "openai_chat_completions",
+    normalizedBaseUrl: "https://example.com/v1/chat/completions",
+    state: "ready",
+    credentialStatus: "ready",
+    enabled: true,
+    providerRevision: "7",
+    sourceGeneration: "11",
+    catalogGeneration: "13",
+    models: [
+      {
+        id: "vision",
+        displayName: "",
+        metadata: declared,
+        metadataProvenance: "user_declared",
+        testStatus: "connected",
+        ready: true,
+      },
+    ],
+  };
+  renderModelSettings({
+    models: { ...readySettingsModels, customProviders: [source] },
+    onCreateCustomProvider: async (input) => {
+      created.push(input);
+      return true;
+    },
+    onSaveCustomModel: async (input) => {
+      changes.push(input);
+      return {
+        accepted: true,
+        applied: ["image_input"],
+        source,
+        modelId: input.nextModelId,
+        reviewRequired: false,
+      };
+    },
+  });
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  const add = await chooseModelSource(user, "Custom / other service");
+  const choice = within(add).getByRole("combobox", { name: "Image input" });
+  assert.equal(choice.textContent, "Not sure");
+  assert.match(accessibleDescription(choice), /decides from the model name/);
+  await user.type(
+    within(add).getByRole("textbox", { name: "Request URL (Endpoint)" }),
+    "https://custom.example.com/v1/messages",
+  );
+  await user.type(within(add).getByLabelText("API key"), "custom-secret");
+  await user.type(
+    within(add).getByRole("textbox", { name: "Model ID" }),
+    "custom-vision",
+  );
+  await user.click(choice);
+  await user.click(
+    await screen.findByRole("option", { name: "Supported", exact: true }),
+  );
+  await user.click(
+    within(add).getByRole("button", { name: "Save", exact: true }),
+  );
+  assert.deepEqual(created[0].model, {
+    id: "custom-vision",
+    metadata: declared,
+  });
+
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  const edit = screen.getByRole("dialog", { name: "Edit model" });
+  const editChoice = within(edit).getByRole("combobox", {
+    name: "Image input",
+  });
+  assert.equal(editChoice.textContent, "Supported");
+  const save = within(edit).getByRole("button", { name: "Save", exact: true });
+  assert.equal(save.disabled, true);
+  await user.click(editChoice);
+  await user.click(
+    await screen.findByRole("option", { name: "Not supported", exact: true }),
+  );
+  assert.equal(save.disabled, false);
+  await user.click(save);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].nextModelId, "vision");
+  assert.equal(changes[0].imageInput, false);
 });
 
 test("model dialog feedback is visible: defined error color, invalid borders and dimmed disabled actions", () => {
@@ -1937,7 +2031,7 @@ test("Models adds a model independently without listing or reusing legacy provid
             {
               id: "model-a",
               displayName: "Model A",
-              metadata: {},
+              metadata: emptyModelMetadata(),
               metadataProvenance: "unknown",
               testStatus: "untested",
               ready: false,
@@ -2013,7 +2107,7 @@ test("Models adds a model independently without listing or reusing legacy provid
       protocol: "openai_chat_completions",
       normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",
       apiKey: "new-model-key",
-      model: { id: "gpt-5.6-sol" },
+      model: { id: "gpt-5.6-sol", metadata: emptyModelMetadata() },
     },
   ]);
   const dialog = addDialog;

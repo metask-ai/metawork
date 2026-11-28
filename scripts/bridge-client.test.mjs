@@ -7,6 +7,7 @@ import {
   BridgeCommandTimeoutError,
   RendererBridgeContractError,
 } from "../frontend/src/bridge/client.ts";
+import { declareImageInput } from "../frontend/src/features/settings/model-declaration.ts";
 
 function bridgeWith(invoke) {
   return {
@@ -310,12 +311,16 @@ test("Provider creation can carry its first model without a second command", asy
       return { accepted: true, errorCode: "none", attemptId: null };
     }),
   });
+  const vision = {
+    id: "custom-model",
+    metadata: declareImageInput(undefined, true),
+  };
   await client.createCustomProvider({
     displayName: "Custom",
     protocol: "openai_responses",
     normalizedBaseUrl: "https://example.com/responses",
     apiKey: "fixture-secret",
-    model: { id: "custom-model" },
+    model: vision,
   });
   await client.createBuiltinProvider({
     providerId: "deepseek",
@@ -324,7 +329,9 @@ test("Provider creation can carry its first model without a second command", asy
     model: { id: "deepseek-flash" },
   });
   assert.equal(calls.length, 2);
-  assert.deepEqual(calls[0].payload.model, { id: "custom-model" });
+  // The first model's declaration travels with the create, as Host reads it.
+  assert.deepEqual(calls[0].payload.model, structuredClone(vision));
+  assert.equal(calls[0].payload.model.metadata.capabilities.imageInput, true);
   assert.deepEqual(calls[1].payload.model, { id: "deepseek-flash" });
   assert.equal(calls[0].command, "metawork.models.customProviders.create");
   assert.equal(calls[1].command, "metawork.models.builtinProviders.create");

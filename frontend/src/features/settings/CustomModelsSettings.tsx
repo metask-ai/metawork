@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type {
   BuiltinProviderId,
   CustomProviderView,
+  ModelMetadata,
   ModelsView,
   Protocol,
 } from "../../bridge/contracts.ts";
@@ -24,6 +25,7 @@ import {
   protocolFromEndpoint,
   suggestChatCompletionsEndpoint,
 } from "./model-connection.ts";
+import { declareImageInput } from "./model-declaration.ts";
 
 function ModelAction({
   label,
@@ -79,13 +81,15 @@ const examples: Record<Protocol, string> = {
   anthropic_messages: "https://api.anthropic.com/v1/messages",
   gemini_native: "https://generativelanguage.googleapis.com",
 };
-export type ModelEditPart = "address" | "api_key" | "model_id";
+export type ModelEditPart = "address" | "api_key" | "model_id" | "image_input";
 export type CustomModelEditInput = {
   providerId: string;
   expectedProviderRevision: string;
   expectedCatalogGeneration: string;
   modelId: string;
   nextModelId: string;
+  /** The model's image input as the user now declares it; null is unknown. */
+  imageInput: boolean | null;
   protocol: Protocol;
   endpoint: string;
   apiKey: string;
@@ -103,13 +107,13 @@ export type CustomModelActions = {
     protocol: Protocol;
     normalizedBaseUrl: string;
     apiKey: string;
-    model: { id: string };
+    model: { id: string; metadata: ModelMetadata };
   }) => Promise<boolean>;
   onCreateBuiltinProvider: (input: {
     providerId: BuiltinProviderId;
     baseUrl: string;
     apiKey: string;
-    model: { id: string };
+    model: { id: string; metadata: ModelMetadata };
   }) => Promise<boolean>;
   onSaveCustomModel: (
     input: CustomModelEditInput,
@@ -132,6 +136,8 @@ type Draft = {
   choice: string;
   modelId: string;
   originalModelId: string | null;
+  imageInput: boolean | null;
+  originalImageInput: boolean | null;
   providerId: string | null;
   revision: string | null;
   catalogGeneration: string | null;
@@ -140,6 +146,12 @@ type Draft = {
   apiKey: string;
 };
 type FormField = "choice" | "address" | "api_key" | "model_id";
+type ImageInputChoice = "supported" | "unsupported" | "unknown";
+const imageInputChoice = (value: boolean | null): ImageInputChoice =>
+  value === null ? "unknown" : value ? "supported" : "unsupported";
+const imageInputValue = (choice: string): boolean | null =>
+  choice === "supported" ? true : choice === "unsupported" ? false : null;
+const imageInputFieldId = "model-form-image-input";
 type AddressProblem = EndpointIssue | "required" | "root";
 const fieldIds: Record<FormField, string> = {
   choice: "model-form-vendor",
@@ -152,6 +164,8 @@ const emptyDraft = (): Draft => ({
   choice: "",
   modelId: "",
   originalModelId: null,
+  imageInput: null,
+  originalImageInput: null,
   providerId: null,
   revision: null,
   catalogGeneration: null,
@@ -209,6 +223,7 @@ export function CustomModelsSettings({
     editing &&
     provider !== undefined &&
     draft.modelId.trim() === draft.originalModelId &&
+    draft.imageInput === draft.originalImageInput &&
     !draft.apiKey &&
     draft.protocol === provider.protocol &&
     draft.baseUrl.trim() === provider.normalizedBaseUrl;
@@ -248,6 +263,9 @@ export function CustomModelsSettings({
     setFailed(false);
   }
   function open(source?: CustomProviderView, modelId: string | null = null) {
+    const declared =
+      source?.models.find((model) => model.id === modelId)?.metadata
+        .capabilities.imageInput ?? null;
     returnFocus.current =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -272,6 +290,8 @@ export function CustomModelsSettings({
             baseUrl: source.normalizedBaseUrl,
             modelId: modelId ?? "",
             originalModelId: modelId,
+            imageInput: declared,
+            originalImageInput: declared,
           }
         : emptyDraft(),
     );
@@ -364,6 +384,10 @@ export function CustomModelsSettings({
     if (!draft.protocol) return;
     const protocol = draft.protocol;
     const modelId = draft.modelId.trim();
+    const model = {
+      id: modelId,
+      metadata: declareImageInput(undefined, draft.imageInput),
+    };
     if (editing) {
       if (!provider) return;
       const version = dialogVersion.current;
@@ -377,6 +401,7 @@ export function CustomModelsSettings({
           expectedCatalogGeneration: draft.catalogGeneration!,
           modelId: draft.originalModelId!,
           nextModelId: modelId,
+          imageInput: draft.imageInput,
           protocol,
           endpoint: draft.baseUrl.trim(),
           apiKey: draft.apiKey,
@@ -396,6 +421,9 @@ export function CustomModelsSettings({
                   revision: source.providerRevision,
                   catalogGeneration: source.catalogGeneration,
                   originalModelId: outcome.modelId,
+                  originalImageInput: outcome.applied.includes("image_input")
+                    ? current.imageInput
+                    : current.originalImageInput,
                 }
               : null,
           );
@@ -416,7 +444,7 @@ export function CustomModelsSettings({
           providerId: preset.id,
           baseUrl: preset.defaultBaseUrl,
           apiKey: draft.apiKey,
-          model: { id: modelId },
+          model,
         }),
       );
     } else if (draft.choice === "custom") {
@@ -434,7 +462,7 @@ export function CustomModelsSettings({
           protocol,
           normalizedBaseUrl: draft.baseUrl.trim(),
           apiKey: draft.apiKey,
-          model: { id: modelId },
+          model,
         }),
       );
     }
@@ -959,6 +987,38 @@ export function CustomModelsSettings({
                         )}
                       </p>
                     )}
+                    <label className="settings-model-form-field">
+                      <span>{t("settings.custom_model_image_input")}</span>
+                      <SelectionMenu
+                        triggerId={imageInputFieldId}
+                        triggerClassName="settings-control"
+                        value={imageInputChoice(draft.imageInput)}
+                        options={(
+                          ["supported", "unsupported", "unknown"] as const
+                        ).map((choice) => ({
+                          value: choice,
+                          label: t(
+                            `settings.custom_model_image_input.${choice}`,
+                          ),
+                        }))}
+                        placeholder={t("settings.choose_selection")}
+                        ariaLabel={t("settings.custom_model_image_input")}
+                        ariaDescribedBy={`${imageInputFieldId}-help`}
+                        disabled={busy}
+                        onValueChange={(choice) =>
+                          setDraft({
+                            ...draft,
+                            imageInput: imageInputValue(choice),
+                          })
+                        }
+                      />
+                    </label>
+                    <p
+                      id={`${imageInputFieldId}-help`}
+                      className="text-xs text-(--ui-content-muted)"
+                    >
+                      {t("settings.custom_model_image_input_help")}
+                    </p>
                     {preset && (
                       <p className="text-xs text-(--ui-content-muted)">
                         <a
@@ -1003,7 +1063,9 @@ export function CustomModelsSettings({
                                 ? "settings.custom_provider_endpoint"
                                 : part === "api_key"
                                   ? "settings.api_key"
-                                  : "settings.custom_model_id",
+                                  : part === "image_input"
+                                    ? "settings.custom_model_image_input"
+                                    : "settings.custom_model_id",
                             ),
                           )
                           .join("、"),
