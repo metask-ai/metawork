@@ -1264,21 +1264,29 @@ pub const Runtime = struct {
                 return .rejected(.local_resource_exhausted)),
             .too_large => retained = true,
         }
-        switch (source) {
-            .missing => {},
-            .retired, .unreadable => |bytes| store.quarantine(bytes) catch return .rejected(.persistence_unavailable),
-            .too_large => store.quarantineFile() catch return .rejected(.persistence_unavailable),
-        }
         // The empty store records the Metask source memory holds: the
         // catalog in hand stays, and so does its account's identity.
+        // Whatever can fail without writing is done before the original
+        // is set aside.
         if (self.metask_source) |*metask|
             candidate.configureMetaskSource(metask.principal.view(), metask.generation) catch |err|
                 return .rejected(mapRegistryError(err));
         const encoded = registry_impl.encodeAlloc(self.allocator, &candidate) catch |err|
             return .rejected(mapRegistryError(err));
         defer self.allocator.free(encoded);
-        if (commitCanonical(self.allocator, store, encoded) != .committed)
+        var aside_name: [80]u8 = undefined;
+        var aside: ?[]const u8 = null;
+        switch (source) {
+            .missing => {},
+            .retired, .unreadable => |bytes| store.quarantine(bytes) catch return .rejected(.persistence_unavailable),
+            .too_large => aside = store.quarantineFile(&aside_name) catch return .rejected(.persistence_unavailable),
+        }
+        if (commitCanonical(self.allocator, store, encoded) != .committed) {
+            // A file set aside unread goes back, so the next reset or start
+            // finds it as it was; a copy left the original in place.
+            if (aside) |name| store.restoreQuarantined(name);
             return .rejected(.persistence_unavailable);
+        }
         self.registry.replace(&candidate);
         self.store_healthy = true;
         self.reset_notice = if (retained) .credentials_retained else .none;
@@ -4187,29 +4195,37 @@ test "an explicit reset sets the original aside and clears every key it can iden
 }
 
 test "a reset that cannot commit leaves models.json where it can be read again" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const length = try tmp.dir.realPath(std.testing.io, &path);
-    try writeTestFile(&tmp.dir, registry_impl.store_file_name, newer_store);
-    var vault: CleanupTestVault = .{};
-    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
-    try runtime.start(path[0..length], vault.port());
-    defer {
-        runtime.stop();
-        runtime.deinit();
+    var oversized: [70 * 1024]u8 = undefined;
+    @memset(&oversized, ' ');
+    for ([_][]const u8{ newer_store, &oversized }) |original| {
+        const too_large = original.len == oversized.len;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const length = try tmp.dir.realPath(std.testing.io, &path);
+        try writeTestFile(&tmp.dir, registry_impl.store_file_name, original);
+        var vault: CleanupTestVault = .{};
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try runtime.start(path[0..length], vault.port());
+        defer {
+            runtime.stop();
+            runtime.deinit();
+        }
+        runtime.store.?.commit_fault = .write_failed;
+        try std.testing.expect(!runtime.resetStore().accepted);
+        try std.testing.expect(!runtime.store_healthy);
+        try std.testing.expectEqual(@as(usize, 0), vault.call_count);
+        // Read as bytes: one too large is set aside unread, and put back.
+        const still = try tmp.dir.readFileAlloc(std.testing.io, registry_impl.store_file_name, std.testing.allocator, .limited(1024 * 1024));
+        defer std.testing.allocator.free(still);
+        try std.testing.expectEqualStrings(original, still);
+        // The next attempt reads the same keys from it again, or sets it
+        // aside again and says some may stay.
+        runtime.store.?.commit_fault = .none;
+        try std.testing.expect(runtime.resetStore().accepted);
+        try std.testing.expectEqual(@as(usize, if (too_large) 0 else 3), vault.call_count);
+        try std.testing.expectEqual(too_large, runtime.view().error_code == .credentials_retained);
     }
-    runtime.store.?.commit_fault = .write_failed;
-    try std.testing.expect(!runtime.resetStore().accepted);
-    try std.testing.expect(!runtime.store_healthy);
-    try std.testing.expectEqual(@as(usize, 0), vault.call_count);
-    const still = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse return error.TestExpectedEqual;
-    defer std.testing.allocator.free(still);
-    try std.testing.expectEqualStrings(newer_store, still);
-    // The next attempt reads the same keys from it again.
-    runtime.store.?.commit_fault = .none;
-    try std.testing.expect(runtime.resetStore().accepted);
-    try std.testing.expectEqual(@as(usize, 3), vault.call_count);
 }
 
 test "a retained-key notice never hides an unsaved preference" {

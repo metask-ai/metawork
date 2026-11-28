@@ -1291,13 +1291,24 @@ pub const FileStore = struct {
         try self.syncDirectory();
     }
 
-    /// Sets the canonical file aside unread, for one too large to read here.
-    /// Afterwards there is no canonical until the replacement commits.
-    pub fn quarantineFile(self: *FileStore) FileStoreError!void {
-        var storage: [80]u8 = undefined;
-        const name = try self.quarantineName(&storage);
+    /// Sets the canonical file aside unread, for one too large to read here,
+    /// and returns the name it went under. Until the replacement commits
+    /// there is no canonical: `restoreQuarantined` puts it back.
+    pub fn quarantineFile(self: *FileStore, storage: *[80]u8) FileStoreError![]const u8 {
+        const name = try self.quarantineName(storage);
         std.Io.Dir.rename(self.dir, store_file_name, self.dir, name, self.io) catch return error.WriteFailed;
-        try self.syncDirectory();
+        self.syncDirectory() catch |err| {
+            self.restoreQuarantined(name);
+            return err;
+        };
+        return name;
+    }
+
+    /// Best effort: the file `quarantineFile` set aside is the canonical
+    /// again, over whatever a failed replacement left.
+    pub fn restoreQuarantined(self: *FileStore, name: []const u8) void {
+        std.Io.Dir.rename(self.dir, name, self.dir, store_file_name, self.io) catch return;
+        self.syncDirectory() catch {};
     }
 
     fn quarantineName(self: *FileStore, storage: *[80]u8) FileStoreError![]const u8 {
