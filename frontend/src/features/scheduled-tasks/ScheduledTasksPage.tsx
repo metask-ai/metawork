@@ -16,7 +16,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { BrandIcon } from "../../components/ui/BrandIcon.tsx";
 import { ConfirmationNotice } from "../../components/ConfirmationNotice.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { DatePicker } from "../../components/ui/date-picker.tsx";
+import { DateTimePicker } from "../../components/ui/date-time-picker.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { HeaderSearch } from "../../components/ui/HeaderSearch.tsx";
 import { Input } from "../../components/ui/input.tsx";
@@ -324,7 +324,6 @@ export function ScheduledTasksPage({
     return () => window.clearInterval(interval);
   }, [hasNextRun]);
   const isOnce = draft.recurrenceKind === "once";
-  const dateLabel = t("scheduled.date");
   const timeLabel = t("scheduled.time");
   const availableModels = modelOptions(snapshot);
   const draftStart = draftUnixSeconds(draft);
@@ -346,6 +345,14 @@ export function ScheduledTasksPage({
     : expiredOnce
       ? "scheduled.expired_once"
       : null;
+  const timePickerProps = {
+    "aria-label": timeLabel,
+    "aria-invalid": timeError !== null,
+    "aria-describedby": timeError ? "scheduled-time-error" : undefined,
+    hourLabel: t("scheduled.hours"),
+    minuteLabel: t("scheduled.minutes"),
+    className: "min-w-0 flex-1 border-0 bg-transparent px-0",
+  };
   const normalizedQuery = query.trim().toLocaleLowerCase(locale);
   const filteredTasks = snapshot.scheduledTasks.filter((task) => {
     if (!normalizedQuery) return true;
@@ -419,6 +426,14 @@ export function ScheduledTasksPage({
     setCreating(false);
     setDraft(draftFromTask(task));
     setError(null);
+  }
+
+  function changeDraftTime(time: string) {
+    setDraft((value) => ({
+      ...value,
+      start: `${value.start.slice(0, -5)}${time}`,
+      originalStart: null,
+    }));
   }
 
   async function submit() {
@@ -1135,12 +1150,7 @@ export function ScheduledTasksPage({
                     <h3 id="scheduled-editor-time-title" className="sr-only">
                       {t("scheduled.when")}
                     </h3>
-                    <div
-                      className={cn(
-                        "scheduled-time-fields",
-                        isOnce && "scheduled-time-fields-once",
-                      )}
-                    >
+                    <div className="scheduled-time-fields">
                       <ScheduleRecurrencePicker
                         value={draft.recurrenceKind}
                         weekdays={draft.weekdays}
@@ -1194,34 +1204,6 @@ export function ScheduledTasksPage({
                           }))
                         }
                       />
-                      {isOnce && (
-                        <div className="scheduled-inline-input scheduled-start">
-                          <span>{dateLabel}:</span>
-                          <DatePicker
-                            locale={locale}
-                            className="min-w-0 flex-1"
-                            today={localDateTime(
-                              Math.floor(Date.now() / 1000),
-                            ).slice(0, 10)}
-                            previousMonthLabel={t("date_picker.previous_month")}
-                            nextMonthLabel={t("date_picker.next_month")}
-                            todayLabel={t("date_picker.today")}
-                            aria-label={dateLabel}
-                            aria-invalid={timeError !== null}
-                            aria-describedby={
-                              timeError ? "scheduled-time-error" : undefined
-                            }
-                            value={draft.start.slice(0, -6)}
-                            onValueChange={(date) =>
-                              setDraft((value) => ({
-                                ...value,
-                                start: `${date}T${value.start.slice(-5)}`,
-                                originalStart: null,
-                              }))
-                            }
-                          />
-                        </div>
-                      )}
                       <div
                         className={cn(
                           "scheduled-inline-input scheduled-start",
@@ -1229,24 +1211,38 @@ export function ScheduledTasksPage({
                         )}
                       >
                         <span>{timeLabel}:</span>
-                        <TimePicker
-                          aria-label={timeLabel}
-                          aria-invalid={timeError !== null}
-                          aria-describedby={
-                            timeError ? "scheduled-time-error" : undefined
-                          }
-                          value={draft.start.slice(-5)}
-                          hourLabel={t("scheduled.hours")}
-                          minuteLabel={t("scheduled.minutes")}
-                          className="flex-1 border-0 bg-transparent px-0"
-                          onValueChange={(time) =>
-                            setDraft((value) => ({
-                              ...value,
-                              start: `${value.start.slice(0, -5)}${time}`,
-                              originalStart: null,
-                            }))
-                          }
-                        />
+                        {isOnce ? (
+                          <DateTimePicker
+                            {...timePickerProps}
+                            date={draft.start.slice(0, -6)}
+                            time={draft.start.slice(-5)}
+                            locale={locale}
+                            today={localDateTime(
+                              Math.floor(Date.now() / 1000),
+                            ).slice(0, 10)}
+                            dateLabel={t("scheduled.date")}
+                            timeLabel={timeLabel}
+                            closeLabel={t("common.close")}
+                            popupClassName="scheduled-editor-neutral"
+                            previousMonthLabel={t("date_picker.previous_month")}
+                            nextMonthLabel={t("date_picker.next_month")}
+                            todayLabel={t("date_picker.today")}
+                            onDateChange={(date) =>
+                              setDraft((value) => ({
+                                ...value,
+                                start: `${date}T${value.start.slice(-5)}`,
+                                originalStart: null,
+                              }))
+                            }
+                            onTimeChange={changeDraftTime}
+                          />
+                        ) : (
+                          <TimePicker
+                            {...timePickerProps}
+                            value={draft.start.slice(-5)}
+                            onValueChange={changeDraftTime}
+                          />
+                        )}
                       </div>
                       {draft.recurrenceKind === "interval" && (
                         <div

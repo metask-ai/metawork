@@ -12,16 +12,19 @@ import {
   pickerControlText,
 } from "./utils.ts";
 
-type TimePickerProps = Pick<
-  HTMLAttributes<HTMLDivElement>,
-  "className" | "aria-label" | "aria-invalid" | "aria-describedby"
-> & {
+type TimePickerOptionsProps = {
   value: string;
   onValueChange: (value: string) => void;
   hourLabel: string;
   minuteLabel: string;
   disabled?: boolean;
 };
+
+type TimePickerProps = Pick<
+  HTMLAttributes<HTMLDivElement>,
+  "className" | "aria-label" | "aria-invalid" | "aria-describedby"
+> &
+  TimePickerOptionsProps;
 
 function TimeColumn({
   value,
@@ -65,7 +68,7 @@ function TimeColumn({
         value={value}
         onValueChange={onValueChange}
         disabled={disabled}
-        className="relative h-56 max-h-[calc(var(--available-height)-40px)] overflow-y-auto overscroll-contain [scrollbar-width:thin]"
+        className="ui-time-picker-scroll relative h-56 max-h-[calc(var(--available-height)-40px)] overflow-y-auto overscroll-contain"
       >
         {Array.from({ length: count }, (_, number) => {
           const part = String(number).padStart(2, "0");
@@ -86,6 +89,34 @@ function TimeColumn({
   );
 }
 
+export function TimePickerOptions({
+  value,
+  onValueChange,
+  hourLabel,
+  minuteLabel,
+  disabled = false,
+}: TimePickerOptionsProps) {
+  const parts = value.split(":");
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      {[hourLabel, minuteLabel].map((label, index) => (
+        <TimeColumn
+          key={index}
+          value={parts[index] || ""}
+          count={index === 0 ? 24 : 60}
+          label={label}
+          disabled={disabled}
+          onValueChange={(next) => {
+            const updated = [parts[0] || "00", parts[1] || "00"];
+            updated[index] = next;
+            onValueChange(updated.join(":"));
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 export function TimePicker({
   value,
   onValueChange,
@@ -95,7 +126,6 @@ export function TimePicker({
   className,
   ...props
 }: TimePickerProps) {
-  const parts = value.split(":");
   const popup = useRef<HTMLDivElement>(null);
   return (
     <Popover.Root>
@@ -143,22 +173,15 @@ export function TimePicker({
               ) ?? null
             }
             aria-label={props["aria-label"]}
-            className={cn("grid w-48 grid-cols-2 gap-2 p-2", pickerControlText)}
+            className={cn("w-48 p-2", pickerControlText)}
           >
-            {[hourLabel, minuteLabel].map((label, index) => (
-              <TimeColumn
-                key={index}
-                value={parts[index] || ""}
-                count={index === 0 ? 24 : 60}
-                label={label}
-                disabled={disabled}
-                onValueChange={(next) => {
-                  const updated = [parts[0] || "00", parts[1] || "00"];
-                  updated[index] = next;
-                  onValueChange(updated.join(":"));
-                }}
-              />
-            ))}
+            <TimePickerOptions
+              value={value}
+              hourLabel={hourLabel}
+              minuteLabel={minuteLabel}
+              disabled={disabled}
+              onValueChange={onValueChange}
+            />
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>

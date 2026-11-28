@@ -102,11 +102,23 @@ function render(snapshot) {
   return renderToStaticMarkup(scheduledElement(snapshot));
 }
 
-async function chooseTime(user, value) {
-  const picker = screen.getByRole("group", { name: "Time" });
-  await user.click(within(picker).getByRole("button"));
+function timeControl() {
+  return screen.getByRole("group", { name: "Time", exact: true });
+}
+
+async function openTimePicker(user) {
+  await user.click(within(timeControl()).getByRole("button"));
+  return screen.findByRole("dialog", { name: "Time", exact: true });
+}
+
+async function chooseTime(user, value, popup = null) {
+  const panel = popup ?? (await openTimePicker(user));
+  const timeTab = within(panel).queryByRole("tab", { name: "Time" });
+  if (timeTab) await user.click(timeTab);
   for (const [index, label] of ["Hours", "Minutes"].entries()) {
-    const column = await screen.findByRole("radiogroup", { name: label });
+    const column = await within(panel).findByRole("radiogroup", {
+      name: label,
+    });
     await user.click(
       within(column).getByRole("radio", {
         name: value.split(":")[index],
@@ -116,12 +128,11 @@ async function chooseTime(user, value) {
   }
   await user.keyboard("{Escape}");
   await waitFor(() =>
-    assert.ok(screen.queryByRole("radiogroup", { name: "Hours" }) === null),
+    assert.equal(
+      screen.queryByRole("dialog", { name: "Time", exact: true }),
+      null,
+    ),
   );
-}
-
-function dateControl() {
-  return screen.getByRole("group", { name: "Date", exact: true });
 }
 
 function calendarDayLabel(value) {
@@ -131,16 +142,19 @@ function calendarDayLabel(value) {
   }).format(Date.parse(value));
 }
 
-async function chooseDate(user, value) {
-  await user.click(within(dateControl()).getByRole("button"));
-  const popup = await screen.findByRole("dialog", {
-    name: "Date",
-    exact: true,
-  });
+async function selectDate(user, popup, value) {
   const day = { name: calendarDayLabel(value), exact: true };
   if (within(popup).queryByRole("button", day) === null)
     await user.click(within(popup).getByRole("button", { name: "Next month" }));
   await user.click(await within(popup).findByRole("button", day));
+}
+
+async function chooseDate(user, value) {
+  const popup = await openTimePicker(user);
+  await selectDate(user, popup, value);
+  await user.click(
+    within(popup).getByRole("button", { name: "Close", exact: true }),
+  );
   await waitFor(() => assert.equal(screen.queryByRole("grid"), null));
 }
 
@@ -694,9 +708,8 @@ test("expired one-time edits require a future date and time at confirmation", as
   );
   const user = userEvent.setup({ document });
   await user.click(screen.getByRole("button", { name: "Edit", exact: true }));
-  const date = dateControl();
-  const time = screen.getByRole("group", { name: "Time" });
-  assert.equal(date.textContent, "01/30/2032");
+  const time = timeControl();
+  assert.equal(time.textContent, "01/30/2032 09:00");
   assert.equal(time.getAttribute("aria-invalid"), "true");
   assert.equal(screen.getByRole("button", { name: "Confirm" }).disabled, true);
   await chooseTime(user, "13:00");
@@ -706,8 +719,8 @@ test("expired one-time edits require a future date and time at confirmation", as
   now = new Date("2032-02-02T13:00").getTime();
   fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
   await screen.findByText("Choose a future time for this one-time run.");
-  assert.equal(date.getAttribute("aria-invalid"), "true");
-  assert.equal(date.textContent, "02/02/2032");
+  assert.equal(time.getAttribute("aria-invalid"), "true");
+  assert.equal(time.textContent, "02/02/2032 13:00");
   assert.equal(saved, undefined);
   await chooseDate(user, "2032-02-03");
   await user.click(screen.getByRole("button", { name: "Confirm" }));
@@ -1065,7 +1078,7 @@ test("schedule instructions have no separate Skill or Workspace configuration", 
   assert.doesNotMatch(dialog.textContent, /workspace/i);
 });
 
-test("schedule editor has labeled controls and a date for single runs", async () => {
+test("the schedule editor uses repeat and time controls for each new frequency", async () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.automaticWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
@@ -1138,12 +1151,13 @@ test("schedule editor has labeled controls and a date for single runs", async ()
     await screen.findByRole("menuitem", { name: "Daily", exact: true }),
   );
   assert.equal(screen.queryByRole("spinbutton", { name: "Every" }), null);
-  assert.equal(
-    screen.queryByRole("group", { name: "Date", exact: true }),
-    null,
-  );
-  await chooseFrequency(user, "Once");
-  assert.ok(within(dateControl()).getByRole("button"));
+  const timeSection = screen.getByRole("region", { name: "When" });
+  assert.equal(within(timeSection).getAllByRole("button").length, 2);
+  for (const frequency of ["Weekly", "Monthly", "Once"]) {
+    await chooseFrequency(user, frequency);
+    assert.equal(within(timeSection).getAllByRole("button").length, 2);
+    assert.ok(within(timeControl()).getByRole("button"));
+  }
   assert.equal(dialog.querySelectorAll("select").length, 0);
   assert.ok(dialog.querySelector('[role="combobox"]'));
 
@@ -1783,12 +1797,11 @@ test("new one-time schedules default across midnight and save the selected date"
   fireEvent.change(screen.getByLabelText("Instruction"), {
     target: { value: "Summarize work" },
   });
-  assert.equal(dateControl().textContent, "02/01/2032");
-  const clock = screen.getByRole("group", { name: "Time" });
-  assert.match(clock.textContent, /00:30/);
+  assert.equal(timeControl().textContent, "02/01/2032 00:30");
   const user = userEvent.setup({ document });
-  await chooseDate(user, "2032-02-12");
-  await chooseTime(user, "10:15");
+  const popup = await openTimePicker(user);
+  await selectDate(user, popup, "2032-02-12");
+  await chooseTime(user, "10:15", popup);
   now = new Date("2032-02-02T12:00").getTime();
   fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
   await waitFor(() => assert.ok(created));
@@ -1824,9 +1837,7 @@ test("one-time edits preserve the other field and keep an untouched instant", as
       ),
     );
     fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
-    const clock = screen.getByRole("group", { name: "Time" });
-    assert.equal(dateControl().textContent, "12/10/2032");
-    assert.match(clock.textContent, /09:00/);
+    assert.equal(timeControl().textContent, "12/10/2032 09:00");
     fireEvent.change(screen.getByLabelText("Name"), {
       target: { value: "Review changes" },
     });
@@ -1878,11 +1889,7 @@ test("changing an existing calendar rule to once gives its clock a visible date"
   fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
   const user = userEvent.setup({ document });
   await chooseFrequency(user, "Once");
-  assert.equal(dateControl().textContent, "02/01/2032");
-  assert.match(
-    screen.getByRole("group", { name: "Time" }).textContent,
-    /08:00/,
-  );
+  assert.equal(timeControl().textContent, "02/01/2032 08:00");
   fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
   await waitFor(() => assert.ok(saved));
   assert.deepEqual(saved.recurrence, {
@@ -1898,7 +1905,7 @@ test("the date calendar supports keyboard navigation, selection and focus return
   renderDom(scheduledElement(snapshot));
   const user = userEvent.setup({ document });
   await user.click(screen.getByRole("button", { name: "New" }));
-  const trigger = within(dateControl()).getByRole("button");
+  const trigger = within(timeControl()).getByRole("button");
   trigger.focus();
   await user.keyboard("{Enter}");
   const january = await screen.findByRole("grid", { name: "January 2032" });
@@ -1921,7 +1928,7 @@ test("the date calendar supports keyboard navigation, selection and focus return
   assert.equal(document.activeElement, february29);
   await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(document.activeElement, trigger));
-  assert.equal(dateControl().textContent, "01/31/2032");
+  assert.equal(timeControl().textContent, "01/31/2032 13:00");
   await user.keyboard("{Enter}");
   const reopened = await screen.findByRole("grid", { name: "January 2032" });
   await waitFor(() =>
@@ -1933,12 +1940,14 @@ test("the date calendar supports keyboard navigation, selection and focus return
     ),
   );
   await user.keyboard("{PageDown}{ArrowRight}{Enter}");
+  assert.equal(timeControl().textContent, "03/01/2032 13:00");
+  assert.ok(screen.getByRole("grid", { name: "March 2032" }));
+  await user.keyboard("{Escape}");
   await waitFor(() => assert.equal(document.activeElement, trigger));
-  assert.equal(dateControl().textContent, "03/01/2032");
   assert.ok(screen.getByRole("dialog", { name: "New schedule" }));
 });
 
-test("one time panel contains both columns and supports keyboard navigation", async () => {
+test("the wide one-time panel shows the calendar and both clock columns", async () => {
   const snapshot = scheduleSnapshot();
   snapshot.scheduledTasks = [];
   renderDom(scheduledElement(snapshot));
@@ -1946,10 +1955,12 @@ test("one time panel contains both columns and supports keyboard navigation", as
   await user.click(screen.getByRole("button", { name: "New" }));
   const picker = screen.getByRole("group", { name: "Time" });
   const trigger = within(picker).getByRole("button");
-  assert.match(trigger.textContent, /^\d{2}:\d{2}/);
+  assert.match(trigger.textContent, /\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}$/);
   assert.equal(within(picker).queryByRole("combobox"), null);
   await user.click(trigger);
   const panel = await screen.findByRole("dialog", { name: "Time" });
+  assert.ok(within(panel).getByRole("grid"));
+  assert.equal(within(panel).queryByRole("tablist"), null);
   const hours = within(panel).getByRole("radiogroup", { name: "Hours" });
   const minutes = within(panel).getByRole("radiogroup", { name: "Minutes" });
   assert.equal(within(hours).getAllByRole("radio").length, 24);
@@ -1981,6 +1992,44 @@ test("one time panel contains both columns and supports keyboard navigation", as
   assert.ok(screen.getByRole("dialog", { name: "New schedule" }));
   await waitFor(() => assert.ok(document.activeElement === trigger));
   assert.equal(within(picker).queryByRole("textbox"), null);
+});
+
+test("the narrow one-time panel switches between date and time tabs", async (ctx) => {
+  const previousWidth = window.innerWidth;
+  window.innerWidth = 390;
+  ctx.after(() => {
+    window.innerWidth = previousWidth;
+  });
+  ctx.mock.method(Date, "now", () => Date.parse("2032-01-31T12:00"));
+  const snapshot = scheduleSnapshot();
+  snapshot.scheduledTasks = [];
+  renderDom(scheduledElement(snapshot));
+  const user = userEvent.setup({ document });
+  await user.click(screen.getByRole("button", { name: "New" }));
+  const popup = await openTimePicker(user);
+  const dateTab = within(popup).getByRole("tab", {
+    name: "Date",
+    selected: true,
+  });
+  await waitFor(() => assert.equal(document.activeElement, dateTab));
+  assert.ok(within(popup).getByRole("grid"));
+  assert.equal(
+    within(popup).queryByRole("radiogroup", { name: "Hours" }),
+    null,
+  );
+  await selectDate(user, popup, "2032-02-02");
+  dateTab.focus();
+  await user.keyboard("{ArrowRight}");
+  await within(popup).findByRole("tab", { name: "Time", selected: true });
+  assert.equal(within(popup).queryByRole("grid"), null);
+  await chooseTime(user, "15:30", popup);
+  assert.equal(timeControl().textContent, "02/02/2032 15:30");
+  await waitFor(() => {
+    assert.equal(
+      document.activeElement,
+      within(timeControl()).getByRole("button"),
+    );
+  });
 });
 
 test("weekly and monthly submenus default to today, enforce one selection, and submit sorted sets", async (ctx) => {
