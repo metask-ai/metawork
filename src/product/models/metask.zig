@@ -33,8 +33,8 @@ pub const Error = error{
 
 pub fn errorCode(err: Error) contract.ModelsError {
     return switch (err) {
+        error.Forbidden => .account_suspended,
         error.Unauthorized,
-        error.Forbidden,
         error.RateLimited,
         error.ServiceUnavailable,
         error.Cancelled,
@@ -1153,9 +1153,10 @@ test "catalog status mapping is fail closed" {
     try requireSuccess(200);
     try std.testing.expectError(error.Unauthorized, requireSuccess(401));
     try std.testing.expectError(error.Forbidden, requireSuccess(403));
-    // Neither says the login is gone: only Account may decide that.
+    // Neither says the login is gone: only Account may decide that. A
+    // refused account is told as such, since asking again will not help.
     try std.testing.expectEqual(contract.ModelsError.catalog_unavailable, errorCode(error.Unauthorized));
-    try std.testing.expectEqual(contract.ModelsError.catalog_unavailable, errorCode(error.Forbidden));
+    try std.testing.expectEqual(contract.ModelsError.account_suspended, errorCode(error.Forbidden));
     try std.testing.expectError(error.RateLimited, requireSuccess(429));
     try std.testing.expectError(
         error.ServiceUnavailable,

@@ -459,6 +459,11 @@ test("Host preparation, failures and default selection are not first-use setup",
     reason: "catalog_failed",
     action: "refresh",
   });
+  state.models.providers[0].errorCode = "account_suspended";
+  assert.deepEqual(classify(state), {
+    reason: "account_suspended",
+    action: null,
+  });
   state.models.providers[0].errorCode = "no_models";
   assert.deepEqual(classify(state), { reason: "no_models", action: "refresh" });
   state.newTaskAdmission.reason = "shutting_down";

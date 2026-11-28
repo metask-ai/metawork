@@ -603,7 +603,7 @@ Host 将 Desired Registry 的完整非敏感 typed connection、authorization op
 
 `models.defaultSelectionDisplayName` 为必需的 nullable string，仅在保存了非空 Metask 起始偏好显示名时为字符串。新任务 Composer 依据[产品需求](requirements.md#52-账号provider模型与执行配置)将它解析为目录中的当前 `ModelRef`，创建命令继续提交精确模型 ID 和当前 generation。
 
-`providers[]` 中 Metask 的 `catalogState` 只在没有目录时为 `loading` 或 `failed`，有目录时更新不改变它；没有账号时为 `needs_authentication`，退出后 `errorCode = authorization_unavailable`；`catalogGeneration` 只随目录内容变化。Metask 的 `catalogState`、`errorCode` 与可选模型都与 `persistenceHealth` 无关；顶层 `availability` 只等于 Custom Provider 与起始偏好的持久化是否可信，不约束 Metask。Renderer 只对 Custom 来源要求 `persistenceHealth = ready`。根 `operation = refreshing_catalog` 表示加载或用户自己发起的刷新正在进行，加载期间（含重试间隙）不灭，后台更新不亮。
+`providers[]` 中 Metask 的 `catalogState` 只在没有目录时为 `loading` 或 `failed`，有目录时更新不改变它；没有账号时为 `needs_authentication`，退出后 `errorCode = authorization_unavailable`；Metask 拒绝账号本身（403）时为 `failed` 且 `errorCode = account_suspended`，Renderer 提示到 Metask 官网查看、不给刷新，任务页照旧按目录失败显示；`catalogGeneration` 只随目录内容变化。Metask 的 `catalogState`、`errorCode` 与可选模型都与 `persistenceHealth` 无关；顶层 `availability` 只等于 Custom Provider 与起始偏好的持久化是否可信，不约束 Metask。Renderer 只对 Custom 来源要求 `persistenceHealth = ready`。根 `operation = refreshing_catalog` 表示加载或用户自己发起的刷新正在进行，加载期间（含重试间隙）不灭，后台更新不亮。
 
 退役 `metawork.models.configureMetaskSelection` 与 `metawork.models.selectDefault` Renderer command，不提供旧 payload 兼容。起始偏好仅由 Host 在交互 Task 创建成功或主动模型意图 confirmed commit 后 best-effort 保存；自动创建、目录更新或浏览历史不更新。偏好写失败不改变已确认 Task 结果，根 Models.errorCode 发布 `preference_not_saved` 独立非阻塞提示；Provider errorCode 不产生此值。
 

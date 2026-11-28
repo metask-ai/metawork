@@ -332,6 +332,7 @@ const modelsErrorCodes = [
   "authorization_unavailable",
   "persistence_unavailable",
   "catalog_unavailable",
+  "account_suspended",
   "catalog_invalid",
   "catalog_too_large",
   "no_models",

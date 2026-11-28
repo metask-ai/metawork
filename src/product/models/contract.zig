@@ -110,6 +110,9 @@ pub const ModelsError = enum {
     authorization_unavailable,
     persistence_unavailable,
     catalog_unavailable,
+    /// Metask refused the account itself: not the credential, and not soon
+    /// over. The Metask website says why.
+    account_suspended,
     catalog_invalid,
     catalog_too_large,
     no_models,

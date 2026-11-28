@@ -39,6 +39,7 @@ export type ModelSetupReason =
   | "unreachable"
   | "sign_in"
   | "no_models"
+  | "account_suspended"
   | "catalog_failed"
   | "model_unavailable"
   | "choose"
@@ -141,6 +142,9 @@ export function modelSetupNotice({
   if (needsMetask && account.state === "authenticated") {
     if (metask?.errorCode === "no_models")
       return { reason: "no_models", action: "refresh" };
+    // Asking again changes nothing: the Metask website says why.
+    if (metask?.errorCode === "account_suspended")
+      return { reason: "account_suspended", action: null };
     if (
       metask?.catalogState === "failed" ||
       metask?.catalogState === "unavailable"

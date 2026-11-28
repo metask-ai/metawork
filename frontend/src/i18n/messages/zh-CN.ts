@@ -136,6 +136,8 @@ export const zhCN: Record<MessageId, string> = {
   "model_setup.choose": "选择可用模型后即可发送。",
   "model_setup.custom_models_unavailable":
     "自定义模型配置无法读取，自定义模型暂不可用；Metask 模型照常可用。",
+  "model_setup.account_suspended":
+    "Metask 账号已被停用，请到 Metask 官网查看原因。",
   "model_setup.catalog_failed": "模型加载失败，请重试。",
   "model_setup.no_models":
     "当前 Metask 账号没有可用对话模型，请重试或查看模型设置。",

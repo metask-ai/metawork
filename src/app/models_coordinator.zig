@@ -690,6 +690,7 @@ fn managementError(error_code: models_contract.ModelsError) models_contract.Mana
         .operation_in_progress => .operation_in_progress,
         .local_resource_exhausted => .local_resource_exhausted,
         .catalog_unavailable,
+        .account_suspended,
         .catalog_invalid,
         .catalog_too_large,
         .no_models,
@@ -750,7 +751,7 @@ test "a catalog refused for its token is worth a second try, one refused for the
         coordinator.drain();
         // Neither ends the login here; only Account may. Whether and when
         // to try again is Models' to decide from its classification.
-        try std.testing.expectEqual(models_contract.ModelsError.catalog_unavailable, fixture.failed.?.code);
+        try std.testing.expectEqual(@as(models_contract.ModelsError, if (status == 401) .catalog_unavailable else .account_suspended), fixture.failed.?.code);
         try std.testing.expectEqual(status == 401, fixture.failed.?.retryable);
         // Account hears of the refused token, with the generation it was.
         try std.testing.expectEqual(@as(?u64, if (status == 401) 3 else null), fixture.reported);

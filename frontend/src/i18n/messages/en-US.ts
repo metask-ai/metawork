@@ -172,6 +172,8 @@ export const enUS = {
   "model_setup.choose": "Choose an available model before sending.",
   "model_setup.custom_models_unavailable":
     "Custom model configuration cannot be read, so custom models are unavailable for now. Metask models work as usual.",
+  "model_setup.account_suspended":
+    "Your Metask account is suspended. See the Metask website for details.",
   "model_setup.catalog_failed":
     "Models could not be loaded. Retry loading them.",
   "model_setup.no_models":
