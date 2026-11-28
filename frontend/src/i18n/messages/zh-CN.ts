@@ -134,6 +134,8 @@ export const zhCN: Record<MessageId, string> = {
     "暂时连不上 Metask，会自动重试，已输入的内容会保留。",
   "model_setup.preparing": "正在准备模型…",
   "model_setup.choose": "选择可用模型后即可发送。",
+  "model_setup.custom_models_unavailable":
+    "自定义模型配置无法读取，自定义模型暂不可用；Metask 模型照常可用。",
   "model_setup.catalog_failed": "模型加载失败，请重试。",
   "model_setup.no_models":
     "当前 Metask 账号没有可用对话模型，请重试或查看模型设置。",
@@ -1572,9 +1574,9 @@ export const zhCN: Record<MessageId, string> = {
     "模型请求将向 {host} 发送 API Key。",
   "settings.get_api_key": "获取 API Key",
   "settings.open_provider_docs": "查看官方文档",
-  "settings.models_reset_message": "模型配置无法读取",
+  "settings.models_reset_message": "自定义模型配置无法读取",
   "settings.models_reset_detail":
-    "恢复会先重新读取有效配置；只有配置缺失或确认损坏时才会清空。账户、Task、Workspace 和对话不会改变。",
+    "Metask 模型照常可用，自定义模型暂不可用。恢复会先重新读取有效配置；只有配置缺失或确认损坏时才会清空。账户、Task、Workspace 和对话不会改变。",
   "settings.models_reset_action": "恢复模型配置",
   "settings.models_reset_dialog_title": "恢复模型配置？",
   "settings.models_reset_dialog_body":

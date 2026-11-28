@@ -555,15 +555,13 @@ pub const Coordinator = struct {
     }
 
     /// Resets Product-owned Models state through the snapshot CAS boundary.
-    /// Models then loads the followed account's catalog again by itself;
-    /// acceptance only confirms the durable reset.
+    /// The Metask catalog never stood on models.json, so a request underway
+    /// goes on; acceptance only confirms the durable reset.
     pub fn resetModelsStore(
         self: *Coordinator,
         expected_revision: u64,
     ) models_contract.CommandResult {
         self.assertMainThread();
-        if (self.catalog_job != null)
-            return .rejected(.operation_in_progress);
         const result = self.management.resetModelStore(expected_revision);
         if (result.accepted) self.reconcile();
         return result;

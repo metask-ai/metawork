@@ -577,7 +577,7 @@ test("Models canonical recovery preserves Account identity without restoring def
     { initialSection: "models" },
   );
   assert.match(accountMarkup, /Metask User/);
-  assert.match(modelsMarkup, /Model configuration cannot be read/);
+  assert.match(modelsMarkup, /Custom model configuration cannot be read/);
   assert.doesNotMatch(modelsMarkup, />Sign in with Metask</);
   assert.doesNotMatch(modelsMarkup, /id="settings-model"/);
   assert.match(modelsMarkup, />Recover model configuration</);

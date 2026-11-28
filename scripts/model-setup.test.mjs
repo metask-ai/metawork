@@ -6,7 +6,10 @@ import { JSDOM } from "jsdom";
 import { createElement, StrictMode } from "react";
 import { createServer } from "vite";
 import { productStateFixture } from "./test-support/product-view-fixture.mjs";
-import { modelSetupNotice } from "../frontend/src/workbench/model-setup.ts";
+import {
+  customModelsUnavailableNotice,
+  modelSetupNotice,
+} from "../frontend/src/workbench/model-setup.ts";
 
 const fixture = JSON.parse(
   readFileSync(
@@ -460,12 +463,20 @@ test("Host preparation, failures and default selection are not first-use setup",
   assert.deepEqual(classify(state), { reason: "no_models", action: "refresh" });
   state.newTaskAdmission.reason = "shutting_down";
   assert.deepEqual(classify(state), { reason: "preparing", action: null });
+  // The Models store holds Custom Providers only: a Metask flow goes on with
+  // a note beside it, and only a Custom choice waits for the store.
   state.models.persistenceHealth = "recovery_required";
-  assert.deepEqual(classify(state), {
-    reason: "persistence",
+  assert.deepEqual(classify(state), { reason: "preparing", action: null });
+  assert.deepEqual(
+    classify(state, { selected: { sourceId: "custom", modelId: "model" } }),
+    { reason: "persistence", action: "models" },
+  );
+  assert.deepEqual(customModelsUnavailableNotice(state.models), {
+    reason: "custom_models_unavailable",
     action: "models",
   });
   state.models.persistenceHealth = "ready";
+  assert.equal(customModelsUnavailableNotice(state.models), null);
   state.newTaskAdmission.reason = "none";
   state.account.state = "signed_out";
   assert.deepEqual(classify(state, { hasReadyModels: true }), {

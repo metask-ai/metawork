@@ -170,6 +170,8 @@ export const enUS = {
     "Can't reach Metask right now. MetaWork keeps retrying; your text is kept.",
   "model_setup.preparing": "Preparing the model…",
   "model_setup.choose": "Choose an available model before sending.",
+  "model_setup.custom_models_unavailable":
+    "Custom model configuration cannot be read, so custom models are unavailable for now. Metask models work as usual.",
   "model_setup.catalog_failed":
     "Models could not be loaded. Retry loading them.",
   "model_setup.no_models":
@@ -1804,9 +1806,9 @@ export const enUS = {
     "Model requests will send the API key to {host}.",
   "settings.get_api_key": "Get an API key",
   "settings.open_provider_docs": "Open official documentation",
-  "settings.models_reset_message": "Model configuration cannot be read",
+  "settings.models_reset_message": "Custom model configuration cannot be read",
   "settings.models_reset_detail":
-    "Recovery first reloads valid configuration and clears it only when it is missing or confirmed damaged. Your account, Tasks, Workspaces, and conversations are unchanged.",
+    "Metask models work as usual; custom models are unavailable for now. Recovery first reloads valid configuration and clears it only when it is missing or confirmed damaged. Your account, Tasks, Workspaces, and conversations are unchanged.",
   "settings.models_reset_action": "Recover model configuration",
   "settings.models_reset_dialog_title": "Recover model configuration?",
   "settings.models_reset_dialog_body":

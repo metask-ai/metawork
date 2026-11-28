@@ -1213,9 +1213,17 @@ fn settleTesting(provider: *OwnedProvider) bool {
     return changed;
 }
 
+pub const CommitFault = enum {
+    none,
+    write_failed,
+    outcome_unknown,
+};
+
 pub const FileStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
+    commit_fault: if (builtin.is_test) CommitFault else void =
+        if (builtin.is_test) .none else {},
 
     pub fn init(io: std.Io, absolute_directory: []const u8) FileStoreError!FileStore {
         if (!std.fs.path.isAbsolute(absolute_directory)) return error.OpenFailed;
@@ -1273,6 +1281,12 @@ pub const FileStore = struct {
     }
 
     pub fn commit(self: *FileStore, bytes: []const u8) FileStoreError!void {
+        if (builtin.is_test) switch (self.commit_fault) {
+            .none => {},
+            .write_failed => return error.WriteFailed,
+            // Nothing was written, so a readback finds the file as it was.
+            .outcome_unknown => return error.PersistenceOutcomeUnknown,
+        };
         if (bytes.len == 0 or bytes.len > max_store_bytes) return error.WriteFailed;
         var random: [8]u8 = undefined;
         std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;

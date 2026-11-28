@@ -15458,6 +15458,29 @@ test "resetting the Models store stops the plans on the Custom Providers it remo
     try std.testing.expectEqual(product_schedule.Health.ready, fixture.stored(metask).health);
 }
 
+test "a Custom plan waits, unspent, while another version's models.json is in place" {
+    var fixture: MetaskScheduleFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const selection = try createReadyTestCustomProvider(&fixture.control);
+    try std.testing.expect(fixture.control.custom_providers.rememberPreference(.{ .source_id = selection.source_id, .model_id = "gpt-5" }).accepted);
+    const id = try fixture.schedule();
+    const original = try fixture.models_tmp.dir.readFileAlloc(std.testing.io, "models.json", std.testing.allocator, .limited(64 * 1024));
+    defer std.testing.allocator.free(original);
+    // A newer version wrote models.json: this one lists no provider at all.
+    try fixture.models_tmp.dir.writeFile(std.testing.io, .{ .sub_path = "models.json", .data = "{\"schema\":4}" });
+    try fixture.restartModels();
+    fixture.clock.now = 2_000;
+    fixture.control.onScheduledTaskTimer();
+    const waiting = fixture.stored(id);
+    try std.testing.expect(waiting.enabled and waiting.health == .ready);
+    try std.testing.expect(waiting.last_occurrence == null);
+    // Back on the version that wrote it, everything is there again.
+    try fixture.models_tmp.dir.writeFile(std.testing.io, .{ .sub_path = "models.json", .data = original });
+    try fixture.restartModels();
+    try std.testing.expect(fixture.control.scheduleAdmission(null, fixture.stored(id).binding) == .run);
+}
+
 test "a due Metask schedule reads the Account once and waits while it is confirmed" {
     var fixture: MetaskScheduleFixture = undefined;
     try fixture.init();
@@ -17041,6 +17064,11 @@ test "Product Control publishes Task model selection availability from cross-own
         .expected_source_generation = provider.source_generation,
         .expected_catalog_generation = provider.catalog_generation,
     });
+    // Its Custom Provider stands on models.json; while that cannot be
+    // trusted the menu waits, and Metask is not this intent's source.
+    control.custom_providers.store_healthy = false;
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.catalog_unavailable, control.taskModelSelectionAvailability(query));
+    control.custom_providers.store_healthy = true;
     try std.testing.expect(control.submitCustomProviderCommand(.{ .update = .{
         .selection = .{ .source_id = custom.source_id, .expected_provider_revision = provider.provider_revision },
         .spec = .{
@@ -17057,8 +17085,10 @@ test "Product Control publishes Task model selection availability from cross-own
         .expected_provider_revision = configuring.provider_revision,
     } }).accepted);
     try std.testing.expectEqual(product_task.ModelSelectionAvailability.available, control.taskModelSelectionAvailability(query));
+    // The removed source scopes nothing, so the menu is every source's, and
+    // Metask has no say from models.json.
     control.custom_providers.store_healthy = false;
-    try std.testing.expectEqual(product_task.ModelSelectionAvailability.catalog_unavailable, control.taskModelSelectionAvailability(query));
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.available, control.taskModelSelectionAvailability(query));
     control.custom_providers.store_healthy = true;
     task.durable.archived = true;
     try std.testing.expectEqual(product_task.ModelSelectionAvailability.task_unavailable, control.taskModelSelectionAvailability(query));

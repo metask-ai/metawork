@@ -121,7 +121,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         defer candidate.deinit();
         if (candidate.defaultSelection() == null) return;
         if (!candidate.clearDefault(try runtime.freshGeneration(candidate.selection_revision))) return error.TestUnexpectedResult;
-        if (!runtime.commitCandidate(&candidate, true).accepted) return error.TestUnexpectedResult;
+        if (!runtime.commitCandidate(&candidate, true, .bookkeeping).accepted) return error.TestUnexpectedResult;
     }
 
     pub fn refreshMetaskCatalog(
@@ -193,6 +193,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             return error.InvalidTestModel;
         _ = metask_selection_revision;
         try runtime.registry.configureMetaskSource(principal_ref, source_generation);
+        runtime.metask_source = Runtime.MetaskSource.of(principal_ref, source_generation) orelse return error.InvalidTestModel;
         if (runtime.registry.defaultSelection()) |current| {
             if (runtime.registry.selection_revision == default_selection_revision) {
                 _ = current;
@@ -310,6 +311,8 @@ pub const Runtime = struct {
     main_thread_id: std.Thread.Id,
     registry: registry_impl.Registry,
     store: ?registry_impl.FileStore = null,
+    /// models.json can be trusted and written: the Custom Providers and the
+    /// starting preference stand on it. Nothing Metask does reads it.
     store_healthy: bool = false,
     credential_vault: ?ports.CredentialVault = null,
     /// Where the Metask credential of the moment comes from, beside the vault.
@@ -317,6 +320,10 @@ pub const Runtime = struct {
     metask_credentials: ?ports.MetaskCredentials = null,
     /// The Metask source's catalog, and when to ask for it again.
     metask: Metask = .{},
+    /// The source identity of the account whose content Models holds, or
+    /// last held: every Metask answer reads it. models.json keeps a record
+    /// of it whenever it can; that record never decides a Metask answer.
+    metask_source: ?MetaskSource = null,
     metask_public_catalog: ?*metask_provider.PublicCatalog = null,
     preference_error: contract.ModelsError = .none,
     provider_views: [1]contract.ProviderView = undefined,
@@ -363,6 +370,39 @@ pub const Runtime = struct {
         } = .none,
         /// MetaWork is in front.
         active: bool = false,
+    };
+
+    /// One account's Metask source: its principal and the generation every
+    /// binding on it names.
+    const MetaskSource = struct {
+        principal: FixedText(contract.Limits.principal_ref_bytes) = .{},
+        generation: u64,
+
+        fn of(principal_ref: []const u8, generation: u64) ?MetaskSource {
+            var result: MetaskSource = .{ .generation = generation };
+            if (generation == 0 or principal_ref.len == 0 or !result.principal.set(principal_ref)) return null;
+            return result;
+        }
+
+        fn fromRecord(record: ?registry_impl.Registry.MetaskSource) ?MetaskSource {
+            const value = record orelse return null;
+            return of(value.principal_ref, value.source_generation);
+        }
+
+        fn recorded(self: *const MetaskSource, record: ?registry_impl.Registry.MetaskSource) bool {
+            const value = record orelse return false;
+            return value.source_generation == self.generation and std.mem.eql(u8, value.principal_ref, self.principal.view());
+        }
+    };
+
+    /// What one commit changes, so what an unconfirmed outcome may cost.
+    const CommitClass = enum {
+        /// Custom Providers, their models, proofs or keys: an outcome nobody
+        /// can confirm leaves the Custom part untrusted.
+        authority,
+        /// Only the preference, the Metask record or a credential tombstone:
+        /// both possible files grant the same, so nothing is withdrawn.
+        bookkeeping,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, main_thread_id: std.Thread.Id) Runtime {
@@ -515,6 +555,7 @@ pub const Runtime = struct {
         self.store_healthy = false;
         self.credential_vault = null;
         self.clearMetask(true);
+        self.metask_source = null;
         if (self.metask_public_catalog) |public_catalog| {
             self.allocator.destroy(public_catalog);
             self.metask_public_catalog = null;
@@ -528,19 +569,19 @@ pub const Runtime = struct {
 
     pub fn view(self: *Runtime) contract.ModelsView {
         self.assertMainThread();
-        const intent = self.registry.metaskSource();
+        const source: ?*const MetaskSource = if (self.metask_source) |*value| value else null;
         self.provider_views[0] = .{
             .id = contract.metask_source_id,
             .display_name = "Metask",
             .recommended = true,
             .catalog_state = self.metaskCatalogState(),
-            .principal_ref = if (intent) |value| value.principal_ref else "",
+            .principal_ref = if (source) |value| value.principal.view() else "",
             .models = if (self.metask_public_catalog) |public_catalog|
                 public_catalog.modelViews()
             else
                 &.{},
             .catalog_generation = self.metask.generation,
-            .source_generation = if (intent) |value| value.source_generation else 0,
+            .source_generation = if (source) |value| value.generation else 0,
             .error_code = self.metaskError(),
             .safe_diagnostic = "",
         };
@@ -563,8 +604,9 @@ pub const Runtime = struct {
         };
     }
 
+    /// Metask answers by its own catalog alone; only a Custom Provider needs
+    /// models.json to be trusted.
     pub fn selectionCatalogAvailability(models: contract.ModelsView, intent_source: ?[]const u8) enum { available, catalog_loading, catalog_unavailable } {
-        if (models.availability != .ready or models.persistence_health != .ready) return .catalog_unavailable;
         const source_scope = scope: {
             const source_id = intent_source orelse break :scope null;
             for (models.providers) |provider|
@@ -573,14 +615,14 @@ pub const Runtime = struct {
                 if (std.mem.eql(u8, provider.id, source_id)) break :scope source_id;
             break :scope null;
         };
-        for (models.custom_providers) |provider| {
+        if (models.persistence_health == .ready) for (models.custom_providers) |provider| {
             if (source_scope) |source_id| if (!std.mem.eql(u8, provider.id, source_id)) continue;
             if (provider.state != .ready or !provider.enabled or provider.credential_status != .ready or
                 provider.source_generation == 0 or provider.catalog_generation == 0) continue;
             for (provider.models) |model| {
                 if (model.ready) return .available;
             }
-        }
+        };
         var loading = false;
         for (models.providers) |provider| {
             if (source_scope) |source_id| if (!std.mem.eql(u8, provider.id, source_id)) continue;
@@ -599,8 +641,10 @@ pub const Runtime = struct {
     /// Models facts only; what each answer means is the consumer's to decide.
     pub fn lookup(self: *Runtime, target: contract.ModelRef, expect: Expect) Lookup {
         self.assertMainThread();
-        if (!self.store_healthy) return .not_ready;
         if (std.mem.eql(u8, target.source_id, contract.metask_source_id)) return self.lookupMetask(target.model_id, expect);
+        // Before any provider is looked for: a models.json this version
+        // cannot read lists none, and that is "not now", never "gone".
+        if (!self.store_healthy) return .not_ready;
         const provider = findProviderView(self.registry.views(), target.source_id) orelse return .source_changed;
         if (!provider.enabled) return .source_changed;
         switch (expect) {
@@ -630,11 +674,11 @@ pub const Runtime = struct {
 
     fn lookupMetask(self: *Runtime, model_id: []const u8, expect: Expect) Lookup {
         const catalog = if (self.metask.catalog) |*value| value else return .not_ready;
-        // Content is installed only after its source identity is written.
-        const source = self.registry.metaskSource() orelse return .not_ready;
+        // Content always comes with its account's source identity.
+        const source = self.metask_source orelse return .not_ready;
         switch (expect) {
             .current => {},
-            .bound => |generation| if (source.source_generation != generation) return .source_changed,
+            .bound => |generation| if (source.generation != generation) return .source_changed,
         }
         const protocol = catalog.modelProtocol(model_id) orelse return .missing;
         // Metask declares only routes it has an endpoint for.
@@ -646,7 +690,7 @@ pub const Runtime = struct {
                 .protocol = protocol,
                 .base_url = base_url,
                 .image_input = catalog.imageInput(model_id),
-                .source_generation = source.source_generation,
+                .source_generation = source.generation,
             },
             .catalog_generation = self.metask.generation,
         } };
@@ -780,14 +824,14 @@ pub const Runtime = struct {
     }
 
     /// When the next catalog request is due; null when none is asked for
-    /// now. The beat waits in the background and while the store cannot be
-    /// trusted; a load still comes due there, so its wait can end.
+    /// now. The beat waits in the background; a load still comes due there,
+    /// so its wait can end. models.json has no say in either.
     pub fn metaskCatalogNext(self: *const Runtime) ?u64 {
         if (self.metask.principal.len == 0 or self.metask.request != null) return null;
         return switch (self.metask.next) {
             .none, .credential => null,
             .soon => |at| at,
-            .beat => |at| if (self.metask.active and self.store_healthy) at else null,
+            .beat => |at| if (self.metask.active) at else null,
         };
     }
 
@@ -805,12 +849,6 @@ pub const Runtime = struct {
         if (self.metask.request != null) return .{ .outcome = .{ .rejected = .operation_in_progress }, .changed = false };
         if (kind == .due and !self.metaskCatalogDue(now_ms)) return .{ .outcome = .skipped, .changed = false };
         const before = self.metaskFacts();
-        if (!self.store_healthy) {
-            if (self.metask.catalog == null and self.metask.load == .loading)
-                self.metask.load = .{ .failed = .{ .code = .persistence_unavailable, .generation = 0 } };
-            self.metask.next = .none;
-            return .{ .outcome = .{ .rejected = .persistence_unavailable }, .changed = self.metaskChanged(before) };
-        }
         const ready = switch (credential) {
             .ready => |value| if (std.mem.eql(u8, value.principal_ref, self.metask.principal.view())) value else null,
             .unavailable => null,
@@ -870,8 +908,6 @@ pub const Runtime = struct {
         const session = &completion.session;
         const failure: ?contract.ModelsError = failure: {
             if (!std.mem.eql(u8, session.ownerAccountId(), self.metask.principal.view())) break :failure .catalog_invalid;
-            if (!self.store_healthy) break :failure .persistence_unavailable;
-            if (self.ensureMetaskSource()) |code| break :failure code;
             if (self.metask.catalog) |*catalog| if (catalog.sameContent(session)) break :failure null;
             const public_catalog = self.metask_public_catalog orelse break :failure .persistence_unavailable;
             const generation = self.freshGeneration(self.metask.generation) catch break :failure .local_resource_exhausted;
@@ -885,6 +921,8 @@ pub const Runtime = struct {
         if (failure) |code| {
             self.settleMetaskFailure(request.visible, request.generation, request.followed != self.metask.followed_generation, .{ .code = code, .retryable = false }, now_ms);
         } else {
+            self.followContentSource();
+            self.persistMetaskSource();
             self.metask.next = .{ .beat = now_ms +| metask_provider.refresh_interval_ms };
         }
         return self.metaskChanged(before);
@@ -920,23 +958,31 @@ pub const Runtime = struct {
         self.metask.next = if (again) .{ .soon = 0 } else .{ .beat = now_ms +| metask_provider.refresh_interval_ms };
     }
 
-    /// The source identity of the account whose content is installed, in
-    /// models.json. The one place it is written; null when it holds.
-    fn ensureMetaskSource(self: *Runtime) ?contract.ModelsError {
+    /// The content in hand belongs to the account followed, so its source is
+    /// that account's: derived from the principal, kept as it is for the
+    /// same account, an older version's generation included.
+    fn followContentSource(self: *Runtime) void {
         const principal_ref = self.metask.principal.view();
-        if (self.registry.metaskSource()) |source| if (std.mem.eql(u8, source.principal_ref, principal_ref)) return null;
-        var candidate = self.registry.clone() catch return .local_resource_exhausted;
+        if (self.metask_source) |*source| if (std.mem.eql(u8, source.principal.view(), principal_ref)) return;
+        self.metask_source = MetaskSource.of(principal_ref, registry_impl.metaskSourceGeneration(principal_ref));
+    }
+
+    /// Writes the record of the Metask source when models.json lags behind
+    /// memory and can be written. Whatever happens only leaves the record
+    /// owed: the next catalog that lands, or an adoption, writes it again.
+    fn persistMetaskSource(self: *Runtime) void {
+        const source = if (self.metask_source) |*value| value else return;
+        if (!self.store_healthy or source.recorded(self.registry.metaskSource())) return;
+        var candidate = self.registry.clone() catch return;
         defer candidate.deinit();
-        candidate.configureMetaskSource(principal_ref, registry_impl.metaskSourceGeneration(principal_ref)) catch return .local_resource_exhausted;
-        if (!self.commitCandidate(&candidate, true).accepted) return .persistence_unavailable;
-        return null;
+        candidate.configureMetaskSource(source.principal.view(), source.generation) catch return;
+        _ = self.commitCandidate(&candidate, false, .bookkeeping);
     }
 
     /// Resolve the preferred model or the first eligible catalog entry with
     /// the credential of this moment. No user selection is persisted.
     pub fn prepareMediaCandidate(self: *Runtime, kind: contract.MediaKind) contract.MediaPreparation {
         self.assertMainThread();
-        if (!self.store_healthy) return .{ .rejected = .persistence_unavailable };
         const catalog = if (self.metask.catalog) |*value| value else return .{ .rejected = .catalog_unavailable };
         var storage: MetaskCredentialStorage = .{};
         defer storage.zero();
@@ -962,8 +1008,9 @@ pub const Runtime = struct {
 
     pub const MetaskAdoption = struct { stored: u64, derived: u64 };
 
-    /// The generation an older version drew for the stored account, while it
-    /// is still the one in use.
+    /// The generation an older version drew for the account models.json
+    /// records. The record decides, whatever account memory follows now:
+    /// bindings on that value exist whether or not its account is back.
     pub fn pendingMetaskAdoption(self: *const Runtime) ?MetaskAdoption {
         self.assertMainThread();
         if (!self.store_healthy) return null;
@@ -972,15 +1019,16 @@ pub const Runtime = struct {
         return if (source.source_generation == derived) null else .{ .stored = source.source_generation, .derived = derived };
     }
 
-    /// Memory moves first, because the bindings that named the stored value
-    /// already moved. A failed write leaves that value for the next start.
+    /// Called once Schedule moved the bindings that named the stored value.
+    /// Memory follows when it names that account or none; a record that
+    /// cannot be written stays owed, and the next start finds it again.
     pub fn adoptMetaskGeneration(self: *Runtime, adoption: MetaskAdoption) void {
         self.assertMainThread();
-        self.registry.metask_source_generation = adoption.derived;
-        const encoded = registry_impl.encodeAlloc(self.allocator, &self.registry) catch return;
-        defer self.allocator.free(encoded);
-        const store = if (self.store) |*value| value else return;
-        if (commitCanonical(self.allocator, store, encoded) == .unresolved) self.store_healthy = false;
+        const record = self.registry.metaskSource() orelse return;
+        if (record.source_generation != adoption.stored) return;
+        const same_account = if (self.metask_source) |*source| std.mem.eql(u8, source.principal.view(), record.principal_ref) else true;
+        if (same_account) self.metask_source = MetaskSource.of(record.principal_ref, adoption.derived);
+        self.persistMetaskSource();
     }
 
     /// Best-effort memory of a confirmed interactive consumer choice. This
@@ -1111,7 +1159,7 @@ pub const Runtime = struct {
                 ) catch |err| return .rejected(mapRegistryError(err));
             },
         }
-        return self.commitCandidate(&candidate, true);
+        return self.commitCandidate(&candidate, true, .authority);
     }
 
     pub fn completeTest(
@@ -1125,7 +1173,7 @@ pub const Runtime = struct {
         defer candidate.deinit();
         candidate.completeTest(command, succeeded) catch |err|
             return .rejected(mapRegistryError(err));
-        return self.commitCandidate(&candidate, true);
+        return self.commitCandidate(&candidate, true, .authority);
     }
 
     /// Recovers the Models canonical store without destroying a valid current
@@ -1135,8 +1183,6 @@ pub const Runtime = struct {
         self.assertMainThread();
         if (self.store == null or self.store_healthy)
             return .rejected(.persistence_unavailable);
-        if (self.metask.request != null)
-            return .rejected(.operation_in_progress);
         const store = if (self.store) |*value| value else return .rejected(.persistence_unavailable);
         const bytes_optional = store.loadAlloc(self.allocator) catch
             return .rejected(.persistence_unavailable);
@@ -1159,7 +1205,10 @@ pub const Runtime = struct {
             }
             self.registry.replace(&restored);
             self.store_healthy = true;
-            self.reloadMetask();
+            // The catalog never depended on this file. Its record is not
+            // written back yet: an older version's generation in it is for
+            // the adoption that follows a reset to find.
+            if (self.metask_source == null) self.metask_source = MetaskSource.fromRecord(self.registry.metaskSource());
             self.drainCredentialCleanup();
             return .acceptedResult();
         }
@@ -1181,6 +1230,11 @@ pub const Runtime = struct {
                 if (!ports.validCredentialSlot(slot)) return .rejected(.persistence_unavailable);
             store.quarantine(bytes) catch return .rejected(.persistence_unavailable);
         }
+        // The empty store records the Metask source memory holds: the
+        // catalog in hand stays, and so does its account's identity.
+        if (self.metask_source) |*source|
+            candidate.configureMetaskSource(source.principal.view(), source.generation) catch |err|
+                return .rejected(mapRegistryError(err));
         const encoded = registry_impl.encodeAlloc(self.allocator, &candidate) catch |err|
             return .rejected(mapRegistryError(err));
         defer self.allocator.free(encoded);
@@ -1188,7 +1242,6 @@ pub const Runtime = struct {
             return .rejected(.persistence_unavailable);
         self.registry.replace(&candidate);
         self.store_healthy = true;
-        self.reloadMetask();
         self.drainCredentialCleanup();
         return .acceptedResult();
     }
@@ -1258,7 +1311,7 @@ pub const Runtime = struct {
             .spec = definition.spec(endpoint),
         }, provider_revision, source_generation) catch |err|
             return .rejected(mapRegistryError(err));
-        return self.commitCandidate(&candidate, true);
+        return self.commitCandidate(&candidate, true, .authority);
     }
 
     fn createWithResolvedCredential(
@@ -1279,7 +1332,7 @@ pub const Runtime = struct {
         var reserved = self.registry.clone() catch |err| return .rejected(mapRegistryError(err));
         defer reserved.deinit();
         reserved.reserveCredentialDeletion(slot_id) catch |err| return .rejected(mapRegistryError(err));
-        const reserve_result = self.commitCandidate(&reserved, false);
+        const reserve_result = self.commitCandidate(&reserved, false, .bookkeeping);
         if (!reserve_result.accepted) return reserve_result;
 
         vault.store(slot_id, secret) catch {
@@ -1315,7 +1368,7 @@ pub const Runtime = struct {
             self.drainCredentialCleanup();
             return .rejected(.invalid_provider);
         };
-        const result = self.commitCandidate(&committed, true);
+        const result = self.commitCandidate(&committed, true, .authority);
         if (!result.accepted and self.store_healthy) self.drainCredentialCleanup();
         return result;
     }
@@ -1340,7 +1393,7 @@ pub const Runtime = struct {
         defer revoked.deinit();
         revoked.markCredentialMissing(selection) catch |err|
             return .rejected(mapRegistryError(err));
-        const revoke_result = self.commitCandidate(&revoked, false);
+        const revoke_result = self.commitCandidate(&revoked, false, .authority);
         if (!revoke_result.accepted) return revoke_result;
 
         vault.store(selection.source_id, secret) catch
@@ -1357,7 +1410,7 @@ pub const Runtime = struct {
             return .rejected(.local_resource_exhausted);
         restored.restoreCredential(selection, provider_revision, source_generation) catch |err|
             return .rejected(mapRegistryError(err));
-        return self.commitCandidate(&restored, true);
+        return self.commitCandidate(&restored, true, .authority);
     }
 
     pub fn nextGeneration(self: *Runtime, current_generation: u64) !u64 {
@@ -1390,16 +1443,6 @@ pub const Runtime = struct {
         self.metask.catalog = null;
         self.metask.generation = 0;
         if (self.metask_public_catalog) |public_catalog| public_catalog.clear();
-    }
-
-    /// A reset replaced models.json: what the catalog proved about it no
-    /// longer holds, so the account followed loads again at once and its
-    /// source identity is written back when that load lands.
-    fn reloadMetask(self: *Runtime) void {
-        if (self.metask.principal.len == 0) return;
-        self.dropMetaskContent();
-        self.metask.load = .{ .loading = .{} };
-        self.metask.next = .{ .soon = 0 };
     }
 
     pub fn resolveProbeCandidate(
@@ -1491,6 +1534,7 @@ pub const Runtime = struct {
         self: *Runtime,
         candidate: *registry_impl.Registry,
         drain_cleanup: bool,
+        class: CommitClass,
     ) contract.CommandResult {
         const encoded = registry_impl.encodeAlloc(self.allocator, candidate) catch |err|
             return .rejected(mapRegistryError(err));
@@ -1500,7 +1544,7 @@ pub const Runtime = struct {
             .committed => {},
             .not_committed => return .rejected(.persistence_unavailable),
             .unresolved => {
-                self.store_healthy = false;
+                if (class == .authority) self.store_healthy = false;
                 return .rejected(.persistence_unavailable);
             },
         }
@@ -1510,6 +1554,12 @@ pub const Runtime = struct {
     }
 
     fn restore(self: *Runtime, absolute_directory: []const u8) void {
+        // Only what this start reads is known: a file it cannot read or
+        // decode lists no provider, whatever an earlier start had.
+        var empty = registry_impl.Registry.init(self.allocator);
+        self.registry.replace(&empty);
+        empty.deinit();
+        self.metask_source = null;
         self.store = registry_impl.FileStore.init(self.io, absolute_directory) catch return;
         self.store_healthy = true;
         const bytes_optional = self.store.?.loadAlloc(self.allocator) catch {
@@ -1548,6 +1598,7 @@ pub const Runtime = struct {
         }
         self.registry.replace(restored);
         restored.deinit();
+        self.metask_source = MetaskSource.fromRecord(self.registry.metaskSource());
         self.drainCredentialCleanup();
     }
 
@@ -1566,22 +1617,18 @@ pub const Runtime = struct {
         self.registry.replace(&empty);
     }
 
+    /// Records a key the store no longer has. When that cannot be recorded
+    /// nothing else is withdrawn: the resolution that found it already
+    /// failed, and the next one finds it again. Only an outcome nobody can
+    /// confirm leaves the Custom part untrusted.
     fn markCredentialMissing(self: *Runtime, binding: registry_impl.Registry.ModelBinding) void {
-        var candidate = self.registry.clone() catch {
-            self.store_healthy = false;
-            return;
-        };
+        var candidate = self.registry.clone() catch return;
         defer candidate.deinit();
         candidate.markCredentialMissing(.{
             .source_id = binding.provider_id,
             .expected_provider_revision = binding.provider_revision,
-        }) catch {
-            self.store_healthy = false;
-            return;
-        };
-        if (!self.commitCandidate(&candidate, false).accepted) {
-            self.store_healthy = false;
-        }
+        }) catch return;
+        _ = self.commitCandidate(&candidate, false, .authority);
     }
 
     fn drainCredentialCleanup(self: *Runtime) void {
@@ -1605,8 +1652,9 @@ pub const Runtime = struct {
             var candidate = self.registry.clone() catch continue;
             defer candidate.deinit();
             candidate.completeCredentialDeletion(provider_id) catch continue;
-            const result = self.commitCandidate(&candidate, false);
-            if (!result.accepted and !self.store_healthy) return;
+            // Either file asks to delete a key that is gone already: a
+            // tombstone that stays in memory is only tried once more.
+            _ = self.commitCandidate(&candidate, false, .bookkeeping);
         }
     }
 
@@ -1931,7 +1979,7 @@ test "credential cleanup skips failed tombstones and completes later IDs" {
     try candidate.reserveCredentialDeletion(cleanup_a);
     try candidate.reserveCredentialDeletion(cleanup_b);
     try candidate.reserveCredentialDeletion(cleanup_c);
-    try std.testing.expect(runtime.commitCandidate(&candidate, false).accepted);
+    try std.testing.expect(runtime.commitCandidate(&candidate, false, .bookkeeping).accepted);
 
     runtime.drainCredentialCleanup();
     try std.testing.expectEqual(@as(usize, 3), vault.call_count);
@@ -2345,8 +2393,11 @@ test "Models explicit resolution uses the target Metask protocol and rejects sta
     try std.testing.expect((try runtime.resolveModel(target, source_generation +% 1, catalog_generation)) == null);
     try std.testing.expect((try runtime.resolveModel(target, source_generation, catalog_generation +% 1)) == null);
     try std.testing.expect((try runtime.resolveModel(target, 0, catalog_generation)) == null);
+    // A models.json that cannot be trusted has no say in Metask.
     runtime.store_healthy = false;
-    try std.testing.expect((try runtime.resolveModel(target, source_generation, catalog_generation)) == null);
+    var untrusted = (try runtime.resolveModel(target, source_generation, catalog_generation)).?;
+    untrusted.deinit();
+    try std.testing.expectEqual(contract.ManagementError.model_not_found, runtime.prepareMediaCandidate(.image).rejected);
     runtime.store_healthy = true;
 
     try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalog(&runtime, "principal", &.{}));
@@ -3342,7 +3393,9 @@ test "Metask source follows its account through a switch, a return, a restart an
         runtime.adoptMetaskGeneration(adoption);
         runtime.store = store;
         try std.testing.expectEqual(seen[0], runtime.view().providers[0].source_generation);
-        try std.testing.expect(runtime.pendingMetaskAdoption() == null);
+        // The file decides what is still to adopt: a record that could not
+        // be written is adopted again, which moves nothing a second time.
+        try std.testing.expectEqual(!writes, runtime.pendingMetaskAdoption() != null);
     }
     runtime.stop();
     try runtime.start(home, vault.port());
@@ -3554,9 +3607,13 @@ const MetaskCatalogFixture = struct {
 
     /// Completes request `id` with these models; whether anything published changed.
     fn complete(self: *MetaskCatalogFixture, id: u64, models: []const contract.ModelView, now_ms: u64) !bool {
+        return self.completeAs("principal", id, models, now_ms);
+    }
+
+    fn completeAs(self: *MetaskCatalogFixture, principal: []const u8, id: u64, models: []const contract.ModelView, now_ms: u64) !bool {
         var session = metask_provider.CatalogSession.init(std.testing.allocator);
         defer session.deinit();
-        try metask_provider.TestSupport.replaceOwnedCatalog(&session, "principal", models);
+        try metask_provider.TestSupport.replaceOwnedCatalog(&session, principal, models);
         var completion = metask_provider.OwnedCatalogCompletion.init(&session);
         var port = completion.ownedPort();
         return self.runtime.completeMetaskCatalogRequest(id, &port, now_ms);
@@ -3747,7 +3804,7 @@ test "a Metask load that fails after Account renewed under it tries the new cred
     try std.testing.expectEqual(@as(?u64, retry + metask_provider.refresh_interval_ms), runtime.metaskCatalogNext());
 }
 
-test "a Metask request without a credential waits for Account, and a reset loads the catalog again" {
+test "a Metask request without a credential waits for Account, and models.json never stops the catalog" {
     var fixture: MetaskCatalogFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -3766,19 +3823,18 @@ test "a Metask request without a credential waits for Account, and a reset loads
     const due = metask_provider.refresh_interval_ms;
     _ = runtime.beginMetaskCatalogRequest(.due, .unavailable, due);
     try std.testing.expectEqual(@as(?u64, 2 * due), runtime.metaskCatalogNext());
-    // A store that cannot be trusted asks for nothing and keeps the content.
+    // A models.json that cannot be trusted has no say in the catalog: the
+    // beat stays, and the person's request starts and lands.
     runtime.store_healthy = false;
-    try std.testing.expectEqual(@as(?u64, null), runtime.metaskCatalogNext());
-    try std.testing.expectEqual(contract.ModelsError.persistence_unavailable, fixture.begin(.user, 17, 2 * due).outcome.rejected);
-    try std.testing.expect(runtime.metask.catalog != null);
-    // A reset empties it and loads it again at once; the load writes the
-    // source identity back.
+    try std.testing.expectEqual(@as(?u64, 2 * due), runtime.metaskCatalogNext());
+    const generation = fixture.provider().catalog_generation;
+    _ = try fixture.complete(fixture.begin(.user, 17, 2 * due).outcome.started, &catalog_two, 2 * due);
+    try std.testing.expect(fixture.provider().catalog_generation != generation);
+    // A reset leaves the catalog as it is, its account recorded.
     try std.testing.expect(runtime.resetStore().accepted);
-    try std.testing.expectEqual(contract.CatalogState.loading, fixture.provider().catalog_state);
-    try std.testing.expect(runtime.metaskCatalogDue(2 * due));
-    try std.testing.expect(try fixture.complete(fixture.begin(.due, 17, 2 * due).outcome.started, &catalog_one, 2 * due));
     try std.testing.expectEqual(contract.CatalogState.ready, fixture.provider().catalog_state);
-    try std.testing.expectEqualStrings("principal", fixture.provider().principal_ref);
+    try std.testing.expect(runtime.metaskCatalogNext() != null);
+    try std.testing.expectEqualStrings("principal", runtime.registry.metaskSource().?.principal_ref);
 }
 
 test "Metask resolution reads the credential once, for the catalog's account only" {
@@ -3858,8 +3914,9 @@ test "one lookup answers every source state for both identities" {
     fixture.vault.present = false;
     try std.testing.expect((try runtime.resolveModel(custom, provider.source_generation, provider.catalog_generation)) == null);
     try std.testing.expect(runtime.lookup(custom, .{ .bound = provider.source_generation }) == .not_ready);
+    // models.json has no say in Metask.
     runtime.store_healthy = false;
-    try std.testing.expect(runtime.lookup(metask, .current) == .not_ready);
+    try std.testing.expect(runtime.lookup(metask, .current) == .present);
 
     // A models.json this version cannot decode leaves no provider to find:
     // the answer must still be "not now", never "gone".
@@ -3879,4 +3936,114 @@ test "one lookup answers every source state for both identities" {
     try std.testing.expect(unread.lookup(custom, .{ .bound = provider.source_generation }) == .not_ready);
     unread.store_healthy = true;
     try std.testing.expect(unread.lookup(custom, .{ .bound = provider.source_generation }) == .source_changed);
+}
+
+test "a switched account's catalog loads whatever models.json can take" {
+    for ([_]enum { untrusted, write_fails }{ .untrusted, .write_fails }) |case| {
+        var fixture: MetaskCatalogFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const runtime = &fixture.runtime;
+        _ = runtime.followMetaskPrincipal("principal", 17);
+        try std.testing.expect(try fixture.complete(fixture.begin(.due, 17, 0).outcome.started, &catalog_one, 0));
+        switch (case) {
+            .untrusted => runtime.store_healthy = false,
+            .write_fails => runtime.store.?.commit_fault = .write_failed,
+        }
+        _ = runtime.followMetaskPrincipal("other", 18);
+        const credential: contract.CatalogCredential = .{ .ready = .{ .principal_ref = "other", .generation = 18 } };
+        _ = try fixture.completeAs("other", runtime.beginMetaskCatalogRequest(.due, credential, 0).outcome.started, &catalog_one, 0);
+        // The account's catalog is in hand and answers; only its record waits.
+        const derived = registry_impl.metaskSourceGeneration("other");
+        try std.testing.expectEqual(contract.MetaskCatalogAvailability.ready, runtime.metaskCatalog());
+        try std.testing.expectEqual(derived, fixture.provider().source_generation);
+        try std.testing.expect(runtime.lookup(.{ .source_id = contract.metask_source_id, .model_id = "model-1" }, .{ .bound = derived }) == .present);
+        try std.testing.expectEqualStrings("principal", runtime.registry.metaskSource().?.principal_ref);
+        try std.testing.expectEqual(case == .write_fails, runtime.store_healthy);
+        // Once models.json takes a write, the next catalog that lands records it.
+        runtime.store_healthy = true;
+        runtime.store.?.commit_fault = .none;
+        _ = try fixture.completeAs("other", runtime.beginMetaskCatalogRequest(.user, credential, 1).outcome.started, &catalog_one, 1);
+        try std.testing.expectEqualStrings("other", runtime.registry.metaskSource().?.principal_ref);
+    }
+}
+
+test "an older version's generation is rewritten from the record, whatever account memory holds" {
+    const recorded = "{\"schema\":3,\"metask\":{\"principal_ref\":\"principal\",\"source_generation\":1234},\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}";
+    for ([_][]const u8{ "principal", "other" }) |landed| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const length = try tmp.dir.realPath(std.testing.io, &path);
+        // Started on a file this version cannot read, an account's catalog
+        // landed; the file then turned out to be an older version's.
+        try writeTestFile(&tmp.dir, registry_impl.store_file_name, "{\"schema\":4}");
+        var vault: TestVault = .{};
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try runtime.start(path[0..length], vault.port());
+        defer {
+            runtime.stop();
+            runtime.deinit();
+        }
+        try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalog(&runtime, landed, &catalog_one));
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = registry_impl.store_file_name, .data = recorded });
+        try std.testing.expect(runtime.resetStore().accepted);
+        const adoption = runtime.pendingMetaskAdoption() orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(@as(u64, 1234), adoption.stored);
+        try std.testing.expectEqual(registry_impl.metaskSourceGeneration("principal"), adoption.derived);
+        runtime.adoptMetaskGeneration(adoption);
+        // Memory keeps the account whose content it holds; the record follows it.
+        try std.testing.expectEqual(registry_impl.metaskSourceGeneration(landed), runtime.view().providers[0].source_generation);
+        try std.testing.expectEqualStrings(landed, runtime.registry.metaskSource().?.principal_ref);
+        try std.testing.expect(runtime.pendingMetaskAdoption() == null);
+    }
+}
+
+test "a commit that only keeps records stops nothing when its outcome is unknown" {
+    var fixture: MetaskCatalogFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    const spec: contract.CustomProviderSpec = .{
+        .display_name = "OpenAI",
+        .protocol = .openai_responses,
+        .normalized_base_url = "https://api.openai.com/v1/responses",
+    };
+    runtime.store.?.commit_fault = .outcome_unknown;
+    // The tombstone a new provider is reserved under.
+    try std.testing.expect(!runtime.createWithCredential("provider-secret", spec).accepted);
+    try std.testing.expect(runtime.store_healthy);
+    runtime.store.?.commit_fault = .none;
+    try createTestProviderWithModel(runtime, "provider-secret", spec, .{ .id = "gpt-5" });
+    // A record of the Metask source.
+    _ = runtime.followMetaskPrincipal("principal", 17);
+    runtime.store.?.commit_fault = .outcome_unknown;
+    try std.testing.expect(try fixture.complete(fixture.begin(.due, 17, 0).outcome.started, &catalog_one, 0));
+    try std.testing.expect(runtime.store_healthy);
+    // A tombstone whose key is gone.
+    runtime.store.?.commit_fault = .none;
+    var reserved = try runtime.registry.clone();
+    defer reserved.deinit();
+    try reserved.reserveCredentialDeletion("custom-provider-00000000000000000000000000000002");
+    try std.testing.expect(runtime.commitCandidate(&reserved, false, .bookkeeping).accepted);
+    runtime.store.?.commit_fault = .outcome_unknown;
+    runtime.drainCredentialCleanup();
+    try std.testing.expect(runtime.store_healthy);
+    try std.testing.expectEqual(@as(usize, 1), runtime.registry.credentialDeletions().len);
+    // A key the store lost, recorded nowhere.
+    const provider = runtime.views()[0];
+    runtime.store.?.commit_fault = .write_failed;
+    fixture.vault.present = false;
+    _ = try runtime.resolveModel(.{ .source_id = provider.id, .model_id = "gpt-5" }, provider.source_generation, provider.catalog_generation);
+    try std.testing.expect(runtime.store_healthy);
+    // A change to what a Custom Provider can do is another matter.
+    runtime.store.?.commit_fault = .outcome_unknown;
+    const current = runtime.views()[0];
+    try std.testing.expect(!runtime.submitCommand(.{ .add_custom_model = .{
+        .source_id = current.id,
+        .expected_provider_revision = current.provider_revision,
+        .expected_catalog_generation = current.catalog_generation,
+        .model = .{ .id = "gpt-6" },
+    } }).accepted);
+    try std.testing.expect(!runtime.store_healthy);
 }

@@ -41,6 +41,7 @@ const reasonMessages: Record<ModelSetupReason, MessageId> = {
   schedule_failed: "model_setup.schedule_failed",
   schedule_unknown: "model_setup.schedule_unknown",
   resources_unavailable: "model_setup.resources_unavailable",
+  custom_models_unavailable: "model_setup.custom_models_unavailable",
 };
 
 export function modelSetupMessage(notice: Notice): MessageId {
