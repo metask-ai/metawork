@@ -685,7 +685,7 @@ fn managementError(error_code: models_contract.ModelsError) models_contract.Mana
     return switch (error_code) {
         .none => unreachable,
         .authorization_unavailable => .authorization_unavailable,
-        .persistence_unavailable, .preference_not_saved => .persistence_unavailable,
+        .persistence_unavailable, .preference_not_saved, .credentials_retained => .persistence_unavailable,
         .operation_in_progress => .operation_in_progress,
         .local_resource_exhausted => .local_resource_exhausted,
         .catalog_unavailable,

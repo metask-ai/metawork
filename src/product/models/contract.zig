@@ -115,6 +115,9 @@ pub const ModelsError = enum {
     no_models,
     operation_in_progress,
     local_resource_exhausted,
+    /// An explicit reset discarded a file whose keys could not all be read:
+    /// some may still be in the credential store.
+    credentials_retained,
 };
 
 /// Provider declarations, not MetaWork feature gates. null means unknown.

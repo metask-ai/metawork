@@ -1576,11 +1576,13 @@ export const zhCN: Record<MessageId, string> = {
   "settings.open_provider_docs": "查看官方文档",
   "settings.models_reset_message": "自定义模型配置无法读取",
   "settings.models_reset_detail":
-    "Metask 模型照常可用，自定义模型暂不可用。恢复会先重新读取有效配置；只有配置缺失或确认损坏时才会清空。账户、Task、Workspace 和对话不会改变。",
+    "Metask 模型照常可用，自定义模型暂不可用。恢复会先重新读取：本版本能读的配置原样恢复；读不了的（可能由另一个版本写入或已损坏）会另存原文件，并清空自定义模型。账户、Task、Workspace 和对话不会改变。",
   "settings.models_reset_action": "恢复模型配置",
   "settings.models_reset_dialog_title": "恢复模型配置？",
   "settings.models_reset_dialog_body":
-    "MetaWork 会先验证并恢复现有配置。只有文件缺失或确认损坏时，才会清空模型配置；账户、Task、Workspace 与对话会保留。",
+    "MetaWork 会先验证并恢复现有配置。本版本读不了的配置会另存原文件，再清空自定义模型，其中能识别的自定义模型 Key 会从系统凭据库删除；账户、Task、Workspace 与对话会保留。",
+  "settings.models_credentials_retained":
+    "可能仍有凭据未清理：原配置文件里有本版本识别不了的自定义模型 Key，它们可能还在系统凭据库中。原文件已另存。",
   "settings.models_reset_confirm": "恢复并继续",
   "settings.models_reset_pending": "正在恢复…",
   "settings.models_reset_failed": "模型配置恢复结果尚未确认",

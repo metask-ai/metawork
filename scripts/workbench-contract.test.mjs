@@ -1167,6 +1167,9 @@ test("Models recovery-required health crosses the strict snapshot decoder", () =
   };
 
   assert.deepEqual(decodeWorkbenchSnapshot(recoveryRequired), recoveryRequired);
+  const retained = clone(fixture);
+  retained.models.errorCode = "credentials_retained";
+  assert.deepEqual(decodeWorkbenchSnapshot(retained), retained);
 });
 
 test("attachment results enforce opaque grants and atomic typed outcomes", () => {

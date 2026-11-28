@@ -337,6 +337,7 @@ const modelsErrorCodes = [
   "no_models",
   "operation_in_progress",
   "local_resource_exhausted",
+  "credentials_retained",
 ] as const;
 const executionCommandErrorCodes = [
   "none",

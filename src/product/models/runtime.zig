@@ -326,6 +326,10 @@ pub const Runtime = struct {
     metask_source: ?MetaskSource = null,
     metask_public_catalog: ?*metask_provider.PublicCatalog = null,
     preference_error: contract.ModelsError = .none,
+    /// What the last explicit reset could not do: keys a discarded file named
+    /// that could not be read may still be in the credential store. Held
+    /// until the next reset or start; nothing is persisted about it.
+    reset_notice: enum { none, credentials_retained } = .none,
     provider_views: [1]contract.ProviderView = undefined,
     resident: std.ArrayList(Resident) = .empty,
 
@@ -598,7 +602,16 @@ pub const Runtime = struct {
             .default_selection_display_name = if (self.registry.default_display_name.len == 0) null else self.registry.default_display_name,
             .selection_revision = self.registry.selection_revision,
             .operation = self.metaskOperation(),
-            .error_code = if (!self.store_healthy) .persistence_unavailable else if (self.preference_error != .none) self.preference_error else self.metaskError(),
+            // A choice that was not remembered is news now; keys a reset left
+            // behind are from the past and wait their turn.
+            .error_code = if (!self.store_healthy)
+                .persistence_unavailable
+            else if (self.preference_error != .none)
+                self.preference_error
+            else if (self.reset_notice == .credentials_retained)
+                .credentials_retained
+            else
+                self.metaskError(),
             .builtin_provider_presets = builtin_providers.views(),
             .custom_providers = self.registry.views(),
         };
@@ -1177,23 +1190,27 @@ pub const Runtime = struct {
     }
 
     /// Recovers the Models canonical store without destroying a valid current
-    /// schema. Missing or strictly invalid canonical bytes are replaced with
-    /// the current empty schema after the caller explicitly requests reset.
+    /// schema. Anything else is replaced with the current empty schema after
+    /// the person explicitly asked, its bytes set aside first.
     pub fn resetStore(self: *Runtime) contract.CommandResult {
         self.assertMainThread();
         if (self.store == null or self.store_healthy)
             return .rejected(.persistence_unavailable);
         const store = if (self.store) |*value| value else return .rejected(.persistence_unavailable);
-        const bytes_optional = store.loadAlloc(self.allocator) catch
-            return .rejected(.persistence_unavailable);
+        const bytes_optional = store.loadAlloc(self.allocator) catch |err| return switch (err) {
+            // Too large to read here: set aside as it is, unread.
+            error.TooLarge => self.installEmpty(store, .too_large),
+            error.OutOfMemory => .rejected(.local_resource_exhausted),
+            else => .rejected(.persistence_unavailable),
+        };
         if (bytes_optional) |bytes| {
             defer self.allocator.free(bytes);
+            // An empty file names no key and holds nothing to keep.
+            if (bytes.len == 0) return self.installEmpty(store, .missing);
             var restored = registry_impl.decode(self.allocator, bytes) catch |err| {
                 if (err == error.OutOfMemory) return .rejected(.local_resource_exhausted);
-                if (registry_impl.isRetiredCanonical(self.allocator, bytes)) {
-                    return self.installEmptyRecovery(store, bytes);
-                }
-                return self.installEmptyRecovery(store, null);
+                if (registry_impl.isRetiredCanonical(self.allocator, bytes)) return self.installEmpty(store, .{ .retired = bytes });
+                return self.installEmpty(store, .{ .unreadable = bytes });
             };
             defer restored.deinit();
             if (restored.reconcileInterruptedTests()) {
@@ -1209,31 +1226,53 @@ pub const Runtime = struct {
             // written back yet: an older version's generation in it is for
             // the adoption that follows a reset to find.
             if (self.metask_source == null) self.metask_source = MetaskSource.fromRecord(self.registry.metaskSource());
+            self.reset_notice = .none;
             self.drainCredentialCleanup();
             return .acceptedResult();
         }
-        return self.installEmptyRecovery(store, null);
+        return self.installEmpty(store, .missing);
     }
 
-    fn installEmptyRecovery(
-        self: *Runtime,
-        store: *registry_impl.FileStore,
-        retired_bytes: ?[]const u8,
-    ) contract.CommandResult {
+    /// What an empty store replaces, and so what is kept and cleaned.
+    const EmptySource = union(enum) {
+        /// No file, or an empty one: nothing to keep.
+        missing,
+        /// A retired schema, cut over without anyone asking: every key it
+        /// names must be read, or the file stays where it is.
+        retired: []const u8,
+        /// A file this version cannot decode, discarded at the person's
+        /// word: the keys that can be read are cleaned, the rest reported.
+        unreadable: []const u8,
+        /// A file too large to read here: set aside unread, reported.
+        too_large,
+    };
+
+    fn installEmpty(self: *Runtime, store: *registry_impl.FileStore, source: EmptySource) contract.CommandResult {
         var candidate = self.registry.resetCandidate() catch |err|
             return .rejected(mapRegistryError(err));
         defer candidate.deinit();
-        if (retired_bytes) |bytes| {
-            registry_impl.collectRetiredCredentialDeletions(&candidate, bytes) catch |err|
-                return .rejected(if (err == error.OutOfMemory) .local_resource_exhausted else .persistence_unavailable);
-            for (candidate.credentialDeletions()) |slot|
-                if (!ports.validCredentialSlot(slot)) return .rejected(.persistence_unavailable);
-            store.quarantine(bytes) catch return .rejected(.persistence_unavailable);
+        var retained = false;
+        switch (source) {
+            .missing => {},
+            .retired => |bytes| {
+                registry_impl.collectCredentialDeletions(&candidate, bytes, .retired) catch |err|
+                    return .rejected(if (err == error.OutOfMemory) .local_resource_exhausted else .persistence_unavailable);
+                for (candidate.credentialDeletions()) |slot|
+                    if (!ports.validCredentialSlot(slot)) return .rejected(.persistence_unavailable);
+            },
+            .unreadable => |bytes| retained = !(mergeReadableDeletions(&candidate, bytes) catch
+                return .rejected(.local_resource_exhausted)),
+            .too_large => retained = true,
+        }
+        switch (source) {
+            .missing => {},
+            .retired, .unreadable => |bytes| store.quarantine(bytes) catch return .rejected(.persistence_unavailable),
+            .too_large => store.quarantineFile() catch return .rejected(.persistence_unavailable),
         }
         // The empty store records the Metask source memory holds: the
         // catalog in hand stays, and so does its account's identity.
-        if (self.metask_source) |*source|
-            candidate.configureMetaskSource(source.principal.view(), source.generation) catch |err|
+        if (self.metask_source) |*metask|
+            candidate.configureMetaskSource(metask.principal.view(), metask.generation) catch |err|
                 return .rejected(mapRegistryError(err));
         const encoded = registry_impl.encodeAlloc(self.allocator, &candidate) catch |err|
             return .rejected(mapRegistryError(err));
@@ -1242,8 +1281,35 @@ pub const Runtime = struct {
             return .rejected(.persistence_unavailable);
         self.registry.replace(&candidate);
         self.store_healthy = true;
+        self.reset_notice = if (retained) .credentials_retained else .none;
         self.drainCredentialCleanup();
         return .acceptedResult();
+    }
+
+    /// Queues the keys a discarded file names, only when every one of them
+    /// reads as a credential slot and all fit. False: some may stay behind.
+    fn mergeReadableDeletions(candidate: *registry_impl.Registry, bytes: []const u8) std.mem.Allocator.Error!bool {
+        var scratch = registry_impl.Registry.init(candidate.allocator);
+        defer scratch.deinit();
+        registry_impl.collectCredentialDeletions(&scratch, bytes, .any) catch |err|
+            return if (err == error.OutOfMemory) error.OutOfMemory else false;
+        var added: usize = 0;
+        for (scratch.credentialDeletions()) |slot| {
+            if (!ports.validCredentialSlot(slot)) return false;
+            if (!containsSlot(candidate.credentialDeletions(), slot)) added += 1;
+        }
+        if (candidate.credentialDeletions().len + added > registry_impl.max_pending_credential_deletions) return false;
+        for (scratch.credentialDeletions()) |slot| {
+            if (containsSlot(candidate.credentialDeletions(), slot)) continue;
+            candidate.reserveCredentialDeletion(slot) catch |err|
+                return if (err == error.OutOfMemory) error.OutOfMemory else false;
+        }
+        return true;
+    }
+
+    fn containsSlot(slots: []const []const u8, slot: []const u8) bool {
+        for (slots) |existing| if (std.mem.eql(u8, existing, slot)) return true;
+        return false;
     }
 
     pub fn createWithCredential(
@@ -1560,6 +1626,7 @@ pub const Runtime = struct {
         self.registry.replace(&empty);
         empty.deinit();
         self.metask_source = null;
+        self.reset_notice = .none;
         self.store = registry_impl.FileStore.init(self.io, absolute_directory) catch return;
         self.store_healthy = true;
         const bytes_optional = self.store.?.loadAlloc(self.allocator) catch {
@@ -1573,7 +1640,7 @@ pub const Runtime = struct {
         defer self.allocator.free(bytes);
         var restored = registry_impl.decode(self.allocator, bytes) catch {
             if (registry_impl.isRetiredCanonical(self.allocator, bytes)) {
-                if (!self.installEmptyRecovery(&self.store.?, bytes).accepted)
+                if (!self.installEmpty(&self.store.?, .{ .retired = bytes }).accepted)
                     self.store_healthy = false;
                 return;
             }
@@ -2789,6 +2856,9 @@ test "Models bootstrap rejects damaged canonical shapes" {
         "{\"schema\":3,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[]}",
         "{\"schema\":3,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[],\"unknown\":true}",
         "not-json",
+        // A newer version's file, and an empty one: read, never rewritten.
+        "{\"schema\":4}",
+        "",
     };
     for (inputs) |input| {
         var tmp = std.testing.tmpDir(.{});
@@ -2852,6 +2922,13 @@ test "Models reset replaces damaged canonical bytes with current empty schema" {
     try std.testing.expectEqualStrings(
         "{\"schema\":3,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
         bytes,
+    );
+    // The damaged bytes were set aside, exactly, before being replaced.
+    const aside = (try quarantinedFile(&tmp.dir)) orelse return error.TestExpectedEqual;
+    defer std.testing.allocator.free(aside);
+    try std.testing.expectEqualStrings(
+        "{\"schema\":3,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[]}",
+        aside,
     );
 }
 
@@ -2977,6 +3054,21 @@ fn writeTestFile(dir: *std.Io.Dir, name: []const u8, bytes: []const u8) !void {
     defer file.close(std.testing.io);
     try file.writeStreamingAll(std.testing.io, bytes);
     try file.sync(std.testing.io);
+}
+
+/// The one file a reset set aside in `dir`, or null when there is none.
+fn quarantinedFile(dir: *std.Io.Dir) !?[]u8 {
+    var listing = try dir.openDir(std.testing.io, ".", .{ .iterate = true, .follow_symlinks = false });
+    defer listing.close(std.testing.io);
+    var it = listing.iterate();
+    var found: ?[]u8 = null;
+    errdefer if (found) |bytes| std.testing.allocator.free(bytes);
+    while (try it.next(std.testing.io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".quarantine")) continue;
+        if (found != null) return error.TestUnexpectedResult;
+        found = try listing.readFileAlloc(std.testing.io, entry.name, std.testing.allocator, .limited(1024 * 1024));
+    }
+    return found;
 }
 
 test "successful empty Metask catalog preserves intent but removes all resolvable members" {
@@ -4046,4 +4138,100 @@ test "a commit that only keeps records stops nothing when its outcome is unknown
         .model = .{ .id = "gpt-6" },
     } }).accepted);
     try std.testing.expect(!runtime.store_healthy);
+}
+
+const newer_store = "{\"schema\":4,\"pending_credential_deletions\":[\"custom-provider-cccccccccccccccccccccccccccccccc\"],\"custom_providers\":[{\"id\":\"custom-provider-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"newer\":true},{\"id\":\"custom-provider-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}";
+
+test "an explicit reset sets the original aside and clears every key it can identify" {
+    var oversized: [70 * 1024]u8 = undefined;
+    @memset(&oversized, ' ');
+    const Row = struct { bytes: []const u8, deleted: usize, aside: bool, retained: bool };
+    for ([_]Row{
+        .{ .bytes = newer_store, .deleted = 3, .aside = true, .retained = false },
+        .{ .bytes = "{\"schema\":4,\"pending_credential_deletions\":[\"not a slot\"],\"custom_providers\":[]}", .deleted = 0, .aside = true, .retained = true },
+        .{ .bytes = "not-json", .deleted = 0, .aside = true, .retained = true },
+        .{ .bytes = &oversized, .deleted = 0, .aside = true, .retained = true },
+        .{ .bytes = "", .deleted = 0, .aside = false, .retained = false },
+    }, 0..) |row, index| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const length = try tmp.dir.realPath(std.testing.io, &path);
+        try writeTestFile(&tmp.dir, registry_impl.store_file_name, row.bytes);
+        var vault: CleanupTestVault = .{};
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try runtime.start(path[0..length], vault.port());
+        defer {
+            runtime.stop();
+            runtime.deinit();
+        }
+        try std.testing.expect(!runtime.store_healthy);
+        if (index == 0) {
+            // A catalog request underway holds no reset back, and outlives it.
+            try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalog(&runtime, "principal", &catalog_one));
+            _ = runtime.beginMetaskCatalogRequest(.user, .{ .ready = .{ .principal_ref = "principal", .generation = TestSupport.FakeMetaskCredentials.default_generation } }, 0).outcome.started;
+        }
+        try std.testing.expect(runtime.resetStore().accepted);
+        try std.testing.expect(runtime.store_healthy);
+        try std.testing.expectEqual(row.deleted, vault.call_count);
+        try std.testing.expectEqual(row.retained, runtime.view().error_code == .credentials_retained);
+        const aside = try quarantinedFile(&tmp.dir);
+        defer if (aside) |bytes| std.testing.allocator.free(bytes);
+        try std.testing.expectEqual(row.aside, aside != null);
+        if (aside) |bytes| try std.testing.expectEqualStrings(row.bytes, bytes);
+        if (index == 0) {
+            try std.testing.expectEqual(contract.MetaskCatalogAvailability.ready, runtime.metaskCatalog());
+            try std.testing.expect(runtime.metask.request != null);
+        }
+    }
+}
+
+test "a reset that cannot commit leaves models.json where it can be read again" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &path);
+    try writeTestFile(&tmp.dir, registry_impl.store_file_name, newer_store);
+    var vault: CleanupTestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(path[0..length], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    runtime.store.?.commit_fault = .write_failed;
+    try std.testing.expect(!runtime.resetStore().accepted);
+    try std.testing.expect(!runtime.store_healthy);
+    try std.testing.expectEqual(@as(usize, 0), vault.call_count);
+    const still = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse return error.TestExpectedEqual;
+    defer std.testing.allocator.free(still);
+    try std.testing.expectEqualStrings(newer_store, still);
+    // The next attempt reads the same keys from it again.
+    runtime.store.?.commit_fault = .none;
+    try std.testing.expect(runtime.resetStore().accepted);
+    try std.testing.expectEqual(@as(usize, 3), vault.call_count);
+}
+
+test "a retained-key notice never hides an unsaved preference" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &path);
+    try writeTestFile(&tmp.dir, registry_impl.store_file_name, "not-json");
+    var vault: CleanupTestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(path[0..length], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try std.testing.expect(runtime.resetStore().accepted);
+    try std.testing.expectEqual(contract.ModelsError.credentials_retained, runtime.view().error_code);
+    const choice: contract.ModelRef = .{ .source_id = contract.metask_source_id, .model_id = "model-1" };
+    runtime.store.?.commit_fault = .write_failed;
+    try std.testing.expect(!runtime.rememberPreference(choice).accepted);
+    try std.testing.expectEqual(contract.ModelsError.preference_not_saved, runtime.view().error_code);
+    runtime.store.?.commit_fault = .none;
+    try std.testing.expect(runtime.rememberPreference(choice).accepted);
+    try std.testing.expectEqual(contract.ModelsError.credentials_retained, runtime.view().error_code);
 }

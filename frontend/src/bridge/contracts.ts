@@ -265,7 +265,8 @@ export type ModelsErrorCode =
   | "catalog_too_large"
   | "no_models"
   | "operation_in_progress"
-  | "local_resource_exhausted";
+  | "local_resource_exhausted"
+  | "credentials_retained";
 export type CatalogModelView = {
   id: string;
   displayName: string;

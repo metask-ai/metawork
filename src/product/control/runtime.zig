@@ -15456,6 +15456,10 @@ test "resetting the Models store stops the plans on the Custom Providers it remo
     try std.testing.expect(fixture.control.resetModelsStore(fixture.control.currentRevision()).accepted);
     try std.testing.expectEqual(product_schedule.Health.needs_attention, fixture.stored(custom).health);
     try std.testing.expectEqual(product_schedule.Health.ready, fixture.stored(metask).health);
+    // The key Models knew is cleaned; the unreadable file may have named
+    // others, which is said rather than assumed away.
+    try std.testing.expect(!fixture.vault.present);
+    try std.testing.expectEqual(models_contract.ModelsError.credentials_retained, fixture.control.modelsView().error_code);
 }
 
 test "a Custom plan waits, unspent, while another version's models.json is in place" {

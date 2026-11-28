@@ -39,6 +39,8 @@ pub const Error = error{
 pub const FileStoreError = error{
     OpenFailed,
     ReadFailed,
+    /// Larger than this version reads; set aside unread on an explicit reset.
+    TooLarge,
     WriteFailed,
     PersistenceOutcomeUnknown,
 };
@@ -1073,15 +1075,22 @@ pub fn isRetiredCanonical(allocator: std.mem.Allocator, bytes: []const u8) bool 
     return schema == .integer and (schema.integer == 1 or schema.integer == 2);
 }
 
-/// Retired metadata contributes cleanup obligations only. No provider, model,
-/// preference or source authority is installed in the replacement registry.
-pub fn collectRetiredCredentialDeletions(registry: *Registry, bytes: []const u8) !void {
+/// Which files may contribute cleanup obligations: only a retired schema when
+/// no one asked, any shape once the person confirmed discarding the file.
+pub const DeletionSource = enum { retired, any };
+
+/// A discarded file contributes cleanup obligations only. No provider, model,
+/// preference or source authority is installed in the replacement registry,
+/// and only the key identities are read, never anything they grant.
+pub fn collectCredentialDeletions(registry: *Registry, bytes: []const u8, source: DeletionSource) !void {
     if (bytes.len == 0 or bytes.len > max_store_bytes) return error.InvalidData;
     const parsed = try std.json.parseFromSlice(std.json.Value, registry.allocator, bytes, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidData;
-    const schema = parsed.value.object.get("schema") orelse return error.InvalidData;
-    if (schema != .integer or (schema.integer != 1 and schema.integer != 2)) return error.InvalidData;
+    if (source == .retired) {
+        const schema = parsed.value.object.get("schema") orelse return error.InvalidData;
+        if (schema != .integer or (schema.integer != 1 and schema.integer != 2)) return error.InvalidData;
+    }
     const pending = parsed.value.object.get("pending_credential_deletions") orelse return error.InvalidData;
     const providers = parsed.value.object.get("custom_providers") orelse return error.InvalidData;
     if (pending != .array or providers != .array) return error.InvalidData;
@@ -1103,7 +1112,7 @@ fn reserveRetiredCredentialDeletion(registry: *Registry, value: std.json.Value) 
 test "retired cleanup validates and deduplicates only credential slot identities" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
-    try collectRetiredCredentialDeletions(&registry, "{\"schema\":2,\"pending_credential_deletions\":[\"pending\",\"pending\"],\"custom_providers\":[{\"id\":\"pending\"},{\"id\":\"provider\",\"model\":\"must-not-restore\"}]}");
+    try collectCredentialDeletions(&registry, "{\"schema\":2,\"pending_credential_deletions\":[\"pending\",\"pending\"],\"custom_providers\":[{\"id\":\"pending\"},{\"id\":\"provider\",\"model\":\"must-not-restore\"}]}", .retired);
     try std.testing.expectEqual(@as(usize, 2), registry.credentialDeletions().len);
     try std.testing.expectEqual(@as(usize, 0), registry.views().len);
     try std.testing.expect(registry.defaultSelection() == null);
@@ -1115,7 +1124,7 @@ test "retired cleanup validates and deduplicates only credential slot identities
     }) |bytes| {
         var invalid = Registry.init(std.testing.allocator);
         defer invalid.deinit();
-        try std.testing.expectError(error.InvalidData, collectRetiredCredentialDeletions(&invalid, bytes));
+        try std.testing.expectError(error.InvalidData, collectCredentialDeletions(&invalid, bytes, .retired));
     }
 }
 
@@ -1253,8 +1262,10 @@ pub const FileStore = struct {
         if (builtin.os.tag == .windows) file.flags.nonblocking = true;
         defer file.close(self.io);
         const length = file.length(self.io) catch return error.ReadFailed;
-        if (length == 0 or length > max_store_bytes) return error.ReadFailed;
+        if (length > max_store_bytes) return error.TooLarge;
+        // An empty file is read, and decodes as nothing this version knows.
         const bytes = try allocator.alloc(u8, @intCast(length));
+        if (bytes.len == 0) return bytes;
         errdefer allocator.free(bytes);
         const read = file.readPositionalAll(self.io, bytes, 0) catch
             return error.ReadFailed;
@@ -1262,22 +1273,38 @@ pub const FileStore = struct {
         return bytes;
     }
 
-    /// Preserve the exact retired canonical before the normal atomic empty
+    /// Preserve the exact canonical bytes before the normal atomic empty
     /// replacement. Failure leaves the original canonical available to retry.
     pub fn quarantine(self: *FileStore, bytes: []const u8) FileStoreError!void {
-        var random: [16]u8 = undefined;
-        std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
-        const hex = std.fmt.bytesToHex(random, .lower);
         var storage: [80]u8 = undefined;
-        const name = std.fmt.bufPrint(&storage, ".models.{s}.quarantine", .{hex}) catch return error.WriteFailed;
+        const name = try self.quarantineName(&storage);
         const file = self.dir.createFile(self.io, name, .{ .exclusive = true, .permissions = privateFilePermissions(), .resolve_beneath = true }) catch return error.WriteFailed;
         defer file.close(self.io);
         file.writeStreamingAll(self.io, bytes) catch return error.WriteFailed;
         file.sync(self.io) catch return error.WriteFailed;
-        if (builtin.os.tag != .windows) {
-            const directory: std.Io.File = .{ .handle = self.dir.handle, .flags = .{ .nonblocking = false } };
-            directory.sync(self.io) catch return error.WriteFailed;
-        }
+        try self.syncDirectory();
+    }
+
+    /// Sets the canonical file aside unread, for one too large to read here.
+    /// Afterwards there is no canonical until the replacement commits.
+    pub fn quarantineFile(self: *FileStore) FileStoreError!void {
+        var storage: [80]u8 = undefined;
+        const name = try self.quarantineName(&storage);
+        std.Io.Dir.rename(self.dir, store_file_name, self.dir, name, self.io) catch return error.WriteFailed;
+        try self.syncDirectory();
+    }
+
+    fn quarantineName(self: *FileStore, storage: *[80]u8) FileStoreError![]const u8 {
+        var random: [16]u8 = undefined;
+        std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
+        const hex = std.fmt.bytesToHex(random, .lower);
+        return std.fmt.bufPrint(storage, ".models.{s}.quarantine", .{hex}) catch error.WriteFailed;
+    }
+
+    fn syncDirectory(self: *FileStore) FileStoreError!void {
+        if (builtin.os.tag == .windows) return;
+        const directory: std.Io.File = .{ .handle = self.dir.handle, .flags = .{ .nonblocking = false } };
+        directory.sync(self.io) catch return error.WriteFailed;
     }
 
     pub fn commit(self: *FileStore, bytes: []const u8) FileStoreError!void {
