@@ -2399,7 +2399,7 @@ export type TaskModelSelectionReason =
   | "persistence_failed"
   | "persistence_outcome_unknown"
   | "model_changed"
-  | "stale_catalog"
+  | "model_selection_changed"
   | "task_unavailable"
   | "task_busy"
   | "shutting_down"

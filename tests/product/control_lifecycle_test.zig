@@ -2389,7 +2389,7 @@ test "Task source settings stay pinned until an explicit same-model selection in
         }
         const changed = workbench.modelsView().custom_providers[0];
         try std.testing.expect(changed.source_generation != installed_source_generation);
-        try std.testing.expectError(error.StaleCatalog, workbench.selectTaskModel(task_id, .{
+        try std.testing.expectError(error.ModelSelectionChanged, workbench.selectTaskModel(task_id, .{
             .expected_selection_revision = old_revision,
             .target = initial.model,
             .expected_source_generation = changed.source_generation,

@@ -5391,7 +5391,7 @@ pub const Runtime = struct {
             .expected_source_generation = input.expected_source_generation,
             .expected_catalog_generation = input.expected_catalog_generation,
         }) == null)
-            return error.StaleCatalog;
+            return error.ModelSelectionChanged;
         if (self.approvalHistoryBlocked()) return error.TaskBusy;
         const revision = try self.task_runtime.prepareModelIntent(task_id, input.expected_selection_revision, input.target);
         var rollback = true;
@@ -16942,7 +16942,7 @@ test "busy Task model selection commits the last intent without changing install
     );
     cross_source.target.source_id = "provider-1";
     try std.testing.expectError(
-        error.StaleCatalog,
+        error.ModelSelectionChanged,
         control.selectTaskModel(task.durable.id, cross_source),
     );
     _ = try control.selectTaskModel(

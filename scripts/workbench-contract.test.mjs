@@ -25,6 +25,7 @@ import {
   decodeTaskCreateResult,
   decodeTaskProjectResult,
   decodeTaskCompactResult,
+  decodeTaskModelSelectionResult,
   decodeTaskRestoreResult,
   decodeTaskRunResult,
   decodeTaskCompletionSeenResult,
@@ -2426,6 +2427,14 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
       reason: "binding_changed",
     },
   );
+  const choiceReason = (reason) =>
+    decodeTaskModelSelectionResult(
+      { accepted: false, taskId: "3", selectionRevision: null, reason },
+      "3",
+    ).reason;
+  const changed = "model_selection_changed";
+  assert.equal(choiceReason(changed), changed);
+  assert.throws(() => choiceReason("stale_catalog"), /unexpected value/);
   assert.deepEqual(
     decodeTaskCompactResult(
       {
