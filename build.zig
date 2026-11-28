@@ -657,6 +657,13 @@ pub fn build(b: *std.Build) void {
         },
     });
     account_test_step.dependOn(&b.addRunArtifact(account_bridge_tests).step);
+    // The composition root releases Account only after Product Control,
+    // which reads it, has closed.
+    account_test_step.dependOn(&b.addRunArtifact(b.addTest(.{
+        .name = "metawork-app-account-lifetime",
+        .root_module = test_modules.app,
+        .filters = &.{"quitting closes Product Control before releasing the Account"},
+    })).step);
     const app_history_tests = b.addTest(.{ .name = "metawork-app-history", .root_module = test_modules.app, .filters = &.{"SQLite history"} });
     const app_inbox_tests = b.addTest(.{ .name = "metawork-app-inbox", .root_module = test_modules.app, .filters = &.{"inbox"} });
     const inbox_host_step = b.step("test-inbox-host", "Run MetaTeam inbox coordinator, HTTP and Bridge tests");

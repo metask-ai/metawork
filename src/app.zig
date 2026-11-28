@@ -596,6 +596,47 @@ const App = struct {
         self.models_started = false;
     }
 
+    /// What is left to close once the runner returns, in the one order every
+    /// exit takes. Product Control is composed last and reads Account until
+    /// its own teardown ends, so it closes first and Account is released only
+    /// after it. True when Account left a worker running: its Runtime is
+    /// kept, and the process has to end without waiting for that thread.
+    fn closeAfterRunner(self: *App, account_runtime: *account_api.Runtime) bool {
+        if (self.mcp_management) |*coordinator| {
+            coordinator.deinit();
+            self.mcp_management = null;
+        }
+        if (self.mcp_oauth_refresh) |*coordinator| {
+            coordinator.deinit();
+            self.mcp_oauth_refresh = null;
+        }
+        const control: ?*product_control.Runtime = if (self.control_initialized) self.control_storage.? else null;
+        if (control) |initialized| initialized.shutdownExecutor();
+        // Ending the link is the execution process's shutdown, and it cannot
+        // fail: whatever Sessions the process held end with it.
+        if (!self.agent_shutdown) {
+            if (self.execution) |owner| owner.shutdown();
+            self.agent_shutdown = true;
+        }
+        if (control) |initialized| {
+            initialized.syncLifecycle();
+            initialized.relinquishAgentSessionsAfterRuntimeShutdown();
+            initialized.deinit();
+        }
+        if (self.mcp_authorizations) |*authorizations| {
+            authorizations.deinit();
+            self.mcp_authorizations = null;
+        }
+        if (self.mcp_budget) |budget| {
+            budget.release();
+            self.mcp_budget = null;
+        }
+        if (account_runtime.detached()) return true;
+        account_runtime.deinit();
+        std.heap.c_allocator.destroy(account_runtime);
+        return false;
+    }
+
     fn event(
         context: *anyopaque,
         native_runtime: *native_sdk.Runtime,
@@ -1147,37 +1188,9 @@ pub fn run(init: std.process.Init) !void {
             .create_fn = completion_http_transport.Backend.createCompletion,
         },
     };
-    defer {
-        if (app.mcp_management) |*coordinator| {
-            coordinator.deinit();
-            app.mcp_management = null;
-        }
-        if (app.mcp_oauth_refresh) |*coordinator| {
-            coordinator.deinit();
-            app.mcp_oauth_refresh = null;
-        }
-        if (app.control_initialized) control.shutdownExecutor();
-        // Ending the link is the execution process's shutdown, and it cannot
-        // fail: whatever Sessions the process held end with it.
-        if (!app.agent_shutdown) {
-            execution_owner.shutdown();
-            app.agent_shutdown = true;
-        }
-        if (app.control_initialized) {
-            control.syncLifecycle();
-            control.relinquishAgentSessionsAfterRuntimeShutdown();
-            control.deinit();
-        }
-        if (app.mcp_authorizations) |*authorizations| {
-            authorizations.deinit();
-            app.mcp_authorizations = null;
-        }
-        if (app.mcp_budget) |budget| {
-            budget.release();
-            app.mcp_budget = null;
-        }
-    }
 
+    // Account is composed before Product Control's teardown is registered,
+    // so it is released after it: Control reads Account until it is gone.
     const account_http = try std.heap.c_allocator.create(metask_http_transport.Adapter);
     account_http.* = .{ .http = http_engine };
     defer if (!account_detached) std.heap.c_allocator.destroy(account_http);
@@ -1195,6 +1208,8 @@ pub fn run(init: std.process.Init) !void {
             .notify_fn = app_platform.Adapter.notifyRequired,
         },
     );
+    defer account_detached = app.closeAfterRunner(account_runtime);
+
     var account_coordinator_state = account_coordinator.Coordinator.init(
         account_runtime,
         control.accountCommitSink(),
@@ -1233,11 +1248,6 @@ pub fn run(init: std.process.Init) !void {
         app.models_coordinator = null;
         app.account_coordinator = null;
         if (app.control_initialized) control.clearAccountProjectionCredentials();
-        account_detached = account_runtime.detached();
-        if (!account_detached) {
-            account_runtime.deinit();
-            std.heap.c_allocator.destroy(account_runtime);
-        }
     }
 
     var dispatcher = try bridge_api.Dispatcher.init(
@@ -1518,6 +1528,55 @@ test "notification activation follows SDK command routing into the real Task Bri
     try harness.runtime.dispatchPlatformEvent(app, run_activation);
     try std.testing.expectEqual(@as(usize, 2), host.calls);
     try std.testing.expectEqual(before, control.currentRevision());
+}
+
+test "quitting closes Product Control before releasing the Account it reads" {
+    const Account = struct {
+        var context: u8 = 0;
+        fn perform(_: *anyopaque, _: account_api.TransportRequest, _: []u8) account_api.TransportError!account_api.TransportResponse {
+            return error.NetworkFailed;
+        }
+        fn wake(_: *anyopaque) void {}
+    };
+    const control = try std.testing.allocator.create(product_control.Runtime);
+    defer std.testing.allocator.destroy(control);
+    try product_control.TestSupport.initHistoryFixture(std.testing.allocator, control, .{ .worker_count = 1, .queue_capacity = 1 }, .{});
+    // Allocated as run() allocates it, since closeAfterRunner releases it.
+    const account_runtime = try std.heap.c_allocator.create(account_api.Runtime);
+    account_runtime.* = account_api.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        .{ .context = &Account.context, .perform_fn = Account.perform, .retire_fn = account_api.retireNothing },
+        account_api.TestSupport.loopbackEndpoint(),
+        .{ .context = &Account.context, .notify_fn = Account.wake },
+    );
+    var account = account_coordinator.Coordinator.init(account_runtime, control.accountCommitSink(), std.Thread.getCurrentId());
+    account.startAutomation();
+    control.setAccountAuthorization(account.authorizationQuery());
+    // What App.stop leaves: Control has synced once and given up its
+    // Sessions, then Account closed last of the live owners.
+    control.beginShutdown();
+    control.shutdownExecutor();
+    control.syncLifecycle();
+    control.relinquishAgentSessionsAfterRuntimeShutdown();
+    account.shutdown();
+    var composition: App = .{
+        .env_map = undefined,
+        .io = std.testing.io,
+        .frontend_asset_root = "",
+        .main_thread_id = std.Thread.getCurrentId(),
+        .automation = undefined,
+        .platform = .{ .io = std.testing.io, .main_thread_id = std.Thread.getCurrentId() },
+        .completion_transport = undefined,
+        .control_storage = control,
+        .control_initialized = true,
+        .agent_shutdown = true,
+    };
+    // Control's last lifecycle sync reads the authorization of the Account
+    // that just closed. Releasing Account first makes that a read of freed
+    // memory, which fails Account's main-thread assertion.
+    try std.testing.expect(!composition.closeAfterRunner(account_runtime));
 }
 
 test "MCP Application composition imports the startup owner" {
