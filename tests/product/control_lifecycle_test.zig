@@ -2070,7 +2070,7 @@ test "new Task model selection is independent of default execution admission" {
     try std.testing.expect(identity.generation != 0);
     try expectFakeSessionModel(0, "fixture-model-2");
     try std.testing.expect(workbench.modelsView().default_selection == null);
-    try std.testing.expectEqual(models_contract.ModelsError.preference_not_saved, workbench.modelsView().error_code);
+    try std.testing.expectEqual(models_contract.ModelsError.none, workbench.modelsView().error_code);
     const execution = workbench.testTaskConst(task_id).?.runtime.executionConst().?;
     try std.testing.expectEqual(models_contract.Protocol.anthropic_messages, execution.protocol);
     try std.testing.expectEqualStrings(models_contract.metask_anthropic_messages_url, execution.base_url);

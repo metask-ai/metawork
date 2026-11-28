@@ -328,7 +328,6 @@ const accountErrorCodes = [
 ] as const;
 const modelsErrorCodes = [
   "none",
-  "preference_not_saved",
   "authorization_unavailable",
   "persistence_unavailable",
   "catalog_unavailable",
@@ -340,10 +339,9 @@ const modelsErrorCodes = [
   "local_resource_exhausted",
   "credentials_retained",
 ] as const;
-// An unsaved preference and keys a reset left behind are the whole store's,
-// published only at the top.
+// Keys a reset left behind are the whole store's, published only at the top.
 const providerErrorCodes = modelsErrorCodes.filter(
-  (code) => code !== "preference_not_saved" && code !== "credentials_retained",
+  (code) => code !== "credentials_retained",
 );
 const executionCommandErrorCodes = [
   "none",

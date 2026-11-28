@@ -2372,19 +2372,6 @@ export default function App() {
           )
             inputHistoryReader.clear();
           latestSnapshotRef.current = next;
-          updateFeedbackState((current) =>
-            observeFeedback(
-              current,
-              "models:preference",
-              "condition",
-              next.models.errorCode === "preference_not_saved"
-                ? attentionStatus("model_setup.preference_not_saved", {
-                    scope: "execution",
-                  })
-                : null,
-              accountFeedbackRequest.current.observed,
-            ),
-          );
           observeAccountFeedback(
             next.account,
             accountFeedbackRequest.current.observed,
@@ -6003,15 +5990,6 @@ export default function App() {
                     : undefined
                 }
                 detailsLabel={t("feedback.details")}
-                dismissLabel={t("feedback.dismiss")}
-                onDismiss={
-                  entry.key === "models:preference"
-                    ? () =>
-                        updateFeedbackState((current) =>
-                          dismissFeedback(current, entry.key, entry.cycle),
-                        )
-                    : undefined
-                }
                 pending={
                   entry.audience.scope === "connection" && connectionBusy
                 }
