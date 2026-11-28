@@ -4694,8 +4694,11 @@ pub const Runtime = struct {
         const target = facts.target orelse
             return if (same_intent and facts.installed_available) .keep else .{ .blocked = .model_unavailable };
         const execution = installed orelse return .restore;
-        // A Custom Provider's edits wait for the user to choose it again.
-        if (same_intent and !execution.isMetask()) return .keep;
+        // A Custom Provider's address and key wait for the user to choose it
+        // again; a new statement about the model's own image input on the
+        // same route rebuilds once.
+        if (same_intent and !execution.isMetask())
+            return if (execution.servesRoute(target) and !execution.declaresAsTarget(target)) .rebind else .keep;
         if (!execution.servesTarget(target)) return .rebind;
         const renew = facts.credential_generation != 0 and
             (task.runtime.credential_update_failed or execution.credential_generation != facts.credential_generation);
@@ -12244,8 +12247,14 @@ test "Task model binding plan answers projection and admission from one table" {
         .{ .facts = .{ .credential_generation = 9, .target = change(metask, "image_input", null) }, .expected = .rebind },
         .{ .declared = &.{}, .facts = .{ .credential_generation = 9, .target = change(metask, "image_input", null) }, .expected = .keep },
         .{ .declared = &.{ .{ .model = "m", .supported = true }, .{ .model = "other", .supported = true } }, .facts = .{ .credential_generation = 9, .target = metask }, .expected = .keep },
-        // A Custom Provider keeps what it installed until it is chosen again.
+        // A Custom Provider keeps its connection until it is chosen again;
+        // only the model's own image declaration rebuilds on that connection.
         .{ .installed = .custom, .facts = .{ .target = change(change(custom, "protocol", .gemini_native), "source_generation", 8) }, .expected = .keep },
+        .{ .installed = .custom, .facts = .{ .target = custom }, .expected = .keep },
+        .{ .installed = .custom, .facts = .{ .target = change(custom, "image_input", false) }, .expected = .rebind },
+        .{ .installed = .custom, .facts = .{ .target = change(custom, "image_input", null) }, .expected = .rebind },
+        .{ .installed = .custom, .declared = &.{ .{ .model = "m", .supported = true }, .{ .model = "other", .supported = true } }, .facts = .{ .target = custom }, .expected = .keep },
+        .{ .installed = .custom, .facts = .{ .target = change(change(custom, "source_generation", 8), "image_input", false) }, .expected = .keep },
         // Another chosen model.
         .{ .revision = 3, .facts = .{ .credential_generation = 9, .target = metask }, .expected = .{ .set_model = .{ .renew = false } } },
         .{ .revision = 3, .facts = .{ .credential_generation = 10, .target = change(metask, "source_generation", 8) }, .expected = .{ .set_model = .{ .renew = true } } },

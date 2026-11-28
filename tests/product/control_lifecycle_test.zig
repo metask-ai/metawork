@@ -2450,6 +2450,105 @@ test "Task source settings stay pinned until an explicit same-model selection in
     }
 }
 
+test "a Custom model's own image declaration rebuilds its Task Session once" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(1);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+    defer checkpoints.deinit();
+    const bytes = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+    defer std.testing.allocator.free(bytes);
+    var history = TaskPersistenceProbe{ .storage = bytes };
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    configuration.task_persistence = history.capability();
+    configuration.checkpoint_store = .{ .file_store = &checkpoints };
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime.runtimePort(), .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_workspaces = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 3,
+    }, configuration);
+    defer workbench.deinit();
+    defer fake_core.releaseControlled();
+    var vault: TaskModelsVault = .{};
+    defer TaskModelsVault.delete(&vault, TaskModelsVault.slot) catch unreachable;
+    try workbench.startCustomProviders(home, vault.port());
+    defer workbench.stopCustomProviders();
+    try installControlExecution(&workbench);
+    installTwoModelCatalog(&workbench);
+    const initial = try configureTaskRebindTarget(&workbench);
+    var workspace_input = productControlTaskInput();
+    workspace_input.workspace_root = home;
+    workspace_input.trust = .explicitly_trusted;
+    const workspace = try workbench.openWorkspace(workspace_input);
+    const task_id = try workbench.createTaskInWorkspace(workspace, try workbench.workspaceEpoch(workspace), .{
+        .target = initial.model,
+        .expected_source_generation = initial.expected_source_generation,
+        .expected_catalog_generation = initial.expected_catalog_generation,
+    }, null, null, .{ .interactive = .manual });
+    const task = workbench.testTask(task_id).?;
+    // Nothing declared: the installed table leaves the model to AgentCore.
+    try std.testing.expectEqual(@as(usize, 0), task.runtime.executionConst().?.image_capabilities.entries.len);
+    const old_revision = task.durable.model_intent.?.revision;
+    const old_epoch = task.durable.binding_epoch;
+    const first_run = try runPreparedTask(&workbench, task_id, .{ .text = "before the declaration" });
+    try waitCheckpointRecord(&workbench, &history);
+    for (0..2000) |_| {
+        workbench.syncLifecycle();
+        if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+
+    // The same model on the same connection now says it takes images.
+    const current = workbench.modelsView().custom_providers[0];
+    try std.testing.expect(workbench.submitCustomProviderCommand(.{ .replace_custom_model = .{
+        .selection = .{ .source_id = TaskModelsVault.slot, .model_id = "other-model" },
+        .expected_provider_revision = current.provider_revision,
+        .expected_catalog_generation = current.catalog_generation,
+        .replacement = .{ .id = "other-model", .metadata = .{ .capabilities = .{ .image_input = true } } },
+    } }).accepted);
+    try std.testing.expect(workbench.modelsView().custom_providers[0].models[0].ready);
+    fake_core.setRestoredLogicalId(task.durable.checkpoint.?.session.logical_session_id);
+    fake_core.setRestoredModel("other-model");
+    fake_core.lock();
+    fake_core.restore_last_run_id = first_run;
+    fake_core.unlock();
+    try std.testing.expectError(error.RestoreBusy, workbench.runTask(task_id, .{ .text = "with the new declaration" }));
+    for (0..5000) |_| {
+        try workbench.drainAgentEvents();
+        workbench.syncLifecycle();
+        if (task.runtime.restore_job == null and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    if (task.runtime.last_restore_failure) |failure| std.debug.print("declaration rebuild failed: {s}\n", .{@tagName(failure)});
+    try std.testing.expect(task.runtime.last_restore_failure == null);
+    const execution = task.runtime.executionConst().?;
+    // What the new Session hands AgentCore as this model's capability.
+    const declared = execution.image_capabilities.entries;
+    try std.testing.expectEqual(@as(usize, 1), declared.len);
+    try std.testing.expectEqualStrings("other-model", declared[0].model);
+    try std.testing.expect(declared[0].supported);
+    // The connection, its key and the user's choice are as they were.
+    try std.testing.expectEqualStrings("other-secret", execution.secret);
+    try std.testing.expectEqualStrings("https://other.example.com/v1/responses", execution.base_url);
+    try std.testing.expectEqual(initial.expected_source_generation, execution.source_generation);
+    try std.testing.expectEqual(old_revision, execution.model_intent_revision);
+    try std.testing.expectEqual(old_epoch + 1, task.durable.binding_epoch);
+    // Once is enough: the next message runs on the rebuilt Session.
+    try std.testing.expectEqual(@as(u64, 2), try runPreparedTask(&workbench, task_id, .{ .text = "with the new declaration" }));
+    try std.testing.expectEqual(old_epoch + 1, task.durable.binding_epoch);
+}
+
 test "Task model rebind confirms a full target connection and restores the original once on failure" {
     const Failure = enum { none, restore, set_model, target_export, stale_intent, baseline_export, baseline_history, original_close, original_close_start, target_queue, candidate_close, candidate_close_start, rollback, rollback_queue, baseline_unknown_old, baseline_unknown_new, baseline_unknown_shutdown, shutdown };
     const Blocker = struct {
