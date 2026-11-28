@@ -2533,7 +2533,7 @@ test "a Custom model's own image declaration rebuilds its Task Session once" {
     if (task.runtime.last_restore_failure) |failure| std.debug.print("declaration rebuild failed: {s}\n", .{@tagName(failure)});
     try std.testing.expect(task.runtime.last_restore_failure == null);
     const execution = task.runtime.executionConst().?;
-    // What the new Session hands AgentCore as this model's capability.
+    // The table Product installs for the new Session as this model's capability.
     const declared = execution.image_capabilities.entries;
     try std.testing.expectEqual(@as(usize, 1), declared.len);
     try std.testing.expectEqualStrings("other-model", declared[0].model);
