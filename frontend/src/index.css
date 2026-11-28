@@ -5841,6 +5841,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   flex: 1 1 230px;
 }
 
+.scheduled-time-fields-once > * {
+  flex-basis: 176px;
+}
+
 .scheduled-editor .scheduled-inline-input input,
 .scheduled-editor .scheduled-inline-input input:focus {
   min-width: 0;

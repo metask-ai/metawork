@@ -2145,6 +2145,10 @@ export const enUS = {
   "scheduled.invalid_time":
     "This time does not exist or is invalid. Choose another time.",
   "scheduled.recurrence.interval": "Fixed interval",
+  "scheduled.date": "Date",
+  "date_picker.previous_month": "Previous month",
+  "date_picker.next_month": "Next month",
+  "date_picker.today": "Today",
   "scheduled.time": "Time",
   "scheduled.every": "Every",
   "scheduled.interval_unit": "Interval unit",

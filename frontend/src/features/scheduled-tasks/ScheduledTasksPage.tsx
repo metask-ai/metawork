@@ -16,6 +16,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { BrandIcon } from "../../components/ui/BrandIcon.tsx";
 import { ConfirmationNotice } from "../../components/ConfirmationNotice.tsx";
 import { Button } from "../../components/ui/button.tsx";
+import { DatePicker } from "../../components/ui/date-picker.tsx";
 import { Dialog } from "../../components/ui/dialog.tsx";
 import { HeaderSearch } from "../../components/ui/HeaderSearch.tsx";
 import { Input } from "../../components/ui/input.tsx";
@@ -33,7 +34,7 @@ import {
   formatRecurrence,
 } from "./ScheduleRecurrencePicker.tsx";
 
-import { calendarInstant, nextOnceTime } from "./calendar-time.ts";
+import { calendarInstant } from "./calendar-time.ts";
 
 type Draft = {
   modelId: string;
@@ -57,7 +58,12 @@ function localDateTime(unixSeconds: number) {
   return local.toISOString().slice(0, 16);
 }
 
+function defaultStartUnixSeconds() {
+  return Math.floor(Date.now() / 60_000) * 60 + 3600;
+}
+
 function defaultDraft(permissionProfile: PermissionProfile): Draft {
+  const start = defaultStartUnixSeconds();
   return {
     modelId: "",
     modelChanged: true,
@@ -68,8 +74,8 @@ function defaultDraft(permissionProfile: PermissionProfile): Draft {
     weekdays: [new Date(Date.now()).getDay() || 7],
     monthDays: [new Date(Date.now()).getDate()],
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    originalStart: null,
-    start: localDateTime(Math.floor(Date.now() / 1000) + 3600),
+    originalStart: start,
+    start: localDateTime(start),
     every: "1",
     unit: "hours",
   };
@@ -148,8 +154,19 @@ function draftUnixSeconds(draft: Draft): number | null {
   if (draft.recurrenceKind === "interval")
     return calendarInstant(draft.start, draft.timezone);
   if (draft.recurrenceKind === "once")
-    return nextOnceTime(draft.start.slice(-5), draft.timezone);
+    return calendarInstant(
+      draft.start,
+      Intl.DateTimeFormat().resolvedOptions().timeZone,
+    );
   return null;
+}
+
+function isExpiredOnce(draft: Draft, start: number | null, now: number) {
+  return (
+    draft.recurrenceKind === "once" &&
+    start !== null &&
+    start <= Math.floor(now / 1000)
+  );
 }
 
 function toMutation(
@@ -162,11 +179,6 @@ function toMutation(
     draft.recurrenceKind === "once" || draft.recurrenceKind === "interval";
   const localTime = draft.start.slice(-5);
   if (!draft.title.trim() || (absolute && start === null)) return null;
-  if (
-    draft.recurrenceKind === "once" &&
-    Number(start) <= Math.floor(Date.now() / 1000)
-  )
-    return null;
   if (!draft.text.trim()) return null;
   if (!snapshot.capabilities.automaticWorkspaces) return null;
   if (
@@ -311,10 +323,15 @@ export function ScheduledTasksPage({
     const interval = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(interval);
   }, [hasNextRun]);
+  const isOnce = draft.recurrenceKind === "once";
+  const dateLabel = t("scheduled.date");
   const timeLabel = t("scheduled.time");
   const availableModels = modelOptions(snapshot);
   const draftStart = draftUnixSeconds(draft);
-  const mutation = toMutation(snapshot, draft, draftStart, availableModels);
+  const expiredOnce = isExpiredOnce(draft, draftStart, Date.now());
+  const mutation = expiredOnce
+    ? null
+    : toMutation(snapshot, draft, draftStart, availableModels);
   const modelHeldBack = draft.modelChanged
     ? metaskAdmission(
         snapshot.newTaskAdmission,
@@ -322,13 +339,13 @@ export function ScheduledTasksPage({
           ?.modelRef,
       )
     : null;
-  const absolute =
-    draft.recurrenceKind === "once" || draft.recurrenceKind === "interval";
+  const absolute = isOnce || draft.recurrenceKind === "interval";
   const invalidStart = absolute && draftStart === null;
-  const expiredOnce =
-    draft.recurrenceKind === "once" &&
-    draftStart !== null &&
-    draftStart <= Math.floor(Date.now() / 1000);
+  const timeError = invalidStart
+    ? "scheduled.invalid_time"
+    : expiredOnce
+      ? "scheduled.expired_once"
+      : null;
   const normalizedQuery = query.trim().toLocaleLowerCase(locale);
   const filteredTasks = snapshot.scheduledTasks.filter((task) => {
     if (!normalizedQuery) return true;
@@ -410,14 +427,14 @@ export function ScheduledTasksPage({
       setError(t("scheduled.changed"));
       return;
     }
-    const mutation = toMutation(
-      snapshot,
-      draft,
-      draftUnixSeconds(draft),
-      availableModels,
-    );
+    const submittedAt = Date.now();
+    if (isExpiredOnce(draft, draftStart, submittedAt)) {
+      setNow(submittedAt);
+      setError(null);
+      return;
+    }
     if (!mutation) {
-      setError(t(expiredOnce ? "scheduled.expired_once" : "scheduled.error"));
+      setError(t("scheduled.error"));
       return;
     }
     setBusy(true);
@@ -1118,7 +1135,12 @@ export function ScheduledTasksPage({
                     <h3 id="scheduled-editor-time-title" className="sr-only">
                       {t("scheduled.when")}
                     </h3>
-                    <div className="scheduled-time-fields">
+                    <div
+                      className={cn(
+                        "scheduled-time-fields",
+                        isOnce && "scheduled-time-fields-once",
+                      )}
+                    >
                       <ScheduleRecurrencePicker
                         value={draft.recurrenceKind}
                         weekdays={draft.weekdays}
@@ -1139,6 +1161,12 @@ export function ScheduledTasksPage({
                                   ...value,
                                   recurrenceKind: kind,
                                   originalStart: null,
+                                  ...(kind === "once" &&
+                                  value.start.length === 5
+                                    ? {
+                                        start: `${localDateTime(defaultStartUnixSeconds()).slice(0, -5)}${value.start}`,
+                                      }
+                                    : {}),
                                   ...(kind === "weekly"
                                     ? {
                                         weekdays: [
@@ -1166,6 +1194,34 @@ export function ScheduledTasksPage({
                           }))
                         }
                       />
+                      {isOnce && (
+                        <div className="scheduled-inline-input scheduled-start">
+                          <span>{dateLabel}:</span>
+                          <DatePicker
+                            locale={locale}
+                            className="min-w-0 flex-1"
+                            today={localDateTime(
+                              Math.floor(Date.now() / 1000),
+                            ).slice(0, 10)}
+                            previousMonthLabel={t("date_picker.previous_month")}
+                            nextMonthLabel={t("date_picker.next_month")}
+                            todayLabel={t("date_picker.today")}
+                            aria-label={dateLabel}
+                            aria-invalid={timeError !== null}
+                            aria-describedby={
+                              timeError ? "scheduled-time-error" : undefined
+                            }
+                            value={draft.start.slice(0, -6)}
+                            onValueChange={(date) =>
+                              setDraft((value) => ({
+                                ...value,
+                                start: `${date}T${value.start.slice(-5)}`,
+                                originalStart: null,
+                              }))
+                            }
+                          />
+                        </div>
+                      )}
                       <div
                         className={cn(
                           "scheduled-inline-input scheduled-start",
@@ -1175,11 +1231,9 @@ export function ScheduledTasksPage({
                         <span>{timeLabel}:</span>
                         <TimePicker
                           aria-label={timeLabel}
-                          aria-invalid={expiredOnce || invalidStart}
+                          aria-invalid={timeError !== null}
                           aria-describedby={
-                            expiredOnce || invalidStart
-                              ? "scheduled-time-error"
-                              : undefined
+                            timeError ? "scheduled-time-error" : undefined
                           }
                           value={draft.start.slice(-5)}
                           hourLabel={t("scheduled.hours")}
@@ -1242,13 +1296,9 @@ export function ScheduledTasksPage({
                         </div>
                       )}
                     </div>
-                    {(expiredOnce || invalidStart) && (
+                    {timeError && (
                       <small id="scheduled-time-error" role="alert">
-                        {t(
-                          invalidStart
-                            ? "scheduled.invalid_time"
-                            : "scheduled.expired_once",
-                        )}
+                        {t(timeError)}
                       </small>
                     )}
                   </section>
