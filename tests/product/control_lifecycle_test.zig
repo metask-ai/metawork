@@ -7887,14 +7887,21 @@ test "Product Control manual compact uses the active operation lane and appends 
     _ = try runPreparedTask(&workbench, task_id, .{ .text = "establish conversation" });
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
+    // A compaction publishes `compacted` before its worker releases its
+    // leases, and the third one has to grow the two-slot history, which waits
+    // for every lease. Compact when the Task offers it, as a user would.
+    const compact_offered = "\"compactBlocker\":null";
+    try waitControlSnapshot(&workbench, compact_offered);
     _ = try workbench.compactTaskAtBinding(task_id, 1);
     try waitControlSnapshot(&workbench, "\"phase\":\"compacted\"");
+    try waitControlSnapshot(&workbench, compact_offered);
     _ = try workbench.compactTaskAtBinding(task_id, 1);
     try waitTaskSnapshot(
         &workbench,
         "\"operationId\":\"2\"",
         "\"phase\":\"compacted\"",
     );
+    try waitControlSnapshot(&workbench, compact_offered);
     _ = try workbench.compactTaskAtBinding(task_id, 1);
     try waitTaskSnapshot(&workbench, "\"operationId\":\"3\"", "\"phase\":\"compacted\"");
 
