@@ -4,18 +4,27 @@ import { RadioGroup } from "@base-ui/react/radio-group";
 
 import { Icon } from "./Icon.tsx";
 import { Popover } from "./popover.tsx";
-import { cn, controlBase, controlFocus } from "./utils.ts";
+import {
+  cn,
+  controlBase,
+  controlFocus,
+  pickerCaptionText,
+  pickerControlText,
+} from "./utils.ts";
 
-type TimePickerProps = Pick<
-  HTMLAttributes<HTMLDivElement>,
-  "className" | "aria-label" | "aria-invalid" | "aria-describedby"
-> & {
+type TimePickerOptionsProps = {
   value: string;
   onValueChange: (value: string) => void;
   hourLabel: string;
   minuteLabel: string;
   disabled?: boolean;
 };
+
+type TimePickerProps = Pick<
+  HTMLAttributes<HTMLDivElement>,
+  "className" | "aria-label" | "aria-invalid" | "aria-describedby"
+> &
+  TimePickerOptionsProps;
 
 function TimeColumn({
   value,
@@ -46,7 +55,10 @@ function TimeColumn({
     <div className="min-w-0">
       <div
         aria-hidden="true"
-        className="pb-1 text-center text-xs text-(--ui-content-muted)"
+        className={cn(
+          "pb-1 text-center text-(--ui-content-muted)",
+          pickerCaptionText,
+        )}
       >
         {label}
       </div>
@@ -56,7 +68,7 @@ function TimeColumn({
         value={value}
         onValueChange={onValueChange}
         disabled={disabled}
-        className="relative h-56 max-h-[calc(var(--available-height)-40px)] overflow-y-auto overscroll-contain [scrollbar-width:thin]"
+        className="ui-time-picker-scroll relative h-56 max-h-[calc(var(--available-height)-40px)] overflow-y-auto overscroll-contain"
       >
         {Array.from({ length: count }, (_, number) => {
           const part = String(number).padStart(2, "0");
@@ -66,13 +78,41 @@ function TimeColumn({
               value={part}
               nativeButton
               render={<button type="button" />}
-              className="flex h-8 w-full items-center justify-center rounded-[6px] border-0 bg-transparent text-[length:var(--text-control)] font-normal outline-none hover:bg-(--ui-action-hover-surface) focus-visible:bg-(--ui-action-hover-surface) data-checked:bg-(--ui-surface-panel-2)"
+              className="flex h-8 w-full items-center justify-center rounded-[6px] border-0 bg-transparent outline-none hover:bg-(--ui-action-hover-surface) focus-visible:bg-(--ui-action-hover-surface) data-checked:bg-(--ui-surface-panel-2)"
             >
               {part}
             </Radio.Root>
           );
         })}
       </RadioGroup>
+    </div>
+  );
+}
+
+export function TimePickerOptions({
+  value,
+  onValueChange,
+  hourLabel,
+  minuteLabel,
+  disabled = false,
+}: TimePickerOptionsProps) {
+  const parts = value.split(":");
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      {[hourLabel, minuteLabel].map((label, index) => (
+        <TimeColumn
+          key={index}
+          value={parts[index] || ""}
+          count={index === 0 ? 24 : 60}
+          label={label}
+          disabled={disabled}
+          onValueChange={(next) => {
+            const updated = [parts[0] || "00", parts[1] || "00"];
+            updated[index] = next;
+            onValueChange(updated.join(":"));
+          }}
+        />
+      ))}
     </div>
   );
 }
@@ -86,14 +126,14 @@ export function TimePicker({
   className,
   ...props
 }: TimePickerProps) {
-  const parts = value.split(":");
   const popup = useRef<HTMLDivElement>(null);
   return (
     <Popover.Root>
       <div
         role="group"
         className={cn(
-          "inline-flex h-9 min-w-0 items-center rounded-[7px] px-2 text-[length:var(--text-control)] data-disabled:opacity-50",
+          "inline-flex h-9 min-w-0 items-center rounded-[7px] px-2 data-disabled:opacity-50",
+          pickerControlText,
           controlBase,
           controlFocus,
           className,
@@ -110,7 +150,7 @@ export function TimePicker({
               : undefined
           }
           className={cn(
-            "flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-[6px] border-0 bg-transparent px-1 text-[length:var(--text-control)] hover:bg-(--ui-action-hover-surface)",
+            "flex h-8 w-full min-w-0 items-center justify-between gap-2 rounded-[6px] border-0 bg-transparent px-1 hover:bg-(--ui-action-hover-surface)",
             controlFocus,
           )}
         >
@@ -133,22 +173,15 @@ export function TimePicker({
               ) ?? null
             }
             aria-label={props["aria-label"]}
-            className="grid w-48 grid-cols-2 gap-2 p-2"
+            className={cn("w-48 p-2", pickerControlText)}
           >
-            {[hourLabel, minuteLabel].map((label, index) => (
-              <TimeColumn
-                key={index}
-                value={parts[index] || ""}
-                count={index === 0 ? 24 : 60}
-                label={label}
-                disabled={disabled}
-                onValueChange={(next) => {
-                  const updated = [parts[0] || "00", parts[1] || "00"];
-                  updated[index] = next;
-                  onValueChange(updated.join(":"));
-                }}
-              />
-            ))}
+            <TimePickerOptions
+              value={value}
+              hourLabel={hourLabel}
+              minuteLabel={minuteLabel}
+              disabled={disabled}
+              onValueChange={onValueChange}
+            />
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>

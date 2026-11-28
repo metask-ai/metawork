@@ -26,3 +26,9 @@ export const controlFocus = "ui-control-focus outline-none";
 
 export const controlBase =
   "border border-(--ui-border) bg-(--ui-surface-panel) text-(--ui-content-primary) placeholder:text-(--ui-content-muted) transition-colors disabled:cursor-not-allowed disabled:opacity-50";
+
+export const pickerControlText =
+  "text-[length:var(--text-control)] font-normal leading-normal tabular-nums";
+
+export const pickerCaptionText =
+  "text-[length:var(--text-label)] font-normal leading-4";

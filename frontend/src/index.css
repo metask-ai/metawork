@@ -25,17 +25,33 @@ html[data-metawork-renderer-window-controls="true"] {
   box-sizing: border-box;
 }
 
-:is(.sidebar-navigation, .ai-conversation-viewport)::-webkit-scrollbar {
+:is(
+  .sidebar-navigation,
+  .ai-conversation-viewport,
+  .ui-time-picker-scroll
+)::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
-:is(.sidebar-navigation, .ai-conversation-viewport)::-webkit-scrollbar-track,
-:is(.sidebar-navigation, .ai-conversation-viewport)::-webkit-scrollbar-corner {
+:is(
+  .sidebar-navigation,
+  .ai-conversation-viewport,
+  .ui-time-picker-scroll
+)::-webkit-scrollbar-track,
+:is(
+  .sidebar-navigation,
+  .ai-conversation-viewport,
+  .ui-time-picker-scroll
+)::-webkit-scrollbar-corner {
   background: transparent;
 }
 
-:is(.sidebar-navigation, .ai-conversation-viewport)::-webkit-scrollbar-thumb {
+:is(
+  .sidebar-navigation,
+  .ai-conversation-viewport,
+  .ui-time-picker-scroll
+)::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background: color-mix(in srgb, var(--ui-content-primary) 15%, transparent);
 }
@@ -43,18 +59,27 @@ html[data-metawork-renderer-window-controls="true"] {
 :is(
     .sidebar-navigation,
     .ai-conversation-viewport
-  )::-webkit-scrollbar-thumb:hover {
+  )::-webkit-scrollbar-thumb:hover,
+.ui-time-picker-scroll:is(
+    :hover,
+    :has(:focus-visible)
+  )::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--ui-content-primary) 30%, transparent);
 }
 
 :is(
     .sidebar-navigation,
-    .ai-conversation-viewport
+    .ai-conversation-viewport,
+    .ui-time-picker-scroll
   )::-webkit-scrollbar-thumb:active {
   background: color-mix(in srgb, var(--ui-content-primary) 40%, transparent);
 }
 
-:is(.sidebar-navigation, .ai-conversation-viewport)::-webkit-scrollbar-button {
+:is(
+  .sidebar-navigation,
+  .ai-conversation-viewport,
+  .ui-time-picker-scroll
+)::-webkit-scrollbar-button {
   display: none;
   width: 0;
   height: 0;
